@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
+	"slices"
 	"strconv"
-	"strings"
-	"sync/atomic"
+	"sync"
 	"testing"
 )
 
@@ -18,203 +20,191 @@ func setTestToken(c *VikunjaClient, token string) {
 	c.token = token
 }
 
-type vikunjaAuthenticateTestCase struct {
-	name           string
-	loginStatus    int
-	loginBody      string
-	registerStatus int
-	registerBody   string
-	initialToken   string
-	wantToken      string
-	wantErr        string
+// vikunjaResp is one scripted reply: status 0 means 200; hangup closes the
+// connection without a response.
+type vikunjaResp struct {
+	status int
+	body   string
+	hangup bool
 }
 
-func runVikunjaAuthenticateCase(t *testing.T, tc vikunjaAuthenticateTestCase) {
-	t.Helper()
-	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		if r.URL.Path == "/api/v1/login" {
-			if tc.loginStatus != 0 {
-				w.WriteHeader(tc.loginStatus)
-			}
-			_, _ = w.Write([]byte(tc.loginBody))
-			return
-		}
-		if r.URL.Path == "/api/v1/register" {
-			if tc.registerStatus != 0 {
-				w.WriteHeader(tc.registerStatus)
-			}
-			_, _ = w.Write([]byte(tc.registerBody))
-			return
-		}
+// vikunjaFake serves scripted replies keyed by "METHOD /path". Each hit
+// consumes the head of the route's sequence and the last reply repeats;
+// unrouted requests get 404. Every request is recorded in calls and its body
+// in bodies.
+type vikunjaFake struct {
+	mu     sync.Mutex
+	routes map[string][]vikunjaResp
+	calls  []string
+	bodies []string
+}
+
+func (f *vikunjaFake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	key := r.Method + " " + r.URL.Path
+	body, _ := io.ReadAll(r.Body)
+	f.mu.Lock()
+	f.calls = append(f.calls, key)
+	f.bodies = append(f.bodies, string(body))
+	seq := f.routes[key]
+	if len(seq) > 1 {
+		f.routes[key] = seq[1:]
+	}
+	f.mu.Unlock()
+	if len(seq) == 0 {
 		http.NotFound(w, r)
-	})
-
-	ts := httptest.NewServer(handler)
-	t.Cleanup(ts.Close)
-
-	cfg := &Config{
-		VikunjaURL:      ts.URL,
-		VikunjaUsername: "user",
-		VikunjaPassword: "pass",
+		return
 	}
-	client := NewVikunjaClient(cfg, ts.Client())
-	if tc.initialToken != "" {
-		setTestToken(client, tc.initialToken)
-	}
-
-	err := client.authenticateLocked(context.Background())
-	if tc.wantErr == "" && err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if tc.wantErr != "" {
-		if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
-			t.Fatalf("expected error containing %q, got %v", tc.wantErr, err)
+	resp := seq[0]
+	if resp.hangup {
+		if hj, ok := w.(http.Hijacker); ok {
+			if conn, _, err := hj.Hijack(); err == nil {
+				_ = conn.Close()
+			}
 		}
 		return
 	}
-	if client.getToken() != tc.wantToken {
-		t.Fatalf("token = %q, want %q", client.getToken(), tc.wantToken)
+	w.Header().Set("Content-Type", "application/json")
+	if resp.status != 0 {
+		w.WriteHeader(resp.status)
+	}
+	_, _ = w.Write([]byte(resp.body))
+}
+
+func (f *vikunjaFake) recorded() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.calls)
+}
+
+// newVikunjaFakeClient starts a vikunjaFake with a copy of routes and returns a
+// client for it holding token. A non-empty url replaces the fake's URL.
+func newVikunjaFakeClient(t *testing.T, routes map[string][]vikunjaResp, token, url string, projectID int64) (*VikunjaClient, *vikunjaFake) {
+	t.Helper()
+	fake := &vikunjaFake{routes: map[string][]vikunjaResp{}}
+	for k, v := range routes {
+		fake.routes[k] = slices.Clone(v)
+	}
+	ts := httptest.NewServer(fake)
+	t.Cleanup(ts.Close)
+	if url == "" {
+		url = ts.URL
+	}
+	cfg := &Config{VikunjaURL: url, VikunjaUsername: "user", VikunjaPassword: "pass", DefaultProjectID: projectID}
+	client := NewVikunjaClient(cfg, ts.Client())
+	setTestToken(client, token)
+	return client, fake
+}
+
+func (f *vikunjaFake) recordedBodies() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.bodies)
+}
+
+func assertVikunjaCalls(t *testing.T, fake *vikunjaFake, want []string) {
+	t.Helper()
+	if got := fake.recorded(); !slices.Equal(got, want) {
+		t.Fatalf("calls = %q; want %q", got, want)
 	}
 }
+
+const (
+	vikunjaLogin    = "POST /api/v1/login"
+	vikunjaRegister = "POST /api/v1/register"
+	vikunjaGetTask  = "GET /api/v1/tasks/10"
+	vikunjaProjects = "GET /api/v1/projects"
+	vikunjaNewProj  = "PUT /api/v1/projects"
+	vikunjaErrBody  = `{"error":"boom"}`
+	vikunjaErr500   = `vikunja API returned status 500: {"error":"boom"}`
+)
+
+var vikunjaFail = []vikunjaResp{{status: http.StatusInternalServerError, body: vikunjaErrBody}}
+
+func vikunjaOK(body string) []vikunjaResp { return []vikunjaResp{{body: body}} }
 
 func TestVikunjaClient_Authenticate(t *testing.T) {
 	t.Parallel()
 
-	tests := []vikunjaAuthenticateTestCase{
+	tests := []struct {
+		name      string
+		routes    map[string][]vikunjaResp
+		wantToken string
+		wantErr   string
+		wantCalls []string
+	}{
 		{
-			name:        "login success on first try",
-			loginStatus: http.StatusOK,
-			loginBody:   `{"token":"test-token-123"}`,
-			wantToken:   "test-token-123",
+			name:      "login success on first try",
+			routes:    map[string][]vikunjaResp{vikunjaLogin: vikunjaOK(`{"token":"test-token-123"}`)},
+			wantToken: "test-token-123", wantCalls: []string{vikunjaLogin},
 		},
 		{
-			name:           "login fails, register succeeds",
-			loginStatus:    http.StatusUnauthorized,
-			loginBody:      `{"message":"user not found"}`,
-			registerStatus: http.StatusOK,
-			registerBody:   `{"token":"reg-token-456"}`,
-			wantToken:      "reg-token-456",
+			name: "login fails, register succeeds",
+			routes: map[string][]vikunjaResp{
+				vikunjaLogin:    {{status: http.StatusUnauthorized, body: `{"message":"user not found"}`}},
+				vikunjaRegister: vikunjaOK(`{"token":"reg-token-456"}`),
+			},
+			wantToken: "reg-token-456", wantCalls: []string{vikunjaLogin, vikunjaRegister},
 		},
 		{
-			name:        "login and register both fail",
-			loginStatus: http.StatusInternalServerError,
-			loginBody:   `{"error":"db failure"}`,
-			wantErr:     "vikunja authentication failed",
+			name:    "login and register both fail",
+			routes:  map[string][]vikunjaResp{vikunjaLogin: vikunjaFail},
+			wantErr: "vikunja authentication failed: " + vikunjaErr500, wantCalls: []string{vikunjaLogin, vikunjaRegister, vikunjaLogin},
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			runVikunjaAuthenticateCase(t, tc)
+			client, fake := newVikunjaFakeClient(t, tc.routes, "", "", 0)
+			assertErrString(t, client.authenticateLocked(context.Background()), tc.wantErr)
+			if got := client.getToken(); got != tc.wantToken {
+				t.Fatalf("token = %q, want %q", got, tc.wantToken)
+			}
+			assertVikunjaCalls(t, fake, tc.wantCalls)
 		})
-	}
-}
-
-type getDefaultProjectTestCase struct {
-	name             string
-	defaultProjectID int64
-	projectsResponse string
-	createResponse   string
-	wantID           int64
-	wantErr          string
-}
-
-func handleProjectsEndpoint(w http.ResponseWriter, r *http.Request, projectsResponse, createResponse string) {
-	if r.Method == http.MethodGet {
-		if strings.HasPrefix(projectsResponse, "500:") {
-			w.WriteHeader(http.StatusInternalServerError)
-			_, _ = w.Write([]byte(projectsResponse[4:]))
-			return
-		}
-		_, _ = w.Write([]byte(projectsResponse))
-		return
-	}
-	if r.Method == http.MethodPut {
-		if strings.HasPrefix(createResponse, "500:") {
-			w.WriteHeader(http.StatusInternalServerError)
-			_, _ = w.Write([]byte(createResponse[4:]))
-			return
-		}
-		_, _ = w.Write([]byte(createResponse))
-		return
-	}
-}
-
-func runGetDefaultProjectCase(t *testing.T, tc getDefaultProjectTestCase) {
-	t.Helper()
-	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		if r.URL.Path == "/api/v1/projects" {
-			handleProjectsEndpoint(w, r, tc.projectsResponse, tc.createResponse)
-			return
-		}
-		http.NotFound(w, r)
-	})
-
-	ts := httptest.NewServer(handler)
-	t.Cleanup(ts.Close)
-
-	cfg := &Config{
-		VikunjaURL:       ts.URL,
-		DefaultProjectID: tc.defaultProjectID,
-	}
-	client := NewVikunjaClient(cfg, ts.Client())
-	setTestToken(client, "dummy-token")
-
-	gotID, err := client.GetDefaultProject(context.Background())
-	if tc.wantErr == "" && err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if tc.wantErr != "" {
-		if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
-			t.Fatalf("expected error containing %q, got %v", tc.wantErr, err)
-		}
-		return
-	}
-	if gotID != tc.wantID {
-		t.Fatalf("GetDefaultProject = %d, want %d", gotID, tc.wantID)
 	}
 }
 
 func TestVikunjaClient_GetDefaultProject(t *testing.T) {
 	t.Parallel()
 
-	tests := []getDefaultProjectTestCase{
+	tests := []struct {
+		name      string
+		projectID int64
+		routes    map[string][]vikunjaResp
+		want      int64
+		wantErr   string
+		wantCalls []string
+	}{
+		{name: "configured default project returns immediately", projectID: 99, want: 99},
 		{
-			name:             "configured default project returns immediately",
-			defaultProjectID: 99,
-			wantID:           99,
+			name:   "lists existing project when default is zero",
+			routes: map[string][]vikunjaResp{vikunjaProjects: vikunjaOK(`[{"id":55,"title":"Existing"}]`)},
+			want:   55, wantCalls: []string{vikunjaProjects},
 		},
 		{
-			name:             "lists existing project when default is zero",
-			projectsResponse: `[{"id":55,"title":"Existing"}]`,
-			wantID:           55,
+			name:   "creates docket project when none exist",
+			routes: map[string][]vikunjaResp{vikunjaProjects: vikunjaOK(`[]`), vikunjaNewProj: vikunjaOK(`{"id":77,"title":"Docket"}`)},
+			want:   77, wantCalls: []string{vikunjaProjects, vikunjaNewProj},
 		},
+		{name: "list failure returns error", routes: map[string][]vikunjaResp{vikunjaProjects: vikunjaFail}, wantErr: vikunjaErr500, wantCalls: []string{vikunjaProjects}},
 		{
-			name:             "creates docket project when none exist",
-			projectsResponse: `[]`,
-			createResponse:   `{"id":77,"title":"Docket"}`,
-			wantID:           77,
-		},
-		{
-			name:             "list failure returns error",
-			projectsResponse: `500:internal error`,
-			wantErr:          "status 500",
-		},
-		{
-			name:             "create failure returns error",
-			projectsResponse: `[]`,
-			createResponse:   `500:create error`,
-			wantErr:          "status 500",
+			name:    "create failure returns error",
+			routes:  map[string][]vikunjaResp{vikunjaProjects: vikunjaOK(`[]`), vikunjaNewProj: vikunjaFail},
+			wantErr: vikunjaErr500, wantCalls: []string{vikunjaProjects, vikunjaNewProj},
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			runGetDefaultProjectCase(t, tc)
+			client, fake := newVikunjaFakeClient(t, tc.routes, "dummy-token", "", tc.projectID)
+			got, err := client.GetDefaultProject(context.Background())
+			assertErrString(t, err, tc.wantErr)
+			if got != tc.want {
+				t.Fatalf("GetDefaultProject = %d, want %d", got, tc.want)
+			}
+			assertVikunjaCalls(t, fake, tc.wantCalls)
 		})
 	}
 }
@@ -263,346 +253,322 @@ func TestVikunjaClient_GetDefaultProject_Concurrent(t *testing.T) {
 	}
 }
 
-type listProjectTasksTestCase struct {
-	name       string
-	totalTasks int
-	maxPerPage int
-	ignorePage bool
-	serverErr  bool
-	wantCount  int
-	wantErr    string
+// pagedTasksServer serves total tasks for any project, capping per_page at
+// maxPerPage; ignorePage always serves page 1; fail answers 500.
+type pagedTasksServer struct {
+	total, maxPerPage int
+	ignorePage, fail  bool
 }
 
-func runListProjectTasksCase(t *testing.T, tc listProjectTasksTestCase) {
-	t.Helper()
-	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		if tc.serverErr {
-			w.WriteHeader(http.StatusInternalServerError)
-			_, _ = w.Write([]byte(`{"error":"list failure"}`))
-			return
-		}
-		perPage, _ := strconv.Atoi(r.URL.Query().Get("per_page"))
-		perPage = min(perPage, tc.maxPerPage)
-		page, _ := strconv.Atoi(r.URL.Query().Get("page"))
-		if tc.ignorePage {
-			page = 1
-		}
-		tasks := []VikunjaTask{}
-		for id := (page-1)*perPage + 1; id <= min(page*perPage, tc.totalTasks); id++ {
-			tasks = append(tasks, VikunjaTask{ID: int64(id), Title: "Task"})
-		}
-		_ = json.NewEncoder(w).Encode(tasks)
-	})
-
-	ts := httptest.NewServer(handler)
-	t.Cleanup(ts.Close)
-
-	client := NewVikunjaClient(&Config{VikunjaURL: ts.URL}, ts.Client())
-	setTestToken(client, "dummy")
-
-	tasks, err := client.ListProjectTasks(context.Background(), 1)
-	if tc.wantErr != "" {
-		if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
-			t.Fatalf("expected error containing %q, got %v", tc.wantErr, err)
-		}
+func (s pagedTasksServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	if s.fail {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(vikunjaErrBody))
 		return
 	}
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	perPage, _ := strconv.Atoi(r.URL.Query().Get("per_page"))
+	perPage = min(perPage, s.maxPerPage)
+	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+	if s.ignorePage {
+		page = 1
 	}
-	if len(tasks) != tc.wantCount {
-		t.Fatalf("task count = %d, want %d", len(tasks), tc.wantCount)
+	tasks := []VikunjaTask{}
+	for id := (page-1)*perPage + 1; id <= min(page*perPage, s.total); id++ {
+		tasks = append(tasks, VikunjaTask{ID: int64(id), Title: "Task"})
 	}
-	for i, task := range tasks {
-		if task.ID != int64(i+1) {
-			t.Fatalf("tasks[%d].ID = %d, want %d", i, task.ID, i+1)
-		}
-	}
+	_ = json.NewEncoder(w).Encode(tasks)
 }
 
 func TestVikunjaClient_ListProjectTasks(t *testing.T) {
 	t.Parallel()
 
-	tests := []listProjectTasksTestCase{
-		{name: "120 tasks capped at 50 per page returns all", totalTasks: 120, maxPerPage: 50, wantCount: 120},
-		{name: "server capping pages at 20 still returns all", totalTasks: 120, maxPerPage: 20, wantCount: 120},
-		{name: "exact multiple of page size returns all", totalTasks: 100, maxPerPage: 50, wantCount: 100},
-		{name: "empty project returns no tasks", totalTasks: 0, maxPerPage: 50, wantCount: 0},
-		{name: "server ignoring page param terminates after one page", totalTasks: 120, maxPerPage: 50, ignorePage: true, wantCount: 50},
-		{name: "server error propagates", serverErr: true, wantErr: "status 500"},
+	tests := []struct {
+		name      string
+		server    pagedTasksServer
+		wantCount int
+		wantErr   string
+	}{
+		{"120 tasks capped at 50 per page returns all", pagedTasksServer{total: 120, maxPerPage: 50}, 120, ""},
+		{"server capping pages at 20 still returns all", pagedTasksServer{total: 120, maxPerPage: 20}, 120, ""},
+		{"exact multiple of page size returns all", pagedTasksServer{total: 100, maxPerPage: 50}, 100, ""},
+		{"empty project returns no tasks", pagedTasksServer{total: 0, maxPerPage: 50}, 0, ""},
+		{"server ignoring page param terminates after one page", pagedTasksServer{total: 120, maxPerPage: 50, ignorePage: true}, 50, ""},
+		{"server error propagates", pagedTasksServer{fail: true}, 0, vikunjaErr500},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			runListProjectTasksCase(t, tc)
+			ts := httptest.NewServer(tc.server)
+			t.Cleanup(ts.Close)
+			client := NewVikunjaClient(&Config{VikunjaURL: ts.URL}, ts.Client())
+			setTestToken(client, "dummy")
+
+			tasks, err := client.ListProjectTasks(context.Background(), 1)
+			assertErrString(t, err, tc.wantErr)
+			if len(tasks) != tc.wantCount {
+				t.Fatalf("task count = %d, want %d", len(tasks), tc.wantCount)
+			}
+			for i, task := range tasks {
+				if task.ID != int64(i+1) {
+					t.Fatalf("tasks[%d].ID = %d, want %d", i, task.ID, i+1)
+				}
+			}
 		})
 	}
 }
 
-type taskOperationsTestCase struct {
-	name      string
-	serverErr bool
-	wantErr   string
-}
-
-func handleTaskOperationsServer(w http.ResponseWriter, r *http.Request, serverErr bool) {
-	w.Header().Set("Content-Type", "application/json")
-	if serverErr {
-		w.WriteHeader(http.StatusInternalServerError)
-		_, _ = w.Write([]byte(`{"error":"server error"}`))
-		return
-	}
-
-	switch {
-	case r.Method == http.MethodPut && r.URL.Path == "/api/v1/projects/1/tasks":
-		_ = json.NewEncoder(w).Encode(VikunjaTask{ID: 10, Title: "Created"})
-	case r.Method == http.MethodGet && r.URL.Path == "/api/v1/tasks/10":
-		_ = json.NewEncoder(w).Encode(VikunjaTask{ID: 10, Title: "Fetched"})
-	case r.Method == http.MethodPost && r.URL.Path == "/api/v1/tasks/10":
-		_ = json.NewEncoder(w).Encode(VikunjaTask{ID: 10, Title: "Updated"})
-	case r.Method == http.MethodPut && r.URL.Path == "/api/v1/tasks/10/relations":
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{}`))
-	case r.Method == http.MethodDelete && r.URL.Path == "/api/v1/tasks/10/relations/blocking/2":
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{}`))
-	case r.Method == http.MethodGet && r.URL.Path == "/api/v1/tasks/10/comments":
-		_ = json.NewEncoder(w).Encode([]VikunjaComment{{ID: 1, Comment: "Hello"}})
-	case r.Method == http.MethodPut && r.URL.Path == "/api/v1/tasks/10/comments":
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{}`))
-	default:
-		http.NotFound(w, r)
-	}
-}
-
-func runTaskOperationsCase(t *testing.T, tc taskOperationsTestCase) {
-	t.Helper()
-	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		handleTaskOperationsServer(w, r, tc.serverErr)
-	})
-
-	ts := httptest.NewServer(handler)
-	t.Cleanup(ts.Close)
-
-	client := NewVikunjaClient(&Config{VikunjaURL: ts.URL}, ts.Client())
-	setTestToken(client, "dummy")
-
-	ctx := context.Background()
-	assertTaskCRUDFlow(ctx, t, client, tc.wantErr)
-	assertTaskRelationsFlow(ctx, t, client, tc.wantErr)
-	assertTaskCommentsFlow(ctx, t, client, tc.wantErr)
-}
-
-func assertTaskCRUDFlow(ctx context.Context, t *testing.T, client *VikunjaClient, wantErr string) {
-	t.Helper()
-	created, err := client.CreateTask(ctx, 1, "Created", "Desc")
-	if wantErr == "" && (err != nil || created.ID != 10) {
-		t.Fatalf("CreateTask err: %v, task: %+v", err, created)
-	}
-	if wantErr != "" && (err == nil || !strings.Contains(err.Error(), wantErr)) {
-		t.Fatalf("CreateTask expected error %q, got %v", wantErr, err)
-	}
-
-	fetched, err := client.GetTask(ctx, 10)
-	if wantErr == "" && (err != nil || fetched.ID != 10) {
-		t.Fatalf("GetTask err: %v, task: %+v", err, fetched)
-	}
-	if wantErr != "" && (err == nil || !strings.Contains(err.Error(), wantErr)) {
-		t.Fatalf("GetTask expected error %q, got %v", wantErr, err)
-	}
-
-	updated, err := client.UpdateTask(ctx, &VikunjaTask{ID: 10, Title: "Updated"})
-	if wantErr == "" && (err != nil || updated.Title != "Updated") {
-		t.Fatalf("UpdateTask err: %v, task: %+v", err, updated)
-	}
-	if wantErr != "" && (err == nil || !strings.Contains(err.Error(), wantErr)) {
-		t.Fatalf("UpdateTask expected error %q, got %v", wantErr, err)
-	}
-}
-
-func assertOperationError(t *testing.T, opName string, err error, wantErr string) {
-	t.Helper()
-	if wantErr == "" && err != nil {
-		t.Fatalf("%s err: %v", opName, err)
-	}
-	if wantErr != "" && (err == nil || !strings.Contains(err.Error(), wantErr)) {
-		t.Fatalf("%s expected error %q, got %v", opName, wantErr, err)
-	}
-}
-
-func assertTaskRelationsFlow(ctx context.Context, t *testing.T, client *VikunjaClient, wantErr string) {
-	t.Helper()
-	assertOperationError(t, "CreateRelation", client.CreateRelation(ctx, 10, 2, "blocking"), wantErr)
-	assertOperationError(t, "DeleteRelation", client.DeleteRelation(ctx, 10, 2, "blocking"), wantErr)
-}
-
-func assertTaskCommentsFlow(ctx context.Context, t *testing.T, client *VikunjaClient, wantErr string) {
-	t.Helper()
-	comments, err := client.ListComments(ctx, 10)
-	if wantErr == "" && (err != nil || len(comments) != 1) {
-		t.Fatalf("ListComments err: %v, len: %d", err, len(comments))
-	}
-	if wantErr != "" && (err == nil || !strings.Contains(err.Error(), wantErr)) {
-		t.Fatalf("ListComments expected error %q, got %v", wantErr, err)
-	}
-	assertOperationError(t, "CreateComment", client.CreateComment(ctx, 10, "New comment"), wantErr)
-}
-
-func TestVikunjaClient_TaskOperations(t *testing.T) {
+func TestVikunjaClient_CreateTask(t *testing.T) {
 	t.Parallel()
 
-	tests := []taskOperationsTestCase{
-		{
-			name: "success on all endpoints",
-		},
-		{
-			name:      "server error on all endpoints",
-			serverErr: true,
-			wantErr:   "status 500",
-		},
+	const route = "PUT /api/v1/projects/1/tasks"
+	tests := []struct {
+		name    string
+		resp    []vikunjaResp
+		want    *VikunjaTask
+		wantErr string
+	}{
+		{"created", vikunjaOK(`{"id":10,"title":"Created"}`), &VikunjaTask{ID: 10, Title: "Created"}, ""},
+		{"server error", vikunjaFail, nil, vikunjaErr500},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			runTaskOperationsCase(t, tc)
+			client, fake := newVikunjaFakeClient(t, map[string][]vikunjaResp{route: tc.resp}, "dummy", "", 0)
+			got, err := client.CreateTask(context.Background(), 1, "Created", "Desc")
+			assertErrString(t, err, tc.wantErr)
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("CreateTask = %+v, want %+v", got, tc.want)
+			}
+			assertVikunjaCalls(t, fake, []string{route})
 		})
 	}
 }
 
-type authAndRetryTestCase struct {
-	name         string
-	initialToken string
-	emptyURL     bool
-	unauthorized bool
-	reauthFails  bool
-	invalidJSON  bool
-	networkError bool
-	authError    bool
-	wantErr      string
-}
+func TestVikunjaClient_GetTask(t *testing.T) {
+	t.Parallel()
 
-func handleAuthAndRetryRequest(w http.ResponseWriter, r *http.Request, tc authAndRetryTestCase, taskCalls *atomic.Int32) {
-	w.Header().Set("Content-Type", "application/json")
-	if r.URL.Path == "/api/v1/login" {
-		if tc.reauthFails || tc.authError {
-			w.WriteHeader(http.StatusInternalServerError)
-			_, _ = w.Write([]byte(`{"error":"login failed"}`))
-			return
-		}
-		_ = json.NewEncoder(w).Encode(map[string]string{"token": "refreshed-token"})
-		return
-	}
-	if r.URL.Path == "/api/v1/register" && tc.authError {
-		w.WriteHeader(http.StatusInternalServerError)
-		_, _ = w.Write([]byte(`{"error":"register failed"}`))
-		return
-	}
-	if r.URL.Path == "/api/v1/tasks/10" {
-		c := taskCalls.Add(1)
-		if tc.unauthorized && c == 1 {
-			w.WriteHeader(http.StatusUnauthorized)
-			_, _ = w.Write([]byte(`{"message":"token expired"}`))
-			return
-		}
-		if tc.invalidJSON {
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(`{not valid json`))
-			return
-		}
-		_ = json.NewEncoder(w).Encode(VikunjaTask{ID: 10, Title: "Success"})
-		return
-	}
-	http.NotFound(w, r)
-}
-
-func runAuthAndRetryCase(t *testing.T, tc authAndRetryTestCase) {
-	t.Helper()
-	var taskCalls atomic.Int32
-	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		handleAuthAndRetryRequest(w, r, tc, &taskCalls)
-	})
-
-	ts := httptest.NewServer(handler)
-	t.Cleanup(ts.Close)
-
-	serverURL := ts.URL
-	if tc.networkError {
-		ts.Close()
-	}
-	if tc.emptyURL {
-		serverURL = ""
+	tests := []struct {
+		name    string
+		resp    []vikunjaResp
+		want    *VikunjaTask
+		wantErr string
+	}{
+		{"fetched", vikunjaOK(`{"id":10,"title":"Fetched"}`), &VikunjaTask{ID: 10, Title: "Fetched"}, ""},
+		{"server error", vikunjaFail, nil, vikunjaErr500},
 	}
 
-	client := NewVikunjaClient(&Config{VikunjaURL: serverURL, VikunjaUsername: "u", VikunjaPassword: "p"}, ts.Client())
-	if tc.initialToken != "" {
-		setTestToken(client, tc.initialToken)
-	}
-
-	task, err := client.GetTask(context.Background(), 10)
-	if tc.wantErr == "" && err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)) {
-		t.Fatalf("expected error %q, got %v", tc.wantErr, err)
-	}
-	if tc.wantErr == "" && task.ID != 10 {
-		t.Fatalf("task.ID = %d, want 10", task.ID)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			client, fake := newVikunjaFakeClient(t, map[string][]vikunjaResp{vikunjaGetTask: tc.resp}, "dummy", "", 0)
+			got, err := client.GetTask(context.Background(), 10)
+			assertErrString(t, err, tc.wantErr)
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("GetTask = %+v, want %+v", got, tc.want)
+			}
+			assertVikunjaCalls(t, fake, []string{vikunjaGetTask})
+		})
 	}
 }
 
+func TestVikunjaClient_UpdateTask(t *testing.T) {
+	t.Parallel()
+
+	const route = "POST /api/v1/tasks/10"
+	tests := []struct {
+		name    string
+		resp    []vikunjaResp
+		want    *VikunjaTask
+		wantErr string
+	}{
+		{"updated", vikunjaOK(`{"id":10,"title":"Updated"}`), &VikunjaTask{ID: 10, Title: "Updated"}, ""},
+		{"server error", vikunjaFail, nil, vikunjaErr500},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			client, fake := newVikunjaFakeClient(t, map[string][]vikunjaResp{route: tc.resp}, "dummy", "", 0)
+			got, err := client.UpdateTask(context.Background(), &VikunjaTask{ID: 10, Title: "Updated"})
+			assertErrString(t, err, tc.wantErr)
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("UpdateTask = %+v, want %+v", got, tc.want)
+			}
+			assertVikunjaCalls(t, fake, []string{route})
+		})
+	}
+}
+
+func TestVikunjaClient_CreateRelation(t *testing.T) {
+	t.Parallel()
+
+	const route = "PUT /api/v1/tasks/10/relations"
+	tests := []struct {
+		name     string
+		kind     string
+		resp     []vikunjaResp
+		wantBody string
+		wantErr  string
+	}{
+		{"blocking created", "blocking", vikunjaOK(`{}`), `{"other_task_id":2,"relation_kind":"blocking"}`, ""},
+		{"related created", "related", vikunjaOK(`{}`), `{"other_task_id":2,"relation_kind":"related"}`, ""},
+		{"server error", "blocking", vikunjaFail, `{"other_task_id":2,"relation_kind":"blocking"}`, vikunjaErr500},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			client, fake := newVikunjaFakeClient(t, map[string][]vikunjaResp{route: tc.resp}, "dummy", "", 0)
+			assertErrString(t, client.CreateRelation(context.Background(), 10, 2, tc.kind), tc.wantErr)
+			assertVikunjaCalls(t, fake, []string{route})
+			if got := fake.recordedBodies(); !slices.Equal(got, []string{tc.wantBody}) {
+				t.Fatalf("bodies = %q; want [%q]", got, tc.wantBody)
+			}
+		})
+	}
+}
+
+func TestVikunjaClient_DeleteRelation(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		kind    string
+		route   string
+		resp    []vikunjaResp
+		wantErr string
+	}{
+		{"blocking deleted", "blocking", "DELETE /api/v1/tasks/10/relations/blocking/2", vikunjaOK(`{}`), ""},
+		{"related deleted", "related", "DELETE /api/v1/tasks/10/relations/related/2", vikunjaOK(`{}`), ""},
+		{"server error", "blocking", "DELETE /api/v1/tasks/10/relations/blocking/2", vikunjaFail, vikunjaErr500},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			client, fake := newVikunjaFakeClient(t, map[string][]vikunjaResp{tc.route: tc.resp}, "dummy", "", 0)
+			assertErrString(t, client.DeleteRelation(context.Background(), 10, 2, tc.kind), tc.wantErr)
+			assertVikunjaCalls(t, fake, []string{tc.route})
+		})
+	}
+}
+
+func TestVikunjaClient_ListComments(t *testing.T) {
+	t.Parallel()
+
+	const route = "GET /api/v1/tasks/10/comments"
+	tests := []struct {
+		name    string
+		resp    []vikunjaResp
+		want    []VikunjaComment
+		wantErr string
+	}{
+		{"listed", vikunjaOK(`[{"id":1,"comment":"Hello"}]`), []VikunjaComment{{ID: 1, Comment: "Hello"}}, ""},
+		{"server error", vikunjaFail, nil, vikunjaErr500},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			client, fake := newVikunjaFakeClient(t, map[string][]vikunjaResp{route: tc.resp}, "dummy", "", 0)
+			got, err := client.ListComments(context.Background(), 10)
+			assertErrString(t, err, tc.wantErr)
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("ListComments = %+v, want %+v", got, tc.want)
+			}
+			assertVikunjaCalls(t, fake, []string{route})
+		})
+	}
+}
+
+func TestVikunjaClient_CreateComment(t *testing.T) {
+	t.Parallel()
+
+	const route = "PUT /api/v1/tasks/10/comments"
+	tests := []struct {
+		name    string
+		resp    []vikunjaResp
+		wantErr string
+	}{
+		{"created", vikunjaOK(`{}`), ""},
+		{"server error", vikunjaFail, vikunjaErr500},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			client, fake := newVikunjaFakeClient(t, map[string][]vikunjaResp{route: tc.resp}, "dummy", "", 0)
+			assertErrString(t, client.CreateComment(context.Background(), 10, "New comment"), tc.wantErr)
+			assertVikunjaCalls(t, fake, []string{route})
+		})
+	}
+}
+
+// TestVikunjaClient_AuthAndRetry covers doJSON's token bootstrap, 401
+// refresh-and-retry and transport/parse failures through GetTask.
 func TestVikunjaClient_AuthAndRetry(t *testing.T) {
 	t.Parallel()
 
-	tests := []authAndRetryTestCase{
+	refreshed := vikunjaOK(`{"token":"refreshed-token"}`)
+	task := vikunjaOK(`{"id":10,"title":"Success"}`)
+	expired := vikunjaResp{status: http.StatusUnauthorized, body: `{"message":"token expired"}`}
+	tests := []struct {
+		name      string
+		token     string
+		url       string
+		routes    map[string][]vikunjaResp
+		want      *VikunjaTask
+		wantErr   string
+		wantCalls []string
+	}{
+		{name: "blank vikunja URL fails fast", url: "   ", wantErr: "vikunja URL is not configured"},
 		{
-			name:     "unconfigured vikunja URL fails fast",
-			emptyURL: true,
-			wantErr:  "vikunja URL is not configured",
+			name:   "empty token bootstraps login",
+			routes: map[string][]vikunjaResp{vikunjaLogin: refreshed, vikunjaGetTask: task},
+			want:   &VikunjaTask{ID: 10, Title: "Success"}, wantCalls: []string{vikunjaLogin, vikunjaGetTask},
 		},
 		{
-			name:         "empty token bootstraps login",
-			initialToken: "",
+			name: "401 unauthorized refreshes token and retries", token: "stale-token",
+			routes: map[string][]vikunjaResp{vikunjaLogin: refreshed, vikunjaGetTask: {expired, task[0]}},
+			want:   &VikunjaTask{ID: 10, Title: "Success"}, wantCalls: []string{vikunjaGetTask, vikunjaLogin, vikunjaGetTask},
 		},
 		{
-			name:         "401 unauthorized refreshes token and retries",
-			initialToken: "stale-token",
-			unauthorized: true,
+			name: "401 reauth fails returns error", token: "stale-token",
+			routes:    map[string][]vikunjaResp{vikunjaLogin: vikunjaFail, vikunjaGetTask: {expired}},
+			wantErr:   "reauth on 401 failed: vikunja authentication failed: " + vikunjaErr500,
+			wantCalls: []string{vikunjaGetTask, vikunjaLogin, vikunjaRegister, vikunjaLogin},
 		},
 		{
-			name:         "401 reauth fails returns error",
-			initialToken: "stale-token",
-			unauthorized: true,
-			reauthFails:  true,
-			wantErr:      "reauth on 401 failed",
+			name: "invalid json returns parse error", token: "token",
+			routes:  map[string][]vikunjaResp{vikunjaGetTask: vikunjaOK(`{not valid json`)},
+			wantErr: "failed to parse response JSON", wantCalls: []string{vikunjaGetTask},
 		},
 		{
-			name:         "invalid json returns parse error",
-			initialToken: "token",
-			invalidJSON:  true,
-			wantErr:      "failed to parse response JSON",
+			name: "dropped connection returns http failure", token: "token",
+			routes:  map[string][]vikunjaResp{vikunjaGetTask: {{hangup: true}}},
+			wantErr: "http request GET /api/v1/tasks/10 failed", wantCalls: []string{vikunjaGetTask},
 		},
 		{
-			name:         "network error returns http failure",
-			initialToken: "token",
-			networkError: true,
-			wantErr:      "failed",
-		},
-		{
-			name:         "bootstrap auth fails propagates error",
-			initialToken: "",
-			authError:    true,
-			wantErr:      "vikunja authentication failed",
+			name:      "bootstrap auth fails propagates error",
+			routes:    map[string][]vikunjaResp{vikunjaLogin: vikunjaFail, vikunjaRegister: vikunjaFail},
+			wantErr:   "vikunja authentication failed: " + vikunjaErr500,
+			wantCalls: []string{vikunjaLogin, vikunjaRegister, vikunjaLogin},
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			runAuthAndRetryCase(t, tc)
+			client, fake := newVikunjaFakeClient(t, tc.routes, tc.token, tc.url, 0)
+			got, err := client.GetTask(context.Background(), 10)
+			assertErrString(t, err, tc.wantErr)
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("GetTask = %+v, want %+v", got, tc.want)
+			}
+			assertVikunjaCalls(t, fake, tc.wantCalls)
 		})
 	}
 }
