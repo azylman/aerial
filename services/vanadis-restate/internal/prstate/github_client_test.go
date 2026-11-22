@@ -2,6 +2,7 @@ package prstate
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -21,9 +22,11 @@ type apiResponse struct {
 
 // apiRequest is one request the fake GitHub API saw.
 type apiRequest struct {
-	method string
-	path   string
-	auth   string
+	method      string
+	path        string
+	auth        string
+	accept      string
+	contentType string
 }
 
 // fakeGitHubAPI serves canned responses per "METHOD path?query", in order;
@@ -38,7 +41,7 @@ func (f *fakeGitHubAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	route := r.Method + " " + r.URL.RequestURI()
-	f.requests = append(f.requests, apiRequest{method: r.Method, path: r.URL.RequestURI(), auth: r.Header.Get("Authorization")})
+	f.requests = append(f.requests, apiRequest{method: r.Method, path: r.URL.RequestURI(), auth: r.Header.Get("Authorization"), accept: r.Header.Get("Accept"), contentType: r.Header.Get("Content-Type")})
 	queue := f.responses[route]
 	if len(queue) == 0 {
 		w.WriteHeader(http.StatusNotFound)
@@ -101,6 +104,39 @@ func TestNewGitHubClient(t *testing.T) {
 			require.Equal(t, tc.wantURL, c.apiURL)
 			require.Equal(t, tc.wantToken, c.token)
 			require.NotNil(t, c.http)
+		})
+	}
+}
+
+func TestGitHubClientDo(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name            string
+		token           string
+		method          string
+		body            string
+		wantAuth        string
+		wantAccept      string
+		wantContentType string
+	}{
+		{name: "get carries bearer token and github json accept", token: "tok", method: http.MethodGet, wantAuth: "Bearer tok", wantAccept: "application/vnd.github+json"},
+		{name: "body sets json content type", token: "tok", method: http.MethodPut, body: `{"a":1}`, wantAuth: "Bearer tok", wantAccept: "application/vnd.github+json", wantContentType: "application/json"},
+		{name: "empty token sends no authorization", method: http.MethodGet, wantAccept: "application/vnd.github+json"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			api := &fakeGitHubAPI{responses: map[string][]apiResponse{tc.method + " /x": {{status: 200, body: "{}"}}}}
+			srv := httptest.NewServer(api)
+			t.Cleanup(srv.Close)
+			var body io.Reader
+			if tc.body != "" {
+				body = strings.NewReader(tc.body)
+			}
+			status, _, gerr := NewGitHubClient(srv.Client(), srv.URL, tc.token).do(context.Background(), tc.method, "/x", body, 1<<10)
+			require.Nil(t, gerr)
+			require.Equal(t, http.StatusOK, status)
+			require.Equal(t, []apiRequest{{method: tc.method, path: "/x", auth: tc.wantAuth, accept: tc.wantAccept, contentType: tc.wantContentType}}, api.Requests())
 		})
 	}
 }
@@ -211,7 +247,7 @@ func TestGitHubClientUpdateBranch(t *testing.T) {
 			require.Len(t, api.Requests(), tc.wantRequests)
 			if tc.wantErrStatus == 0 {
 				require.Nil(t, gerr)
-				require.Equal(t, "token tok", api.Requests()[0].auth)
+				require.Equal(t, "Bearer tok", api.Requests()[0].auth)
 				return
 			}
 			require.Equal(t, tc.wantErrStatus, gerr.Status)

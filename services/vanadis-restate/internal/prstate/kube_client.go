@@ -7,6 +7,8 @@ package prstate
 // without importing it: synapse is a separate module and its packages are
 // internal. Only the write paths these effects need are ported; discovery
 // stays in synapse, which carries the resolved Kustomizations in the event.
+// The API-server transport, service-account token cache and image-tag key
+// rules come from pkg/k8sauth and pkg/prwire.
 //
 // Error classification is data, not error types, so a journaled result
 // replays identically: KubeError carries the HTTP status. Transport
@@ -15,8 +17,6 @@ package prstate
 import (
 	"bytes"
 	"context"
-	"crypto/tls"
-	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -24,10 +24,9 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"os"
 	"strings"
-	"time"
 
+	"github.com/azylman/aerial/pkg/k8sauth"
 	"github.com/azylman/aerial/pkg/prwire"
 )
 
@@ -105,22 +104,22 @@ var _ KubeEffector = (*KubeClient)(nil)
 type KubeClient struct {
 	http        *http.Client
 	apiServer   string
-	tokenPath   string
+	tokens      *k8sauth.TokenSource
 	receiverURL string
 }
 
 // NewKubeClient builds a client for apiServer authenticating with the token
-// read from tokenPath on every call (projected tokens rotate). client is
-// used as-is for plain-HTTP servers; HTTPS servers trust caPath.
+// at tokenPath, re-read at most once a minute (projected tokens rotate); an
+// empty tokenPath sends no token. The HTTP client comes from
+// k8sauth.NewAPIServerClient: client as-is for plain-HTTP servers, a
+// transport trusting caPath for HTTPS servers.
 func NewKubeClient(client *http.Client, apiServer, tokenPath, caPath, receiverURL string) *KubeClient {
 	apiServer = strings.TrimRight(strings.TrimSpace(apiServer), "/")
-	if client == nil {
-		client = &http.Client{Timeout: 15 * time.Second}
+	var tokens *k8sauth.TokenSource
+	if tokenPath = strings.TrimSpace(tokenPath); tokenPath != "" {
+		tokens = k8sauth.NewTokenSource(tokenPath, nil)
 	}
-	if strings.HasPrefix(apiServer, "https://") {
-		client = kubeTLSClient(client, caPath)
-	}
-	return &KubeClient{http: client, apiServer: apiServer, tokenPath: strings.TrimSpace(tokenPath), receiverURL: normalizeReceiverURL(receiverURL)}
+	return &KubeClient{http: k8sauth.NewAPIServerClient(apiServer, client, caPath), apiServer: apiServer, tokens: tokens, receiverURL: normalizeReceiverURL(receiverURL)}
 }
 
 // InClusterAPIServer returns the API server URL from the in-cluster service
@@ -131,31 +130,6 @@ func InClusterAPIServer(host, port string) string {
 		return ""
 	}
 	return "https://" + net.JoinHostPort(host, port)
-}
-
-// kubeTLSClient trusts the service-account CA on top of the system pool,
-// keeping the caller's timeout. A missing CA keeps the system pool.
-func kubeTLSClient(base *http.Client, caPath string) *http.Client {
-	transport := &http.Transport{Proxy: http.ProxyFromEnvironment, IdleConnTimeout: 90 * time.Second}
-	if pool := loadCertPool(caPath); pool != nil {
-		transport.TLSClientConfig = &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}
-	}
-	return &http.Client{Timeout: base.Timeout, Transport: transport}
-}
-
-func loadCertPool(caPath string) *x509.CertPool {
-	data, err := os.ReadFile(strings.TrimSpace(caPath))
-	if err != nil || len(data) == 0 {
-		return nil
-	}
-	pool, err := x509.SystemCertPool()
-	if err != nil || pool == nil {
-		pool = x509.NewCertPool()
-	}
-	if !pool.AppendCertsFromPEM(data) {
-		return nil
-	}
-	return pool
 }
 
 // normalizeReceiverURL trims the receiver URL and drops a bare
@@ -174,15 +148,17 @@ func normalizeReceiverURL(raw string) string {
 	return trimmed
 }
 
+// token returns the cached service-account token, or "" when no token path
+// is configured or the token cannot be read.
 func (c *KubeClient) token() string {
-	if c.tokenPath == "" {
+	if c.tokens == nil {
 		return ""
 	}
-	data, err := os.ReadFile(c.tokenPath)
+	tok, err := c.tokens.Token()
 	if err != nil {
 		return ""
 	}
-	return strings.TrimSpace(string(data))
+	return tok
 }
 
 // do sends one request and returns the status and a bounded body; transport
@@ -255,43 +231,12 @@ func (c *KubeClient) DispatchGitPush(ctx context.Context, req GitPushRequest) *K
 	return c.forwardReceiver(ctx, req)
 }
 
-// ResolveImageTag resolves the ConfigMap tag key and workload name for one
-// image of repo, mirroring synapse kube.ResolveImageTag.
-func ResolveImageTag(repo, imageRef string) (tagKey, workloadName string) {
-	ref := strings.TrimSpace(imageRef)
-	if i := strings.LastIndex(ref, "/"); i != -1 {
-		ref = ref[i+1:]
-	}
-	if i := strings.Index(ref, ":"); i != -1 {
-		ref = ref[:i]
-	}
-	workloadName = strings.TrimSpace(ref)
-	if workloadName == "" || strings.EqualFold(workloadName, "none") {
-		return "", ""
-	}
-	var imageName string
-	switch repo[strings.LastIndex(repo, "/")+1:] {
-	case "aerial":
-		imageName = "aerial-" + strings.TrimPrefix(workloadName, "aerial-")
-	case "aerial-sidecars":
-		imageName = "aerial-sidecar-" + strings.TrimPrefix(workloadName, "aerial-sidecar-")
-	case "mirrormere":
-		imageName = workloadName
-		if !strings.HasPrefix(workloadName, "mirrormere") {
-			imageName = "mirrormere-" + workloadName
-		}
-	default:
-		imageName = workloadName
-	}
-	return "TAG_" + strings.ToUpper(strings.ReplaceAll(imageName, "-", "_")), workloadName
-}
-
 // PromoteImageTag writes the image tag into ConfigMap/aerial-image-tags and
 // forwards the promotion to the Flux receiver, mirroring synapse
 // kube.Client.PromoteImageTag: the promotion succeeds when either write
 // succeeds, and returns the workload name ("" when nothing was promoted).
 func (c *KubeClient) PromoteImageTag(ctx context.Context, req ImagePromotionRequest) (string, *KubeError) {
-	tagKey, workloadName := ResolveImageTag(req.Repo, req.Image)
+	tagKey, _, workloadName := prwire.ResolveImageTag(req.Repo, req.Image)
 	if workloadName == "" {
 		return "", nil
 	}
