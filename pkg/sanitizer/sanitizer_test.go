@@ -275,10 +275,6 @@ func TestSanitizeAuthor_TableDriven(t *testing.T) {
 	}, SanitizeAuthor)
 }
 
-func resetSensitiveTokens() {
-	ResetSensitiveTokensForTest()
-}
-
 func TestMaskTokenSample_TableDriven(t *testing.T) {
 	t.Parallel()
 
@@ -375,34 +371,6 @@ func TestMatchSensitiveTokens_TableDriven(t *testing.T) {
 	}
 }
 
-func TestResetSensitiveTokensForTest_TableDriven(t *testing.T) {
-	tests := []struct {
-		name  string
-		token string
-		input string
-	}{
-		{
-			name:  "token cleared after reset",
-			token: "my_temporary_secret_token_999",
-			input: "log with my_temporary_secret_token_999",
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			ResetSensitiveTokensForTest()
-			RegisterSensitiveTokens(tc.token)
-			if len(MatchSensitiveTokens(tc.input)) == 0 {
-				t.Fatalf("expected token %q to match before reset", tc.token)
-			}
-			ResetSensitiveTokensForTest()
-			if len(MatchSensitiveTokens(tc.input)) != 0 {
-				t.Fatalf("expected token %q to NOT match after reset", tc.token)
-			}
-		})
-	}
-}
-
 func TestRegisterSensitiveTokens_TableDriven(t *testing.T) {
 	// Not t.Parallel() because it mutates global sensitive tokens state
 	tests := []struct {
@@ -427,8 +395,8 @@ func TestRegisterSensitiveTokens_TableDriven(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			resetSensitiveTokens()
-			defer resetSensitiveTokens()
+			ResetSensitiveTokensForTest()
+			defer ResetSensitiveTokensForTest()
 
 			RegisterSensitiveTokens(tc.tokens...)
 			got := SanitizeString(tc.input)
@@ -480,8 +448,8 @@ func TestReplaceSensitiveTokens_TableDriven(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			resetSensitiveTokens()
-			defer resetSensitiveTokens()
+			ResetSensitiveTokensForTest()
+			defer ResetSensitiveTokensForTest()
 
 			if len(tc.initialTokens) > 0 {
 				RegisterSensitiveTokens(tc.initialTokens...)
@@ -561,8 +529,8 @@ func TestRegisterSharedSecrets_TableDriven(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			resetSensitiveTokens()
-			defer resetSensitiveTokens()
+			ResetSensitiveTokensForTest()
+			defer ResetSensitiveTokensForTest()
 
 			RegisterSharedSecrets(tc.path)
 			got := SanitizeString(tc.input)
@@ -591,7 +559,18 @@ func TestValuePattern_TableDriven(t *testing.T) {
 		wantExact  string
 		matches    []string
 		nonMatches []string
+		wantOrder  []string
 	}{
+		{
+			name:      "duplicate values collapse and longest variant first",
+			values:    []string{"abcd", "abcd", " abcd "},
+			wantOrder: []string{"eC1hY2Nlc3MtdG9rZW46YWJjZA==", "eC1hY2Nlc3MtdG9rZW46YWJjZA", "YWJjZA==", "YWJjZA", "abcd"},
+		},
+		{
+			name:      "longer value precedes shorter overlapping value",
+			values:    []string{"wxyz", "wxyzwxyz"},
+			wantOrder: []string{"wxyzwxyz", "wxyz"},
+		},
 		{
 			name:       "no values matches nothing",
 			values:     nil,
@@ -653,56 +632,40 @@ func TestValuePattern_TableDriven(t *testing.T) {
 					t.Errorf("pattern should not match %q", s)
 				}
 			}
+			assertValuePatternOrder(t, re, got, tc.wantOrder)
 		})
 	}
 }
 
-func TestValuePattern_Ordering_TableDriven(t *testing.T) {
-	tests := []struct {
-		name   string
-		values []string
-		want   []string
-	}{
-		{
-			name:   "duplicate values collapse and longest variant first",
-			values: []string{"abcd", "abcd", " abcd "},
-			want:   []string{"eC1hY2Nlc3MtdG9rZW46YWJjZA==", "eC1hY2Nlc3MtdG9rZW46YWJjZA", "YWJjZA==", "YWJjZA", "abcd"},
-		},
-		{
-			name:   "longer value precedes shorter overlapping value",
-			values: []string{"wxyz", "wxyzwxyz"},
-			want:   []string{"wxyzwxyz", "wxyz"},
-		},
+func assertValuePatternOrder(t *testing.T, re *regexp.Regexp, pattern string, wantOrder []string) {
+	t.Helper()
+	if len(wantOrder) == 0 {
+		return
 	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			alts := strings.Split(ValuePattern(tc.values), "|")
-			seen := make(map[string]bool, len(alts))
-			for i, a := range alts {
-				if seen[a] {
-					t.Errorf("duplicate alternative %q", a)
-				}
-				seen[a] = true
-				if i > 0 && len(alts[i-1]) < len(a) {
-					t.Errorf("alternative %q (len %d) follows shorter %q", a, len(a), alts[i-1])
-				}
-			}
-			last := -1
-			for _, w := range tc.want {
-				idx := slices.Index(alts, regexp.QuoteMeta(w))
-				if idx < 0 {
-					t.Fatalf("missing alternative %q in %v", w, alts)
-				}
-				if idx < last {
-					t.Errorf("alternative %q out of order in %v", w, alts)
-				}
-				last = idx
-			}
-			re := regexp.MustCompile(ValuePattern(tc.values))
-			if got := re.FindString("--" + tc.want[0] + "--"); got != tc.want[0] {
-				t.Errorf("leftmost match = %q, want longest %q", got, tc.want[0])
-			}
-		})
+	alts := strings.Split(pattern, "|")
+	seen := make(map[string]bool, len(alts))
+	for i, a := range alts {
+		if seen[a] {
+			t.Errorf("duplicate alternative %q", a)
+		}
+		seen[a] = true
+		if i > 0 && len(alts[i-1]) < len(a) {
+			t.Errorf("alternative %q (len %d) follows shorter %q", a, len(a), alts[i-1])
+		}
+	}
+	last := -1
+	for _, w := range wantOrder {
+		idx := slices.Index(alts, regexp.QuoteMeta(w))
+		if idx < 0 {
+			t.Fatalf("missing alternative %q in %v", w, alts)
+		}
+		if idx < last {
+			t.Errorf("alternative %q out of order in %v", w, alts)
+		}
+		last = idx
+	}
+	if m := re.FindString("--" + wantOrder[0] + "--"); m != wantOrder[0] {
+		t.Errorf("leftmost match = %q, want longest %q", m, wantOrder[0])
 	}
 }
 

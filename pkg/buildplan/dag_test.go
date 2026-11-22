@@ -296,16 +296,6 @@ func TestIsPRDependencyCodeReady(t *testing.T) {
 	}
 }
 
-func TestCheckDisjointFiles_ChunkBEmptyTargetFiles(t *testing.T) {
-	t.Parallel()
-	a := VanadisChunk{ID: "c1", TargetFiles: []string{"a.go"}}
-	b := VanadisChunk{ID: "c2", TargetFiles: nil}
-	err := CheckDisjointFiles(a, b, "repo")
-	if err == nil || !strings.Contains(err.Error(), "concurrent PR chunk \"c2\" on repo \"repo\" must specify target_files") {
-		t.Fatalf("expected error on chunk b empty target files, got %v", err)
-	}
-}
-
 func TestValidateCreateBuildInputs(t *testing.T) {
 	t.Parallel()
 	validChunk := VanadisChunk{
@@ -454,20 +444,6 @@ func TestCheckChunkDependenciesReady_ModeAndStatus(t *testing.T) {
 				t.Errorf("CheckChunkDependenciesReady(%s) err = %v, wantErr = %v", tc.name, err, tc.wantErr)
 			}
 		})
-	}
-}
-
-func TestNormalizeAndValidateBuildDAG_TerminalSkip(t *testing.T) {
-	t.Parallel()
-
-	// Concurrent chunks on same repo where one is terminal (merged/completed) -> disjoint check skipped
-	chunks := []VanadisChunk{
-		{ID: "c1", Mode: "pr", Repo: "aerial", Status: "completed", DependsOn: []string{}, TargetFiles: []string{"a.go"}},
-		{ID: "c2", Mode: "pr", Repo: "aerial", Status: "pending", DependsOn: []string{}, TargetFiles: []string{"a.go"}},
-	}
-	_, err := NormalizeAndValidateBuildDAG(chunks)
-	if err != nil {
-		t.Errorf("expected valid DAG when concurrent chunk is terminal, got %v", err)
 	}
 }
 

@@ -286,7 +286,7 @@ type serveMCPStreamTestCase struct {
 func runServeMCPStreamCase(t *testing.T, tc serveMCPStreamTestCase) {
 	t.Helper()
 	sr := tracetest.NewSpanRecorder()
-	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(sr))
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSampler(sdktrace.AlwaysSample()), sdktrace.WithSpanProcessor(sr))
 	t.Cleanup(func() { _ = tp.Shutdown(context.Background()) })
 
 	streamHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
