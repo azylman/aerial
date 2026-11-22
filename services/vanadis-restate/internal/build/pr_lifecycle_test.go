@@ -156,7 +156,7 @@ func (s *checkStatusSpyStore) FailChunk(_ context.Context, chunkID, reason, _ st
 	if s.failErr != nil {
 		return nil, nil, false, s.failErr
 	}
-	return &model.VanadisBuild{ID: "b1", Status: statusFailed, Objective: "Obj", ThreadID: "th-1"}, &model.VanadisChunk{ID: chunkID, BuildID: "b1", Status: statusFailed}, !s.skipFailApply, nil
+	return &model.VanadisBuild{ID: "b1", Status: statusRunning, Objective: "Obj", ThreadID: "th-1"}, &model.VanadisChunk{ID: chunkID, BuildID: "b1", Status: statusFailed}, !s.skipFailApply, nil
 }
 
 func (s *checkStatusSpyStore) UpdateChunkBannerAndStatus(_ context.Context, chunkID, status, banner string) error {
@@ -244,10 +244,10 @@ func TestBuildObject_ExecutorErrorBranches(t *testing.T) {
 	// notifyBuildTerminal error branches
 	assert.Error(t, boErr.notifyBuildTerminal(context.Background(), &b1, []model.VanadisChunk{c1}, "failed", "chunk failed", "TITLE", "MSG"))
 
-	// notifyChunkFailure error branches
+	// notifyChunkFailure swallows cancel and widget errors; reconcile owns the wake
 	ctx := makeObjectMockContext(t, "b-err")
 	_, _ = restate.Run(ctx, func(rc restate.RunContext) (bool, error) {
-		assert.Error(t, boErr.notifyChunkFailure(rc, b1, "c1", "reason"))
+		assert.NoError(t, boErr.notifyChunkFailure(rc, b1, "c1", "reason"))
 		return true, nil
 	})
 
@@ -497,12 +497,6 @@ func TestActionFailureAcceptedAndCompletionMutation(t *testing.T) {
 	assert.True(t, actionFailureAccepted(cPR, statusRunning, "vanadis-conflict-c1"))
 	assert.False(t, actionFailureAccepted(cPR, statusRunning, "stale-dispatch"))
 
-	// isFailureCompletionMutation branches
-	assert.False(t, isFailureCompletionMutation(nil, nil))
-	assert.False(t, isFailureCompletionMutation(&BuildMutationRequest{Action: "other", ChunkID: "c1"}, []model.VanadisChunk{cRunning}))
-	assert.True(t, isFailureCompletionMutation(&BuildMutationRequest{Action: "chunk_failed", ChunkID: "c1"}, []model.VanadisChunk{cRunning}))
-	assert.False(t, isFailureCompletionMutation(&BuildMutationRequest{Action: "chunk_failed", ChunkID: "other"}, []model.VanadisChunk{cRunning}))
-
 	// dispatchCompletionMutation branches
 	mFail := dispatchCompletionMutation(pubsub.DispatchOutcomeEvent{VanadisChunkID: "c1", Status: "failed", Error: "boom", DispatchID: "d1"})
 	assert.NotNil(t, mFail)
@@ -583,7 +577,8 @@ func TestBuildObject_TransitionErrorPropagation(t *testing.T) {
 func TestBuildObject_AuthoritativeFailureContinuation(t *testing.T) {
 	t.Parallel()
 
-	// 1. Replay notifyBuildTerminal on failure continuation when !terminalNotified
+	// 1. A legacy failed build (no FailureIsolation) wakes once per new chunk
+	// failure and never relaunches.
 	bFailed := model.VanadisBuild{ID: "b-failed", Status: statusFailed, ThreadID: "th-1", Objective: "Test failure"}
 	cFailed := model.VanadisChunk{ID: "c1", BuildID: "b-failed", Mode: chunkModeAction, Status: statusFailed, StallNudges: 1}
 	st, _ := dbScript{buildRow: &mockRow{b: &bFailed}, chunks: []model.VanadisChunk{cFailed}, row: failRow(statusFailed, statusFailed, 1)}.open()
@@ -598,14 +593,15 @@ func TestBuildObject_AuthoritativeFailureContinuation(t *testing.T) {
 	out, err := bo.executeAuthoritativeTransition(context.Background(), "b-failed", &BuildMutationRequest{Action: "chunk_failed", ChunkID: "c1", DispatchID: "vanadis-c1-turn-1", Reason: "execution error"}, nil, nil, false)
 	assert.NoError(t, err)
 	assert.Equal(t, statusFailed, out.BuildStatus)
-	assert.True(t, out.State.TerminalNotified)
+	assert.False(t, out.State.FailureIsolation)
+	assert.Equal(t, map[string]bool{failureNotifyKey(cFailed): true}, out.State.FailureNotified)
 	assert.Len(t, queuedPrompts, 1)
-	assert.Contains(t, queuedPrompts[0], "[VANADIS BUILD FAILED]")
+	assert.Contains(t, queuedPrompts[0], "[VANADIS CHUNK FAILED]")
 	assert.Len(t, bus.events, 1)
 
-	// Second run with terminalNotified=true does not duplicate notification
+	// Second run with the recorded ledger does not duplicate the wake
 	queuedPrompts, bus.events = nil, nil
-	out2, err2 := bo.executeAuthoritativeTransition(context.Background(), "b-failed", &BuildMutationRequest{Action: "chunk_failed", ChunkID: "c1", DispatchID: "vanadis-c1-turn-1"}, nil, nil, true)
+	out2, err2 := bo.executeAuthoritativeTransition(context.Background(), "b-failed", &BuildMutationRequest{Action: "chunk_failed", ChunkID: "c1", DispatchID: "vanadis-c1-turn-1"}, out.State, nil, true)
 	assert.NoError(t, err2)
 	assert.Equal(t, statusFailed, out2.BuildStatus)
 	assert.Empty(t, queuedPrompts)
@@ -619,7 +615,8 @@ func TestBuildObject_AuthoritativeFailureContinuation(t *testing.T) {
 	err = boFailRetry.failMutation(context.Background(), "b-fail", &BuildMutationRequest{Action: "chunk_failed", ChunkID: "c1", DispatchID: "vanadis-c1-turn-1"})
 	assert.NoError(t, err)
 
-	// 3. FailChunk second journaled step failure propagates before ClearState
+	// 3. FailChunk's notify step no longer wakes, so a failing wake client
+	// cannot fail it; ClearState is never called on a running build.
 	eriFail := &mockEriClient{promptFn: func(context.Context, string, string) error { return errors.New("prompt unavailable") }}
 	execFail := executor.NewExecutor(t.TempDir(), eriFail, pubsub.NewMemoryBus(), "token", "azylman", nil)
 	bRunning := model.VanadisBuild{ID: "b-running", Status: "running", ThreadID: "th-1"}
@@ -629,8 +626,8 @@ func TestBuildObject_AuthoritativeFailureContinuation(t *testing.T) {
 	boFailChunk := NewBuildObject("", nil, func(restate.ObjectContext) objectRuntime { return fakeRT }).WithAuthority(storeFailChunk, execFail)
 	ctxMock := makeObjectMockContext(t, "b-running")
 	_, fErr := boFailChunk.FailChunk(ctxMock, model.FailChunkRequest{ChunkID: "c1", Reason: "hard error"})
-	assert.Error(t, fErr)
-	assert.False(t, fakeRT.cleared, "ClearState must not be called when notification step fails")
+	assert.NoError(t, fErr)
+	assert.False(t, fakeRT.cleared, "ClearState must not be called on a running build")
 
 	// 4. FailChunk success on failed build leaves fakeRT.cleared false (non-terminal failed state)
 	eriSuccess := &mockEriClient{}
@@ -874,7 +871,9 @@ func TestBuildObject_PRRecoveryAfterClosure(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			var mu sync.Mutex
-			parent := "running"
+			// The build already failed under failure isolation; closing the PR
+			// never changes the build status (reconcile owns it).
+			parent := "failed"
 			chunks := []model.VanadisChunk{{ID: "c1", BuildID: "b1", Mode: "pr", PRNumber: 12, Status: "pr_opened", HeadSHA: "h1"}}
 			st := recoveryLifecycleStore{recoveryFixtureStore(&mu, &parent, &chunks, false), &parent, &chunks}
 			bo := NewBuildObject("", nil).WithAuthority(st, nil)

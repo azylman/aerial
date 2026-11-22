@@ -46,7 +46,7 @@ func TestFirstAttachmentRecovery(t *testing.T) {
 	}{
 		{"failed parent", "failed", "completed", false},
 		{"running parent", "running", "pending", false},
-		{"failed sibling", "failed", "failed", true},
+		{"failed sibling", "failed", "failed", false},
 		{"cancelled sibling", "failed", "cancelled", true},
 	}
 	for _, tc := range tests {
@@ -93,7 +93,7 @@ func TestAttachmentSelectionAndErrors(t *testing.T) {
 		{name: "duplicate at cap", parent: "failed", status: "failed", previous: 101, cap: 3},
 		{name: "cancelled parent", parent: "cancelled", status: "failed", wantErr: ErrBuildConflict},
 		{name: "completed parent", parent: "completed", status: "failed", wantErr: ErrBuildConflict},
-		{name: "failed sibling", parent: "failed", status: "failed", sibling: "failed", wantErr: ErrBuildConflict},
+		{name: "failed sibling", parent: "failed", status: "failed", sibling: "failed"},
 		{name: "cancelled sibling", parent: "failed", status: "failed", sibling: "cancelled", wantErr: ErrBuildConflict},
 		{name: "chunk write failure", parent: "failed", status: "failed", failure: "UPDATE vanadis_chunks", wantErr: writeErr},
 		{name: "parent write failure", parent: "failed", status: "failed", failure: "UPDATE vanadis_builds", wantErr: writeErr},

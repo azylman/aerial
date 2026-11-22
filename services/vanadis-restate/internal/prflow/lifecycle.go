@@ -137,7 +137,9 @@ func (f *Flow) DispatchChunkRemediationForChunk(ctx context.Context, bld *model.
 	})
 }
 
-// NotifyChunkFailure cancels active work and fans out failure notifications.
+// NotifyChunkFailure cancels the failed chunk's dispatch and syncs the card.
+// Build reconciliation owns the failure wake and the failure events: a failed
+// chunk blocks only its dependents while other chunks continue.
 func (f *Flow) NotifyChunkFailure(ctx context.Context, bld model.VanadisBuild, chunkID, reason string) error {
 	if f == nil || f.Exec == nil {
 		return nil
@@ -163,24 +165,20 @@ func (f *Flow) NotifyChunkFailure(ctx context.Context, bld model.VanadisBuild, c
 			}
 		}
 	}
-	if _, sErr := f.Exec.SyncBuildWidget(ctx, f.Store, buildObj, chunks, "Build failed: "+reason); sErr != nil {
+	if _, sErr := f.Exec.SyncBuildWidget(ctx, f.Store, buildObj, chunks, chunkFailureNotice(chunks, chunkID, reason)); sErr != nil {
 		slog.WarnContext(ctx, "[vanadis-restate] sync widget warning", "error", sErr)
 	}
-	var wakeErr error
-	if !buildObj.Quiet {
-		prompt := fmt.Sprintf("[VANADIS BUILD FAILED]\nBuild ID: %s\nObjective: %s\n\nChunk failed: %s", buildObj.ID, buildObj.Objective, reason)
-		if dErr := f.Exec.DispatchWakePrompt(ctx, buildObj.ThreadID, prompt); dErr != nil {
-			slog.WarnContext(ctx, "[vanadis-restate] dispatch wake prompt warning", "error", dErr)
-			wakeErr = dErr
+	return nil
+}
+
+// chunkFailureNotice is the card notice for a failed chunk.
+func chunkFailureNotice(chunks []model.VanadisChunk, chunkID, reason string) string {
+	for _, c := range chunks {
+		if c.ID == chunkID {
+			return fmt.Sprintf("Chunk %d failed: %s (other chunks continue)", c.ChunkIndex+1, reason)
 		}
 	}
-	if pErr := f.Exec.PublishExternalEvent(ctx, "vanadis_chunk", "failed", []string{chunkID}, reason); pErr != nil {
-		slog.WarnContext(ctx, "[vanadis-restate] publish event warning", "error", pErr)
-	}
-	if pErr := f.Exec.PublishExternalEvent(ctx, "vanadis_build", "failed", []string{buildObj.ID}, reason); pErr != nil {
-		slog.WarnContext(ctx, "[vanadis-restate] publish event warning", "error", pErr)
-	}
-	return wakeErr
+	return fmt.Sprintf("Chunk failed: %s (other chunks continue)", reason)
 }
 
 // dispatchSilentThreadWakePrompt wakes the build thread as a silent
@@ -288,12 +286,8 @@ func (f *Flow) HandleCIRemediationCapReached(ctx context.Context, chunkID string
 	if _, sErr := f.Exec.SyncBuildWidget(ctx, f.Store, *bld, chunks, capBanner); sErr != nil {
 		slog.WarnContext(ctx, "[vanadis-restate] sync build widget warning", "error", sErr)
 	}
-	if pErr := f.Exec.PublishExternalEvent(ctx, "vanadis_chunk", "failed", []string{chunkID}, "ci_remediation_cap_reached"); pErr != nil {
-		slog.WarnContext(ctx, "[vanadis-restate] publish event warning", "error", pErr)
-	}
-	if pErr := f.Exec.PublishExternalEvent(ctx, "vanadis_build", "failed", []string{bld.ID}, "ci_remediation_cap_reached"); pErr != nil {
-		slog.WarnContext(ctx, "[vanadis-restate] publish event warning", "error", pErr)
-	}
+	// The chunk failure wake and event come from build reconciliation, which
+	// runs after this PR event.
 	return msgErr
 }
 
@@ -411,7 +405,7 @@ func (f *Flow) HandleClosedPREvent(ctx context.Context, chunkID string, ev pubsu
 	if fErr != nil {
 		return fErr
 	}
-	if isFailureNotificationEligible(chk, failed, "pr_closed_unmerged") && bld != nil && bld.Status == statusFailed && f.Exec != nil {
+	if isFailureNotificationEligible(chk, failed, "pr_closed_unmerged") && bld != nil && f.Exec != nil {
 		if err := f.NotifyChunkFailure(ctx, *bld, chunkID, "pr_closed_unmerged"); err != nil {
 			return err
 		}
