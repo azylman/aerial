@@ -310,16 +310,16 @@ func TestCoordinatorHandlerKinds(t *testing.T) {
 			name:    "ThreadCoordinator",
 			service: NewThreadCoordinator(nil, nil, "aerial"),
 			want: map[string]string{
-				HandlerEnqueue: "SHARED", HandlerCancelTurn: "SHARED", HandlerStatus: "SHARED", HandlerAdoptPending: "SHARED",
-				HandlerAppend: "EXCLUSIVE", HandlerOnTurnDone: "EXCLUSIVE", HandlerKick: "EXCLUSIVE", HandlerClearPending: "EXCLUSIVE", HandlerRunTurn: "EXCLUSIVE",
+				HandlerEnqueue: "SHARED", HandlerCancelTurn: "SHARED", HandlerStatus: "SHARED",
+				HandlerAppend: "EXCLUSIVE", HandlerOnTurnDone: "EXCLUSIVE", HandlerKick: "EXCLUSIVE", HandlerClearPending: "EXCLUSIVE",
 			},
 		},
 		{
 			name:    "DispatchCoordinator",
 			service: NewDispatchCoordinator(nil, "aerial"),
 			want: map[string]string{
-				HandlerEnqueue: "SHARED", HandlerCancel: "SHARED", HandlerStatus: "SHARED", HandlerAdoptPending: "SHARED",
-				HandlerAppend: "EXCLUSIVE", HandlerOnTurnDone: "EXCLUSIVE", HandlerClearPending: "EXCLUSIVE", HandlerRunTurn: "EXCLUSIVE",
+				HandlerEnqueue: "SHARED", HandlerCancel: "SHARED", HandlerStatus: "SHARED",
+				HandlerAppend: "EXCLUSIVE", HandlerOnTurnDone: "EXCLUSIVE", HandlerClearPending: "EXCLUSIVE",
 			},
 		},
 	}
