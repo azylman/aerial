@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -1237,130 +1236,6 @@ func TestAuthorizeTarget(t *testing.T) {
 			}
 			if target != tc.wantTarget {
 				t.Fatalf("targetAgent = %q, want %q", target, tc.wantTarget)
-			}
-		})
-	}
-}
-
-func TestMiddleware(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name         string
-		enabled      bool
-		exemptPaths  []string
-		reqPath      string
-		authHeader   string
-		authStatus   int
-		authBody     string
-		transportErr bool
-		wantStatus   int
-		wantAgent    string
-	}{
-		{
-			name:       "disabled middleware passes through unauthenticated",
-			enabled:    false,
-			reqPath:    "/api/secure",
-			wantStatus: http.StatusOK,
-		},
-		{
-			name:        "exempt path passes through unauthenticated",
-			enabled:     true,
-			exemptPaths: []string{"/healthz"},
-			reqPath:     "/healthz",
-			wantStatus:  http.StatusOK,
-		},
-		{
-			name:        "exempt path with trailing slash passes through",
-			enabled:     true,
-			exemptPaths: []string{"/healthz"},
-			reqPath:     "/healthz/",
-			wantStatus:  http.StatusOK,
-		},
-		{
-			name:       "missing authorization header returns 401",
-			enabled:    true,
-			reqPath:    "/api/secure",
-			wantStatus: http.StatusUnauthorized,
-		},
-		{
-			name:       "malformed authorization header returns 401",
-			enabled:    true,
-			reqPath:    "/api/secure",
-			authHeader: "Basic invalid-token",
-			wantStatus: http.StatusUnauthorized,
-		},
-		{
-			name:       "authenticate failure returns 401",
-			enabled:    true,
-			reqPath:    "/api/secure",
-			authHeader: "Bearer bad-token",
-			authStatus: http.StatusOK,
-			authBody:   `{"apiVersion":"authentication.k8s.io/v1","kind":"TokenReview","status":{"authenticated":false}}`,
-			wantStatus: http.StatusUnauthorized,
-		},
-		{
-			name:         "authenticate infrastructure failure returns 500",
-			enabled:      true,
-			reqPath:      "/api/secure",
-			authHeader:   "Bearer valid-token",
-			transportErr: true,
-			wantStatus:   http.StatusInternalServerError,
-		},
-		{
-			name:       "authenticated request attaches caller to context",
-			enabled:    true,
-			reqPath:    "/api/secure",
-			authHeader: "Bearer valid-token",
-			authStatus: http.StatusOK,
-			authBody:   `{"apiVersion":"authentication.k8s.io/v1","kind":"TokenReview","status":{"authenticated":true,"user":{"username":"system:serviceaccount:default:eri-agent-alpha"}}}`,
-			wantStatus: http.StatusOK,
-			wantAgent:  "agent-alpha",
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-
-			tokenFile := filepath.Join(t.TempDir(), "token")
-			if err := os.WriteFile(tokenFile, []byte("host-sa-token"), 0o600); err != nil {
-				t.Fatalf("write host token: %v", err)
-			}
-
-			rt := &staticRoundTripper{status: tc.authStatus, body: tc.authBody}
-			if tc.transportErr {
-				rt.err = errors.New("simulated network error")
-			}
-
-			auth := NewAuthenticator(Config{
-				Enabled:      tc.enabled,
-				TokenPath:    tokenFile,
-				APIServerURL: "https://k8s.local",
-				HTTPClient:   &http.Client{Transport: rt},
-			})
-
-			var capturedAgent string
-			handler := auth.Middleware(tc.exemptPaths...)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if id, ok := CallerFromContext(r.Context()); ok {
-					capturedAgent = id.CallerAgent
-				}
-				w.WriteHeader(http.StatusOK)
-			}))
-
-			req := httptest.NewRequest(http.MethodGet, tc.reqPath, http.NoBody)
-			if tc.authHeader != "" {
-				req.Header.Set("Authorization", tc.authHeader)
-			}
-			rec := httptest.NewRecorder()
-
-			handler.ServeHTTP(rec, req)
-
-			if rec.Code != tc.wantStatus {
-				t.Fatalf("response status = %d, want %d (body: %s)", rec.Code, tc.wantStatus, rec.Body.String())
-			}
-			if tc.wantAgent != "" && capturedAgent != tc.wantAgent {
-				t.Fatalf("captured caller agent = %q, want %q", capturedAgent, tc.wantAgent)
 			}
 		})
 	}

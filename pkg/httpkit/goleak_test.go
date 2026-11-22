@@ -3,9 +3,9 @@ package httpkit
 import (
 	"testing"
 
-	"go.uber.org/goleak"
+	"github.com/azylman/aerial/pkg/hermetictest"
 )
 
 func TestMain(m *testing.M) {
-	goleak.VerifyTestMain(m)
+	hermetictest.Main(m)
 }
