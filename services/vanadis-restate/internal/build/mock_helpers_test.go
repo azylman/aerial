@@ -219,9 +219,9 @@ func (s *unattachedPREventSpyStore) UpdateChunkBannerAndStatus(_ context.Context
 	return nil
 }
 
-func (s *unattachedPREventSpyStore) UpdateBuildStatusMessageID(_ context.Context, _, _ string) error {
+func (s *unattachedPREventSpyStore) CompareAndSwapBuildStatusMessageID(context.Context, string, string, string) (bool, error) {
 	s.syncWidgetCalls++
-	return nil
+	return true, nil
 }
 
 func (*unattachedPREventSpyStore) UpdateBuildStatus(_ context.Context, _, _ string) error {

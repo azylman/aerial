@@ -35,6 +35,7 @@ type mockWidgetSender struct {
 	lastSendData      *discordgo.MessageSend
 	lastEditData      *discordgo.MessageEdit
 	lastDeleteID      string
+	lastDeleteChannel string
 }
 
 func clearAllChunkActiveStepsForTest() {
@@ -92,7 +93,8 @@ func (m *mockWidgetSender) ChannelMessages(_ string, _ int, _, _, _ string, _ ..
 	return m.msgs, nil
 }
 
-func (m *mockWidgetSender) ChannelMessageDelete(_ string, messageID string, _ ...discordgo.RequestOption) error {
+func (m *mockWidgetSender) ChannelMessageDelete(channelID, messageID string, _ ...discordgo.RequestOption) error {
+	m.lastDeleteChannel = channelID
 	m.lastDeleteID = messageID
 	return m.deleteErr
 }
@@ -453,6 +455,48 @@ func TestDeliverDirectMessageWithAgent(t *testing.T) {
 			assert.Equal(t, tc.wantContent, mock.lastSendData.Content)
 			require.NotNil(t, mock.lastSendData.AllowedMentions)
 			assert.Empty(t, mock.lastSendData.AllowedMentions.Parse)
+		})
+	}
+}
+
+func TestDeleteStatusWidget(t *testing.T) {
+	t.Parallel()
+	notFound := &discordgo.RESTError{Response: &http.Response{StatusCode: http.StatusNotFound}}
+	missingPerms := &discordgo.RESTError{Response: &http.Response{StatusCode: http.StatusForbidden}, Message: &discordgo.APIErrorMessage{Code: 50013}}
+	tests := []struct {
+		name        string
+		d           *DiscordWidgetDeliverer
+		channelID   string
+		messageID   string
+		wantErr     string
+		wantChannel string
+		wantDeleted string
+	}{
+		{name: "nil deliverer returns error", channelID: "123456", messageID: "m1", wantErr: "discord widget deliverer is nil"},
+		{name: "missing sender returns error", d: newSenderDeliverer(nil, ""), channelID: "123456", messageID: "m1", wantErr: `no discord sender configured for agent "aerial"`},
+		{name: "empty message id is a no-op", d: newSenderDeliverer(&mockWidgetSender{}, ""), channelID: "123456", messageID: " "},
+		{name: "empty channel is a no-op", d: newSenderDeliverer(&mockWidgetSender{}, ""), channelID: " ", messageID: "m1"},
+		{name: "deletes in the channel", d: newSenderDeliverer(&mockWidgetSender{}, ""), channelID: " 123456 ", messageID: " m1 ", wantChannel: "123456", wantDeleted: "m1"},
+		{name: "deletes in the redirected channel", d: newSenderDeliverer(&mockWidgetSender{}, "999888"), channelID: "123456", messageID: "m1", wantChannel: "999888", wantDeleted: "m1"},
+		{name: "already deleted message is a success", d: newSenderDeliverer(&mockWidgetSender{deleteErr: notFound}, ""), channelID: "123456", messageID: "m1", wantChannel: "123456", wantDeleted: "m1"},
+		{name: "missing permission is logged not returned", d: newSenderDeliverer(&mockWidgetSender{deleteErr: missingPerms}, ""), channelID: "123456", messageID: "m1", wantChannel: "123456", wantDeleted: "m1"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			err := tc.d.DeleteStatusWidget(context.Background(), "", tc.channelID, tc.messageID)
+			if tc.wantErr != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tc.wantErr)
+			} else {
+				require.NoError(t, err)
+			}
+			var mock mockWidgetSender
+			if m := senderMock(tc.d, ""); m != nil {
+				mock = *m
+			}
+			assert.Equal(t, tc.wantChannel, mock.lastDeleteChannel)
+			assert.Equal(t, tc.wantDeleted, mock.lastDeleteID)
 		})
 	}
 }

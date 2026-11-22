@@ -30,6 +30,9 @@ func DispatchSessionServiceName(name string) string {
 // StatusWidgetDeliverer abstracts status widget delivery to decouple from concrete discord sender.
 type StatusWidgetDeliverer interface {
 	DeliverStatusWidget(ctx context.Context, req StatusWidgetRequest) (string, error)
+	// DeleteStatusWidget removes messageID with agentName's own sender; a
+	// missing message is a success.
+	DeleteStatusWidget(ctx context.Context, agentName, channelID, messageID string) error
 }
 
 // DirectMessageDeliverer abstracts direct message delivery to decouple from concrete discord sender.
@@ -403,6 +406,27 @@ func (c *RestateEriClient) Widget(ctx context.Context, req StatusWidgetRequest) 
 		return c.httpFallback.Widget(ctx, req)
 	}
 	return "", errors.New("neither widget deliverer nor eri url configured for widget delivery")
+}
+
+// DeleteWidget removes a status widget through the direct deliverer under the
+// same conditions Widget delivers through it. The eri HTTP fallback has no
+// delete route, so without direct delivery it is a no-op.
+func (c *RestateEriClient) DeleteWidget(ctx context.Context, agentName, channelID, messageID string) error {
+	if c == nil {
+		return errors.New("restate eri client is nil")
+	}
+	cleanChannelID, cleanMessageID := strings.TrimSpace(channelID), strings.TrimSpace(messageID)
+	if cleanChannelID == "" || cleanMessageID == "" {
+		return nil
+	}
+	c.widgetMu.RLock()
+	deliverer := c.widgetDeliverer
+	hasDiscordToken := c.hasDiscordAuth
+	c.widgetMu.RUnlock()
+	if deliverer != nil && hasDiscordToken && c.restateURL != "" {
+		return deliverer.DeleteStatusWidget(ctx, c.effectiveAgent(ctx, agentName), cleanChannelID, cleanMessageID)
+	}
+	return nil
 }
 
 func (c *RestateEriClient) Message(ctx context.Context, channelID, content string) error {

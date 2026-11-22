@@ -66,7 +66,9 @@ func (s *verdictStore) UpdateBuildStatus(_ context.Context, _, status string) er
 	return nil
 }
 
-func (*verdictStore) UpdateBuildStatusMessageID(context.Context, string, string) error { return nil }
+func (*verdictStore) CompareAndSwapBuildStatusMessageID(context.Context, string, string, string) (bool, error) {
+	return true, nil
+}
 
 func (s *verdictStore) chunkStatus(id string) string {
 	s.mu.Lock()

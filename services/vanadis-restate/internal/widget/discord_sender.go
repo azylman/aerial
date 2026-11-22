@@ -615,6 +615,31 @@ func (d *DiscordWidgetDeliverer) DeliverStatusWidget(ctx context.Context, req er
 	return DeliverStatusWidget(sender, d.gitHubOwner, req, now, opts...)
 }
 
+// DeleteStatusWidget removes a status widget message with agent's own sender,
+// resolving the channel the same way DeliverStatusWidget does. Deletion is
+// best effort: a missing message is a success and Discord failures are only
+// logged; only a missing sender for agent is returned.
+func (d *DiscordWidgetDeliverer) DeleteStatusWidget(ctx context.Context, agent, channelID, messageID string) error {
+	if d == nil {
+		return errors.New("discord widget deliverer is nil")
+	}
+	sender, err := d.senderForAgent(agent)
+	if err != nil {
+		return err
+	}
+	cleanChannelID, cleanMessageID := strings.TrimSpace(channelID), strings.TrimSpace(messageID)
+	if cleanChannelID == "" || cleanMessageID == "" {
+		return nil
+	}
+	targetChannelID := d.redirectChannelIfNoBuildUpdates(agent, cleanChannelID, d.now())
+	var opts []discordgo.RequestOption
+	if ctx != nil {
+		opts = append(opts, discordgo.WithContext(ctx))
+	}
+	deleteOldWidgetBestEffort(sender, targetChannelID, cleanMessageID, opts...)
+	return nil
+}
+
 // DeliverDirectMessageWithAgent delivers a direct plain-text channel alert message using the specified agent sender.
 func (d *DiscordWidgetDeliverer) DeliverDirectMessageWithAgent(ctx context.Context, agent, channelID, content string) error {
 	if d == nil {

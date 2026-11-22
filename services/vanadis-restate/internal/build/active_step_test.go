@@ -32,8 +32,8 @@ func (m *mockActiveStepStore) GetBuild(_ context.Context, _ string) (*model.Vana
 	return m.build, m.chunks, nil
 }
 
-func (*mockActiveStepStore) UpdateBuildStatusMessageID(_ context.Context, _, _ string) error {
-	return nil
+func (*mockActiveStepStore) CompareAndSwapBuildStatusMessageID(context.Context, string, string, string) (bool, error) {
+	return true, nil
 }
 
 var (

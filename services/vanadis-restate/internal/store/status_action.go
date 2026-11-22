@@ -35,31 +35,42 @@ const (
 	statusDeployFailed = "deploy_failed"
 )
 
-func (s *Store) execUpdateByID(ctx context.Context, idLabel, id, valLabel, val string, allowEmptyVal bool, query, opLabel string, notFoundErr error) error {
+func (s *Store) UpdateBuildStatus(ctx context.Context, buildID, status string) error {
 	if s == nil || s.db == nil {
 		return errors.New("database connection is nil")
 	}
-	cleanID, cleanVal := strings.TrimSpace(id), strings.TrimSpace(val)
-	if cleanID == "" || (!allowEmptyVal && cleanVal == "") {
-		return fmt.Errorf("%s and %s cannot be empty", idLabel, valLabel)
+	cleanID, cleanStatus := strings.TrimSpace(buildID), strings.TrimSpace(status)
+	if cleanID == "" || cleanStatus == "" {
+		return errors.New("build id and status cannot be empty")
 	}
-	cmdTag, err := s.db.Exec(ctx, query, cleanVal, cleanID)
+	cmdTag, err := s.db.Exec(ctx, `UPDATE vanadis_builds SET status = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2;`, cleanStatus, cleanID)
 	switch {
 	case err != nil:
-		return fmt.Errorf("%s: %w", opLabel, err)
+		return fmt.Errorf("failed to update vanadis build status: %w", err)
 	case cmdTag.RowsAffected() == 0:
-		return notFoundErr
+		return ErrBuildNotFound
 	default:
 		return nil
 	}
 }
 
-func (s *Store) UpdateBuildStatus(ctx context.Context, buildID, status string) error {
-	return s.execUpdateByID(ctx, "build id", buildID, "status", status, false, `UPDATE vanadis_builds SET status = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2;`, "failed to update vanadis build status", ErrBuildNotFound)
-}
-
-func (s *Store) UpdateBuildStatusMessageID(ctx context.Context, buildID, messageID string) error {
-	return s.execUpdateByID(ctx, "build id", buildID, "message_id", messageID, true, `UPDATE vanadis_builds SET status_message_id = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2;`, "failed to update vanadis build status_message_id", ErrBuildNotFound)
+// CompareAndSwapBuildStatusMessageID stores newID as the build's status message
+// only while the stored ID still equals oldID (NULL counts as ""). It reports
+// whether this caller won; a mismatch or unknown build is (false, nil), so
+// concurrent widget syncs that each re-posted the card leave exactly one stored.
+func (s *Store) CompareAndSwapBuildStatusMessageID(ctx context.Context, buildID, oldID, newID string) (bool, error) {
+	if s == nil || s.db == nil {
+		return false, errors.New("database connection is nil")
+	}
+	cleanID, cleanNew := strings.TrimSpace(buildID), strings.TrimSpace(newID)
+	if cleanID == "" || cleanNew == "" {
+		return false, errors.New("build id and new message_id cannot be empty")
+	}
+	tag, err := s.db.Exec(ctx, `UPDATE vanadis_builds SET status_message_id = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2 AND COALESCE(status_message_id, '') = $3;`, cleanNew, cleanID, strings.TrimSpace(oldID))
+	if err != nil {
+		return false, fmt.Errorf("failed to compare-and-swap vanadis build status_message_id: %w", err)
+	}
+	return tag.RowsAffected() == 1, nil
 }
 
 func (s *Store) ReserveChunkForLaunch(ctx context.Context, chunkID string) error {

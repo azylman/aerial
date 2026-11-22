@@ -97,8 +97,8 @@ func TestClientNotifications(t *testing.T) {
 		want     Client
 		wantErrs []error
 	}{
-		{"records calls", Client{}, Client{LastCancel: "c1", CancelAgent: "alpha", LastThreadID: "th1", LastPrompt: "wake", LastMsgChan: "ch1", LastMsgCont: "hi"}, []error{nil, nil, nil}},
-		{"returns configured errors", Client{CancelErr: errBoom, PromptErr: errBoom, MessageErr: errBoom}, Client{CancelErr: errBoom, PromptErr: errBoom, MessageErr: errBoom, LastCancel: "c1", CancelAgent: "alpha", LastThreadID: "th1", LastPrompt: "wake", LastMsgChan: "ch1", LastMsgCont: "hi"}, []error{errBoom, errBoom, errBoom}},
+		{"records calls", Client{}, Client{LastCancel: "c1", CancelAgent: "alpha", LastThreadID: "th1", LastPrompt: "wake", LastMsgChan: "ch1", LastMsgCont: "hi", DeletedWidgets: []string{"m1"}}, []error{nil, nil, nil, nil}},
+		{"returns configured errors", Client{CancelErr: errBoom, PromptErr: errBoom, MessageErr: errBoom, DeleteWidgetErr: errBoom}, Client{CancelErr: errBoom, PromptErr: errBoom, MessageErr: errBoom, DeleteWidgetErr: errBoom, LastCancel: "c1", CancelAgent: "alpha", LastThreadID: "th1", LastPrompt: "wake", LastMsgChan: "ch1", LastMsgCont: "hi", DeletedWidgets: []string{"m1"}}, []error{errBoom, errBoom, errBoom, errBoom}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -109,6 +109,7 @@ func TestClientNotifications(t *testing.T) {
 				c.CancelDispatch(ericlient.WithAgent(ctx, "alpha"), "c1"),
 				c.Prompt(ctx, "th1", "wake"),
 				c.Message(ctx, "ch1", "hi"),
+				c.DeleteWidget(ctx, "alpha", "ch1", "m1"),
 			}
 			assert.Equal(t, tc.wantErrs, errs)
 			assert.Equal(t, tc.want, c)

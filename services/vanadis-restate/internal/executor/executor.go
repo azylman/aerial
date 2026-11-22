@@ -260,7 +260,10 @@ func (e *Executor) DispatchDirectMessage(ctx context.Context, channelID, content
 }
 
 // SyncBuildWidget formats the Discord tracker widget and dispatches it directly to Eri via POST /discord/widget.
-// It explicitly DOES NOT publish to aerial.coalesced.widget_sync.>.
+// It explicitly DOES NOT publish to aerial.coalesced.widget_sync.>. A newly
+// posted message is stored only by compare-and-swap against
+// build.StatusMessageID; when another sync already stored a different ID the
+// new message is deleted and "" is returned.
 func (e *Executor) SyncBuildWidget(ctx context.Context, st store.VanadisStore, build model.VanadisBuild, chunks []model.VanadisChunk, notice string) (string, error) {
 	if e == nil || e.EriClient == nil {
 		return "", nil
@@ -273,12 +276,24 @@ func (e *Executor) SyncBuildWidget(ctx context.Context, st store.VanadisStore, b
 	if err != nil {
 		return "", fmt.Errorf("sync widget to eri: %w", err)
 	}
-	if msgID != "" && msgID != build.StatusMessageID && st != nil {
-		if uErr := st.UpdateBuildStatusMessageID(ctx, build.ID, msgID); uErr != nil {
-			slog.WarnContext(ctx, "[vanadis-restate] update status message id failed", "error", uErr)
-		}
+	if msgID == "" || msgID == build.StatusMessageID || st == nil {
+		return msgID, nil
 	}
-	return msgID, nil
+	// Concurrent syncs of one build can each re-post the card from the same
+	// stale StatusMessageID; only the first to swap keeps its message.
+	swapped, cErr := st.CompareAndSwapBuildStatusMessageID(ctx, build.ID, build.StatusMessageID, msgID)
+	if cErr != nil {
+		slog.WarnContext(ctx, "[vanadis-restate] update status message id failed", "build_id", build.ID, "error", cErr)
+		return msgID, nil
+	}
+	if swapped {
+		return msgID, nil
+	}
+	slog.InfoContext(ctx, "[vanadis-restate] status widget lost the message id race; deleting duplicate card", "build_id", build.ID, "message_id", msgID)
+	if dErr := e.EriClient.DeleteWidget(ctx, widgetReq.Agent, widgetReq.ChannelID, msgID); dErr != nil {
+		slog.WarnContext(ctx, "[vanadis-restate] delete duplicate status widget failed", "build_id", build.ID, "message_id", msgID, "error", dErr)
+	}
+	return "", nil
 }
 
 // PublishExternalEvent publishes external events strictly for haro / audit consumers.

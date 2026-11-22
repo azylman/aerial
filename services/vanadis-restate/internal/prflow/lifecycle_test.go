@@ -128,8 +128,8 @@ func (s *checkStatusSpyStore) UpdateChunkBannerAndStatus(_ context.Context, chun
 	return s.bannerErr
 }
 
-func (*checkStatusSpyStore) UpdateBuildStatusMessageID(_ context.Context, _, _ string) error {
-	return nil
+func (*checkStatusSpyStore) CompareAndSwapBuildStatusMessageID(context.Context, string, string, string) (bool, error) {
+	return true, nil
 }
 
 func (s *checkStatusSpyStore) GetChunkByPR(_ context.Context, _ string, _ int) (*store.VanadisChunkPRLookup, error) {

@@ -98,8 +98,8 @@ func (*checkStatusSpyStore) UpdateChunkBannerAndStatus(context.Context, string, 
 	return nil
 }
 
-func (*checkStatusSpyStore) UpdateBuildStatusMessageID(_ context.Context, _, _ string) error {
-	return nil
+func (*checkStatusSpyStore) CompareAndSwapBuildStatusMessageID(context.Context, string, string, string) (bool, error) {
+	return true, nil
 }
 
 func (*checkStatusSpyStore) GetChunkByPR(_ context.Context, _ string, _ int) (*store.VanadisChunkPRLookup, error) {
@@ -859,8 +859,8 @@ func (s *crossBuildSweepSpyStore) SweepEarlierDeploymentsAcrossBuilds(_ context.
 	return s.crossSwept, s.crossRecovered, nil
 }
 
-func (*crossBuildSweepSpyStore) UpdateBuildStatusMessageID(context.Context, string, string) error {
-	return nil
+func (*crossBuildSweepSpyStore) CompareAndSwapBuildStatusMessageID(context.Context, string, string, string) (bool, error) {
+	return true, nil
 }
 
 func (s *crossBuildSweepSpyStore) UpdateBuildStatus(_ context.Context, buildID, status string) error {

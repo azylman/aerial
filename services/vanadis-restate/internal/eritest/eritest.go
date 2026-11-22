@@ -25,6 +25,7 @@ type Client struct {
 	CancelErr           error
 	PromptErr           error
 	WidgetErr           error
+	DeleteWidgetErr     error
 	MessageErr          error
 	WidgetID            string
 	SimulateActive      bool
@@ -35,8 +36,10 @@ type Client struct {
 	LastThreadID string
 	LastPrompt   string
 	LastWidget   *ericlient.StatusWidgetRequest
-	LastMsgChan  string
-	LastMsgCont  string
+	// DeletedWidgets records every DeleteWidget messageID in call order.
+	DeletedWidgets []string
+	LastMsgChan    string
+	LastMsgCont    string
 
 	active *eriwire.BrainDispatchRequest
 }
@@ -94,6 +97,12 @@ func (c *Client) Widget(_ context.Context, req ericlient.StatusWidgetRequest) (s
 		return DefaultWidgetID, nil
 	}
 	return c.WidgetID, nil
+}
+
+// DeleteWidget records messageID and returns DeleteWidgetErr.
+func (c *Client) DeleteWidget(_ context.Context, _, _, messageID string) error {
+	c.DeletedWidgets = append(c.DeletedWidgets, messageID)
+	return c.DeleteWidgetErr
 }
 
 // Message records channelID and content, then returns MessageErr.

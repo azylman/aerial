@@ -153,8 +153,8 @@ func (f *retryAuthorityFixture) ReserveChunkForLaunch(context.Context, string) e
 	return nil
 }
 
-func (*retryAuthorityFixture) UpdateBuildStatusMessageID(context.Context, string, string) error {
-	return nil
+func (*retryAuthorityFixture) CompareAndSwapBuildStatusMessageID(context.Context, string, string, string) (bool, error) {
+	return true, nil
 }
 
 type retryDispatchFixture struct {
