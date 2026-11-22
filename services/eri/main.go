@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 	_ "time/tzdata"
@@ -229,24 +228,14 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 	cls := classifier.New(cfg)
 	ambientResolver := ambient.NewResolver(cfg).Resolve
 
-	var restateClient *RestateIngressClient
-	if ingressURL := strings.TrimSpace(os.Getenv("RESTATE_INGRESS_URL")); ingressURL != "" {
-		restateClient = NewRestateIngressClient(ingressURL, appOpts.agentName)
-	}
-	var remoteLLMFn runner.LLMFunc
-	if restateClient != nil {
-		origRestate := activeRestateIngressClient.Swap(restateClient)
-		defer activeRestateIngressClient.Store(origRestate)
-		eriRestateURL := os.Getenv("ERI_RESTATE_URL")
-		remoteLLMFn = NewRestateLLMFunc(restateClient)
-		remoteQuotaProvider := NewRemoteQuotaProvider(eriRestateURL)
-		cls.LLMFunc = remoteLLMFn
-		cls.TitleLLMFunc = remoteLLMFn
-		SetFunnelQuotaProvider(remoteQuotaProvider.ProviderFunc())
-		defer SetFunnelQuotaProvider(nil)
-	}
-
-	llmFn := remoteLLMFn
+	restateClient := NewRestateIngressClient(os.Getenv("RESTATE_INGRESS_URL"), appOpts.agentName)
+	origRestate := activeRestateIngressClient.Swap(restateClient)
+	defer activeRestateIngressClient.Store(origRestate)
+	llmFn := NewRestateLLMFunc(restateClient)
+	cls.LLMFunc = llmFn
+	cls.TitleLLMFunc = llmFn
+	SetFunnelQuotaProvider(NewRemoteQuotaProvider(os.Getenv("ERI_RESTATE_URL")).ProviderFunc())
+	defer SetFunnelQuotaProvider(nil)
 
 	pool := queue.New(cfg, queue.WorkerPoolConfig{
 		ParentContext:          ctx,
