@@ -1,4 +1,8 @@
 version: "2"
+run:
+  # Lint the real-Restate integration tests too (services/eri/pkg/restatetest).
+  build-tags:
+    - restateintegration
 linters:
   enable:
     - asasalint
