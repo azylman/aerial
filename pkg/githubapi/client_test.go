@@ -6,42 +6,19 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/azylman/aerial/pkg/githubapitest"
 )
-
-// getJSONFixture is one GitHub response shape served by getJSONServer.
-type getJSONFixture struct {
-	status     int
-	remaining  string
-	retryAfter string
-	body       string
-}
-
-func getJSONServer(t *testing.T, f getJSONFixture) *httptest.Server {
-	t.Helper()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if f.remaining != "" {
-			w.Header().Set("X-Ratelimit-Remaining", f.remaining)
-		}
-		if f.retryAfter != "" {
-			w.Header().Set("Retry-After", f.retryAfter)
-		}
-		w.WriteHeader(f.status)
-		_, _ = w.Write([]byte(f.body))
-	}))
-	t.Cleanup(srv.Close)
-	return srv
-}
 
 func TestGetJSON(t *testing.T) {
 	t.Parallel()
 	longMsg := strings.Repeat("é", 250)
 	tests := []struct {
 		name            string
-		fixture         getJSONFixture
+		fixture         githubapitest.Response
 		maxBytes        int64
 		nilClient       bool
 		closedServer    bool
@@ -52,35 +29,35 @@ func TestGetJSON(t *testing.T) {
 		wantMessage     string
 		wantErrSub      string
 	}{
-		{name: "200 decodes body", fixture: getJSONFixture{status: 200, body: `{"id":7}`}, maxBytes: 1 << 20, wantID: 7},
-		{name: "zero maxBytes uses 10 MiB default", fixture: getJSONFixture{status: 200, body: `{"id":8}`}, maxBytes: 0, wantID: 8},
-		{name: "nil client uses default client", fixture: getJSONFixture{status: 200, body: `{"id":9}`}, maxBytes: 1 << 20, nilClient: true, wantID: 9},
-		{name: "maxBytes truncation fails decode", fixture: getJSONFixture{status: 200, body: `{"id":10}`}, maxBytes: 3, wantErrSub: "unmarshal github api response"},
-		{name: "malformed JSON fails decode", fixture: getJSONFixture{status: 200, body: `{not json`}, maxBytes: 1 << 20, wantErrSub: "unmarshal github api response"},
-		{name: "closed server is a request error", fixture: getJSONFixture{status: 200}, maxBytes: 1 << 20, closedServer: true, wantErrSub: "github api request failed"},
-		{name: "404 is a status error", fixture: getJSONFixture{status: 404}, maxBytes: 1 << 20, wantStatus: 404, wantMessage: "github api returned status 404"},
-		{name: "500 is a status error", fixture: getJSONFixture{status: 500}, maxBytes: 1 << 20, wantStatus: 500, wantMessage: "github api returned status 500"},
-		{name: "403 with zero remaining is a rate limit", fixture: getJSONFixture{status: 403, remaining: "0", body: `{"message":"API rate limit exceeded"}`}, wantStatus: 403, wantRateLimited: true, wantRetryAfter: time.Minute, wantMessage: "github api rate limit (status 403, remaining: 0)"},
-		{name: "403 with Retry-After is a secondary rate limit", fixture: getJSONFixture{status: 403, remaining: "12", retryAfter: "60"}, wantStatus: 403, wantRateLimited: true, wantRetryAfter: 60 * time.Second, wantMessage: "github api rate limit (status 403, remaining: 12)"},
-		{name: "429 is a rate limit", fixture: getJSONFixture{status: 429}, wantStatus: 429, wantRateLimited: true, wantRetryAfter: time.Minute, wantMessage: "github api rate limit (status 429, remaining: )"},
-		{name: "plain 403 carries GitHub's message", fixture: getJSONFixture{status: 403, remaining: "4999", body: `{"message":"Resource not accessible by integration"}`}, wantStatus: 403, wantMessage: "github api forbidden (status 403): Resource not accessible by integration"},
-		{name: "plain 403 message capped at 200 runes", fixture: getJSONFixture{status: 403, body: `{"message":"` + longMsg + `"}`}, wantStatus: 403, wantMessage: "github api forbidden (status 403): " + strings.Repeat("é", 200)},
-		{name: "plain 403 with non-JSON body omits raw bytes", fixture: getJSONFixture{status: 403, body: "<html>nope</html>"}, wantStatus: 403, wantMessage: "github api forbidden (status 403): "},
+		{name: "200 decodes body", fixture: githubapitest.Response{Status: 200, Body: `{"id":7}`}, maxBytes: 1 << 20, wantID: 7},
+		{name: "zero maxBytes uses 10 MiB default", fixture: githubapitest.Response{Status: 200, Body: `{"id":8}`}, maxBytes: 0, wantID: 8},
+		{name: "nil client uses default client", fixture: githubapitest.Response{Status: 200, Body: `{"id":9}`}, maxBytes: 1 << 20, nilClient: true, wantID: 9},
+		{name: "maxBytes truncation fails decode", fixture: githubapitest.Response{Status: 200, Body: `{"id":10}`}, maxBytes: 3, wantErrSub: "unmarshal github api response"},
+		{name: "malformed JSON fails decode", fixture: githubapitest.Response{Status: 200, Body: `{not json`}, maxBytes: 1 << 20, wantErrSub: "unmarshal github api response"},
+		{name: "closed server is a request error", fixture: githubapitest.Response{Status: 200}, maxBytes: 1 << 20, closedServer: true, wantErrSub: "github api request failed"},
+		{name: "404 is a status error", fixture: githubapitest.Response{Status: 404}, maxBytes: 1 << 20, wantStatus: 404, wantMessage: "github api returned status 404"},
+		{name: "500 is a status error", fixture: githubapitest.Response{Status: 500}, maxBytes: 1 << 20, wantStatus: 500, wantMessage: "github api returned status 500"},
+		{name: "403 with zero remaining is a rate limit", fixture: githubapitest.Response{Status: 403, Remaining: "0", Body: `{"message":"API rate limit exceeded"}`}, wantStatus: 403, wantRateLimited: true, wantRetryAfter: time.Minute, wantMessage: "github api rate limit (status 403, remaining: 0)"},
+		{name: "403 with Retry-After is a secondary rate limit", fixture: githubapitest.Response{Status: 403, Remaining: "12", RetryAfter: "60"}, wantStatus: 403, wantRateLimited: true, wantRetryAfter: 60 * time.Second, wantMessage: "github api rate limit (status 403, remaining: 12)"},
+		{name: "429 is a rate limit", fixture: githubapitest.Response{Status: 429}, wantStatus: 429, wantRateLimited: true, wantRetryAfter: time.Minute, wantMessage: "github api rate limit (status 429, remaining: )"},
+		{name: "plain 403 carries GitHub's message", fixture: githubapitest.Response{Status: 403, Remaining: "4999", Body: `{"message":"Resource not accessible by integration"}`}, wantStatus: 403, wantMessage: "github api forbidden (status 403): Resource not accessible by integration"},
+		{name: "plain 403 message capped at 200 runes", fixture: githubapitest.Response{Status: 403, Body: `{"message":"` + longMsg + `"}`}, wantStatus: 403, wantMessage: "github api forbidden (status 403): " + strings.Repeat("é", 200)},
+		{name: "plain 403 with non-JSON body omits raw bytes", fixture: githubapitest.Response{Status: 403, Body: "<html>nope</html>"}, wantStatus: 403, wantMessage: "github api forbidden (status 403): "},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			srv := getJSONServer(t, tc.fixture)
-			client := srv.Client()
+			api := githubapitest.New(t, map[string][]githubapitest.Response{"GET /f": {tc.fixture}})
+			client := api.Client()
 			if tc.nilClient {
 				client = nil
 			}
-			req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, srv.URL+"/f", http.NoBody)
+			req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, api.URL()+"/f", http.NoBody)
 			if err != nil {
 				t.Fatalf("new request: %v", err)
 			}
 			if tc.closedServer {
-				srv.Close()
+				api.Close()
 			}
 			var out struct {
 				ID int `json:"id"`
