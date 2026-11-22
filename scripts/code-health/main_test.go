@@ -7,6 +7,7 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -25,7 +26,12 @@ func buildLargeGoSource(fileLines, funcLines int) string {
 	return sb.String()
 }
 
-func buildCloneFuncSource(name string) string {
+// buildCloneFuncSource renders the clone fixture function; gap adds an extra if between the select loop and the switch.
+func buildCloneFuncSource(name string, gap bool) string {
+	gapStmt := ""
+	if gap {
+		gapStmt = "\tif x == 42 {\n\t\treturn 42\n\t}\n"
+	}
 	return `func ` + name + `(x int, ch chan int) int {
 	if x > 0 {
 		println("positive")
@@ -40,39 +46,7 @@ func buildCloneFuncSource(name string) string {
 			break
 		}
 	}
-	switch x {
-	case 1:
-		defer println("defer 1")
-	default:
-		defer println("defer default")
-	}
-	for range []int{1} {
-		println("loop")
-	}
-	return x
-}
-`
-}
-
-func buildGappedCloneFuncSource(name string) string {
-	return `func ` + name + `(x int, ch chan int) int {
-	if x > 0 {
-		println("positive")
-	} else {
-		println("non-positive")
-	}
-	for i := 0; i < x; i++ {
-		select {
-		case <-ch:
-			return -1
-		default:
-			break
-		}
-	}
-	if x == 42 {
-		return 42
-	}
-	switch x {
+` + gapStmt + `	switch x {
 	case 1:
 		defer println("defer 1")
 	default:
@@ -172,6 +146,7 @@ type testRunCase struct {
 	configJSON            string
 	readOnlyBase          bool
 	customArgs            []string
+	rawArgs               []string // replaces the generated -root/-baseline prefix and targets
 	targetArgs            []string
 	relTargets            []string
 	wantBaselineFiles     map[string]int
@@ -256,10 +231,8 @@ func testRunBaseCases() []testRunCase {
 			wantOut:    "wrote baseline",
 		},
 		{
-			name: "invalid cli flag returns exit code 2",
-			customArgs: []string{
-				"-unknown-flag",
-			},
+			name:     "invalid cli flag returns exit code 2",
+			rawArgs:  []string{"-unknown-flag"},
 			wantCode: 2,
 			wantErr:  "flag provided but not defined",
 		},
@@ -305,10 +278,8 @@ func testRunBaseCases() []testRunCase {
 			wantErr:      "write baseline",
 		},
 		{
-			name: "missing root directory fails target collection",
-			customArgs: []string{
-				"-root", "/nonexistent-code-health-root-dir-xyz",
-			},
+			name:     "missing root directory fails target collection",
+			rawArgs:  []string{"-root", "/nonexistent-code-health-root-dir-xyz"},
 			wantCode: 1,
 			wantErr:  "collect targets",
 		},
@@ -353,7 +324,7 @@ func testRunCloneCases() []testRunCase {
 		{
 			name: "type-3 near-miss ast clone detected within same package",
 			files: map[string]string{
-				"pkg/clones.go": "package pkg\n\n" + buildCloneFuncSource("CloneA") + "\n" + buildCloneFuncSource("CloneB"),
+				"pkg/clones.go": "package pkg\n\n" + buildCloneFuncSource("CloneA", false) + "\n" + buildCloneFuncSource("CloneB", false),
 			},
 			wantCode: 1,
 			wantErr:  "near-miss AST clone similarity 1.00 exceeds 0.80 ceiling",
@@ -361,7 +332,7 @@ func testRunCloneCases() []testRunCase {
 		{
 			name: "type-3 gapped function clone detected via ast edit distance within same package",
 			files: map[string]string{
-				"pkg/clones.go": "package pkg\n\n" + buildCloneFuncSource("CloneA") + "\n" + buildGappedCloneFuncSource("CloneB"),
+				"pkg/clones.go": "package pkg\n\n" + buildCloneFuncSource("CloneA", false) + "\n" + buildCloneFuncSource("CloneB", true),
 			},
 			wantCode: 1,
 			wantErr:  "near-miss AST edit similarity 0.88 exceeds 0.85 ceiling",
@@ -419,8 +390,8 @@ type SmallB struct {
 		{
 			name: "identical functions in different packages trigger cross-package clone violation",
 			files: map[string]string{
-				"pkg1/a.go": "package pkg1\n\n" + buildCloneFuncSource("CloneA"),
-				"pkg2/b.go": "package pkg2\n\n" + buildCloneFuncSource("CloneA"),
+				"pkg1/a.go": "package pkg1\n\n" + buildCloneFuncSource("CloneA", false),
+				"pkg2/b.go": "package pkg2\n\n" + buildCloneFuncSource("CloneA", false),
 			},
 			wantCode: 1,
 			wantErr:  "near-miss AST clone similarity 1.00 exceeds 0.80 ceiling",
@@ -428,8 +399,8 @@ type SmallB struct {
 		{
 			name: "identical main functions in different packages do not trigger cross-package clone violation",
 			files: map[string]string{
-				"pkg1/main.go": "package main\n\n" + buildCloneFuncSource("main"),
-				"pkg2/main.go": "package main\n\n" + buildCloneFuncSource("main"),
+				"pkg1/main.go": "package main\n\n" + buildCloneFuncSource("main", false),
+				"pkg2/main.go": "package main\n\n" + buildCloneFuncSource("main", false),
 			},
 			wantCode: 0,
 			wantOut:  "Checked 2 Go file(s)",
@@ -643,11 +614,8 @@ func setupBaseline(t *testing.T, dir string, readOnlyBase bool, baselineJSON str
 }
 
 func buildTestArgs(dir, basePath string, tc testRunCase) []string {
-	if len(tc.customArgs) == 2 && tc.customArgs[0] == "-root" {
-		return tc.customArgs
-	}
-	if len(tc.customArgs) == 1 && tc.customArgs[0] == "-unknown-flag" {
-		return tc.customArgs
+	if tc.rawArgs != nil {
+		return tc.rawArgs
 	}
 	args := []string{"-root", dir, "-baseline", basePath}
 	args = append(args, tc.customArgs...)
@@ -704,16 +672,8 @@ func TestExprName(t *testing.T) {
 		expr ast.Expr
 		want string
 	}{
-		{
-			name: "parenthesized receiver",
-			expr: &ast.ParenExpr{X: &ast.Ident{Name: "Srv"}},
-			want: "Srv",
-		},
-		{
-			name: "fallback unknown expression",
-			expr: &ast.BasicLit{},
-			want: "recv",
-		},
+		{name: "parenthesized receiver", expr: &ast.ParenExpr{X: &ast.Ident{Name: "Srv"}}, want: "Srv"},
+		{name: "fallback unknown expression", expr: &ast.BasicLit{}, want: "recv"},
 	}
 
 	for _, tc := range tests {
@@ -730,7 +690,7 @@ type analyzeTestCase struct {
 	name           string
 	content        string
 	rel            string
-	nonexistent    bool
+	missingFile    bool
 	wantViolations []string
 	wantErr        bool
 }
@@ -743,7 +703,7 @@ func runAnalyzeTestFileCase(t *testing.T, tc analyzeTestCase) {
 		rel = "sample_test.go"
 	}
 	filePath := filepath.Join(dir, filepath.FromSlash(rel))
-	if !tc.nonexistent {
+	if !tc.missingFile {
 		if err := os.MkdirAll(filepath.Dir(filePath), 0o755); err != nil {
 			t.Fatalf("mkdir: %v", err)
 		}
@@ -914,7 +874,7 @@ func TestBannedCalls(req *http.Request) {
 		},
 		{
 			name:        "nonexistent file returns error",
-			nonexistent: true,
+			missingFile: true,
 			wantErr:     true,
 		},
 		{
@@ -1069,42 +1029,12 @@ func TestJaccardSimilarity(t *testing.T) {
 		b    map[string]struct{}
 		want float64
 	}{
-		{
-			name: "both empty",
-			a:    nil,
-			b:    nil,
-			want: 0.0,
-		},
-		{
-			name: "left empty",
-			a:    nil,
-			b:    map[string]struct{}{"x": {}},
-			want: 0.0,
-		},
-		{
-			name: "right empty",
-			a:    map[string]struct{}{"x": {}},
-			b:    nil,
-			want: 0.0,
-		},
-		{
-			name: "identical sets",
-			a:    map[string]struct{}{"x": {}, "y": {}},
-			b:    map[string]struct{}{"x": {}, "y": {}},
-			want: 1.0,
-		},
-		{
-			name: "disjoint sets",
-			a:    map[string]struct{}{"x": {}},
-			b:    map[string]struct{}{"y": {}},
-			want: 0.0,
-		},
-		{
-			name: "partial overlap",
-			a:    map[string]struct{}{"x": {}, "y": {}},
-			b:    map[string]struct{}{"y": {}, "z": {}},
-			want: 1.0 / 3.0,
-		},
+		{name: "both empty", a: nil, b: nil, want: 0.0},
+		{name: "left empty", a: nil, b: map[string]struct{}{"x": {}}, want: 0.0},
+		{name: "right empty", a: map[string]struct{}{"x": {}}, b: nil, want: 0.0},
+		{name: "identical sets", a: map[string]struct{}{"x": {}, "y": {}}, b: map[string]struct{}{"x": {}, "y": {}}, want: 1.0},
+		{name: "disjoint sets", a: map[string]struct{}{"x": {}}, b: map[string]struct{}{"y": {}}, want: 0.0},
+		{name: "partial overlap", a: map[string]struct{}{"x": {}, "y": {}}, b: map[string]struct{}{"y": {}, "z": {}}, want: 1.0 / 3.0},
 	}
 
 	for _, tc := range tests {
@@ -1160,15 +1090,7 @@ func TestCollectTestTargets(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			dir := t.TempDir()
-			for rel, content := range tc.files {
-				full := filepath.Join(dir, filepath.FromSlash(rel))
-				if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
-					t.Fatalf("mkdir: %v", err)
-				}
-				if err := os.WriteFile(full, []byte(content), 0o644); err != nil {
-					t.Fatalf("write: %v", err)
-				}
-			}
+			setupTestFiles(t, dir, tc.files)
 
 			var explicitArgs []string
 			for _, exp := range tc.explicit {
@@ -1179,13 +1101,8 @@ func TestCollectTestTargets(t *testing.T) {
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("collectTestTargets() error = %v, wantErr = %v", err, tc.wantErr)
 			}
-			if len(got) != len(tc.want) {
-				t.Fatalf("collectTestTargets() returned %d items, want %d: %v", len(got), len(tc.want), got)
-			}
-			for i := range got {
-				if got[i] != tc.want[i] {
-					t.Errorf("target[%d] = %q, want %q", i, got[i], tc.want[i])
-				}
+			if !slices.Equal(got, tc.want) {
+				t.Errorf("collectTestTargets() = %v, want %v", got, tc.want)
 			}
 		})
 	}
@@ -1236,103 +1153,54 @@ func Control(ch chan int) int {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			fset := token.NewFileSet()
-			f, err := parser.ParseFile(fset, "sample.go", tc.src, 0)
-			if err != nil {
-				t.Fatalf("parse: %v", err)
-			}
-			var body *ast.BlockStmt
-			for _, decl := range f.Decls {
-				if fn, ok := decl.(*ast.FuncDecl); ok && fn.Body != nil {
-					body = fn.Body
-					break
-				}
-			}
-			if body == nil {
-				t.Fatal("no function body found")
-			}
-			got := buildCloneTokens(body)
-			if len(got) != len(tc.wantTokens) {
-				t.Fatalf("buildCloneTokens() got %v, want %v", got, tc.wantTokens)
-			}
-			for i := range got {
-				if got[i] != tc.wantTokens[i] {
-					t.Errorf("token[%d] = %q, want %q", i, got[i], tc.wantTokens[i])
-				}
+			if got := buildCloneTokens(firstFuncBody(t, tc.src)); !slices.Equal(got, tc.wantTokens) {
+				t.Errorf("buildCloneTokens() = %v, want %v", got, tc.wantTokens)
 			}
 		})
-	}
-}
-
-type scopedCloneCase struct {
-	name       string
-	src        string
-	wantTokens []string
-}
-
-func runScopedCloneCase(t *testing.T, tc scopedCloneCase) {
-	t.Helper()
-	if tc.src == "" {
-		if got := buildScopedCloneTokens(nil); got != nil {
-			t.Fatalf("buildScopedCloneTokens(nil) = %v, want nil", got)
-		}
-		return
-	}
-	fset := token.NewFileSet()
-	f, err := parser.ParseFile(fset, "sample.go", tc.src, 0)
-	if err != nil {
-		t.Fatalf("parse: %v", err)
-	}
-	var body *ast.BlockStmt
-	for _, decl := range f.Decls {
-		if fn, ok := decl.(*ast.FuncDecl); ok && fn.Body != nil {
-			body = fn.Body
-			break
-		}
-	}
-	if body == nil {
-		t.Fatal("no function body found")
-	}
-	got := buildScopedCloneTokens(body)
-	if len(got) != len(tc.wantTokens) {
-		t.Fatalf("buildScopedCloneTokens() got %v, want %v", got, tc.wantTokens)
-	}
-	for i := range got {
-		if got[i] != tc.wantTokens[i] {
-			t.Errorf("token[%d] = %q, want %q", i, got[i], tc.wantTokens[i])
-		}
 	}
 }
 
 func TestBuildScopedCloneTokens(t *testing.T) {
 	t.Parallel()
 
-	tests := []scopedCloneCase{
-		{
-			name: "scoped block delimiters with calls and controls",
-			src: `package sample
-func Scoped() {
-	if true {
-		println("ok")
-	}
-}
-`,
-			wantTokens: []string{
-				"{", "if", "{", "}", "}",
-			},
-		},
-		{
-			name:       "nil body returns nil",
-			src:        "",
-			wantTokens: nil,
-		},
+	tests := []struct {
+		name       string
+		src        string
+		wantTokens []string
+	}{
+		{name: "scoped block delimiters with calls and controls", src: "package sample\nfunc Scoped() {\n\tif true {\n\t\tprintln(\"ok\")\n\t}\n}\n", wantTokens: []string{"{", "if", "{", "}", "}"}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			runScopedCloneCase(t, tc)
+			if got := buildScopedCloneTokens(firstFuncBody(t, tc.src)); !slices.Equal(got, tc.wantTokens) {
+				t.Errorf("buildScopedCloneTokens() = %v, want %v", got, tc.wantTokens)
+			}
 		})
 	}
+}
+
+func TestBuildScopedCloneTokensNilBody(t *testing.T) {
+	t.Parallel()
+	if got := buildScopedCloneTokens(nil); got != nil {
+		t.Fatalf("buildScopedCloneTokens(nil) = %v, want nil", got)
+	}
+}
+
+// firstFuncBody parses src and returns the body of its first function declaration.
+func firstFuncBody(t *testing.T, src string) *ast.BlockStmt {
+	t.Helper()
+	f, err := parser.ParseFile(token.NewFileSet(), "sample.go", src, 0)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	for _, decl := range f.Decls {
+		if fn, ok := decl.(*ast.FuncDecl); ok && fn.Body != nil {
+			return fn.Body
+		}
+	}
+	t.Fatal("no function body found")
+	return nil
 }
 
 func TestFormatFieldType(t *testing.T) {
@@ -1343,36 +1211,12 @@ func TestFormatFieldType(t *testing.T) {
 		expr ast.Expr
 		want string
 	}{
-		{
-			name: "ident",
-			expr: &ast.Ident{Name: "int"},
-			want: "int",
-		},
-		{
-			name: "star expr",
-			expr: &ast.StarExpr{X: &ast.Ident{Name: "string"}},
-			want: "*string",
-		},
-		{
-			name: "selector expr",
-			expr: &ast.SelectorExpr{X: &ast.Ident{Name: "pkg"}, Sel: &ast.Ident{Name: "Type"}},
-			want: "pkg.Type",
-		},
-		{
-			name: "array type",
-			expr: &ast.ArrayType{Elt: &ast.Ident{Name: "byte"}},
-			want: "[]byte",
-		},
-		{
-			name: "map type",
-			expr: &ast.MapType{Key: &ast.Ident{Name: "string"}, Value: &ast.Ident{Name: "int"}},
-			want: "map[string]int",
-		},
-		{
-			name: "fallback",
-			expr: &ast.ChanType{Value: &ast.Ident{Name: "int"}},
-			want: "other",
-		},
+		{name: "ident", expr: &ast.Ident{Name: "int"}, want: "int"},
+		{name: "star expr", expr: &ast.StarExpr{X: &ast.Ident{Name: "string"}}, want: "*string"},
+		{name: "selector expr", expr: &ast.SelectorExpr{X: &ast.Ident{Name: "pkg"}, Sel: &ast.Ident{Name: "Type"}}, want: "pkg.Type"},
+		{name: "array type", expr: &ast.ArrayType{Elt: &ast.Ident{Name: "byte"}}, want: "[]byte"},
+		{name: "map type", expr: &ast.MapType{Key: &ast.Ident{Name: "string"}, Value: &ast.Ident{Name: "int"}}, want: "map[string]int"},
+		{name: "fallback", expr: &ast.ChanType{Value: &ast.Ident{Name: "int"}}, want: "other"},
 	}
 
 	for _, tc := range tests {
@@ -1394,48 +1238,13 @@ func TestEditSimilarity(t *testing.T) {
 		b    []string
 		want float64
 	}{
-		{
-			name: "both empty",
-			a:    nil,
-			b:    nil,
-			want: 0.0,
-		},
-		{
-			name: "left empty",
-			a:    nil,
-			b:    []string{"x"},
-			want: 0.0,
-		},
-		{
-			name: "right empty",
-			a:    []string{"x"},
-			b:    nil,
-			want: 0.0,
-		},
-		{
-			name: "identical slices",
-			a:    []string{"a", "b", "c"},
-			b:    []string{"a", "b", "c"},
-			want: 1.0,
-		},
-		{
-			name: "single substitution",
-			a:    []string{"a", "b", "c"},
-			b:    []string{"a", "x", "c"},
-			want: 2.0 / 3.0,
-		},
-		{
-			name: "single insertion",
-			a:    []string{"a", "b"},
-			b:    []string{"a", "x", "b"},
-			want: 2.0 / 3.0,
-		},
-		{
-			name: "completely disjoint",
-			a:    []string{"a", "b"},
-			b:    []string{"c", "d"},
-			want: 0.0,
-		},
+		{name: "both empty", a: nil, b: nil, want: 0.0},
+		{name: "left empty", a: nil, b: []string{"x"}, want: 0.0},
+		{name: "right empty", a: []string{"x"}, b: nil, want: 0.0},
+		{name: "identical slices", a: []string{"a", "b", "c"}, b: []string{"a", "b", "c"}, want: 1.0},
+		{name: "single substitution", a: []string{"a", "b", "c"}, b: []string{"a", "x", "c"}, want: 2.0 / 3.0},
+		{name: "single insertion", a: []string{"a", "b"}, b: []string{"a", "x", "b"}, want: 2.0 / 3.0},
+		{name: "completely disjoint", a: []string{"a", "b"}, b: []string{"c", "d"}, want: 0.0},
 	}
 
 	for _, tc := range tests {
