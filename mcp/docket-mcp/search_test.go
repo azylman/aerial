@@ -6,7 +6,10 @@ import (
 	"database/sql/driver"
 	"errors"
 	"io"
+	"maps"
+	"reflect"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -28,9 +31,21 @@ func (*testDriver) Open(name string) (driver.Conn, error) {
 	return nil, errors.New("open not supported")
 }
 
+// sqlCall is one statement the fake connection received.
+type sqlCall struct {
+	query string
+	args  []driver.Value
+}
+
+// testConn is a declarative database/sql driver connection: Exec fails with
+// execErr, Query returns rows or queryErr, and every statement is recorded.
 type testConn struct {
-	queryFn func(query string, args []driver.NamedValue) (driver.Rows, error)
-	execFn  func(query string, args []driver.NamedValue) (driver.Result, error)
+	execErr  error
+	queryErr error
+	rows     *testRows
+
+	mu    sync.Mutex
+	calls []sqlCall
 }
 
 func (*testConn) Prepare(query string) (driver.Stmt, error) { return nil, nil }
@@ -41,16 +56,47 @@ func (*testConn) CheckNamedValue(nv *driver.NamedValue) error {
 	return nil
 }
 
-func (c *testConn) QueryContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
-	if c.queryFn != nil {
-		return c.queryFn(query, args)
+func (c *testConn) record(query string, args []driver.NamedValue) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	values := make([]driver.Value, len(args))
+	for i, a := range args {
+		values[i] = a.Value
 	}
-	return nil, errors.New("unexpected query")
+	c.calls = append(c.calls, sqlCall{query: query, args: values})
+}
+
+// recordedArgs returns the args after the first (the embedding vector) of the
+// single recorded statement, or nil when there is not exactly one.
+func (c *testConn) recordedArgs() []driver.Value {
+	calls := c.recorded()
+	if len(calls) != 1 || len(calls[0].args) == 0 {
+		return nil
+	}
+	return calls[0].args[1:]
+}
+
+func (c *testConn) recorded() []sqlCall {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]sqlCall(nil), c.calls...)
+}
+
+func (c *testConn) QueryContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
+	c.record(query, args)
+	if c.queryErr != nil {
+		return nil, c.queryErr
+	}
+	if c.rows == nil {
+		return nil, errors.New("unexpected query")
+	}
+	return c.rows, nil
 }
 
 func (c *testConn) ExecContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
-	if c.execFn != nil {
-		return c.execFn(query, args)
+	c.record(query, args)
+	if c.execErr != nil {
+		return nil, c.execErr
 	}
 	return driver.RowsAffected(1), nil
 }
@@ -72,107 +118,82 @@ func (r *testRows) Next(dest []driver.Value) error {
 	return nil
 }
 
-func newTestDB(t *testing.T, conn *testConn) *sql.DB {
+// newSQLStore wraps conn in a SQLTaskStore closed via t.Cleanup.
+func newSQLStore(t *testing.T, conn *testConn) *SQLTaskStore {
 	t.Helper()
 	db := sql.OpenDB(&testConnector{conn: conn})
 	t.Cleanup(func() { _ = db.Close() })
-	return db
+	return NewSQLTaskStore(db)
 }
 
-type updateTaskEmbeddingTestCase struct {
-	name         string
-	taskID       int64
-	embedding    []float32
-	execErr      error
-	wantExec     bool
-	wantQuerySub string
-	wantArgCount int
-	wantErr      string
-}
-
-func runUpdateTaskEmbeddingCase(t *testing.T, tc updateTaskEmbeddingTestCase) {
+// newExecStore returns a store whose Exec calls fail with execErr (nil succeeds).
+func newExecStore(t *testing.T, execErr error) (*SQLTaskStore, *testConn) {
 	t.Helper()
-	var execCount int
-	var calledQuery string
-	var calledArgs []driver.NamedValue
-	conn := &testConn{
-		execFn: func(query string, args []driver.NamedValue) (driver.Result, error) {
-			execCount++
-			calledQuery = query
-			calledArgs = args
-			if tc.execErr != nil {
-				return nil, tc.execErr
-			}
-			return driver.RowsAffected(1), nil
-		},
-	}
-	db := newTestDB(t, conn)
-	store := NewSQLTaskStore(db)
+	conn := &testConn{execErr: execErr}
+	return newSQLStore(t, conn), conn
+}
 
-	err := store.UpdateTaskEmbedding(context.Background(), tc.taskID, tc.embedding)
-	if tc.wantErr == "" && err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if tc.wantErr != "" {
-		if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
-			t.Fatalf("expected error containing %q, got %v", tc.wantErr, err)
+// newQueryStore returns a store whose Query calls return rows or queryErr.
+func newQueryStore(t *testing.T, rows *testRows, queryErr error) (*SQLTaskStore, *testConn) {
+	t.Helper()
+	conn := &testConn{rows: rows, queryErr: queryErr}
+	return newSQLStore(t, conn), conn
+}
+
+// sqlRows builds result rows with the given columns.
+func sqlRows(columns []string, values ...[]driver.Value) *testRows {
+	return &testRows{columns: columns, values: values}
+}
+
+// checkSQLCalls asserts conn received exactly one statement containing
+// wantQuery with wantArgs args, or none when wantQuery is empty.
+func checkSQLCalls(t *testing.T, conn *testConn, wantQuery string, wantArgs int) {
+	t.Helper()
+	calls := conn.recorded()
+	if wantQuery == "" {
+		if len(calls) != 0 {
+			t.Fatalf("calls = %+v, want none", calls)
 		}
 		return
 	}
-	if tc.wantExec && execCount == 0 {
-		t.Fatalf("expected ExecContext to be called")
-	}
-	if !tc.wantExec && execCount > 0 {
-		t.Fatalf("expected ExecContext NOT to be called, called %d times", execCount)
-	}
-	if tc.wantQuerySub != "" && !strings.Contains(calledQuery, tc.wantQuerySub) {
-		t.Fatalf("query %q does not contain %q", calledQuery, tc.wantQuerySub)
-	}
-	if tc.wantArgCount > 0 && len(calledArgs) != tc.wantArgCount {
-		t.Fatalf("args len = %d, want %d", len(calledArgs), tc.wantArgCount)
+	if len(calls) != 1 || !strings.Contains(calls[0].query, wantQuery) || len(calls[0].args) != wantArgs {
+		t.Fatalf("calls = %+v, want one %q with %d args", calls, wantQuery, wantArgs)
 	}
 }
+
+const (
+	sqlEmbeddingUpdate  = "UPDATE tasks SET embedding = $1 WHERE id = $2;"
+	sqlEmbeddingAndRes  = "UPDATE tasks SET embedding = $1, resolution = $2 WHERE id = $3;"
+	sqlResolutionUpdate = "UPDATE tasks SET resolution = $1 WHERE id = $2;"
+	sqlResolutionBatch  = "UPDATE tasks SET resolution = $1 WHERE id = ANY($2);"
+	sqlFetchResolutions = "SELECT id, COALESCE(resolution, '') FROM tasks WHERE id = ANY($1);"
+)
 
 func TestSQLTaskStore_UpdateTaskEmbedding(t *testing.T) {
 	t.Parallel()
 
-	tests := []updateTaskEmbeddingTestCase{
-		{
-			name:         "with embedding updates embedding",
-			taskID:       1,
-			embedding:    make([]float32, 384),
-			execErr:      nil,
-			wantExec:     true,
-			wantQuerySub: "UPDATE tasks SET embedding = $1 WHERE id = $2;",
-			wantArgCount: 2,
-			wantErr:      "",
-		},
-		{
-			name:         "empty embedding returns immediately without query",
-			taskID:       2,
-			embedding:    nil,
-			execErr:      nil,
-			wantExec:     false,
-			wantQuerySub: "",
-			wantArgCount: 0,
-			wantErr:      "",
-		},
-		{
-			name:         "exec failure returns error",
-			taskID:       3,
-			embedding:    make([]float32, 384),
-			execErr:      errors.New("db error"),
-			wantExec:     true,
-			wantQuerySub: "UPDATE tasks SET embedding = $1 WHERE id = $2;",
-			wantArgCount: 2,
-			wantErr:      "failed to update task embedding: db error",
-		},
+	emb := make([]float32, 384)
+	tests := []struct {
+		name      string
+		taskID    int64
+		embedding []float32
+		execErr   error
+		wantQuery string
+		wantArgs  int
+		wantErr   string
+	}{
+		{"with embedding updates embedding", 1, emb, nil, sqlEmbeddingUpdate, 2, ""},
+		{"empty embedding returns immediately without query", 2, nil, nil, "", 0, ""},
+		{"exec failure returns error", 3, emb, errors.New("db error"), sqlEmbeddingUpdate, 2, "failed to update task embedding: db error"},
 	}
-
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			runUpdateTaskEmbeddingCase(t, tc)
+			store, conn := newExecStore(t, tc.execErr)
+			if got := errText(store.UpdateTaskEmbedding(context.Background(), tc.taskID, tc.embedding)); got != tc.wantErr {
+				t.Fatalf("err = %q, want %q", got, tc.wantErr)
+			}
+			checkSQLCalls(t, conn, tc.wantQuery, tc.wantArgs)
 		})
 	}
 }
@@ -180,185 +201,57 @@ func TestSQLTaskStore_UpdateTaskEmbedding(t *testing.T) {
 func TestSQLTaskStore_UpdateTaskEmbeddingAndResolution(t *testing.T) {
 	t.Parallel()
 
+	emb := make([]float32, 384)
 	tests := []struct {
-		name         string
-		taskID       int64
-		embedding    []float32
-		res          string
-		execErr      error
-		wantQuerySub string
-		wantArgCount int
-		wantErr      string
+		name      string
+		taskID    int64
+		embedding []float32
+		res       string
+		execErr   error
+		wantQuery string
+		wantArgs  int
+		wantErr   string
 	}{
-		{
-			name:         "with embedding updates embedding and resolution",
-			taskID:       1,
-			embedding:    make([]float32, 384),
-			res:          "completed",
-			execErr:      nil,
-			wantQuerySub: "embedding = $1, resolution = $2",
-			wantArgCount: 3,
-			wantErr:      "",
-		},
-		{
-			name:         "without embedding updates resolution only",
-			taskID:       2,
-			embedding:    nil,
-			res:          "wont_do",
-			execErr:      nil,
-			wantQuerySub: "resolution = $1 WHERE id = $2",
-			wantArgCount: 2,
-			wantErr:      "",
-		},
-		{
-			name:         "exec failure returns error",
-			taskID:       3,
-			embedding:    make([]float32, 384),
-			res:          "",
-			execErr:      errors.New("db disk failure"),
-			wantQuerySub: "embedding = $1, resolution = $2",
-			wantArgCount: 3,
-			wantErr:      "failed to update task embedding: db disk failure",
-		},
-		{
-			name:         "exec failure without embedding returns error",
-			taskID:       4,
-			embedding:    nil,
-			res:          "completed",
-			execErr:      errors.New("exec error"),
-			wantQuerySub: "resolution = $1 WHERE id = $2",
-			wantArgCount: 2,
-			wantErr:      "failed to update task resolution: exec error",
-		},
+		{"with embedding updates embedding and resolution", 1, emb, "completed", nil, sqlEmbeddingAndRes, 3, ""},
+		{"without embedding updates resolution only", 2, nil, "wont_do", nil, sqlResolutionUpdate, 2, ""},
+		{"exec failure returns error", 3, emb, "", errors.New("db disk failure"), sqlEmbeddingAndRes, 3, "failed to update task embedding: db disk failure"},
+		{"exec failure without embedding returns error", 4, nil, "completed", errors.New("exec error"), sqlResolutionUpdate, 2, "failed to update task resolution: exec error"},
 	}
-
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			var calledQuery string
-			var calledArgs []driver.NamedValue
-			conn := &testConn{
-				execFn: func(query string, args []driver.NamedValue) (driver.Result, error) {
-					calledQuery = query
-					calledArgs = args
-					if tc.execErr != nil {
-						return nil, tc.execErr
-					}
-					return driver.RowsAffected(1), nil
-				},
+			store, conn := newExecStore(t, tc.execErr)
+			if got := errText(store.UpdateTaskEmbeddingAndResolution(context.Background(), tc.taskID, tc.embedding, tc.res)); got != tc.wantErr {
+				t.Fatalf("err = %q, want %q", got, tc.wantErr)
 			}
-			db := newTestDB(t, conn)
-			store := NewSQLTaskStore(db)
-
-			err := store.UpdateTaskEmbeddingAndResolution(context.Background(), tc.taskID, tc.embedding, tc.res)
-			if tc.wantErr == "" && err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if tc.wantErr != "" {
-				if err == nil {
-					t.Fatalf("expected error containing %q, got nil", tc.wantErr)
-				}
-				if !strings.Contains(err.Error(), tc.wantErr) {
-					t.Fatalf("error %q does not contain %q", err.Error(), tc.wantErr)
-				}
-				return
-			}
-			if tc.wantQuerySub != "" && !strings.Contains(calledQuery, tc.wantQuerySub) {
-				t.Fatalf("query %q does not contain %q", calledQuery, tc.wantQuerySub)
-			}
-			if tc.wantArgCount > 0 && len(calledArgs) != tc.wantArgCount {
-				t.Fatalf("args len = %d, want %d", len(calledArgs), tc.wantArgCount)
-			}
+			checkSQLCalls(t, conn, tc.wantQuery, tc.wantArgs)
 		})
-	}
-}
-
-type updateTaskResolutionBatchTestCase struct {
-	name         string
-	taskIDs      []int64
-	res          string
-	execErr      error
-	wantExec     bool
-	wantQuerySub string
-	wantErr      string
-}
-
-func runUpdateTaskResolutionBatchCase(t *testing.T, tc updateTaskResolutionBatchTestCase) {
-	t.Helper()
-	var execCount int
-	var calledQuery string
-	conn := &testConn{
-		execFn: func(query string, args []driver.NamedValue) (driver.Result, error) {
-			execCount++
-			calledQuery = query
-			if tc.execErr != nil {
-				return nil, tc.execErr
-			}
-			return driver.RowsAffected(int64(len(tc.taskIDs))), nil
-		},
-	}
-	db := newTestDB(t, conn)
-	store := NewSQLTaskStore(db)
-
-	err := store.UpdateTaskResolutionBatch(context.Background(), tc.taskIDs, tc.res)
-	if tc.wantErr == "" && err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if tc.wantErr != "" {
-		if err == nil {
-			t.Fatalf("expected error containing %q, got nil", tc.wantErr)
-		}
-		if !strings.Contains(err.Error(), tc.wantErr) {
-			t.Fatalf("error %q does not contain %q", err.Error(), tc.wantErr)
-		}
-		return
-	}
-	if tc.wantExec && execCount == 0 {
-		t.Fatalf("expected ExecContext to be called")
-	}
-	if !tc.wantExec && execCount > 0 {
-		t.Fatalf("expected ExecContext NOT to be called, was called %d times", execCount)
-	}
-	if tc.wantQuerySub != "" && !strings.Contains(calledQuery, tc.wantQuerySub) {
-		t.Fatalf("query %q does not contain %q", calledQuery, tc.wantQuerySub)
 	}
 }
 
 func TestSQLTaskStore_UpdateTaskResolutionBatch(t *testing.T) {
 	t.Parallel()
 
-	tests := []updateTaskResolutionBatchTestCase{
-		{
-			name:         "empty slice returns immediately without query",
-			taskIDs:      nil,
-			res:          "wont_do",
-			wantExec:     false,
-			wantQuerySub: "",
-			wantErr:      "",
-		},
-		{
-			name:         "batch updates successfully",
-			taskIDs:      []int64{1, 2, 3},
-			res:          "wont_do",
-			wantExec:     true,
-			wantQuerySub: "UPDATE tasks SET resolution = $1 WHERE id = ANY($2);",
-			wantErr:      "",
-		},
-		{
-			name:         "exec error returned properly",
-			taskIDs:      []int64{10},
-			res:          "completed",
-			execErr:      errors.New("batch failure"),
-			wantExec:     true,
-			wantQuerySub: "UPDATE tasks SET resolution = $1 WHERE id = ANY($2);",
-			wantErr:      "failed to batch update task resolutions: batch failure",
-		},
+	tests := []struct {
+		name      string
+		taskIDs   []int64
+		res       string
+		execErr   error
+		wantQuery string
+		wantErr   string
+	}{
+		{"empty slice returns immediately without query", nil, "wont_do", nil, "", ""},
+		{"batch updates successfully", []int64{1, 2, 3}, "wont_do", nil, sqlResolutionBatch, ""},
+		{"exec error returned properly", []int64{10}, "completed", errors.New("batch failure"), sqlResolutionBatch, "failed to batch update task resolutions: batch failure"},
 	}
-
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			runUpdateTaskResolutionBatchCase(t, tc)
+			store, conn := newExecStore(t, tc.execErr)
+			if got := errText(store.UpdateTaskResolutionBatch(context.Background(), tc.taskIDs, tc.res)); got != tc.wantErr {
+				t.Fatalf("err = %q, want %q", got, tc.wantErr)
+			}
+			checkSQLCalls(t, conn, tc.wantQuery, 2)
 		})
 	}
 }
@@ -366,210 +259,72 @@ func TestSQLTaskStore_UpdateTaskResolutionBatch(t *testing.T) {
 func TestSQLTaskStore_FetchTaskResolutions(t *testing.T) {
 	t.Parallel()
 
+	idRes := []string{"id", "resolution"}
 	tests := []struct {
-		name     string
-		taskIDs  []int64
-		rows     *testRows
-		queryErr error
-		wantMap  map[int64]string
-		wantErr  string
+		name      string
+		taskIDs   []int64
+		rows      *testRows
+		queryErr  error
+		want      map[int64]string
+		wantQuery string
+		wantErr   string
 	}{
-		{
-			name:    "empty IDs returns empty map",
-			taskIDs: nil,
-			wantMap: map[int64]string{},
-		},
-		{
-			name:    "successful fetch of resolutions",
-			taskIDs: []int64{1, 2},
-			rows: &testRows{
-				columns: []string{"id", "resolution"},
-				values: [][]driver.Value{
-					{int64(1), "completed"},
-					{int64(2), "wont_do"},
-				},
-			},
-			wantMap: map[int64]string{
-				1: "completed",
-				2: "wont_do",
-			},
-		},
-		{
-			name:     "query error returned",
-			taskIDs:  []int64{3},
-			queryErr: errors.New("query error"),
-			wantErr:  "failed to fetch task resolutions: query error",
-		},
-		{
-			name:    "scan error on wrong columns",
-			taskIDs: []int64{4},
-			rows: &testRows{
-				columns: []string{"id"},
-				values: [][]driver.Value{
-					{int64(4)},
-				},
-			},
-			wantErr: "failed to scan task resolution",
-		},
+		{name: "empty IDs returns empty map", want: map[int64]string{}},
+		{name: "successful fetch of resolutions", taskIDs: []int64{1, 2}, rows: sqlRows(idRes, []driver.Value{int64(1), "completed"}, []driver.Value{int64(2), "wont_do"}), want: map[int64]string{1: "completed", 2: "wont_do"}, wantQuery: sqlFetchResolutions},
+		{name: "query error returned", taskIDs: []int64{3}, queryErr: errors.New("query error"), wantQuery: sqlFetchResolutions, wantErr: "failed to fetch task resolutions: query error"},
+		{name: "scan error on wrong columns", taskIDs: []int64{4}, rows: sqlRows([]string{"id"}, []driver.Value{int64(4)}), wantQuery: sqlFetchResolutions, wantErr: "failed to scan task resolution: sql: expected 1 destination arguments in Scan, not 2"},
 	}
-
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			conn := &testConn{
-				queryFn: func(query string, args []driver.NamedValue) (driver.Rows, error) {
-					if tc.queryErr != nil {
-						return nil, tc.queryErr
-					}
-					return tc.rows, nil
-				},
-			}
-			db := newTestDB(t, conn)
-			store := NewSQLTaskStore(db)
-
+			store, conn := newQueryStore(t, tc.rows, tc.queryErr)
 			got, err := store.FetchTaskResolutions(context.Background(), tc.taskIDs)
-			if tc.wantErr == "" && err != nil {
-				t.Fatalf("unexpected error: %v", err)
+			if errText(err) != tc.wantErr || !maps.Equal(got, tc.want) {
+				t.Fatalf("FetchTaskResolutions = %v, %q; want %v, %q", got, errText(err), tc.want, tc.wantErr)
 			}
-			if tc.wantErr != "" {
-				if err == nil {
-					t.Fatalf("expected error containing %q, got nil", tc.wantErr)
-				}
-				if !strings.Contains(err.Error(), tc.wantErr) {
-					t.Fatalf("error %q does not contain %q", err.Error(), tc.wantErr)
-				}
-				return
-			}
-			for k, v := range tc.wantMap {
-				if got[k] != v {
-					t.Fatalf("got[%d] = %q, want %q", k, got[k], v)
-				}
-			}
+			checkSQLCalls(t, conn, tc.wantQuery, 1)
 		})
-	}
-}
-
-type searchTasksRRFTestCase struct {
-	name          string
-	embedding     []float32
-	queryText     string
-	status        string
-	limit         int
-	rows          *testRows
-	queryErr      error
-	wantCount     int
-	wantLimitArg  int
-	wantFilterArg string
-	wantVectorArg bool
-	wantErr       string
-}
-
-func runSearchTasksRRFCase(t *testing.T, tc searchTasksRRFTestCase) {
-	t.Helper()
-	var calledArgs []driver.NamedValue
-	conn := &testConn{
-		queryFn: func(query string, args []driver.NamedValue) (driver.Rows, error) {
-			calledArgs = args
-			if tc.queryErr != nil {
-				return nil, tc.queryErr
-			}
-			return tc.rows, nil
-		},
-	}
-	db := newTestDB(t, conn)
-	store := NewSQLTaskStore(db)
-
-	results, err := store.SearchTasksRRF(context.Background(), tc.embedding, tc.queryText, tc.status, tc.limit)
-	if tc.wantErr == "" && err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if tc.wantErr != "" {
-		if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
-			t.Fatalf("expected error containing %q, got %v", tc.wantErr, err)
-		}
-		return
-	}
-	assertSearchTasksRRFResults(t, tc, results, calledArgs)
-}
-
-func assertSearchTasksRRFResults(t *testing.T, tc searchTasksRRFTestCase, results []ScoredTaskSummary, calledArgs []driver.NamedValue) {
-	t.Helper()
-	if len(results) != tc.wantCount {
-		t.Fatalf("results len = %d, want %d", len(results), tc.wantCount)
-	}
-	if tc.wantLimitArg > 0 && len(calledArgs) > 1 && calledArgs[1].Value != tc.wantLimitArg {
-		t.Fatalf("limit arg = %v, want %d", calledArgs[1].Value, tc.wantLimitArg)
-	}
-	if tc.wantFilterArg != "" && len(calledArgs) > 3 && calledArgs[3].Value != tc.wantFilterArg {
-		t.Fatalf("filter arg = %v, want %q", calledArgs[3].Value, tc.wantFilterArg)
-	}
-	if len(calledArgs) > 4 && calledArgs[4].Value != tc.wantVectorArg {
-		t.Fatalf("hasVector arg = %v, want %v", calledArgs[4].Value, tc.wantVectorArg)
 	}
 }
 
 func TestSQLTaskStore_SearchTasksRRF(t *testing.T) {
 	t.Parallel()
 
-	tests := []searchTasksRRFTestCase{
+	scored := []string{"id", "title", "done", "resolution", "score"}
+	emb := make([]float32, 384)
+	tests := []struct {
+		name      string
+		embedding []float32
+		queryText string
+		status    string
+		limit     int
+		rows      *testRows
+		queryErr  error
+		want      []ScoredTaskSummary
+		wantArgs  []driver.Value // limit, query text, status filter, hasVector
+		wantErr   string
+	}{
 		{
-			name:      "successful search with rows",
-			embedding: make([]float32, 384),
-			queryText: "fix bug",
-			status:    "open",
-			limit:     5,
-			rows: &testRows{
-				columns: []string{"id", "title", "done", "resolution", "score"},
-				values: [][]driver.Value{
-					{int64(1), "Fix bug", false, "", 0.95},
-					{int64(2), "Closed task", true, "completed", 0.70},
-				},
-			},
-			wantCount:     2,
-			wantLimitArg:  5,
-			wantFilterArg: "open",
-			wantVectorArg: true,
+			name: "successful search with rows", embedding: emb, queryText: "fix bug", status: "open", limit: 5,
+			rows:     sqlRows(scored, []driver.Value{int64(1), "Fix bug", false, "", 0.95}, []driver.Value{int64(2), "Closed task", true, "completed", 0.70}),
+			want:     []ScoredTaskSummary{{ID: 1, Title: "Fix bug", Status: "open", Score: 0.95}, {ID: 2, Title: "Closed task", Status: "completed", Score: 0.70}},
+			wantArgs: []driver.Value{5, "fix bug", "open", true},
 		},
-		{
-			name:      "empty embedding uses default vector and vector gate false",
-			embedding: nil,
-			queryText: "search term",
-			status:    "",
-			limit:     0,
-			rows: &testRows{
-				columns: []string{"id", "title", "done", "resolution", "score"},
-				values:  [][]driver.Value{},
-			},
-			wantCount:     0,
-			wantLimitArg:  10,
-			wantFilterArg: "open",
-			wantVectorArg: false,
-		},
-		{
-			name:      "query error handled",
-			embedding: make([]float32, 384),
-			queryText: "query",
-			queryErr:  errors.New("db timeout"),
-			wantErr:   "hybrid rrf search failed: db timeout",
-		},
-		{
-			name:      "scan error handled",
-			embedding: make([]float32, 384),
-			queryText: "query",
-			rows: &testRows{
-				columns: []string{"id"},
-				values: [][]driver.Value{
-					{int64(1)},
-				},
-			},
-			wantErr: "failed to scan scored task row",
-		},
+		{name: "empty embedding uses default vector and vector gate false", queryText: "search term", rows: sqlRows(scored), wantArgs: []driver.Value{10, "search term", "open", false}},
+		{name: "query error handled", embedding: emb, queryText: "query", queryErr: errors.New("db timeout"), wantArgs: []driver.Value{10, "query", "open", true}, wantErr: "hybrid rrf search failed: db timeout"},
+		{name: "scan error handled", embedding: emb, queryText: "query", rows: sqlRows([]string{"id"}, []driver.Value{int64(1)}), wantArgs: []driver.Value{10, "query", "open", true}, wantErr: "failed to scan scored task row: sql: expected 1 destination arguments in Scan, not 5"},
 	}
-
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			runSearchTasksRRFCase(t, tc)
+			store, conn := newQueryStore(t, tc.rows, tc.queryErr)
+			got, err := store.SearchTasksRRF(context.Background(), tc.embedding, tc.queryText, tc.status, tc.limit)
+			if errText(err) != tc.wantErr || !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("SearchTasksRRF = %+v, %q; want %+v, %q", got, errText(err), tc.want, tc.wantErr)
+			}
+			if gotArgs := conn.recordedArgs(); !reflect.DeepEqual(gotArgs, tc.wantArgs) {
+				t.Fatalf("query args = %#v, want %#v", gotArgs, tc.wantArgs)
+			}
 		})
 	}
 }
