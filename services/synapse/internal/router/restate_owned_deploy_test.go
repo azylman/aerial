@@ -281,6 +281,7 @@ func TestApplyKustomizationStatusRestateOwned(t *testing.T) {
 		bodies       map[string]string
 		callCode     int
 		sourceRepo   string
+		workloads    []workloadRollout
 		workloadsErr bool
 		ghBody       string
 		wantPaths    []string
@@ -338,6 +339,61 @@ func TestApplyKustomizationStatusRestateOwned(t *testing.T) {
 			name: "deploy view failure surfaces for the watcher retry", obs: kustomizationObservation{Ref: core},
 			bodies: map[string]string{"ListRollouts": list, "GetDeployView": `nope`}, wantErr: true,
 		},
+		{
+			name: "pr with expected jobs completes even when unrelated workload fails", obs: kustomizationObservation{Ref: core, LastHandledReconcileAt: ownedReqAt, Conditions: ready},
+			bodies: map[string]string{
+				"ListRollouts":  list,
+				"GetDeployView": deployViewBody("aerial-config", statusDeploying, `,"jobs":["eri-restate"],"kustomization_requests":{"core":{"namespace":"flux-system","requested_at":"`+ownedReqAt+`"}}`),
+			},
+			workloads: []workloadRollout{
+				{
+					Name: "eri-restate", Kind: "Deployment", Namespace: "default",
+					Generation: 1, ObservedGeneration: 1, Replicas: 1, UpdatedReplicas: 1, ReadyReplicas: 1, AvailableReplicas: 1, StatusReplicas: 1,
+					Images: []string{"ghcr.io/azylman/eri-restate:" + ownedMerge},
+				},
+				{
+					Name: "unrelated-app", Kind: "Deployment", Namespace: "default",
+					Generation: 1, ObservedGeneration: 1, Replicas: 1, UpdatedReplicas: 0,
+					ProgressDeadlineExceeded: true,
+					Images:                   []string{"ghcr.io/azylman/unrelated:latest"},
+				},
+			},
+			wantPaths:  []string{cfgPRKey + "HandleRolloutProgress/send", cfgPRKey + "HandleDeploySuccess/send"},
+			wantBodies: []string{`"deployed_jobs":["eri-restate","core"],"deployed_kustomizations":["core"]`, `"facts":[{"event":"deploy_success"`},
+		},
+		{
+			name: "pr with expected jobs accepts ahead descendant image tag", obs: kustomizationObservation{Ref: core, LastHandledReconcileAt: ownedReqAt, Conditions: ready},
+			bodies: map[string]string{
+				"ListRollouts":  list,
+				"GetDeployView": deployViewBody("aerial-config", statusDeploying, `,"jobs":["eri-restate"],"kustomization_requests":{"core":{"namespace":"flux-system","requested_at":"`+ownedReqAt+`"}}`),
+			},
+			ghBody: `{"committer":{"date":"2026-11-20T00:00:00Z"},"status":"ahead"}`,
+			workloads: []workloadRollout{
+				{
+					Name: "eri-restate", Kind: "Deployment", Namespace: "default",
+					Generation: 1, ObservedGeneration: 1, Replicas: 1, UpdatedReplicas: 1, ReadyReplicas: 1, AvailableReplicas: 1, StatusReplicas: 1,
+					Images: []string{"ghcr.io/azylman/eri-restate:descendant123"},
+				},
+			},
+			wantPaths:  []string{cfgPRKey + "HandleRolloutProgress/send", cfgPRKey + "HandleDeploySuccess/send"},
+			wantBodies: []string{`"deployed_jobs":["eri-restate","core"],"deployed_kustomizations":["core"]`, `"facts":[{"event":"deploy_success"`},
+		},
+		{
+			name: "compare error on candidate descendant tag surfaces for watcher retry", obs: kustomizationObservation{Ref: core, LastHandledReconcileAt: ownedReqAt, Conditions: ready},
+			bodies: map[string]string{
+				"ListRollouts":  list,
+				"GetDeployView": deployViewBody("aerial-config", statusDeploying, `,"jobs":["eri-restate"],"kustomization_requests":{"core":{"namespace":"flux-system","requested_at":"`+ownedReqAt+`"}}`),
+			},
+			ghBody: `{"committer":{"date":"2026-11-20T00:00:00Z"},"status":123}`,
+			workloads: []workloadRollout{
+				{
+					Name: "eri-restate", Kind: "Deployment", Namespace: "default",
+					Generation: 1, ObservedGeneration: 1, Replicas: 1, UpdatedReplicas: 1, ReadyReplicas: 1, AvailableReplicas: 1, StatusReplicas: 1,
+					Images: []string{"ghcr.io/azylman/eri-restate:descendant123"},
+				},
+			},
+			wantErr: true,
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -352,6 +408,7 @@ func TestApplyKustomizationStatusRestateOwned(t *testing.T) {
 			}
 			h := newOwnedHarness(t, Config{}, &ownedIngress{sendCode: http.StatusAccepted, callCode: code, handlerBodies: tc.bodies}, ghBody)
 			h.disp.sourceRepo = tc.sourceRepo
+			h.disp.workloads = tc.workloads
 			if tc.workloadsErr {
 				h.disp.workloadsErr = errors.New("kube down")
 			}
@@ -644,6 +701,16 @@ func TestRolloutFromView(t *testing.T) {
 			name: "deploying view with requests is tracked", wantOK: true,
 			view: prwire.DeployView{Found: true, Repo: "azylman/aerial", PRNumber: 42, Status: statusDeploying, Branch: "feat", HeadSHA: ownedHead, MergeSHA: ownedMerge, TargetID: ownedThread, KustomizationRequests: reqs, DeployedKustomizations: []string{"web"}},
 			want: trackedRollout{PR: DeployingPR{Repo: "azylman/aerial", PRNumber: 42, Branch: "feat", HeadSHA: ownedHead, MergeSHA: ownedMerge, TargetID: ownedThread}, Requests: reqs, Deployed: []string{"web"}},
+		},
+		{
+			name: "service jobs are preserved while kustomization requests are filtered out", wantOK: true,
+			view: prwire.DeployView{Found: true, Repo: "azylman/aerial", PRNumber: 42, Status: statusDeploying, Branch: "feat", HeadSHA: ownedHead, MergeSHA: ownedMerge, TargetID: ownedThread, Jobs: []string{"eri-restate", "core", "synapse"}, KustomizationRequests: reqs},
+			want: trackedRollout{PR: DeployingPR{Repo: "azylman/aerial", PRNumber: 42, Branch: "feat", HeadSHA: ownedHead, MergeSHA: ownedMerge, TargetID: ownedThread, Jobs: []string{"eri-restate", "synapse"}}, Requests: reqs},
+		},
+		{
+			name: "kustomization-only jobs leave pr jobs empty", wantOK: true,
+			view: prwire.DeployView{Found: true, Repo: "azylman/aerial", PRNumber: 42, Status: statusDeploying, Branch: "feat", HeadSHA: ownedHead, MergeSHA: ownedMerge, TargetID: ownedThread, Jobs: []string{"core"}, KustomizationRequests: reqs},
+			want: trackedRollout{PR: DeployingPR{Repo: "azylman/aerial", PRNumber: 42, Branch: "feat", HeadSHA: ownedHead, MergeSHA: ownedMerge, TargetID: ownedThread}, Requests: reqs},
 		},
 		{name: "unknown pr is skipped", view: prwire.DeployView{}},
 		{name: "deployed view is skipped", view: prwire.DeployView{Found: true, PRNumber: 42, Status: "deployed", KustomizationRequests: reqs}},

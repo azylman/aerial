@@ -235,7 +235,19 @@ func (s *RouterServer) gateKustomizationRequest(ctx context.Context, pr Deployin
 	if err != nil {
 		return fmt.Errorf("resolve merge time of %s#%d: %w", pr.Repo, pr.PRNumber, err)
 	}
-	in := prRolloutInput{Workloads: state.Workloads, ConfigMaps: state.ConfigMaps, CommitSHA: commitSHA, Since: since, Now: time.Now()}
+	includedCommits, err := s.includedWorkloadCommits(ctx, pr, commitSHA, state.Workloads)
+	if err != nil {
+		return err
+	}
+	in := prRolloutInput{
+		Workloads:       state.Workloads,
+		ConfigMaps:      state.ConfigMaps,
+		CommitSHA:       commitSHA,
+		IncludedCommits: includedCommits,
+		ExpectedJobs:    pr.Jobs,
+		Since:           since,
+		Now:             time.Now(),
+	}
 	done, failed, reason := flux.PRRolloutStatus(in)
 	if failed {
 		return s.failKustomizationRollout(ctx, pr, name, reason)
@@ -251,6 +263,26 @@ func (s *RouterServer) gateKustomizationRequest(ctx context.Context, pr Deployin
 		slog.InfoContext(ctx, "[synapse] [flux-watch] waiting for rollout", "kustomization", name, "repo", pr.Repo, "pr", pr.PRNumber, "reason", reason)
 	}
 	return nil
+}
+
+// includedWorkloadCommits checks candidate descendant image tags on workloads against the commit
+// in GitHub git history, returning tags that are identical to or ahead of the commit.
+func (s *RouterServer) includedWorkloadCommits(ctx context.Context, pr DeployingPR, commitSHA string, workloads []workloadRollout) ([]string, error) {
+	candidates := flux.CandidateDescendantTags(workloads, commitSHA, pr.Jobs)
+	if len(candidates) == 0 {
+		return nil, nil
+	}
+	var included []string
+	for _, tag := range candidates {
+		live, err := s.revisionIncludes(ctx, pr.Repo, tag, commitSHA)
+		if err != nil {
+			return nil, fmt.Errorf("check workload image revision %s of %s for %s#%d: %w", tag, pr.Repo, pr.Repo, pr.PRNumber, err)
+		}
+		if live {
+			included = append(included, tag)
+		}
+	}
+	return included, nil
 }
 
 // commitTime returns the committer date of sha in repo, which for a merge commit is when it merged.
