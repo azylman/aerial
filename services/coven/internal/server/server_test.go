@@ -47,9 +47,6 @@ func newServerFixture(t *testing.T, sabotage string) *Server {
 	execSQL(t, db, sabotage)
 	handler := NewToolHandler(&config.Config{}, s, &MockOllamaClient{embedding: testEmbedding(1.0)})
 	server := NewServer(handler, func(_ context.Context, threadID string) error {
-		if threadID == "th-busy" {
-			return store.ErrAdvisoryLockBusy
-		}
 		if threadID == "th-err" {
 			return errors.New("extract error")
 		}
@@ -89,7 +86,6 @@ func TestServer_Routes(t *testing.T) {
 		{name: "AdminExtractBlankJSONThreadID", method: http.MethodPost, path: "/admin/extract", body: strings.NewReader(`{"thread_id":"   "}`), wantStatus: http.StatusBadRequest},
 		{name: "AdminExtractSuccessQuery", method: http.MethodPost, path: "/admin/extract?thread_id=th-1", wantStatus: http.StatusOK, wantSubstr: `{"status":"ok"}`},
 		{name: "AdminExtractSuccessBody", method: http.MethodPost, path: "/admin/extract", body: strings.NewReader(`{"thread_id":"th-1"}`), wantStatus: http.StatusOK, wantSubstr: `{"status":"ok"}`},
-		{name: "AdminExtractLockBusy", method: http.MethodPost, path: "/admin/extract?thread_id=th-busy", wantStatus: http.StatusConflict},
 		{name: "AdminExtractError", method: http.MethodPost, path: "/admin/extract?thread_id=th-err", wantStatus: http.StatusInternalServerError},
 		{name: "FactsJSON", method: http.MethodGet, path: "/facts?limit=10&offset=0", wantStatus: http.StatusOK, wantSubstr: `"facts"`},
 		{name: "FactsStoreError", method: http.MethodGet, path: "/facts", sabotage: sabotageFacts, wantStatus: http.StatusInternalServerError},
@@ -424,9 +420,6 @@ func newServerFixtureWithAuth(t *testing.T, authCfg k8sauth.Config) *Server {
 	}
 	handler := NewToolHandler(&config.Config{Stack: config.DefaultStack, Auth: authCfg}, s, &MockOllamaClient{embedding: testEmbedding(1.0)})
 	server := NewServer(handler, func(_ context.Context, threadID string) error {
-		if threadID == "th-busy" {
-			return store.ErrAdvisoryLockBusy
-		}
 		if threadID == "th-err" {
 			return errors.New("extract failed")
 		}

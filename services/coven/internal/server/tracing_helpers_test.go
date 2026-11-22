@@ -1,6 +1,10 @@
 package server
 
 import (
+	"context"
+	"errors"
+	"testing"
+
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/propagation"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
@@ -38,4 +42,20 @@ func endedSpanSummary(id trace.SpanID) (name string, root bool, attrs map[string
 		attrs[string(kv.Key)] = kv.Value.String()
 	}
 	return s.Name(), !s.Parent().IsValid(), attrs
+}
+
+func TestEndSchedulerSpan(t *testing.T) {
+	t.Parallel()
+	endSchedulerSpan(nil, nil)
+	endSchedulerSpan(nil, errors.New("err"))
+
+	tp := sdktrace.NewTracerProvider()
+	tracer := tp.Tracer("test")
+	_, spanErr := tracer.Start(context.Background(), "test-err")
+	defer spanErr.End()
+	endSchedulerSpan(spanErr, errors.New("failure"))
+
+	_, spanOK := tracer.Start(context.Background(), "test-ok")
+	defer spanOK.End()
+	endSchedulerSpan(spanOK, nil)
 }
