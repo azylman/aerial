@@ -19,6 +19,7 @@ import (
 	"github.com/azylman/aerial/services/vanadis-restate/internal/eritest"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/executor"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
+	"github.com/azylman/aerial/services/vanadis-restate/internal/restatetest"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
 )
 
@@ -326,7 +327,7 @@ func reconcileStore(t *testing.T, build model.VanadisBuild, chunks []model.Vanad
 func TestNotifyChunkFailure_NilObjectIsNoop(t *testing.T) {
 	t.Parallel()
 	var bo *BuildObject
-	assert.NoError(t, bo.notifyChunkFailure(mockRunContext{}, model.VanadisBuild{ID: "b1"}, "c1", "boom"))
+	assert.NoError(t, bo.notifyChunkFailure(restatetest.MockRunContext{}, model.VanadisBuild{ID: "b1"}, "c1", "boom"))
 }
 
 func TestCompactStateForStorage(t *testing.T) {

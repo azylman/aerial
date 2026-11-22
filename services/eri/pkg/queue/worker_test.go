@@ -312,7 +312,7 @@ func TestWorkerPool_PersistentDaemonTurns(t *testing.T) {
 		},
 		{
 			name: "ClaudeSyntheticRateLimit_WallClockReset_QuotaPause", threadID: "thread-claude-quota-wallclock", daemonUUID: "f5555555-6666-7777-8888-999999999999", presetSessionInDB: "f5555555-6666-7777-8888-999999999999",
-			turnResponses:       []string{`{"event":"result","result":{"status":"ERROR","exit_code":1,"error":"claude synthetic reply (error=rate_limit): You've hit your usage limit. Resets 3:00 PM (America/Los_Angeles)"}}` + "\n"},
+			turnResponses:       []string{`{"event":"result","result":{"status":"ERROR","exit_code":1,"error":"claude synthetic reply (error=rate_limit): You've hit your usage limit. Resets ` + wallClockResetIn(t, 3*time.Hour) + ` (America/Los_Angeles)"}}` + "\n"},
 			expectedFinalStatus: db.StatusFailed, wantDeliveredSubstr: "resets in", checkQuotaSchedule: true, checkQuotaDbError: true,
 		},
 		{
@@ -1366,4 +1366,16 @@ func TestTurnExecution_CreateOneShotSchedule_JetStream(t *testing.T) {
 	if !gotArgs.RunAt.Equal(runAt) {
 		t.Errorf("args.RunAt = %v, want %v", gotArgs.RunAt, runAt)
 	}
+}
+
+// wallClockResetIn renders a Claude-style "3:04 PM" reset clock d from now in
+// America/Los_Angeles, so wall-clock reset rows never land inside the <=90s
+// capacity window regardless of when the suite runs.
+func wallClockResetIn(t *testing.T, d time.Duration) string {
+	t.Helper()
+	loc, err := time.LoadLocation("America/Los_Angeles")
+	if err != nil {
+		t.Fatalf("load location: %v", err)
+	}
+	return time.Now().Add(d).In(loc).Format("3:04 PM")
 }

@@ -364,48 +364,94 @@ func (s *Store) RecordPRCheckStatus(ctx context.Context, chunkID, headSHA, check
 	if id == "" || name == "" {
 		return errors.New("chunk_id and check_name cannot be empty")
 	}
-	const q = `UPDATE vanadis_chunks
+	const q = `WITH reopened_build AS (
+    UPDATE vanadis_builds AS rb
+    SET status = 'running', updated_at = CURRENT_TIMESTAMP
+    FROM vanadis_chunks AS target
+    WHERE target.id = $3
+      AND rb.id = target.build_id
+      AND rb.status = 'failed'
+      AND target.mode = 'pr'
+      AND COALESCE(target.pr_number, 0) > 0
+      AND target.status = 'failed'
+      AND COALESCE(target.ci_checks->>'_merge_sha', '') = ''
+      AND $2 = 'passed'
+      AND (
+          $4 = ''
+          OR COALESCE(target.ci_checks->>'_head_sha', '') = ''
+          OR target.ci_checks->>'_head_sha' = $4
+      )
+      AND NOT EXISTS (
+          SELECT 1 FROM jsonb_each_text(jsonb_set(COALESCE(target.ci_checks, '{}'::jsonb), ARRAY[$1], to_jsonb($2::text), true))
+          WHERE key NOT LIKE '\_%' AND value = 'failed'
+      )
+      AND NOT EXISTS (
+          SELECT 1 FROM vanadis_chunks AS s
+          WHERE s.build_id = target.build_id
+            AND s.id != target.id
+            AND s.status IN ('failed', 'cancelled')
+      )
+)
+UPDATE vanadis_chunks AS c
 SET ci_checks = jsonb_set(
         CASE
-            WHEN status NOT IN ('merged', 'synced', 'deploy_failed') AND COALESCE(ci_checks->>'_merge_sha', '') = '' AND $4 != '' AND COALESCE(ci_checks->>'_head_sha', '') = ''
-                THEN jsonb_set(COALESCE(ci_checks, '{}'::jsonb), '{_head_sha}', to_jsonb($4::text), true)
-            ELSE COALESCE(ci_checks, '{}'::jsonb)
+            WHEN c.status NOT IN ('merged', 'synced', 'deploy_failed') AND COALESCE(c.ci_checks->>'_merge_sha', '') = '' AND $4 != '' AND COALESCE(c.ci_checks->>'_head_sha', '') = ''
+                THEN jsonb_set(COALESCE(c.ci_checks, '{}'::jsonb), '{_head_sha}', to_jsonb($4::text), true)
+            ELSE COALESCE(c.ci_checks, '{}'::jsonb)
         END,
         ARRAY[$1],
         to_jsonb($2::text),
         true
     ),
     status = CASE
-        WHEN status = 'ci_failed' AND $2 = 'passed' AND NOT EXISTS (
-            SELECT 1 FROM jsonb_each_text(jsonb_set(COALESCE(ci_checks, '{}'::jsonb), ARRAY[$1], to_jsonb($2::text), true))
+        WHEN c.status IN ('ci_failed', 'failed') AND COALESCE(c.ci_checks->>'_merge_sha', '') = '' AND $2 = 'passed' AND NOT EXISTS (
+            SELECT 1 FROM jsonb_each_text(jsonb_set(COALESCE(c.ci_checks, '{}'::jsonb), ARRAY[$1], to_jsonb($2::text), true))
             WHERE key NOT LIKE '\_%' AND value = 'failed'
         ) THEN 'pr_opened'
-        ELSE status
+        ELSE c.status
     END,
     banner = CASE
-        WHEN status = 'ci_failed' AND $2 = 'passed' AND NOT EXISTS (
-            SELECT 1 FROM jsonb_each_text(jsonb_set(COALESCE(ci_checks, '{}'::jsonb), ARRAY[$1], to_jsonb($2::text), true))
+        WHEN c.status IN ('ci_failed', 'failed') AND COALESCE(c.ci_checks->>'_merge_sha', '') = '' AND $2 = 'passed' AND NOT EXISTS (
+            SELECT 1 FROM jsonb_each_text(jsonb_set(COALESCE(c.ci_checks, '{}'::jsonb), ARRAY[$1], to_jsonb($2::text), true))
             WHERE key NOT LIKE '\_%' AND value = 'failed'
         ) THEN ''
-        ELSE banner
+        ELSE c.banner
+    END,
+    ci_fail_count = CASE
+        WHEN c.status = 'failed' AND COALESCE(c.ci_checks->>'_merge_sha', '') = '' AND $2 = 'passed' AND NOT EXISTS (
+            SELECT 1 FROM jsonb_each_text(jsonb_set(COALESCE(c.ci_checks, '{}'::jsonb), ARRAY[$1], to_jsonb($2::text), true))
+            WHERE key NOT LIKE '\_%' AND value = 'failed'
+        ) THEN 0
+        ELSE c.ci_fail_count
+    END,
+    completed_at = CASE
+        WHEN c.status = 'failed' AND COALESCE(c.ci_checks->>'_merge_sha', '') = '' AND $2 = 'passed' AND NOT EXISTS (
+            SELECT 1 FROM jsonb_each_text(jsonb_set(COALESCE(c.ci_checks, '{}'::jsonb), ARRAY[$1], to_jsonb($2::text), true))
+            WHERE key NOT LIKE '\_%' AND value = 'failed'
+        ) THEN NULL
+        ELSE c.completed_at
     END,
     updated_at = CURRENT_TIMESTAMP
-WHERE id = $3
-  AND status NOT IN ('deploying', 'deployed', 'completed', 'failed', 'cancelled')
+FROM vanadis_builds AS b
+WHERE c.id = $3
+  AND b.id = c.build_id
+  AND c.status NOT IN ('deploying', 'deployed', 'completed', 'cancelled')
+  AND (c.status != 'failed' OR (c.mode = 'pr' AND COALESCE(c.pr_number, 0) > 0))
+  AND b.status != 'cancelled'
   AND (
       (
-          (status IN ('merged', 'synced', 'deploy_failed') OR COALESCE(ci_checks->>'_merge_sha', '') != '')
+          (c.status IN ('merged', 'synced', 'deploy_failed') OR COALESCE(c.ci_checks->>'_merge_sha', '') != '')
           AND $2 != 'failed'
-          AND COALESCE(ci_checks->>'_merge_sha', '') != ''
-          AND ci_checks->>'_merge_sha' = $4
+          AND COALESCE(c.ci_checks->>'_merge_sha', '') != ''
+          AND c.ci_checks->>'_merge_sha' = $4
       )
       OR (
-          status NOT IN ('merged', 'synced', 'deploy_failed')
-          AND COALESCE(ci_checks->>'_merge_sha', '') = ''
+          c.status NOT IN ('merged', 'synced', 'deploy_failed')
+          AND COALESCE(c.ci_checks->>'_merge_sha', '') = ''
           AND (
               $4 = ''
-              OR COALESCE(ci_checks->>'_head_sha', '') = ''
-              OR ci_checks->>'_head_sha' = $4
+              OR COALESCE(c.ci_checks->>'_head_sha', '') = ''
+              OR c.ci_checks->>'_head_sha' = $4
           )
       )
   );`
@@ -439,7 +485,7 @@ SET ci_checks = CASE
     END,
     banner = '',
     updated_at = CURRENT_TIMESTAMP
-WHERE id = $1 AND status NOT IN ('completed', 'failed', 'cancelled');`
+WHERE id = $1 AND status NOT IN ('completed', 'cancelled') AND (status != 'failed' OR (mode = 'pr' AND COALESCE(pr_number, 0) > 0));`
 		tag, err := s.db.Exec(ctx, mergeQ, id, cleanHead, cleanMerge)
 		if err != nil {
 			return fmt.Errorf("reset merge check state: %w", err)
