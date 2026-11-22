@@ -1227,17 +1227,24 @@ func TestRunApp_Lifecycle(t *testing.T) {
 		created_at TIMESTAMP NOT NULL
 	);
 	`
-	if _, err := db.Exec(schema); err != nil {
+	if _, err = db.Exec(schema); err != nil {
 		db.Close()
 		t.Fatalf("failed to create test schema: %v", err)
 	}
 	_ = db.Close()
 
+	natsLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("reserve loopback port: %v", err)
+	}
+	closedNATSAddr := natsLn.Addr().String()
+	_ = natsLn.Close()
+
 	cfg := &config.Config{
 		Port:                  "0",
 		DatabaseURL:           "sqlite://" + dbPath,
 		DefaultDiscordChannel: "prospera",
-		NATSURL:               "nats://127.0.0.1:4222",
+		NATSURL:               "nats://" + closedNATSAddr,
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1299,6 +1306,8 @@ func TestRoutes_HealthAndCoverage(t *testing.T) {
 	store := newMockStoreForDelivery()
 	server := NewServer(newTestConfigSource(cfg), store, &mockTwilioForDelivery{}, nil, nil, nil)
 	handler := server.Routes()
+	// Test binaries carry no runtime/coverage meta-data (only `go build -cover`
+	// binaries do), so the wired flush handler answers 500 here, never 404.
 
 	tests := []struct {
 		name       string
@@ -1307,25 +1316,9 @@ func TestRoutes_HealthAndCoverage(t *testing.T) {
 		wantStatus int
 		wantBody   string
 	}{
-		{
-			name:       "health endpoint",
-			method:     http.MethodGet,
-			path:       "/health",
-			wantStatus: http.StatusOK,
-			wantBody:   `"status":"ok"`,
-		},
-		{
-			name:       "coverage flush get",
-			method:     http.MethodGet,
-			path:       "/debug/coverage/flush",
-			wantStatus: http.StatusOK,
-		},
-		{
-			name:       "coverage flush post",
-			method:     http.MethodPost,
-			path:       "/debug/coverage/flush",
-			wantStatus: http.StatusOK,
-		},
+		{name: "health endpoint", method: http.MethodGet, path: "/health", wantStatus: http.StatusOK, wantBody: `"status":"ok"`},
+		{name: "coverage flush get", method: http.MethodGet, path: "/debug/coverage/flush", wantStatus: http.StatusInternalServerError},
+		{name: "coverage flush post", method: http.MethodPost, path: "/debug/coverage/flush", wantStatus: http.StatusInternalServerError},
 	}
 
 	for _, tc := range tests {
@@ -1335,7 +1328,7 @@ func TestRoutes_HealthAndCoverage(t *testing.T) {
 			rec := httptest.NewRecorder()
 			handler.ServeHTTP(rec, req)
 
-			if rec.Code != tc.wantStatus && rec.Code != http.StatusInternalServerError {
+			if rec.Code != tc.wantStatus {
 				t.Fatalf("%s %s status = %d, want %d", tc.method, tc.path, rec.Code, tc.wantStatus)
 			}
 			if tc.wantBody != "" && !bytes.Contains(rec.Body.Bytes(), []byte(tc.wantBody)) {

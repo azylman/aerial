@@ -87,7 +87,6 @@ type loadConfigFileTestCase struct {
 	path                   string
 	env                    map[string]string
 	nilEnv                 bool
-	callLoadConfig         bool
 	wantErr                bool
 	wantPort               string
 	wantDatabaseURL        string
@@ -226,9 +225,9 @@ func loadConfigValidCases(paths map[string]string) []loadConfigFileTestCase {
 			wantTwilioFromNumber: "",
 		},
 		{
-			name:           "load config wrapper with env",
-			path:           paths["valid"],
-			callLoadConfig: true,
+			name:   "nil getenv falls back to process env",
+			path:   paths["valid"],
+			nilEnv: true,
 			env: map[string]string{
 				"DATABASE_URL": "postgres://user:pass@localhost:5432/testdb",
 			},
@@ -415,26 +414,11 @@ func loadConfigErrorCases(paths map[string]string, tmpDir string) []loadConfigFi
 
 func runLoadConfigFileCase(t *testing.T, tc loadConfigFileTestCase) {
 	t.Helper()
-	if tc.callLoadConfig {
+	var getenv func(string) string
+	if tc.nilEnv {
 		for k, v := range tc.env {
 			t.Setenv(k, v)
 		}
-		cfg, err := LoadConfig(tc.path)
-		if (err != nil) != tc.wantErr {
-			t.Fatalf("LoadConfig() error = %v, wantErr = %v", err, tc.wantErr)
-		}
-		if tc.wantErr {
-			return
-		}
-		if cfg.Port != tc.wantPort {
-			t.Errorf("cfg.Port = %q, want %q", cfg.Port, tc.wantPort)
-		}
-		return
-	}
-
-	var getenv func(string) string
-	if tc.nilEnv {
-		getenv = nil
 	} else {
 		getenv = func(key string) string {
 			if tc.env == nil {
@@ -494,5 +478,32 @@ func assertLoadedConfig(t *testing.T, tc loadConfigFileTestCase, cfg *Config) {
 	}
 	if tc.wantFirstAllowFrom != "" && len(cfg.AllowFrom) > 0 && cfg.AllowFrom[0] != tc.wantFirstAllowFrom {
 		t.Errorf("cfg.AllowFrom[0] = %q, want %q", cfg.AllowFrom[0], tc.wantFirstAllowFrom)
+	}
+}
+
+func TestRestartRequired(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		next Config
+		want bool
+	}{
+		{"identical", Config{}, false},
+		{"live fields change", Config{GeminiLiveModel: "live-2", DefaultDiscordChannel: "chan", MaxConcurrentCalls: 9}, false},
+		{"port change", Config{Port: "9090"}, true},
+		{"database change", Config{DatabaseURL: "postgres://db2/app"}, true},
+		{"twilio account change", Config{TwilioAccountSID: "AC2"}, true},
+		{"twilio token change", Config{TwilioAuthToken: "tok2"}, true},
+		{"google mcp change", Config{GoogleMCPURL: "http://google-mcp-2"}, true},
+		{"coven change", Config{CovenURL: "http://coven-2"}, true},
+		{"nats url change", Config{NATSURL: "nats://nats.example.com:4222"}, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := RestartRequired(&Config{}, &tc.next); got != tc.want {
+				t.Fatalf("RestartRequired() = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }

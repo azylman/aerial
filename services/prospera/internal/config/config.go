@@ -150,11 +150,6 @@ func parseAllowFrom(raw string) ([]string, error) {
 	return allowed, nil
 }
 
-// LoadConfig loads and strictly validates configuration from the file at path using os.Getenv.
-func LoadConfig(path string) (*Config, error) {
-	return LoadConfigFile(path, os.Getenv)
-}
-
 func validateProsperaYAML(ycfg ProsperaYAMLConfig, cleanPath string, eriURL string) error {
 	if strings.TrimSpace(ycfg.Port) == "" {
 		return fmt.Errorf("config: port is required in %s", cleanPath)

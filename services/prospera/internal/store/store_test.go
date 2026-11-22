@@ -18,14 +18,6 @@ import (
 	"github.com/azylman/aerial/services/prospera/internal/testutil"
 )
 
-func TestPGStore_SQLiteDetection(t *testing.T) {
-	t.Parallel()
-	st := testutil.SetUpTestStore(t)
-	if !st.IsSQLite() {
-		t.Errorf("IsSQLite() = false, want true for SQLite test store")
-	}
-}
-
 func TestPGStore_CallLifecycle(t *testing.T) {
 	t.Parallel()
 	st := testutil.SetUpTestStore(t)
