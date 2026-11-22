@@ -223,8 +223,6 @@ func (s *HaroSchedule) Arm(ctx restate.ObjectContext, req ArmRequest) (restate.V
 	if err != nil {
 		return restate.Void{}, err
 	}
-	gen++
-	restate.Set(ctx, "gen", gen)
 
 	loaded, err := restate.Run(ctx, func(rc restate.RunContext) (ScheduleRow, error) {
 		return s.loadScheduleRow(rc, scheduleID, req.ScheduleType)
@@ -233,8 +231,22 @@ func (s *HaroSchedule) Arm(ctx restate.ObjectContext, req ArmRequest) (restate.V
 		return restate.Void{}, err
 	}
 	if !loaded.Found || !loaded.Enabled {
+		restate.Clear(ctx, "armed_due_at")
 		return restate.Void{}, nil
 	}
+
+	dueStr := loaded.NextRunAt.UTC().Format(time.RFC3339Nano)
+	lastArmedDue, err := restate.Get[string](ctx, "armed_due_at")
+	if err != nil {
+		return restate.Void{}, err
+	}
+	if lastArmedDue == dueStr {
+		return restate.Void{}, nil
+	}
+
+	gen++
+	restate.Set(ctx, "gen", gen)
+	restate.Set(ctx, "armed_due_at", dueStr)
 
 	schedType := loaded.ScheduleType
 	if schedType == "" {
@@ -273,6 +285,7 @@ func (s *HaroSchedule) Fire(ctx restate.ObjectContext, req FireRequest) (restate
 	}
 	if !loaded.Found || !loaded.Enabled {
 		restate.Set(ctx, "gen", currentGen+1)
+		restate.Clear(ctx, "armed_due_at")
 		return restate.Void{}, nil
 	}
 
@@ -321,10 +334,12 @@ func (s *HaroSchedule) Fire(ctx restate.ObjectContext, req FireRequest) (restate
 
 	if finRes.IsOneShot {
 		restate.Set(ctx, "gen", currentGen+1)
+		restate.Clear(ctx, "armed_due_at")
 		return restate.Void{}, nil
 	}
 
 	nextDelay := max(0, time.Duration(finRes.DelayMs)*time.Millisecond)
+	restate.Set(ctx, "armed_due_at", finRes.NextRunAt.UTC().Format(time.RFC3339Nano))
 
 	_ = restate.ObjectSend(ctx, "HaroSchedule", scheduleID, "Fire").Send(
 		FireRequest{
@@ -512,6 +527,7 @@ func (*HaroSchedule) Cancel(ctx restate.ObjectContext, _ struct{}) (restate.Void
 		return restate.Void{}, err
 	}
 	restate.Set(ctx, "gen", gen+1)
+	restate.Clear(ctx, "armed_due_at")
 	return restate.Void{}, nil
 }
 
@@ -609,6 +625,7 @@ type Ticker struct {
 	advertiseURL      string
 	httpClient        *http.Client
 	restateRegistered bool
+	restateBackfilled bool
 }
 
 // NewTicker returns a Ticker that evaluates schedules on interval.
@@ -678,6 +695,7 @@ func (t *Ticker) BackfillActiveSchedules(ctx context.Context) error {
 	if t == nil || t.db == nil || strings.TrimSpace(t.ingressURL) == "" {
 		return nil
 	}
+	var errs []error
 	crons, err := store.ListCronSchedules(ctx, t.db, "", "")
 	if err != nil {
 		return err
@@ -690,6 +708,7 @@ func (t *Ticker) BackfillActiveSchedules(ctx context.Context) error {
 		endpoint := fmt.Sprintf("%s/HaroSchedule/%s/Arm/send", t.ingressURL, url.PathEscape(c.ID))
 		if _, postErr := restateingress.Post(ctx, t.httpClient, endpoint, key, ArmRequest{ScheduleType: model.ScheduleTypeCron}, 0); postErr != nil {
 			log.Printf("[Haro Ticker] warning: failed to backfill cron %s: %v", c.ID, postErr)
+			errs = append(errs, postErr)
 		}
 	}
 
@@ -702,6 +721,7 @@ func (t *Ticker) BackfillActiveSchedules(ctx context.Context) error {
 		endpoint := fmt.Sprintf("%s/HaroSchedule/%s/Arm/send", t.ingressURL, url.PathEscape(o.ID))
 		if _, postErr := restateingress.Post(ctx, t.httpClient, endpoint, key, ArmRequest{ScheduleType: model.ScheduleTypeOneShot}, 0); postErr != nil {
 			log.Printf("[Haro Ticker] warning: failed to backfill one-shot %s: %v", o.ID, postErr)
+			errs = append(errs, postErr)
 		}
 	}
 
@@ -717,10 +737,11 @@ func (t *Ticker) BackfillActiveSchedules(ctx context.Context) error {
 		endpoint := fmt.Sprintf("%s/HaroSchedule/%s/Arm/send", t.ingressURL, url.PathEscape(hb.ID))
 		if _, postErr := restateingress.Post(ctx, t.httpClient, endpoint, key, ArmRequest{ScheduleType: model.ScheduleTypeHeartbeat}, 0); postErr != nil {
 			log.Printf("[Haro Ticker] warning: failed to backfill heartbeat %s: %v", hb.ID, postErr)
+			errs = append(errs, postErr)
 		}
 	}
 
-	return nil
+	return errors.Join(errs...)
 }
 
 // HandleExternalEvent queries matching triggers and invokes HaroEventWatch/<triggerID>/Fire synchronously via Restate ingress.
@@ -1296,6 +1317,7 @@ func (t *Ticker) ensureRegisteredAndBackfilled(ctx context.Context) {
 
 	t.mu.Lock()
 	registered := t.restateRegistered
+	backfilled := t.restateBackfilled
 	t.mu.Unlock()
 
 	if !registered {
@@ -1313,12 +1335,16 @@ func (t *Ticker) ensureRegisteredAndBackfilled(ctx context.Context) {
 		t.mu.Unlock()
 	}
 
-	if t.ingressURL != "" {
+	if !backfilled && t.ingressURL != "" {
 		backfillCtx, backfillCancel := context.WithTimeout(ctx, 10*time.Second)
 		defer backfillCancel()
 		if err := t.BackfillActiveSchedules(backfillCtx); err != nil {
 			log.Printf("[Haro Ticker] warning: failed to backfill active schedules: %v", err)
+			return
 		}
+		t.mu.Lock()
+		t.restateBackfilled = true
+		t.mu.Unlock()
 	}
 }
 

@@ -267,14 +267,6 @@ func claimEventTriggersTx(ctx context.Context, database *sql.DB, placeholders st
 	return triggers, nil
 }
 
-func buildClaimEventTriggersPostgresQuery(placeholders string) string {
-	return fmt.Sprintf(`WITH deleted AS (
-		DELETE FROM event_triggers WHERE source = $1 AND event_type = $2 AND target IN (%s) AND persistent = FALSE RETURNING id, agent, channel_id, source, target, event_type, prompt, COALESCE(NULLIF(effort, ''), 'medium') AS effort, created_at, persistent
-	), updated_persistent AS (
-		UPDATE event_triggers SET updated_at = CURRENT_TIMESTAMP WHERE source = $1 AND event_type = $2 AND target IN (%s) AND persistent = TRUE AND (updated_at IS NULL OR updated_at < CURRENT_TIMESTAMP - INTERVAL '5 seconds') RETURNING id, agent, channel_id, source, target, event_type, prompt, COALESCE(NULLIF(effort, ''), 'medium') AS effort, created_at, persistent
-	) SELECT id, agent, channel_id, source, target, event_type, prompt, effort, created_at, persistent FROM deleted UNION ALL SELECT id, agent, channel_id, source, target, event_type, prompt, effort, created_at, persistent FROM updated_persistent ORDER BY created_at ASC`, placeholders, placeholders)
-}
-
 // ClaimEventTriggers atomically deletes and returns matching event triggers from event_triggers.
 func ClaimEventTriggers(ctx context.Context, database *sql.DB, source string, targets []string, eventType string) ([]model.EventTrigger, error) {
 	ctx, err := normCtxAndDB(ctx, database)
@@ -290,7 +282,11 @@ func ClaimEventTriggers(ctx context.Context, database *sql.DB, source string, ta
 		return claimEventTriggersTx(ctx, database, placeholders, args)
 	}
 
-	rawQuery := buildClaimEventTriggersPostgresQuery(placeholders)
+	rawQuery := fmt.Sprintf(`WITH deleted AS (
+		DELETE FROM event_triggers WHERE source = $1 AND event_type = $2 AND target IN (%s) AND persistent = FALSE RETURNING id, agent, channel_id, source, target, event_type, prompt, COALESCE(NULLIF(effort, ''), 'medium') AS effort, created_at, persistent
+	), updated_persistent AS (
+		UPDATE event_triggers SET updated_at = CURRENT_TIMESTAMP WHERE source = $1 AND event_type = $2 AND target IN (%s) AND persistent = TRUE AND (updated_at IS NULL OR updated_at < CURRENT_TIMESTAMP - INTERVAL '5 seconds') RETURNING id, agent, channel_id, source, target, event_type, prompt, COALESCE(NULLIF(effort, ''), 'medium') AS effort, created_at, persistent
+	) SELECT id, agent, channel_id, source, target, event_type, prompt, effort, created_at, persistent FROM deleted UNION ALL SELECT id, agent, channel_id, source, target, event_type, prompt, effort, created_at, persistent FROM updated_persistent ORDER BY created_at ASC`, placeholders, placeholders)
 	rows, err := database.QueryContext(ctx, rawQuery, args...)
 	if err != nil {
 		return nil, err

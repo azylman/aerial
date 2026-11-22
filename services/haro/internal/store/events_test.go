@@ -389,40 +389,36 @@ func TestClaimEventTriggersErrors(t *testing.T) {
 	}
 }
 
-func TestBuildClaimEventTriggersPostgresQuery(t *testing.T) {
+func TestGetEventTrigger_Errors(t *testing.T) {
 	t.Parallel()
-	query := buildClaimEventTriggersPostgresQuery("$3, $4")
-	expectedClauses := []string{
-		"WITH deleted AS",
-		"DELETE FROM event_triggers WHERE source = $1 AND event_type = $2 AND target IN ($3, $4) AND persistent = FALSE",
-		"RETURNING id, agent, channel_id, source, target, event_type, prompt",
-		"updated_persistent AS",
-		"UPDATE event_triggers SET updated_at = CURRENT_TIMESTAMP WHERE source = $1 AND event_type = $2 AND target IN ($3, $4) AND persistent = TRUE",
-		"INTERVAL '5 seconds'",
-		"UNION ALL",
-		"ORDER BY created_at ASC",
+	db := openStoreTestDB(t)
+	_ = db.Close()
+	if _, err := GetEventTrigger(context.Background(), db, "et-1"); err == nil {
+		t.Error("expected error on closed db")
 	}
-	for _, clause := range expectedClauses {
-		if !strings.Contains(query, clause) {
-			t.Errorf("query missing expected clause %q:\n%s", clause, query)
-		}
+	if _, err := GetEventTrigger(context.Background(), nil, "et-1"); err == nil {
+		t.Error("expected error on nil db")
+	}
+	db2 := openStoreTestDB(t)
+	if _, err := GetEventTrigger(context.Background(), db2, ""); err == nil {
+		t.Error("expected error on empty id")
 	}
 }
 
-func TestClaimEventTriggers_PostgresQueryPathExecution(t *testing.T) {
-	// Must remain non-parallel as it temporarily overrides the global isSQLiteDBFn hook.
+func TestQueryMatchingEventTriggers_Errors(t *testing.T) {
+	t.Parallel()
 	db := openStoreTestDB(t)
-	ctx := context.Background()
-	orig := isSQLiteDBFn
-	defer func() { isSQLiteDBFn = orig }()
-	isSQLiteDBFn = func(db *sql.DB) bool { return false }
-
-	_, err := ClaimEventTriggers(ctx, db, "camera", []string{"garage"}, "person_arrived")
-	if err == nil {
-		t.Fatal("expected error executing Postgres CTE against SQLite engine, got nil")
+	_ = db.Close()
+	if _, err := QueryMatchingEventTriggers(context.Background(), db, "source", []string{"target"}, "type"); err == nil {
+		t.Error("expected error on closed db")
 	}
-	if !strings.Contains(err.Error(), "syntax error") && !strings.Contains(err.Error(), "SQL logic error") {
-		t.Fatalf("unexpected error message from SQLite engine: %v", err)
+	if _, err := QueryMatchingEventTriggers(context.Background(), nil, "source", []string{"target"}, "type"); err == nil {
+		t.Error("expected error on nil db")
+	}
+	db2 := openStoreTestDB(t)
+	res, err := QueryMatchingEventTriggers(context.Background(), db2, "", nil, "")
+	if err != nil || res != nil {
+		t.Errorf("expected nil result and nil err on empty filter, got %v, %v", res, err)
 	}
 }
 

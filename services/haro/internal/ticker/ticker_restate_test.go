@@ -52,6 +52,25 @@ func setupObjectMockContext(t *testing.T, key string, initialGen int64) (*mocks.
 		}
 	}).Return().Maybe()
 
+	var armedDueAt string
+	mc.On("Get", "armed_due_at", mock.Anything).Run(func(args mock.Arguments) {
+		if outPtr, ok := args.Get(1).(*string); ok && outPtr != nil {
+			*outPtr = armedDueAt
+		}
+	}).Return(true, nil).Maybe()
+
+	mc.On("Set", "armed_due_at", mock.Anything).Run(func(args mock.Arguments) {
+		if val, ok := args.Get(1).(string); ok {
+			armedDueAt = val
+		}
+	}).Return().Maybe()
+
+	mc.On("Clear", mock.Anything).Run(func(args mock.Arguments) {
+		if key, ok := args.Get(0).(string); ok && key == "armed_due_at" {
+			armedDueAt = ""
+		}
+	}).Return().Maybe()
+
 	runHandler := func(fn func(restate.RunContext) (any, error), output any, _ ...restate.RunOption) restate.TerminalError {
 		res, err := fn(mockRunContext{Context: context.Background()})
 		if err != nil {
@@ -219,6 +238,43 @@ func TestHaroSchedule_Arm(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestHaroSchedule_Arm_Idempotent(t *testing.T) {
+	t.Parallel()
+	db := openTickerTestDB(t)
+	ctx := context.Background()
+	scheduleID := "arm-idempotent"
+	now := time.Date(2026, 11, 22, 10, 0, 0, 0, time.UTC)
+
+	_ = store.InsertCronSchedule(ctx, db, model.CronSchedule{
+		ID:        scheduleID,
+		TargetID:  "100000000000000001",
+		CronExpr:  "0 * * * *",
+		Prompt:    "Hourly check",
+		Timezone:  "UTC",
+		NextRunAt: now.Add(time.Hour),
+		Enabled:   true,
+	})
+
+	mc, mClient := setupObjectMockContext(t, scheduleID, 0)
+	objCtx := restate.WithMockContext(mc)
+
+	s := NewHaroSchedule(db, &fakeDispatcher{})
+	s.nowFn = func() time.Time { return now }
+
+	// First Arm: arms Fire, sets gen to 1
+	if _, err := s.Arm(objCtx, ArmRequest{ScheduleType: model.ScheduleTypeCron}); err != nil {
+		t.Fatalf("first Arm err: %v", err)
+	}
+	mc.AssertCalled(t, "Set", "gen", int64(1))
+	mClient.AssertCalled(t, "Send", mock.Anything, mock.Anything)
+
+	// Second Arm with identical NextRunAt: idempotent early return, does not bump gen or re-send Fire
+	if _, err := s.Arm(objCtx, ArmRequest{ScheduleType: model.ScheduleTypeCron}); err != nil {
+		t.Fatalf("second Arm err: %v", err)
+	}
+	mc.AssertNotCalled(t, "Set", "gen", int64(2))
 }
 
 func TestHaroSchedule_LoadScheduleRow(t *testing.T) {
@@ -398,8 +454,8 @@ func TestBackfillActiveSchedules_PostErrors(t *testing.T) {
 	tk.SetRestateConfig("9080", srv.URL, "", "")
 	tk.httpClient = srv.Client()
 
-	if err := tk.BackfillActiveSchedules(ctx); err != nil {
-		t.Fatalf("expected nil error despite post failure, got %v", err)
+	if err := tk.BackfillActiveSchedules(ctx); err == nil {
+		t.Fatal("expected error on post failure, got nil")
 	}
 	if got := hits.Load(); got != 1 {
 		t.Errorf("expected 1 post attempt, got %d", got)
@@ -1282,7 +1338,10 @@ func TestTicker_EnsureRegisteredAndBackfilled_Retry(t *testing.T) {
 			w.WriteHeader(http.StatusOK)
 			return
 		}
-		backfilled.Add(1)
+		if backfilled.Add(1) == 1 {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
 		w.WriteHeader(http.StatusAccepted)
 	}))
 	defer srv.Close()
@@ -1311,26 +1370,44 @@ func TestTicker_EnsureRegisteredAndBackfilled_Retry(t *testing.T) {
 	if tk.restateRegistered {
 		t.Error("expected restateRegistered to be false after failure")
 	}
+	if tk.restateBackfilled {
+		t.Error("expected restateBackfilled to be false after failure")
+	}
 
-	// Attempt 2: registration succeeds, backfill runs
+	// Attempt 2: registration succeeds, backfill fails
 	tk.ensureRegisteredAndBackfilled(ctx)
 	if attempts.Load() != 2 {
 		t.Errorf("expected 2 registration attempts, got %d", attempts.Load())
 	}
 	if backfilled.Load() != 1 {
-		t.Errorf("expected 1 backfill call after successful registration, got %d", backfilled.Load())
+		t.Errorf("expected 1 backfill call, got %d", backfilled.Load())
 	}
 	if !tk.restateRegistered {
 		t.Error("expected restateRegistered to be true after success")
 	}
+	if tk.restateBackfilled {
+		t.Error("expected restateBackfilled to be false after backfill failure")
+	}
 
-	// Attempt 3: already registered, registration skipped, backfill runs again
+	// Attempt 3: registration skipped (already registered), backfill retries and succeeds
 	tk.ensureRegisteredAndBackfilled(ctx)
 	if attempts.Load() != 2 {
 		t.Errorf("expected registration attempts to remain 2, got %d", attempts.Load())
 	}
 	if backfilled.Load() != 2 {
 		t.Errorf("expected 2 backfill calls, got %d", backfilled.Load())
+	}
+	if !tk.restateBackfilled {
+		t.Error("expected restateBackfilled to be true after backfill success")
+	}
+
+	// Attempt 4: both registration and backfill are skipped
+	tk.ensureRegisteredAndBackfilled(ctx)
+	if attempts.Load() != 2 {
+		t.Errorf("expected registration attempts to remain 2, got %d", attempts.Load())
+	}
+	if backfilled.Load() != 2 {
+		t.Errorf("expected backfill calls to remain 2, got %d", backfilled.Load())
 	}
 
 	// Nil ticker safety check
