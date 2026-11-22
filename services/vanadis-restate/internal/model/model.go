@@ -28,6 +28,13 @@ type BuildObjectState struct {
 	// DeferralReconcileSeq identifies the one pending delayed Reconcile that
 	// retries deferred launches; zero means none is pending.
 	DeferralReconcileSeq int `json:"deferral_reconcile_seq,omitempty"`
+	// FailureNotified records chunk failures (failureNotifyKey) that already
+	// woke the thread, so each failure wakes it exactly once.
+	FailureNotified map[string]bool `json:"failure_notified,omitempty"`
+	// FailureIsolation marks a build transitioned under failure isolation: a
+	// failed chunk blocks only its dependents. Failed builds without it are
+	// legacy pauses that resume only through an explicit retry.
+	FailureIsolation bool `json:"failure_isolation,omitempty"`
 }
 
 // DispatchDeferral records continuous skipped_active deferral of one launch.

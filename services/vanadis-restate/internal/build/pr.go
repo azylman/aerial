@@ -86,21 +86,6 @@ func isActionCompletionMutation(mutation *BuildMutationRequest, chunks []model.V
 	return false
 }
 
-func isFailureCompletionMutation(mutation *BuildMutationRequest, chunks []model.VanadisChunk) bool {
-	if mutation == nil {
-		return false
-	}
-	if strings.ToLower(strings.TrimSpace(mutation.Action)) != mutationChunkFailed {
-		return false
-	}
-	for _, chunk := range chunks {
-		if chunk.ID == mutation.ChunkID {
-			return true
-		}
-	}
-	return false
-}
-
 func terminalNotificationRecorded(state *model.BuildObjectState) bool {
 	return state != nil && state.TerminalNotified
 }
@@ -312,7 +297,7 @@ func (b *BuildObject) failMutation(ctx context.Context, buildID string, mutation
 		return err
 	}
 	if !failed {
-		if bld != nil && chk != nil && chk.Status == statusFailed && bld.Status == statusFailed && (chk.Mode != chunkModeAction || actionFailureAccepted(*chk, bld.Status, mutation.DispatchID)) {
+		if bld != nil && chk != nil && chk.Status == statusFailed && (bld.Status == statusRunning || bld.Status == statusFailed) && (chk.Mode != chunkModeAction || actionFailureAccepted(*chk, bld.Status, mutation.DispatchID)) {
 			return nil
 		}
 		return errActionCompletionSkipped

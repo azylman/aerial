@@ -118,7 +118,7 @@ func (s *checkStatusSpyStore) FailChunk(_ context.Context, chunkID, reason, _ st
 	} else if !s.skipFailApply && banner == "" {
 		banner = "Chunk 1 failed: " + reason
 	}
-	return &model.VanadisBuild{ID: "b1", Status: statusFailed, Objective: "Obj", ThreadID: "th-1"}, &model.VanadisChunk{ID: chunkID, BuildID: "b1", Status: statusFailed, Banner: banner}, !s.skipFailApply, nil
+	return &model.VanadisBuild{ID: "b1", Status: statusRunning, Objective: "Obj", ThreadID: "th-1"}, &model.VanadisChunk{ID: chunkID, BuildID: "b1", Status: statusFailed, Banner: banner}, !s.skipFailApply, nil
 }
 
 func (s *checkStatusSpyStore) UpdateChunkBannerAndStatus(_ context.Context, chunkID, status, banner string) error {
@@ -276,7 +276,6 @@ func TestBuildObject_HandlePREventType_Deployment(t *testing.T) {
 		prEvent       pubsub.PRLifecycleEvent
 		bannerErr     error
 		failErr       error
-		promptErr     error
 		skipFailApply bool
 		failBanner    string
 		wantErr       bool
@@ -286,11 +285,10 @@ func TestBuildObject_HandlePREventType_Deployment(t *testing.T) {
 		wantSilentIn  string
 	}{
 		{
-			name:         "closed unmerged fails chunk and dispatches failure prompt",
-			event:        "closed",
-			prEvent:      pubsub.PRLifecycleEvent{Event: "closed", Status: "closed"},
-			wantFailed:   []string{"c1:pr_closed_unmerged"},
-			wantPromptIn: "[VANADIS BUILD FAILED]",
+			name:       "closed unmerged fails chunk and leaves the wake to reconcile",
+			event:      "closed",
+			prEvent:    pubsub.PRLifecycleEvent{Event: "closed", Status: "closed"},
+			wantFailed: []string{"c1:pr_closed_unmerged"},
 		},
 		{
 			name:       "closed with status merged skips fail chunk",
@@ -299,11 +297,10 @@ func TestBuildObject_HandlePREventType_Deployment(t *testing.T) {
 			wantFailed: nil,
 		},
 		{
-			name:         "closed_unmerged event fails chunk and dispatches failure prompt",
-			event:        "closed_unmerged",
-			prEvent:      pubsub.PRLifecycleEvent{Event: "closed_unmerged"},
-			wantFailed:   []string{"c1:pr_closed_unmerged"},
-			wantPromptIn: "[VANADIS BUILD FAILED]",
+			name:       "closed_unmerged event fails chunk and leaves the wake to reconcile",
+			event:      "closed_unmerged",
+			prEvent:    pubsub.PRLifecycleEvent{Event: "closed_unmerged"},
+			wantFailed: []string{"c1:pr_closed_unmerged"},
 		},
 		{
 			name:          "closed_unmerged on already failed chunk skips notifications",
@@ -319,16 +316,6 @@ func TestBuildObject_HandlePREventType_Deployment(t *testing.T) {
 			skipFailApply: true,
 			failBanner:    "Chunk 1 failed: pr_closed_unmerged",
 			wantFailed:    []string{"c1:pr_closed_unmerged"},
-			wantPromptIn:  "[VANADIS BUILD FAILED]",
-		},
-		{
-			name:         "closed_unmerged notification error propagates",
-			event:        "closed_unmerged",
-			prEvent:      pubsub.PRLifecycleEvent{Event: "closed_unmerged"},
-			promptErr:    errors.New("prompt unavailable"),
-			wantErr:      true,
-			wantFailed:   []string{"c1:pr_closed_unmerged"},
-			wantPromptIn: "[VANADIS BUILD FAILED]",
 		},
 		{
 			name:       "closed_unmerged fail chunk error propagates",
@@ -380,9 +367,6 @@ func TestBuildObject_HandlePREventType_Deployment(t *testing.T) {
 				failBanner:    tc.failBanner,
 			}
 			eri := &mockEriClient{}
-			if tc.promptErr != nil {
-				eri.promptFn = func(context.Context, string, string) error { return tc.promptErr }
-			}
 			exec := executor.NewExecutor(t.TempDir(), eri, nil, "token", "azylman", nil)
 			f := NewFlow(spy, exec)
 
@@ -1028,7 +1012,7 @@ func TestFlow_HandleClosedPREventNotifyBranches(t *testing.T) {
 		{name: "cancel error swallowed", cancelErr: errors.New("cancel unavailable")},
 		{name: "read error propagates", getBuildErr: errors.New("read unavailable"), wantErr: true},
 		{name: "widget error swallowed", widgetErr: errors.New("widget unavailable"), busErr: errors.New("bus unavailable"), wantErr: false},
-		{name: "wake prompt error propagates", promptErr: errors.New("prompt unavailable"), busErr: errors.New("bus unavailable"), wantErr: true},
+		{name: "wake left to reconcile", promptErr: errors.New("prompt unavailable"), busErr: errors.New("bus unavailable")},
 		{name: "publish errors swallowed", busErr: errors.New("bus unavailable")},
 	}
 	for _, tc := range tests {
@@ -1303,6 +1287,23 @@ func TestFlow_LocateOrAttachPRChunkOwnership(t *testing.T) {
 			got, err := f.LocateOrAttachPRChunk(context.Background(), "b1", pubsub.PRLifecycleEvent{Repo: "owner/repo", PRNumber: 12})
 			require.NoError(t, err)
 			assert.Equal(t, tc.wantChunk, got)
+		})
+	}
+}
+
+func TestChunkFailureNotice(t *testing.T) {
+	t.Parallel()
+	chunks := []model.VanadisChunk{{ID: "c1", ChunkIndex: 0}, {ID: "c2", ChunkIndex: 1}}
+	tests := []struct {
+		name, chunkID, want string
+	}{
+		{"indexed chunk", "c2", "Chunk 2 failed: boom (other chunks continue)"},
+		{"unknown chunk", "c9", "Chunk failed: boom (other chunks continue)"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tc.want, chunkFailureNotice(chunks, tc.chunkID, "boom"))
 		})
 	}
 }

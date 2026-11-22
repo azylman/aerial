@@ -41,6 +41,7 @@ const (
 	labelReconcileAfterPREvent     = "reconcile-after-pr-event"
 	labelReconcileAfterDispatch    = "reconcile-after-dispatch-outcome"
 	labelReconcileAfterNoPRFail    = "reconcile-after-nopr-fail"
+	labelReconcileAfterFailChunk   = "reconcile-after-fail-chunk"
 	LabelRoutePREvent              = "RoutePREvent"
 	LabelRouteDispatchOutcome      = "RouteDispatchOutcome"
 	LabelRouteAttachPR             = "RouteAttachPR"
@@ -69,6 +70,7 @@ var reconcileErrorHandlerLabels = []string{
 	labelReconcileAfterPREvent,
 	labelReconcileAfterDispatch,
 	labelReconcileAfterNoPRFail,
+	labelReconcileAfterFailChunk,
 	LabelRoutePREvent,
 	LabelRouteDispatchOutcome,
 	LabelRouteAttachPR,
@@ -771,7 +773,10 @@ func (b *BuildObject) FailChunk(ctx restate.ObjectContext, req model.FailChunkRe
 	if err != nil {
 		return model.FailChunkResponse{}, ToTerminalErr(err)
 	}
-	if res.Failed && res.BuildID != "" && res.BuildStatus == statusFailed && res.ChunkStatus == statusFailed && b.executor != nil {
+	if !res.Failed || res.BuildID == "" || res.ChunkStatus != statusFailed {
+		return res, nil
+	}
+	if b.executor != nil {
 		_, nErr := RunJournaled(ctx, labelFailChunk, "notify-chunk-failure", func(rc restate.RunContext) (bool, error) {
 			bld := model.VanadisBuild{
 				ID:        res.BuildID,
@@ -788,6 +793,15 @@ func (b *BuildObject) FailChunk(ctx restate.ObjectContext, req model.FailChunkRe
 		if nErr != nil {
 			return model.FailChunkResponse{}, ToTerminalErr(nErr)
 		}
+	}
+	// Reconcile owns the build status and the failure wake: the failed chunk
+	// blocks only its dependents while every other ready chunk keeps launching.
+	tRes, tErr := b.executeObjectTransition(b.getRuntime(ctx), labelReconcileAfterFailChunk, nil)
+	if tErr != nil {
+		return model.FailChunkResponse{}, ToTerminalErr(tErr)
+	}
+	if tRes.Status != "" {
+		res.BuildStatus = tRes.Status
 	}
 	return res, nil
 }

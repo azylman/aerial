@@ -195,7 +195,7 @@ func TestPostgresVanadisStore_PRRecoveryTransactions(t *testing.T) {
 		wantParent string
 		wantFailed int
 	}{
-		{"parent write rolls back last recovery", true, "failed", 1},
+		{"parent write rolls back recovery", true, "failed", 2},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -205,10 +205,9 @@ func TestPostgresVanadisStore_PRRecoveryTransactions(t *testing.T) {
 			chunks := []model.VanadisChunk{{ID: "c1", BuildID: "b1", Mode: "pr", PRNumber: 12, Status: "failed", HeadSHA: "old"}, {ID: "c2", BuildID: "b1", Mode: "pr", PRNumber: 13, Status: "failed", HeadSHA: "old"}}
 			st := recoveryFixtureStore(&mu, &parent, &chunks, tc.failParent)
 			ctx := context.WithValue(context.Background(), PrHeadVerifiedContextKey{}, true)
-			if err := st.recoverFailedPR(ctx, "c1", "new"); err != nil {
-				t.Fatal(err)
-			}
-			if err := st.recoverFailedPR(ctx, "c2", "new"); err == nil {
+			// A failed sibling no longer blocks reopening the parent, so the
+			// first recovery writes the parent and its failure rolls back.
+			if err := st.recoverFailedPR(ctx, "c1", "new"); err == nil {
 				t.Fatal("expected parent write failure")
 			}
 			failed := 0
@@ -258,17 +257,13 @@ func TestPostgresVanadisStore_PRRecoveryHeadUpdates(t *testing.T) {
 			if tc.skip {
 				wantHead = "h2"
 			}
-			if parent != "failed" || chunks[0].HeadSHA != wantHead {
+			if parent != "running" || chunks[0].HeadSHA != wantHead {
 				t.Fatalf("parent=%s head=%s", parent, chunks[0].HeadSHA)
 			}
 			if err := st.recoverFailedPR(context.WithValue(context.Background(), PrHeadVerifiedContextKey{}, true), "c2", "h2"); err != nil {
 				t.Fatal(err)
 			}
-			wantParent := "running"
-			if tc.nextStatus == "cancelled" {
-				wantParent = "failed"
-			}
-			if parent != wantParent || chunks[0].HeadSHA != wantHead {
+			if parent != "running" || chunks[0].HeadSHA != wantHead {
 				t.Fatalf("after sibling recovery parent=%s head=%s", parent, chunks[0].HeadSHA)
 			}
 		})
