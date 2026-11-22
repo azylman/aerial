@@ -204,6 +204,7 @@ func TestPostgresVanadisStore_FailChunk(t *testing.T) {
 		wantErrIs  error
 		wantErr    bool
 		wantFailed bool
+		wantBuild  string
 		dispatchID string
 	}{
 		{name: "nil receiver", chunkID: "c1", db: dbScript{bare: nilReceiver}, wantErr: true},
@@ -217,14 +218,14 @@ func TestPostgresVanadisStore_FailChunk(t *testing.T) {
 		{name: "completed chunk is a no-op", chunkID: "c1", db: dbScript{row: failRow("completed", "running")}},
 		{name: "cancelled chunk is a no-op", chunkID: "c1", db: dbScript{row: failRow("cancelled", "running")}},
 		{name: "update chunk error", chunkID: "c1", db: dbScript{row: running, failExec: "UPDATE vanadis_chunks", execErr: errors.New("update chunk fail err")}, wantErr: true},
-		{name: "update build error", chunkID: "c1", db: dbScript{row: running, failExec: "UPDATE vanadis_builds", execErr: errors.New("update build fail err")}, wantErr: true},
 		{name: "commit error", chunkID: "c1", db: dbScript{row: running, commitErr: errors.New("commit fail err")}, wantErr: true},
 		{name: "retry missing identity", chunkID: "c1", db: dbScript{row: failRow("running", "running", 1)}},
 		{name: "retry old identity", chunkID: "c1", dispatchID: "vanadis-c1-turn-0", db: dbScript{row: failRow("running", "running", 1)}},
 		{name: "retry current identity", chunkID: "c1", dispatchID: "vanadis-c1-turn-1", db: dbScript{row: failRow("running", "running", 1)}, wantFailed: true},
 		{name: "parent lock error", chunkID: "c1", db: dbScript{routes: []sqlRoute{{match: "SELECT id FROM vanadis_builds", row: errRow(context.Canceled)}}}, wantErrIs: context.Canceled},
 		{name: "stale identity", chunkID: "c1", dispatchID: "stale", db: dbScript{row: running}},
-		{name: "fails running chunk and build", chunkID: "c1", db: dbScript{row: running}, wantFailed: true},
+		{name: "fails running chunk and keeps build running", chunkID: "c1", db: dbScript{row: running}, wantFailed: true},
+		{name: "fails running chunk of failed build", chunkID: "c1", db: dbScript{row: failRow("running", "failed")}, wantFailed: true, wantBuild: "failed"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -237,8 +238,12 @@ func TestPostgresVanadisStore_FailChunk(t *testing.T) {
 			if failed != tc.wantFailed {
 				t.Fatalf("FailChunk failed = %v, want %v", failed, tc.wantFailed)
 			}
-			if tc.wantFailed && (b.Status != "failed" || c.Status != "failed") {
-				t.Errorf("FailChunk statuses = build %q chunk %q, want failed/failed", b.Status, c.Status)
+			wantBuild := tc.wantBuild
+			if wantBuild == "" {
+				wantBuild = "running"
+			}
+			if tc.wantFailed && (b.Status != wantBuild || c.Status != "failed") {
+				t.Errorf("FailChunk statuses = build %q chunk %q, want %s/failed", b.Status, c.Status, wantBuild)
 			}
 		})
 	}
@@ -318,7 +323,9 @@ func TestActionCompletionAllowed(t *testing.T) {
 		{"pr chunk rejected", model.VanadisChunk{ID: "c1", Mode: "pr", Status: "running", StallNudges: 1}, "running", "vanadis-c1-turn-1", false},
 		{"deployed repair pr accepted", model.VanadisChunk{ID: "c1", Mode: "action", Status: "running", PRNumber: 7, StallNudges: 1}, "running", "vanadis-c1-turn-1-resume-1", true},
 		{"repair pr in flight rejected", model.VanadisChunk{ID: "c1", Mode: "action", Status: "deploying", PRNumber: 7, StallNudges: 1}, "running", "vanadis-c1-turn-1-resume-1", false},
-		{"failed build rejected", running, "failed", "vanadis-c1-turn-1-resume-1", false},
+		{"failed build accepted", running, "failed", "vanadis-c1-turn-1-resume-1", true},
+		{"completed build rejected", running, "completed", "vanadis-c1-turn-1-resume-1", false},
+		{"cancelled build rejected", running, "cancelled", "vanadis-c1-turn-1-resume-1", false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -349,7 +356,8 @@ func TestActionFailureAllowed(t *testing.T) {
 		{"repair ci remediation accepted", repair, "running", "vanadis-c1-cifail-abc-1", true},
 		{"repair stale resume rejected", repair, "running", "vanadis-c1-turn-0-resume-1", false},
 		{"deploying repair rejected", model.VanadisChunk{ID: "c1", Mode: "action", Status: "deploying", PRNumber: 7, StallNudges: 1}, "running", "vanadis-c1-turn-1-resume-1", false},
-		{"repair on failed build rejected", repair, "failed", "vanadis-c1-turn-1-resume-1", false},
+		{"repair on failed build accepted", repair, "failed", "vanadis-c1-turn-1-resume-1", true},
+		{"repair on cancelled build rejected", repair, "cancelled", "vanadis-c1-turn-1-resume-1", false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

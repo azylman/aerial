@@ -91,25 +91,25 @@ func TestBuildObject_LifecycleTransitionsAndFailures(t *testing.T) {
 	boTermErr := NewBuildObject("", nil).WithAuthority(storeCancelErr, execErr)
 	bF := model.VanadisBuild{ID: "b-fail", Status: "running", ThreadID: "th-1"}
 	cF := model.VanadisChunk{ID: "c1", Status: "failed"}
-	retF, errF := boTermErr.evaluateBuildTerminalStatus(context.Background(), &bF, []model.VanadisChunk{cF})
+	retF, errF := boTermErr.evaluateBuildTerminalStatus(context.Background(), &bF, []model.VanadisChunk{cF}, map[string]bool{}, false)
 	assert.Error(t, errF)
 	assert.Empty(t, retF)
 
 	bD := model.VanadisBuild{ID: "b-done", Status: "running", ThreadID: "th-1"}
 	cD := model.VanadisChunk{ID: "c1", Status: "completed"}
-	retD, errD := boTermErr.evaluateBuildTerminalStatus(context.Background(), &bD, []model.VanadisChunk{cD})
+	retD, errD := boTermErr.evaluateBuildTerminalStatus(context.Background(), &bD, []model.VanadisChunk{cD}, map[string]bool{}, false)
 	assert.Error(t, errD)
 	assert.Empty(t, retD)
 
 	// 9b. evaluateBuildTerminalStatus failing on UpdateBuildStatus (storeCancelErr with nil executor)
 	boStoreUpdateErr := NewBuildObject("", nil).WithAuthority(storeCancelErr, nil)
 	bFStore := model.VanadisBuild{ID: "b-fail", Status: "running", ThreadID: "th-1"}
-	retFStore, errFStore := boStoreUpdateErr.evaluateBuildTerminalStatus(context.Background(), &bFStore, []model.VanadisChunk{cF})
+	retFStore, errFStore := boStoreUpdateErr.evaluateBuildTerminalStatus(context.Background(), &bFStore, []model.VanadisChunk{cF}, map[string]bool{}, false)
 	assert.Error(t, errFStore)
 	assert.Empty(t, retFStore)
 
 	bDStore := model.VanadisBuild{ID: "b-done", Status: "running", ThreadID: "th-1"}
-	retDStore, errDStore := boStoreUpdateErr.evaluateBuildTerminalStatus(context.Background(), &bDStore, []model.VanadisChunk{cD})
+	retDStore, errDStore := boStoreUpdateErr.evaluateBuildTerminalStatus(context.Background(), &bDStore, []model.VanadisChunk{cD}, map[string]bool{}, false)
 	assert.Error(t, errDStore)
 	assert.Empty(t, retDStore)
 
@@ -129,13 +129,13 @@ func TestBuildObject_LifecycleTransitionsAndFailures(t *testing.T) {
 
 	bRetry := model.VanadisBuild{ID: "b-retry", Status: "running", StatusMessageID: "msg-123", ThreadID: "th-1"}
 	// Attempt 1: notifyBuildTerminal fails
-	retRetry1, errRetry1 := boRetry.evaluateBuildTerminalStatus(context.Background(), &bRetry, []model.VanadisChunk{cD})
+	retRetry1, errRetry1 := boRetry.evaluateBuildTerminalStatus(context.Background(), &bRetry, []model.VanadisChunk{cD}, map[string]bool{}, false)
 	assert.Error(t, errRetry1)
 	assert.Empty(t, retRetry1)
 	assert.Empty(t, spyStore.updatedStatus)
 
 	// Attempt 2: retry succeeds
-	retRetry2, errRetry2 := boRetry.evaluateBuildTerminalStatus(context.Background(), &bRetry, []model.VanadisChunk{cD})
+	retRetry2, errRetry2 := boRetry.evaluateBuildTerminalStatus(context.Background(), &bRetry, []model.VanadisChunk{cD}, map[string]bool{}, false)
 	assert.NoError(t, errRetry2)
 	assert.Equal(t, statusCompleted, retRetry2)
 	assert.Equal(t, statusCompleted, spyStore.updatedStatus)
@@ -143,7 +143,7 @@ func TestBuildObject_LifecycleTransitionsAndFailures(t *testing.T) {
 	// 9d. evaluateBuildTerminalStatus default branch widget sync warning
 	bRunning := model.VanadisBuild{ID: "b-run", Status: "running", ThreadID: "th-1"}
 	cRunning := model.VanadisChunk{ID: "c1", Status: "running"}
-	retRun, errRun := boTermErr.evaluateBuildTerminalStatus(context.Background(), &bRunning, []model.VanadisChunk{cRunning})
+	retRun, errRun := boTermErr.evaluateBuildTerminalStatus(context.Background(), &bRunning, []model.VanadisChunk{cRunning}, map[string]bool{}, false)
 	assert.NoError(t, errRun)
 	assert.Equal(t, statusRunning, retRun)
 
@@ -593,7 +593,7 @@ func (s *noPRFailStore) FailChunk(_ context.Context, chunkID, reason, _ string) 
 		return &model.VanadisBuild{ID: "b1", Status: statusRunning}, &model.VanadisChunk{ID: chunkID, Mode: "pr", Status: statusRunning}, false, nil
 	}
 	s.failedChunk, s.failReason = chunkID, reason
-	return &model.VanadisBuild{ID: "b1", Status: statusFailed}, &model.VanadisChunk{ID: chunkID, Mode: "pr", Status: statusFailed}, true, nil
+	return &model.VanadisBuild{ID: "b1", Status: statusRunning}, &model.VanadisChunk{ID: chunkID, Mode: "pr", Status: statusFailed}, true, nil
 }
 
 func (s *noPRFailStore) GetBuild(ctx context.Context, buildID string) (*model.VanadisBuild, []model.VanadisChunk, error) {
@@ -601,7 +601,6 @@ func (s *noPRFailStore) GetBuild(ctx context.Context, buildID string) (*model.Va
 	if err != nil || s.failedChunk == "" {
 		return bld, chunks, err
 	}
-	bld.Status = statusFailed
 	for i := range chunks {
 		if chunks[i].ID == s.failedChunk {
 			chunks[i].Status = statusFailed
@@ -618,7 +617,7 @@ func TestDispatchCompletionContinuation(t *testing.T) {
 	prRunning := model.VanadisChunk{ID: "c1", BuildID: "b1", Mode: "pr", Status: "running", Repo: "aerial", Title: "Chunk 1", Instructions: "Do step 1"}
 	prOpened := model.VanadisChunk{ID: "c1", BuildID: "b1", Mode: "pr", Status: "pr_opened", PRNumber: 7, Repo: "aerial", Title: "Chunk 1"}
 	const actionResume1 = "[VANADIS AUTOMATIC RESUME 1/12]\nYour previous turn for action chunk c1 ended without calling complete_chunk."
-	const buildFailed = "[VANADIS BUILD FAILED]\nBuild ID: b1\nObjective: \n\nBuild encountered failures."
+	const buildFailed = "[VANADIS BUILD FAILED]\nBuild ID: b1\nObjective: \n\nBuild encountered failures.\nChunk 1 failed [c1]"
 	const actionFailReason = "RESUMABLE: action turn ended without complete_chunk after 12 automatic resumes"
 	tests := []struct {
 		name, identity, chunkID, status string
@@ -640,20 +639,20 @@ func TestDispatchCompletionContinuation(t *testing.T) {
 		{"whitespace identity resumes to the last resume", "vanadis-c1-turn-1-resume-11", " c1 ", "completed", actionRunning, "running", false, false, nil, nil, "", 0, "vanadis-c1-turn-1-resume-12", "vanadis-c1", "[VANADIS AUTOMATIC RESUME 12/12]\n", "", nil},
 		{"timeout action turn resumes like a verdictless turn", "vanadis-c1-turn-1-resume-3", "c1", "timeout", actionRunning, "running", false, false, nil, nil, "", 0, "vanadis-c1-turn-1-resume-4", "vanadis-c1", "[VANADIS AUTOMATIC RESUME 4/12]\n", "", nil},
 		{"action in repair pr stage resumes", "vanadis-c1-turn-1", "c1", "completed", actionDeploying, "running", false, false, nil, nil, "", 0, "vanadis-c1-turn-1-resume-1", "vanadis-c1", actionResume1, "", nil},
-		{"last action resume fails resumable and wakes thread", "vanadis-c1-turn-1-resume-12", "c1", "completed", actionRunning, "running", false, false, nil, nil, "", 1, "", "", "", actionFailReason, []string{buildFailed}},
-		{"timeout on last action resume fails resumable", "vanadis-c1-turn-1-resume-12", "c1", "timeout", actionRunning, "running", false, false, nil, nil, "", 1, "", "", "", actionFailReason, []string{buildFailed}},
+		{"last action resume fails resumable and wakes thread", "vanadis-c1-turn-1-resume-12", "c1", "completed", actionRunning, "running", false, false, nil, nil, "", 2, "", "", "", actionFailReason, []string{buildFailed}},
+		{"timeout on last action resume fails resumable", "vanadis-c1-turn-1-resume-12", "c1", "timeout", actionRunning, "running", false, false, nil, nil, "", 2, "", "", "", actionFailReason, []string{buildFailed}},
 		{"other generation action turn ignored", "vanadis-c1-turn-0", "c1", "completed", actionRunning, "running", false, false, nil, nil, "", 0, "", "", "", "", nil},
 		{"action resume on failed build resumes", "vanadis-c1-turn-1", "c1", "completed", actionRunning, "failed", false, false, nil, nil, "", 0, "vanadis-c1-turn-1-resume-1", "vanadis-c1", actionResume1, "", nil},
 		{"action resume on cancelled build ignored", "vanadis-c1-turn-1", "c1", "completed", actionRunning, "cancelled", false, false, nil, nil, "", 0, "", "", "", "", nil},
 		{"action resume dispatch failure stays retryable", "vanadis-c1-turn-1", "c1", "completed", actionRunning, "running", false, false, errors.New("eri unavailable"), nil, "eri unavailable", 0, "vanadis-c1-turn-1-resume-1", "vanadis-c1", actionResume1, "", nil},
 		{"action resume fail transition error stays retryable", "vanadis-c1-turn-1-resume-12", "c1", "completed", actionRunning, "running", true, false, nil, nil, "continuation unavailable", 0, "", "", "", "", nil},
 		{"pr launch turn without pr resumes once", "vanadis-c1-turn-0", "c1", "completed", prRunning, "running", false, false, nil, nil, "", 0, "vanadis-c1-nopr-resume-1", "vanadis-c1", "[VANADIS AUTOMATIC RESUME]\nYour previous turn for chunk c1 ended without opening a PR.", "", nil},
-		{"pr resume turn without pr fails and wakes thread", "vanadis-c1-nopr-resume-1", "c1", "completed", prRunning, "running", false, false, nil, nil, "", 1, "", "", "", "chunk turn ended without opening a PR (after one automatic resume)", []string{buildFailed}},
+		{"pr resume turn without pr fails and wakes thread", "vanadis-c1-nopr-resume-1", "c1", "completed", prRunning, "running", false, false, nil, nil, "", 2, "", "", "", "chunk turn ended without opening a PR (after one automatic resume)", []string{buildFailed}},
 		{"pr launch turn with attached pr ignored", "vanadis-c1-turn-0", "c1", "completed", prOpened, "running", false, false, nil, nil, "", 0, "", "", "", "", nil},
 		{"pr resume dispatch failure stays retryable", "vanadis-c1-turn-0", "c1", "completed", prRunning, "running", false, false, errors.New("eri unavailable"), nil, "eri unavailable", 0, "vanadis-c1-nopr-resume-1", "vanadis-c1", "[VANADIS AUTOMATIC RESUME]\n", "", nil},
 		{"pr resume widget failure still resumes", "vanadis-c1-turn-0", "c1", "completed", prRunning, "running", false, false, nil, errors.New("widget down"), "", 0, "vanadis-c1-nopr-resume-1", "vanadis-c1", "[VANADIS AUTOMATIC RESUME]\n", "", nil},
 		{"pr no-pr failure transition error stays retryable", "vanadis-c1-nopr-resume-1", "c1", "completed", prRunning, "running", true, false, nil, nil, "continuation unavailable", 0, "", "", "", "", nil},
-		{"pr timeout still fails the chunk", "vanadis-c1-turn-0", "c1", "timeout", prRunning, "running", false, false, nil, nil, "", 1, "", "", "", "dispatch outcome failed", []string{buildFailed}},
+		{"pr timeout still fails the chunk", "vanadis-c1-turn-0", "c1", "timeout", prRunning, "running", false, false, nil, nil, "", 2, "", "", "", "dispatch outcome failed", []string{buildFailed}},
 		{"skipped pr timeout never resumes", "vanadis-c1-turn-0", "c1", "timeout", prRunning, "running", false, true, nil, nil, "", 0, "", "", "", "", nil},
 	}
 	for _, tc := range tests {
@@ -795,7 +794,7 @@ func TestActionPRFailureFence(t *testing.T) {
 			assert.NoError(t, err)
 			assert.Equal(t, tc.wantFailed, failed)
 			if tc.wantFailed {
-				assert.Equal(t, "failed", build.Status)
+				assert.Equal(t, "running", build.Status)
 				assert.Equal(t, "failed", chunk.Status)
 			}
 		})

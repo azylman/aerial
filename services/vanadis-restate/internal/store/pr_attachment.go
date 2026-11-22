@@ -237,7 +237,7 @@ func attachmentRecoveryAllowed(b model.VanadisBuild, chunks []model.VanadisChunk
 		return false
 	}
 	for _, sibling := range chunks {
-		if sibling.ID != selected && (sibling.Status == statusFailed || sibling.Status == statusCancelled) {
+		if sibling.ID != selected && sibling.Status == statusCancelled {
 			return false
 		}
 	}
