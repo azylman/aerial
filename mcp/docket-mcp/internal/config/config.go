@@ -1,4 +1,4 @@
-package main
+package config
 
 import (
 	"cmp"
@@ -18,13 +18,48 @@ import (
 )
 
 const (
-	taskStatusAll       = "all"
-	relationRelated     = "related"
-	relationParent      = "parent"
-	taskStatusOpen      = "open"
-	taskStatusCompleted = "completed"
-	taskStatusWontDo    = "wont_do"
+	TaskStatusAll       = "all"
+	RelationRelated     = "related"
+	RelationParent      = "parent"
+	TaskStatusOpen      = "open"
+	TaskStatusCompleted = "completed"
+	TaskStatusWontDo    = "wont_do"
 )
+
+// VikunjaTask models a task object from the Vikunja REST API.
+type VikunjaTask struct {
+	ID           int64                    `json:"id"`
+	Title        string                   `json:"title"`
+	Description  string                   `json:"description"`
+	Done         bool                     `json:"done"`
+	DoneAt       *time.Time               `json:"done_at,omitempty"`
+	Created      time.Time                `json:"created"`
+	Updated      time.Time                `json:"updated"`
+	ProjectID    int64                    `json:"project_id"`
+	RelatedTasks map[string][]VikunjaTask `json:"related_tasks,omitempty"`
+}
+
+// VikunjaProject models a project object in Vikunja.
+type VikunjaProject struct {
+	ID    int64  `json:"id"`
+	Title string `json:"title"`
+}
+
+// VikunjaComment models a comment on a Vikunja task.
+type VikunjaComment struct {
+	ID     int64 `json:"id"`
+	Author struct {
+		Username string `json:"username"`
+	} `json:"author"`
+	Comment string    `json:"comment"`
+	Created time.Time `json:"created"`
+}
+
+// VikunjaRelationReq models the body for creating a task relation.
+type VikunjaRelationReq struct {
+	OtherTaskID  int64  `json:"other_task_id"`
+	RelationKind string `json:"relation_kind"`
+}
 
 // Config holds runtime configuration for docket-mcp.
 type Config struct {
@@ -62,8 +97,8 @@ func LoadConfig(path string, getenv func(string) string) (*Config, error) {
 	return cfg, nil
 }
 
-// resolveConfigPath picks the config file from CONFIG_PATH or the default locations.
-func resolveConfigPath() string {
+// ResolveConfigPath picks the config file from CONFIG_PATH or the default locations.
+func ResolveConfigPath() string {
 	return httpkit.ResolveConfigPathWithLocal(
 		"CONFIG_PATH",
 		"docket-mcp.yaml",
@@ -254,8 +289,8 @@ func ParseTaskID(raw string) (int64, error) {
 func parseTaskStatusFilter(raw string) (string, error) {
 	switch raw {
 	case "":
-		return taskStatusOpen, nil
-	case taskStatusOpen, taskStatusCompleted, taskStatusWontDo, taskStatusAll:
+		return TaskStatusOpen, nil
+	case TaskStatusOpen, TaskStatusCompleted, TaskStatusWontDo, TaskStatusAll:
 		return raw, nil
 	default:
 		return "", fmt.Errorf("invalid status %q: must be one of open, completed, wont_do, all", raw)
@@ -273,12 +308,12 @@ type ClosedTaskResult struct {
 // ResolveTaskStatus converts done and resolution flags to a 3-state status string.
 func ResolveTaskStatus(done bool, resolution string) string {
 	if !done {
-		return taskStatusOpen
+		return TaskStatusOpen
 	}
-	if strings.TrimSpace(resolution) == taskStatusWontDo {
-		return taskStatusWontDo
+	if strings.TrimSpace(resolution) == TaskStatusWontDo {
+		return TaskStatusWontDo
 	}
-	return taskStatusCompleted
+	return TaskStatusCompleted
 }
 
 // NodeSource resolves task graph nodes on demand. ok=false means the task does
@@ -287,8 +322,8 @@ type NodeSource interface {
 	Node(ctx context.Context, id int64) (TaskNode, bool, error)
 }
 
-// taskToNode converts a Vikunja task and its stored resolution into a graph node.
-func taskToNode(t VikunjaTask, resolution string) TaskNode {
+// TaskToNode converts a Vikunja task and its stored resolution into a graph node.
+func TaskToNode(t VikunjaTask, resolution string) TaskNode {
 	node := TaskNode{
 		ID:          t.ID,
 		Title:       t.Title,
@@ -310,7 +345,7 @@ func taskToNode(t VikunjaTask, resolution string) TaskNode {
 	for _, bkd := range t.RelatedTasks["blocked"] {
 		node.BlockedBy = append(node.BlockedBy, bkd.ID)
 	}
-	for _, rel := range t.RelatedTasks[relationRelated] {
+	for _, rel := range t.RelatedTasks[RelationRelated] {
 		node.Related = append(node.Related, rel.ID)
 	}
 	return node
@@ -323,7 +358,7 @@ func taskToNode(t VikunjaTask, resolution string) TaskNode {
 func HydrateTask(task VikunjaTask, status string, comments []VikunjaComment, neighbors map[int64]TaskNode) HydratedTask {
 	summarize := func(t VikunjaTask) TaskSummary {
 		if node, ok := neighbors[t.ID]; ok {
-			return summarizeNode(node)
+			return SummarizeNode(node)
 		}
 		return TaskSummary{ID: t.ID, Title: t.Title, Status: ResolveTaskStatus(t.Done, "")}
 	}
@@ -374,7 +409,7 @@ func DetectGraphCycle(ctx context.Context, src NodeSource, sourceID, targetID in
 		return fmt.Errorf("self-link cycle: task %d cannot link to itself", sourceID)
 	}
 	switch edgeType {
-	case relationParent:
+	case RelationParent:
 		isAncestor, err := hasAncestor(ctx, src, targetID, sourceID)
 		if err != nil {
 			return err
@@ -390,7 +425,7 @@ func DetectGraphCycle(ctx context.Context, src NodeSource, sourceID, targetID in
 		if reached {
 			return fmt.Errorf("cycle detected: task %d already transitively blocks task %d", targetID, sourceID)
 		}
-	case relationRelated:
+	case RelationRelated:
 		return nil
 	default:
 		return fmt.Errorf("unknown edge type: %q", edgeType)
@@ -468,10 +503,10 @@ func firstReachableAlongBlocks(ctx context.Context, src NodeSource, startID int6
 	return 0, false, nil
 }
 
-// loadCloseNeighborhood fetches exactly the nodes closing id can observe: the task
+// LoadCloseNeighborhood fetches exactly the nodes closing id can observe: the task
 // and its descendants, their blockers and blocked tasks, and every blocker of
 // those blocked tasks (to judge whether they become unblocked).
-func loadCloseNeighborhood(ctx context.Context, src NodeSource, id int64) (map[int64]TaskNode, error) {
+func LoadCloseNeighborhood(ctx context.Context, src NodeSource, id int64) (map[int64]TaskNode, error) {
 	nb := neighborhood{src: src, nodes: make(map[int64]TaskNode)}
 	subtree, err := nb.loadSubtree(ctx, id)
 	if err != nil {
@@ -556,11 +591,11 @@ func (nb *neighborhood) loadSubtree(ctx context.Context, rootID int64) ([]TaskNo
 }
 
 func isTaskReady(node TaskNode, nodes map[int64]TaskNode) bool {
-	if node.Status != taskStatusOpen {
+	if node.Status != TaskStatusOpen {
 		return false
 	}
 	for _, bid := range node.BlockedBy {
-		if bNode, exists := nodes[bid]; exists && bNode.Status != taskStatusCompleted {
+		if bNode, exists := nodes[bid]; exists && bNode.Status != TaskStatusCompleted {
 			return false
 		}
 	}
@@ -627,12 +662,12 @@ func buildReadyNode(node TaskNode, nodes map[int64]TaskNode) ReadyTask {
 // ValidateCloseGuard validates completion prerequisites for closing a task.
 func ValidateCloseGuard(nodes map[int64]TaskNode, id int64, resolution string) error {
 	switch resolution {
-	case taskStatusWontDo:
+	case TaskStatusWontDo:
 		if _, exists := nodes[id]; !exists {
 			return fmt.Errorf("task %d not found in graph", id)
 		}
 		return validateWontDoClose(nodes, id)
-	case taskStatusCompleted:
+	case TaskStatusCompleted:
 		node, exists := nodes[id]
 		if !exists {
 			return fmt.Errorf("task %d not found in graph", id)
@@ -653,7 +688,7 @@ func validateWontDoClose(nodes map[int64]TaskNode, id int64) error {
 	for cid := range closingSet {
 		for _, bid := range nodes[cid].Blocks {
 			if !closingSet[bid] {
-				if bNode, ok := nodes[bid]; ok && bNode.Status == taskStatusOpen {
+				if bNode, ok := nodes[bid]; ok && bNode.Status == TaskStatusOpen {
 					openBlockedSet[bid] = true
 				}
 			}
@@ -673,13 +708,13 @@ func validateWontDoClose(nodes map[int64]TaskNode, id int64) error {
 func validateCompletedClose(nodes map[int64]TaskNode, node TaskNode, id int64) error {
 	var openBlockers []int64
 	for _, bid := range node.BlockedBy {
-		if b, ok := nodes[bid]; ok && b.Status == taskStatusOpen {
+		if b, ok := nodes[bid]; ok && b.Status == TaskStatusOpen {
 			openBlockers = append(openBlockers, bid)
 		}
 	}
 	var openSubtasks []int64
 	for _, sid := range node.SubtaskIDs {
-		if s, ok := nodes[sid]; ok && s.Status == taskStatusOpen {
+		if s, ok := nodes[sid]; ok && s.Status == TaskStatusOpen {
 			openSubtasks = append(openSubtasks, sid)
 		}
 	}
@@ -706,7 +741,7 @@ func CollectOpenSubtreeIDs(nodes map[int64]TaskNode, rootID int64) []int64 {
 			}
 			visited[sid] = true
 			if sub, ok := nodes[sid]; ok {
-				if sub.Status == taskStatusOpen {
+				if sub.Status == TaskStatusOpen {
 					openIDs = append(openIDs, sid)
 				}
 				walk(sid)
@@ -726,11 +761,11 @@ func ComputeUnblockedIDs(before, after map[int64]TaskNode, closedIDs []int64) []
 	}
 	var unblocked []int64
 	for id, afterNode := range after {
-		if closedSet[id] || afterNode.Status != taskStatusOpen {
+		if closedSet[id] || afterNode.Status != TaskStatusOpen {
 			continue
 		}
 		beforeNode, exists := before[id]
-		if !exists || beforeNode.Status != taskStatusOpen {
+		if !exists || beforeNode.Status != TaskStatusOpen {
 			continue
 		}
 		if !isTaskReady(beforeNode, before) && isTaskReady(afterNode, after) {
@@ -741,8 +776,8 @@ func ComputeUnblockedIDs(before, after map[int64]TaskNode, closedIDs []int64) []
 	return unblocked
 }
 
-// summarizeNode projects a graph node onto its compact summary.
-func summarizeNode(node TaskNode) TaskSummary {
+// SummarizeNode projects a graph node onto its compact summary.
+func SummarizeNode(node TaskNode) TaskSummary {
 	return TaskSummary{
 		ID:        node.ID,
 		Title:     node.Title,

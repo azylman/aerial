@@ -1,4 +1,4 @@
-package main
+package store
 
 import (
 	"bytes"
@@ -11,46 +11,13 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/azylman/aerial/mcp/docket-mcp/internal/config"
 )
-
-// VikunjaTask models a task object from the Vikunja REST API.
-type VikunjaTask struct {
-	ID           int64                    `json:"id"`
-	Title        string                   `json:"title"`
-	Description  string                   `json:"description"`
-	Done         bool                     `json:"done"`
-	DoneAt       *time.Time               `json:"done_at,omitempty"`
-	Created      time.Time                `json:"created"`
-	Updated      time.Time                `json:"updated"`
-	ProjectID    int64                    `json:"project_id"`
-	RelatedTasks map[string][]VikunjaTask `json:"related_tasks,omitempty"`
-}
-
-// VikunjaProject models a project object in Vikunja.
-type VikunjaProject struct {
-	ID    int64  `json:"id"`
-	Title string `json:"title"`
-}
-
-// VikunjaComment models a comment on a Vikunja task.
-type VikunjaComment struct {
-	ID     int64 `json:"id"`
-	Author struct {
-		Username string `json:"username"`
-	} `json:"author"`
-	Comment string    `json:"comment"`
-	Created time.Time `json:"created"`
-}
-
-// VikunjaRelationReq models the body for creating a task relation.
-type VikunjaRelationReq struct {
-	OtherTaskID  int64  `json:"other_task_id"`
-	RelationKind string `json:"relation_kind"`
-}
 
 // VikunjaClient provides HTTP interaction with Vikunja REST API.
 type VikunjaClient struct {
-	cfg              *Config
+	cfg              *config.Config
 	httpClient       *http.Client
 	mu               sync.Mutex
 	token            string
@@ -58,7 +25,7 @@ type VikunjaClient struct {
 }
 
 // NewVikunjaClient initializes a new Vikunja client.
-func NewVikunjaClient(cfg *Config, hc *http.Client) *VikunjaClient {
+func NewVikunjaClient(cfg *config.Config, hc *http.Client) *VikunjaClient {
 	if hc == nil {
 		hc = &http.Client{Timeout: 10 * time.Second}
 	}
@@ -237,8 +204,8 @@ func (c *VikunjaClient) GetDefaultProject(ctx context.Context) (int64, error) {
 }
 
 // ListProjects retrieves all projects visible to the authenticated user.
-func (c *VikunjaClient) ListProjects(ctx context.Context) ([]VikunjaProject, error) {
-	var projects []VikunjaProject
+func (c *VikunjaClient) ListProjects(ctx context.Context) ([]config.VikunjaProject, error) {
+	var projects []config.VikunjaProject
 	if err := c.doJSON(ctx, http.MethodGet, "/api/v1/projects", nil, &projects); err != nil {
 		return nil, err
 	}
@@ -246,9 +213,9 @@ func (c *VikunjaClient) ListProjects(ctx context.Context) ([]VikunjaProject, err
 }
 
 // CreateProject creates a new project.
-func (c *VikunjaClient) CreateProject(ctx context.Context, title string) (*VikunjaProject, error) {
+func (c *VikunjaClient) CreateProject(ctx context.Context, title string) (*config.VikunjaProject, error) {
 	req := map[string]string{"title": title}
-	var proj VikunjaProject
+	var proj config.VikunjaProject
 	if err := c.doJSON(ctx, http.MethodPut, "/api/v1/projects", req, &proj); err != nil {
 		return nil, err
 	}
@@ -261,11 +228,11 @@ const vikunjaPageSize = 50
 // ListProjectTasks fetches every task within a project, page by page. Paging stops
 // only on an empty page or a page that adds no unseen task (a server ignoring the
 // page param), never on a short page, since Vikunja may cap pages below per_page.
-func (c *VikunjaClient) ListProjectTasks(ctx context.Context, projectID int64) ([]VikunjaTask, error) {
-	var allTasks []VikunjaTask
+func (c *VikunjaClient) ListProjectTasks(ctx context.Context, projectID int64) ([]config.VikunjaTask, error) {
+	var allTasks []config.VikunjaTask
 	seen := make(map[int64]bool)
 	for page := 1; ; page++ {
-		var pageTasks []VikunjaTask
+		var pageTasks []config.VikunjaTask
 		path := fmt.Sprintf("/api/v1/projects/%d/tasks?page=%d&per_page=%d", projectID, page, vikunjaPageSize)
 		if err := c.doJSON(ctx, http.MethodGet, path, nil, &pageTasks); err != nil {
 			return nil, err
@@ -286,8 +253,8 @@ func (c *VikunjaClient) ListProjectTasks(ctx context.Context, projectID int64) (
 }
 
 // GetTask fetches full details of a specific task.
-func (c *VikunjaClient) GetTask(ctx context.Context, taskID int64) (*VikunjaTask, error) {
-	var task VikunjaTask
+func (c *VikunjaClient) GetTask(ctx context.Context, taskID int64) (*config.VikunjaTask, error) {
+	var task config.VikunjaTask
 	path := fmt.Sprintf("/api/v1/tasks/%d", taskID)
 	if err := c.doJSON(ctx, http.MethodGet, path, nil, &task); err != nil {
 		return nil, err
@@ -296,12 +263,12 @@ func (c *VikunjaClient) GetTask(ctx context.Context, taskID int64) (*VikunjaTask
 }
 
 // CreateTask creates a task within the designated project.
-func (c *VikunjaClient) CreateTask(ctx context.Context, projectID int64, title, description string) (*VikunjaTask, error) {
+func (c *VikunjaClient) CreateTask(ctx context.Context, projectID int64, title, description string) (*config.VikunjaTask, error) {
 	req := map[string]string{
 		"title":       title,
 		"description": description,
 	}
-	var task VikunjaTask
+	var task config.VikunjaTask
 	path := fmt.Sprintf("/api/v1/projects/%d/tasks", projectID)
 	if err := c.doJSON(ctx, http.MethodPut, path, req, &task); err != nil {
 		return nil, err
@@ -310,8 +277,8 @@ func (c *VikunjaClient) CreateTask(ctx context.Context, projectID int64, title, 
 }
 
 // UpdateTask writes mutated task fields back to Vikunja via full-struct overwrite.
-func (c *VikunjaClient) UpdateTask(ctx context.Context, task *VikunjaTask) (*VikunjaTask, error) {
-	var updated VikunjaTask
+func (c *VikunjaClient) UpdateTask(ctx context.Context, task *config.VikunjaTask) (*config.VikunjaTask, error) {
+	var updated config.VikunjaTask
 	path := fmt.Sprintf("/api/v1/tasks/%d", task.ID)
 	if err := c.doJSON(ctx, http.MethodPost, path, task, &updated); err != nil {
 		return nil, err
@@ -321,7 +288,7 @@ func (c *VikunjaClient) UpdateTask(ctx context.Context, task *VikunjaTask) (*Vik
 
 // CreateRelation links two tasks via a directed relation kind.
 func (c *VikunjaClient) CreateRelation(ctx context.Context, taskID, otherTaskID int64, kind string) error {
-	req := VikunjaRelationReq{
+	req := config.VikunjaRelationReq{
 		OtherTaskID:  otherTaskID,
 		RelationKind: kind,
 	}
@@ -336,8 +303,8 @@ func (c *VikunjaClient) DeleteRelation(ctx context.Context, taskID, otherTaskID 
 }
 
 // ListComments retrieves all comments on a task.
-func (c *VikunjaClient) ListComments(ctx context.Context, taskID int64) ([]VikunjaComment, error) {
-	var comments []VikunjaComment
+func (c *VikunjaClient) ListComments(ctx context.Context, taskID int64) ([]config.VikunjaComment, error) {
+	var comments []config.VikunjaComment
 	path := fmt.Sprintf("/api/v1/tasks/%d/comments", taskID)
 	if err := c.doJSON(ctx, http.MethodGet, path, nil, &comments); err != nil {
 		return nil, err

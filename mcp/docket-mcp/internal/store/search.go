@@ -1,4 +1,4 @@
-package main
+package store
 
 import (
 	"context"
@@ -7,6 +7,8 @@ import (
 	"strings"
 
 	"github.com/pgvector/pgvector-go"
+
+	"github.com/azylman/aerial/mcp/docket-mcp/internal/config"
 )
 
 // DBTX specifies the database interface required by SQLTaskStore.
@@ -22,7 +24,7 @@ type TaskStore interface {
 	UpdateTaskEmbeddingAndResolution(ctx context.Context, taskID int64, embedding []float32, resolution string) error
 	UpdateTaskResolutionBatch(ctx context.Context, taskIDs []int64, resolution string) error
 	FetchTaskResolutions(ctx context.Context, taskIDs []int64) (map[int64]string, error)
-	SearchTasksRRF(ctx context.Context, embedding []float32, queryText string, statusFilter string, limit int) ([]ScoredTaskSummary, error)
+	SearchTasksRRF(ctx context.Context, embedding []float32, queryText string, statusFilter string, limit int) ([]config.ScoredTaskSummary, error)
 }
 
 // SQLTaskStore implements TaskStore on top of PostgreSQL 18 tasks table.
@@ -108,13 +110,13 @@ func (s *SQLTaskStore) FetchTaskResolutions(ctx context.Context, taskIDs []int64
 }
 
 // SearchTasksRRF executes a 70/30 Hybrid Weighted RRF search over Vikunja's tasks table.
-func (s *SQLTaskStore) SearchTasksRRF(ctx context.Context, embedding []float32, queryText string, statusFilter string, limit int) ([]ScoredTaskSummary, error) {
+func (s *SQLTaskStore) SearchTasksRRF(ctx context.Context, embedding []float32, queryText string, statusFilter string, limit int) ([]config.ScoredTaskSummary, error) {
 	if limit <= 0 {
 		limit = 10
 	}
 	filter := strings.TrimSpace(statusFilter)
 	if filter == "" {
-		filter = taskStatusOpen
+		filter = config.TaskStatusOpen
 	}
 
 	hasVector := len(embedding) == 384
@@ -165,7 +167,7 @@ LIMIT $2;`
 	}
 	defer rows.Close()
 
-	var results []ScoredTaskSummary
+	var results []config.ScoredTaskSummary
 	for rows.Next() {
 		var id int64
 		var title string
@@ -175,8 +177,8 @@ LIMIT $2;`
 		if err := rows.Scan(&id, &title, &done, &res, &score); err != nil {
 			return nil, fmt.Errorf("failed to scan scored task row: %w", err)
 		}
-		status := ResolveTaskStatus(done, res)
-		results = append(results, ScoredTaskSummary{
+		status := config.ResolveTaskStatus(done, res)
+		results = append(results, config.ScoredTaskSummary{
 			ID:     id,
 			Title:  title,
 			Status: status,
