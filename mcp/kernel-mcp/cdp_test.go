@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -20,65 +21,97 @@ var testUpgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool { return true },
 }
 
+// fakeCDPFault is a CDP error reply.
+type fakeCDPFault struct {
+	code int
+	msg  string
+}
+
+// fakeCDPEval scripts the Runtime.evaluate reply for expressions containing match
+// ("" matches every expression): a CDP error, an exception or a value.
+type fakeCDPEval struct {
+	match     string
+	err       string
+	exception string
+	value     any
+}
+
+// fakeCDPOptions configures one fake CDP endpoint. Every failure is keyed on the
+// request (CDP method, mouse event type, evaluated expression), never on call order.
 type fakeCDPOptions struct {
-	emptyHost        bool
-	failList         bool
-	corruptList      bool
-	emptyTargets     bool
-	includeChrome    bool
-	onlyChrome       bool
-	evalException    string
-	detachOnMethod   string
-	failMouseMoved   bool
-	failMousePress   bool
-	failMouseRelease bool
-	returnCDPError   bool
-	withholdMethod   string
+	emptyHost      bool
+	failList       bool
+	corruptList    bool
+	emptyTargets   bool
+	includeChrome  bool
+	onlyChrome     bool
+	detachOnMethod string
+	withholdMethod string
+	// faults maps "Method" or "Input.dispatchMouseEvent/<type>" to an error reply.
+	faults map[string]fakeCDPFault
+	// evals are checked before fakeCDPPageEvals.
+	evals          []fakeCDPEval
+	screenshotData string
+}
+
+// fakeCDPFailOn fails requests matching key with a -32000 "<key> failed" error.
+func fakeCDPFailOn(key string) fakeCDPOptions {
+	return fakeCDPOptions{faults: map[string]fakeCDPFault{key: {-32000, key + " failed"}}}
+}
+
+// fakeCDPPageEvals answer the page scripts the tools build, keyed on markers in
+// each script (selectors "#missing" and "throw new Error" are input keys).
+var fakeCDPPageEvals = []fakeCDPEval{
+	{match: "throw new Error", exception: "Uncaught Error: boom"},
+	{match: "#sc-subtotal-amount-activecart", value: map[string]any{
+		"subtotal": "$49.99", "count": "1 item",
+		"items": []map[string]any{{"asin": "B08N5WRWNW", "title": "Echo Dot 4111-2222-3333-4444", "price": "$49.99", "quantity": "1"}},
+	}},
+	{match: "#add-to-cart-button", value: map[string]any{"found": true, "hasRect": true, "x": 200, "y": 150, "productTitle": "Echo Dot Gen 4"}},
+	{match: "s-search-result", value: []map[string]any{{"asin": "B08N5WRWNW", "title": "Echo Dot with card 4111-2222-3333-4444", "price": "$49.99"}}},
+	{match: "cloneNode(true)", value: map[string]any{
+		"title": "Store", "url": "https://www.example.com", "text": "Product details with card 4111-2222-3333-4444 here",
+	}},
+	{match: "#nav-cart-count", value: "1"},
+	{match: `"#missing"`, value: map[string]any{"found": false}},
+	{match: "getBoundingClientRect", value: map[string]any{
+		"found": true, "tag": "button", "text": "Add to Cart", "hasRect": true, "x": 120, "y": 340,
+	}},
 }
 
 type fakeCDPServer struct {
 	*httptest.Server
 
-	attachedMu     sync.Mutex
+	opts           fakeCDPOptions
+	wsMu           sync.Mutex
+	activeWS       *websocket.Conn
 	attachedTarget string
 }
 
 func (s *fakeCDPServer) getAttachedTarget() string {
-	s.attachedMu.Lock()
-	defer s.attachedMu.Unlock()
+	s.wsMu.Lock()
+	defer s.wsMu.Unlock()
 	return s.attachedTarget
 }
 
-func handleFakeCDPList(w http.ResponseWriter, r *http.Request, opts fakeCDPOptions) {
-	if opts.failList {
+func (s *fakeCDPServer) handleList(w http.ResponseWriter, r *http.Request) {
+	switch {
+	case s.opts.failList:
 		http.Error(w, "server error", http.StatusInternalServerError)
 		return
-	}
-	if opts.corruptList {
+	case s.opts.corruptList:
 		_, _ = w.Write([]byte("not valid json"))
 		return
 	}
-	if opts.emptyTargets {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`[]`))
-		return
-	}
-	host := r.Host
 	targets := []TargetInfo{}
-	if opts.includeChrome || opts.onlyChrome {
+	if s.opts.includeChrome || s.opts.onlyChrome {
 		targets = append(targets, TargetInfo{
-			ID:                   "chrome-target",
-			Type:                 "page",
-			URL:                  "chrome://newtab",
-			WebSocketDebuggerURL: "ws://" + host + "/devtools/page/chrome-target",
+			ID: "chrome-target", Type: "page", URL: "chrome://newtab", WebSocketDebuggerURL: "ws://" + r.Host + "/devtools/page/chrome-target",
 		})
 	}
-	if !opts.onlyChrome {
+	if !s.opts.onlyChrome && !s.opts.emptyTargets {
 		targets = append(targets, TargetInfo{
-			ID:                   "page-target-1",
-			Type:                 "page",
-			URL:                  "https://www.example.com",
-			WebSocketDebuggerURL: "ws://" + host + "/devtools/page/page-target-1",
+			ID: "page-target-1", Type: "page", URL: "https://example.com", WebSocketDebuggerURL: "ws://" + r.Host + "/devtools/page/page-target-1",
 		})
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -91,106 +124,75 @@ type fakeCDPReq struct {
 	Params json.RawMessage `json:"params"`
 }
 
-func checkFakeCDPMethodFails(ws *websocket.Conn, req fakeCDPReq, opts fakeCDPOptions, wsMu *sync.Mutex) bool {
-	if opts.returnCDPError && req.Method == "Input.insertText" {
-		writeFakeCDPError(ws, req.ID, -32603, "Internal error executing command", wsMu)
-		return true
-	}
-	return checkFakeCDPMouseFails(ws, req, opts, wsMu)
+// fakeCDPParams is the union of the request params the fake keys on.
+type fakeCDPParams struct {
+	TargetID   string `json:"targetId"`
+	Type       string `json:"type"`
+	Expression string `json:"expression"`
+	Format     string `json:"format"`
 }
 
-func checkFakeCDPMouseFails(ws *websocket.Conn, req fakeCDPReq, opts fakeCDPOptions, wsMu *sync.Mutex) bool {
-	if req.Method != "Input.dispatchMouseEvent" {
-		return false
-	}
-	var mp struct {
-		Type string `json:"type"`
-	}
-	_ = json.Unmarshal(req.Params, &mp)
-	mouseFails := []struct {
-		fail  bool
-		mType string
-		msg   string
-	}{
-		{opts.failMouseMoved, "mouseMoved", "mouseMoved error"},
-		{opts.failMousePress, "mousePressed", "mousePressed error"},
-		{opts.failMouseRelease, "mouseReleased", "mouseReleased error"},
-	}
-	for _, mf := range mouseFails {
-		if mf.fail && mp.Type == mf.mType {
-			writeFakeCDPError(ws, req.ID, -32000, mf.msg, wsMu)
-			return true
-		}
-	}
-	return false
+func (s *fakeCDPServer) write(ws *websocket.Conn, msg any) {
+	s.wsMu.Lock()
+	defer s.wsMu.Unlock()
+	_ = ws.WriteJSON(msg)
 }
 
-func writeFakeCDPError(ws *websocket.Conn, id int64, code int, msg string, wsMu *sync.Mutex) {
-	wsMu.Lock()
-	_ = ws.WriteJSON(map[string]any{
-		"id": id,
-		"error": map[string]any{
-			"code":    code,
-			"message": msg,
-		},
-	})
-	wsMu.Unlock()
-}
-
-func handleFakeCDPMethod(ws *websocket.Conn, req fakeCDPReq, opts fakeCDPOptions, fakeSrv *fakeCDPServer, wsMu *sync.Mutex) (any, bool) {
+// reply returns the reply for req, or nil when the request gets no reply.
+func (s *fakeCDPServer) reply(req fakeCDPReq) any {
+	var p fakeCDPParams
+	_ = json.Unmarshal(req.Params, &p)
+	if req.Method == s.opts.withholdMethod {
+		return nil
+	}
+	fault, ok := s.opts.faults[req.Method+"/"+p.Type]
+	if !ok {
+		fault, ok = s.opts.faults[req.Method]
+	}
+	if ok {
+		return map[string]any{"id": req.ID, "error": map[string]any{"code": fault.code, "message": fault.msg}}
+	}
 	switch req.Method {
 	case "Target.attachToTarget":
-		var p struct {
-			TargetID string `json:"targetId"`
-		}
-		_ = json.Unmarshal(req.Params, &p)
-		fakeSrv.attachedMu.Lock()
-		fakeSrv.attachedTarget = p.TargetID
-		fakeSrv.attachedMu.Unlock()
-		return map[string]any{"sessionId": "test-session-1"}, false
+		s.wsMu.Lock()
+		s.attachedTarget = p.TargetID
+		s.wsMu.Unlock()
+		return map[string]any{"id": req.ID, "result": map[string]any{"sessionId": "test-session-1"}}
 	case "Runtime.evaluate":
-		return handleFakeCDPEval(ws, req, opts, wsMu)
-	case "Input.dispatchMouseEvent", "Input.insertText", "Page.navigate":
-		return map[string]any{}, false
+		return s.evalReply(req.ID, p.Expression)
 	case "Page.captureScreenshot":
-		return handleFakeCDPScreenshot(ws, req, wsMu)
-	default:
-		return map[string]any{}, false
+		if p.Format == "fail-unmarshal" {
+			return json.RawMessage(`{"id":` + strconv.FormatInt(req.ID, 10) + `,"result":"not-a-json-object"}`)
+		}
+		data := "dGVzdC1zY3JlZW5zaG90"
+		if s.opts.screenshotData != "" {
+			data = s.opts.screenshotData
+		}
+		return map[string]any{"id": req.ID, "result": map[string]any{"data": data}}
 	}
+	return map[string]any{"id": req.ID, "result": map[string]any{}}
 }
 
-func handleFakeCDPEval(ws *websocket.Conn, req fakeCDPReq, opts fakeCDPOptions, wsMu *sync.Mutex) (any, bool) {
-	if opts.evalException != "" {
-		return map[string]any{
-			"result": map[string]any{"type": "undefined"},
-			"exceptionDetails": map[string]any{
-				"text": opts.evalException, "exception": map[string]any{"description": opts.evalException},
-			},
-		}, false
+func (s *fakeCDPServer) evalReply(id int64, expr string) any {
+	for _, ev := range slices.Concat(s.opts.evals, fakeCDPPageEvals) {
+		if !strings.Contains(expr, ev.match) {
+			continue
+		}
+		switch {
+		case ev.err != "":
+			return map[string]any{"id": id, "error": map[string]any{"code": -32000, "message": ev.err}}
+		case ev.exception != "":
+			return map[string]any{"id": id, "result": map[string]any{
+				"result":           map[string]any{"type": "undefined"},
+				"exceptionDetails": map[string]any{"text": ev.exception, "exception": map[string]any{"description": ev.exception}},
+			}}
+		}
+		return map[string]any{"id": id, "result": map[string]any{"result": map[string]any{"type": "object", "value": ev.value}}}
 	}
-	return map[string]any{
-		"result": map[string]any{
-			"type":  "string",
-			"value": "eval-success",
-		},
-	}, false
+	return map[string]any{"id": id, "result": map[string]any{"result": map[string]any{"type": "string", "value": "eval-success"}}}
 }
 
-func handleFakeCDPScreenshot(ws *websocket.Conn, req fakeCDPReq, wsMu *sync.Mutex) (any, bool) {
-	var p struct {
-		Format string `json:"format"`
-	}
-	_ = json.Unmarshal(req.Params, &p)
-	if p.Format == "fail-unmarshal" {
-		wsMu.Lock()
-		_ = ws.WriteMessage(websocket.TextMessage, []byte(`{"id":`+strconv.FormatInt(req.ID, 10)+`,"result":"not-a-json-object"}`))
-		wsMu.Unlock()
-		return nil, true
-	}
-	return map[string]any{"data": "dGVzdC1zY3JlZW5zaG90"}, false
-}
-
-func handleFakeCDPWSLoop(ws *websocket.Conn, opts fakeCDPOptions, fakeSrv *fakeCDPServer, wsMu *sync.Mutex) {
+func (s *fakeCDPServer) serveWS(ws *websocket.Conn) {
 	defer ws.Close()
 	for {
 		_, data, err := ws.ReadMessage()
@@ -201,80 +203,50 @@ func handleFakeCDPWSLoop(ws *websocket.Conn, opts fakeCDPOptions, fakeSrv *fakeC
 		if err := json.Unmarshal(data, &req); err != nil {
 			continue
 		}
-		if opts.detachOnMethod != "" && req.Method == opts.detachOnMethod {
-			_ = ws.WriteJSON(map[string]any{
-				"method": "Target.detachedFromTarget",
-				"params": map[string]any{"sessionId": "test-session-1"},
-			})
+		if req.Method == s.opts.detachOnMethod {
+			s.write(ws, map[string]any{"method": "Target.detachedFromTarget", "params": map[string]any{"sessionId": "test-session-1"}})
 			return
 		}
-		if opts.withholdMethod != "" && req.Method == opts.withholdMethod {
-			continue
+		if msg := s.reply(req); msg != nil {
+			s.write(ws, msg)
 		}
-		if checkFakeCDPMethodFails(ws, req, opts, wsMu) {
-			continue
-		}
-		result, handled := handleFakeCDPMethod(ws, req, opts, fakeSrv, wsMu)
-		if handled {
-			continue
-		}
-		wsMu.Lock()
-		_ = ws.WriteJSON(map[string]any{"id": req.ID, "result": result})
-		wsMu.Unlock()
 	}
 }
 
 func startFakeCDPServer(t *testing.T, opts fakeCDPOptions) (*fakeCDPServer, *Config) {
 	t.Helper()
-
-	var wsMu sync.Mutex
-	var activeWS *websocket.Conn
-	fakeSrv := &fakeCDPServer{}
-
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/json/list" {
-			handleFakeCDPList(w, r, opts)
-			return
-		}
-
-		if strings.HasPrefix(r.URL.Path, "/devtools/page/") {
+	fakeSrv := &fakeCDPServer{opts: opts}
+	fakeSrv.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/json/list":
+			fakeSrv.handleList(w, r)
+		case strings.HasPrefix(r.URL.Path, "/devtools/page/"):
 			ws, err := testUpgrader.Upgrade(w, r, nil)
 			if err != nil {
 				return
 			}
-			wsMu.Lock()
-			activeWS = ws
-			wsMu.Unlock()
-
-			go handleFakeCDPWSLoop(ws, opts, fakeSrv, &wsMu)
-			return
+			fakeSrv.wsMu.Lock()
+			fakeSrv.activeWS = ws
+			fakeSrv.wsMu.Unlock()
+			go fakeSrv.serveWS(ws)
+		default:
+			http.NotFound(w, r)
 		}
-
-		http.NotFound(w, r)
 	}))
+	t.Cleanup(func() {
+		fakeSrv.wsMu.Lock()
+		if fakeSrv.activeWS != nil {
+			_ = fakeSrv.activeWS.Close()
+		}
+		fakeSrv.wsMu.Unlock()
+		fakeSrv.Close()
+	})
 
-	u, _ := url.Parse(server.URL)
-	cfg := &Config{
-		Port:        "4018",
-		CDPHost:     u.Hostname(),
-		CDPPort:     u.Port(),
-		SettleDelay: 1 * time.Millisecond,
-	}
+	u, _ := url.Parse(fakeSrv.URL)
+	cfg := &Config{Port: "4018", CDPHost: u.Hostname(), CDPPort: u.Port(), SettleDelay: time.Millisecond}
 	if opts.emptyHost {
 		cfg.CDPHost = ""
 	}
-
-	fakeSrv.Server = server
-
-	t.Cleanup(func() {
-		wsMu.Lock()
-		if activeWS != nil {
-			_ = activeWS.Close()
-		}
-		wsMu.Unlock()
-		server.Close()
-	})
-
 	return fakeSrv, cfg
 }
 
@@ -282,86 +254,29 @@ func TestCDPClient_EnsureConnectionTable(t *testing.T) {
 	tests := []struct {
 		name               string
 		opts               fakeCDPOptions
-		wantErr            bool
-		errSubstr          string
+		wantErr            string
 		wantAttachedTarget string
 	}{
-		{
-			name:      "unconfigured cdp host fails fast",
-			opts:      fakeCDPOptions{emptyHost: true},
-			wantErr:   true,
-			errSubstr: "cdp host is not configured",
-		},
-		{
-			name:               "successful connection and stealth init",
-			wantAttachedTarget: "page-target-1",
-			wantErr:            false,
-		},
-		{
-			name:               "target selection skips chrome:// url",
-			opts:               fakeCDPOptions{includeChrome: true},
-			wantAttachedTarget: "page-target-1",
-			wantErr:            false,
-		},
-		{
-			name:               "target selection falls back to chrome:// when only chrome target exists",
-			opts:               fakeCDPOptions{onlyChrome: true},
-			wantAttachedTarget: "chrome-target",
-			wantErr:            false,
-		},
-		{
-			name:      "fail list query returns error",
-			opts:      fakeCDPOptions{failList: true},
-			wantErr:   true,
-			errSubstr: "cdp target query returned status 500",
-		},
-		{
-			name:      "empty targets returns error",
-			opts:      fakeCDPOptions{emptyTargets: true},
-			wantErr:   true,
-			errSubstr: "no open page target found",
-		},
-		{
-			name:      "corrupt targets returns error",
-			opts:      fakeCDPOptions{corruptList: true},
-			wantErr:   true,
-			errSubstr: "parse cdp target response",
-		},
+		{"unconfigured cdp host fails fast", fakeCDPOptions{emptyHost: true}, "cdp host is not configured", ""},
+		{"successful connection and stealth init", fakeCDPOptions{}, "", "page-target-1"},
+		{"target selection skips chrome:// url", fakeCDPOptions{includeChrome: true}, "", "page-target-1"},
+		{"target selection falls back to chrome:// when only chrome target exists", fakeCDPOptions{onlyChrome: true}, "", "chrome-target"},
+		{"fail list query returns error", fakeCDPOptions{failList: true}, "cdp target query returned status 500", ""},
+		{"empty targets returns error", fakeCDPOptions{emptyTargets: true}, "no open page target found", ""},
+		{"corrupt targets returns error", fakeCDPOptions{corruptList: true}, "parse cdp target response", ""},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			server, cfg := startFakeCDPServer(t, tc.opts)
-
-			client := NewCDPClient(cfg)
-			defer client.Close()
-
-			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-			defer cancel()
-
-			err := client.EnsureConnection(ctx)
-			if tc.wantErr {
-				if err == nil {
-					t.Fatalf("EnsureConnection() expected error, got nil")
-				}
-				if !strings.Contains(err.Error(), tc.errSubstr) {
-					t.Fatalf("EnsureConnection() error = %q, want substring %q", err.Error(), tc.errSubstr)
-				}
+			server, client, ctx := startCDPClient(t, tc.opts)
+			checkCDPErr(t, "EnsureConnection", client.EnsureConnection(ctx), tc.wantErr)
+			if tc.wantErr != "" {
 				return
 			}
-			if err != nil {
-				t.Fatalf("EnsureConnection() unexpected error: %v", err)
+			if got := server.getAttachedTarget(); got != tc.wantAttachedTarget {
+				t.Fatalf("attached target = %q, want %q", got, tc.wantAttachedTarget)
 			}
-
-			if tc.wantAttachedTarget != "" {
-				if got := server.getAttachedTarget(); got != tc.wantAttachedTarget {
-					t.Fatalf("attached target = %q, want %q", got, tc.wantAttachedTarget)
-				}
-			}
-
-			if err := client.EnsureConnection(ctx); err != nil {
-				t.Fatalf("EnsureConnection() fast-path error: %v", err)
-			}
+			checkCDPErr(t, "EnsureConnection fast path", client.EnsureConnection(ctx), "")
 		})
 	}
 }
@@ -401,9 +316,9 @@ func TestCDPClient_DispatchTrustedClick(t *testing.T) {
 		wantErr string
 	}{
 		{"three step click succeeds", fakeCDPOptions{}, ""},
-		{"mouseMoved error", fakeCDPOptions{failMouseMoved: true}, "mouseMoved: cdp error -32000"},
-		{"mousePressed error", fakeCDPOptions{failMousePress: true}, "mousePressed: cdp error -32000"},
-		{"mouseReleased error", fakeCDPOptions{failMouseRelease: true}, "mouseReleased: cdp error -32000"},
+		{"mouseMoved error", fakeCDPFailOn("Input.dispatchMouseEvent/mouseMoved"), "mouseMoved: cdp error -32000"},
+		{"mousePressed error", fakeCDPFailOn("Input.dispatchMouseEvent/mousePressed"), "mousePressed: cdp error -32000"},
+		{"mouseReleased error", fakeCDPFailOn("Input.dispatchMouseEvent/mouseReleased"), "mouseReleased: cdp error -32000"},
 	}
 
 	for _, tc := range tests {
@@ -422,7 +337,11 @@ func TestCDPClient_InsertText(t *testing.T) {
 	}{
 		{"insert text succeeds", fakeCDPOptions{}, ""},
 		{"target detach closes connection", fakeCDPOptions{detachOnMethod: "Input.insertText"}, "cdp connection closed"},
-		{"cdp error response", fakeCDPOptions{returnCDPError: true}, "cdp error -32603: Internal error executing command"},
+		{
+			"cdp error response",
+			fakeCDPOptions{faults: map[string]fakeCDPFault{"Input.insertText": {-32603, "Internal error executing command"}}},
+			"cdp error -32603: Internal error executing command",
+		},
 	}
 
 	for _, tc := range tests {
@@ -490,7 +409,12 @@ func TestCDPClient_EvaluateJS(t *testing.T) {
 		wantErr string
 	}{
 		{"returns value", fakeCDPOptions{}, `"eval-success"`, ""},
-		{"exception details", fakeCDPOptions{evalException: "SyntaxError: bad token"}, "", "javascript evaluation error: SyntaxError: bad token"},
+		{
+			"exception details",
+			fakeCDPOptions{evals: []fakeCDPEval{{exception: "SyntaxError: bad token"}}},
+			"",
+			"javascript evaluation error: SyntaxError: bad token",
+		},
 	}
 
 	for _, tc := range tests {
