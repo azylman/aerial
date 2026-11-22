@@ -13,7 +13,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/azylman/aerial/pkg/eriwire"
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/pkg/pubsubtest"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/deploygate"
@@ -128,11 +127,6 @@ func launchedState(chunks []model.VanadisChunk, ids ...string) *model.BuildObjec
 	return state
 }
 
-// leaseState is a running-build object state carrying dispatch deferrals.
-func leaseState(deferrals map[string]model.DispatchDeferral, seq int) *model.BuildObjectState {
-	return &model.BuildObjectState{Build: bld(statusRunning), DispatchDeferrals: deferrals, DeferralReconcileSeq: seq}
-}
-
 // ciChunk is a pr chunk c1 with one lint check and the given rollout.
 func ciChunk(status, lint string, pr int, rollout *pubsub.PRRolloutState) model.VanadisChunk {
 	c := ck("c1", status, "pr", pr)
@@ -153,7 +147,6 @@ func cks(cs ...model.VanadisChunk) []model.VanadisChunk { return cs }
 func TestExecuteObjectTransition(t *testing.T) {
 	t.Parallel()
 
-	const expired = "RESUMABLE: dispatch never accepted by eri (skipped_active for 10m)"
 	rollout := &pubsub.PRRolloutState{ExpectedJobs: []string{"eri"}}
 	running, pending := ck("c1", "running", "pr", 0), ck("c1", "pending", "pr", 0)
 	action := ck("c1", "running", "action", 0)
@@ -162,39 +155,29 @@ func TestExecuteObjectTransition(t *testing.T) {
 	}
 
 	tests := []struct {
-		name          string
-		build         model.VanadisBuild
-		chunks        []model.VanadisChunk
-		missing       bool
-		closed        bool
-		nilStore      bool
-		mutation      *BuildMutationRequest
-		prior         *model.BuildObjectState
-		tick          int
-		dispatchErr   error
-		failErr       error
-		wantStatus    string
-		wantChunks    []string
-		wantErr       string
-		wantCleared   bool
-		wantLaunched  map[string]bool
-		wantSends     []deferredSend
-		wantDeferrals map[string]int
-		wantSeq       int
-		wantReserved  []string
-		wantFailed    []string
-		wantWidget    string
-		wantStored    map[string]string
-		wantBuildRow  string
+		name         string
+		build        model.VanadisBuild
+		chunks       []model.VanadisChunk
+		missing      bool
+		closed       bool
+		nilStore     bool
+		mutation     *BuildMutationRequest
+		prior        *model.BuildObjectState
+		dispatchErr  error
+		failErr      error
+		wantStatus   string
+		wantChunks   []string
+		wantErr      string
+		wantCleared  bool
+		wantLaunched map[string]bool
+		wantReserved []string
+		wantFailed   []string
+		wantWidget   string
+		wantStored   map[string]string
+		wantBuildRow string
 	}{
 		{name: "pending chunk launches", build: bld("running"), chunks: cks(pending), prior: launchedState(nil, "c0"), wantStatus: "running", wantChunks: []string{"c1"}, wantReserved: []string{"c1"}, wantWidget: "running"},
-		{name: "deferred launch starts lease chain", build: bld("running"), chunks: leaseChunks("pending", 0), dispatchErr: eriwire.ErrDispatchActive, wantStatus: "running", wantSends: []deferredSend{{Delay: time.Second, Seq: 1}}, wantDeferrals: map[string]int{"c1": 1}, wantSeq: 1, wantWidget: "running"},
-		{name: "deferred launch with pending chain schedules nothing", build: bld("running"), chunks: leaseChunks("pending", 0), dispatchErr: eriwire.ErrDispatchActive, prior: leaseState(nil, 3), wantStatus: "running", wantDeferrals: map[string]int{"c1": 1}, wantSeq: 3, wantWidget: "running"},
-		{name: "chain tick schedules next tick", build: bld("running"), chunks: leaseChunks("running", 0), dispatchErr: eriwire.ErrDispatchActive, prior: leaseState(nil, 3), tick: 3, wantStatus: "running", wantSends: []deferredSend{{Delay: time.Second, Seq: 4}}, wantDeferrals: map[string]int{"c1": 1}, wantSeq: 4, wantWidget: "running"},
-		{name: "lease expiry fails pending action chunk", build: bld("running"), chunks: leaseChunks("pending", 0), dispatchErr: eriwire.ErrDispatchActive, prior: leaseState(expiredLease("c1"), 40), tick: 40, wantStatus: statusFailed, wantReserved: []string{"c1"}, wantFailed: []string{"c1 vanadis-c1-turn-0 " + expired}},
-		{name: "lease expiry fails running retry generation", build: bld("running"), chunks: leaseChunks("running", 2), dispatchErr: eriwire.ErrDispatchActive, prior: leaseState(expiredLease("dispatch:vanadis-c1-turn-2"), 0), wantStatus: statusFailed, wantFailed: []string{"c1 vanadis-c1-turn-2 " + expired}},
-		{name: "lease expiry fail write error", build: bld("running"), chunks: leaseChunks("running", 0), dispatchErr: eriwire.ErrDispatchActive, prior: leaseState(expiredLease("c1"), 0), failErr: errors.New("database unavailable"), wantErr: "database unavailable"},
-		{name: "accepted launch clears lease", build: bld("running"), chunks: leaseChunks("pending", 0), prior: leaseState(expiredLease("c1"), 5), wantStatus: "running", wantChunks: []string{"c1"}, wantReserved: []string{"c1"}, wantWidget: "running"},
+		{name: "dispatch error fails transition", build: bld("running"), chunks: cks(pending), dispatchErr: errors.New("dispatch failed"), wantErr: "dispatch failed"},
 		{name: "merged and completed clears state", build: bld("running"), chunks: cks(ck("c1", "completed", "pr", 0)), mutation: &BuildMutationRequest{Action: "chunk_merged", ChunkID: "c1"}, prior: launchedState(nil, "c0"), wantStatus: statusCompleted, wantCleared: true, wantWidget: statusCompleted},
 		{name: "failed build keeps state and launched", build: bld(statusFailed), chunks: cks(ck("c1", statusFailed, "pr", 0)), prior: launchedState(nil, "c0"), wantStatus: statusFailed, wantLaunched: map[string]bool{"c0": true}},
 		{name: "cancelled build clears state", build: bld(statusCancelled), chunks: cks(ck("c1", statusCancelled, "pr", 0)), wantStatus: statusCancelled, wantCleared: true},
@@ -228,7 +211,7 @@ func TestExecuteObjectTransition(t *testing.T) {
 			}
 			rt := newFakeObjectRuntime("b1")
 			rt.state = tc.prior
-			res, err := bo.executeObjectTransitionTick(rt, "reconcile", tc.mutation, tc.tick)
+			res, err := bo.executeObjectTransition(rt, "reconcile", tc.mutation)
 			if tc.wantErr != "" {
 				assert.ErrorContains(t, err, tc.wantErr)
 				return
@@ -241,12 +224,8 @@ func TestExecuteObjectTransition(t *testing.T) {
 			if tc.wantLaunched != nil {
 				assert.Equal(t, tc.wantLaunched, rt.launched)
 			}
-			assert.Equal(t, tc.wantSends, rt.deferredSends)
 			assert.Equal(t, tc.wantReserved, st.reserved)
 			assert.Equal(t, tc.wantFailed, st.failed)
-			seq, counts := deferralSummary(rt.state)
-			assert.Equal(t, tc.wantSeq, seq)
-			assert.Equal(t, tc.wantDeferrals, counts)
 			assert.Equal(t, tc.wantWidget, widgetStatus(eri))
 			if tc.wantStored != nil {
 				assert.Equal(t, tc.wantStored, chunkStatuses(t, raw, "b1"))
@@ -350,33 +329,73 @@ func TestNotifyChunkFailure_NilObjectIsNoop(t *testing.T) {
 	assert.NoError(t, bo.notifyChunkFailure(mockRunContext{}, model.VanadisBuild{ID: "b1"}, "c1", "boom"))
 }
 
-// leaseChunks is one action chunk at the given status and retry generation.
-func leaseChunks(status string, nudges int) []model.VanadisChunk {
-	return []model.VanadisChunk{{ID: "c1", BuildID: "b1", Status: status, Mode: "action", StallNudges: nudges}}
-}
+func TestCompactStateForStorage(t *testing.T) {
+	t.Parallel()
 
-// expiredLease is a deferral that began well over ten minutes ago.
-func expiredLease(key string) map[string]model.DispatchDeferral {
-	return map[string]model.DispatchDeferral{key: {FirstDeferredAt: time.Date(2026, 11, 21, 3, 0, 0, 0, time.UTC), Count: 40}}
-}
+	tests := []struct {
+		name  string
+		state model.BuildObjectState
+	}{
+		{
+			name: "clears shared context and prompt bulk fields",
+			state: model.BuildObjectState{
+				Build: model.VanadisBuild{
+					ID:            "b1",
+					Status:        "running",
+					SharedContext: "large prompt context",
+				},
+				Chunks: []model.VanadisChunk{
+					{
+						ID:                 "c1",
+						Status:             "pending",
+						Instructions:       "do something",
+						TargetFiles:        []string{"a.go", "b.go"},
+						TargetSymbols:      []string{"Foo", "Bar"},
+						AcceptanceCriteria: []string{"passes tests"},
+						Title:              "Chunk 1",
+						Mode:               "pr",
+						Repo:               "aerial",
+					},
+				},
+			},
+		},
+		{
+			name: "handles empty chunks slice",
+			state: model.BuildObjectState{
+				Build: model.VanadisBuild{
+					ID:            "b2",
+					Status:        "completed",
+					SharedContext: "something",
+				},
+				Chunks: nil,
+			},
+		},
+	}
 
-// deferralSummary reduces state to its chain seq and per-launch counts.
-func deferralSummary(state *model.BuildObjectState) (int, map[string]int) {
-	if state == nil || len(state.DispatchDeferrals) == 0 {
-		return deferralSeqOf(state), nil
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			compacted := compactStateForStorage(tc.state)
+			assert.Empty(t, compacted.Build.SharedContext)
+			assert.Equal(t, tc.state.Build.ID, compacted.Build.ID)
+			assert.Equal(t, tc.state.Build.Status, compacted.Build.Status)
+			if tc.state.Chunks != nil {
+				require.Len(t, compacted.Chunks, len(tc.state.Chunks))
+				for i := range compacted.Chunks {
+					assert.Empty(t, compacted.Chunks[i].Instructions)
+					assert.Nil(t, compacted.Chunks[i].TargetFiles)
+					assert.Nil(t, compacted.Chunks[i].TargetSymbols)
+					assert.Nil(t, compacted.Chunks[i].AcceptanceCriteria)
+					assert.Equal(t, tc.state.Chunks[i].ID, compacted.Chunks[i].ID)
+					assert.Equal(t, tc.state.Chunks[i].Title, compacted.Chunks[i].Title)
+					assert.Equal(t, tc.state.Chunks[i].Mode, compacted.Chunks[i].Mode)
+					assert.Equal(t, tc.state.Chunks[i].Repo, compacted.Chunks[i].Repo)
+				}
+			} else {
+				assert.Nil(t, compacted.Chunks)
+			}
+		})
 	}
-	counts := make(map[string]int, len(state.DispatchDeferrals))
-	for key, entry := range state.DispatchDeferrals {
-		counts[key] = entry.Count
-	}
-	return state.DeferralReconcileSeq, counts
-}
-
-func deferralSeqOf(state *model.BuildObjectState) int {
-	if state == nil {
-		return 0
-	}
-	return state.DeferralReconcileSeq
 }
 
 // leaseStore records launch reservations and failures and reflects them in
@@ -714,7 +733,7 @@ func TestRunTransitionStep_NotifyOnceAcrossReplay(t *testing.T) {
 			rt := &replayNotifyRuntime{fakeObjectRuntime: newFakeObjectRuntime("b1"), primaryErr: errors.New("boom")}
 			prior := &model.BuildObjectState{Build: b}
 			for range 2 {
-				_, err := bo.runTransitionStep(rt, "reconcile", "b1", nil, prior, nil, transitionAttempt{})
+				_, err := bo.runTransitionStep(rt, "reconcile", "b1", nil, prior, nil)
 				require.Error(t, err)
 			}
 			assert.Equal(t, tc.wantCalls, widgetCalls)

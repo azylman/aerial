@@ -161,7 +161,7 @@ func (e *Executor) ExecuteLaunchChunk(ctx context.Context, st store.VanadisStore
 		VanadisBuildID: strings.TrimSpace(build.ID),
 		Prompt:         notice + chunkPrompt,
 		Effort:         store.CapChunkEffort(chunk.Effort),
-		SkipIfActive:   true,
+		SkipIfActive:   false,
 	}
 
 	// Reserve only after eri accepts: a deferred (skipped_active) or failed

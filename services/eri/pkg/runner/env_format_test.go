@@ -218,6 +218,8 @@ func TestFilterAgyBaseEnv(t *testing.T) {
 		"OTHER_AGENT_DISCORD_BOT_TOKEN=s32",
 		"DATABASE_URL=s10",
 		"POSTGRES_PASSWORD=s11",
+		"atlas_dev_password=dev-fixture",
+		"ATLAS_PROD_PASSWORD=s11b",
 		"ha_token=s12",
 		"unifi_pass=s15",
 		"UNIFI_PASSWORD=s16",
@@ -244,7 +246,7 @@ func TestFilterAgyBaseEnv(t *testing.T) {
 		"MALFORMED_NO_EQUALS",
 		"PATH=/usr/bin",
 	})
-	if fj := strings.Join(filt, "\n"); strings.Contains(fj, "secret1") || strings.Contains(fj, "=s") || strings.Contains(fj, "secret-nats") || strings.Contains(fj, "secret-restate") || !strings.Contains(fj, "FOO=bar") || !strings.Contains(fj, "CLAUDE_CODE_OAUTH_TOKEN=claude-secret-kept") || !strings.Contains(fj, "MALFORMED_NO_EQUALS") || !strings.Contains(fj, "PATH=/usr/bin") {
+	if fj := strings.Join(filt, "\n"); strings.Contains(fj, "secret1") || strings.Contains(fj, "=s") || strings.Contains(fj, "secret-nats") || strings.Contains(fj, "secret-restate") || !strings.Contains(fj, "atlas_dev_password=dev-fixture") || !strings.Contains(fj, "FOO=bar") || !strings.Contains(fj, "CLAUDE_CODE_OAUTH_TOKEN=claude-secret-kept") || !strings.Contains(fj, "MALFORMED_NO_EQUALS") || !strings.Contains(fj, "PATH=/usr/bin") {
 		t.Errorf("FilterAgyBaseEnv leak or drop: %v", filt)
 	}
 }
@@ -351,6 +353,11 @@ func TestBuildAgyEnv(t *testing.T) {
 			AgyEnvInput{BaseEnv: []string{"TRACEPARENT=00-11111111111111111111111111111111-1111111111111111-01", "KEEP=1"}},
 			[]string{"KEEP=1"},
 			[]string{"TRACEPARENT="},
+		},
+		{
+			AgyEnvInput{BaseEnv: []string{"ATLAS_DEV_PASSWORD=dev-fixture", "POSTGRES_PASSWORD=pg-fixture", "KEEP=1"}},
+			[]string{"ATLAS_DEV_PASSWORD=dev-fixture", "KEEP=1"},
+			[]string{"POSTGRES_PASSWORD="},
 		},
 	} {
 		assertContainsAndOmits(t, strings.Join(BuildAgyEnv(tc.input), "\n"), tc.contains, tc.notContains, tc.input)
