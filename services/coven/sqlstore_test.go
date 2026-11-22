@@ -4,106 +4,99 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"math"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
-	_ "modernc.org/sqlite"
+	"github.com/pgvector/pgvector-go"
 )
 
-type testCustomResult struct {
-	rows int64
-	err  error
+// sqlstoreFact is one facts row seeded through the production InsertFact.
+// deg places the embedding with angleEmbedding; count and ageDays then set
+// reinforce_count and last_reinforced_at (ageDays before a shared reference
+// instant, so equal ages tie exactly).
+type sqlstoreFact struct {
+	text    string
+	deg     float64
+	count   int
+	ageDays int
 }
 
-func (testCustomResult) LastInsertId() (int64, error)   { return 0, nil }
-func (r testCustomResult) RowsAffected() (int64, error) { return r.rows, r.err }
-
-type queryMockDBTX struct {
-	dbMem         *sql.DB
-	queryErr      error
-	execErr       error
-	rowsAffected  int64
-	capturedQuery *string
-	rowSQL        string
-	rowsSQL       string
-	watermarkSQL  string
-	summarySQL    string
-	joinSQL       string
+// sqlstoreScored is an expected (fact text, score) result.
+type sqlstoreScored struct {
+	text  string
+	score float64
 }
 
-func (q queryMockDBTX) ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error) {
-	if q.capturedQuery != nil {
-		*q.capturedQuery = query
-	}
-	if q.execErr != nil {
-		return nil, q.execErr
-	}
-	return testCustomResult{rows: q.rowsAffected}, nil
+// sqlstoreWatermark is one extraction_watermarks row.
+type sqlstoreWatermark struct {
+	agent     string
+	thread    string
+	rowID     int64
+	extracted bool
 }
 
-func (q queryMockDBTX) QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row {
-	if q.capturedQuery != nil {
-		*q.capturedQuery = query
-	}
-	if q.queryErr != nil {
-		if errors.Is(q.queryErr, sql.ErrNoRows) {
-			return q.dbMem.QueryRowContext(ctx, "SELECT 1 WHERE 1 = 0")
-		}
-		return q.dbMem.QueryRowContext(ctx, "SELECT syntax error")
-	}
-	if strings.Contains(query, "COUNT(*)") {
-		return q.dbMem.QueryRowContext(ctx, "SELECT 1")
-	}
-	if q.watermarkSQL != "" && strings.Contains(query, "extraction_watermarks") {
-		return q.dbMem.QueryRowContext(ctx, q.watermarkSQL)
-	}
-	if strings.Contains(query, "JOIN sessions") {
-		if q.joinSQL != "" {
-			return q.dbMem.QueryRowContext(ctx, q.joinSQL)
-		}
-		return q.dbMem.QueryRowContext(ctx, "SELECT 1 WHERE 1 = 0")
-	}
-	if strings.Contains(query, "sessions") {
-		if q.summarySQL != "" {
-			return q.dbMem.QueryRowContext(ctx, q.summarySQL)
-		}
-		return q.dbMem.QueryRowContext(ctx, "SELECT 1 WHERE 1 = 0")
-	}
-	if q.rowSQL != "" {
-		return q.dbMem.QueryRowContext(ctx, q.rowSQL)
-	}
-	return q.dbMem.QueryRowContext(ctx, "SELECT 1")
-}
+const sqlstoreScoreTolerance = 1e-4
 
-func (q queryMockDBTX) QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error) {
-	if q.capturedQuery != nil {
-		*q.capturedQuery = query
-	}
-	if q.queryErr != nil {
-		return nil, q.queryErr
-	}
-	if q.rowsSQL != "" {
-		return q.dbMem.QueryContext(ctx, q.rowsSQL)
-	}
-	if q.rowSQL != "" {
-		return q.dbMem.QueryContext(ctx, q.rowSQL)
-	}
-	return q.dbMem.QueryContext(ctx, "SELECT 1 WHERE 1 = 0")
-}
+// sqlstoreSabotagePaginateSelect fails only the GetFactsPaginated row select
+// (COUNT(*) does not read reinforce_count).
+const sqlstoreSabotagePaginateSelect = `ALTER TABLE facts DROP COLUMN reinforce_count`
 
-func setupTestDBMem(t *testing.T) *sql.DB {
+// seedSQLStoreFacts inserts facts through InsertFact and returns their ids.
+func seedSQLStoreFacts(t *testing.T, store *SQLStore, facts ...sqlstoreFact) []int64 {
 	t.Helper()
-	db, err := sql.Open("sqlite", ":memory:")
-	if err != nil {
-		t.Fatalf("failed to open in-memory sqlite: %v", err)
+	ref := time.Now().UTC().Truncate(time.Second)
+	ids := make([]int64, 0, len(facts))
+	for _, f := range facts {
+		id, err := store.InsertFact(context.Background(), f.text, angleEmbedding(f.deg))
+		if err != nil {
+			t.Fatalf("seed fact %q: %v", f.text, err)
+		}
+		execSQL(t, store.DB(), `UPDATE facts SET reinforce_count = $1, last_reinforced_at = $2 WHERE id = $3`, max(f.count, 1), ref.AddDate(0, 0, -f.ageDays), id)
+		ids = append(ids, id)
 	}
-	t.Cleanup(func() { _ = db.Close() })
-	return db
+	return ids
+}
+
+// sqlstoreTestStore returns a real store with sabotage applied after facts are
+// seeded, or a nil-db store when nilDB is set.
+func sqlstoreTestStore(t *testing.T, nilDB bool, sabotage string, facts ...sqlstoreFact) *SQLStore {
+	t.Helper()
+	if nilDB {
+		return &SQLStore{}
+	}
+	store := newTestStore(t)
+	seedSQLStoreFacts(t, store, facts...)
+	execSQL(t, store.DB(), sabotage)
+	return store
+}
+
+func assertSQLStoreErr(t *testing.T, err error, wantErr bool, wantIs error) {
+	t.Helper()
+	if (err != nil) != (wantErr || wantIs != nil) {
+		t.Fatalf("err = %v, wantErr = %v (want %v)", err, wantErr, wantIs)
+	}
+	if wantIs != nil && !errors.Is(err, wantIs) {
+		t.Fatalf("err = %v, want errors.Is %v", err, wantIs)
+	}
+}
+
+func assertScoredTexts(t *testing.T, gotTexts []string, gotScores []float64, want []sqlstoreScored) {
+	t.Helper()
+	if len(gotTexts) != len(want) {
+		t.Fatalf("results = %q (scores %v), want %v", gotTexts, gotScores, want)
+	}
+	for i, w := range want {
+		if gotTexts[i] != w.text || math.Abs(gotScores[i]-w.score) > sqlstoreScoreTolerance {
+			t.Errorf("result[%d] = (%q, %.6f), want (%q, %.6f)", i, gotTexts[i], gotScores[i], w.text, w.score)
+		}
+	}
 }
 
 func TestSQLStore_ConstructorsAndSetters(t *testing.T) {
-	dbMem := setupTestDBMem(t)
-
+	t.Parallel()
 	tests := []struct {
 		name      string
 		nilStore  bool
@@ -119,8 +112,10 @@ func TestSQLStore_ConstructorsAndSetters(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			store := NewSQLStore(dbMem)
-			wantDB := DBTX(dbMem)
+			t.Parallel()
+			db := newTestDB(t)
+			store := NewSQLStore(db)
+			wantDB := DBTX(db)
 			if tc.nilStore {
 				store = nil
 				wantDB = nil
@@ -137,507 +132,602 @@ func TestSQLStore_ConstructorsAndSetters(t *testing.T) {
 			if !tc.nilStore && store.indexerClient != ic {
 				t.Errorf("indexerClient = %v, want %v", store.indexerClient, ic)
 			}
-			if _, err := store.Conn(context.Background()); tc.nilStore && err == nil {
-				t.Errorf("Conn() expected error for nil store")
-			}
 		})
 	}
+}
 
-	mockStore := NewSQLStore(queryMockDBTX{dbMem: dbMem})
-	if c, err := mockStore.Conn(context.Background()); !errors.Is(err, errNoPinnedConn) || c != nil {
-		t.Errorf("mockStore.Conn() = (%v, %v), want (nil, errNoPinnedConn)", c, err)
+// sqlstoreHandle builds the DBTX fixture for TestSQLStore_Conn.
+func sqlstoreHandle(t *testing.T, kind string) (DBTX, *sql.Conn) {
+	t.Helper()
+	db := newTestDB(t)
+	switch kind {
+	case "db":
+		return db, nil
+	case "conn":
+		conn, err := db.Conn(context.Background())
+		if err != nil {
+			t.Fatalf("pin conn: %v", err)
+		}
+		t.Cleanup(func() { _ = conn.Close() })
+		return conn, conn
+	case "tx":
+		tx, err := db.BeginTx(context.Background(), nil)
+		if err != nil {
+			t.Fatalf("begin: %v", err)
+		}
+		t.Cleanup(func() { _ = tx.Rollback() })
+		return tx, nil
+	}
+	return nil, nil
+}
+
+func TestSQLStore_Conn(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		nilStore bool
+		handle   string
+		wantSame bool
+		wantErr  bool
+		wantIs   error
+	}{
+		{name: "PoolPinsUsableConn", handle: "db"},
+		{name: "PinnedConnReturnsItself", handle: "conn", wantSame: true},
+		{name: "TxIsNotPinnable", handle: "tx", wantIs: errNoPinnedConn},
+		{name: "NilDB", handle: "", wantErr: true},
+		{name: "NilStore", nilStore: true, handle: "db", wantErr: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			handle, pinned := sqlstoreHandle(t, tc.handle)
+			store := &SQLStore{db: handle}
+			if tc.nilStore {
+				store = nil
+			}
+			conn, err := store.Conn(ctx)
+			assertSQLStoreErr(t, err, tc.wantErr, tc.wantIs)
+			if err != nil {
+				if conn != nil {
+					t.Errorf("Conn() = %v on error, want nil", conn)
+				}
+				return
+			}
+			if tc.wantSame != (conn == pinned) {
+				t.Errorf("Conn() same as pinned = %v, want %v", conn == pinned, tc.wantSame)
+			}
+			var one int
+			if err := conn.QueryRowContext(ctx, `SELECT 1`).Scan(&one); err != nil || one != 1 {
+				t.Errorf("pinned conn SELECT 1 = (%d, %v), want (1, nil)", one, err)
+			}
+			if !tc.wantSame {
+				_ = conn.Close()
+			}
+		})
 	}
 }
 
 func TestSQLStore_InsertFact(t *testing.T) {
-	dbMem := setupTestDBMem(t)
-	validEmb := make([]float32, ExpectedEmbeddingDim)
-
-	tests := []sqlStoreInsertFactCase{
-		{
-			name:     "NilDBError",
-			nilDB:    true,
-			factText: "valid",
-			emb:      validEmb,
-			wantErr:  true,
-		},
-		{
-			name:     "EmptyFactText",
-			factText: "",
-			emb:      validEmb,
-			wantErr:  true,
-		},
-		{
-			name:     "InvalidEmbeddingDim",
-			factText: "valid",
-			emb:      make([]float32, 10),
-			wantErr:  true,
-		},
-		{
-			name:     "QueryError",
-			factText: "valid fact",
-			emb:      validEmb,
-			queryErr: errors.New("insert error"),
-			wantErr:  true,
-		},
-		{
-			name:     "SuccessValidFact",
-			factText: "valid fact",
-			emb:      validEmb,
-			rowSQL:   "SELECT 42",
-			wantID:   42,
-		},
+	t.Parallel()
+	tests := []struct {
+		name        string
+		nilDB       bool
+		stack       string
+		factText    string
+		emb         []float32
+		sourceAgent []string
+		sabotage    string
+		wantErr     bool
+		wantText    string
+		wantAgent   string
+	}{
+		{name: "NilDBError", nilDB: true, factText: "valid", emb: angleEmbedding(0), wantErr: true},
+		{name: "EmptyFactText", factText: "   ", emb: angleEmbedding(0), wantErr: true},
+		{name: "InvalidEmbeddingDim", factText: "valid", emb: make([]float32, 10), wantErr: true},
+		{name: "InsertError", factText: "valid fact", emb: angleEmbedding(0), sabotage: sabotageInsertFact, wantErr: true},
+		{name: "DefaultStackTrimmed", factText: "  Alex drinks matcha  ", emb: angleEmbedding(0), wantText: "Alex drinks matcha", wantAgent: "aerial"},
+		{name: "StoreStack", stack: "agent-beta", factText: "Alex owns a kayak", emb: angleEmbedding(30), wantText: "Alex owns a kayak", wantAgent: "agent-beta"},
+		{name: "ExplicitSourceAgent", stack: "agent-beta", factText: "Alex likes sushi", emb: angleEmbedding(60), sourceAgent: []string{"  agent-x  "}, wantText: "Alex likes sushi", wantAgent: "agent-x"},
+		{name: "BlankSourceAgentFallsBack", factText: "Alex likes tea", emb: angleEmbedding(60), sourceAgent: []string{"  "}, wantText: "Alex likes tea", wantAgent: "aerial"},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			runInsertFactCase(t, tc, dbMem)
+			t.Parallel()
+			ctx := context.Background()
+			store := sqlstoreTestStore(t, tc.nilDB, tc.sabotage)
+			if tc.stack != "" {
+				store.SetStack(tc.stack)
+			}
+			id, err := store.InsertFact(ctx, tc.factText, tc.emb, tc.sourceAgent...)
+			assertSQLStoreErr(t, err, tc.wantErr, nil)
+			if tc.wantErr {
+				return
+			}
+			var text, agent string
+			var count int
+			var sameTimes bool
+			if err := store.DB().QueryRowContext(ctx, `SELECT fact_text, reinforce_count, source_agent, created_at = last_reinforced_at FROM facts WHERE id = $1`, id).Scan(&text, &count, &agent, &sameTimes); err != nil {
+				t.Fatalf("read back fact %d: %v", id, err)
+			}
+			if text != tc.wantText || count != 1 || agent != tc.wantAgent || !sameTimes {
+				t.Errorf("row = (%q, %d, %q, sameTimes=%v), want (%q, 1, %q, true)", text, count, agent, sameTimes, tc.wantText, tc.wantAgent)
+			}
 		})
 	}
 }
 
-func TestSQLStore_UpdateFact(t *testing.T) {
-	dbMem := setupTestDBMem(t)
-	validEmb := make([]float32, ExpectedEmbeddingDim)
+// sqlstoreMissingFactID never exists in a test database.
+const sqlstoreMissingFactID int64 = 987654321
 
-	tests := []sqlStoreUpdateFactCase{
-		{
-			name:     "NilDBError",
-			nilDB:    true,
-			factText: "valid",
-			emb:      validEmb,
-			wantErr:  true,
-		},
-		{
-			name:     "EmptyFactText",
-			factText: "",
-			emb:      validEmb,
-			wantErr:  true,
-		},
-		{
-			name:     "InvalidEmbeddingDim",
-			factText: "valid",
-			emb:      make([]float32, 10),
-			wantErr:  true,
-		},
-		{
-			name:     "ExecError",
-			factText: "valid",
-			emb:      validEmb,
-			execErr:  errors.New("update err"),
-			wantErr:  true,
-		},
-		{
-			name:         "NotFoundZeroRows",
-			factText:     "valid",
-			emb:          validEmb,
-			rowsAffected: 0,
-			wantErr:      true,
-		},
-		{
-			name:         "SuccessValidFact",
-			factText:     "valid",
-			emb:          validEmb,
-			rowsAffected: 1,
-			wantErr:      false,
-		},
+func TestSQLStore_UpdateFact(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		nilDB     bool
+		id        int64 // 0 = the seeded fact
+		factText  string
+		emb       []float32
+		sabotage  string
+		wantErr   bool
+		wantIs    error
+		wantText  string
+		wantCount int
+	}{
+		{name: "NilDBError", nilDB: true, factText: "valid", emb: testEmbeddingAt(5, 1), wantErr: true},
+		{name: "EmptyFactText", factText: " ", emb: testEmbeddingAt(5, 1), wantErr: true, wantText: "Alex drinks coffee", wantCount: 1},
+		{name: "InvalidEmbeddingDim", factText: "valid", emb: make([]float32, 10), wantErr: true, wantText: "Alex drinks coffee", wantCount: 1},
+		{name: "ExecError", factText: "Alex drinks matcha", emb: testEmbeddingAt(5, 1), sabotage: sabotageUpdateFact, wantErr: true, wantText: "Alex drinks coffee", wantCount: 1},
+		{name: "NotFound", id: sqlstoreMissingFactID, factText: "Alex drinks matcha", emb: testEmbeddingAt(5, 1), wantIs: ErrFactNotFound, wantText: "Alex drinks coffee", wantCount: 1},
+		{name: "SuccessRewritesAndReinforces", factText: "  Alex drinks matcha ", emb: testEmbeddingAt(5, 1), wantText: "Alex drinks matcha", wantCount: 2},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			runUpdateFactCase(t, tc, dbMem)
+			t.Parallel()
+			ctx := context.Background()
+			if tc.nilDB {
+				assertSQLStoreErr(t, (&SQLStore{}).UpdateFact(ctx, 1, tc.factText, tc.emb), true, nil)
+				return
+			}
+			store := newTestStore(t)
+			seeded, err := store.InsertFact(ctx, "Alex drinks coffee", testEmbeddingAt(0, 1))
+			if err != nil {
+				t.Fatalf("seed: %v", err)
+			}
+			execSQL(t, store.DB(), tc.sabotage)
+			id := tc.id
+			if id == 0 {
+				id = seeded
+			}
+			assertSQLStoreErr(t, store.UpdateFact(ctx, id, tc.factText, tc.emb), tc.wantErr, tc.wantIs)
+			var text string
+			var count int
+			var simToNew float64
+			if err := store.DB().QueryRowContext(ctx, `SELECT fact_text, reinforce_count, 1 - (embedding <=> $2) FROM facts WHERE id = $1`, seeded, pgvector.NewVector(testEmbeddingAt(5, 1))).Scan(&text, &count, &simToNew); err != nil {
+				t.Fatalf("read back: %v", err)
+			}
+			wantSim := 0.0
+			if tc.wantCount == 2 {
+				wantSim = 1
+			}
+			if text != tc.wantText || count != tc.wantCount || math.Abs(simToNew-wantSim) > sqlstoreScoreTolerance {
+				t.Errorf("row = (%q, %d, sim %.3f), want (%q, %d, sim %.0f)", text, count, simToNew, tc.wantText, tc.wantCount, wantSim)
+			}
 		})
 	}
 }
 
 func TestSQLStore_ReinforceFact(t *testing.T) {
-	dbMem := setupTestDBMem(t)
-	for _, tc := range sqlStoreFactMutateCases("reinforce") {
+	t.Parallel()
+	tests := []struct {
+		name           string
+		nilDB          bool
+		id             int64 // 0 = the seeded fact
+		sabotage       string
+		wantErr        bool
+		wantIs         error
+		wantCount      int
+		wantReinforced bool
+	}{
+		{name: "NilDBError", nilDB: true, wantErr: true},
+		{name: "ExecError", sabotage: sabotageReinforceFact, wantErr: true, wantCount: 1},
+		{name: "NotFound", id: sqlstoreMissingFactID, wantIs: ErrFactNotFound, wantCount: 1},
+		{name: "SuccessBumpsCountAndTime", wantCount: 2, wantReinforced: true},
+	}
+
+	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			runSQLStoreFactMutateCase(t, "ReinforceFact", tc, dbMem)
+			t.Parallel()
+			ctx := context.Background()
+			if tc.nilDB {
+				assertSQLStoreErr(t, (&SQLStore{}).ReinforceFact(ctx, 1), true, nil)
+				return
+			}
+			store := newTestStore(t)
+			seeded := seedSQLStoreFacts(t, store, sqlstoreFact{text: "Alex drinks coffee", ageDays: 400})[0]
+			execSQL(t, store.DB(), tc.sabotage)
+			id := tc.id
+			if id == 0 {
+				id = seeded
+			}
+			assertSQLStoreErr(t, store.ReinforceFact(ctx, id), tc.wantErr, tc.wantIs)
+			var count int
+			var fresh bool
+			if err := store.DB().QueryRowContext(ctx, `SELECT reinforce_count, last_reinforced_at > now() - interval '1 day' FROM facts WHERE id = $1`, seeded).Scan(&count, &fresh); err != nil {
+				t.Fatalf("read back: %v", err)
+			}
+			if count != tc.wantCount || fresh != tc.wantReinforced {
+				t.Errorf("row = (count %d, reinforced today %v), want (%d, %v)", count, fresh, tc.wantCount, tc.wantReinforced)
+			}
 		})
 	}
 }
 
 func TestSQLStore_DeleteFact(t *testing.T) {
-	dbMem := setupTestDBMem(t)
-	for _, tc := range sqlStoreFactMutateCases("delete") {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		nilDB    bool
+		id       int64 // 0 = the seeded fact
+		sabotage string
+		wantErr  bool
+		wantIs   error
+		wantLeft int
+	}{
+		{name: "NilDBError", nilDB: true, wantErr: true},
+		{name: "ExecError", sabotage: sabotageDeleteFact, wantErr: true, wantLeft: 1},
+		{name: "NotFound", id: sqlstoreMissingFactID, wantIs: ErrFactNotFound, wantLeft: 1},
+		{name: "SuccessRemovesRow", wantLeft: 0},
+	}
+
+	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			runSQLStoreFactMutateCase(t, "DeleteFact", tc, dbMem)
+			t.Parallel()
+			ctx := context.Background()
+			if tc.nilDB {
+				assertSQLStoreErr(t, (&SQLStore{}).DeleteFact(ctx, 1), true, nil)
+				return
+			}
+			store := newTestStore(t)
+			seeded := seedSQLStoreFacts(t, store, sqlstoreFact{text: "Alex drinks coffee"})[0]
+			execSQL(t, store.DB(), tc.sabotage)
+			id := tc.id
+			if id == 0 {
+				id = seeded
+			}
+			assertSQLStoreErr(t, store.DeleteFact(ctx, id), tc.wantErr, tc.wantIs)
+			var left int
+			if err := store.DB().QueryRowContext(ctx, `SELECT count(*) FROM facts`).Scan(&left); err != nil {
+				t.Fatalf("count: %v", err)
+			}
+			if left != tc.wantLeft {
+				t.Errorf("facts left = %d, want %d", left, tc.wantLeft)
+			}
 		})
 	}
+}
+
+// sqlstoreDupFacts sit at 25.84° (cos = 0.9 to 0°) and 60° (cos = 0.5).
+var sqlstoreDupFacts = []sqlstoreFact{
+	{text: "Alex drinks matcha daily", deg: 25.84, count: 3},
+	{text: "Alex owns a kayak", deg: 60},
 }
 
 func TestSQLStore_FindDuplicateFact(t *testing.T) {
-	dbMem := setupTestDBMem(t)
-	ctx := context.Background()
-
+	t.Parallel()
 	tests := []struct {
-		name       string
-		nilDB      bool
-		embLen     int
-		minSim     float64
-		queryErr   error
-		rowSQL     string
-		wantErr    bool
-		wantNil    bool
-		wantID     int64
-		wantSimMin float64
+		name      string
+		nilDB     bool
+		facts     []sqlstoreFact
+		emb       []float32
+		minSim    float64
+		sabotage  string
+		wantErr   bool
+		wantText  string // "" = no duplicate returned
+		wantCount int
+		wantSim   float64
 	}{
-		{
-			name:    "NilDBError",
-			nilDB:   true,
-			embLen:  ExpectedEmbeddingDim,
-			wantErr: true,
-		},
-		{
-			name:    "ShortEmbeddingReturnsNil",
-			embLen:  10,
-			wantNil: true,
-		},
-		{
-			name:    "ErrNoRowsReturnsNil",
-			embLen:  ExpectedEmbeddingDim,
-			minSim:  -1,
-			rowSQL:  "SELECT 1 WHERE 1=0",
-			wantNil: true,
-		},
-		{
-			name:     "QueryError",
-			embLen:   ExpectedEmbeddingDim,
-			queryErr: errors.New("dup query error"),
-			wantErr:  true,
-		},
-		{
-			name:       "MatchedAboveMin",
-			embLen:     ExpectedEmbeddingDim,
-			minSim:     0.85,
-			rowSQL:     "SELECT 7, 'fact text', '2026-10-21 09:00:00', '2026-10-21 09:00:00', 2, 0.92",
-			wantID:     7,
-			wantSimMin: 0.90,
-		},
-		{
-			name:    "MatchedBelowMin",
-			embLen:  ExpectedEmbeddingDim,
-			minSim:  0.85,
-			rowSQL:  "SELECT 8, 'fact text', '2026-10-21 09:00:00', '2026-10-21 09:00:00', 2, 0.40",
-			wantNil: true,
-		},
+		{name: "NilDBError", nilDB: true, emb: angleEmbedding(0), wantErr: true},
+		{name: "ShortEmbeddingReturnsNil", facts: sqlstoreDupFacts, emb: make([]float32, 10)},
+		{name: "EmptyTableReturnsNil", emb: angleEmbedding(0), minSim: 0.1},
+		{name: "QueryError", facts: sqlstoreDupFacts, emb: angleEmbedding(0), sabotage: sabotageFacts, wantErr: true},
+		{name: "NearestAboveMin", facts: sqlstoreDupFacts, emb: angleEmbedding(0), minSim: 0.85, wantText: "Alex drinks matcha daily", wantCount: 3, wantSim: 0.9},
+		{name: "DefaultMinSimIs085", facts: sqlstoreDupFacts, emb: angleEmbedding(0), wantText: "Alex drinks matcha daily", wantCount: 3, wantSim: 0.9},
+		{name: "NearestBelowMinReportsSim", facts: sqlstoreDupFacts, emb: angleEmbedding(0), minSim: 0.95, wantSim: 0.9},
+		{name: "OtherNeighbour", facts: sqlstoreDupFacts, emb: angleEmbedding(60), minSim: 0.99, wantText: "Alex owns a kayak", wantCount: 1, wantSim: 1},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			var store *SQLStore
-			if tc.nilDB {
-				store = &SQLStore{}
-			} else {
-				store = NewSQLStore(queryMockDBTX{
-					dbMem:    dbMem,
-					queryErr: tc.queryErr,
-					rowSQL:   tc.rowSQL,
-				})
+			t.Parallel()
+			store := sqlstoreTestStore(t, tc.nilDB, tc.sabotage, tc.facts...)
+			dup, sim, err := store.FindDuplicateFact(context.Background(), tc.emb, tc.minSim)
+			assertSQLStoreErr(t, err, tc.wantErr, nil)
+			if math.Abs(sim-tc.wantSim) > sqlstoreScoreTolerance {
+				t.Errorf("sim = %.6f, want %.6f", sim, tc.wantSim)
 			}
-			testEmb := make([]float32, tc.embLen)
-			dup, sim, err := store.FindDuplicateFact(ctx, testEmb, tc.minSim)
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("FindDuplicateFact() err = %v, wantErr = %v", err, tc.wantErr)
-			}
-			if tc.wantNil && dup != nil {
-				t.Errorf("expected nil duplicate, got %+v", dup)
-			}
-			if tc.wantID > 0 {
-				if dup == nil || dup.ID != tc.wantID {
-					t.Errorf("dup.ID = %v, want %d", dup, tc.wantID)
+			gotText := ""
+			if dup != nil {
+				gotText = dup.FactText
+				if dup.ReinforceCount != tc.wantCount || dup.CreatedAt.IsZero() || dup.LastReinforcedAt.IsZero() {
+					t.Errorf("dup = %+v, want count %d and non-zero timestamps", dup, tc.wantCount)
 				}
-				if sim < tc.wantSimMin {
-					t.Errorf("sim = %f, want >= %f", sim, tc.wantSimMin)
-				}
+			}
+			if gotText != tc.wantText {
+				t.Errorf("dup text = %q, want %q", gotText, tc.wantText)
 			}
 		})
 	}
+}
+
+// sqlstoreRankingFacts against query angleEmbedding(0) + text "kayak" (vector
+// rank = list order; FTS rank: the double-kayak fact first). Expected scores
+// = 60*(0.7/(60+vrank) + 0.3/(60+trank)) * (1+0.15*ln(1+count)) * (1+days/14)^-0.35:
+//
+//	matcha (vector-only, vr1, count 1):       0.6885246*1.1039721            = 0.760112
+//	double kayak (vr2 + tr1, count 1):        0.9725013*1.1039721            = 1.073614
+//	sushi (vector-only, vr3, count 10):       0.6666667*1.3596842            = 0.906456
+//	sails kayak (vr4 + tr2, count 1, 14 d):   0.9465726*1.1039721*0.7845840  = 0.819882
+//	tea (vector-only, vr5 at 90°, count 1):   0.6461538*1.1039721            = 0.713336
+var sqlstoreRankingFacts = []sqlstoreFact{
+	{text: "Alex drinks matcha", deg: 0},
+	{text: "Alex owns a kayak and a spare kayak", deg: 10},
+	{text: "Alex likes sushi", deg: 20, count: 10},
+	{text: "Alex sails a kayak", deg: 30, ageDays: 14},
+	{text: "Alex brews tea", deg: 90},
 }
 
 func TestSQLStore_SearchCandidateFacts(t *testing.T) {
-	dbMem := setupTestDBMem(t)
-	emb := make([]float32, ExpectedEmbeddingDim)
-
-	tests := []sqlStoreSearchCandidateFactsCase{
-		{
-			name:    "NilDBError",
-			nilDB:   true,
-			emb:     emb,
-			query:   "q",
-			wantErr: true,
-		},
-		{
-			name:      "ShortEmbeddingReturnsNil",
-			emb:       make([]float32, 10),
-			query:     "fact",
-			wantCount: 0,
-		},
-		{
-			name:      "EmptyQueryReturnsNil",
-			emb:       emb,
-			query:     "",
-			wantCount: 0,
-		},
-		{
-			name:     "BothWithDefaultBounds",
-			emb:      emb,
-			query:    "test query",
-			limit:    -1,
-			minScore: -1,
-		},
-		{
-			name:     "QueryError",
-			emb:      emb,
-			query:    "test query",
-			queryErr: errors.New("search failure"),
-			wantErr:  true,
-		},
-		{
-			name:      "SuccessfulRowsScan",
-			emb:       emb,
-			query:     "fact",
-			rowSQL:    "SELECT 5, 'scanned fact', '2026-10-21 09:00:00', '2026-10-21 09:00:00', 1, '[0.1,0.2]', 0.88",
-			wantCount: 1,
-		},
+	t.Parallel()
+	tests := []struct {
+		name     string
+		nilDB    bool
+		facts    []sqlstoreFact
+		emb      []float32
+		query    string
+		limit    int
+		minScore float64
+		sabotage string
+		wantErr  bool
+		want     []sqlstoreScored
+	}{
+		{name: "NilDBError", nilDB: true, emb: angleEmbedding(0), query: "q", wantErr: true},
+		{name: "ShortEmbeddingReturnsNil", facts: sqlstoreRankingFacts, emb: make([]float32, 10), query: "kayak"},
+		{name: "EmptyQueryReturnsNil", facts: sqlstoreRankingFacts, emb: angleEmbedding(0), query: "   "},
+		{name: "QueryError", facts: sqlstoreRankingFacts, emb: angleEmbedding(0), query: "kayak", sabotage: sabotageFactSearch, wantErr: true},
+		{name: "HybridRankingWithBoostAndDecayDefaults", facts: sqlstoreRankingFacts, emb: angleEmbedding(0), query: "kayak", limit: -1, minScore: -1, want: []sqlstoreScored{
+			{"Alex owns a kayak and a spare kayak", 1.073614},
+			{"Alex likes sushi", 0.906456},
+			{"Alex sails a kayak", 0.819882},
+			{"Alex drinks matcha", 0.760112},
+			{"Alex brews tea", 0.713336},
+		}},
+		{name: "MinScoreCutoff", facts: sqlstoreRankingFacts, emb: angleEmbedding(0), query: "kayak", minScore: 0.75, want: []sqlstoreScored{
+			{"Alex owns a kayak and a spare kayak", 1.073614},
+			{"Alex likes sushi", 0.906456},
+			{"Alex sails a kayak", 0.819882},
+			{"Alex drinks matcha", 0.760112},
+		}},
+		// limit 2: vector hits {matcha, double kayak}, text hits {double kayak,
+		// sails kayak}; sails kayak is text-only: 60*0.3/62*1.1039721*0.784584 = 0.251465.
+		{name: "CandidateLimitTruncates", facts: sqlstoreRankingFacts, emb: angleEmbedding(0), query: "kayak", limit: 2, want: []sqlstoreScored{
+			{"Alex owns a kayak and a spare kayak", 1.073614},
+			{"Alex drinks matcha", 0.760112},
+		}},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			runSearchCandidateFactsCase(t, tc, dbMem)
+			t.Parallel()
+			store := sqlstoreTestStore(t, tc.nilDB, tc.sabotage, tc.facts...)
+			results, err := store.SearchCandidateFacts(context.Background(), tc.emb, tc.query, tc.limit, tc.minScore)
+			assertSQLStoreErr(t, err, tc.wantErr, nil)
+			texts := make([]string, 0, len(results))
+			scores := make([]float64, 0, len(results))
+			for _, r := range results {
+				texts = append(texts, r.Fact.FactText)
+				scores = append(scores, r.Score)
+				if len(r.Embedding) != ExpectedEmbeddingDim || r.Fact.CreatedAt.IsZero() {
+					t.Errorf("result %q embedding dim %d created %v, want %d and non-zero", r.Fact.FactText, len(r.Embedding), r.Fact.CreatedAt, ExpectedEmbeddingDim)
+				}
+			}
+			assertScoredTexts(t, texts, scores, tc.want)
 		})
 	}
 }
 
-func TestSQLStore_GetFactsPaginated(t *testing.T) {
-	dbMem := setupTestDBMem(t)
+// sqlstorePageFacts ordered by reinforce_count desc, last_reinforced_at desc,
+// id desc: kernel (3, today), vim (3, 1 day ago), then the count-1 ties of
+// equal time by id desc: progress, linuxXuser, pasta, runs.
+var sqlstorePageFacts = []sqlstoreFact{
+	{text: "Linux kernel 100%", count: 3},
+	{text: "linux_user prefers vim", count: 3, ageDays: 1},
+	{text: "Alex runs Linux"},
+	{text: "Cooking pasta"},
+	{text: "linuxXuser"},
+	{text: "progress 100x"},
+}
 
-	tests := []sqlStoreGetFactsPaginatedCase{
-		{
-			name:    "NilDBError",
-			nilDB:   true,
-			wantErr: true,
-		},
-		{
-			name:     "CountQueryError",
-			filter:   FactsFilter{Limit: 10},
-			queryErr: errors.New("count err"),
-			wantErr:  true,
-		},
-		{
-			name:         "SuccessWithQuery",
-			filter:       FactsFilter{Query: "linux", Limit: 5, Offset: -1},
-			wantPatterns: []string{"LOWER(fact_text) LIKE", "LIMIT 5 OFFSET 0"},
-		},
-		{
-			name:         "OffsetOnly",
-			filter:       FactsFilter{Offset: 10},
-			wantPatterns: []string{"OFFSET 10"},
-		},
-		{
-			name:      "SuccessfulRowsScan",
-			filter:    FactsFilter{Limit: 5},
-			rowSQL:    "SELECT 1, 'fact', '2026-10-21 09:00:00', '2026-10-21 09:00:00', 1",
-			wantTotal: 1,
-		},
-		{
-			name:     "SelectQueryError",
-			filter:   FactsFilter{Limit: 5},
-			rowSQL:   "syntax error",
-			queryErr: errors.New("select query err"),
-			wantErr:  true,
-		},
+func TestSQLStore_GetFactsPaginated(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		nilDB      bool
+		filter     FactsFilter
+		sabotage   string
+		wantErr    bool
+		wantTotal  int
+		wantLimit  int
+		wantOffset int
+		wantTexts  []string
+	}{
+		{name: "NilDBError", nilDB: true, wantErr: true},
+		{name: "CountQueryError", filter: FactsFilter{Limit: 10}, sabotage: sabotageFacts, wantErr: true},
+		{name: "SelectQueryError", filter: FactsFilter{Limit: 5}, sabotage: sqlstoreSabotagePaginateSelect, wantErr: true},
+		{name: "AllOrdered", wantTotal: 6, wantTexts: []string{"Linux kernel 100%", "linux_user prefers vim", "progress 100x", "linuxXuser", "Cooking pasta", "Alex runs Linux"}},
+		{name: "CaseInsensitiveFilterNegativeOffset", filter: FactsFilter{Query: " LINUX ", Limit: 2, Offset: -1}, wantTotal: 4, wantLimit: 2, wantTexts: []string{"Linux kernel 100%", "linux_user prefers vim"}},
+		{name: "UnderscoreEscaped", filter: FactsFilter{Query: "linux_user"}, wantTotal: 1, wantTexts: []string{"linux_user prefers vim"}},
+		{name: "PercentEscaped", filter: FactsFilter{Query: "100%"}, wantTotal: 1, wantTexts: []string{"Linux kernel 100%"}},
+		{name: "LimitOffset", filter: FactsFilter{Limit: 2, Offset: 2}, wantTotal: 6, wantLimit: 2, wantOffset: 2, wantTexts: []string{"progress 100x", "linuxXuser"}},
+		{name: "OffsetOnly", filter: FactsFilter{Offset: 4}, wantTotal: 6, wantOffset: 4, wantTexts: []string{"Cooking pasta", "Alex runs Linux"}},
+		{name: "NoMatchesEmptySlice", filter: FactsFilter{Query: "kayak"}, wantTexts: []string{}},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			runGetFactsPaginatedCase(t, tc, dbMem)
+			t.Parallel()
+			store := sqlstoreTestStore(t, tc.nilDB, tc.sabotage, sqlstorePageFacts...)
+			res, err := store.GetFactsPaginated(context.Background(), tc.filter)
+			assertSQLStoreErr(t, err, tc.wantErr, nil)
+			if tc.wantErr {
+				return
+			}
+			texts := make([]string, 0, len(res.Facts))
+			for _, f := range res.Facts {
+				texts = append(texts, f.FactText)
+			}
+			if res.Total != tc.wantTotal || res.Limit != tc.wantLimit || res.Offset != tc.wantOffset || res.Status != "ok" || strings.Join(texts, "|") != strings.Join(tc.wantTexts, "|") || res.Facts == nil {
+				t.Errorf("result = total %d limit %d offset %d status %q facts %q, want total %d limit %d offset %d status ok facts %q", res.Total, res.Limit, res.Offset, res.Status, texts, tc.wantTotal, tc.wantLimit, tc.wantOffset, tc.wantTexts)
+			}
 		})
 	}
 }
 
 func TestIsExtractableAdminTurn(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		msg  Message
 		want bool
 	}{
-		{
-			name: "CompletedAdminNormalText",
-			msg: Message{
-				Status:       "COMPLETED",
-				ResponseText: "Here is your answer.",
-				IsAdmin:      true,
-			},
-			want: true,
-		},
-		{
-			name: "NotCompleted",
-			msg: Message{
-				Status:       "PENDING",
-				ResponseText: "Here is your answer.",
-				IsAdmin:      true,
-			},
-			want: false,
-		},
-		{
-			name: "NotAdmin",
-			msg: Message{
-				Status:       "COMPLETED",
-				ResponseText: "Here is your answer.",
-				IsAdmin:      false,
-			},
-			want: false,
-		},
-		{
-			name: "BracketPrefix",
-			msg: Message{
-				Status:       "COMPLETED",
-				ResponseText: "[SILENT_TURN]",
-				IsAdmin:      true,
-			},
-			want: false,
-		},
-		{
-			name: "EmptyResponseText",
-			msg: Message{
-				Status:       "COMPLETED",
-				ResponseText: "   ",
-				IsAdmin:      true,
-			},
-			want: false,
-		},
+		{name: "CompletedAdminNormalText", msg: Message{Status: "COMPLETED", ResponseText: "Here is your answer.", IsAdmin: true}, want: true},
+		{name: "NotCompleted", msg: Message{Status: "PENDING", ResponseText: "Here is your answer.", IsAdmin: true}},
+		{name: "NotAdmin", msg: Message{Status: "COMPLETED", ResponseText: "Here is your answer."}},
+		{name: "BracketPrefix", msg: Message{Status: "COMPLETED", ResponseText: "  [SILENT_TURN]", IsAdmin: true}},
+		{name: "EmptyResponseText", msg: Message{Status: "COMPLETED", ResponseText: "   ", IsAdmin: true}},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := IsExtractableAdminTurn(tc.msg)
-			if got != tc.want {
+			t.Parallel()
+			if got := IsExtractableAdminTurn(tc.msg); got != tc.want {
 				t.Fatalf("IsExtractableAdminTurn() = %v, want %v", got, tc.want)
 			}
 		})
 	}
 }
 
-func TestSQLStore_GetUnextractedAdminTurns(t *testing.T) {
-	dbMem := setupTestDBMem(t)
+// sqlstoreAlphaTurns exercise every GetUnextractedAdminTurns filter for
+// agent-alpha/th-1 with a watermark at row 10: only row 12 qualifies.
+var sqlstoreAlphaTurns = []testTurn{
+	{agent: "agent-alpha", thread: "th-1", rowID: 5, content: "old", response: "below watermark", status: "COMPLETED", admin: true},
+	{agent: "agent-alpha", thread: "th-1", rowID: 12, content: "hello", response: "world", status: "COMPLETED", admin: true},
+	{agent: "agent-alpha", thread: "th-1", rowID: 13, content: "guest", response: "not admin", status: "COMPLETED"},
+	{agent: "agent-alpha", thread: "th-1", rowID: 14, content: "pending", response: "not completed", status: "PENDING", admin: true},
+	{agent: "agent-alpha", thread: "th-1", rowID: 15, content: "silent", response: "[SILENT_TURN]", status: "COMPLETED", admin: true},
+	{agent: "agent-alpha", thread: "th-1", rowID: 16, content: "no response", status: "COMPLETED", admin: true},
+	{agent: "agent-alpha", thread: "th-9", rowID: 17, content: "other thread", response: "x", status: "COMPLETED", admin: true},
+	adminTurn("th-1", 18, "other agent", "x"),
+	adminTurn("th-2", 25, "turn 2", "answer 2"),
+	adminTurn("th-2", 11, "turn 1", "answer 1"),
+}
 
-	tests := []unextractedAdminTurnsTestCase{
-		{
-			name:     "NilDBError",
-			nilDB:    true,
-			threadID: "th-1",
-			wantErr:  true,
-		},
-		{
-			name:      "EmptyThreadID",
-			threadID:  "   ",
-			wantErr:   false,
-			wantEmpty: true,
-		},
-		{
-			name:     "DBQueryError",
-			threadID: "th-1",
-			queryErr: errors.New("query error"),
-			wantErr:  true,
-		},
-		{
-			name:         "Success",
-			threadID:     "th-1",
-			limit:        50,
-			agent:        "agent-alpha",
-			watermarkSQL: "SELECT 10, NULL",
-			rowsSQL:      "SELECT 'm1', 12, 'th-1', 'hello', 'world', 'COMPLETED', 1, '2026-01-01 00:00:00', '2026-01-01 00:00:00'",
-			wantCount:    1,
-			wantRowIDs:   []int64{12},
-			wantPatterns: []string{"FROM messages", "WHERE agent = $1 AND thread_id = $2"},
-		},
-		{
-			name:         "Success_MultipleTurnsSortedAscending",
-			threadID:     "th-2",
-			limit:        50,
-			watermarkSQL: "SELECT 0, NULL",
-			rowsSQL:      "SELECT 'm1', 10, 'th-2', 'turn 1', 'answer 1', 'COMPLETED', 1, '2026-01-01 00:00:00', '2026-01-01 00:00:00' UNION ALL SELECT 'm2', 25, 'th-2', 'turn 2', 'answer 2', 'COMPLETED', 1, '2026-01-01 00:00:00', '2026-01-01 00:00:00'",
-			wantCount:    2,
-			wantRowIDs:   []int64{10, 25},
-			wantPatterns: []string{"FROM messages", "WHERE agent = $1 AND thread_id = $2"},
-		},
+var sqlstoreAlphaWatermarks = []sqlstoreWatermark{{agent: "agent-alpha", thread: "th-1", rowID: 10}}
+
+func seedSQLStoreWatermarks(t *testing.T, db DBTX, marks []sqlstoreWatermark) {
+	t.Helper()
+	for _, m := range marks {
+		seedWatermark(t, db, m.agent, m.thread, m.rowID, nil)
+	}
+}
+
+func TestSQLStore_GetUnextractedAdminTurns(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		nilDB      bool
+		turns      []testTurn
+		watermarks []sqlstoreWatermark
+		threadID   string
+		limit      int
+		agent      []string
+		sabotage   string
+		wantErr    bool
+		want       []string // id|row|thread|content|response|created
+	}{
+		{name: "NilDBError", nilDB: true, threadID: "th-1", wantErr: true},
+		{name: "EmptyThreadID", turns: sqlstoreAlphaTurns, threadID: "   "},
+		{name: "WatermarkError", turns: sqlstoreAlphaTurns, threadID: "th-1", sabotage: sabotageWatermarks, wantErr: true},
+		{name: "TurnQueryError", turns: sqlstoreAlphaTurns, threadID: "th-1", sabotage: sabotageTurnReads, wantErr: true},
+		{name: "AgentScopedAboveWatermarkExtractableOnly", turns: sqlstoreAlphaTurns, watermarks: sqlstoreAlphaWatermarks, threadID: " th-1 ", limit: 50, agent: []string{" agent-alpha "}, want: []string{"m12|12|th-1|hello|world|2026-01-02T03:04:17Z"}},
+		{name: "DefaultAgentSortedAscending", turns: sqlstoreAlphaTurns, watermarks: sqlstoreAlphaWatermarks, threadID: "th-2", want: []string{"m11|11|th-2|turn 1|answer 1|2026-01-02T03:04:16Z", "m25|25|th-2|turn 2|answer 2|2026-01-02T03:04:30Z"}},
+		{name: "LimitBoundsBatch", turns: sqlstoreAlphaTurns, threadID: "th-2", limit: 1, want: []string{"m11|11|th-2|turn 1|answer 1|2026-01-02T03:04:16Z"}},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			runGetUnextractedAdminTurnsCase(t, tc, dbMem)
+			t.Parallel()
+			store := sqlstoreTestStore(t, tc.nilDB, "")
+			if !tc.nilDB {
+				seedTurns(t, store.DB(), tc.turns...)
+				seedSQLStoreWatermarks(t, store.DB(), tc.watermarks)
+				execSQL(t, store.DB(), tc.sabotage)
+			}
+			turns, err := store.GetUnextractedAdminTurns(context.Background(), tc.threadID, tc.limit, tc.agent...)
+			assertSQLStoreErr(t, err, tc.wantErr, nil)
+			got := make([]string, 0, len(turns))
+			for _, m := range turns {
+				got = append(got, strings.Join([]string{m.ID, strconv.FormatInt(m.RowID, 10), m.ThreadID, m.Content, m.ResponseText, m.CreatedAt.Format(time.RFC3339)}, "|"))
+				if m.Status != "COMPLETED" || !m.IsAdmin || !m.UpdatedAt.Equal(m.CreatedAt) {
+					t.Errorf("turn %s status %q admin %v updated %v, want COMPLETED admin updated=created", m.ID, m.Status, m.IsAdmin, m.UpdatedAt)
+				}
+			}
+			if strings.Join(got, "\n") != strings.Join(tc.want, "\n") {
+				t.Errorf("turns = %q, want %q", got, tc.want)
+			}
 		})
 	}
 }
 
 func TestSQLStore_GetMaxMessageRowID(t *testing.T) {
-	dbMem := setupTestDBMem(t)
-	ctx := context.Background()
-
+	t.Parallel()
+	maxTurns := []testTurn{
+		{agent: "agent-alpha", thread: "th-1", rowID: 42, content: "a", status: "COMPLETED"},
+		{agent: "agent-alpha", thread: "th-1", rowID: 50, content: "b", status: "PENDING"},
+		{agent: "agent-alpha", thread: "th-1", rowID: 41, content: "c", status: "COMPLETED", admin: true},
+		adminTurn("th-1", 7, "d", "e"),
+	}
 	tests := []struct {
 		name     string
 		nilDB    bool
 		threadID string
-		agent    string
-		queryErr error
-		rowSQL   string
+		agent    []string
+		sabotage string
 		wantErr  bool
 		wantID   int64
 	}{
-		{
-			name:     "NilDBError",
-			nilDB:    true,
-			threadID: "th-1",
-			wantErr:  true,
-		},
-		{
-			name:     "EmptyThreadID",
-			threadID: "",
-			wantErr:  false,
-			wantID:   0,
-		},
-		{
-			name:     "QueryError",
-			threadID: "th-1",
-			queryErr: errors.New("db error"),
-			wantErr:  true,
-		},
-		{
-			name:     "SuccessWithRow",
-			threadID: "th-1",
-			agent:    "agent-alpha",
-			rowSQL:   "SELECT 42",
-			wantID:   42,
-		},
-		{
-			name:     "SuccessEmptyDefaultZero",
-			threadID: "th-2",
-			rowSQL:   "SELECT 0",
-			wantID:   0,
-		},
+		{name: "NilDBError", nilDB: true, threadID: "th-1", wantErr: true},
+		{name: "EmptyThreadID", threadID: " "},
+		{name: "QueryError", threadID: "th-1", sabotage: sabotageMessages, wantErr: true},
+		{name: "AgentScopedCompletedOnly", threadID: "th-1", agent: []string{"agent-alpha"}, wantID: 42},
+		{name: "DefaultAgent", threadID: " th-1 ", wantID: 7},
+		{name: "UnknownThreadZero", threadID: "th-404", agent: []string{"agent-alpha"}},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			var store *SQLStore
-			if tc.nilDB {
-				store = &SQLStore{}
-			} else {
-				store = NewSQLStore(queryMockDBTX{
-					dbMem:    dbMem,
-					queryErr: tc.queryErr,
-					rowSQL:   tc.rowSQL,
-				})
+			t.Parallel()
+			store := sqlstoreTestStore(t, tc.nilDB, "")
+			if !tc.nilDB {
+				seedTurns(t, store.DB(), maxTurns...)
+				execSQL(t, store.DB(), tc.sabotage)
 			}
-
-			id, err := store.GetMaxMessageRowID(ctx, tc.threadID, tc.agent)
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("GetMaxMessageRowID() err = %v, wantErr = %v", err, tc.wantErr)
-			}
-			if !tc.wantErr && id != tc.wantID {
+			id, err := store.GetMaxMessageRowID(context.Background(), tc.threadID, tc.agent...)
+			assertSQLStoreErr(t, err, tc.wantErr, nil)
+			if id != tc.wantID {
 				t.Errorf("GetMaxMessageRowID() = %d, want %d", id, tc.wantID)
 			}
 		})
@@ -645,418 +735,112 @@ func TestSQLStore_GetMaxMessageRowID(t *testing.T) {
 }
 
 func TestSQLStore_UpdateConversationFactWatermark(t *testing.T) {
-	dbMem := setupTestDBMem(t)
-
-	tests := []sqlStoreUpdateWatermarkCase{
-		{
-			name:     "NilDBError",
-			nilDB:    true,
-			threadID: "th-1",
-			wantErr:  true,
-		},
-		{
-			name:     "EmptyThreadID",
-			threadID: "",
-			wantErr:  false,
-		},
-		{
-			name:     "ExecError",
-			threadID: "th-1",
-			execErr:  errors.New("exec error"),
-			wantErr:  true,
-		},
-		{
-			name:         "Success",
-			threadID:     "th-1",
-			maxRowID:     99,
-			wantPatterns: []string{"INSERT INTO extraction_watermarks (agent, thread_id", "ON CONFLICT (agent, thread_id) DO UPDATE"},
-		},
+	t.Parallel()
+	tests := []struct {
+		name     string
+		nilDB    bool
+		seed     []sqlstoreWatermark
+		threadID string
+		maxRowID int64
+		agent    []string
+		sabotage string
+		wantErr  bool
+		want     []sqlstoreWatermark // all rows ordered by agent, thread
+	}{
+		{name: "NilDBError", nilDB: true, threadID: "th-1", wantErr: true},
+		{name: "EmptyThreadIDNoop", threadID: "  ", maxRowID: 9, want: []sqlstoreWatermark{}},
+		{name: "ExecError", seed: []sqlstoreWatermark{{agent: "aerial", thread: "th-1", rowID: 5}}, threadID: "th-1", maxRowID: 99, sabotage: sabotageWatermarkWrite, wantErr: true, want: []sqlstoreWatermark{{agent: "aerial", thread: "th-1", rowID: 5}}},
+		{name: "InsertsNewRow", threadID: " th-1 ", maxRowID: 99, want: []sqlstoreWatermark{{agent: "aerial", thread: "th-1", rowID: 99, extracted: true}}},
+		{name: "AdvancesLowerRow", seed: []sqlstoreWatermark{{agent: "aerial", thread: "th-1", rowID: 50}}, threadID: "th-1", maxRowID: 99, want: []sqlstoreWatermark{{agent: "aerial", thread: "th-1", rowID: 99, extracted: true}}},
+		{name: "GreatestKeepsHigherRow", seed: []sqlstoreWatermark{{agent: "aerial", thread: "th-1", rowID: 120}}, threadID: "th-1", maxRowID: 99, want: []sqlstoreWatermark{{agent: "aerial", thread: "th-1", rowID: 120, extracted: true}}},
+		{name: "PerAgentScoping", seed: []sqlstoreWatermark{{agent: "agent-beta", thread: "th-1", rowID: 500}, {agent: "aerial", thread: "th-1", rowID: 3}}, threadID: "th-1", maxRowID: 99, agent: []string{" agent-beta "}, want: []sqlstoreWatermark{{agent: "aerial", thread: "th-1", rowID: 3}, {agent: "agent-beta", thread: "th-1", rowID: 500, extracted: true}}},
+		{name: "DefaultAgentLeavesOtherAgent", seed: []sqlstoreWatermark{{agent: "agent-beta", thread: "th-1", rowID: 500}}, threadID: "th-1", maxRowID: 99, want: []sqlstoreWatermark{{agent: "aerial", thread: "th-1", rowID: 99, extracted: true}, {agent: "agent-beta", thread: "th-1", rowID: 500}}},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			runUpdateConversationFactWatermarkCase(t, tc, dbMem)
+			t.Parallel()
+			ctx := context.Background()
+			store := sqlstoreTestStore(t, tc.nilDB, "")
+			if !tc.nilDB {
+				seedSQLStoreWatermarks(t, store.DB(), tc.seed)
+				execSQL(t, store.DB(), tc.sabotage)
+			}
+			assertSQLStoreErr(t, store.UpdateConversationFactWatermark(ctx, tc.threadID, tc.maxRowID, tc.agent...), tc.wantErr, nil)
+			if tc.nilDB {
+				return
+			}
+			rows, err := store.DB().QueryContext(ctx, `SELECT agent, thread_id, last_extracted_rowid, fact_extracted_at IS NOT NULL FROM extraction_watermarks ORDER BY agent, thread_id`)
+			if err != nil {
+				t.Fatalf("read watermarks: %v", err)
+			}
+			defer rows.Close()
+			got := []sqlstoreWatermark{}
+			for rows.Next() {
+				var w sqlstoreWatermark
+				if err := rows.Scan(&w.agent, &w.thread, &w.rowID, &w.extracted); err != nil {
+					t.Fatalf("scan: %v", err)
+				}
+				got = append(got, w)
+			}
+			if err := rows.Err(); err != nil {
+				t.Fatalf("read watermarks: %v", err)
+			}
+			if len(got) != len(tc.want) {
+				t.Fatalf("watermarks = %+v, want %+v", got, tc.want)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Errorf("watermark[%d] = %+v, want %+v", i, got[i], tc.want[i])
+				}
+			}
 		})
 	}
+}
+
+// sqlstoreNearestFacts sit at 0°, 25.84°, 60° and 90°; cosine similarity
+// to angle q is cos(deg - q).
+var sqlstoreNearestFacts = []sqlstoreFact{
+	{text: "a", deg: 0},
+	{text: "b", deg: 25.84},
+	{text: "c", deg: 60},
+	{text: "d", deg: 90},
 }
 
 func TestSQLStore_FindNearestScoredFacts(t *testing.T) {
-	dbMem := setupTestDBMem(t)
-	emb := make([]float32, ExpectedEmbeddingDim)
-
-	tests := []sqlStoreFindNearestScoredFactsCase{
-		{
-			name:    "NilDBError",
-			nilDB:   true,
-			emb:     emb,
-			wantErr: true,
-		},
-		{
-			name:      "InvalidEmbeddingDim",
-			emb:       []float32{1.0, 2.0},
-			wantErr:   false,
-			wantCount: 0,
-		},
-		{
-			name:     "QueryError",
-			emb:      emb,
-			queryErr: errors.New("nearest scored query error"),
-			wantErr:  true,
-		},
-		{
-			name:    "RowScanError",
-			emb:     emb,
-			rowSQL:  "SELECT 'invalid' AS id",
-			wantErr: true,
-		},
-		{
-			name:         "SuccessDefaults",
-			emb:          emb,
-			limit:        -1,
-			minSim:       -1,
-			rowSQL:       "SELECT 10, 'Morning walk', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 1, 0.77",
-			wantCount:    1,
-			wantMinScore: 0.77,
-		},
+	t.Parallel()
+	tests := []struct {
+		name     string
+		nilDB    bool
+		emb      []float32
+		limit    int
+		minSim   float64
+		sabotage string
+		wantErr  bool
+		want     []sqlstoreScored
+	}{
+		{name: "NilDBError", nilDB: true, emb: angleEmbedding(0), wantErr: true},
+		{name: "InvalidEmbeddingDim", emb: []float32{1, 2}},
+		{name: "QueryError", emb: angleEmbedding(0), sabotage: sabotageFacts, wantErr: true},
+		{name: "DefaultsMinSim060", emb: angleEmbedding(0), limit: -1, minSim: -1, want: []sqlstoreScored{{"a", 1}, {"b", 0.9}}},
+		{name: "LowerMinSim", emb: angleEmbedding(0), limit: 5, minSim: 0.4, want: []sqlstoreScored{{"a", 1}, {"b", 0.9}, {"c", 0.5}}},
+		{name: "LimitOne", emb: angleEmbedding(0), limit: 1, minSim: 0.1, want: []sqlstoreScored{{"a", 1}}},
+		{name: "OtherQueryAngle", emb: angleEmbedding(90), minSim: 0.4, want: []sqlstoreScored{{"d", 1}, {"c", 0.866025}, {"b", 0.435860}}},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			runFindNearestScoredFactsCase(t, tc, dbMem)
+			t.Parallel()
+			store := sqlstoreTestStore(t, tc.nilDB, tc.sabotage, sqlstoreNearestFacts...)
+			scored, err := store.FindNearestScoredFacts(context.Background(), tc.emb, tc.limit, tc.minSim)
+			assertSQLStoreErr(t, err, tc.wantErr, nil)
+			texts := make([]string, 0, len(scored))
+			scores := make([]float64, 0, len(scored))
+			for _, s := range scored {
+				texts = append(texts, s.Fact.FactText)
+				scores = append(scores, s.Score)
+			}
+			assertScoredTexts(t, texts, scores, tc.want)
 		})
-	}
-}
-
-type sqlStoreInsertFactCase struct {
-	name     string
-	nilDB    bool
-	factText string
-	emb      []float32
-	queryErr error
-	rowSQL   string
-	wantErr  bool
-	wantID   int64
-}
-
-func runInsertFactCase(t *testing.T, tc sqlStoreInsertFactCase, dbMem *sql.DB) {
-	t.Helper()
-	ctx := context.Background()
-	var store *SQLStore
-	if tc.nilDB {
-		store = &SQLStore{}
-	} else {
-		store = NewSQLStore(queryMockDBTX{
-			dbMem:    dbMem,
-			queryErr: tc.queryErr,
-			rowSQL:   tc.rowSQL,
-		})
-	}
-	id, err := store.InsertFact(ctx, tc.factText, tc.emb)
-	if (err != nil) != tc.wantErr {
-		t.Fatalf("InsertFact() err = %v, wantErr = %v", err, tc.wantErr)
-	}
-	if tc.wantID > 0 && id != tc.wantID {
-		t.Errorf("InsertFact() id = %d, want %d", id, tc.wantID)
-	}
-}
-
-type sqlStoreUpdateFactCase struct {
-	name         string
-	nilDB        bool
-	factText     string
-	emb          []float32
-	execErr      error
-	rowsAffected int64
-	wantErr      bool
-}
-
-func runUpdateFactCase(t *testing.T, tc sqlStoreUpdateFactCase, dbMem *sql.DB) {
-	t.Helper()
-	ctx := context.Background()
-	var store *SQLStore
-	if tc.nilDB {
-		store = &SQLStore{}
-	} else {
-		store = NewSQLStore(queryMockDBTX{
-			dbMem:        dbMem,
-			execErr:      tc.execErr,
-			rowsAffected: tc.rowsAffected,
-		})
-	}
-	err := store.UpdateFact(ctx, 10, tc.factText, tc.emb)
-	if (err != nil) != tc.wantErr {
-		t.Fatalf("UpdateFact() err = %v, wantErr = %v", err, tc.wantErr)
-	}
-}
-
-type sqlStoreFactMutateCase struct {
-	name         string
-	nilDB        bool
-	execErr      error
-	rowsAffected int64
-	wantErr      bool
-}
-
-func runSQLStoreFactMutateCase(t *testing.T, opName string, tc sqlStoreFactMutateCase, dbMem *sql.DB) {
-	t.Helper()
-	ctx := context.Background()
-	var store *SQLStore
-	if tc.nilDB {
-		store = &SQLStore{}
-	} else {
-		store = NewSQLStore(queryMockDBTX{
-			dbMem:        dbMem,
-			execErr:      tc.execErr,
-			rowsAffected: tc.rowsAffected,
-		})
-	}
-	var err error
-	if opName == "ReinforceFact" {
-		err = store.ReinforceFact(ctx, 10)
-	} else {
-		err = store.DeleteFact(ctx, 10)
-	}
-	if (err != nil) != tc.wantErr {
-		t.Fatalf("%s() err = %v, wantErr = %v", opName, err, tc.wantErr)
-	}
-}
-
-func sqlStoreFactMutateCases(errPrefix string) []sqlStoreFactMutateCase {
-	return []sqlStoreFactMutateCase{
-		{name: "NilDBError", nilDB: true, wantErr: true},
-		{name: "ExecError", execErr: errors.New(errPrefix + " err"), wantErr: true},
-		{name: "NotFoundZeroRows", rowsAffected: 0, wantErr: true},
-		{name: "Success", rowsAffected: 1, wantErr: false},
-	}
-}
-
-type sqlStoreSearchCandidateFactsCase struct {
-	name         string
-	nilDB        bool
-	emb          []float32
-	query        string
-	limit        int
-	minScore     float64
-	queryErr     error
-	rowSQL       string
-	wantErr      bool
-	wantPatterns []string
-	wantCount    int
-}
-
-func runSearchCandidateFactsCase(t *testing.T, tc sqlStoreSearchCandidateFactsCase, dbMem *sql.DB) {
-	t.Helper()
-	ctx := context.Background()
-	var captured string
-	var store *SQLStore
-	if tc.nilDB {
-		store = &SQLStore{}
-	} else {
-		store = NewSQLStore(queryMockDBTX{
-			dbMem:         dbMem,
-			queryErr:      tc.queryErr,
-			rowSQL:        tc.rowSQL,
-			capturedQuery: &captured,
-		})
-	}
-	results, err := store.SearchCandidateFacts(ctx, tc.emb, tc.query, tc.limit, tc.minScore)
-	if (err != nil) != tc.wantErr {
-		t.Fatalf("SearchCandidateFacts() err = %v, wantErr = %v", err, tc.wantErr)
-	}
-	assertCapturedQueryPatterns(t, captured, tc.wantPatterns)
-	if tc.wantCount > 0 && len(results) != tc.wantCount {
-		t.Errorf("len(results) = %d, want %d", len(results), tc.wantCount)
-	}
-}
-
-type sqlStoreGetFactsPaginatedCase struct {
-	name         string
-	nilDB        bool
-	filter       FactsFilter
-	queryErr     error
-	rowSQL       string
-	wantErr      bool
-	wantPatterns []string
-	wantTotal    int
-}
-
-func assertCapturedQueryPatterns(t *testing.T, captured string, patterns []string) {
-	t.Helper()
-	for _, pat := range patterns {
-		if !strings.Contains(captured, pat) {
-			t.Errorf("captured query missing %q: %s", pat, captured)
-		}
-	}
-}
-
-func runGetFactsPaginatedCase(t *testing.T, tc sqlStoreGetFactsPaginatedCase, dbMem *sql.DB) {
-	t.Helper()
-	ctx := context.Background()
-	var captured string
-	var store *SQLStore
-	if tc.nilDB {
-		store = &SQLStore{}
-	} else {
-		store = NewSQLStore(queryMockDBTX{
-			dbMem:         dbMem,
-			queryErr:      tc.queryErr,
-			rowSQL:        tc.rowSQL,
-			capturedQuery: &captured,
-		})
-	}
-	res, err := store.GetFactsPaginated(ctx, tc.filter)
-	if (err != nil) != tc.wantErr {
-		t.Fatalf("GetFactsPaginated() err = %v, wantErr = %v", err, tc.wantErr)
-	}
-	if !tc.wantErr && tc.wantTotal > 0 && res != nil && res.Total != tc.wantTotal {
-		t.Errorf("TotalCount = %d, want %d", res.Total, tc.wantTotal)
-	}
-	assertCapturedQueryPatterns(t, captured, tc.wantPatterns)
-}
-
-type unextractedAdminTurnsTestCase struct {
-	name         string
-	nilDB        bool
-	threadID     string
-	limit        int
-	agent        string
-	queryErr     error
-	watermarkSQL string
-	rowsSQL      string
-	wantErr      bool
-	wantEmpty    bool
-	wantCount    int
-	wantRowIDs   []int64
-	wantPatterns []string
-}
-
-func runGetUnextractedAdminTurnsCase(t *testing.T, tc unextractedAdminTurnsTestCase, dbMem *sql.DB) {
-	t.Helper()
-	ctx := context.Background()
-	var captured string
-	var store *SQLStore
-
-	if tc.nilDB {
-		store = &SQLStore{}
-	} else {
-		store = NewSQLStore(queryMockDBTX{
-			dbMem:         dbMem,
-			queryErr:      tc.queryErr,
-			rowSQL:        tc.watermarkSQL,
-			rowsSQL:       tc.rowsSQL,
-			capturedQuery: &captured,
-		})
-	}
-
-	var turns []Message
-	var err error
-	if tc.agent != "" {
-		turns, err = store.GetUnextractedAdminTurns(ctx, tc.threadID, tc.limit, tc.agent)
-	} else {
-		turns, err = store.GetUnextractedAdminTurns(ctx, tc.threadID, tc.limit)
-	}
-	if (err != nil) != tc.wantErr {
-		t.Fatalf("GetUnextractedAdminTurns() err = %v, wantErr = %v", err, tc.wantErr)
-	}
-	if tc.wantEmpty && len(turns) != 0 {
-		t.Errorf("expected empty turns, got %d", len(turns))
-	}
-	if tc.wantCount > 0 && len(turns) != tc.wantCount {
-		t.Errorf("len(turns) = %d, want %d", len(turns), tc.wantCount)
-	}
-	if len(tc.wantRowIDs) > 0 {
-		assertTurnRowIDsMatch(t, turns, tc.wantRowIDs)
-	}
-	for _, pat := range tc.wantPatterns {
-		if !strings.Contains(captured, pat) {
-			t.Errorf("captured query missing %q: %s", pat, captured)
-		}
-	}
-}
-
-func assertTurnRowIDsMatch(t *testing.T, turns []Message, wantRowIDs []int64) {
-	t.Helper()
-	gotRowIDs := make([]int64, 0, len(turns))
-	for _, turn := range turns {
-		gotRowIDs = append(gotRowIDs, turn.RowID)
-	}
-	if len(gotRowIDs) != len(wantRowIDs) {
-		t.Errorf("got rowIDs len = %d, want %d", len(gotRowIDs), len(wantRowIDs))
-		return
-	}
-	for i, id := range gotRowIDs {
-		if id != wantRowIDs[i] {
-			t.Errorf("rowID[%d] = %d, want %d", i, id, wantRowIDs[i])
-		}
-	}
-}
-
-type sqlStoreUpdateWatermarkCase struct {
-	name         string
-	nilDB        bool
-	threadID     string
-	maxRowID     int64
-	execErr      error
-	wantErr      bool
-	wantPatterns []string
-}
-
-func runUpdateConversationFactWatermarkCase(t *testing.T, tc sqlStoreUpdateWatermarkCase, dbMem *sql.DB) {
-	t.Helper()
-	ctx := context.Background()
-	var captured string
-	var store *SQLStore
-	if tc.nilDB {
-		store = &SQLStore{}
-	} else {
-		store = NewSQLStore(queryMockDBTX{
-			dbMem:         dbMem,
-			execErr:       tc.execErr,
-			capturedQuery: &captured,
-		})
-	}
-	if err := store.UpdateConversationFactWatermark(ctx, tc.threadID, tc.maxRowID); (err != nil) != tc.wantErr {
-		t.Fatalf("UpdateConversationFactWatermark() err = %v, wantErr = %v", err, tc.wantErr)
-	}
-	assertCapturedQueryPatterns(t, captured, tc.wantPatterns)
-}
-
-type sqlStoreFindNearestScoredFactsCase struct {
-	name         string
-	nilDB        bool
-	emb          []float32
-	limit        int
-	minSim       float64
-	queryErr     error
-	rowSQL       string
-	wantErr      bool
-	wantCount    int
-	wantMinScore float64
-}
-
-func runFindNearestScoredFactsCase(t *testing.T, tc sqlStoreFindNearestScoredFactsCase, dbMem *sql.DB) {
-	t.Helper()
-	ctx := context.Background()
-	var captured string
-	var store *SQLStore
-	if tc.nilDB {
-		store = &SQLStore{}
-	} else {
-		store = NewSQLStore(queryMockDBTX{
-			dbMem:         dbMem,
-			queryErr:      tc.queryErr,
-			rowSQL:        tc.rowSQL,
-			capturedQuery: &captured,
-		})
-	}
-	scored, err := store.FindNearestScoredFacts(ctx, tc.emb, tc.limit, tc.minSim)
-	if (err != nil) != tc.wantErr {
-		t.Fatalf("FindNearestScoredFacts() err = %v, wantErr = %v", err, tc.wantErr)
-	}
-	if tc.wantCount > 0 && len(scored) != tc.wantCount {
-		t.Errorf("len(scored) = %d, want %d", len(scored), tc.wantCount)
-	}
-	if tc.wantMinScore > 0 && len(scored) > 0 && scored[0].Score < tc.wantMinScore {
-		t.Errorf("scored[0].Score = %f, want >= %f", scored[0].Score, tc.wantMinScore)
 	}
 }
