@@ -5,9 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 
 	"github.com/azylman/aerial/pkg/eriwire"
+	"github.com/azylman/aerial/pkg/prwire"
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/ericlient"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/executor"
@@ -259,11 +261,89 @@ func (f *Flow) handleCIFailureAtCap(ctx context.Context, buildID, chunkID, banne
 // HandleCIRemediationCapReached fails the chunk once CI remediation attempts
 // are exhausted and fans out the human-review alert.
 func (f *Flow) HandleCIRemediationCapReached(ctx context.Context, chunkID string, failCount int, ev pubsub.PRLifecycleEvent) error {
-	bld, chk, failed, err := f.Store.FailChunk(ctx, chunkID, "ci_remediation_cap_reached", "")
+	content := fmt.Sprintf("🛑 [%s#%d] CI check %q failed %d times (remediation cap %d/%d reached). Automatic fix loop paused for human review.", ev.Repo, ev.PRNumber, ev.CheckName, failCount, executor.MaxCIRemediationAttempts, executor.MaxCIRemediationAttempts)
+	capBanner := fmt.Sprintf("CI remediation cap (%d/%d) reached — awaiting human review", executor.MaxCIRemediationAttempts, executor.MaxCIRemediationAttempts)
+	return f.pauseChunk(ctx, chunkID, "ci_remediation_cap_reached", content, capBanner)
+}
+
+// CIRemediationNoOutcomeReason is the failure reason for a CI fix-up turn that
+// ended without pushing, overriding RoboRev, or calling fail_chunk.
+const CIRemediationNoOutcomeReason = "ci_remediation_no_outcome"
+
+// HandleCIRemediationTurnEnded pauses the chunk when the current CI fix-up turn
+// ended verdictless and nothing moved: the chunk is still ci_failed on the same
+// attempt, the PR is open on the dispatched head, and (for RoboRev failures) no
+// override is recorded on that head. Every other case is a no-op because some
+// other path already acted.
+func (f *Flow) HandleCIRemediationTurnEnded(ctx context.Context, buildID, chunkID, dispatchID string) error {
+	if f == nil || f.Store == nil || f.Exec == nil {
+		return nil
+	}
+	headSHA, attempt, ok := executor.ParseCIRemediationDispatchID(chunkID, dispatchID)
+	if !ok || headSHA == "" {
+		return nil
+	}
+	bld, chunks, err := f.Store.GetBuild(ctx, buildID)
 	if err != nil {
 		return err
 	}
-	if !isFailureNotificationEligible(chk, failed, "ci_remediation_cap_reached") || bld == nil || f.Exec == nil {
+	idx := FindChunkIndex(chunks, chunkID)
+	if bld == nil || idx < 0 {
+		return nil
+	}
+	chunk := chunks[idx]
+	if strings.TrimSpace(chunk.Status) != statusCIFailed || chunk.PRNumber <= 0 || chunk.CIFailCount != attempt {
+		return nil
+	}
+	liveHead, open, err := f.Exec.LivePRState(ctx, chunk.Repo, chunk.PRNumber)
+	if err != nil {
+		return err
+	}
+	if !open || !strings.EqualFold(liveHead, headSHA) {
+		return nil
+	}
+	if hasFailingRoboRevCheck(chunk) {
+		overridden, oErr := f.Exec.HasRoboRevOverride(ctx, chunk.Repo, chunk.PRNumber, headSHA)
+		if oErr != nil {
+			return oErr
+		}
+		if overridden {
+			return nil
+		}
+	}
+	content := fmt.Sprintf("🛑 [%s#%d] CI fix-up turn ended without pushing a fix, recording an override, or calling fail_chunk. Chunk paused for a decision.", chunk.Repo, chunk.PRNumber)
+	return f.pauseChunk(ctx, chunkID, CIRemediationNoOutcomeReason, content, "CI fix-up turn ended without an outcome — awaiting a decision")
+}
+
+// hasFailingRoboRevCheck reports whether the chunk's recorded checks or its
+// failure banner name a failing RoboRev gate.
+func hasFailingRoboRevCheck(chunk model.VanadisChunk) bool {
+	for name, state := range chunk.CIChecks {
+		if prwire.IsRoboRevCheck(name) && state == "failed" {
+			return true
+		}
+	}
+	name, ok := strings.CutPrefix(strings.TrimSpace(chunk.Banner), "CI check ")
+	if !ok {
+		return false
+	}
+	unquoted, err := strconv.QuotedPrefix(name)
+	if err != nil {
+		return false
+	}
+	checkName, err := strconv.Unquote(unquoted)
+	return err == nil && prwire.IsRoboRevCheck(checkName)
+}
+
+// pauseChunk fails the chunk with reason, cancels its dispatch, posts content to
+// the build thread unless the build is quiet, and refreshes the widget banner.
+// The chunk failure wake and event come from build reconciliation.
+func (f *Flow) pauseChunk(ctx context.Context, chunkID, reason, content, banner string) error {
+	bld, chk, failed, err := f.Store.FailChunk(ctx, chunkID, reason, "")
+	if err != nil {
+		return err
+	}
+	if !isFailureNotificationEligible(chk, failed, reason) || bld == nil || f.Exec == nil {
 		return nil
 	}
 	if strings.TrimSpace(bld.Agent) != "" {
@@ -274,23 +354,18 @@ func (f *Flow) HandleCIRemediationCapReached(ctx context.Context, chunkID string
 	}
 	var msgErr error
 	if !bld.Quiet {
-		targetID := strings.TrimSpace(bld.ThreadID)
-		content := fmt.Sprintf("🛑 [%s#%d] CI check %q failed %d times (remediation cap %d/%d reached). Automatic fix loop paused for human review.", ev.Repo, ev.PRNumber, ev.CheckName, failCount, executor.MaxCIRemediationAttempts, executor.MaxCIRemediationAttempts)
-		if mErr := f.Exec.DispatchDirectMessage(ctx, targetID, content); mErr != nil {
+		if mErr := f.Exec.DispatchDirectMessage(ctx, strings.TrimSpace(bld.ThreadID), content); mErr != nil {
 			slog.WarnContext(ctx, "[vanadis-restate] direct alert message warning", "error", mErr)
 			msgErr = mErr
 		}
 	}
-	capBanner := fmt.Sprintf("CI remediation cap (%d/%d) reached — awaiting human review", executor.MaxCIRemediationAttempts, executor.MaxCIRemediationAttempts)
 	chunks := []model.VanadisChunk{}
 	if chk != nil {
 		chunks = append(chunks, *chk)
 	}
-	if _, sErr := f.Exec.SyncBuildWidget(ctx, f.Store, *bld, chunks, capBanner); sErr != nil {
+	if _, sErr := f.Exec.SyncBuildWidget(ctx, f.Store, *bld, chunks, banner); sErr != nil {
 		slog.WarnContext(ctx, "[vanadis-restate] sync build widget warning", "error", sErr)
 	}
-	// The chunk failure wake and event come from build reconciliation, which
-	// runs after this PR event.
 	return msgErr
 }
 
