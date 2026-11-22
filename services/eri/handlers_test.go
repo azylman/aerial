@@ -10,8 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"os"
-	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -25,6 +24,7 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/db"
 	"github.com/azylman/aerial/services/eri/pkg/db/dbtest"
 	"github.com/azylman/aerial/services/eri/pkg/delivery"
+	"github.com/azylman/aerial/services/eri/pkg/llmcall"
 	"github.com/azylman/aerial/services/eri/pkg/queue"
 	"github.com/azylman/aerial/services/eri/pkg/runner"
 	"github.com/azylman/aerial/services/eri/pkg/transcript"
@@ -1075,125 +1075,132 @@ func TestStatusRecorder_Flush(t *testing.T) {
 	srPlain.Flush() // should not panic
 }
 
-func TestHandleInternalLLM(t *testing.T) {
-	attSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/file.txt":
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte("attachment content"))
-		case "/notfound":
-			http.NotFound(w, r)
-		case "/servererror":
-			w.WriteHeader(http.StatusInternalServerError)
-		default:
-			http.NotFound(w, r)
-		}
+// llmIngressCapture is what the Restate ingress stub saw for one call.
+type llmIngressCapture struct {
+	path    string
+	idemKey string
+	hasKey  bool
+	req     llmcall.Request
+}
+
+// newLLMIngressStub serves the Restate ingress with a fixed status and body,
+// recording each request into the returned channel.
+func newLLMIngressStub(t *testing.T, status int, body string) (*httptest.Server, <-chan llmIngressCapture) {
+	t.Helper()
+	seen := make(chan llmIngressCapture, 1)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c := llmIngressCapture{path: r.URL.Path}
+		c.idemKey = r.Header.Get("Idempotency-Key")
+		_, c.hasKey = r.Header["Idempotency-Key"]
+		_ = json.NewDecoder(r.Body).Decode(&c.req)
+		seen <- c
+		w.WriteHeader(status)
+		_, _ = w.Write([]byte(body))
 	}))
-	defer attSrv.Close()
+	t.Cleanup(ts.Close)
+	return ts, seen
+}
 
-	attSrvURL, _ := url.Parse(attSrv.URL)
-	attSrvHost := strings.ToLower(attSrvURL.Hostname())
-	delivery.AllowedInternalHosts[attSrvHost] = true
-	defer delete(delivery.AllowedInternalHosts, attSrvHost)
+func TestHandleInternalLLM(t *testing.T) {
+	t.Parallel()
 
-	var observedPrompt string
-	var observedDir string
-	var stagedFileContent []byte
-	var stagedFileExistsDuringRun bool
-	var observedDirPerm os.FileMode
-	var stagedFilePerm os.FileMode
-
-	stagingLLM := handleInternalLLM(func(ctx context.Context, model, p string) (string, error) {
-		observedPrompt = p
-		if _, after, ok := strings.Cut(p, "Staged directory: "); ok {
-			rest := after
-			lines := strings.Split(rest, "\n")
-			observedDir = strings.TrimSpace(lines[0])
-			if info, err := os.Stat(observedDir); err == nil {
-				observedDirPerm = info.Mode().Perm()
-			}
-			stagedPath := filepath.Join(observedDir, "test.txt")
-			if info, err := os.Stat(stagedPath); err == nil {
-				stagedFilePerm = info.Mode().Perm()
-			}
-			if data, err := os.ReadFile(stagedPath); err == nil {
-				stagedFileExistsDuringRun = true
-				stagedFileContent = data
-			}
-		}
-		return `[{"category":"system","fact":"ok"}]`, nil
-	})
-
-	okLLM := handleInternalLLM(func(ctx context.Context, model, p string) (string, error) {
-		return `[{"category":"system","fact":"ok"}]`, nil
-	})
-	errLLM := handleInternalLLM(func(ctx context.Context, model, p string) (string, error) {
-		return "", errors.New("llm failed")
-	})
-	nilLLM := handleInternalLLM(nil)
-
-	attsJSON := func(n int) string {
-		atts := make([]string, 0, n)
-		for i := range n {
-			atts = append(atts, fmt.Sprintf(`{"url":"%s/file.txt","filename":"file%d.txt"}`, attSrv.URL, i))
-		}
-		return fmt.Sprintf(`{"prompt":"inspect","attachments":[%s]}`, strings.Join(atts, ","))
+	const att1 = "http://vision.aerial/api/events/1/snapshot.jpg"
+	const att2 = "http://vision.aerial/api/events/1/clip.mp4"
+	tooMany := make([]string, 0, 33)
+	for i := range 33 {
+		tooMany = append(tooMany, fmt.Sprintf(`{"url":"%s","filename":"f%d.jpg"}`, att1, i))
 	}
-	elevenAttsJSON := attsJSON(11)
-	tooManyAttsJSON := attsJSON(33)
+	tooManyBody := `{"prompt":"inspect","attachments":[` + strings.Join(tooMany, ",") + `]}`
 
-	for _, tc := range []struct {
+	tests := []struct {
 		name       string
 		method     string
-		handler    http.HandlerFunc
+		agent      string
+		nilClient  bool
+		callerKey  string
 		body       string
+		stubStatus int
+		stubBody   string
 		wantStatus int
+		wantPath   string
+		wantReq    *llmcall.Request
+		wantBody   string
 	}{
-		{"method not allowed", http.MethodGet, okLLM, "", http.StatusMethodNotAllowed},
-		{"nil llm runner", http.MethodPost, nilLLM, `{"prompt":"hi"}`, http.StatusServiceUnavailable},
-		{"invalid json", http.MethodPost, okLLM, `{bad`, http.StatusBadRequest},
-		{"empty prompt", http.MethodPost, okLLM, `{"prompt":"   "}`, http.StatusBadRequest},
-		{"llm error", http.MethodPost, errLLM, `{"prompt":"extract"}`, http.StatusInternalServerError},
-		{"valid request", http.MethodPost, okLLM, `{"prompt":"extract"}`, http.StatusOK},
-		{"valid effort low", http.MethodPost, okLLM, `{"prompt":"extract","effort":"low"}`, http.StatusOK},
-		{"valid effort mixed case", http.MethodPost, okLLM, `{"prompt":"extract","effort":"Medium"}`, http.StatusOK},
-		{"valid effort high", http.MethodPost, okLLM, `{"prompt":"extract","effort":"high"}`, http.StatusOK},
-		{"invalid effort", http.MethodPost, okLLM, `{"prompt":"extract","effort":"turbo"}`, http.StatusBadRequest},
-		{"valid attachment staging", http.MethodPost, stagingLLM, fmt.Sprintf(`{"prompt":"inspect","attachments":[{"url":"%s/file.txt","filename":"test.txt"}]}`, attSrv.URL), http.StatusOK},
-		{"empty attachment url", http.MethodPost, okLLM, `{"prompt":"test","attachments":[{"url":"","filename":"test.txt"}]}`, http.StatusBadRequest},
-		{"empty attachment filename", http.MethodPost, okLLM, fmt.Sprintf(`{"prompt":"test","attachments":[{"url":"%s/file.txt","filename":""}]}`, attSrv.URL), http.StatusBadRequest},
-		{"duplicate attachment filename", http.MethodPost, okLLM, fmt.Sprintf(`{"prompt":"test","attachments":[{"url":"%s/file.txt","filename":"dup.txt"},{"url":"%s/file.txt","filename":"DUP.TXT"}]}`, attSrv.URL, attSrv.URL), http.StatusBadRequest},
-		{"disallowed attachment url", http.MethodPost, okLLM, `{"prompt":"test","attachments":[{"url":"http://evil.com/file.txt","filename":"test.txt"}]}`, http.StatusBadRequest},
-		{"invalid traversal attachment filename", http.MethodPost, okLLM, fmt.Sprintf(`{"prompt":"test","attachments":[{"url":"%s/file.txt","filename":"../test.txt"}]}`, attSrv.URL), http.StatusBadRequest},
-		{"eleven attachments accepted", http.MethodPost, okLLM, elevenAttsJSON, http.StatusOK},
-		{"exceeds max attachments", http.MethodPost, okLLM, tooManyAttsJSON, http.StatusBadRequest},
-		{"upstream 404 fetch error", http.MethodPost, okLLM, fmt.Sprintf(`{"prompt":"test","attachments":[{"url":"%s/notfound","filename":"nf.txt"}]}`, attSrv.URL), http.StatusBadRequest},
-		{"upstream 500 fetch error", http.MethodPost, okLLM, fmt.Sprintf(`{"prompt":"test","attachments":[{"url":"%s/servererror","filename":"err.txt"}]}`, attSrv.URL), http.StatusBadGateway},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			if code := runHTTP(tc.handler, tc.method, "/internal/llm", strings.NewReader(tc.body)).Code; code != tc.wantStatus {
-				t.Fatalf("got status=%d, want %d", code, tc.wantStatus)
-			}
-		})
+		{name: "method not allowed", method: http.MethodGet, agent: "aerial", wantStatus: http.StatusMethodNotAllowed},
+		{name: "nil client", method: http.MethodPost, nilClient: true, body: `{"prompt":"hi"}`, wantStatus: http.StatusServiceUnavailable},
+		{name: "invalid json", method: http.MethodPost, agent: "aerial", body: `{bad`, wantStatus: http.StatusBadRequest},
+		{name: "empty prompt", method: http.MethodPost, agent: "aerial", body: `{"prompt":"   "}`, wantStatus: http.StatusBadRequest},
+		{name: "invalid effort", method: http.MethodPost, agent: "aerial", body: `{"prompt":"extract","effort":"turbo"}`, wantStatus: http.StatusBadRequest},
+		{name: "caller key with whitespace", method: http.MethodPost, agent: "aerial", callerKey: "coven:extract a", body: `{"prompt":"extract"}`, wantStatus: http.StatusBadRequest},
+		{name: "empty attachment url", method: http.MethodPost, agent: "aerial", body: `{"prompt":"test","attachments":[{"url":"","filename":"a.jpg"}]}`, wantStatus: http.StatusBadRequest},
+		{name: "duplicate attachment filename", method: http.MethodPost, agent: "aerial", body: `{"prompt":"test","attachments":[{"url":"` + att1 + `","filename":"dup.jpg"},{"url":"` + att2 + `","filename":"DUP.JPG"}]}`, wantStatus: http.StatusBadRequest},
+		{name: "exceeds max attachments", method: http.MethodPost, agent: "aerial", body: tooManyBody, wantStatus: http.StatusBadRequest},
+		{
+			name: "unkeyed call", method: http.MethodPost, agent: "aerial", body: `{"prompt":"  extract  "}`,
+			stubStatus: http.StatusOK, stubBody: `{"response":"facts"}`,
+			wantStatus: http.StatusOK, wantPath: "/LLM/Complete", wantReq: &llmcall.Request{Prompt: "extract"}, wantBody: "facts",
+		},
+		{
+			name: "keyed call forwards attachments and effort", method: http.MethodPost, agent: "aerial", callerKey: "vision:caption:event:42:init",
+			body:       `{"prompt":"caption","effort":"Medium","attachments":[{"url":"` + att1 + `","filename":"snap.jpg"},{"url":"` + att2 + `","filename":"clip.mp4"}]}`,
+			stubStatus: http.StatusOK, stubBody: `{"response":"a cat"}`,
+			wantStatus: http.StatusOK, wantPath: "/LLM/Complete",
+			wantReq: &llmcall.Request{
+				Prompt: "caption", Effort: "medium", CallerKey: "vision:caption:event:42:init",
+				Attachments: []llmcall.Attachment{{URL: att1, Filename: "snap.jpg"}, {URL: att2, Filename: "clip.mp4"}},
+			},
+			wantBody: "a cat",
+		},
+		{
+			name: "sibling agent service", method: http.MethodPost, agent: "miorine", callerKey: "coven:extract:miorine:t1:7", body: `{"prompt":"extract"}`,
+			stubStatus: http.StatusOK, stubBody: `{"response":"ok"}`,
+			wantStatus: http.StatusOK, wantPath: "/LLM-miorine/Complete", wantReq: &llmcall.Request{Prompt: "extract", CallerKey: "coven:extract:miorine:t1:7"}, wantBody: "ok",
+		},
+		{
+			name: "restate 400 stays 400", method: http.MethodPost, agent: "aerial", body: `{"prompt":"extract"}`,
+			stubStatus: http.StatusBadRequest, stubBody: `{"message":"attachment fetch returned 404"}`,
+			wantStatus: http.StatusBadRequest, wantPath: "/LLM/Complete", wantReq: &llmcall.Request{Prompt: "extract"}, wantBody: "attachment fetch returned 404",
+		},
+		{
+			name: "restate 500 maps to 502", method: http.MethodPost, agent: "aerial", body: `{"prompt":"extract"}`,
+			stubStatus: http.StatusInternalServerError, stubBody: `{"message":"engine down"}`,
+			wantStatus: http.StatusBadGateway, wantPath: "/LLM/Complete", wantReq: &llmcall.Request{Prompt: "extract"}, wantBody: "engine down",
+		},
 	}
 
-	if !stagedFileExistsDuringRun {
-		t.Errorf("expected staged attachment file to exist during llmFn execution")
-	}
-	if string(stagedFileContent) != "attachment content" {
-		t.Errorf("expected staged content %q, got %q", "attachment content", string(stagedFileContent))
-	}
-	if observedDirPerm != 0o755 {
-		t.Errorf("expected staged directory perm 0755, got %#o", observedDirPerm)
-	}
-	if stagedFilePerm != 0o644 {
-		t.Errorf("expected staged file perm 0644, got %#o", stagedFilePerm)
-	}
-	if !strings.Contains(observedPrompt, "<ATTACHMENTS>") {
-		t.Errorf("expected observed prompt to contain <ATTACHMENTS>, got %q", observedPrompt)
-	}
-	if _, err := os.Stat(observedDir); !os.IsNotExist(err) {
-		t.Errorf("expected staged tmpDir %q to be removed after handleInternalLLM returned", observedDir)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ts, seen := newLLMIngressStub(t, tc.stubStatus, tc.stubBody)
+			var client *RestateIngressClient
+			if !tc.nilClient {
+				client = NewRestateIngressClient(ts.URL, tc.agent, ts.Client())
+			}
+			w := runHTTP(handleInternalLLM(client), tc.method, "/internal/llm", strings.NewReader(tc.body), "Idempotency-Key", tc.callerKey)
+			if w.Code != tc.wantStatus {
+				t.Fatalf("status = %d, want %d (body %s)", w.Code, tc.wantStatus, w.Body.String())
+			}
+			if !strings.Contains(w.Body.String(), tc.wantBody) {
+				t.Errorf("body %q does not contain %q", w.Body.String(), tc.wantBody)
+			}
+			if tc.wantReq == nil {
+				if len(seen) != 0 {
+					t.Fatalf("Restate ingress was called for a rejected request")
+				}
+				return
+			}
+			got := <-seen
+			if got.path != tc.wantPath {
+				t.Errorf("path = %q, want %q", got.path, tc.wantPath)
+			}
+			if !reflect.DeepEqual(got.req, *tc.wantReq) {
+				t.Errorf("forwarded request = %+v, want %+v", got.req, *tc.wantReq)
+			}
+			wantKey := llmcall.IdempotencyKey(*tc.wantReq)
+			if got.hasKey != (wantKey != "") || got.idemKey != wantKey {
+				t.Errorf("Idempotency-Key = %q (present %v), want %q", got.idemKey, got.hasKey, wantKey)
+			}
+		})
 	}
 }
 

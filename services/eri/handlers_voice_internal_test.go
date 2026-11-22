@@ -413,11 +413,6 @@ func TestHandleInternalDiscordInteraction(t *testing.T) {
 	}
 }
 
-func TestCleanTempDir_ErrorBranch(t *testing.T) {
-	t.Parallel()
-	cleanTempDir("/dev/null/impossible-path-that-fails-removeall")
-}
-
 type syncVoiceMsg struct {
 	pubsub.Message
 

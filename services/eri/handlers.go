@@ -10,8 +10,6 @@ import (
 	"log"
 	"net/http"
 	"net/url"
-	"os"
-	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -25,12 +23,14 @@ import (
 	"github.com/azylman/aerial/pkg/eriwire"
 	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/pkg/k8sauth"
+	"github.com/azylman/aerial/pkg/restateingress"
 	"github.com/azylman/aerial/pkg/sanitizer"
 	"github.com/azylman/aerial/pkg/tracing"
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
 	"github.com/azylman/aerial/services/eri/pkg/delivery"
 	"github.com/azylman/aerial/services/eri/pkg/githubproxy"
+	"github.com/azylman/aerial/services/eri/pkg/llmcall"
 	"github.com/azylman/aerial/services/eri/pkg/metrics"
 	"github.com/azylman/aerial/services/eri/pkg/queue"
 	"github.com/azylman/aerial/services/eri/pkg/transcript"
@@ -888,141 +888,47 @@ func setNoCacheJSONHeaders(w http.ResponseWriter) {
 	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
 }
 
-type InternalLLMAttachment struct {
-	URL      string `json:"url"`
-	Filename string `json:"filename"`
-}
-
-func validateInternalLLMAttachments(atts []InternalLLMAttachment) error {
-	if len(atts) > delivery.MaxInternalLLMAttachments {
-		return fmt.Errorf("attachments count %d exceeds maximum of %d", len(atts), delivery.MaxInternalLLMAttachments)
-	}
-	seen := make(map[string]bool, len(atts))
-	for _, a := range atts {
-		rawURL := strings.TrimSpace(a.URL)
-		filename := strings.TrimSpace(a.Filename)
-		if rawURL == "" || filename == "" {
-			return errors.New("attachment URL and filename cannot be empty")
-		}
-		lower := strings.ToLower(filename)
-		if seen[lower] {
-			return fmt.Errorf("duplicate attachment filename %q", filename)
-		}
-		seen[lower] = true
-	}
-	return nil
-}
-
-type stagedAttachmentFile struct {
-	path     string
-	mimeType string
-	size     int
-}
-
-func cleanTempDir(dir string) {
-	if err := os.RemoveAll(dir); err != nil {
-		log.Printf("[Internal LLM] Warning: failed to clean up temp dir %s: %v", dir, err)
-	}
-}
-
-func stageInternalLLMAttachments(ctx context.Context, atts []InternalLLMAttachment) (string, string, int, error) {
-	if len(atts) == 0 {
-		return "", "", http.StatusOK, nil
-	}
-	if err := validateInternalLLMAttachments(atts); err != nil {
-		return "", "", http.StatusBadRequest, err
-	}
-	tmpDir, err := os.MkdirTemp("", "eri-llm-*")
-	if err != nil {
-		return "", "", http.StatusInternalServerError, fmt.Errorf("failed to create temporary staging directory: %w", err)
-	}
-	if err := os.Chmod(tmpDir, 0o755); err != nil {
-		cleanTempDir(tmpDir)
-		return "", "", http.StatusInternalServerError, fmt.Errorf("failed to set permissions on temporary staging directory: %w", err)
-	}
-
-	stagedFiles := make([]stagedAttachmentFile, 0, len(atts))
-	for _, a := range atts {
-		att, err := delivery.ResolveAndFetchInternalAttachment(ctx, a.URL, a.Filename)
-		if err != nil {
-			cleanTempDir(tmpDir)
-			if errors.Is(err, delivery.ErrInvalidInternalAttachment) {
-				return "", "", http.StatusBadRequest, err
-			}
-			return "", "", http.StatusBadGateway, err
-		}
-		targetPath := filepath.Join(tmpDir, att.Filename)
-		if err := os.WriteFile(targetPath, att.Data, 0o644); err != nil {
-			cleanTempDir(tmpDir)
-			return "", "", http.StatusInternalServerError, fmt.Errorf("failed to stage attachment %q: %w", att.Filename, err)
-		}
-		if err := os.Chmod(targetPath, 0o644); err != nil {
-			cleanTempDir(tmpDir)
-			return "", "", http.StatusInternalServerError, fmt.Errorf("failed to set permissions on staged attachment %q: %w", att.Filename, err)
-		}
-		stagedFiles = append(stagedFiles, stagedAttachmentFile{
-			path:     targetPath,
-			mimeType: att.ContentType,
-			size:     len(att.Data),
-		})
-	}
-
-	var sb strings.Builder
-	sb.WriteString("\n\n<ATTACHMENTS>\n")
-	fmt.Fprintf(&sb, "Staged directory: %s\n", tmpDir)
-	sb.WriteString("Files are pre-downloaded and staged for direct inspection. Use read_file or view_file to examine them; do not execute curl, wget, or rm commands.\n")
-	for _, f := range stagedFiles {
-		fmt.Fprintf(&sb, "- %s (%s, %d bytes)\n", f.path, f.mimeType, f.size)
-	}
-	sb.WriteString("</ATTACHMENTS>")
-
-	return tmpDir, sb.String(), http.StatusOK, nil
-}
-
-func handleInternalLLM(llmFn func(context.Context, string, string) (string, error)) http.HandlerFunc {
+// handleInternalLLM serves POST /internal/llm by running the call as one
+// durable invocation of the Restate LLM service. The optional Idempotency-Key
+// header names the caller's logical operation; eri appends a content hash so a
+// retried or redelivered call attaches to the recorded result instead of paying
+// for a new one. Attachments are forwarded as URLs and staged by the service.
+func handleInternalLLM(client *RestateIngressClient) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			w.Header().Set("Allow", "POST")
 			writeErr(w, http.StatusMethodNotAllowed, "Method not allowed")
 			return
 		}
-		if llmFn == nil {
+		if client == nil {
 			writeErr(w, http.StatusServiceUnavailable, "LLM runner not available")
 			return
 		}
-		var req struct {
-			Prompt      string                  `json:"prompt"`
-			Attachments []InternalLLMAttachment `json:"attachments"`
-			Effort      string                  `json:"effort,omitempty"`
+		var body struct {
+			Prompt      string               `json:"prompt"`
+			Attachments []llmcall.Attachment `json:"attachments"`
+			Effort      string               `json:"effort,omitempty"`
 		}
-		if !readPostJSON(w, r, &req) {
+		if !readPostJSON(w, r, &body) {
 			return
 		}
-		prompt := strings.TrimSpace(req.Prompt)
-		if prompt == "" {
-			writeErr(w, http.StatusBadRequest, "Invalid payload: 'prompt' field is required and cannot be empty")
+		req := llmcall.Request{
+			Prompt:      strings.TrimSpace(body.Prompt),
+			Effort:      strings.ToLower(strings.TrimSpace(body.Effort)),
+			Attachments: body.Attachments,
+			CallerKey:   strings.TrimSpace(r.Header.Get("Idempotency-Key")),
+		}
+		if err := llmcall.Validate(req); err != nil {
+			writeErr(w, http.StatusBadRequest, "Invalid payload: "+err.Error())
 			return
 		}
-		// Effort is parsed and validated now but stays dark: the extraction
-		// cutover wires it into the runner in a later chunk.
-		if effort := strings.ToLower(strings.TrimSpace(req.Effort)); effort != "" && effort != config.EffortLow && effort != config.EffortMedium && effort != config.EffortHigh {
-			writeErr(w, http.StatusBadRequest, "Invalid payload: 'effort' must be 'low', 'medium', or 'high'")
-			return
-		}
-
-		tmpDir, attBlock, statusCode, err := stageInternalLLMAttachments(r.Context(), req.Attachments)
+		resp, err := client.CompleteLLM(r.Context(), req)
 		if err != nil {
-			writeErr(w, statusCode, err.Error())
-			return
-		}
-		if tmpDir != "" {
-			defer cleanTempDir(tmpDir)
-			prompt += attBlock
-		}
-
-		resp, err := llmFn(r.Context(), "", prompt)
-		if err != nil {
-			writeErr(w, http.StatusInternalServerError, err.Error())
+			status := http.StatusBadGateway
+			if httpErr, ok := errors.AsType[*restateingress.HTTPError](err); ok && httpErr.Status == http.StatusBadRequest {
+				status = http.StatusBadRequest
+			}
+			writeErr(w, status, err.Error())
 			return
 		}
 		httpkit.WriteJSON(w, http.StatusOK, map[string]string{"response": resp})
@@ -1335,14 +1241,7 @@ func SetupBrainMuxWithEmbedder(store db.Store, txStore db.TranscriptStore, pool 
 	mux.HandleFunc("/transcripts/steps", stepsHandler)
 	mux.HandleFunc("/api/transcripts/steps", stepsHandler)
 	mux.HandleFunc("/tasks", handleTasks(store, pool))
-	var llmFn func(context.Context, string, string) (string, error)
-	if pool != nil {
-		llmFn = pool.LLMFunc()
-	}
-	if llmFn == nil && activeRestateIngressClient.Load() != nil {
-		llmFn = NewRemoteEphemeralLLMFunc(os.Getenv("ERI_RESTATE_URL"))
-	}
-	mux.HandleFunc("/internal/llm", handleInternalLLM(llmFn))
+	mux.HandleFunc("/internal/llm", handleInternalLLM(activeRestateIngressClient.Load()))
 	mux.HandleFunc("/debug/coverage/flush", httpkit.HandleCoverageFlush("eri"))
 	healthHandler := func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

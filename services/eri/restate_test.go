@@ -16,6 +16,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/azylman/aerial/pkg/eriwire"
+	"github.com/azylman/aerial/services/eri/pkg/llmcall"
 	"github.com/azylman/aerial/services/eri/pkg/metrics"
 	"github.com/azylman/aerial/services/eri/pkg/queue"
 )
@@ -131,152 +132,10 @@ func TestRemoteQuotaProvider_NilSafetyAndDefaultURL(t *testing.T) {
 	assert.Equal(t, metrics.QuotaSnapshot{}, malformedProvider.LatestQuotaSnapshot())
 }
 
-type remoteLLMCase struct {
-	name           string
-	statusCode     int
-	responseBody   string
-	transportError bool
-	model          string
-	prompt         string
-	wantResponse   string
-	wantErrorSub   string
-}
-
-func runRemoteLLMCase(t *testing.T, tc remoteLLMCase) {
-	t.Helper()
-	t.Parallel()
-
-	var mu sync.Mutex
-	var gotModel, gotPrompt string
-
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		assert.Equal(t, "/internal/llm", r.URL.Path)
-		assert.Equal(t, http.MethodPost, r.Method)
-		var body struct {
-			Model  string `json:"model"`
-			Prompt string `json:"prompt"`
-		}
-		_ = json.NewDecoder(r.Body).Decode(&body)
-		mu.Lock()
-		gotModel = body.Model
-		gotPrompt = body.Prompt
-		mu.Unlock()
-
-		w.WriteHeader(tc.statusCode)
-		_, _ = w.Write([]byte(tc.responseBody))
-	}))
-	defer ts.Close()
-
-	client := ts.Client()
-	if tc.transportError {
-		client = &http.Client{Transport: &errRoundTripper{err: assert.AnError}}
-	}
-
-	llmFn := NewRemoteEphemeralLLMFunc(ts.URL, client)
-	resp, err := llmFn(context.Background(), tc.model, tc.prompt)
-
-	if tc.wantErrorSub != "" {
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), tc.wantErrorSub)
-		return
-	}
-
-	require.NoError(t, err)
-	assert.Equal(t, tc.wantResponse, resp)
-	mu.Lock()
-	defer mu.Unlock()
-	assert.Equal(t, tc.model, gotModel)
-	assert.Equal(t, tc.prompt, gotPrompt)
-}
-
-func TestRemoteEphemeralLLMFunc(t *testing.T) {
-	t.Parallel()
-
-	tests := []remoteLLMCase{
-		{
-			name:         "successful generation",
-			statusCode:   http.StatusOK,
-			responseBody: `{"response":"generated text"}`,
-			model:        "gemini-flash",
-			prompt:       "summarize this",
-			wantResponse: "generated text",
-		},
-		{
-			name:         "server returns error status",
-			statusCode:   http.StatusServiceUnavailable,
-			responseBody: `{"error":"unavailable"}`,
-			model:        "gemini-flash",
-			prompt:       "summarize",
-			wantErrorSub: "internal llm returned status 503",
-		},
-		{
-			name:         "invalid json body",
-			statusCode:   http.StatusOK,
-			responseBody: `not-valid-json`,
-			model:        "gemini-flash",
-			prompt:       "summarize",
-			wantErrorSub: "unmarshal internal llm response",
-		},
-		{
-			name:           "transport error",
-			statusCode:     http.StatusOK,
-			transportError: true,
-			model:          "gemini-flash",
-			prompt:         "summarize",
-			wantErrorSub:   "post internal llm request",
-		},
-		{
-			name:         "oversized response body rejected",
-			statusCode:   http.StatusOK,
-			responseBody: `{"response":"` + strings.Repeat("x", (1<<20)+16) + `"}`,
-			model:        "gemini-flash",
-			prompt:       "summarize",
-			wantErrorSub: "internal llm response body exceeds 1MiB limit",
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			runRemoteLLMCase(t, tc)
-		})
-	}
-}
-
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
 	return f(r)
-}
-
-func TestRemoteEphemeralLLMFunc_DefaultURL(t *testing.T) {
-	t.Parallel()
-
-	var gotURL string
-	var gotMethod string
-	var gotBody string
-	client := &http.Client{
-		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
-			gotURL = r.URL.String()
-			gotMethod = r.Method
-			bodyBytes, _ := io.ReadAll(r.Body)
-			gotBody = string(bodyBytes)
-			return &http.Response{
-				StatusCode: http.StatusOK,
-				Body:       io.NopCloser(strings.NewReader(`{"response":"default-url-ok"}`)),
-				Header:     make(http.Header),
-			}, nil
-		}),
-	}
-
-	fn := NewRemoteEphemeralLLMFunc("", client)
-	require.NotNil(t, fn)
-
-	resp, err := fn(context.Background(), "test-model", "test-prompt")
-	require.NoError(t, err)
-	assert.Equal(t, "default-url-ok", resp)
-	assert.Equal(t, "http://eri-restate-health:4028/internal/llm", gotURL)
-	assert.Equal(t, http.MethodPost, gotMethod)
-	assert.Contains(t, gotBody, "test-prompt")
 }
 
 type errRoundTripper struct {
@@ -1016,7 +875,7 @@ func TestHandleVoiceAskSSE_RestateCutover(t *testing.T) {
 
 func TestSetupBrainMuxWithEmbedder_RestateLLM(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		assert.Equal(t, "/internal/llm", r.URL.Path)
+		assert.Equal(t, "/LLM/Complete", r.URL.Path)
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"response":"remote llm result"}`))
 	}))
@@ -1025,8 +884,6 @@ func TestSetupBrainMuxWithEmbedder_RestateLLM(t *testing.T) {
 	client := NewRestateIngressClient(ts.URL, "aerial", ts.Client())
 	orig := activeRestateIngressClient.Swap(client)
 	defer activeRestateIngressClient.Store(orig)
-
-	t.Setenv("ERI_RESTATE_URL", ts.URL)
 
 	mux := SetupBrainMuxWithEmbedder(nil, nil, nil, nil)
 	req := httptest.NewRequest(http.MethodPost, "/internal/llm", strings.NewReader(`{"prompt":"summarize"}`))
@@ -1312,6 +1169,76 @@ func TestHandleDispatchViaRestate_IdempotencyKey(t *testing.T) {
 			assert.Equal(t, "accepted", res)
 			assert.True(t, hasHeader)
 			assert.Equal(t, tc.wantIdempotencyKey, receivedKey)
+		})
+	}
+}
+
+func TestNewRestateLLMFunc(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		agent        string
+		cancelCaller bool
+		stubStatus   int
+		stubBody     string
+		wantResponse string
+		wantErrSub   string
+		wantPath     string
+	}{
+		{name: "unkeyed call returns response", agent: "aerial", stubStatus: http.StatusOK, stubBody: `{"response":"title"}`, wantResponse: "title", wantPath: "/LLM/Complete"},
+		{name: "sibling agent service", agent: "miorine", stubStatus: http.StatusOK, stubBody: `{"response":"ok"}`, wantResponse: "ok", wantPath: "/LLM-miorine/Complete"},
+		{name: "restate failure", agent: "aerial", stubStatus: http.StatusInternalServerError, stubBody: `{"message":"boom"}`, wantErrSub: "boom", wantPath: "/LLM/Complete"},
+		{name: "cancelled caller returns promptly", agent: "aerial", cancelCaller: true, wantErrSub: "context canceled", wantPath: "/LLM/Complete"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			release := make(chan struct{})
+			seen := make(chan llmIngressCapture, 1)
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				c := llmIngressCapture{path: r.URL.Path, idemKey: r.Header.Get("Idempotency-Key")}
+				_, c.hasKey = r.Header["Idempotency-Key"]
+				_ = json.NewDecoder(r.Body).Decode(&c.req)
+				seen <- c
+				if tc.cancelCaller {
+					select {
+					case <-r.Context().Done():
+					case <-release:
+					}
+					return
+				}
+				w.WriteHeader(tc.stubStatus)
+				_, _ = w.Write([]byte(tc.stubBody))
+			}))
+			t.Cleanup(ts.Close)
+			t.Cleanup(func() { close(release) })
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			done := make(chan struct{})
+			var resp string
+			var err error
+			go func() {
+				defer close(done)
+				resp, err = NewRestateLLMFunc(NewRestateIngressClient(ts.URL, tc.agent, ts.Client()))(ctx, "flash", "summarize")
+			}()
+			got := <-seen
+			if tc.cancelCaller {
+				cancel()
+			}
+			<-done
+
+			if tc.wantErrSub != "" {
+				require.ErrorContains(t, err, tc.wantErrSub)
+			} else {
+				require.NoError(t, err)
+			}
+			assert.Equal(t, tc.wantResponse, resp)
+			assert.False(t, got.hasKey, "unkeyed call must not send Idempotency-Key")
+			assert.Equal(t, llmcall.Request{Prompt: "summarize", Model: "flash"}, got.req)
+			assert.Equal(t, tc.wantPath, got.path)
 		})
 	}
 }
