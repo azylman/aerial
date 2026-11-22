@@ -20,80 +20,40 @@ func testBatchBase() TranscriptStepBatch {
 	}
 }
 
-func testBatchSteps(n, base int) []TranscriptStep {
-	steps := make([]TranscriptStep, 0, n)
-	for i := range n {
-		steps = append(steps, TranscriptStep{
-			StepIndex: base + i,
-			Source:    "model",
-			Content:   "content",
-		})
-	}
-	return steps
-}
-
+// sizedBatchSteps returns n model steps indexed from base, each with size bytes of content.
 func sizedBatchSteps(n, base, size int) []TranscriptStep {
 	steps := make([]TranscriptStep, 0, n)
 	for i := range n {
-		steps = append(steps, TranscriptStep{
-			StepIndex: base + i,
-			Source:    "model",
-			Content:   strings.Repeat("y", size),
-		})
+		steps = append(steps, TranscriptStep{StepIndex: base + i, Source: "model", Content: strings.Repeat("y", size)})
 	}
 	return steps
 }
 
-type splitBatchTestCase struct {
-	name                 string
-	base                 TranscriptStepBatch
-	steps                []TranscriptStep
-	wantBatches          int
-	wantFirsts           []int
-	wantLasts            []int
-	wantCounts           []int
-	wantFinals           []bool
-	wantResetFirst       bool
-	wantPromptFirst      bool
-	wantClipped          bool
-	wantThinkingDropped  bool
-	wantToolCallsDropped bool
+// splitBatchWant is the expected range, step count and final flag of one split batch.
+type splitBatchWant struct {
+	first, last, count int
+	final              bool
 }
 
-func checkSplitBatch(t *testing.T, tc splitBatchTestCase, i int, b TranscriptStepBatch) {
+// assertSplitBatch checks batch i against want: the envelope survives every split, reset and the
+// step-0 prompt ride the first batch only, no step keeps thinking, and steps fit the byte budget.
+func assertSplitBatch(t *testing.T, i int, b, base TranscriptStepBatch, want splitBatchWant, reset, prompt bool) {
 	t.Helper()
-	if b.FirstStep != tc.wantFirsts[i] || b.LastStep != tc.wantLasts[i] {
-		t.Errorf("batch %d range = [%d,%d], want [%d,%d]",
-			i, b.FirstStep, b.LastStep, tc.wantFirsts[i], tc.wantLasts[i])
+	if got := (splitBatchWant{b.FirstStep, b.LastStep, len(b.Steps), b.Final}); got != want {
+		t.Errorf("batch %d = %+v, want %+v", i, got, want)
 	}
-	if len(b.Steps) != tc.wantCounts[i] {
-		t.Errorf("batch %d step count = %d, want %d", i, len(b.Steps), tc.wantCounts[i])
-	}
-	if b.Final != tc.wantFinals[i] {
-		t.Errorf("batch %d final = %v, want %v", i, b.Final, tc.wantFinals[i])
-	}
-	if b.Stack != tc.base.Stack || b.SessionID != tc.base.SessionID {
+	if b.Stack != base.Stack || b.SessionID != base.SessionID || !b.FileMtime.Equal(base.FileMtime) {
 		t.Errorf("batch %d lost envelope: %+v", i, b)
 	}
-	if !b.FileMtime.Equal(tc.base.FileMtime) {
-		t.Errorf("batch %d file mtime = %v, want %v", i, b.FileMtime, tc.base.FileMtime)
-	}
-	first := i == 0
-	if first && b.Reset != tc.wantResetFirst {
-		t.Errorf("first batch reset = %v, want %v", b.Reset, tc.wantResetFirst)
-	}
-	if first && (b.Step0Prompt != "") != tc.wantPromptFirst {
-		t.Errorf("first batch step0 prompt present = %v, want %v", b.Step0Prompt != "", tc.wantPromptFirst)
-	}
-	if !first && b.Reset {
-		t.Errorf("batch %d carries reset, want reset on first batch only", i)
-	}
-	if !first && b.Step0Prompt != "" {
-		t.Errorf("batch %d carries step0 prompt, want prompt on first batch only", i)
+	if b.Reset != (i == 0 && reset) || (b.Step0Prompt != "") != (i == 0 && prompt) {
+		t.Errorf("batch %d reset=%v prompt=%v, want first batch only reset=%v prompt=%v", i, b.Reset, b.Step0Prompt != "", reset, prompt)
 	}
 	size := 0
 	for _, s := range b.Steps {
 		size += stepBytes(s)
+		if s.Thinking != "" {
+			t.Errorf("batch %d step %d kept %d chars of thinking", i, s.StepIndex, len(s.Thinking))
+		}
 	}
 	if size > MaxBatchBytes {
 		t.Errorf("batch %d encoded steps = %d bytes, want within %d", i, size, MaxBatchBytes)
@@ -105,178 +65,66 @@ func TestSplitStepBatches(t *testing.T) {
 
 	big := strings.Repeat("x", MaxBatchBytes+1024)
 	base := testBatchBase()
+	empty := TranscriptStepBatch{Stack: "aerial", SessionID: "sess-1", BaseStep: 7, FileMtime: base.FileMtime}
+	hugeArgs := []TranscriptToolCall{{Name: "t", Args: json.RawMessage(`"` + strings.Repeat("z", MaxBatchBytes) + `"`)}}
+	badArgs := []TranscriptToolCall{{Name: "t", Args: json.RawMessage("{invalid")}}
+	one := func(i int) []splitBatchWant { return []splitBatchWant{{i, i, 1, true}} }
 
-	tests := []splitBatchTestCase{
+	// wantSuffix0 and wantCalls0 describe step 0 of batch 0 after clipping/dropping.
+	tests := []struct {
+		name        string
+		base        TranscriptStepBatch
+		steps       []TranscriptStep
+		want        []splitBatchWant
+		wantReset   bool
+		wantPrompt  bool
+		wantSuffix0 string
+		wantCalls0  int
+	}{
+		{"empty yields one empty final batch", empty, nil, []splitBatchWant{{7, 7, 0, true}}, false, false, "", 0},
+		{"single batch keeps envelope and marks final", base, sizedBatchSteps(3, 5, 7), []splitBatchWant{{5, 7, 3, true}}, true, true, "yyyyyyy", 0},
 		{
-			name:            "empty yields one empty final batch",
-			base:            TranscriptStepBatch{Stack: "aerial", SessionID: "sess-1", BaseStep: 7, FileMtime: base.FileMtime},
-			steps:           nil,
-			wantBatches:     1,
-			wantFirsts:      []int{7},
-			wantLasts:       []int{7},
-			wantCounts:      []int{0},
-			wantFinals:      []bool{true},
-			wantResetFirst:  false,
-			wantPromptFirst: false,
-			wantClipped:     false,
+			"split chain carries contiguous ranges with final last", base, sizedBatchSteps(250, 0, 7),
+			[]splitBatchWant{{0, 99, 100, false}, {100, 199, 100, false}, {200, 249, 50, true}},
+			true, true, "yyyyyyy", 0,
+		},
+		{"oversize step clipped into one final batch", base, []TranscriptStep{{StepIndex: 3, Source: "model", Content: big}}, one(3), true, true, "...[clipped]", 0},
+		{
+			"byte budget splits before count limit", base, sizedBatchSteps(6, 10, 100*1024),
+			[]splitBatchWant{{10, 14, 5, false}, {15, 15, 1, true}},
+			true, true, "y", 0,
+		},
+		{"thinking dropped to fit budget", base, []TranscriptStep{{StepIndex: 4, Source: "model", Content: "small", Thinking: big}}, one(4), true, true, "small", 0},
+		{
+			"tool calls dropped to fit budget", base,
+			[]TranscriptStep{{StepIndex: 6, Source: "model", Content: "small", ToolCalls: hugeArgs}},
+			one(6), true, true, "small", 0,
 		},
 		{
-			name:            "single batch keeps envelope and marks final",
-			base:            base,
-			steps:           testBatchSteps(3, 5),
-			wantBatches:     1,
-			wantFirsts:      []int{5},
-			wantLasts:       []int{7},
-			wantCounts:      []int{3},
-			wantFinals:      []bool{true},
-			wantResetFirst:  true,
-			wantPromptFirst: true,
-			wantClipped:     false,
-		},
-		{
-			name:            "split chain carries contiguous ranges with final last",
-			base:            base,
-			steps:           testBatchSteps(250, 0),
-			wantBatches:     3,
-			wantFirsts:      []int{0, 100, 200},
-			wantLasts:       []int{99, 199, 249},
-			wantCounts:      []int{100, 100, 50},
-			wantFinals:      []bool{false, false, true},
-			wantResetFirst:  true,
-			wantPromptFirst: true,
-			wantClipped:     false,
-		},
-		{
-			name:            "oversize step clipped into one final batch",
-			base:            base,
-			steps:           []TranscriptStep{{StepIndex: 3, Source: "model", Content: big}},
-			wantBatches:     1,
-			wantFirsts:      []int{3},
-			wantLasts:       []int{3},
-			wantCounts:      []int{1},
-			wantFinals:      []bool{true},
-			wantResetFirst:  true,
-			wantPromptFirst: true,
-			wantClipped:     true,
-		},
-		{
-			name:            "byte budget splits before count limit",
-			base:            base,
-			steps:           sizedBatchSteps(6, 10, 100*1024),
-			wantBatches:     2,
-			wantFirsts:      []int{10, 15},
-			wantLasts:       []int{14, 15},
-			wantCounts:      []int{5, 1},
-			wantFinals:      []bool{false, true},
-			wantResetFirst:  true,
-			wantPromptFirst: true,
-		},
-		{
-			name:                "thinking dropped to fit budget",
-			base:                base,
-			steps:               []TranscriptStep{{StepIndex: 4, Source: "model", Content: "small", Thinking: big}},
-			wantBatches:         1,
-			wantFirsts:          []int{4},
-			wantLasts:           []int{4},
-			wantCounts:          []int{1},
-			wantFinals:          []bool{true},
-			wantResetFirst:      true,
-			wantPromptFirst:     true,
-			wantThinkingDropped: true,
-		},
-		{
-			name:                 "tool calls dropped to fit budget",
-			base:                 base,
-			steps:                []TranscriptStep{{StepIndex: 6, Source: "model", Content: "small", ToolCalls: []TranscriptToolCall{{Name: "t", Args: json.RawMessage(`"` + strings.Repeat("z", MaxBatchBytes) + `"`)}}}},
-			wantBatches:          1,
-			wantFirsts:           []int{6},
-			wantLasts:            []int{6},
-			wantCounts:           []int{1},
-			wantFinals:           []bool{true},
-			wantResetFirst:       true,
-			wantPromptFirst:      true,
-			wantToolCallsDropped: true,
-		},
-		{
-			name:            "unmarshable args never error",
-			base:            base,
-			steps:           []TranscriptStep{{StepIndex: 8, Source: "model", Content: "small", ToolCalls: []TranscriptToolCall{{Name: "t", Args: json.RawMessage("{invalid")}}}},
-			wantBatches:     1,
-			wantFirsts:      []int{8},
-			wantLasts:       []int{8},
-			wantCounts:      []int{1},
-			wantFinals:      []bool{true},
-			wantResetFirst:  true,
-			wantPromptFirst: true,
+			"unmarshable args never error", base,
+			[]TranscriptStep{{StepIndex: 8, Source: "model", Content: "small", ToolCalls: badArgs}},
+			one(8), true, true, "small", 1,
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			runSplitBatchCase(t, tc)
+			got := SplitStepBatches(tc.base, tc.steps)
+			if len(got) != len(tc.want) {
+				t.Fatalf("batch count = %d, want %d", len(got), len(tc.want))
+			}
+			for i, b := range got {
+				assertSplitBatch(t, i, b, tc.base, tc.want[i], tc.wantReset, tc.wantPrompt)
+			}
+			if len(tc.steps) == 0 {
+				return
+			}
+			st := got[0].Steps[0]
+			if !strings.HasSuffix(st.Content, tc.wantSuffix0) || len(st.ToolCalls) != tc.wantCalls0 {
+				t.Errorf("step 0 content %.40q... calls %d, want suffix %q calls %d", st.Content, len(st.ToolCalls), tc.wantSuffix0, tc.wantCalls0)
+			}
 		})
-	}
-}
-
-func runSplitBatchCase(t *testing.T, tc splitBatchTestCase) {
-	t.Helper()
-	got := SplitStepBatches(tc.base, tc.steps)
-	if len(got) != tc.wantBatches {
-		t.Fatalf("batch count = %d, want %d", len(got), tc.wantBatches)
-	}
-	for i, b := range got {
-		checkSplitBatch(t, tc, i, b)
-	}
-	checkSplitBatchExtras(t, tc, got)
-}
-
-func checkSplitBatchExtras(t *testing.T, tc splitBatchTestCase, got []TranscriptStepBatch) {
-	t.Helper()
-	checkClippedContent(t, tc, got)
-	checkThinkingDropped(t, tc, got)
-	checkToolCallsDropped(t, tc, got)
-}
-
-func checkClippedContent(t *testing.T, tc splitBatchTestCase, got []TranscriptStepBatch) {
-	t.Helper()
-	if !tc.wantClipped {
-		return
-	}
-	content := got[0].Steps[0].Content
-	if !strings.HasSuffix(content, clipMarker) {
-		t.Errorf("clipped step content %q does not end with clip marker", content)
-	}
-	if stepBytes(got[0].Steps[0]) > MaxBatchBytes {
-		t.Errorf("clipped step still exceeds %d bytes", MaxBatchBytes)
-	}
-}
-
-func checkThinkingDropped(t *testing.T, tc splitBatchTestCase, got []TranscriptStepBatch) {
-	t.Helper()
-	if !tc.wantThinkingDropped {
-		return
-	}
-	st := got[0].Steps[0]
-	if st.Thinking != "" {
-		t.Errorf("thinking not dropped, still %d chars", len(st.Thinking))
-	}
-	if st.Content != "small" {
-		t.Errorf("content = %q, want intact small content", st.Content)
-	}
-}
-
-func checkToolCallsDropped(t *testing.T, tc splitBatchTestCase, got []TranscriptStepBatch) {
-	t.Helper()
-	if !tc.wantToolCallsDropped {
-		return
-	}
-	st := got[0].Steps[0]
-	if st.ToolCalls != nil {
-		t.Errorf("tool calls not dropped, still %d calls", len(st.ToolCalls))
-	}
-	if st.Content != "small" {
-		t.Errorf("content = %q, want intact small content", st.Content)
 	}
 }
 
@@ -342,38 +190,10 @@ func TestEffectiveAgent_TableDriven(t *testing.T) {
 		batch     TranscriptStepBatch
 		wantAgent string
 	}{
-		{
-			name: "agent specified wins over stack",
-			batch: TranscriptStepBatch{
-				Agent: "agent-alpha",
-				Stack: "aerial",
-			},
-			wantAgent: "agent-alpha",
-		},
-		{
-			name: "agent empty falls back to stack",
-			batch: TranscriptStepBatch{
-				Agent: "",
-				Stack: "agent-beta",
-			},
-			wantAgent: "agent-beta",
-		},
-		{
-			name: "both empty returns empty",
-			batch: TranscriptStepBatch{
-				Agent: "",
-				Stack: "",
-			},
-			wantAgent: "",
-		},
-		{
-			name: "whitespace trimmed correctly",
-			batch: TranscriptStepBatch{
-				Agent: "  agent-beta  ",
-				Stack: "aerial",
-			},
-			wantAgent: "agent-beta",
-		},
+		{"agent specified wins over stack", TranscriptStepBatch{Agent: "agent-alpha", Stack: "aerial"}, "agent-alpha"},
+		{"agent empty falls back to stack", TranscriptStepBatch{Agent: "", Stack: "agent-beta"}, "agent-beta"},
+		{"both empty returns empty", TranscriptStepBatch{Agent: "", Stack: ""}, ""},
+		{"whitespace trimmed correctly", TranscriptStepBatch{Agent: "  agent-beta  ", Stack: "aerial"}, "agent-beta"},
 	}
 
 	for _, tc := range tests {

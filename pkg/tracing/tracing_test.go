@@ -58,11 +58,13 @@ func TestLoadConfig(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name    string
+		file    string // path under the temp dir; "" means tracing.yaml, "." the directory itself
 		content string // "" means the file is absent
 		want    Config
 		wantErr bool
 	}{
 		{name: "missing file is disabled", want: Config{}},
+		{name: "unreadable path (a directory)", file: ".", wantErr: true},
 		{
 			name: "agent config key", content: "enabled: true\nendpoint: http://vt.aerial/insert/opentelemetry/v1/traces\nsample_ratio: 0.5\nagent: aerial\n",
 			want: Config{Enabled: true, Endpoint: "http://vt.aerial/insert/opentelemetry/v1/traces", SampleRatio: 0.5, Agent: "aerial"},
@@ -84,7 +86,11 @@ func TestLoadConfig(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			path := filepath.Join(t.TempDir(), "tracing.yaml")
+			file := tc.file
+			if file == "" {
+				file = "tracing.yaml"
+			}
+			path := filepath.Join(t.TempDir(), file)
 			if tc.content != "" {
 				if err := os.WriteFile(path, []byte(tc.content), 0o600); err != nil {
 					t.Fatal(err)
@@ -156,13 +162,6 @@ func TestContentAttr(t *testing.T) {
 				t.Errorf("value = %.200q..., want %.200q...", got.Value.AsString(), tc.want)
 			}
 		})
-	}
-}
-
-func TestLoadConfig_Unreadable(t *testing.T) {
-	t.Parallel()
-	if _, err := LoadConfig(t.TempDir()); err == nil {
-		t.Fatal("expected error reading a directory")
 	}
 }
 
@@ -334,14 +333,13 @@ func TestEnvOverrides(t *testing.T) {
 // TestNewResource sets process environment (t.Setenv), so it is not parallel.
 func TestNewResource(t *testing.T) {
 	tests := []struct {
-		name          string
-		agent         string
-		stack         string
-		env           map[string]string
-		want          map[string]string
-		wantAbsent    []string
-		wantSchemaURL string
-		wantErr       bool
+		name       string
+		agent      string
+		stack      string
+		env        map[string]string
+		want       map[string]string
+		wantAbsent []string
+		wantErr    bool
 	}{
 		{
 			name: "agent becomes service.namespace and aerial.agent", agent: "agent-alpha",
@@ -349,7 +347,6 @@ func TestNewResource(t *testing.T) {
 				"service.name": "haro", "service.namespace": "agent-alpha", "aerial.agent": "agent-alpha", "aerial.stack": "agent-alpha",
 				"telemetry.sdk.language": "go", "telemetry.sdk.name": "opentelemetry",
 			},
-			wantSchemaURL: "https://opentelemetry.io/schemas/1.43.0",
 		},
 		{
 			name: "stack fallback becomes service.namespace and aerial.agent", stack: "agent-alpha",
@@ -357,7 +354,6 @@ func TestNewResource(t *testing.T) {
 				"service.name": "haro", "service.namespace": "agent-alpha", "aerial.agent": "agent-alpha", "aerial.stack": "agent-alpha",
 				"telemetry.sdk.language": "go", "telemetry.sdk.name": "opentelemetry",
 			},
-			wantSchemaURL: "https://opentelemetry.io/schemas/1.43.0",
 		},
 		{
 			name: "agent takes precedence over stack", agent: "agent-beta", stack: "agent-alpha",
@@ -365,12 +361,10 @@ func TestNewResource(t *testing.T) {
 				"service.name": "haro", "service.namespace": "agent-beta", "aerial.agent": "agent-beta", "aerial.stack": "agent-beta",
 				"telemetry.sdk.language": "go", "telemetry.sdk.name": "opentelemetry",
 			},
-			wantSchemaURL: "https://opentelemetry.io/schemas/1.43.0",
 		},
 		{
 			name: "empty agent and stack omits namespace and aerial.agent",
 			want: map[string]string{"service.name": "haro", "aerial.stack": ""}, wantAbsent: []string{"service.namespace", "aerial.agent"},
-			wantSchemaURL: "https://opentelemetry.io/schemas/1.43.0",
 		},
 		{
 			name: "OTEL_RESOURCE_ATTRIBUTES added", agent: "aerial",
@@ -379,19 +373,17 @@ func TestNewResource(t *testing.T) {
 				"service.name": "haro", "service.namespace": "aerial", "aerial.agent": "aerial", "aerial.stack": "aerial", "k8s.pod.name": "haro-7d9",
 				"k8s.namespace.name": "default", "k8s.node.name": "calibarn", "service.version": "v1.2.3",
 			},
-			wantSchemaURL: "https://opentelemetry.io/schemas/1.43.0",
 		},
 		{
 			name: "OTEL_SERVICE_NAME overrides service.name", agent: "agent-beta",
-			env:           map[string]string{"OTEL_SERVICE_NAME": "haro-canary"},
-			want:          map[string]string{"service.name": "haro-canary", "service.namespace": "agent-beta", "aerial.agent": "agent-beta", "aerial.stack": "agent-beta"},
-			wantSchemaURL: "https://opentelemetry.io/schemas/1.43.0",
+			env:  map[string]string{"OTEL_SERVICE_NAME": "haro-canary"},
+			want: map[string]string{"service.name": "haro-canary", "service.namespace": "agent-beta", "aerial.agent": "agent-beta", "aerial.stack": "agent-beta"},
 		},
 		{
 			name: "malformed attributes keep the rest", agent: "aerial",
 			env:     map[string]string{"OTEL_RESOURCE_ATTRIBUTES": "k8s.pod.name=haro-7d9,broken"},
 			want:    map[string]string{"service.name": "haro", "service.namespace": "aerial", "aerial.agent": "aerial", "aerial.stack": "aerial", "k8s.pod.name": "haro-7d9"},
-			wantErr: true, wantSchemaURL: "https://opentelemetry.io/schemas/1.43.0",
+			wantErr: true,
 		},
 	}
 	for _, tc := range tests {
@@ -413,8 +405,8 @@ func TestNewResource(t *testing.T) {
 					t.Errorf("resource has %s, want absent", k)
 				}
 			}
-			if res.SchemaURL() != tc.wantSchemaURL {
-				t.Errorf("schema URL = %q, want %q", res.SchemaURL(), tc.wantSchemaURL)
+			if res.SchemaURL() != "https://opentelemetry.io/schemas/1.43.0" {
+				t.Errorf("schema URL = %q, want %q", res.SchemaURL(), "https://opentelemetry.io/schemas/1.43.0")
 			}
 		})
 	}
@@ -483,67 +475,45 @@ func TestContextWithTraceparent(t *testing.T) {
 	}
 }
 
-func TestClient(t *testing.T) {
+// TestClientWrappers covers the shared contract of Client, ExternalClient, Transport and
+// ExternalTransport: each wraps its base (http.DefaultTransport when nil) in *transport with the
+// wrapper's propagate mode, and the client forms return a copy that keeps timeout and settings.
+// Transport rows wrap the result in a bare client so every row asserts the same shape.
+func TestClientWrappers(t *testing.T) {
 	t.Parallel()
 	base := &http.Transport{}
+	internal := &http.Client{Timeout: 7 * time.Second, Transport: base}
+	external := &http.Client{Timeout: 20 * time.Second, Transport: base}
 	tests := []struct {
-		name        string
-		in          *http.Client
-		wantTimeout time.Duration
-		wantBase    http.RoundTripper
+		name          string
+		in            *http.Client
+		got           *http.Client
+		wantTimeout   time.Duration
+		wantBase      http.RoundTripper
+		wantPropagate bool
 	}{
-		{name: "nil client gets default transport", in: nil, wantBase: http.DefaultTransport},
-		{name: "settings and base transport are kept", in: &http.Client{Timeout: 7 * time.Second, Transport: base}, wantTimeout: 7 * time.Second, wantBase: base},
+		{name: "Client nil gets default transport", got: Client(nil), wantBase: http.DefaultTransport, wantPropagate: true},
+		{name: "Client keeps settings and base", in: internal, got: Client(internal), wantTimeout: 7 * time.Second, wantBase: base, wantPropagate: true},
+		{name: "ExternalClient nil gets default transport", got: ExternalClient(nil), wantBase: http.DefaultTransport},
+		{name: "ExternalClient keeps settings and base", in: external, got: ExternalClient(external), wantTimeout: 20 * time.Second, wantBase: base},
+		{name: "Transport nil gets default transport", got: &http.Client{Transport: Transport(nil)}, wantBase: http.DefaultTransport, wantPropagate: true},
+		{name: "ExternalTransport nil gets default transport", got: &http.Client{Transport: ExternalTransport(nil)}, wantBase: http.DefaultTransport},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := Client(tc.in)
-			if got == tc.in {
-				t.Fatal("Client must return a copy")
+			if tc.in != nil && tc.got == tc.in {
+				t.Fatal("wrapper must return a copy")
 			}
-			if tc.in != nil && tc.in.Transport != tc.wantBase {
+			if tc.in != nil && tc.in.Transport != base {
 				t.Error("input client transport was mutated")
 			}
-			rt, ok := got.Transport.(*transport)
+			rt, ok := tc.got.Transport.(*transport)
 			if !ok {
-				t.Fatalf("transport = %T, want *transport", got.Transport)
+				t.Fatalf("transport = %T, want *transport", tc.got.Transport)
 			}
-			if got.Timeout != tc.wantTimeout || rt.base != tc.wantBase || !rt.propagate {
-				t.Errorf("timeout %v base %T propagate %v, want %v %T true", got.Timeout, rt.base, rt.propagate, tc.wantTimeout, tc.wantBase)
-			}
-		})
-	}
-}
-
-func TestExternalClient(t *testing.T) {
-	t.Parallel()
-	base := &http.Transport{}
-	tests := []struct {
-		name        string
-		in          *http.Client
-		wantTimeout time.Duration
-		wantBase    http.RoundTripper
-	}{
-		{name: "nil client gets default transport", in: nil, wantBase: http.DefaultTransport},
-		{name: "settings and base transport are kept", in: &http.Client{Timeout: 20 * time.Second, Transport: base}, wantTimeout: 20 * time.Second, wantBase: base},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			got := ExternalClient(tc.in)
-			if got == tc.in {
-				t.Fatal("ExternalClient must return a copy")
-			}
-			if tc.in != nil && tc.in.Transport != tc.wantBase {
-				t.Error("input client transport was mutated")
-			}
-			rt, ok := got.Transport.(*transport)
-			if !ok {
-				t.Fatalf("transport = %T, want *transport", got.Transport)
-			}
-			if got.Timeout != tc.wantTimeout || rt.base != tc.wantBase || rt.propagate {
-				t.Errorf("timeout %v base %T propagate %v, want %v %T false", got.Timeout, rt.base, rt.propagate, tc.wantTimeout, tc.wantBase)
+			if tc.got.Timeout != tc.wantTimeout || rt.base != tc.wantBase || rt.propagate != tc.wantPropagate {
+				t.Errorf("timeout %v base %T propagate %v, want %v %T %v", tc.got.Timeout, rt.base, rt.propagate, tc.wantTimeout, tc.wantBase, tc.wantPropagate)
 			}
 		})
 	}
@@ -879,27 +849,6 @@ func TestTransportCloseIdleConnections(t *testing.T) {
 	}
 }
 
-func TestTransport_DefaultBase(t *testing.T) {
-	t.Parallel()
-	rt, ok := Transport(nil).(*transport)
-	if !ok {
-		t.Fatalf("Transport(nil) is %T, want *transport", Transport(nil))
-	}
-	if rt.base != http.DefaultTransport || !rt.propagate {
-		t.Errorf("base = %T propagate %v, want http.DefaultTransport true", rt.base, rt.propagate)
-	}
-	ext, ok := ExternalTransport(nil).(*transport)
-	if !ok {
-		t.Fatalf("ExternalTransport(nil) is %T, want *transport", ExternalTransport(nil))
-	}
-	if ext.base != http.DefaultTransport || ext.propagate {
-		t.Errorf("external base = %T propagate %v, want http.DefaultTransport false", ext.base, ext.propagate)
-	}
-	if originOnly(nil) != "" {
-		t.Error("originOnly(nil) should be empty")
-	}
-}
-
 func TestExternalTransport(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -1032,6 +981,26 @@ func TestRouteFromPattern(t *testing.T) {
 			t.Parallel()
 			if got := routeFromPattern(tc.in); got != tc.want {
 				t.Errorf("routeFromPattern(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestOriginOnly(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		in   *url.URL
+		want string
+	}{
+		{name: "nil url is empty", in: nil, want: ""},
+		{name: "path query and userinfo dropped", in: &url.URL{Scheme: "https", User: url.User("u"), Host: "h:8443", Path: "/p", RawQuery: "token=x"}, want: "https://h:8443"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := originOnly(tc.in); got != tc.want {
+				t.Errorf("originOnly = %q, want %q", got, tc.want)
 			}
 		})
 	}
