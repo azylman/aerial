@@ -407,11 +407,11 @@ func TestImageTag(t *testing.T) {
 		image string
 		want  string
 	}{
-		{name: "plain tag", image: "ghcr.io/azylman/aerial-synapse:abc123", want: "abc123"},
+		{name: "plain tag", image: "ghcr.io/example/aerial-synapse:abc123", want: "abc123"},
 		{name: "registry with port and tag", image: "registry.lan:5000/aerial/haro:def456", want: "def456"},
 		{name: "registry with port untagged", image: "registry.lan:5000/aerial/haro"},
-		{name: "tag with digest", image: "ghcr.io/azylman/aerial-synapse:abc123@sha256:beef", want: "abc123"},
-		{name: "digest only", image: "ghcr.io/azylman/aerial-synapse@sha256:beef"},
+		{name: "tag with digest", image: "ghcr.io/example/aerial-synapse:abc123@sha256:beef", want: "abc123"},
+		{name: "digest only", image: "ghcr.io/example/aerial-synapse@sha256:beef"},
 		{name: "untagged", image: "busybox"},
 		{name: "bare name with tag", image: "postgres:18", want: "18"},
 	}
@@ -425,32 +425,72 @@ func TestImageTag(t *testing.T) {
 	}
 }
 
-func TestLinkManagedWorkloadsAndReloadsOn(t *testing.T) {
+func TestLinkManagedWorkloads(t *testing.T) {
 	t.Parallel()
-	workloads := []model.WorkloadRollout{
+	mixed := []model.WorkloadRollout{
 		{Kind: "Deployment", Name: "dep"},
 		{Kind: "RestateCluster", Name: "restate-cluster", Namespace: "ns1"},
 		{Kind: "StatefulSet", Name: "restate", Namespace: "ns1"},
 		{Kind: "StatefulSet", Name: "restate-cluster", Namespace: "ns1"},
 		{Kind: "StatefulSet", Name: "other", Namespace: "ns1"},
 	}
-	LinkManagedWorkloads(workloads)
-	if len(workloads[1].ManagedWorkloads) != 2 {
-		t.Errorf("expected 2 statefulsets linked to cluster, got %d", len(workloads[1].ManagedWorkloads))
+	tests := []struct {
+		name        string
+		workloads   []model.WorkloadRollout
+		calls       int
+		cluster     int
+		wantManaged []string
+	}{
+		{name: "cluster links its own and restate statefulsets", workloads: mixed, calls: 1, cluster: 1, wantManaged: []string{"restate", "restate-cluster"}},
+		{name: "relinking is idempotent", calls: 2, wantManaged: []string{"restate"}, workloads: []model.WorkloadRollout{{Kind: "RestateCluster", Namespace: "default", Name: "restate"}, {Kind: "StatefulSet", Namespace: "default", Name: "restate"}}},
+		{name: "unnamespaced cluster uses its name as namespace", calls: 1, wantManaged: []string{"restate"}, workloads: []model.WorkloadRollout{{Kind: "RestateCluster", Name: "restate"}, {Kind: "StatefulSet", Namespace: "restate", Name: "restate"}}},
 	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			for range tc.calls {
+				LinkManagedWorkloads(tc.workloads)
+			}
+			var got []string
+			for _, m := range tc.workloads[tc.cluster].ManagedWorkloads {
+				got = append(got, m.Name)
+			}
+			if !slices.Equal(got, tc.wantManaged) {
+				t.Errorf("managed = %v, want %v", got, tc.wantManaged)
+			}
+		})
+	}
+}
 
-	w := model.WorkloadRollout{
-		Annotations:   map[string]string{reloaderConfigMapAnnotation: "cm1, cm2"},
-		ConfigMapRefs: []string{"cm1"},
+func TestReloadsOn(t *testing.T) {
+	t.Parallel()
+	listed := model.WorkloadRollout{Annotations: map[string]string{reloaderConfigMapAnnotation: "cm1, cm2"}, ConfigMapRefs: []string{"cm1"}}
+	auto := model.WorkloadRollout{Annotations: map[string]string{reloaderAutoAnnotation: "true"}, ConfigMapRefs: []string{"cm1"}}
+	tests := []struct {
+		name string
+		w    model.WorkloadRollout
+		cm   string
+		want bool
+	}{
+		{"listed first", listed, "cm1", true},
+		{"listed trimmed", listed, "cm2", true},
+		{"not listed", listed, "cm3", false},
+		{"auto referenced", auto, "cm1", true},
+		{"auto unreferenced", auto, "cm2", false},
 	}
-	if !ReloadsOn(w, "cm1") || !ReloadsOn(w, "cm2") || ReloadsOn(w, "cm3") {
-		t.Errorf("ReloadsOn failed for explicit annotation")
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := ReloadsOn(tc.w, tc.cm); got != tc.want {
+				t.Errorf("ReloadsOn(%q) = %v, want %v", tc.cm, got, tc.want)
+			}
+		})
 	}
 }
 
 func TestWorkloadRolloutComplete(t *testing.T) {
 	t.Parallel()
-	synapseImage := "ghcr.io/azylman/aerial-synapse:0123abcd"
+	synapseImage := "ghcr.io/example/aerial-synapse:0123abcd"
 
 	deployRollout := func(name, image string, gen, observed int64, replicas, updated, available, total int32, deadline bool) model.WorkloadRollout {
 		return model.WorkloadRollout{Kind: "Deployment", Namespace: "default", Name: name, Images: []string{image}, Generation: gen, ObservedGeneration: observed, Replicas: replicas, UpdatedReplicas: updated, AvailableReplicas: available, StatusReplicas: total, ProgressDeadlineExceeded: deadline}
@@ -563,9 +603,9 @@ func TestPRRolloutStatus(t *testing.T) {
 		return model.WorkloadRollout{Kind: "StatefulSet", Namespace: "default", Name: name, Images: []string{image}, Generation: gen, ObservedGeneration: observed, Replicas: replicas, AvailableReplicas: available, UpdateRevision: updateRev, CurrentRevision: currentRev}
 	}
 
-	const otherImage = "ghcr.io/azylman/aerial-haro:feedface"
+	const otherImage = "ghcr.io/example/aerial-haro:feedface"
 	const rolloutSHA = "0123abcd"
-	const synapseImage = "ghcr.io/azylman/aerial-synapse:" + rolloutSHA
+	const synapseImage = "ghcr.io/example/aerial-synapse:" + rolloutSHA
 	since := rolloutClock(10, 0, 0)
 	auto := map[string]string{"reloader.stakater.com/auto": "true"}
 	eriDone := deployRollout("eri", otherImage, 2, 2, 1, 1, 1, 1, false)
@@ -596,7 +636,7 @@ func TestPRRolloutStatus(t *testing.T) {
 			wantFailed: true,
 			wantReason: "Deployment default/synapse: terminating since 2026-11-20T18:00:00Z (blocked by finalizers [deployments.restate.dev]; generation 4 not observed)",
 		},
-		{name: "image match done", workloads: []model.WorkloadRollout{deployRollout("synapse", synapseImage, 3, 3, 1, 1, 1, 1, false), stsRollout("db", "ghcr.io/azylman/aerial-db:"+rolloutSHA+"@sha256:beef", 2, 2, 1, 1, "db-2", "db-2")}, commitSHA: rolloutSHA, wantDone: true},
+		{name: "image match done", workloads: []model.WorkloadRollout{deployRollout("synapse", synapseImage, 3, 3, 1, 1, 1, 1, false), stsRollout("db", "ghcr.io/example/aerial-db:"+rolloutSHA+"@sha256:beef", 2, 2, 1, 1, "db-2", "db-2")}, commitSHA: rolloutSHA, wantDone: true},
 		{name: "image match failed", workloads: []model.WorkloadRollout{deployRollout("synapse", synapseImage, 3, 3, 1, 1, 0, 2, true)}, commitSHA: rolloutSHA, wantFailed: true, wantReason: "Deployment default/synapse: progress deadline exceeded"},
 		{name: "manifest-only change done", workloads: []model.WorkloadRollout{withChange(deployRollout("haro", otherImage, 3, 3, 1, 1, 1, 1, false), rolloutClock(10, 1, 0), nil)}, commitSHA: rolloutSHA, wantDone: true},
 		{name: "reloader pending restart", workloads: []model.WorkloadRollout{withChange(eriDone, rolloutClock(9, 0, 0), auto, "eri-config")}, configMaps: eriConfig, commitSHA: rolloutSHA, now: rolloutClock(10, 3, 0), wantReason: "Deployment default/eri (awaiting Reloader restart for ConfigMap default/eri-config)"},
@@ -625,11 +665,11 @@ func TestImageServiceCandidates(t *testing.T) {
 		want  []string
 	}{
 		{name: "empty image", image: "", want: nil},
-		{name: "aerial prefix stripped", image: "ghcr.io/azylman/aerial-eri:sha-42", want: []string{"aerial-eri", "eri"}},
-		{name: "aerial-sidecar prefix stripped before aerial", image: "ghcr.io/azylman/aerial-sidecar-cast-watcher:sha-42", want: []string{"aerial-sidecar-cast-watcher", "cast-watcher"}},
-		{name: "mirrormere prefix stripped", image: "ghcr.io/azylman/mirrormere-kiosk:sha-42", want: []string{"mirrormere-kiosk", "kiosk"}},
-		{name: "mirrormere without hyphen keeps base", image: "ghcr.io/azylman/mirrormere:sha-42", want: []string{"mirrormere"}},
-		{name: "aerial without stripped suffix", image: "ghcr.io/azylman/aerial-:sha-42", want: []string{"aerial-"}},
+		{name: "aerial prefix stripped", image: "ghcr.io/example/aerial-eri:sha-42", want: []string{"aerial-eri", "eri"}},
+		{name: "aerial-sidecar prefix stripped before aerial", image: "ghcr.io/example/aerial-sidecar-cast-watcher:sha-42", want: []string{"aerial-sidecar-cast-watcher", "cast-watcher"}},
+		{name: "mirrormere prefix stripped", image: "ghcr.io/example/mirrormere-kiosk:sha-42", want: []string{"mirrormere-kiosk", "kiosk"}},
+		{name: "mirrormere without hyphen keeps base", image: "ghcr.io/example/mirrormere:sha-42", want: []string{"mirrormere"}},
+		{name: "aerial without stripped suffix", image: "ghcr.io/example/aerial-:sha-42", want: []string{"aerial-"}},
 		{name: "short name without prefix", image: "eri:sha-42", want: []string{"eri"}},
 	}
 	for _, tc := range tests {
@@ -640,23 +680,6 @@ func TestImageServiceCandidates(t *testing.T) {
 				t.Errorf("ImageServiceCandidates(%q) = %v, want %v", tc.image, got, tc.want)
 			}
 		})
-	}
-}
-
-func TestLinkManagedWorkloadsIdempotent(t *testing.T) {
-	t.Parallel()
-	cluster := model.WorkloadRollout{Kind: "RestateCluster", Namespace: "default", Name: "restate"}
-	sts := model.WorkloadRollout{Kind: "StatefulSet", Namespace: "default", Name: "restate"}
-	workloads := []model.WorkloadRollout{cluster, sts}
-
-	LinkManagedWorkloads(workloads)
-	if len(workloads[0].ManagedWorkloads) != 1 {
-		t.Fatalf("first call managed count = %d, want 1", len(workloads[0].ManagedWorkloads))
-	}
-
-	LinkManagedWorkloads(workloads)
-	if len(workloads[0].ManagedWorkloads) != 1 {
-		t.Fatalf("second call managed count = %d, want 1 (not duplicated)", len(workloads[0].ManagedWorkloads))
 	}
 }
 
@@ -674,9 +697,9 @@ func TestReadyForCommitServices(t *testing.T) {
 	}
 
 	const rolloutSHA = "0123abcd"
-	const synapseImage = "ghcr.io/azylman/aerial-synapse:" + rolloutSHA
-	const eriImage = "ghcr.io/azylman/aerial-eri:" + rolloutSHA
-	const otherImage = "ghcr.io/azylman/aerial-haro:other-sha"
+	const synapseImage = "ghcr.io/example/aerial-synapse:" + rolloutSHA
+	const eriImage = "ghcr.io/example/aerial-eri:" + rolloutSHA
+	const otherImage = "ghcr.io/example/aerial-haro:other-sha"
 	since := rolloutClock(10, 0, 0)
 	auto := map[string]string{"reloader.stakater.com/auto": "true"}
 

@@ -194,39 +194,41 @@ func TestResolveStructuredWorkflowImages(t *testing.T) {
 		wantErr  error
 		wantFail bool
 		dbErr    error
+		noGitHub bool
+		noReg    bool
 	}{
-		{"aerial service mapping", tRepo, metadataAPI{runs: runs(ok), checks: tPublished(engine)}, WorkflowRunEvent{tRunID, 1, tHead}, []string{"ghcr.io/example/engine:latest"}, nil, false, nil},
-		{"sidecar service mapping", sidecars, metadataAPI{runs: runs(tRepoRun(sidecars, 1, model.BuildEventPush, "completed", model.ConclusionSuccess)), checks: tPublished(tRepoMeta(sidecars, 1, "engine", "aerial-sidecar-engine"))}, WorkflowRunEvent{tRunID, 1, tHead}, []string{"ghcr.io/example/engine:latest"}, nil, false, nil},
-		{"display service mapping", display, metadataAPI{runs: runs(tRepoRun(display, 1, model.BuildEventPush, "completed", model.ConclusionSuccess)), checks: tPublished(tRepoMeta(display, 1, "engine", "mirrormere-engine"))}, WorkflowRunEvent{tRunID, 1, tHead}, []string{"ghcr.io/example/engine:latest"}, nil, false, nil},
-		{"manual dispatch", tRepo, metadataAPI{runs: runs(withEvent(ok, model.BuildEventDispatch)), checks: tPublished(withMetaEvent(engine, model.BuildEventDispatch))}, WorkflowRunEvent{tRunID, 1, tHead}, []string{"ghcr.io/example/engine:latest"}, nil, false, nil},
-		{"paginated transport", tRepo, metadataAPI{runs: runs(ok), checks: tPublished(engine), paginate: true}, WorkflowRunEvent{tRunID, 1, tHead}, []string{"ghcr.io/example/engine:latest"}, nil, false, nil},
-		{"explicit empty selection", tRepo, metadataAPI{runs: runs(ok), checks: tPublished(tMeta(1))}, WorkflowRunEvent{tRunID, 1, tHead}, []string{}, nil, false, nil},
-		{"missing metadata never means no deploy", tRepo, metadataAPI{runs: runs(ok)}, WorkflowRunEvent{tRunID, 1, tHead}, nil, ErrBuildMetadataMissing, false, nil},
-		{"malformed record blocks promotion", tRepo, metadataAPI{runs: runs(ok), checks: checks(withText(tCheck(engine), "{"))}, WorkflowRunEvent{tRunID, 1, tHead}, nil, nil, true, nil},
-		{"manifest cannot promote", tRepo, metadataAPI{runs: runs(ok), checks: checks(tCheck(engine))}, WorkflowRunEvent{tRunID, 1, tHead}, nil, nil, true, nil},
-		{"failed separate promotion", tRepo, metadataAPI{runs: runs(tRun(1, "completed", model.BuildResultFailure)), checks: tPublished(engine)}, WorkflowRunEvent{tRunID, 1, tHead}, nil, nil, true, nil},
-		{"rerun of a finished run waits for its own final", tRepo, metadataAPI{runs: runs(tRun(2, "completed", model.ConclusionSuccess)), checks: tPublished(engine)}, WorkflowRunEvent{tRunID, 2, tHead}, nil, nil, true, nil},
-		{"delayed prior-attempt webhook", tRepo, metadataAPI{runs: runs(tRun(2, "completed", model.ConclusionSuccess)), checks: tPublished(engine)}, WorkflowRunEvent{tRunID, 1, tHead}, nil, ErrStaleWorkflowEvent, false, nil},
-		{"API behind webhook retries", tRepo, metadataAPI{runs: runs(ok), checks: tPublished(engine)}, WorkflowRunEvent{tRunID, 2, tHead}, nil, nil, true, nil},
-		{"webhook without attempt", tRepo, metadataAPI{runs: runs(ok), checks: tPublished(engine)}, WorkflowRunEvent{tRunID, 0, tHead}, nil, nil, true, nil},
-		{"webhook head mismatch", tRepo, metadataAPI{runs: runs(ok), checks: tPublished(engine)}, WorkflowRunEvent{tRunID, 1, tOther}, nil, nil, true, nil},
-		{"PR run never promotes", tRepo, metadataAPI{runs: runs(tPRRun(1, "completed", model.ConclusionSuccess))}, WorkflowRunEvent{tRunID, 1, tHead}, nil, ErrNotImageWorkflow, false, nil},
-		{"non-producer workflow", tRepo, metadataAPI{runs: runs(withRunPath(ok, "dynamic/dependabot/dependabot-updates"))}, WorkflowRunEvent{tRunID, 1, tHead}, nil, ErrNotImageWorkflow, false, nil},
-		{"repository without producer", "example/aerial-config", metadataAPI{}, WorkflowRunEvent{tRunID, 1, tHead}, nil, nil, false, nil},
-		{"snapshot write failure never blocks promotion", tRepo, metadataAPI{runs: runs(ok), checks: tPublished(engine)}, WorkflowRunEvent{tRunID, 1, tHead}, []string{"ghcr.io/example/engine:latest"}, nil, false, errors.New("offline")},
-		{"webhook without run", tRepo, metadataAPI{runs: runs(ok)}, WorkflowRunEvent{0, 1, tHead}, nil, nil, true, nil},
-		{"final disagrees with transport", tRepo, metadataAPI{runs: runs(ok), checks: tPublished(engine)[2:]}, WorkflowRunEvent{tRunID, 1, tHead}, nil, nil, true, nil},
-		{"run unavailable", tRepo, metadataAPI{runs: runs(ok), runStatus: http.StatusInternalServerError}, WorkflowRunEvent{tRunID, 1, tHead}, nil, nil, true, nil},
-		{"checks unavailable", tRepo, metadataAPI{runs: runs(ok), checksStatus: http.StatusInternalServerError}, WorkflowRunEvent{tRunID, 1, tHead}, nil, nil, true, nil},
+		{"aerial service mapping", tRepo, metadataAPI{runs: runs(ok), checks: tPublished(engine)}, WorkflowRunEvent{tRunID, 1, tHead}, []string{"ghcr.io/example/engine:latest"}, nil, false, nil, false, false},
+		{"sidecar service mapping", sidecars, metadataAPI{runs: runs(tRepoRun(sidecars, 1, model.BuildEventPush, "completed", model.ConclusionSuccess)), checks: tPublished(tRepoMeta(sidecars, 1, "engine", "aerial-sidecar-engine"))}, WorkflowRunEvent{tRunID, 1, tHead}, []string{"ghcr.io/example/engine:latest"}, nil, false, nil, false, false},
+		{"display service mapping", display, metadataAPI{runs: runs(tRepoRun(display, 1, model.BuildEventPush, "completed", model.ConclusionSuccess)), checks: tPublished(tRepoMeta(display, 1, "engine", "mirrormere-engine"))}, WorkflowRunEvent{tRunID, 1, tHead}, []string{"ghcr.io/example/engine:latest"}, nil, false, nil, false, false},
+		{"manual dispatch", tRepo, metadataAPI{runs: runs(withEvent(ok, model.BuildEventDispatch)), checks: tPublished(withMetaEvent(engine, model.BuildEventDispatch))}, WorkflowRunEvent{tRunID, 1, tHead}, []string{"ghcr.io/example/engine:latest"}, nil, false, nil, false, false},
+		{"paginated transport", tRepo, metadataAPI{runs: runs(ok), checks: tPublished(engine), paginate: true}, WorkflowRunEvent{tRunID, 1, tHead}, []string{"ghcr.io/example/engine:latest"}, nil, false, nil, false, false},
+		{"explicit empty selection", tRepo, metadataAPI{runs: runs(ok), checks: tPublished(tMeta(1))}, WorkflowRunEvent{tRunID, 1, tHead}, []string{}, nil, false, nil, false, false},
+		{"missing metadata never means no deploy", tRepo, metadataAPI{runs: runs(ok)}, WorkflowRunEvent{tRunID, 1, tHead}, nil, ErrBuildMetadataMissing, false, nil, false, false},
+		{"malformed record blocks promotion", tRepo, metadataAPI{runs: runs(ok), checks: checks(withText(tCheck(engine), "{"))}, WorkflowRunEvent{tRunID, 1, tHead}, nil, nil, true, nil, false, false},
+		{"manifest cannot promote", tRepo, metadataAPI{runs: runs(ok), checks: checks(tCheck(engine))}, WorkflowRunEvent{tRunID, 1, tHead}, nil, nil, true, nil, false, false},
+		{"failed separate promotion", tRepo, metadataAPI{runs: runs(tRun(1, "completed", model.BuildResultFailure)), checks: tPublished(engine)}, WorkflowRunEvent{tRunID, 1, tHead}, nil, nil, true, nil, false, false},
+		{"rerun of a finished run waits for its own final", tRepo, metadataAPI{runs: runs(tRun(2, "completed", model.ConclusionSuccess)), checks: tPublished(engine)}, WorkflowRunEvent{tRunID, 2, tHead}, nil, nil, true, nil, false, false},
+		{"delayed prior-attempt webhook", tRepo, metadataAPI{runs: runs(tRun(2, "completed", model.ConclusionSuccess)), checks: tPublished(engine)}, WorkflowRunEvent{tRunID, 1, tHead}, nil, ErrStaleWorkflowEvent, false, nil, false, false},
+		{"API behind webhook retries", tRepo, metadataAPI{runs: runs(ok), checks: tPublished(engine)}, WorkflowRunEvent{tRunID, 2, tHead}, nil, nil, true, nil, false, false},
+		{"webhook without attempt", tRepo, metadataAPI{runs: runs(ok), checks: tPublished(engine)}, WorkflowRunEvent{tRunID, 0, tHead}, nil, nil, true, nil, false, false},
+		{"webhook head mismatch", tRepo, metadataAPI{runs: runs(ok), checks: tPublished(engine)}, WorkflowRunEvent{tRunID, 1, tOther}, nil, nil, true, nil, false, false},
+		{"PR run never promotes", tRepo, metadataAPI{runs: runs(tPRRun(1, "completed", model.ConclusionSuccess))}, WorkflowRunEvent{tRunID, 1, tHead}, nil, ErrNotImageWorkflow, false, nil, false, false},
+		{"non-producer workflow", tRepo, metadataAPI{runs: runs(withRunPath(ok, "dynamic/dependabot/dependabot-updates"))}, WorkflowRunEvent{tRunID, 1, tHead}, nil, ErrNotImageWorkflow, false, nil, false, false},
+		{"repository without producer", "example/aerial-config", metadataAPI{}, WorkflowRunEvent{tRunID, 1, tHead}, nil, nil, false, nil, false, false},
+		{"snapshot write failure never blocks promotion", tRepo, metadataAPI{runs: runs(ok), checks: tPublished(engine)}, WorkflowRunEvent{tRunID, 1, tHead}, []string{"ghcr.io/example/engine:latest"}, nil, false, errors.New("offline"), false, false},
+		{"webhook without run", tRepo, metadataAPI{runs: runs(ok)}, WorkflowRunEvent{0, 1, tHead}, nil, nil, true, nil, false, false},
+		{"final disagrees with transport", tRepo, metadataAPI{runs: runs(ok), checks: tPublished(engine)[2:]}, WorkflowRunEvent{tRunID, 1, tHead}, nil, nil, true, nil, false, false},
+		{"run unavailable", tRepo, metadataAPI{runs: runs(ok), runStatus: http.StatusInternalServerError}, WorkflowRunEvent{tRunID, 1, tHead}, nil, nil, true, nil, false, false},
+		{"checks unavailable", tRepo, metadataAPI{runs: runs(ok), checksStatus: http.StatusInternalServerError}, WorkflowRunEvent{tRunID, 1, tHead}, nil, nil, true, nil, false, false},
+		{"github client missing", tRepo, metadataAPI{}, WorkflowRunEvent{tRunID, 1, tHead}, nil, nil, true, nil, true, false},
+		{"registry missing still promotes", tRepo, metadataAPI{runs: runs(ok), checks: tPublished(engine)}, WorkflowRunEvent{tRunID, 1, tHead}, []string{"ghcr.io/example/engine:latest"}, nil, false, nil, false, true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			server := httptest.NewServer(http.HandlerFunc(tc.api.serve))
 			defer server.Close()
-			reg := &testPRRegistry{recordErr: tc.dbErr}
-			gh := &testGitHubGetter{client: server.Client(), baseURL: server.URL}
-			c := NewConsumer(gh, reg)
+			c := newMetadataConsumer(server, &testPRRegistry{recordErr: tc.dbErr}, tc.noGitHub, tc.noReg)
 
 			got, err := c.ResolveWorkflowRunImages(context.Background(), tc.repo, tc.event, 42)
 			if tc.wantErr != nil && !errors.Is(err, tc.wantErr) || tc.wantErr == nil && (err != nil) != tc.wantFail {
@@ -262,23 +264,25 @@ func TestRefreshPRBuildMetadata(t *testing.T) {
 		wantKind    string
 		wantUpdated bool
 		wantErr     bool
+		noGitHub    bool
 	}{
-		{"PR head final", open, nil, nil, metadataAPI{runs: runs(prRun), checks: prChecks, parents: bound}, prwire.BuildMetadataFinal, true, false},
-		{"Dependabot-free conflict status still tracked", model.PRBuildLifecycle{Status: "conflict", HeadSHA: tHead}, nil, nil, metadataAPI{runs: runs(prRun), checks: prChecks, parents: bound}, prwire.BuildMetadataFinal, true, false},
-		{"unbound execution revision", open, nil, nil, metadataAPI{runs: runs(prRun), checks: prChecks, parents: []string{tBase, tOther}}, "", false, true},
-		{"execution commit unavailable", open, nil, nil, metadataAPI{runs: runs(prRun), checks: prChecks, cmt: http.StatusNotFound}, "", false, true},
-		{"stale PR revision", model.PRBuildLifecycle{Status: "open", HeadSHA: tOther}, nil, nil, metadataAPI{runs: runs(prRun), checks: prChecks, parents: bound}, "", false, false},
-		{"merged PR follows main run", merged, nil, nil, metadataAPI{runs: runs(priorPRRun(), tRun(1, "completed", model.ConclusionSuccess)), checks: tPublished(tMeta(1, "engine"))}, prwire.BuildMetadataFinal, true, false},
-		{"newer pending run hides older success", open, nil, nil, metadataAPI{runs: runs(prRun, newer), checks: prChecks, parents: bound}, "", false, false},
-		{"newer failed run without metadata", open, nil, nil, metadataAPI{runs: runs(prRun, newerFailed), checks: prChecks, parents: bound}, "", false, true},
-		{"no eligible run yet", open, nil, nil, metadataAPI{}, "", false, false},
-		{"wrong PR number", open, nil, nil, metadataAPI{runs: runs(prRun), checks: checks(tCheck(withPRNumber(pr, &pr43))), parents: bound}, "", false, true},
-		{"completed PR run without metadata", open, nil, nil, metadataAPI{runs: runs(prRun), parents: bound}, "", false, true},
-		{"run listing unavailable", open, nil, nil, metadataAPI{runs: runs(prRun), listStatus: http.StatusBadGateway}, "", false, true},
-		{"authoritative run unavailable", open, nil, nil, metadataAPI{runs: runs(prRun), runStatus: http.StatusBadGateway}, "", false, true},
-		{"authoritative run identity invalid", open, nil, nil, metadataAPI{runs: runs(tPRRun(0, "queued", ""))}, "", false, true},
-		{"lifecycle unavailable", open, errors.New("offline"), nil, metadataAPI{}, "", false, true},
-		{"snapshot write fails", open, nil, errors.New("offline"), metadataAPI{runs: runs(prRun), checks: prChecks, parents: bound}, prwire.BuildMetadataFinal, false, true},
+		{"PR head final", open, nil, nil, metadataAPI{runs: runs(prRun), checks: prChecks, parents: bound}, prwire.BuildMetadataFinal, true, false, false},
+		{"Dependabot-free conflict status still tracked", model.PRBuildLifecycle{Status: "conflict", HeadSHA: tHead}, nil, nil, metadataAPI{runs: runs(prRun), checks: prChecks, parents: bound}, prwire.BuildMetadataFinal, true, false, false},
+		{"unbound execution revision", open, nil, nil, metadataAPI{runs: runs(prRun), checks: prChecks, parents: []string{tBase, tOther}}, "", false, true, false},
+		{"execution commit unavailable", open, nil, nil, metadataAPI{runs: runs(prRun), checks: prChecks, cmt: http.StatusNotFound}, "", false, true, false},
+		{"stale PR revision", model.PRBuildLifecycle{Status: "open", HeadSHA: tOther}, nil, nil, metadataAPI{runs: runs(prRun), checks: prChecks, parents: bound}, "", false, false, false},
+		{"merged PR follows main run", merged, nil, nil, metadataAPI{runs: runs(priorPRRun(), tRun(1, "completed", model.ConclusionSuccess)), checks: tPublished(tMeta(1, "engine"))}, prwire.BuildMetadataFinal, true, false, false},
+		{"newer pending run hides older success", open, nil, nil, metadataAPI{runs: runs(prRun, newer), checks: prChecks, parents: bound}, "", false, false, false},
+		{"newer failed run without metadata", open, nil, nil, metadataAPI{runs: runs(prRun, newerFailed), checks: prChecks, parents: bound}, "", false, true, false},
+		{"no eligible run yet", open, nil, nil, metadataAPI{}, "", false, false, false},
+		{"wrong PR number", open, nil, nil, metadataAPI{runs: runs(prRun), checks: checks(tCheck(withPRNumber(pr, &pr43))), parents: bound}, "", false, true, false},
+		{"completed PR run without metadata", open, nil, nil, metadataAPI{runs: runs(prRun), parents: bound}, "", false, true, false},
+		{"run listing unavailable", open, nil, nil, metadataAPI{runs: runs(prRun), listStatus: http.StatusBadGateway}, "", false, true, false},
+		{"authoritative run unavailable", open, nil, nil, metadataAPI{runs: runs(prRun), runStatus: http.StatusBadGateway}, "", false, true, false},
+		{"authoritative run identity invalid", open, nil, nil, metadataAPI{runs: runs(tPRRun(0, "queued", ""))}, "", false, true, false},
+		{"lifecycle unavailable", open, errors.New("offline"), nil, metadataAPI{}, "", false, true, false},
+		{"snapshot write fails", open, nil, errors.New("offline"), metadataAPI{runs: runs(prRun), checks: prChecks, parents: bound}, prwire.BuildMetadataFinal, false, true, false},
+		{"github client missing", open, nil, nil, metadataAPI{}, "", false, true, true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -286,8 +290,7 @@ func TestRefreshPRBuildMetadata(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(tc.api.serve))
 			defer server.Close()
 			reg := &testPRRegistry{lifecycle: tc.lifecycle, lifeErr: tc.lifeErr, recordErr: tc.dbErr}
-			gh := &testGitHubGetter{client: server.Client(), baseURL: server.URL}
-			c := NewConsumer(gh, reg)
+			c := newMetadataConsumer(server, reg, tc.noGitHub, false)
 
 			updated, err := c.RefreshPRBuildMetadata(context.Background(), tRepo, 42, tHead)
 			if (err != nil) != tc.wantErr || updated != tc.wantUpdated {
@@ -318,6 +321,7 @@ func TestSupersedeStaleBuildAttempt(t *testing.T) {
 		{"different run untouched", true, WorkflowRunEvent{78, 2, tHead}, false},
 		{"different revision untouched", true, WorkflowRunEvent{tRunID, 2, tOther}, false},
 		{"no snapshot", false, WorkflowRunEvent{tRunID, 2, tHead}, false},
+		{"event without run untouched", true, WorkflowRunEvent{0, 2, tHead}, false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -338,39 +342,74 @@ func TestSupersedeStaleBuildAttempt(t *testing.T) {
 	}
 }
 
-func TestConsumer_DirectEdgeCases(t *testing.T) {
+func TestValidateMetadataExecution(t *testing.T) {
 	t.Parallel()
-	ctx := context.Background()
+	branchRun := MetadataWorkflowRun{Event: model.BuildEventPush, HeadSHA: tHead, Path: MetadataWorkflowPath(tRepo)}
+	prRun := tPRRun(1, "completed", model.ConclusionSuccess)
+	tests := []struct {
+		name      string
+		run       MetadataWorkflowRun
+		execution string
+		wantErr   string
+	}{
+		{"branch build runs its head", branchRun, tHead, ""},
+		{"branch build on another revision", branchRun, tOther, "branch execution revision mismatch"},
+		{"PR build on its head is not a merge", prRun, tHead, "PR execution is not a merge revision"},
+		{"PR build without github client", prRun, tOther, "github client not initialized"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			err := NewConsumer(nil, nil).ValidateMetadataExecution(context.Background(), tRepo, tc.run, tc.execution)
+			if got := errString(err); got != tc.wantErr {
+				t.Fatalf("ValidateMetadataExecution() error = %q, want %q", got, tc.wantErr)
+			}
+		})
+	}
+}
 
-	// Consumer with nil dependencies
-	c := NewConsumer(nil, nil)
-	c.recordPRBuildSnapshot(ctx, "repo", 0, prwire.BuildMetadata{})
-	c.recordPRBuildSnapshot(ctx, "repo", 1, prwire.BuildMetadata{})
+func TestResolveRunMetadata(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		run        MetadataWorkflowRun
+		noGitHub   bool
+		wantSource MetadataSource
+		wantErr    string
+	}{
+		{"github client missing", tRun(1, "completed", model.ConclusionSuccess), true, MetadataPending, "github client not initialized"},
+		{"running run without records is pending", tRun(1, "in_progress", ""), false, MetadataPending, ""},
+		{"completed run without records lacks metadata", tRun(1, "completed", model.ConclusionSuccess), false, MetadataPending, ErrBuildMetadataMissing.Error()},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			server := httptest.NewServer(http.HandlerFunc(metadataAPI{}.serve))
+			defer server.Close()
+			_, source, err := newMetadataConsumer(server, nil, tc.noGitHub, true).ResolveRunMetadata(context.Background(), tRepo, tc.run)
+			if got := errString(err); got != tc.wantErr || source != tc.wantSource {
+				t.Fatalf("ResolveRunMetadata() = (%v, %q), want (%v, %q)", source, got, tc.wantSource, tc.wantErr)
+			}
+		})
+	}
+}
 
-	if _, err := c.fetchMetadataRun(ctx, "example/aerial", -1); err == nil {
-		t.Fatal("expected error for id <= 0")
+// newMetadataConsumer builds a Consumer against server; noGitHub and noReg leave that dependency nil.
+func newMetadataConsumer(server *httptest.Server, reg *testPRRegistry, noGitHub, noReg bool) *Consumer {
+	var gh GitHubGetter = &testGitHubGetter{client: server.Client(), baseURL: server.URL}
+	if noGitHub {
+		gh = nil
 	}
-	if _, err := c.fetchMetadataRun(ctx, "example/aerial", 1); err == nil {
-		t.Fatal("expected error for nil gh")
+	var registry PRMetadataRegistry = reg
+	if noReg || reg == nil {
+		registry = nil
 	}
-	if _, err := c.listCommitCheckRuns(ctx, "example/aerial", "sha"); err == nil {
-		t.Fatal("expected error for nil gh")
-	}
-	if _, _, err := c.newestMetadataRun(ctx, "example/aerial", "sha", true); err == nil {
-		t.Fatal("expected error for nil gh")
-	}
+	return NewConsumer(gh, registry)
+}
 
-	nonPRRun := MetadataWorkflowRun{Event: model.BuildEventPush, HeadSHA: tHead, Path: MetadataWorkflowPath("example/aerial")}
-
-	// ValidateMetadataExecution branch build matching / mismatching head
-	if execErr := c.ValidateMetadataExecution(ctx, "example/aerial", nonPRRun, tHead); execErr != nil {
-		t.Fatalf("expected nil for branch execution match, got %v", execErr)
+func errString(err error) string {
+	if err == nil {
+		return ""
 	}
-	if execErr := c.ValidateMetadataExecution(ctx, "example/aerial", nonPRRun, tOther); execErr == nil {
-		t.Fatal("expected error for branch execution mismatch")
-	}
-
-	// SupersedeStaleBuildAttempt edge cases
-	c.SupersedeStaleBuildAttempt(ctx, "example/aerial", 0, WorkflowRunEvent{ID: 1})
-	c.SupersedeStaleBuildAttempt(ctx, "example/aerial", 42, WorkflowRunEvent{ID: 0})
+	return err.Error()
 }
