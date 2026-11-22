@@ -731,3 +731,25 @@ func TestOTTLStringBody_TableDriven(t *testing.T) {
 		})
 	}
 }
+
+func TestSensitiveTokenCount_TableDriven(t *testing.T) {
+	tests := []struct {
+		name     string
+		tokens   []string
+		wantSome bool
+	}{
+		{name: "empty pool counts zero"},
+		{name: "registered value counts", tokens: []string{"count_test_secret_value_42"}, wantSome: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ResetSensitiveTokensForTest()
+			defer ResetSensitiveTokensForTest()
+			ReplaceSensitiveTokens(tc.tokens...)
+			if got := SensitiveTokenCount() > 0; got != tc.wantSome {
+				t.Fatalf("SensitiveTokenCount() > 0 = %t, want %t", got, tc.wantSome)
+			}
+		})
+	}
+}
