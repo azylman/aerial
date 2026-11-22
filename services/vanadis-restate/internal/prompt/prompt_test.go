@@ -251,27 +251,28 @@ func TestNormalizeSymbolName(t *testing.T) {
 
 func TestFormatCIFailurePrompt(t *testing.T) {
 	t.Parallel()
+	const failChunk = `call fail_chunk(chunk_id=chunk-a, dispatch_id=vanadis-chunk-a-cifail-abcdef1-1, reason="BLOCKED: <reason and the decision needed>") and then end the turn`
 	tests := []struct {
 		name         string
 		ev           pubsub.PRLifecycleEvent
 		details      string
 		wantContains []string
-		wantMissing  string
+		wantMissing  []string
 	}{
 		{
-			name:    "ci check demands a fix or blocked line",
+			name:    "ci check uses fail_chunk and loopback fallback",
 			ev:      pubsub.PRLifecycleEvent{Repo: "acme/aerial", PRNumber: 123, CheckName: "test-unit", Branch: "feat/test", HeadSHA: "abcdef1"},
 			details: "extracted failure details",
 			wantContains: []string{
 				"PR #123", "extracted failure details", "[VANADIS CI REMEDIATION — MANDATORY]",
-				"must end in exactly one machine-visible outcome: (1) a fix pushed", "(2) a final line in the form REMEDIATION BLOCKED",
-				"Ending this turn with neither a commit nor that blocked final line is a failed remediation", "counts as no outcome",
-				"smallest boundary-crossing fix", "REMEDIATION BLOCKED: <reason and the decision needed>",
+				"must end in exactly one machine-visible outcome: (1) a fix pushed", failChunk,
+				"pauses the chunk for human review automatically", "smallest boundary-crossing fix",
+				"http://127.0.0.1:4028/internal/github-api/repos/<owner>/<repo>/actions/runs/<run_id>/jobs",
 			},
-			wantMissing: "critically evaluate each RoboRev finding",
+			wantMissing: []string{"critically evaluate each RoboRev finding", "REMEDIATION BLOCKED"},
 		},
 		{
-			name: "roborev check allows a recorded rebuttal",
+			name: "roborev check uses fail_chunk without loopback fallback",
 			ev: pubsub.PRLifecycleEvent{
 				Repo: "aerial", PRNumber: 101, CheckName: "roborev", HeadSHA: "abcdef1", Branch: "feat/test",
 				CheckURL: "https://github.com/acme/aerial/actions/runs/123/job/456789",
@@ -279,22 +280,22 @@ func TestFormatCIFailurePrompt(t *testing.T) {
 			details: "details",
 			wantContains: []string{
 				"critically evaluate each RoboRev finding", "[VANADIS CI REMEDIATION — MANDATORY]",
-				"must end in exactly one machine-visible outcome: (1) a verified fix pushed", "(2) a technical rebuttal recorded via",
-				"(3) a final line in the form REMEDIATION BLOCKED",
-				"Ending this turn with no commit, no override, and no blocked final line is a failed remediation",
-				"REMEDIATION BLOCKED: <reason and the decision needed>",
+				"(2) a technical rebuttal recorded via", "(3) when genuinely blocked, " + failChunk,
+				"pauses the chunk for human review automatically",
 			},
-			wantMissing: "Ending this turn with neither a commit",
+			wantMissing: []string{"REMEDIATION BLOCKED", "127.0.0.1:4028"},
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := FormatCIFailurePrompt(tc.ev, tc.details)
+			got := FormatCIFailurePrompt(tc.ev, tc.details, "chunk-a", "vanadis-chunk-a-cifail-abcdef1-1")
 			for _, want := range tc.wantContains {
 				assert.Contains(t, got, want)
 			}
-			assert.NotContains(t, got, tc.wantMissing)
+			for _, missing := range tc.wantMissing {
+				assert.NotContains(t, got, missing)
+			}
 		})
 	}
 }

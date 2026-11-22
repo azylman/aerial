@@ -392,8 +392,9 @@ func (f *Flow) HandleCIFailureEvent(ctx context.Context, buildID, chunkID, event
 		return err
 	}
 	dispatchID := executor.CIRemediationDispatchID(chunkID, ev.HeadSHA, chunk.CIFailCount+1)
+	ciPrompt := executor.FormatCIFailurePrompt(ev, details, chunkID, dispatchID)
 	skipIfActive := cleanHead == "" || strings.EqualFold(strings.TrimSpace(chunk.RemediatedSHA), cleanHead)
-	if err = f.DispatchChunkRemediationForChunk(ctx, bld, chunk, dispatchID, executor.FormatCIFailurePrompt(ev, details), skipIfActive); err != nil {
+	if err = f.DispatchChunkRemediationForChunk(ctx, bld, chunk, dispatchID, ciPrompt, skipIfActive); err != nil {
 		if errors.Is(err, eriwire.ErrDispatchActive) {
 			f.syncBuildWidget(ctx, buildID, banner+" — remediation in progress")
 			return nil
