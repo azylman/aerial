@@ -324,6 +324,13 @@ func TestSetupHealthMux(t *testing.T) {
 			wantBodySub: `Claude`,
 		},
 		{
+			name:        "GET /metrics serves the eri application registry",
+			method:      http.MethodGet,
+			path:        "/metrics",
+			wantStatus:  http.StatusOK,
+			wantBodySub: "aerial_brain_discord_typing_sessions_active",
+		},
+		{
 			name:          "POST /internal/quota returns 405",
 			method:        http.MethodPost,
 			path:          "/internal/quota",

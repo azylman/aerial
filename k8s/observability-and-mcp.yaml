@@ -893,7 +893,16 @@ metadata:
   name: kubernetes-services
   namespace: default
 spec:
-  discoveryRole: service
+  # Generic opt-in scrape for any Service in default carrying prometheus.io/*
+  # annotations. Discovery is per endpoint, so every backing pod is its own
+  # target at podIP:<prometheus.io/port> (a draining pod and its replacement
+  # are separate series instead of one load-balanced, flapping target).
+  # prometheus.io/port names the pod's target (container) port, not the
+  # Service port. Services that expose the same target port under several
+  # Service ports produce identical targets that vmagent collapses into one
+  # (see promscrape.suppressDuplicateScrapeTargetErrors on the VMSingle).
+  # job = prometheus.io/job if set, else the Service name; instance = pod name.
+  discoveryRole: endpointslices
   namespaceSelector:
     matchNames:
       - default
@@ -907,7 +916,7 @@ spec:
             - __meta_kubernetes_service_annotation_prometheus_io_scrape
         - action: keep_if_equal
           sourceLabels:
-            - __meta_kubernetes_service_port_number
+            - __meta_kubernetes_endpointslice_port
             - __meta_kubernetes_service_annotation_prometheus_io_port
         - action: replace
           regex: (.+)
@@ -915,19 +924,18 @@ spec:
             - __meta_kubernetes_service_annotation_prometheus_io_path
           targetLabel: __metrics_path__
         - action: replace
-          regex: (.+);(.+)
-          replacement: $1:$2
-          sourceLabels:
-            - __meta_kubernetes_service_name
-            - __meta_kubernetes_service_annotation_prometheus_io_port
-          targetLabel: __address__
-        - action: replace
           sourceLabels:
             - __meta_kubernetes_service_name
           targetLabel: job
         - action: replace
+          regex: (.+)
           sourceLabels:
-            - __meta_kubernetes_service_name
+            - __meta_kubernetes_service_annotation_prometheus_io_job
+          targetLabel: job
+        - action: replace
+          regex: (.+)
+          sourceLabels:
+            - __meta_kubernetes_pod_name
           targetLabel: instance
         - action: labelmap
           regex: __meta_kubernetes_service_annotation_prometheus_io_label_(.+)
@@ -962,20 +970,6 @@ spec:
 apiVersion: operator.victoriametrics.com/v1beta1
 kind: VMPodScrape
 metadata:
-  name: vanadis-restate
-  namespace: default
-spec:
-  selector:
-    matchLabels:
-      app.kubernetes.io/name: vanadis-restate
-  podMetricsEndpoints:
-    - port: http
-      path: /metrics
-      interval: 15s
----
-apiVersion: operator.victoriametrics.com/v1beta1
-kind: VMPodScrape
-metadata:
   name: nats
   namespace: default
 spec:
@@ -986,20 +980,6 @@ spec:
     - port: metrics
       path: /metrics
       interval: 30s
----
-apiVersion: operator.victoriametrics.com/v1beta1
-kind: VMPodScrape
-metadata:
-  name: eri-restate
-  namespace: default
-spec:
-  selector:
-    matchLabels:
-      app.kubernetes.io/name: eri-restate
-  podMetricsEndpoints:
-    - port: http
-      path: /metrics
-      interval: 15s
 ---
 apiVersion: operator.victoriametrics.com/v1beta1
 kind: VMPodScrape
@@ -1059,6 +1039,10 @@ spec:
       memory: 256Mi
   extraArgs:
     loggerFormat: json
+    # kubernetes-services discovers per endpoint port; Services aliasing one
+    # target port under several Service ports (e.g. 8080 and 80 -> 8080) yield
+    # identical targets that vmagent scrapes once. Silence the per-refresh log.
+    promscrape.suppressDuplicateScrapeTargetErrors: "true"
     promscrape.config.strictParse: "false"
     vmalert.proxyURL: http://vmalert:8880
 ---

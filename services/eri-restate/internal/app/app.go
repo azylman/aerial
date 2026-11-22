@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/bwmarrin/discordgo"
-	"github.com/prometheus/client_golang/prometheus/promhttp"
 	restate "github.com/restatedev/sdk-go"
 	"github.com/restatedev/sdk-go/server"
 	"golang.org/x/sync/errgroup"
@@ -130,7 +129,7 @@ func SetupHealthMux(opts HealthMuxOptions) *http.ServeMux {
 	}
 	mux.HandleFunc("/health", healthHandler)
 	mux.HandleFunc("/healthz", healthHandler)
-	mux.Handle("/metrics", promhttp.Handler())
+	mux.Handle("/metrics", metrics.Handler())
 	mux.HandleFunc("/debug/coverage/flush", httpkit.HandleCoverageFlush("eri-restate"))
 
 	if opts.ReloadTrigger != nil {
