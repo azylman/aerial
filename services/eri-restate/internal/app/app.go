@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io/fs"
 	"log"
 	"net"
 	"net/http"
@@ -46,52 +45,6 @@ type Config struct {
 	HealthPort  string
 	PostgresURL string
 	AgentName   string
-	// TurnQueueModeFile is the downward-API file carrying the pod's aerial.dev/turn-queue
-	// annotation; blank or missing means legacy.
-	TurnQueueModeFile string
-}
-
-// TurnQueueModeFile is where the eri-restate RestateDeployment mounts the pod template's
-// aerial.dev/turn-queue annotation (downwardAPI volume "podinfo", item "turn-queue"). A pod's
-// annotations never change after creation, so every pod keeps the queue mode of the revision
-// that created it across container restarts, drains and rollbacks.
-const TurnQueueModeFile = "/etc/aerial/podinfo/turn-queue"
-
-// ResolveTurnQueueMode picks the handler set from the pod annotation file: absent or blank ->
-// legacy, "legacy" / "coordinator" -> that mode, anything else -> error (startup fails, so the
-// new revision never becomes ready and the old one keeps serving). configValue (config.yaml
-// turn_queue) is only cross-checked: mismatch reports a disagreement and never changes the mode.
-func ResolveTurnQueueMode(fileValue string, filePresent bool, configValue string) (mode string, mismatch bool, err error) {
-	mode = config.TurnQueueLegacy
-	if filePresent {
-		mode, err = config.ParseTurnQueueMode(fileValue)
-		if err != nil {
-			return "", false, fmt.Errorf("pod annotation aerial.dev/turn-queue: %w", err)
-		}
-	}
-	// configValue was validated when config.yaml loaded; an unparseable value still only
-	// counts as a mismatch, never as a startup error.
-	cfgMode, cfgErr := config.ParseTurnQueueMode(configValue)
-	if cfgErr != nil {
-		return mode, true, nil //nolint:nilerr // config is cross-checked only; mode comes from the annotation.
-	}
-	return mode, cfgMode != mode, nil
-}
-
-// readTurnQueueModeFile reads the annotation file; a blank path or a missing file is absent,
-// any other read error is returned.
-func readTurnQueueModeFile(path string) (value string, present bool, err error) {
-	if strings.TrimSpace(path) == "" {
-		return "", false, nil
-	}
-	b, err := os.ReadFile(path)
-	if errors.Is(err, fs.ErrNotExist) {
-		return "", false, nil
-	}
-	if err != nil {
-		return "", false, fmt.Errorf("read turn queue mode file %s: %w", path, err)
-	}
-	return string(b), true, nil
 }
 
 // LoadConfigFromEnv loads configuration from environment variables with defaults.
@@ -117,48 +70,33 @@ func LoadConfigFromEnv() Config {
 		HealthPort:  healthPort,
 		PostgresURL: pgURL,
 		AgentName:   agentName,
-		// A code constant, not an env var: the mount path is fixed by the manifest.
-		TurnQueueModeFile: TurnQueueModeFile,
 	}
 }
 
-// eriRestateDefinitions returns the services an eri-restate revision binds in mode. Both modes
-// bind the same services with the same handler names and kinds (the legacy objects carry
-// rollback adapters), so no revision is ever the last deployment of a service and a flip or
-// rollback never strands in-flight invocations. ThreadSession/DispatchSession take
-// queue.TurnHoldTimeout in both modes because timeouts are service-wide and the legacy RunTurn
-// executes a whole turn inside one Run step under the same names; an old revision drains those
-// invocations after a flip. Voice, session-manager and LLM handlers never hold a turn and keep
-// 1h. The LLM service runs on llmFn (the ephemeral summarizer pool) and is bound in every mode.
-func eriRestateDefinitions(pool *queue.WorkerPool, agentName, mode string, llmFn runner.LLMFunc) []restate.ServiceDefinition {
+// eriRestateDefinitions returns the fixed service set every eri-restate revision binds: the
+// thread and dispatch coordinators, the voice session, the dispatch cancel router (under the
+// SessionManager service name), TurnRunner and the LLM service on llmFn (the ephemeral
+// summarizer pool). ThreadSession/DispatchSession take queue.TurnHoldTimeout; voice,
+// session-manager and LLM handlers never hold a turn and keep 1h.
+func eriRestateDefinitions(pool *queue.WorkerPool, agentName string, llmFn runner.LLMFunc) []restate.ServiceDefinition {
 	hour := []restate.ServiceDefinitionOption{restate.WithInactivityTimeout(time.Hour), restate.WithAbortTimeout(time.Hour)}
 	turnHold := []restate.ServiceDefinitionOption{restate.WithInactivityTimeout(queue.TurnHoldTimeout), restate.WithAbortTimeout(queue.TurnHoldTimeout)}
-	var thread, dispatch, sessionManager any
-	if mode == config.TurnQueueCoordinator {
-		store := pool.Store()
-		thread = queue.NewThreadCoordinator(store, pool, agentName)
-		dispatch = queue.NewDispatchCoordinator(store, agentName)
-		sessionManager = queue.NewDispatchCancelRouter(store, agentName)
-	} else {
-		thread = queue.NewThreadSessionObject(pool, agentName)
-		dispatch = queue.NewDispatchSessionObject(pool, agentName)
-		sessionManager = queue.NewSessionManagerService(pool, agentName)
-	}
+	store := pool.Store()
 	return []restate.ServiceDefinition{
-		restate.Reflect(thread, turnHold...),
-		restate.Reflect(dispatch, turnHold...),
+		restate.Reflect(queue.NewThreadCoordinator(store, pool, agentName), turnHold...),
+		restate.Reflect(queue.NewDispatchCoordinator(store, agentName), turnHold...),
 		restate.Reflect(queue.NewVoiceSessionObject(pool, agentName), hour...),
-		restate.Reflect(sessionManager, hour...),
+		restate.Reflect(queue.NewDispatchCancelRouter(store, agentName), hour...),
 		queue.ReflectTurnRunner(queue.NewTurnRunnerService(pool, agentName)),
 		restate.Reflect(llmcall.NewService(llmFn, agentName), hour...),
 	}
 }
 
-// NewEriRestateServer binds the Eri services for mode (config.TurnQueueLegacy or
-// config.TurnQueueCoordinator) plus the LLM service on llmFn and returns a Restate server handler.
-func NewEriRestateServer(pool *queue.WorkerPool, agentName, mode string, llmFn runner.LLMFunc) *server.Restate {
+// NewEriRestateServer binds the Eri services plus the LLM service on llmFn and returns a Restate
+// server handler.
+func NewEriRestateServer(pool *queue.WorkerPool, agentName string, llmFn runner.LLMFunc) *server.Restate {
 	srv := server.NewRestate()
-	for _, def := range eriRestateDefinitions(pool, agentName, mode, llmFn) {
+	for _, def := range eriRestateDefinitions(pool, agentName, llmFn) {
 		srv = srv.Bind(def)
 	}
 	return srv
@@ -426,24 +364,9 @@ func RunApp(ctx context.Context, cfg Config, opts ...AppOption) error {
 	}
 
 	cur := appCfg.Current()
-	if cur == nil {
-		cur = config.DefaultConfigData()
-	}
 	config.RegisterConfigTokens(appCfg)
 
-	// The handler set is chosen once, from this pod's own annotation. Hot reloads and config
-	// changes never rebind: git-sync updates config.yaml under a running old revision, and
-	// rebinding (or a container restart reading the new value) would attach the other handler
-	// set to a deployment whose in-flight invocations were journaled under this one (RT0016).
-	modeValue, modePresent, modeErr := readTurnQueueModeFile(cfg.TurnQueueModeFile)
-	if modeErr != nil {
-		return modeErr
-	}
-	turnQueueMode, modeMismatch, modeErr := ResolveTurnQueueMode(modeValue, modePresent, cur.TurnQueue)
-	if modeErr != nil {
-		return modeErr
-	}
-	log.Printf("[eri-restate] turn_queue=%s source=annotation config_turn_queue=%s mismatch=%t", turnQueueMode, cur.TurnQueue, modeMismatch)
+	log.Printf("[eri-restate] turn_queue=coordinator source=builtin")
 
 	store := appOpts.store
 	txStore := appOpts.txStore
@@ -520,7 +443,7 @@ func RunApp(ctx context.Context, cfg Config, opts ...AppOption) error {
 		bootstrap.WithProvisioner(ctx, provisioner),
 		bootstrap.WithDirtyPools(pools.ephemeralPool, workerPool)))
 
-	restateSrv := NewEriRestateServer(workerPool, cfg.AgentName, turnQueueMode, llmFn)
+	restateSrv := NewEriRestateServer(workerPool, cfg.AgentName, llmFn)
 	restateHandler, err := restateSrv.Handler()
 	if err != nil {
 		return fmt.Errorf("create restate handler: %w", err)
