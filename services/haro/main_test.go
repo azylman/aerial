@@ -13,10 +13,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nats-io/nats.go"
-
 	"github.com/azylman/aerial/pkg/eriwire"
 	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/pkg/pubsubtest"
 	"github.com/azylman/aerial/services/haro/internal/config"
 	"github.com/azylman/aerial/services/haro/internal/dispatch"
 	"github.com/azylman/aerial/services/haro/internal/model"
@@ -178,7 +177,6 @@ func TestHaro_EventsConsumerIntegration(t *testing.T) {
 		Effort:    "low",
 	})
 
-	done := make(chan struct{})
 	mockDisp := &mockDispatcher{response: dispatch.PromptDispatchResponse{Status: "ok", MessageID: "msg-ext-int"}}
 	srv := server.NewServer(tools.NewToolHandler(&config.Config{DatabaseURL: ":memory:"}, db), mockDisp)
 
@@ -189,7 +187,7 @@ func TestHaro_EventsConsumerIntegration(t *testing.T) {
 		t.Fatalf("EnsureCoreStreams: %v", err)
 	}
 
-	wrapped := &ackSubscribeBus{Bus: memBus, onHandled: func() { close(done) }}
+	wrapped := &pubsubtest.FaultBus{Bus: memBus, Handled: make(chan error, 1)}
 	bus := initHaroJetStreamWithFactory(ctx, srv, db, "nats://mock", func(_ context.Context, _ string) (pubsub.Bus, error) {
 		return wrapped, nil
 	})
@@ -207,15 +205,22 @@ func TestHaro_EventsConsumerIntegration(t *testing.T) {
 		t.Fatalf("Publish: %v", err)
 	}
 
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for event delivery")
-	}
+	awaitBusHandled(t, wrapped.Handled, "event delivery")
 
 	verifyTriggerState(ctx, t, db, ev, false)
-	if wrapped.lastErr != nil {
-		t.Errorf("expected nil error on successful event handling, got %v", wrapped.lastErr)
+}
+
+// awaitBusHandled waits for one handler result reported by a pubsubtest.FaultBus
+// and fails the test when the handler errored or never ran.
+func awaitBusHandled(t *testing.T, handled <-chan error, what string) {
+	t.Helper()
+	select {
+	case err := <-handled:
+		if err != nil {
+			t.Fatalf("%s handler error = %v", what, err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("timed out waiting for %s", what)
 	}
 }
 
@@ -233,22 +238,6 @@ func verifyTriggerState(ctx context.Context, t *testing.T, db *sql.DB, ev pubsub
 	if matched != wantInDB {
 		t.Errorf("trigger in db = %v, want %v", matched, wantInDB)
 	}
-}
-
-type ackSubscribeBus struct {
-	pubsub.Bus
-
-	lastErr   error
-	onHandled func()
-}
-
-func (a *ackSubscribeBus) Subscribe(ctx context.Context, subject, durable string, handler pubsub.Handler) (pubsub.Subscription, error) {
-	return a.Bus.Subscribe(ctx, subject, durable, func(mCtx context.Context, msg pubsub.Message) error {
-		defer a.onHandled()
-		err := handler(mCtx, msg)
-		a.lastErr = err
-		return err
-	})
 }
 
 func TestHaro_MemoryBusIntegration(t *testing.T) {
@@ -286,7 +275,6 @@ func TestHaro_MemoryBusIntegration(t *testing.T) {
 		t.Fatalf("CreateScheduleRun failed: %v", err)
 	}
 
-	done := make(chan struct{})
 	memBus := pubsub.NewMemoryBus()
 	defer memBus.Close()
 
@@ -294,7 +282,7 @@ func TestHaro_MemoryBusIntegration(t *testing.T) {
 		t.Fatalf("EnsureCoreStreams: %v", err)
 	}
 
-	wrapped := &ackBus{Bus: memBus, onHandled: func() { close(done) }}
+	wrapped := &pubsubtest.FaultBus{Bus: memBus, Handled: make(chan error, 1)}
 	bus := initHaroJetStreamWithFactory(ctx, nil, db, "nats://mock", func(_ context.Context, _ string) (pubsub.Bus, error) {
 		return wrapped, nil
 	})
@@ -313,11 +301,7 @@ func TestHaro_MemoryBusIntegration(t *testing.T) {
 		t.Fatalf("Publish: %v", err)
 	}
 
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for message delivery")
-	}
+	awaitBusHandled(t, wrapped.Handled, "message delivery")
 
 	updatedRun, err := store.GetScheduleRun(ctx, db, "run-bus-1")
 	if err != nil {
@@ -336,8 +320,6 @@ func TestHaro_MemoryBusIntegration(t *testing.T) {
 	}
 
 	// Verify haro-oneshot consumer consumes from SubjectHaroOneShotJob
-	oneshotDone := make(chan struct{})
-	wrapped.onHandled = func() { close(oneshotDone) }
 	oneShotJob := pubsub.HaroOneShotJobArgs{
 		ID:       "os-bus-integration",
 		ThreadID: "th-bus-oneshot",
@@ -348,11 +330,7 @@ func TestHaro_MemoryBusIntegration(t *testing.T) {
 	if err = memBus.Publish(ctx, pubsub.SubjectHaroOneShotJob, "os-bus-integration", oneShotJob); err != nil {
 		t.Fatalf("Publish one-shot: %v", err)
 	}
-	select {
-	case <-oneshotDone:
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for one-shot delivery")
-	}
+	awaitBusHandled(t, wrapped.Handled, "one-shot delivery")
 	osSched, err := store.GetOneShotSchedule(ctx, db, "os-bus-integration")
 	if err != nil {
 		t.Fatalf("GetOneShotSchedule failed: %v", err)
@@ -385,7 +363,7 @@ func TestInitHaroJetStreamWithFactory(t *testing.T) {
 			db := setupTestDB(t.Context(), t)
 			memBus := pubsub.NewMemoryBus()
 			t.Cleanup(func() { _ = memBus.Close() })
-			fb := &failBus{Bus: memBus, ensureErr: tc.ensureErr, queueErr: tc.queueErr, subErr: tc.subErr}
+			fb := &pubsubtest.FaultBus{Bus: memBus, EnsureErr: tc.ensureErr, ConsumeErr: tc.queueErr, SubscribeErr: tc.subErr}
 			var srv *server.Server
 			if tc.withServer {
 				srv = server.NewServer(tools.NewToolHandler(&config.Config{DatabaseURL: ":memory:"}, db))
@@ -433,7 +411,7 @@ func TestHaro_InitJetStreamEdgeCases(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			err := captureBus.captured(t.Context(), &memoryMsg{data: tc.data, numDelivered: tc.numDelivered})
+			err := captureBus.captured(t.Context(), &pubsubtest.Message{Payload: tc.data, Delivered: tc.numDelivered})
 			gotErr := ""
 			if err != nil {
 				gotErr = err.Error()
@@ -443,69 +421,6 @@ func TestHaro_InitJetStreamEdgeCases(t *testing.T) {
 			}
 		})
 	}
-}
-
-type memoryMsg struct {
-	data         []byte
-	subject      string
-	naked        bool
-	numDelivered uint64
-}
-
-func (m *memoryMsg) Data() []byte      { return m.data }
-func (m *memoryMsg) Subject() string   { return m.subject }
-func (*memoryMsg) Header() nats.Header { return nil }
-func (m *memoryMsg) NumDelivered() uint64 {
-	if m.numDelivered > 0 {
-		return m.numDelivered
-	}
-	return 1
-}
-func (*memoryMsg) Ack() error                           { return nil }
-func (m *memoryMsg) NakWithDelay(_ time.Duration) error { m.naked = true; return nil }
-func (*memoryMsg) Term() error                          { return nil }
-func (*memoryMsg) Snooze(_ time.Duration) error         { return nil }
-func (*memoryMsg) InProgress() error                    { return nil }
-
-type ackBus struct {
-	pubsub.Bus
-
-	onHandled func()
-}
-
-func (a *ackBus) ConsumeQueue(ctx context.Context, subject, queue string, handler pubsub.Handler) (pubsub.Subscription, error) {
-	return a.Bus.ConsumeQueue(ctx, subject, queue, func(mCtx context.Context, msg pubsub.Message) error {
-		defer a.onHandled()
-		return handler(mCtx, msg)
-	})
-}
-
-// failBus injects declarative errors into the bus calls initHaroJetStreamWithFactory makes.
-type failBus struct {
-	pubsub.Bus
-
-	ensureErr, queueErr, subErr error
-}
-
-func (f *failBus) EnsureCoreStreams(ctx context.Context) error {
-	if f.ensureErr != nil {
-		return f.ensureErr
-	}
-	return f.Bus.EnsureCoreStreams(ctx)
-}
-
-func (f *failBus) ConsumeQueue(ctx context.Context, subject, queue string, handler pubsub.Handler) (pubsub.Subscription, error) {
-	if f.queueErr != nil {
-		return nil, f.queueErr
-	}
-	return f.Bus.ConsumeQueue(ctx, subject, queue, handler)
-}
-
-func (f *failBus) Subscribe(ctx context.Context, subject, durable string, handler pubsub.Handler) (pubsub.Subscription, error) {
-	if f.subErr != nil {
-		return nil, f.subErr
-	}
-	return f.Bus.Subscribe(ctx, subject, durable, handler)
 }
 
 type handlerCaptureBus struct {
