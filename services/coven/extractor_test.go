@@ -132,7 +132,6 @@ type extractBatchingTestCase struct {
 	totalTurns     int
 	timeoutOnCall  int
 	timeoutAlways  bool
-	wantCalls      int
 	wantBatchSizes []int
 	wantWatermark  int64
 	wantErr        bool
@@ -181,9 +180,6 @@ func runBatchingAndHalvingCase(t *testing.T, tc extractBatchingTestCase) {
 			t.Errorf("err = %v, want substring %q", err, tc.errSubstr)
 		}
 	}
-	if callIdx != tc.wantCalls {
-		t.Errorf("LLM call count = %d, want %d", callIdx, tc.wantCalls)
-	}
 	if !slices.Equal(capturedBatchSizes, tc.wantBatchSizes) {
 		t.Errorf("batch sizes = %v, want %v", capturedBatchSizes, tc.wantBatchSizes)
 	}
@@ -199,7 +195,6 @@ func TestExtractThreadFacts_BatchingAndHalving(t *testing.T) {
 		{
 			name:           "120Turns_ThreeBatchesOldestFirst",
 			totalTurns:     120,
-			wantCalls:      3,
 			wantBatchSizes: []int{50, 50, 20},
 			wantWatermark:  120,
 			wantErr:        false,
@@ -208,7 +203,6 @@ func TestExtractThreadFacts_BatchingAndHalving(t *testing.T) {
 			name:           "HalvingOnDeadlineExceeded_ThenSuccess",
 			totalTurns:     50,
 			timeoutOnCall:  1,
-			wantCalls:      3,
 			wantBatchSizes: []int{50, 25, 25},
 			wantWatermark:  50,
 			wantErr:        false,
@@ -217,7 +211,6 @@ func TestExtractThreadFacts_BatchingAndHalving(t *testing.T) {
 			name:           "HalvingDownToOneTurnBeforeFailing",
 			totalTurns:     50,
 			timeoutAlways:  true,
-			wantCalls:      6,
 			wantBatchSizes: []int{50, 25, 12, 6, 3, 1},
 			wantWatermark:  0,
 			wantErr:        true,
@@ -227,7 +220,6 @@ func TestExtractThreadFacts_BatchingAndHalving(t *testing.T) {
 			name:           "SingleTurnFailsImmediatelyWithoutHalving",
 			totalTurns:     1,
 			timeoutAlways:  true,
-			wantCalls:      1,
 			wantBatchSizes: []int{1},
 			wantWatermark:  0,
 			wantErr:        true,
