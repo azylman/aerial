@@ -3,24 +3,40 @@ package store_test
 import (
 	"context"
 	"database/sql"
-	"database/sql/driver"
 	"errors"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
-	"modernc.org/sqlite"
-
+	"github.com/azylman/aerial/pkg/pgtest"
 	"github.com/azylman/aerial/services/prospera/internal/model"
 	"github.com/azylman/aerial/services/prospera/internal/store"
 	"github.com/azylman/aerial/services/prospera/internal/testutil"
 )
 
+func TestMain(m *testing.M) {
+	os.Exit(pgtest.Main(m))
+}
+
+// seedEndedCall inserts a finished call that FK columns
+// (callback_of_call_id, related_call_id) can reference.
+func seedEndedCall(t *testing.T, db *sql.DB, callID string) {
+	t.Helper()
+	if _, err := db.ExecContext(context.Background(),
+		`INSERT INTO voice_calls (call_id, direction, state, from_number, to_number, ended_at)
+		VALUES ($1, 'outbound', 'completed', '+15105550100', '+15105550198', NOW())`, callID); err != nil {
+		t.Fatalf("seed call %s: %v", callID, err)
+	}
+}
+
 func TestPGStore_CallLifecycle(t *testing.T) {
 	t.Parallel()
-	st := testutil.SetUpTestStore(t)
+	db := testutil.OpenTestDB(t)
+	seedEndedCall(t, db, "call-orig")
+	st := store.NewPGStore(db)
 	ctx := context.Background()
 
 	testLifecycleCreateAndFetch(ctx, t, st)
@@ -182,8 +198,8 @@ func testLifecycleInstructionsAndCompletion(ctx context.Context, t *testing.T, s
 	if err != nil {
 		t.Fatalf("ListCalls() error = %v", err)
 	}
-	if len(list) != 1 {
-		t.Errorf("len(list) = %d, want 1", len(list))
+	if len(list) != 2 {
+		t.Errorf("len(list) = %d, want 2 (call-123 and its seeded call-orig)", len(list))
 	}
 }
 
@@ -643,29 +659,52 @@ func TestPGStore_VoiceMessages(t *testing.T) {
 
 func TestPGStore_DatabaseErrors(t *testing.T) {
 	t.Parallel()
-	db, _ := sql.Open("sqlite", ":memory:")
+	db := testutil.OpenTestDB(t)
 	st := store.NewPGStore(db)
-	_ = db.Close()
+	if err := st.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
 	ctx := context.Background()
 
-	_ = st.CreateOutboundCall(ctx, model.VoiceCall{}, 1)
-	_ = st.CreateInboundCall(ctx, model.VoiceCall{})
-	_ = st.BindProviderCallSID(ctx, "id", "sid")
-	_, _ = st.GetCall(ctx, "id")
-	_, _ = st.GetCallByProviderSID(ctx, "sid")
-	_, _ = st.ListCalls(ctx, 10)
-	_, _ = st.FindRecentOutboundCall(ctx, "+15105550100", time.Hour)
-	_ = st.UpdateCallState(ctx, "id", "in-progress", "", "")
-	_ = st.AppendTranscriptTurn(ctx, "id", model.TranscriptTurn{})
-	_, _ = st.AdvanceLiveTranscriptCursor(ctx, "id", 0, 1)
-	_ = st.AppendOwnerInstruction(ctx, "id", model.OwnerInstruction{})
-	_ = st.SetVoicemailRecording(ctx, "id", "url")
-	_, _ = st.TransitionReportStatus(ctx, "id", nil, "done", "")
-	_, _ = st.ListUnfinishedReportCalls(ctx, 10)
-	_, _ = st.ReconcileOrphanedCalls(ctx, nil)
-	_, _ = st.SaveVoiceMessage(ctx, model.VoiceMessage{MessageSID: "SM1"})
-	_ = st.MarkVoiceMessageDelivered(ctx, "SM1")
-	_, _ = st.ListVoiceMessages(ctx, 10)
+	_, getErr := st.GetCall(ctx, "id")
+	_, bySIDErr := st.GetCallByProviderSID(ctx, "sid")
+	_, listErr := st.ListCalls(ctx, 10)
+	_, recentErr := st.FindRecentOutboundCall(ctx, "+15105550100", time.Hour)
+	_, cursorErr := st.AdvanceLiveTranscriptCursor(ctx, "id", 0, 1)
+	_, transitionErr := st.TransitionReportStatus(ctx, "id", nil, "delivered", "")
+	_, unfinishedErr := st.ListUnfinishedReportCalls(ctx, 10)
+	_, reconcileErr := st.ReconcileOrphanedCalls(ctx, nil)
+	_, saveErr := st.SaveVoiceMessage(ctx, model.VoiceMessage{MessageSID: "SM1"})
+	_, listMsgErr := st.ListVoiceMessages(ctx, 10)
+
+	results := []struct {
+		op  string
+		err error
+	}{
+		{op: "CreateOutboundCall", err: st.CreateOutboundCall(ctx, model.VoiceCall{}, 1)},
+		{op: "CreateInboundCall", err: st.CreateInboundCall(ctx, model.VoiceCall{})},
+		{op: "BindProviderCallSID", err: st.BindProviderCallSID(ctx, "id", "sid")},
+		{op: "GetCall", err: getErr},
+		{op: "GetCallByProviderSID", err: bySIDErr},
+		{op: "ListCalls", err: listErr},
+		{op: "FindRecentOutboundCall", err: recentErr},
+		{op: "UpdateCallState", err: st.UpdateCallState(ctx, "id", "in-progress", "", "")},
+		{op: "AppendTranscriptTurn", err: st.AppendTranscriptTurn(ctx, "id", model.TranscriptTurn{})},
+		{op: "AdvanceLiveTranscriptCursor", err: cursorErr},
+		{op: "AppendOwnerInstruction", err: st.AppendOwnerInstruction(ctx, "id", model.OwnerInstruction{})},
+		{op: "SetVoicemailRecording", err: st.SetVoicemailRecording(ctx, "id", "url")},
+		{op: "TransitionReportStatus", err: transitionErr},
+		{op: "ListUnfinishedReportCalls", err: unfinishedErr},
+		{op: "ReconcileOrphanedCalls", err: reconcileErr},
+		{op: "SaveVoiceMessage", err: saveErr},
+		{op: "MarkVoiceMessageDelivered", err: st.MarkVoiceMessageDelivered(ctx, "SM1")},
+		{op: "ListVoiceMessages", err: listMsgErr},
+	}
+	for _, r := range results {
+		if r.err == nil || !strings.Contains(r.err.Error(), "sql: database is closed") {
+			t.Errorf("%s on closed handle err = %v, want sql: database is closed", r.op, r.err)
+		}
+	}
 }
 
 func TestOpenDB(t *testing.T) {
@@ -675,9 +714,8 @@ func TestOpenDB(t *testing.T) {
 		url     string
 		wantErr bool
 	}{
-		{name: "sqlite memory prefix", url: "sqlite://:memory:", wantErr: false},
-		{name: "sqlite file prefix", url: "file:test.db?mode=memory", wantErr: false},
-		{name: "sqlite memory keyword", url: ":memory:", wantErr: false},
+		{name: "postgres dsn opens and pings", url: pgtest.NewDSN(t), wantErr: false},
+		{name: "postgres dsn with surrounding space", url: "  " + pgtest.NewDSN(t) + "\n", wantErr: false},
 		{name: "empty url", url: "   ", wantErr: true},
 		{name: "unsupported scheme", url: "invalid://url", wantErr: true},
 	}
@@ -767,7 +805,9 @@ func TestPGStore_SaveVoiceMessage_Concurrent(t *testing.T) {
 
 func TestPGStore_MissingCallErrorsAndFullFields(t *testing.T) {
 	t.Parallel()
-	st := testutil.SetUpTestStore(t)
+	db := testutil.OpenTestDB(t)
+	seedEndedCall(t, db, "call-prior")
+	st := store.NewPGStore(db)
 	ctx := context.Background()
 
 	now := time.Now().UTC()
@@ -831,409 +871,194 @@ func TestPGStore_MissingCallErrorsAndFullFields(t *testing.T) {
 	}
 }
 
-func TestPGStore_CorruptCallJSON(t *testing.T) {
+// TestPGStore_SabotagedCallRows: JSONB only stores valid JSON, so corruption
+// is well-formed JSON of the wrong shape, a sabotaged column or a constraint
+// written into the test's own database.
+func TestPGStore_SabotagedCallRows(t *testing.T) {
 	t.Parallel()
-	db := testutil.OpenTestSQLiteDB(t)
-	st := store.NewPGStore(db)
-	ctx := context.Background()
+	tests := []struct {
+		name          string
+		sabotageSQL   string
+		wantGetErr    string
+		wantListErr   string
+		wantAppendErr string
+	}{
+		{name: "brief not an object", sabotageSQL: `UPDATE voice_calls SET brief = '[1]'`, wantGetErr: "store: unmarshal brief", wantListErr: "store: unmarshal brief"},
+		{name: "owner instructions not a list", sabotageSQL: `UPDATE voice_calls SET owner_instructions = '{}'`, wantGetErr: "store: unmarshal owner instructions", wantListErr: "store: unmarshal owner instructions", wantAppendErr: "store: unmarshal owner instructions"},
+		{name: "transcript not a list", sabotageSQL: `UPDATE voice_calls SET transcript = '{}'`, wantGetErr: "store: unmarshal transcript", wantListErr: "store: unmarshal transcript"},
+		{name: "cursor column unscannable", sabotageSQL: `ALTER TABLE voice_calls ALTER COLUMN live_transcript_cursor TYPE TEXT USING 'x'`, wantGetErr: "store: scan call", wantListErr: "store: scan call"},
+		{name: "owner instructions column dropped", sabotageSQL: `ALTER TABLE voice_calls DROP COLUMN owner_instructions`, wantGetErr: "store: scan call", wantListErr: "store: list calls", wantAppendErr: "store: get owner instructions"},
+		{name: "owner instructions append rejected", sabotageSQL: `ALTER TABLE voice_calls ADD CONSTRAINT no_instructions CHECK (jsonb_array_length(owner_instructions) = 0)`, wantAppendErr: "store: update owner instructions"},
+		{name: "json null slices default empty", sabotageSQL: `UPDATE voice_calls SET transcript = 'null', owner_instructions = 'null'`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			db := testutil.OpenTestDB(t)
+			st := store.NewPGStore(db)
+			seed := model.VoiceCall{CallID: "corr-1", Direction: "inbound", State: "ringing", FromNumber: "+15105550100", ToNumber: "+15105550199"}
+			if err := st.CreateInboundCall(ctx, seed); err != nil {
+				t.Fatalf("CreateInboundCall() error = %v", err)
+			}
+			if _, err := db.ExecContext(ctx, tc.sabotageSQL); err != nil {
+				t.Fatalf("sabotage %q: %v", tc.sabotageSQL, err)
+			}
 
-	now := time.Now().UTC()
-	seed := model.VoiceCall{
-		CallID:     "corr-1",
-		Direction:  "inbound",
-		State:      "ringing",
-		FromNumber: "+15105550100",
-		ToNumber:   "+15105550199",
-		StartedAt:  now,
-		UpdatedAt:  now,
-	}
-	if err := st.CreateInboundCall(ctx, seed); err != nil {
-		t.Fatalf("CreateInboundCall() error = %v", err)
-	}
-	corruptCallJSON(t, db, `brief = '{bad'`)
-	if _, err := st.GetCall(ctx, "corr-1"); err == nil || !strings.Contains(err.Error(), "store: unmarshal brief") {
-		t.Errorf("GetCall corrupt brief err = %v, want unmarshal brief error", err)
-	}
-	if _, err := st.ListCalls(ctx, 10); err == nil || !strings.Contains(err.Error(), "store: unmarshal brief") {
-		t.Errorf("ListCalls corrupt brief err = %v, want unmarshal brief error", err)
-	}
-
-	corruptCallJSON(t, db, `brief = '{}', owner_instructions = '{bad'`)
-	if _, err := st.GetCall(ctx, "corr-1"); err == nil || !strings.Contains(err.Error(), "store: unmarshal owner instructions") {
-		t.Errorf("GetCall corrupt owner instructions err = %v, want unmarshal error", err)
-	}
-
-	corruptCallJSON(t, db, `owner_instructions = '[]', transcript = '{bad'`)
-	if _, err := st.GetCall(ctx, "corr-1"); err == nil || !strings.Contains(err.Error(), "store: unmarshal transcript") {
-		t.Errorf("GetCall corrupt transcript err = %v, want unmarshal error", err)
-	}
-	corruptCallJSON(t, db, `transcript = '[]', owner_instructions = '{bad'`)
-	if err := st.AppendOwnerInstruction(ctx, "corr-1", model.OwnerInstruction{Instruction: "hi"}); err == nil || !strings.Contains(err.Error(), "store: unmarshal owner instructions") {
-		t.Errorf("AppendOwnerInstruction corrupt JSON err = %v, want unmarshal error", err)
-	}
-
-	corruptCallJSON(t, db, `transcript = 'null', owner_instructions = 'null'`)
-	fetched, err := st.GetCall(ctx, "corr-1")
-	if err != nil {
-		t.Fatalf("GetCall null JSON error = %v", err)
-	}
-	if fetched.Transcript == nil || fetched.OwnerInstructions == nil {
-		t.Errorf("expected non-nil slices for null JSON, got %+v", fetched)
+			fetched, err := st.GetCall(ctx, "corr-1")
+			assertErrContains(t, "GetCall", err, tc.wantGetErr)
+			_, err = st.ListCalls(ctx, 10)
+			assertErrContains(t, "ListCalls", err, tc.wantListErr)
+			err = st.AppendOwnerInstruction(ctx, "corr-1", model.OwnerInstruction{Instruction: "hi"})
+			assertErrContains(t, "AppendOwnerInstruction", err, tc.wantAppendErr)
+			if tc.wantGetErr == "" && (fetched.Transcript == nil || fetched.OwnerInstructions == nil) {
+				t.Errorf("GetCall() slices = %v / %v, want non-nil", fetched.Transcript, fetched.OwnerInstructions)
+			}
+		})
 	}
 }
 
 func TestPGStore_CorruptMessageJSON(t *testing.T) {
 	t.Parallel()
-	db := testutil.OpenTestSQLiteDB(t)
-	st := store.NewPGStore(db)
-	ctx := context.Background()
+	tests := []struct {
+		name        string
+		sabotageSQL string
+		wantErr     string
+	}{
+		{name: "media urls not a list", sabotageSQL: `UPDATE voice_messages SET media_urls = '{}'`, wantErr: "store: unmarshal media urls"},
+		{name: "created at unscannable", sabotageSQL: `ALTER TABLE voice_messages ALTER COLUMN created_at TYPE TEXT USING 'not-a-timestamp'`, wantErr: "store: scan voice message"},
+		{name: "json null media defaults empty", sabotageSQL: `UPDATE voice_messages SET media_urls = 'null'`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			db := testutil.OpenTestDB(t)
+			seedEndedCall(t, db, "corr-1")
+			st := store.NewPGStore(db)
+			msg := model.VoiceMessage{MessageSID: "SM_CORR", Direction: "inbound", FromNumber: "+15105550199", ToNumber: "+15105550100", Body: "corruption probe", RelatedCallID: "corr-1"}
+			if _, err := st.SaveVoiceMessage(ctx, msg); err != nil {
+				t.Fatalf("SaveVoiceMessage() error = %v", err)
+			}
+			if _, err := db.ExecContext(ctx, tc.sabotageSQL); err != nil {
+				t.Fatalf("sabotage %q: %v", tc.sabotageSQL, err)
+			}
 
-	msg := model.VoiceMessage{
-		MessageSID:    "SM_CORR",
-		Direction:     "inbound",
-		FromNumber:    "+15105550199",
-		ToNumber:      "+15105550100",
-		Body:          "corruption probe",
-		RelatedCallID: "corr-1",
-		CreatedAt:     time.Now().UTC(),
-	}
-	if _, err := st.SaveVoiceMessage(ctx, msg); err != nil {
-		t.Fatalf("SaveVoiceMessage() error = %v", err)
-	}
-
-	if _, err := db.Exec("UPDATE voice_messages SET media_urls = '{bad' WHERE message_sid = 'SM_CORR'"); err != nil {
-		t.Fatalf("corrupt media_urls error = %v", err)
-	}
-	if _, err := st.ListVoiceMessages(ctx, 10); err == nil || !strings.Contains(err.Error(), "store: unmarshal media urls") {
-		t.Errorf("ListVoiceMessages corrupt media err = %v, want unmarshal error", err)
-	}
-
-	if _, err := db.Exec("UPDATE voice_messages SET media_urls = 'null' WHERE message_sid = 'SM_CORR'"); err != nil {
-		t.Fatalf("null out media_urls error = %v", err)
-	}
-	msgs, err := st.ListVoiceMessages(ctx, 10)
-	if err != nil {
-		t.Fatalf("ListVoiceMessages null media error = %v", err)
-	}
-	if len(msgs) != 1 {
-		t.Fatalf("len(msgs) = %d, want 1", len(msgs))
-	}
-	if msgs[0].MediaURLs == nil {
-		t.Errorf("expected non-nil media urls for null JSON, got nil")
-	}
-	if msgs[0].RelatedCallID != "corr-1" {
-		t.Errorf("RelatedCallID = %q, want corr-1", msgs[0].RelatedCallID)
-	}
-
-	if _, err := db.Exec("UPDATE voice_messages SET created_at = 'not-a-timestamp' WHERE message_sid = 'SM_CORR'"); err != nil {
-		t.Fatalf("corrupt created_at error = %v", err)
-	}
-	if _, err := st.ListVoiceMessages(ctx, 10); err == nil || !strings.Contains(err.Error(), "store: scan voice message") {
-		t.Errorf("ListVoiceMessages corrupt timestamp err = %v, want scan error", err)
+			msgs, err := st.ListVoiceMessages(ctx, 10)
+			assertErrContains(t, "ListVoiceMessages", err, tc.wantErr)
+			if tc.wantErr != "" {
+				return
+			}
+			if len(msgs) != 1 || msgs[0].MediaURLs == nil || msgs[0].RelatedCallID != "corr-1" {
+				t.Errorf("ListVoiceMessages() = %+v, want one message with non-nil media and related call corr-1", msgs)
+			}
+		})
 	}
 }
 
-func corruptCallJSON(t *testing.T, db *sql.DB, setClause string) {
+// assertErrContains checks err against want: want == "" means no error.
+func assertErrContains(t *testing.T, op string, err error, want string) {
 	t.Helper()
-	if _, err := db.Exec("UPDATE voice_calls SET " + setClause + " WHERE call_id = 'corr-1'"); err != nil {
-		t.Fatalf("corrupt voice_calls (%s) error = %v", setClause, err)
-	}
-}
-
-// errFaultInjected is returned by the fault-injecting test driver.
-var errFaultInjected = errors.New("test: injected driver fault")
-
-// faultKind selects which driver operation a faultDriver sabotages.
-type faultKind int
-
-const (
-	faultNone faultKind = iota
-	faultCommit
-	faultRowsAffected
-	faultNext
-)
-
-// faultSetting is shared between a test and its faultDriver so the test can
-// arm the fault after seeding through the same pool.
-type faultSetting struct {
-	kind faultKind
-}
-
-// faultDriver wraps the sqlite driver to inject deterministic driver-level
-// failures. It exercises error branches that healthy databases never hit
-// (failed commits, failed rows-affected checks, and mid-iteration query
-// failures).
-type faultDriver struct {
-	base    driver.Driver
-	setting *faultSetting
-}
-
-func (d *faultDriver) Open(name string) (driver.Conn, error) {
-	conn, err := d.base.Open(name)
-	if err != nil {
-		return nil, err
-	}
-	return &faultConn{Conn: conn, setting: d.setting}, nil
-}
-
-// faultConn delegates every operation to sqlite except the armed fault.
-type faultConn struct {
-	driver.Conn
-
-	setting *faultSetting
-}
-
-func (c *faultConn) Begin() (driver.Tx, error) {
-	return c.BeginTx(context.Background(), driver.TxOptions{})
-}
-
-func (c *faultConn) BeginTx(ctx context.Context, opts driver.TxOptions) (driver.Tx, error) {
-	beginner, ok := c.Conn.(driver.ConnBeginTx)
-	if !ok {
-		return nil, driver.ErrSkip
-	}
-	tx, err := beginner.BeginTx(ctx, opts)
-	if err != nil {
-		return nil, err
-	}
-	return &faultTx{Tx: tx, setting: c.setting}, nil
-}
-
-func (c *faultConn) ExecContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
-	execer, ok := c.Conn.(driver.ExecerContext)
-	if !ok {
-		return nil, driver.ErrSkip
-	}
-	res, err := execer.ExecContext(ctx, query, args)
-	if err != nil || c.setting.kind != faultRowsAffected {
-		return res, err
-	}
-	return faultResult{Result: res}, nil
-}
-
-func (c *faultConn) QueryContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
-	queryer, ok := c.Conn.(driver.QueryerContext)
-	if !ok {
-		return nil, driver.ErrSkip
-	}
-	rows, err := queryer.QueryContext(ctx, query, args)
-	if err != nil || c.setting.kind != faultNext {
-		return rows, err
-	}
-	return &faultRows{Rows: rows}, nil
-}
-
-// faultTx delegates to the sqlite transaction except the armed fault.
-type faultTx struct {
-	driver.Tx
-
-	setting *faultSetting
-}
-
-func (t *faultTx) Commit() error {
-	if t.setting.kind == faultCommit {
-		return errFaultInjected
-	}
-	return t.Tx.Commit()
-}
-
-// faultResult poisons RowsAffected while delegating the rest.
-type faultResult struct {
-	driver.Result
-}
-
-func (faultResult) RowsAffected() (int64, error) {
-	return 0, errFaultInjected
-}
-
-// faultRows fails iteration on the first row.
-type faultRows struct {
-	driver.Rows
-}
-
-func (*faultRows) Next(dest []driver.Value) error {
-	return errFaultInjected
-}
-
-var (
-	_ driver.Driver         = (*faultDriver)(nil)
-	_ driver.Conn           = (*faultConn)(nil)
-	_ driver.ExecerContext  = (*faultConn)(nil)
-	_ driver.QueryerContext = (*faultConn)(nil)
-	_ driver.Tx             = (*faultTx)(nil)
-	_ driver.Result         = faultResult{}
-	_ driver.Rows           = (*faultRows)(nil)
-)
-
-// openFaultPool registers a fault-injecting driver under name, opens a
-// private in-memory database on it, and clones the canonical test schema
-// into it.
-func openFaultPool(t *testing.T, name string, setting *faultSetting) *sql.DB {
-	t.Helper()
-	sql.Register(name, &faultDriver{base: &sqlite.Driver{}, setting: setting})
-	db, err := sql.Open(name, ":memory:")
-	if err != nil {
-		t.Fatalf("sql.Open(%s) error = %v", name, err)
-	}
-	db.SetMaxOpenConns(1)
-	t.Cleanup(func() { _ = db.Close() })
-	cloneTestSchema(t, db)
-	return db
-}
-
-// cloneTestSchema copies the canonical table DDL from a fresh test database
-// into dst without duplicating the DDL text.
-func cloneTestSchema(t *testing.T, dst *sql.DB) {
-	t.Helper()
-	src := testutil.OpenTestSQLiteDB(t)
-	rows, err := src.Query("SELECT sql FROM sqlite_master WHERE type = 'table' AND sql IS NOT NULL")
-	if err != nil {
-		t.Fatalf("read test schema error = %v", err)
-	}
-	defer rows.Close()
-	var stmts []string
-	for rows.Next() {
-		var ddl string
-		if err := rows.Scan(&ddl); err != nil {
-			t.Fatalf("scan test schema error = %v", err)
+	if want == "" {
+		if err != nil {
+			t.Errorf("%s error = %v, want nil", op, err)
 		}
-		stmts = append(stmts, ddl)
+		return
 	}
-	if err := rows.Err(); err != nil {
-		t.Fatalf("iterate test schema error = %v", err)
+	if err == nil || !strings.Contains(err.Error(), want) {
+		t.Errorf("%s error = %v, want containing %q", op, err, want)
 	}
-	for _, ddl := range stmts {
-		if _, err := dst.Exec(ddl); err != nil {
-			t.Fatalf("apply test schema error = %v", err)
+}
+
+// rejectCommitSQL installs a deferred constraint trigger in the test's own
+// database, so every transaction inserting a call fails at COMMIT.
+const rejectCommitSQL = `
+CREATE FUNCTION reject_commit() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+	RAISE EXCEPTION 'commit rejected by test trigger';
+END $$;
+CREATE CONSTRAINT TRIGGER reject_commit AFTER INSERT ON voice_calls
+	DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION reject_commit();`
+
+func TestPGStore_CommitErrors(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	db := testutil.OpenTestDB(t)
+	st := store.NewPGStore(db)
+	if _, err := db.ExecContext(ctx, rejectCommitSQL); err != nil {
+		t.Fatalf("install commit trigger: %v", err)
+	}
+
+	outbound := model.VoiceCall{CallID: "commit-out", Direction: "outbound", State: "initiated", FromNumber: "+15105550100", ToNumber: "+15105550199"}
+	assertErrContains(t, "CreateOutboundCall", st.CreateOutboundCall(ctx, outbound, 5), "store: commit tx")
+	inbound := model.VoiceCall{CallID: "commit-in", Direction: "inbound", State: "ringing", FromNumber: "+15105550199", ToNumber: "+15105550100"}
+	assertErrContains(t, "CreateInboundCall", st.CreateInboundCall(ctx, inbound), "store: commit tx")
+
+	calls, err := st.ListCalls(ctx, 10)
+	if err != nil || len(calls) != 0 {
+		t.Errorf("ListCalls() after rejected commits = %d calls, err = %v; want 0, nil", len(calls), err)
+	}
+}
+
+// failOnSecondRowSQL swaps each table for a view whose key column raises on
+// one row. The planner evaluates the (non-volatile) function above the sort
+// and LIMIT, per emitted row, so the first row streams and the failure
+// surfaces mid-iteration (rows.Err), not at Query.
+const failOnSecondRowSQL = `
+CREATE FUNCTION fail_on(id TEXT, bad TEXT) RETURNS TEXT LANGUAGE plpgsql STABLE AS $$
+BEGIN
+	IF id = bad THEN
+		RAISE EXCEPTION 'iteration fault on %', id;
+	END IF;
+	RETURN id;
+END $$;
+ALTER TABLE voice_calls RENAME TO voice_calls_base;
+CREATE VIEW voice_calls AS SELECT
+	fail_on(call_id, 'fault-next-2') AS call_id, provider_call_sid, direction, state, end_reason,
+	from_number, to_number, callback_of_call_id, discord_channel_id, discord_thread_id,
+	brief, owner_instructions, transcript, live_transcript_cursor, answered_by,
+	voicemail_recording_url, report_status, report_summary, started_at, answered_at,
+	ended_at, updated_at
+	FROM voice_calls_base;
+ALTER TABLE voice_messages RENAME TO voice_messages_base;
+CREATE VIEW voice_messages AS SELECT
+	fail_on(message_sid, 'FAULT_NEXT_2') AS message_sid, direction, from_number, to_number, body,
+	media_urls, related_call_id, discord_delivered, created_at
+	FROM voice_messages_base;`
+
+func TestPGStore_IterationErrors(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	db := testutil.OpenTestDB(t)
+	st := store.NewPGStore(db)
+
+	now := time.Now().UTC()
+	// fault-next-1 is newest and inserted first, so it is the first row both
+	// in started_at DESC order and in heap order.
+	for _, c := range []model.VoiceCall{
+		{CallID: "fault-next-1", Direction: "inbound", State: "ringing", FromNumber: "+15105550100", ToNumber: "+15105550199", StartedAt: now},
+		{CallID: "fault-next-2", Direction: "inbound", State: "ringing", FromNumber: "+15105550101", ToNumber: "+15105550199", StartedAt: now.Add(-time.Minute)},
+	} {
+		if err := st.CreateInboundCall(ctx, c); err != nil {
+			t.Fatalf("CreateInboundCall(%s) error = %v", c.CallID, err)
 		}
 	}
-}
-
-func TestPGStore_FaultCommitErrors(t *testing.T) {
-	// A failed driver commit leaves the underlying transaction open, so
-	// each faulted commit runs on its own pool.
-	setting := &faultSetting{}
-	ctx := context.Background()
-	now := time.Now().UTC()
-
-	outboundDB := openFaultPool(t, "fault-commit-out", setting)
-	setting.kind = faultCommit
-	outboundStore := store.NewPGStore(outboundDB)
-	call := model.VoiceCall{
-		CallID:     "fault-commit-1",
-		Direction:  "outbound",
-		State:      "initiated",
-		FromNumber: "+15105550100",
-		ToNumber:   "+15105550199",
-		StartedAt:  now,
-		UpdatedAt:  now,
+	for _, m := range []model.VoiceMessage{
+		{MessageSID: "FAULT_NEXT_1", Direction: "inbound", FromNumber: "+15105550199", ToNumber: "+15105550100", Body: "first", CreatedAt: now},
+		{MessageSID: "FAULT_NEXT_2", Direction: "inbound", FromNumber: "+15105550199", ToNumber: "+15105550100", Body: "second", CreatedAt: now.Add(-time.Minute)},
+	} {
+		if _, err := st.SaveVoiceMessage(ctx, m); err != nil {
+			t.Fatalf("SaveVoiceMessage(%s) error = %v", m.MessageSID, err)
+		}
 	}
-	if err := outboundStore.CreateOutboundCall(ctx, call, 5); err == nil || !strings.Contains(err.Error(), "store: commit tx") {
-		t.Errorf("CreateOutboundCall fault commit err = %v, want commit tx error", err)
+	if _, err := db.ExecContext(ctx, failOnSecondRowSQL); err != nil {
+		t.Fatalf("install failing views: %v", err)
 	}
 
-	inboundDB := openFaultPool(t, "fault-commit-in", setting)
-	inboundStore := store.NewPGStore(inboundDB)
-	inbound := model.VoiceCall{
-		CallID:     "fault-commit-2",
-		Direction:  "inbound",
-		State:      "ringing",
-		FromNumber: "+15105550199",
-		ToNumber:   "+15105550100",
-		StartedAt:  now,
-		UpdatedAt:  now,
-	}
-	if err := inboundStore.CreateInboundCall(ctx, inbound); err == nil || !strings.Contains(err.Error(), "store: commit tx") {
-		t.Errorf("CreateInboundCall fault commit err = %v, want commit tx error", err)
-	}
-}
-
-func TestPGStore_FaultRowsAffectedErrors(t *testing.T) {
-	setting := &faultSetting{}
-	db := openFaultPool(t, "fault-rows", setting)
-	st := store.NewPGStore(db)
-	ctx := context.Background()
-
-	now := time.Now().UTC()
-	seed := model.VoiceCall{
-		CallID:     "fault-rows-1",
-		Direction:  "inbound",
-		State:      "ringing",
-		FromNumber: "+15105550100",
-		ToNumber:   "+15105550199",
-		StartedAt:  now,
-		UpdatedAt:  now,
-	}
-	if err := st.CreateInboundCall(ctx, seed); err != nil {
-		t.Fatalf("CreateInboundCall() error = %v", err)
-	}
-	seedMsg := model.VoiceMessage{
-		MessageSID: "FAULT_ROWS_1",
-		Direction:  "inbound",
-		FromNumber: "+15105550199",
-		ToNumber:   "+15105550100",
-		Body:       "fault probe",
-		CreatedAt:  now,
-	}
-	if _, err := st.SaveVoiceMessage(ctx, seedMsg); err != nil {
-		t.Fatalf("SaveVoiceMessage() error = %v", err)
-	}
-
-	setting.kind = faultRowsAffected
-	if err := st.BindProviderCallSID(ctx, "fault-rows-1", "CA1"); err == nil || !strings.Contains(err.Error(), "store: rows affected") {
-		t.Errorf("BindProviderCallSID fault rows err = %v, want rows affected error", err)
-	}
-	if err := st.UpdateCallState(ctx, "fault-rows-1", "completed", "done", ""); err == nil || !strings.Contains(err.Error(), "store: rows affected") {
-		t.Errorf("UpdateCallState fault rows err = %v, want rows affected error", err)
-	}
-	if _, err := st.AdvanceLiveTranscriptCursor(ctx, "fault-rows-1", 0, 1); err == nil || !strings.Contains(err.Error(), "store: rows affected") {
-		t.Errorf("AdvanceLiveTranscriptCursor fault rows err = %v, want rows affected error", err)
-	}
-	if err := st.SetVoicemailRecording(ctx, "fault-rows-1", "https://rec"); err == nil || !strings.Contains(err.Error(), "store: rows affected") {
-		t.Errorf("SetVoicemailRecording fault rows err = %v, want rows affected error", err)
-	}
-	if _, err := st.TransitionReportStatus(ctx, "fault-rows-1", nil, "delivered", ""); err == nil || !strings.Contains(err.Error(), "store: rows affected") {
-		t.Errorf("TransitionReportStatus fault rows err = %v, want rows affected error", err)
-	}
-	if err := st.MarkVoiceMessageDelivered(ctx, "FAULT_ROWS_1"); err == nil || !strings.Contains(err.Error(), "store: rows affected") {
-		t.Errorf("MarkVoiceMessageDelivered fault rows err = %v, want rows affected error", err)
-	}
-	if _, err := st.SaveVoiceMessage(ctx, model.VoiceMessage{MessageSID: "FAULT_ROWS_2"}); err == nil || !strings.Contains(err.Error(), "store: check rows affected") {
-		t.Errorf("SaveVoiceMessage fault rows err = %v, want check rows affected error", err)
-	}
-}
-
-func TestPGStore_FaultIterationErrors(t *testing.T) {
-	setting := &faultSetting{}
-	db := openFaultPool(t, "fault-next", setting)
-	st := store.NewPGStore(db)
-	ctx := context.Background()
-
-	now := time.Now().UTC()
-	seed := model.VoiceCall{
-		CallID:     "fault-next-1",
-		Direction:  "inbound",
-		State:      "ringing",
-		FromNumber: "+15105550100",
-		ToNumber:   "+15105550199",
-		StartedAt:  now,
-		UpdatedAt:  now,
-	}
-	if err := st.CreateInboundCall(ctx, seed); err != nil {
-		t.Fatalf("CreateInboundCall() error = %v", err)
-	}
-	if _, err := st.SaveVoiceMessage(ctx, model.VoiceMessage{MessageSID: "FAULT_NEXT_1", CreatedAt: now}); err != nil {
-		t.Fatalf("SaveVoiceMessage() error = %v", err)
-	}
-
-	setting.kind = faultNext
-	if _, err := st.ListCalls(ctx, 10); err == nil || !strings.Contains(err.Error(), "store: iterate calls") {
-		t.Errorf("ListCalls fault iteration err = %v, want iterate calls error", err)
-	}
-	if _, err := st.ListVoiceMessages(ctx, 10); err == nil || !strings.Contains(err.Error(), "store: iterate voice messages") {
-		t.Errorf("ListVoiceMessages fault iteration err = %v, want iterate error", err)
-	}
-	if _, err := st.ReconcileOrphanedCalls(ctx, nil); err == nil || !strings.Contains(err.Error(), "store: iterate unended calls") {
-		t.Errorf("ReconcileOrphanedCalls fault iteration err = %v, want iterate error", err)
-	}
+	_, err := st.ListCalls(ctx, 10)
+	assertErrContains(t, "ListCalls", err, "store: iterate calls")
+	_, err = st.ListVoiceMessages(ctx, 10)
+	assertErrContains(t, "ListVoiceMessages", err, "store: iterate voice messages")
+	_, err = st.ReconcileOrphanedCalls(ctx, nil)
+	assertErrContains(t, "ReconcileOrphanedCalls", err, "store: iterate unended calls")
 }
