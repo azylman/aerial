@@ -85,7 +85,6 @@ func TestWorker_PassesSessionIDToAgentPool(t *testing.T) {
 		ProcessPool:    procPool,
 		SessionManager: session.New(tmpHome, tempData),
 		Store:          store,
-		TimeoutMinutes: 1,
 		OnMessageCompleted: func(msg db.Message, status string) {
 			if status == db.StatusCompleted {
 				completedCh <- msg.ID
@@ -149,7 +148,7 @@ func TestWorker_PersistentDaemonExecutionErrors(t *testing.T) {
 			failedCh := make(chan struct{})
 			pool := New(cfg, WorkerPoolConfig{
 				SessionManager: session.New(tmpHome, tempData), Store: store,
-				TimeoutMinutes: 1, MaxAttempts: 1,
+				MaxAttempts: 1,
 				OnMessageCompleted: func(msg db.Message, status string) {
 					if status == db.StatusFailed {
 						select {
@@ -283,7 +282,7 @@ func runPersistentDaemonTurnCase(t *testing.T, tc persistentDaemonTurnCase) {
 	haroBus, getOneShots := newMockHaroOneShotBus(t)
 	pool := New(cfg, WorkerPoolConfig{
 		ProcessPool: procPool, SessionManager: session.New(tmpHome, tempData),
-		Store: store, TimeoutMinutes: 1, EventBus: haroBus,
+		Store: store, EventBus: haroBus,
 		DeliveryFunc: func(sess *discordgo.Session, channelID, content string) error {
 			deliveryMu.Lock()
 			deliveredText = content
@@ -391,7 +390,7 @@ func TestWorkerPool_TransientRetry_RotatesBloatedSession(t *testing.T) {
 	doneCh := make(chan struct{})
 
 	pool := New(cfg, WorkerPoolConfig{
-		SessionManager: session.New(tmpHome, tempData), Store: store, TimeoutMinutes: 1, MaxAttempts: 2, BackoffBase: 10 * time.Millisecond,
+		SessionManager: session.New(tmpHome, tempData), Store: store, MaxAttempts: 2, BackoffBase: 10 * time.Millisecond,
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
 			mu.Lock()
 			sessionsSeen = append(sessionsSeen, sessionID)
@@ -490,7 +489,7 @@ func TestWorker_DualPoolRouting(t *testing.T) {
 			doneCh := make(chan struct{}, 1)
 			pool := New(cfg, WorkerPoolConfig{
 				ProcessPool: primaryPool, LowEffortProcessPool: lowPool, MediumEffortProcessPool: medPool,
-				SessionManager: session.New(tmpHome, tempData), Store: store, TimeoutMinutes: 1,
+				SessionManager: session.New(tmpHome, tempData), Store: store,
 				OnMessageCompleted: func(msg db.Message, status string) {
 					if status == db.StatusCompleted {
 						select {
@@ -566,7 +565,7 @@ func TestWorkerPool_LowEffortAndPrimary_ConcurrentExecutionSameThread(t *testing
 			{Ephemeral: false, Effort: "high"}: primaryPool,
 			{Ephemeral: false, Effort: "low"}:  lowPool,
 		},
-		SessionManager: session.New(tmpHome, tempData), Store: store, TimeoutMinutes: 1,
+		SessionManager: session.New(tmpHome, tempData), Store: store,
 		OnMessageCompleted: func(msg db.Message, status string) {
 			if msg.ID == "msg-norm-concurrent" && status == db.StatusCompleted {
 				close(normDoneCh)
@@ -663,7 +662,7 @@ func TestWorker_EphemeralLowEffortPool_SkipsColdStartContextAndRotates(t *testin
 	cfg := newTestConfig(func(d *config.ConfigData) { d.DataDir, d.LowEffortModel = tempData, "gemini-3.8-flash-low" })
 	pool := New(cfg, WorkerPoolConfig{
 		ProcessPool: primaryPool, LowEffortProcessPool: lowPool,
-		SessionManager: session.New(tmpHome, tempData), Store: store, TimeoutMinutes: 1,
+		SessionManager: session.New(tmpHome, tempData), Store: store,
 		HistoryFetcher: func(ctx context.Context, channelID string, beforeID string, limit int) ([]HistoryMessage, error) {
 			return []HistoryMessage{{ID: "hist-1", AuthorName: "test-user", Content: "prior chat history should not be injected", CreatedAt: time.Now().Add(-5 * time.Minute)}}, nil
 		},
@@ -758,7 +757,7 @@ func TestWorker_EphemeralHighEffort_FailsBurst(t *testing.T) {
 	doneCh := make(chan string, 1)
 	pool := New(cfg, WorkerPoolConfig{
 		ProcessPool:    &mockAcquireLeaseFailPool{AgentPool: primaryPool},
-		SessionManager: session.New(tmpHome, tempData), Store: store, TimeoutMinutes: 1,
+		SessionManager: session.New(tmpHome, tempData), Store: store,
 		OnMessageCompleted: func(msg db.Message, status string) {
 			doneCh <- status
 		},
@@ -873,7 +872,7 @@ func runStatefulResumeCase(t *testing.T, tc statefulResumeCase) {
 			{Ephemeral: true, Effort: "medium"}:  ephemMed,
 			{Ephemeral: true, Effort: "low"}:     ephemLow,
 		},
-		SessionManager: session.New(tmpHome, tempData), Store: store, TimeoutMinutes: 1,
+		SessionManager: session.New(tmpHome, tempData), Store: store,
 		OnMessageCompleted: func(msg db.Message, status string) {
 			if status == db.StatusCompleted {
 				doneCh <- struct{}{}
@@ -1350,11 +1349,10 @@ func TestWorkerPool_ProcessInteractiveTurn_PublishesTurnCompleted(t *testing.T) 
 	expectedSessID := "sess-interactive-completed-123"
 
 	pool := NewWorkerPool(WorkerPoolConfig{
-		Store:          store,
-		EventBus:       memBus,
-		TimeoutMinutes: 1,
-		DeliveryFunc:   noopDelivery,
-		TypingFunc:     noopTyping,
+		Store:        store,
+		EventBus:     memBus,
+		DeliveryFunc: noopDelivery,
+		TypingFunc:   noopTyping,
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
 			return mockJSONResponse(expectedSessID, "Task finished cleanly!"), "", 0, nil
 		},

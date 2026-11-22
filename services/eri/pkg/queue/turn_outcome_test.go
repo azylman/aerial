@@ -45,7 +45,7 @@ func runCapacityBlipCase(t *testing.T, tt capacityBlipCase) {
 	appCfg := config.NewFromData(&config.ConfigData{Channels: map[string]config.ChannelPolicy{"default": {Mode: "thread"}}})
 	haroBus, getOneShots := newMockHaroOneShotBus(t)
 	pool := New(appCfg, WorkerPoolConfig{
-		SessionManager: session.New(tmpDir, tmpDir), Store: store, TimeoutMinutes: 1, BackoffBase: 5 * time.Millisecond,
+		SessionManager: session.New(tmpDir, tmpDir), Store: store, BackoffBase: 5 * time.Millisecond,
 		RetryDelayOverride: 10 * time.Millisecond, MaxAttempts: tt.maxAttempts, EventBus: haroBus,
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
 			mu.Lock()
@@ -146,7 +146,7 @@ func TestWorkerPool_CapacityBlip_DoesNotBlockConcurrentThreads(t *testing.T) {
 
 	appCfg := config.NewFromData(&config.ConfigData{Channels: map[string]config.ChannelPolicy{"default": {Mode: "thread"}}})
 	pool := New(appCfg, WorkerPoolConfig{
-		SessionManager: session.New(tmpDir, tmpDir), Store: store, TimeoutMinutes: 1, BackoffBase: 5 * time.Millisecond,
+		SessionManager: session.New(tmpDir, tmpDir), Store: store, BackoffBase: 5 * time.Millisecond,
 		RetryDelayOverride: 10 * time.Millisecond, MaxAttempts: 2,
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
 			if strings.Contains(prompt, "Thread A") {
@@ -233,7 +233,7 @@ func TestWorkerPool_CapacityBlip_ContextCancellation(t *testing.T) {
 			var typingActive, typingStopped bool
 			appCfg := config.NewFromData(&config.ConfigData{Channels: map[string]config.ChannelPolicy{"default": {Mode: "thread"}}})
 			pool := New(appCfg, WorkerPoolConfig{
-				SessionManager: session.New(tmpDir, tmpDir), Store: store, TimeoutMinutes: 1, BackoffBase: 5 * time.Millisecond, MaxAttempts: 2,
+				SessionManager: session.New(tmpDir, tmpDir), Store: store, BackoffBase: 5 * time.Millisecond, MaxAttempts: 2,
 				RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
 					select {
 					case startedCh <- struct{}{}:
@@ -424,7 +424,7 @@ func TestWorker_DualPool_YieldTrapFallback(t *testing.T) {
 	doneCh := make(chan struct{})
 	pool := New(cfg, WorkerPoolConfig{
 		ProcessPool: primaryPool, LowEffortProcessPool: lowPool,
-		SessionManager: session.New(tmpHome, tempData), Store: store, TimeoutMinutes: 1,
+		SessionManager: session.New(tmpHome, tempData), Store: store,
 		OnMessageCompleted: func(msg db.Message, status string) {
 			if status == db.StatusCompleted {
 				turnCount.Add(1)
@@ -484,7 +484,7 @@ func TestWorker_QuotaPause_PreservesEffort(t *testing.T) {
 			haroBus, getOneShots := newMockHaroOneShotBus(t)
 			pool := New(cfg, WorkerPoolConfig{
 				ProcessPool: primaryPool, LowEffortProcessPool: lowPool,
-				SessionManager: session.New(tmpHome, tempData), Store: store, TimeoutMinutes: 1, MaxAttempts: 1,
+				SessionManager: session.New(tmpHome, tempData), Store: store, MaxAttempts: 1,
 				EventBus: haroBus,
 				OnMessageCompleted: func(msg db.Message, status string) {
 					if status == db.StatusFailed {
@@ -540,7 +540,7 @@ func runYieldTrapCase(t *testing.T, tc yieldTrapCase) {
 	_ = os.Chtimes(sessDir, now, now)
 
 	pool := NewWorkerPool(WorkerPoolConfig{
-		SessionManager: sessMgr, Store: store, TimeoutMinutes: 1, BackoffBase: 10 * time.Millisecond, MaxAttempts: 3,
+		SessionManager: sessMgr, Store: store, BackoffBase: 10 * time.Millisecond, MaxAttempts: 3,
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
 			inv := runnerInvocations.Add(1)
 			promptsSeenMu.Lock()
