@@ -1,14 +1,17 @@
-package main
+package store
 
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
+	"errors"
 	"fmt"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/stdlib"
 	_ "modernc.org/sqlite"
 
 	"github.com/azylman/aerial/pkg/transcriptwire"
@@ -352,8 +355,8 @@ func TestParseDBTime(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if _, ok := parseDBTime(tc.value); ok != tc.want {
-				t.Errorf("parseDBTime(%v) ok = %v, want %v", tc.value, ok, tc.want)
+			if _, ok := ParseDBTime(tc.value); ok != tc.want {
+				t.Errorf("ParseDBTime(%v) ok = %v, want %v", tc.value, ok, tc.want)
 			}
 		})
 	}
@@ -607,4 +610,191 @@ func TestApplyBatchMultiAgent(t *testing.T) {
 	if len(steps) != 3 {
 		t.Fatalf("got %d steps, want 3", len(steps))
 	}
+}
+
+func TestStoreSummaryOperations(t *testing.T) {
+	t.Parallel()
+	store := newTestStore(t, "aerial")
+	ctx := context.Background()
+	now := time.Date(2026, 11, 22, 10, 0, 0, 0, time.UTC)
+	epoch := now.Add(-time.Hour)
+
+	batch := testBatch("sess-due", epoch, 0, 5, true, false)
+	if _, err := store.ApplyBatch(ctx, batch); err != nil {
+		t.Fatalf("seed batch: %v", err)
+	}
+
+	candidates, err := store.ListDueSessions(ctx, 10*time.Minute, 1, 10, now)
+	if err != nil {
+		t.Fatalf("ListDueSessions() err = %v", err)
+	}
+	if len(candidates) != 1 {
+		t.Fatalf("ListDueSessions() returned %d candidates, want 1", len(candidates))
+	}
+	cand := candidates[0]
+	if cand.SessionID != "sess-due" || cand.LastIndexed != 5 {
+		t.Errorf("unexpected candidate: %+v", cand)
+	}
+
+	if saveErr := store.SaveSummary(ctx, "aerial", "sess-due", "persisted summary", cand.LastIndexed); saveErr != nil {
+		t.Fatalf("SaveSummary() err = %v", saveErr)
+	}
+
+	after, afterErr := store.ListDueSessions(ctx, 10*time.Minute, 1, 10, now)
+	if afterErr != nil {
+		t.Fatalf("ListDueSessions() after save err = %v", afterErr)
+	}
+	if len(after) != 0 {
+		t.Errorf("ListDueSessions() after save returned %d candidates, want 0", len(after))
+	}
+}
+
+func TestStoreSummaryValidationErrors(t *testing.T) {
+	t.Parallel()
+	st := newTestStore(t, "aerial")
+	emptyStackStore := NewStore(st.db, "")
+	if _, err := emptyStackStore.ListDueSessions(context.Background(), time.Hour, 1, 10, time.Now()); err == nil {
+		t.Errorf("expected ListDueSessions error on empty stack")
+	}
+	if err := emptyStackStore.SaveSummary(context.Background(), "aerial", "s", "sum", 1); err == nil {
+		t.Errorf("expected SaveSummary error on empty stack")
+	}
+}
+
+func TestStoreClosedDBErrors(t *testing.T) {
+	t.Parallel()
+	store := newTestStore(t, "aerial")
+	_ = store.db.Close()
+	epoch := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
+	batch := testBatch("sess-closed", epoch, 0, 1, false, false)
+
+	if _, err := store.ApplyBatch(context.Background(), batch); err == nil {
+		t.Errorf("expected ApplyBatch error on closed db")
+	}
+	if _, err := store.AcquireThreadSummaryLock(context.Background(), "thread-closed"); err == nil {
+		t.Errorf("expected AcquireThreadSummaryLock error on closed db")
+	}
+	if _, err := store.ListDueSessions(context.Background(), time.Hour, 1, 10, time.Now()); err == nil {
+		t.Errorf("expected ListDueSessions error on closed db")
+	}
+	if err := store.SaveSummary(context.Background(), "aerial", "s", "sum", 1); err == nil {
+		t.Errorf("expected SaveSummary error on closed db")
+	}
+}
+
+type mockLockConnector struct {
+	d       driver.Driver
+	connErr error
+	conn    *mockLockConn
+}
+
+func (m mockLockConnector) Connect(context.Context) (driver.Conn, error) {
+	if m.connErr != nil {
+		return nil, m.connErr
+	}
+	if m.conn != nil {
+		return m.conn, nil
+	}
+	return &mockLockConn{}, nil
+}
+
+func (m mockLockConnector) Driver() driver.Driver {
+	return m.d
+}
+
+type mockLockConn struct {
+	lockErr   error
+	unlockErr error
+	queries   []string
+	args      [][]driver.NamedValue
+	closed    bool
+	rawCalled bool
+}
+
+func (*mockLockConn) Prepare(string) (driver.Stmt, error) {
+	return nil, errors.New("not implemented")
+}
+
+func (c *mockLockConn) Close() error {
+	c.closed = true
+	return nil
+}
+
+func (*mockLockConn) Begin() (driver.Tx, error) {
+	return nil, errors.New("not implemented")
+}
+
+func (c *mockLockConn) ExecContext(_ context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
+	c.queries = append(c.queries, query)
+	c.args = append(c.args, args)
+	if strings.Contains(query, "pg_advisory_lock") && c.lockErr != nil {
+		return nil, c.lockErr
+	}
+	if strings.Contains(query, "pg_advisory_unlock") && c.unlockErr != nil {
+		return nil, c.unlockErr
+	}
+	return driver.RowsAffected(1), nil
+}
+
+func (c *mockLockConn) Raw(f func(driverConn any) error) error {
+	c.rawCalled = true
+	return f(c)
+}
+
+func TestAcquireThreadSummaryLockPostgresDriver(t *testing.T) {
+	t.Parallel()
+	pgDriver := stdlib.GetDefaultDriver()
+
+	t.Run("connect failure returns error", func(t *testing.T) {
+		t.Parallel()
+		db := sql.OpenDB(mockLockConnector{d: pgDriver, connErr: errors.New("connect fail")})
+		t.Cleanup(func() { _ = db.Close() })
+		store := NewStore(db, "aerial")
+		if _, err := store.AcquireThreadSummaryLock(context.Background(), "thread-1"); err == nil {
+			t.Errorf("expected error on failed connection")
+		}
+	})
+
+	t.Run("lock failure returns error", func(t *testing.T) {
+		t.Parallel()
+		conn := &mockLockConn{lockErr: errors.New("advisory lock fail")}
+		db := sql.OpenDB(mockLockConnector{d: pgDriver, conn: conn})
+		t.Cleanup(func() { _ = db.Close() })
+		store := NewStore(db, "aerial")
+		if _, err := store.AcquireThreadSummaryLock(context.Background(), "thread-1"); err == nil {
+			t.Errorf("expected error on failed advisory lock")
+		}
+		if len(conn.queries) != 1 || !strings.Contains(conn.queries[0], "pg_advisory_lock") {
+			t.Errorf("expected lock query, got %v", conn.queries)
+		}
+	})
+
+	t.Run("lock and unlock success verifies sql and lock key", func(t *testing.T) {
+		t.Parallel()
+		conn := &mockLockConn{}
+		db := sql.OpenDB(mockLockConnector{d: pgDriver, conn: conn})
+		t.Cleanup(func() { _ = db.Close() })
+		store := NewStore(db, "aerial")
+		release, err := store.AcquireThreadSummaryLock(context.Background(), "thread-test")
+		if err != nil {
+			t.Fatalf("AcquireThreadSummaryLock err = %v", err)
+		}
+		release()
+		if len(conn.queries) != 2 {
+			t.Fatalf("expected 2 queries (lock + unlock), got %d: %v", len(conn.queries), conn.queries)
+		}
+		if !strings.Contains(conn.queries[0], "pg_advisory_lock") {
+			t.Errorf("first query should be lock, got %q", conn.queries[0])
+		}
+		if !strings.Contains(conn.queries[1], "pg_advisory_unlock") {
+			t.Errorf("second query should be unlock, got %q", conn.queries[1])
+		}
+		expectedKey := summaryLockKey("thread-test")
+		if len(conn.args) < 2 || len(conn.args[0]) < 1 || conn.args[0][0].Value != expectedKey {
+			t.Errorf("lock arg = %v, want %q", conn.args, expectedKey)
+		}
+		if len(conn.args[1]) < 1 || conn.args[1][0].Value != expectedKey {
+			t.Errorf("unlock arg = %v, want %q", conn.args[1], expectedKey)
+		}
+	})
 }
