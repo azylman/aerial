@@ -9,6 +9,7 @@ package store
 import (
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -152,7 +153,7 @@ func recoveryFixtureStore(mu *sync.Mutex, parent *string, chunks *[]model.Vanadi
 			}
 			return nil
 		}}, nil
-	}}, "azylman")
+	}}, "example-org")
 }
 
 // retryTransaction models the external database's atomic commit and parent lock.
@@ -187,39 +188,22 @@ func assertLegacyBaseline(t *testing.T, st *Store, parent *string, stored *[]mod
 	}
 }
 
-func TestPostgresVanadisStore_PRRecoveryTransactions(t *testing.T) {
+// A failed sibling no longer blocks reopening the parent, so the first
+// recovery writes the parent; that write's failure must roll back the chunk
+// head update too (rollback is only observable on the stateful fixture).
+func TestPostgresVanadisStore_RecoverFailedPRParentWriteRollsBack(t *testing.T) {
 	t.Parallel()
-	tests := []struct {
-		name       string
-		failParent bool
-		wantParent string
-		wantFailed int
-	}{
-		{"parent write rolls back recovery", true, "failed", 2},
+	var mu sync.Mutex
+	parent := "failed"
+	chunks := []model.VanadisChunk{{ID: "c1", BuildID: "b1", Mode: "pr", PRNumber: 12, Status: "failed", HeadSHA: "old"}, {ID: "c2", BuildID: "b1", Mode: "pr", PRNumber: 13, Status: "failed", HeadSHA: "old"}}
+	st := recoveryFixtureStore(&mu, &parent, &chunks, true)
+	err := st.recoverFailedPR(context.WithValue(context.Background(), PrHeadVerifiedContextKey{}, true), "c1", "new")
+	if err == nil || !strings.Contains(err.Error(), "parent write failed") {
+		t.Fatalf("recoverFailedPR err = %v, want parent write failure", err)
 	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			var mu sync.Mutex
-			parent := "failed"
-			chunks := []model.VanadisChunk{{ID: "c1", BuildID: "b1", Mode: "pr", PRNumber: 12, Status: "failed", HeadSHA: "old"}, {ID: "c2", BuildID: "b1", Mode: "pr", PRNumber: 13, Status: "failed", HeadSHA: "old"}}
-			st := recoveryFixtureStore(&mu, &parent, &chunks, tc.failParent)
-			ctx := context.WithValue(context.Background(), PrHeadVerifiedContextKey{}, true)
-			// A failed sibling no longer blocks reopening the parent, so the
-			// first recovery writes the parent and its failure rolls back.
-			if err := st.recoverFailedPR(ctx, "c1", "new"); err == nil {
-				t.Fatal("expected parent write failure")
-			}
-			failed := 0
-			for _, c := range chunks {
-				if c.Status == "failed" {
-					failed++
-				}
-			}
-			if parent != tc.wantParent || failed != tc.wantFailed {
-				t.Fatalf("parent=%s failed=%d", parent, failed)
-			}
-		})
+	want := []model.VanadisChunk{{ID: "c1", BuildID: "b1", Mode: "pr", PRNumber: 12, Status: "failed", HeadSHA: "old"}, {ID: "c2", BuildID: "b1", Mode: "pr", PRNumber: 13, Status: "failed", HeadSHA: "old"}}
+	if parent != "failed" || !reflect.DeepEqual(chunks, want) {
+		t.Fatalf("after rollback parent=%s chunks=%+v, want failed and unchanged", parent, chunks)
 	}
 }
 

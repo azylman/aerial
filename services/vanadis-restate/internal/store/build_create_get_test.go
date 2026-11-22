@@ -373,6 +373,8 @@ func TestPostgresVanadisStore_BuildCRUD(t *testing.T) {
 		wantErrIs error
 	}{
 		{name: "create build success", db: dbScript{}},
+		{name: "nil receiver", db: dbScript{bare: nilReceiver}, wantErr: true},
+		{name: "nil db", db: dbScript{bare: nilDB}, wantErr: true},
 		{name: "replay build read failure", db: dbScript{execTag: "INSERT 0 0", buildRow: errRow(errors.New("read failed"))}, wantErr: true},
 		{name: "replay chunks read failure", db: dbScript{execTag: "INSERT 0 0", buildRow: &mockRow{b: &b1}, queryErr: errors.New("read failed")}, wantErr: true},
 		{name: "replay chunks scan failure", db: dbScript{execTag: "INSERT 0 0", buildRow: &mockRow{b: &b1}, chunks: c1, scanErr: errors.New("scan failed")}, wantErr: true},
@@ -409,9 +411,12 @@ func TestPostgresVanadisStore_GetBuild(t *testing.T) {
 		wantErr   bool
 		wantErrIs error
 	}{
+		{name: "nil receiver", buildID: "b1", db: dbScript{bare: nilReceiver}, wantErr: true},
+		{name: "empty id", buildID: "  ", wantErr: true},
 		{name: "get build not found", buildID: "b1", db: dbScript{row: errRow(pgx.ErrNoRows)}, wantErrIs: ErrBuildNotFound},
 		{name: "get build query error", buildID: "b1", db: dbScript{row: errRow(errors.New("db error"))}, wantErr: true},
 		{name: "get build chunks query error", buildID: "b1", db: dbScript{row: &mockRow{b: &b1}, queryErr: errors.New("chunks err")}, wantErr: true},
+		{name: "get build chunks scan error", buildID: "b1", db: dbScript{row: &mockRow{b: &b1}, chunks: []model.VanadisChunk{{ID: "c1", BuildID: "b1", Mode: "pr", Repo: "aerial"}}, scanErr: errors.New("scan failed")}, wantErr: true},
 		{name: "get build success", buildID: "b1", db: dbScript{
 			row: &mockRow{b: &b1},
 			chunks: []model.VanadisChunk{{
