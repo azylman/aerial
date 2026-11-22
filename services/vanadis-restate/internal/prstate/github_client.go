@@ -4,7 +4,9 @@ package prstate
 // PR listing, head check-run reads, single-PR mergeability reads, and
 // workflow rerun-failed-jobs. Ported from services/synapse/internal/github
 // (conflicts.go, rollout.go) without importing it: synapse is a separate
-// module and its packages are internal.
+// module and its packages are internal. Requests are built by
+// githubapi.NewRequest; do/getJSON stay local because GitHubError carries
+// transport retryability and raw-body update-branch classification.
 //
 // Error classification is data, not error types, so a journaled result
 // replays identically: GitHubResult carries the HTTP status and whether a
@@ -22,12 +24,10 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/azylman/aerial/pkg/githubapi"
 	"github.com/azylman/aerial/pkg/githubauth"
 	"github.com/azylman/aerial/pkg/prwire"
 )
-
-// DefaultGitHubAPIURL is the public GitHub REST endpoint.
-const DefaultGitHubAPIURL = "https://api.github.com"
 
 // mergeabilityRefetches bounds the immediate refetches while GitHub is still
 // computing mergeability, matching synapse FetchSinglePRWithMergeabilityRetry.
@@ -109,7 +109,7 @@ func NewGitHubClient(httpClient *http.Client, apiURL, token string) *GitHubClien
 	}
 	apiURL = strings.TrimRight(strings.TrimSpace(apiURL), "/")
 	if apiURL == "" {
-		apiURL = DefaultGitHubAPIURL
+		apiURL = githubapi.DefaultAPIURL
 	}
 	return &GitHubClient{http: httpClient, apiURL: apiURL, token: strings.TrimSpace(token)}
 }
@@ -117,16 +117,12 @@ func NewGitHubClient(httpClient *http.Client, apiURL, token string) *GitHubClien
 // do sends one request and returns the status and up to maxBytes of body.
 // A transport failure is a retryable GitHubError with status 0.
 func (c *GitHubClient) do(ctx context.Context, method, path string, body io.Reader, maxBytes int64) (int, []byte, *GitHubError) {
-	req, err := http.NewRequestWithContext(ctx, method, c.apiURL+path, body)
+	req, err := githubapi.NewRequest(ctx, c.apiURL, c.token, method, path, body)
 	if err != nil {
 		return 0, nil, &GitHubError{Message: fmt.Sprintf("github request %s %s: %v", method, path, err)}
 	}
-	req.Header.Set("Accept", "application/vnd.github.v3+json")
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
-	}
-	if c.token != "" {
-		req.Header.Set("Authorization", "token "+c.token)
 	}
 	resp, err := c.http.Do(req)
 	if err != nil {

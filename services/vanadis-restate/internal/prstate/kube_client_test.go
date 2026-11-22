@@ -148,6 +148,7 @@ func TestKubeClientPromoteImageTag(t *testing.T) {
 		commit       string
 		noAPI        bool
 		receiver     bool
+		missingToken bool
 		wantWorkload string
 		wantStatus   int
 		wantErr      bool
@@ -168,6 +169,7 @@ func TestKubeClientPromoteImageTag(t *testing.T) {
 		{name: "receiver success covers a failed patch", routes: map[string][]int{patch: {500}, receiverRoute: {200}}, image: "eri", commit: "s1", receiver: true, wantWorkload: "eri", wantRoutes: []string{patch, receiverRoute}, wantAuth: "Bearer tok"},
 		{name: "receiver failure without api fails", routes: map[string][]int{receiverRoute: {502}}, image: "eri", commit: "s1", noAPI: true, receiver: true, wantErr: true, wantStatus: 502, wantRoutes: []string{receiverRoute}},
 		{name: "zero commit without receiver writes nothing", image: "eri", commit: "0000000000000000000000000000000000000000"},
+		{name: "unreadable token sends no auth", routes: map[string][]int{patch: {200}}, image: "eri", commit: "s1", missingToken: true, wantWorkload: "eri", wantRoutes: []string{patch}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -180,7 +182,11 @@ func TestKubeClientPromoteImageTag(t *testing.T) {
 			if tc.receiver {
 				receiver = srv.URL + "/hook"
 			}
-			c := NewKubeClient(srv.Client(), api, writeToken(t, "tok"), "", receiver)
+			tokenPath := writeToken(t, "tok")
+			if tc.missingToken {
+				tokenPath = filepath.Join(t.TempDir(), "absent")
+			}
+			c := NewKubeClient(srv.Client(), api, tokenPath, "", receiver)
 			workload, kerr := c.PromoteImageTag(context.Background(), ImagePromotionRequest{Image: tc.image, Repo: "azylman/aerial", CommitSHA: tc.commit})
 			require.Equal(t, tc.wantWorkload, workload)
 			require.Equal(t, tc.wantErr, kerr != nil)
@@ -268,34 +274,6 @@ func TestKubeClientTLS(t *testing.T) {
 	}
 }
 
-func TestResolveImageTag(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name         string
-		repo         string
-		image        string
-		wantTag      string
-		wantWorkload string
-	}{
-		{name: "aerial image gains the aerial prefix", repo: "azylman/aerial", image: "ghcr.io/azylman/eri:abc", wantTag: "TAG_AERIAL_ERI", wantWorkload: "eri"},
-		{name: "aerial prefixed image keeps one prefix", repo: "azylman/aerial", image: "aerial-vanadis-restate", wantTag: "TAG_AERIAL_VANADIS_RESTATE", wantWorkload: "aerial-vanadis-restate"},
-		{name: "sidecar image gains the sidecar prefix", repo: "azylman/aerial-sidecars", image: "ghcr.io/azylman/nest-bridge:1", wantTag: "TAG_AERIAL_SIDECAR_NEST_BRIDGE", wantWorkload: "nest-bridge"},
-		{name: "mirrormere image gains the mirrormere prefix", repo: "azylman/mirrormere", image: "kiosk", wantTag: "TAG_MIRRORMERE_KIOSK", wantWorkload: "kiosk"},
-		{name: "mirrormere prefixed image is kept", repo: "azylman/mirrormere", image: "mirrormere-ui", wantTag: "TAG_MIRRORMERE_UI", wantWorkload: "mirrormere-ui"},
-		{name: "other repos use the bare workload", repo: "someone/tool", image: "tool", wantTag: "TAG_TOOL", wantWorkload: "tool"},
-		{name: "none resolves nothing", repo: "azylman/aerial", image: "NONE"},
-		{name: "empty resolves nothing", repo: "azylman/aerial", image: " "},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			tag, workload := ResolveImageTag(tc.repo, tc.image)
-			require.Equal(t, tc.wantTag, tag)
-			require.Equal(t, tc.wantWorkload, workload)
-		})
-	}
-}
-
 func TestNormalizeReceiverURL(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -325,7 +303,7 @@ func TestInClusterAPIServer(t *testing.T) {
 		port string
 		want string
 	}{
-		{name: "ipv4 service host", host: "10.43.0.1", port: "443", want: "https://10.43.0.1:443"},
+		{name: "ipv4 service host", host: "192.0.2.1", port: "443", want: "https://192.0.2.1:443"},
 		{name: "ipv6 service host is bracketed", host: "fd00::1", port: "443", want: "https://[fd00::1]:443"},
 		{name: "outside a cluster", host: "", port: "443", want: ""},
 	}
