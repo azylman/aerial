@@ -18,13 +18,14 @@ import (
 	"github.com/azylman/aerial/services/vanadis-restate/internal/deploygate"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/executor"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
+	"github.com/azylman/aerial/services/vanadis-restate/internal/sqltest"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
 )
 
 func TestBuildObject_WithRestateMockContext_Completed(t *testing.T) {
 	b := model.VanadisBuild{ID: "b-restate-mock", Title: "Build", Status: statusCompleted, ThreadID: "th-1"}
 	c1 := model.VanadisChunk{ID: "c1", BuildID: "b-restate-mock", Status: statusCompleted, Repo: "aerial", Mode: "pr"}
-	st, _ := dbScript{buildRow: &mockRow{b: &b}, chunks: []model.VanadisChunk{c1}, execTag: "UPDATE 1"}.open()
+	st, _ := open(dbScript{BuildRow: &sqltest.Row{Build: &b}, Chunks: []model.VanadisChunk{c1}, ExecTag: "UPDATE 1"})
 	bo := NewBuildObject("", nil).WithAuthority(st, nil)
 
 	ctx := makeObjectMockContext(t, "b-restate-mock")
@@ -36,9 +37,9 @@ func TestBuildObject_WithRestateMockContext_Completed(t *testing.T) {
 func TestBuildObject_WithRestateMockContext_Running(t *testing.T) {
 	b := model.VanadisBuild{ID: "b-restate-mock", Title: "Build", Status: "running", ThreadID: "th-1"}
 	c1 := model.VanadisChunk{ID: "c1", BuildID: "b-restate-mock", Status: "pending", Repo: "aerial", Mode: "pr"}
-	st, _ := dbScript{buildRow: &mockRow{b: &b}, chunks: []model.VanadisChunk{c1}, execTag: "UPDATE 1"}.open()
+	st, _ := open(dbScript{BuildRow: &sqltest.Row{Build: &b}, Chunks: []model.VanadisChunk{c1}, ExecTag: "UPDATE 1"})
 	eri := &mockEriClient{}
-	exec := executor.NewExecutor(t.TempDir(), eri, nil, "token", "azylman", nil)
+	exec := executor.NewExecutor(t.TempDir(), eri, nil, "token", "example-owner", nil)
 	bo := NewBuildObject("", nil).WithAuthority(st, exec)
 
 	ctx := makeObjectMockContext(t, "b-restate-mock")
@@ -101,7 +102,7 @@ func TestBuildObject_ValidationFailures(t *testing.T) {
 			}
 			bo := NewBuildObject(url, nil)
 			if !tc.nilStore {
-				st, _ := dbScript{buildRow: &mockRow{b: &model.VanadisBuild{ID: "b-validate", Status: "running", ThreadID: "th-1"}}}.open()
+				st, _ := open(dbScript{BuildRow: &sqltest.Row{Build: &model.VanadisBuild{ID: "b-validate", Status: "running", ThreadID: "th-1"}}})
 				bo = bo.WithAuthority(st, nil)
 			}
 			bo.runtimeFactory = func(_ restate.ObjectContext) objectRuntime { return rt }
@@ -227,18 +228,18 @@ func TestBuildObject_Transitions_Table(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			b := tc.build
-			script := dbScript{row: &mockRow{b: &b}, chunks: tc.chunks, execTag: "UPDATE 1"}
+			script := dbScript{Row: &sqltest.Row{Build: &b}, Chunks: tc.chunks, ExecTag: "UPDATE 1"}
 			if tc.buildErr {
-				script = dbScript{row: errRow(errors.New("database unavailable"))}
+				script = dbScript{Row: sqltest.ErrRow(errors.New("database unavailable"))}
 			}
 			if tc.notFound {
-				script = dbScript{row: errRow(store.ErrBuildNotFound)}
+				script = dbScript{Row: sqltest.ErrRow(store.ErrBuildNotFound)}
 			}
-			raw, _ := script.open()
+			raw, _ := open(script)
 			st := &leaseStore{VanadisStore: raw, failErr: tc.failErr}
 			eri := &mockEriClient{dispatchFn: func(context.Context, eriwire.BrainDispatchRequest) error { return tc.dispatchErr }}
 			bus := pubsub.NewMemoryBus()
-			exec := executor.NewExecutor(t.TempDir(), eri, bus, "token", "azylman", nil)
+			exec := executor.NewExecutor(t.TempDir(), eri, bus, "token", "example-owner", nil)
 			bo := NewBuildObject("", nil)
 			if !tc.nilStore {
 				bo = bo.WithAuthority(st, exec)
@@ -402,7 +403,7 @@ func TestBuildObject_Transitions_WidgetSyncTable(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			b := runningBuild
-			st, _ := dbScript{row: &mockRow{b: &b}, chunks: tc.chunks, execTag: "UPDATE 1"}.open()
+			st, _ := open(dbScript{Row: &sqltest.Row{Build: &b}, Chunks: tc.chunks, ExecTag: "UPDATE 1"})
 			var widgetCalls atomic.Int32
 			eri := &mockEriClient{
 				widgetFn: func(ctx context.Context, req executor.StatusWidgetRequest) (string, error) {
@@ -410,7 +411,7 @@ func TestBuildObject_Transitions_WidgetSyncTable(t *testing.T) {
 					return "msg-123", nil
 				},
 			}
-			exec := executor.NewExecutor(t.TempDir(), eri, pubsub.NewMemoryBus(), "token", "azylman", nil)
+			exec := executor.NewExecutor(t.TempDir(), eri, pubsub.NewMemoryBus(), "token", "example-owner", nil)
 			bo := NewBuildObject("", nil).WithAuthority(st, exec)
 			rt := newFakeObjectRuntime("b-trans")
 			rt.state = tc.priorState
@@ -426,13 +427,13 @@ func TestBuildObject_AuthoritativeTransitions(t *testing.T) {
 	t.Parallel()
 	eri := &mockEriClient{}
 	bus := pubsub.NewMemoryBus()
-	exec := executor.NewExecutor("", eri, bus, "test-token", "azylman", nil)
+	exec := executor.NewExecutor("", eri, bus, "test-token", "example-owner", nil)
 
 	b := model.VanadisBuild{ID: "b-trans", Title: "Build", Status: "running", ThreadID: "th-1"}
 	c1 := model.VanadisChunk{ID: "c1", BuildID: "b-trans", Status: "pending", Repo: "aerial", Mode: "pr"}
 	c2 := model.VanadisChunk{ID: "c2", BuildID: "b-trans", Status: "pending", Repo: "aerial", Mode: "pr", DependsOn: []string{"c1"}}
 
-	st, _ := dbScript{row: &mockRow{b: &b}, chunks: []model.VanadisChunk{c1, c2}, execTag: "UPDATE 1"}.open()
+	st, _ := open(dbScript{Row: &sqltest.Row{Build: &b}, Chunks: []model.VanadisChunk{c1, c2}, ExecTag: "UPDATE 1"})
 	bo := NewBuildObject("", nil).WithAuthority(st, exec)
 
 	ctx := makeObjectMockContext(t, "b-trans")
@@ -446,7 +447,7 @@ func TestBuildObject_AuthoritativeTransitions(t *testing.T) {
 
 	// Mutate: chunk 1 merged -> launches c2
 	c1Merged := model.VanadisChunk{ID: "c1", BuildID: "b-trans", Status: "merged", Repo: "aerial", Mode: "pr"}
-	storeMerged, _ := dbScript{row: &mockRow{b: &b}, chunks: []model.VanadisChunk{c1Merged, c2}, execTag: "UPDATE 1"}.open()
+	storeMerged, _ := open(dbScript{Row: &sqltest.Row{Build: &b}, Chunks: []model.VanadisChunk{c1Merged, c2}, ExecTag: "UPDATE 1"})
 	boMerged := NewBuildObject("", nil).WithAuthority(storeMerged, exec)
 
 	resMut, err := boMerged.Mutate(ctx, BuildMutationRequest{Action: "chunk_merged", ChunkID: "c1"})
@@ -456,7 +457,7 @@ func TestBuildObject_AuthoritativeTransitions(t *testing.T) {
 
 	// Merged + completed -> still running until all chunks reach completed (deploy_success)
 	c2Done := model.VanadisChunk{ID: "c2", BuildID: "b-trans", Status: "completed", Repo: "aerial", Mode: "pr"}
-	storeStillDeploying, _ := dbScript{row: &mockRow{b: &b}, chunks: []model.VanadisChunk{c1Merged, c2Done}, execTag: "UPDATE 1"}.open()
+	storeStillDeploying, _ := open(dbScript{Row: &sqltest.Row{Build: &b}, Chunks: []model.VanadisChunk{c1Merged, c2Done}, ExecTag: "UPDATE 1"})
 	boStillDeploying := NewBuildObject("", nil).WithAuthority(storeStillDeploying, exec)
 
 	resDeploying, err := boStillDeploying.Reconcile(ctx, ReconcileBuildRequest{})
@@ -465,7 +466,7 @@ func TestBuildObject_AuthoritativeTransitions(t *testing.T) {
 
 	// All completed -> status completed
 	c1Done := model.VanadisChunk{ID: "c1", BuildID: "b-trans", Status: "completed", Repo: "aerial", Mode: "pr"}
-	storeDone, _ := dbScript{row: &mockRow{b: &b}, chunks: []model.VanadisChunk{c1Done, c2Done}, execTag: "UPDATE 1"}.open()
+	storeDone, _ := open(dbScript{Row: &sqltest.Row{Build: &b}, Chunks: []model.VanadisChunk{c1Done, c2Done}, ExecTag: "UPDATE 1"})
 	boDone := NewBuildObject("", nil).WithAuthority(storeDone, exec)
 
 	resDone, err := boDone.Reconcile(ctx, ReconcileBuildRequest{})
@@ -475,7 +476,7 @@ func TestBuildObject_AuthoritativeTransitions(t *testing.T) {
 
 	// Chunk failed -> status failed
 	cFailed := model.VanadisChunk{ID: "c1", BuildID: "b-trans", Status: "failed", Repo: "aerial", Mode: "pr"}
-	storeFail, _ := dbScript{row: &mockRow{b: &b}, chunks: []model.VanadisChunk{cFailed}, execTag: "UPDATE 1"}.open()
+	storeFail, _ := open(dbScript{Row: &sqltest.Row{Build: &b}, Chunks: []model.VanadisChunk{cFailed}, ExecTag: "UPDATE 1"})
 	boFail := NewBuildObject("", nil).WithAuthority(storeFail, exec)
 
 	resFail, err := boFail.Reconcile(ctx, ReconcileBuildRequest{})
@@ -487,11 +488,11 @@ func TestBuildObject_MutationActionsAndTerminalGuards(t *testing.T) {
 	t.Parallel()
 	eri := &mockEriClient{}
 	bus := pubsub.NewMemoryBus()
-	exec := executor.NewExecutor("", eri, bus, "token", "azylman", nil)
+	exec := executor.NewExecutor("", eri, bus, "token", "example-owner", nil)
 	b := model.VanadisBuild{ID: "b-ext", Title: "Build", Status: "running", ThreadID: "th-1"}
 	c1 := model.VanadisChunk{ID: "c1", BuildID: "b-ext", Status: "running", Repo: "aerial", Mode: "pr"}
 
-	st, _ := dbScript{row: &mockRow{b: &b}, routes: []sqlRoute{{match: "SELECT c.id, c.build_id", row: failRow("running", "running")}}, chunks: []model.VanadisChunk{c1}, execTag: "UPDATE 1"}.open()
+	st, _ := open(dbScript{Row: &sqltest.Row{Build: &b}, Routes: []sqlRoute{{Match: "SELECT c.id, c.build_id", Row: sqltest.FailRow("running", "running")}}, Chunks: []model.VanadisChunk{c1}, ExecTag: "UPDATE 1"})
 	bo := NewBuildObject("", nil).WithAuthority(st, exec)
 	ctx := makeObjectMockContext(t, "b-ext")
 
@@ -513,7 +514,7 @@ func TestBuildObject_MutationActionsAndTerminalGuards(t *testing.T) {
 	assert.NoError(t, err)
 
 	// build not found
-	storeNotFound, _ := dbScript{row: errRow(store.ErrBuildNotFound)}.open()
+	storeNotFound, _ := open(dbScript{Row: sqltest.ErrRow(store.ErrBuildNotFound)})
 	boNotFound := NewBuildObject("", nil).WithAuthority(storeNotFound, exec)
 	res, err = boNotFound.Reconcile(ctx, ReconcileBuildRequest{})
 	assert.NoError(t, err)
@@ -521,7 +522,7 @@ func TestBuildObject_MutationActionsAndTerminalGuards(t *testing.T) {
 
 	// build already terminal
 	bTerminal := model.VanadisBuild{ID: "b-ext", Status: "completed"}
-	storeTerm, _ := dbScript{row: &mockRow{b: &bTerminal}}.open()
+	storeTerm, _ := open(dbScript{Row: &sqltest.Row{Build: &bTerminal}})
 	boTerm := NewBuildObject("", nil).WithAuthority(storeTerm, exec)
 	res, err = boTerm.Reconcile(ctx, ReconcileBuildRequest{})
 	assert.NoError(t, err)
@@ -585,12 +586,12 @@ func TestBuildObject_AuthoritativeTransitions_LaunchAndAllDone(t *testing.T) {
 	}
 
 	eriMock := &mockEriClient{}
-	exec := executor.NewExecutor(t.TempDir(), eriMock, nil, "token", "azylman", nil)
-	storeLaunch, _ := dbScript{
-		buildRow: &mockRow{b: &bLaunch},
-		chunks:   []model.VanadisChunk{chunkPending},
-		execTag:  "UPDATE 1",
-	}.open()
+	exec := executor.NewExecutor(t.TempDir(), eriMock, nil, "token", "example-owner", nil)
+	storeLaunch, _ := open(dbScript{
+		BuildRow: &sqltest.Row{Build: &bLaunch},
+		Chunks:   []model.VanadisChunk{chunkPending},
+		ExecTag:  "UPDATE 1",
+	})
 
 	bo := NewBuildObject("", nil).WithAuthority(storeLaunch, exec)
 	out, err := bo.executeAuthoritativeTransition(context.Background(), "b-launch", nil, nil, map[string]bool{"prior-chk": true}, false)
@@ -638,11 +639,11 @@ func TestBuildObject_AuthoritativeTransitions_LaunchAndAllDone(t *testing.T) {
 		Objective: "Test Running Unlaunched Recovery",
 		Status:    "running",
 	}
-	storeRunning, _ := dbScript{
-		buildRow: &mockRow{b: &bLaunchRunning},
-		chunks:   []model.VanadisChunk{chunkRunningUnlaunched, chunkRunningAlreadyLaunched, chunkRunningWithPR},
-		execTag:  "UPDATE 1",
-	}.open()
+	storeRunning, _ := open(dbScript{
+		BuildRow: &sqltest.Row{Build: &bLaunchRunning},
+		Chunks:   []model.VanadisChunk{chunkRunningUnlaunched, chunkRunningAlreadyLaunched, chunkRunningWithPR},
+		ExecTag:  "UPDATE 1",
+	})
 	boRunning := NewBuildObject("", nil).WithAuthority(storeRunning, exec)
 	outRunning, errRunning := boRunning.executeAuthoritativeTransition(
 		context.Background(),
@@ -661,7 +662,7 @@ func TestBuildObject_AuthoritativeTransitions_LaunchAndAllDone(t *testing.T) {
 	assert.True(t, outRunning.LaunchedMap["c-running-already"])
 
 	// Store GetBuild error branch
-	storeGetErr, _ := dbScript{row: errRow(errors.New("db fail"))}.open()
+	storeGetErr, _ := open(dbScript{Row: sqltest.ErrRow(errors.New("db fail"))})
 	boGetErr := NewBuildObject("", nil).WithAuthority(storeGetErr, nil)
 	_, errGetErr := boGetErr.executeAuthoritativeTransition(context.Background(), "b-fail", nil, nil, nil, false)
 	assert.Error(t, errGetErr)
@@ -677,11 +678,11 @@ func TestBuildObject_AuthoritativeTransitions_LaunchAndAllDone(t *testing.T) {
 		Mode:       "pr",
 	}
 	bDone := model.VanadisBuild{ID: "b-done", Status: "running", ThreadID: "th-1"}
-	storeCompleted, _ := dbScript{
-		buildRow: &mockRow{b: &bDone},
-		chunks:   []model.VanadisChunk{chunkDone},
-		execTag:  "UPDATE 1",
-	}.open()
+	storeCompleted, _ := open(dbScript{
+		BuildRow: &sqltest.Row{Build: &bDone},
+		Chunks:   []model.VanadisChunk{chunkDone},
+		ExecTag:  "UPDATE 1",
+	})
 	boDone := NewBuildObject("", nil).WithAuthority(storeCompleted, exec)
 	outDone, err := boDone.executeAuthoritativeTransition(context.Background(), "b-done", nil, nil, nil, false)
 	assert.NoError(t, err)
@@ -698,11 +699,11 @@ func TestBuildObject_AuthoritativeTransitions_LaunchAndAllDone(t *testing.T) {
 		Mode:       "pr",
 	}
 	bFail := model.VanadisBuild{ID: "b-fail", Status: "running", ThreadID: "th-1"}
-	storeFailed, _ := dbScript{
-		buildRow: &mockRow{b: &bFail},
-		chunks:   []model.VanadisChunk{chunkFailed},
-		execTag:  "UPDATE 1",
-	}.open()
+	storeFailed, _ := open(dbScript{
+		BuildRow: &sqltest.Row{Build: &bFail},
+		Chunks:   []model.VanadisChunk{chunkFailed},
+		ExecTag:  "UPDATE 1",
+	})
 	boFailed := NewBuildObject("", nil).WithAuthority(storeFailed, exec)
 	outFailed, err := boFailed.executeAuthoritativeTransition(context.Background(), "b-fail", nil, nil, nil, false)
 	assert.NoError(t, err)
@@ -715,10 +716,10 @@ func TestBuildObject_ReconcileTerminalStatuses(t *testing.T) {
 	// Terminal statuses should return without error and not transition
 	for _, status := range []string{"completed", "failed", "cancelled"} {
 		bTerm := model.VanadisBuild{ID: "b-term", Status: status, ThreadID: "th-1"}
-		storeTerm, _ := dbScript{
-			buildRow: &mockRow{b: &bTerm},
-			chunks:   []model.VanadisChunk{{ID: "c1", Status: status}},
-		}.open()
+		storeTerm, _ := open(dbScript{
+			BuildRow: &sqltest.Row{Build: &bTerm},
+			Chunks:   []model.VanadisChunk{{ID: "c1", Status: status}},
+		})
 		bo := NewBuildObject("", nil).WithAuthority(storeTerm, nil)
 		out, err := bo.executeAuthoritativeTransition(context.Background(), "b-term", nil, nil, nil, false)
 		assert.NoError(t, err)
@@ -726,7 +727,7 @@ func TestBuildObject_ReconcileTerminalStatuses(t *testing.T) {
 	}
 
 	// Build not found returns not_found
-	storeNF, _ := dbScript{row: errRow(store.ErrBuildNotFound)}.open()
+	storeNF, _ := open(dbScript{Row: sqltest.ErrRow(store.ErrBuildNotFound)})
 	boNF := NewBuildObject("", nil).WithAuthority(storeNF, nil)
 	outNF, err := boNF.executeAuthoritativeTransition(context.Background(), "b-nf", nil, nil, nil, false)
 	assert.NoError(t, err)
@@ -737,13 +738,13 @@ func TestBuildObject_ObjectTransitionsDirect(t *testing.T) {
 	t.Parallel()
 	b1 := model.VanadisBuild{ID: "b-active", Status: "running", ThreadID: "th-1"}
 	c1 := model.VanadisChunk{ID: "c1", BuildID: "b-active", ChunkIndex: 0, Title: "C1", Status: "running", Mode: "pr", Repo: "aerial"}
-	st, _ := dbScript{
-		buildRow: &mockRow{b: &b1},
-		chunks:   []model.VanadisChunk{c1},
-		execTag:  "UPDATE 1",
-	}.open()
+	st, _ := open(dbScript{
+		BuildRow: &sqltest.Row{Build: &b1},
+		Chunks:   []model.VanadisChunk{c1},
+		ExecTag:  "UPDATE 1",
+	})
 	eri := &mockEriClient{}
-	exec := executor.NewExecutor(t.TempDir(), eri, nil, "token", "azylman", nil)
+	exec := executor.NewExecutor(t.TempDir(), eri, nil, "token", "example-owner", nil)
 	bo := NewBuildObject("", nil).WithAuthority(st, exec)
 
 	rt := newFakeObjectRuntime("b-active")
@@ -756,11 +757,11 @@ func TestBuildObject_ObjectTransitionsDirect(t *testing.T) {
 
 	// executeObjectTransition with complete action mutation
 	cAction := model.VanadisChunk{ID: "c-act", BuildID: "b-active", ChunkIndex: 0, Title: "CAct", Status: "running", Mode: "action"}
-	storeAct, _ := dbScript{
-		buildRow: &mockRow{b: &b1},
-		chunks:   []model.VanadisChunk{cAction},
-		execTag:  "UPDATE 1",
-	}.open()
+	storeAct, _ := open(dbScript{
+		BuildRow: &sqltest.Row{Build: &b1},
+		Chunks:   []model.VanadisChunk{cAction},
+		ExecTag:  "UPDATE 1",
+	})
 	boAct := NewBuildObject("", nil).WithAuthority(storeAct, exec)
 	rtAct := newFakeObjectRuntime("b-active")
 	rtAct.SetState(model.BuildObjectState{Build: b1, Chunks: []model.VanadisChunk{cAction}})
@@ -771,11 +772,11 @@ func TestBuildObject_ObjectTransitionsDirect(t *testing.T) {
 
 	// executeObjectTransition with cancel mutation
 	bCancel := model.VanadisBuild{ID: "b-cancel", Status: "cancelled", ThreadID: "th-1"}
-	storeCancel, _ := dbScript{
-		buildRow: &mockRow{b: &bCancel},
-		chunks:   []model.VanadisChunk{c1},
-		execTag:  "UPDATE 1",
-	}.open()
+	storeCancel, _ := open(dbScript{
+		BuildRow: &sqltest.Row{Build: &bCancel},
+		Chunks:   []model.VanadisChunk{c1},
+		ExecTag:  "UPDATE 1",
+	})
 	boCancel := NewBuildObject("", nil).WithAuthority(storeCancel, exec)
 	rtCancel := newFakeObjectRuntime("b-cancel")
 	rtCancel.SetState(model.BuildObjectState{Build: bCancel, Chunks: []model.VanadisChunk{c1}})
@@ -790,21 +791,21 @@ func openAuthorityHandlerHarness(t *testing.T) (*BuildObject, *fakeObjectRuntime
 	t.Helper()
 	b1 := model.VanadisBuild{ID: "b-cov", Status: "running", ThreadID: "th-1"}
 	c1 := model.VanadisChunk{ID: "c1", BuildID: "b-cov", ChunkIndex: 0, Title: "C1", Status: "running", Mode: "action"}
-	st, _ := dbScript{
-		buildRow: &mockRow{b: &b1},
-		chunks:   []model.VanadisChunk{c1},
-		routes: []sqlRoute{
-			{match: "SELECT mode FROM vanadis_chunks", row: valuesRow("action")},
-			{match: "UPDATE vanadis_chunks", row: valuesRow("b-cov", "c1", "th-1")},
-			{match: "WHERE c.repo = ANY($1) AND c.pr_number = $2", row: valuesRow("c1", "b-cov", 0, "medium", false)},
-			{match: "SELECT id, build_id, chunk_index, mode, title, status", row: valuesRow("c1", "b-cov", 0, "action", "C1", "running", 0)},
-			{match: "SELECT id, thread_id, tier", row: valuesRow("b-cov", "th-1", 1, "Build Title", "Build Obj", "running", "")},
-			{match: "SELECT COUNT(*)", row: valuesRow(0)},
-			{match: "SELECT c.id, c.build_id, c.chunk_index, c.mode", row: failRow("running", "running")},
+	st, _ := open(dbScript{
+		BuildRow: &sqltest.Row{Build: &b1},
+		Chunks:   []model.VanadisChunk{c1},
+		Routes: []sqlRoute{
+			{Match: "SELECT mode FROM vanadis_chunks", Row: sqltest.ValuesRow("action")},
+			{Match: "UPDATE vanadis_chunks", Row: sqltest.ValuesRow("b-cov", "c1", "th-1")},
+			{Match: "WHERE c.repo = ANY($1) AND c.pr_number = $2", Row: sqltest.ValuesRow("c1", "b-cov", 0, "medium", false)},
+			{Match: "SELECT id, build_id, chunk_index, mode, title, status", Row: sqltest.ValuesRow("c1", "b-cov", 0, "action", "C1", "running", 0)},
+			{Match: "SELECT id, thread_id, tier", Row: sqltest.ValuesRow("b-cov", "th-1", 1, "Build Title", "Build Obj", "running", "")},
+			{Match: "SELECT COUNT(*)", Row: sqltest.ValuesRow(0)},
+			{Match: "SELECT c.id, c.build_id, c.chunk_index, c.mode", Row: sqltest.FailRow("running", "running")},
 		},
-		execTag: "UPDATE 1",
-	}.open()
-	exec := executor.NewExecutor(t.TempDir(), &mockEriClient{}, &mockBusExecutor{}, "token", "azylman", nil)
+		ExecTag: "UPDATE 1",
+	})
+	exec := executor.NewExecutor(t.TempDir(), &mockEriClient{}, &mockBusExecutor{}, "token", "example-owner", nil)
 	bo := NewBuildObject("", nil).WithAuthority(st, exec)
 	rt := newFakeObjectRuntime("b-cov")
 	rt.SetState(model.BuildObjectState{Build: b1, Chunks: []model.VanadisChunk{c1}})
@@ -959,7 +960,7 @@ func TestBuildObject_ReconcileErrorBranches(t *testing.T) {
 					return "", errors.New("widget fail")
 				}
 			}
-			bo.executor = executor.NewExecutor(t.TempDir(), eri, &mockBusExecutor{}, "token", "azylman", nil)
+			bo.executor = executor.NewExecutor(t.TempDir(), eri, &mockBusExecutor{}, "token", "example-owner", nil)
 			build := &model.VanadisBuild{ID: "b-replay", Status: tc.buildStatus, ThreadID: "th-1"}
 			chunks := []model.VanadisChunk{{ID: tc.chunkID, BuildID: "b-replay", Mode: tc.chunkMode, PRNumber: tc.chunkPR}}
 			mutation := &BuildMutationRequest{Action: tc.action, ChunkID: tc.chunkID, Reason: tc.reason}
@@ -976,19 +977,19 @@ func TestBuildObject_ReconcileErrorBranches(t *testing.T) {
 
 	bMerge := model.VanadisBuild{ID: "b-merge", Status: "running", ThreadID: "th-1"}
 	cMerge := model.VanadisChunk{ID: "c1", BuildID: "b-merge", Status: "open", Mode: "pr", Repo: "aerial"}
-	stMerge, _ := dbScript{buildRow: &mockRow{b: &bMerge}, chunks: []model.VanadisChunk{cMerge}, execTag: "UPDATE 1"}.open()
+	stMerge, _ := open(dbScript{BuildRow: &sqltest.Row{Build: &bMerge}, Chunks: []model.VanadisChunk{cMerge}, ExecTag: "UPDATE 1"})
 	busErr := &mockBusError{err: errors.New("pub fail")}
-	boMerge := NewBuildObject("", nil).WithAuthority(stMerge, executor.NewExecutor(t.TempDir(), &mockEriClient{}, busErr, "token", "azylman", nil))
+	boMerge := NewBuildObject("", nil).WithAuthority(stMerge, executor.NewExecutor(t.TempDir(), &mockEriClient{}, busErr, "token", "example-owner", nil))
 	assert.NoError(t, boMerge.applyMutation(context.Background(), "b-merge", &BuildMutationRequest{Action: "chunk_merged", ChunkID: "c1"}))
 
 	bBegin := model.VanadisBuild{ID: "b-begin", Status: "running", ThreadID: "th-1"}
 	cBegin := model.VanadisChunk{ID: "c1", BuildID: "b-begin", Status: "running", Mode: "action"}
-	stBegin, _ := dbScript{buildRow: &mockRow{b: &bBegin}, chunks: []model.VanadisChunk{cBegin}, beginErr: errors.New("begin fail")}.open()
+	stBegin, _ := open(dbScript{BuildRow: &sqltest.Row{Build: &bBegin}, Chunks: []model.VanadisChunk{cBegin}, BeginErr: errors.New("begin fail")})
 	boBegin := NewBuildObject("", nil).WithAuthority(stBegin, nil)
 	assert.Error(t, boBegin.applyMutation(context.Background(), "b-begin", &BuildMutationRequest{Action: "action_completed", ChunkID: "c1"}))
 
 	bTerm := model.VanadisBuild{ID: "b-term", Status: "completed", ThreadID: "th-1"}
-	stTerm, _ := dbScript{buildRow: &mockRow{b: &bTerm}}.open()
+	stTerm, _ := open(dbScript{BuildRow: &sqltest.Row{Build: &bTerm}})
 	boTerm := NewBuildObject("", nil).WithAuthority(stTerm, nil)
 	outTerm, err := boTerm.executeAuthoritativeTransition(context.Background(), "b-term", nil, nil, nil, false)
 	assert.NoError(t, err)
@@ -1004,7 +1005,7 @@ func TestBuildObject_ReconcileErrorBranches(t *testing.T) {
 		return "", errors.New("widget fail")
 	}
 	boReplayFail := NewBuildObject("", nil).WithAuthority(&replayFailStore{},
-		executor.NewExecutor(t.TempDir(), eriReplayFail, &mockBusExecutor{}, "token", "azylman", nil))
+		executor.NewExecutor(t.TempDir(), eriReplayFail, &mockBusExecutor{}, "token", "example-owner", nil))
 	rtReplayFail := newFakeObjectRuntime("b-replay-fail")
 	_, err = boReplayFail.executeObjectTransition(rtReplayFail, labelMutateBuild,
 		&BuildMutationRequest{Action: "action_completed", ChunkID: "c1"})
@@ -1012,13 +1013,13 @@ func TestBuildObject_ReconcileErrorBranches(t *testing.T) {
 
 	bDeadline := model.VanadisBuild{ID: "b-deadline", Status: "running", ThreadID: "th-1"}
 	cDeadline := model.VanadisChunk{ID: "c1", BuildID: "b-deadline", Status: statusDeploying, Mode: "pr", Repo: "aerial", PRNumber: 1, MergeSHA: "sha"}
-	stDeadline, _ := dbScript{buildRow: &mockRow{b: &bDeadline}, chunks: []model.VanadisChunk{cDeadline}, execTag: "UPDATE 1"}.open()
+	stDeadline, _ := open(dbScript{BuildRow: &sqltest.Row{Build: &bDeadline}, Chunks: []model.VanadisChunk{cDeadline}, ExecTag: "UPDATE 1"})
 	eriDeadlineWidgetFail := &mockEriClient{}
 	eriDeadlineWidgetFail.widgetFn = func(context.Context, executor.StatusWidgetRequest) (string, error) {
 		return "", errors.New("widget fail")
 	}
 	boDeadline := NewBuildObject("", nil).WithAuthority(stDeadline,
-		executor.NewExecutor(t.TempDir(), eriDeadlineWidgetFail, &mockBusExecutor{}, "token", "azylman", nil))
+		executor.NewExecutor(t.TempDir(), eriDeadlineWidgetFail, &mockBusExecutor{}, "token", "example-owner", nil))
 	rtDeadline := &errDeploymentAttemptsRuntime{fakeObjectRuntime: newFakeObjectRuntime("b-deadline")}
 	rtDeadline.SetState(model.BuildObjectState{Build: bDeadline, Chunks: []model.VanadisChunk{cDeadline}})
 	_, err = boDeadline.executeObjectTransition(rtDeadline, "reconcile", nil)
@@ -1067,7 +1068,7 @@ func TestRunTransitionStep_NotifyOnceAcrossReplay(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			b := model.VanadisBuild{ID: "b1", ThreadID: "th-1", Title: "Build", Objective: "Obj", Status: "running"}
-			st, _ := dbScript{buildRow: &mockRow{b: &b}}.open()
+			st, _ := open(dbScript{BuildRow: &sqltest.Row{Build: &b}})
 			widgetCalls, deliveries := 0, 0
 			eri := &mockEriClient{}
 			eri.widgetFn = func(context.Context, executor.StatusWidgetRequest) (string, error) {
@@ -1078,7 +1079,7 @@ func TestRunTransitionStep_NotifyOnceAcrossReplay(t *testing.T) {
 				deliveries++
 				return "msg-1", nil
 			}
-			exec := executor.NewExecutor(t.TempDir(), eri, nil, "token", "azylman", nil)
+			exec := executor.NewExecutor(t.TempDir(), eri, nil, "token", "example-owner", nil)
 			bo := NewBuildObject("", nil).WithAuthority(st, exec)
 			rt := &replayNotifyRuntime{fakeObjectRuntime: newFakeObjectRuntime("b1"), primaryErr: errors.New("boom")}
 			prior := &model.BuildObjectState{Build: b}
@@ -1355,7 +1356,7 @@ func TestBuildObject_EvaluateBuildTerminalStatus_SkipWidgetSync(t *testing.T) {
 					return "msg-123", nil
 				},
 			}
-			exec := executor.NewExecutor(t.TempDir(), eri, pubsub.NewMemoryBus(), "token", "azylman", nil)
+			exec := executor.NewExecutor(t.TempDir(), eri, pubsub.NewMemoryBus(), "token", "example-owner", nil)
 			bo := NewBuildObject("", nil).WithAuthority(&mockStoreForLaunch{}, exec)
 			bld := model.VanadisBuild{ID: "b-test", Status: "running", StatusMessageID: "msg-123", ThreadID: "th-1"}
 			chunks := []model.VanadisChunk{{ID: "c1", Status: "running"}}

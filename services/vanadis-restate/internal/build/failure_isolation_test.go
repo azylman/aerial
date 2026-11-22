@@ -15,6 +15,7 @@ import (
 	"github.com/azylman/aerial/pkg/pubsubtest"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/executor"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
+	"github.com/azylman/aerial/services/vanadis-restate/internal/sqltest"
 )
 
 func isolationChunk(id, status string, deps ...string) model.VanadisChunk {
@@ -139,8 +140,8 @@ func TestEvaluateBuildTerminalStatus(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			wakes := &isolationWakes{err: tc.promptErr}
-			st, _ := dbScript{failExec: "UPDATE vanadis_builds SET status", execErr: tc.statusErr}.open()
-			bo := NewBuildObject("", nil).WithAuthority(st, executor.NewExecutor("", wakes.client(), pubsub.NewMemoryBus(), "token", "azylman", nil))
+			st, _ := open(dbScript{FailExec: "UPDATE vanadis_builds SET status", ExecErr: tc.statusErr})
+			bo := NewBuildObject("", nil).WithAuthority(st, executor.NewExecutor("", wakes.client(), pubsub.NewMemoryBus(), "token", "example-owner", nil))
 			bld := model.VanadisBuild{ID: "b1", Status: tc.buildStatus, ThreadID: "th-1", Quiet: tc.quiet}
 			got, err := bo.evaluateBuildTerminalStatus(context.Background(), &bld, tc.chunks, tc.notified, true)
 			if tc.wantErr != "" {
@@ -181,8 +182,8 @@ func TestExecuteAuthoritativeTransition_FailureIsolation(t *testing.T) {
 			t.Parallel()
 			wakes := &isolationWakes{}
 			bld := model.VanadisBuild{ID: "b1", Status: tc.buildStatus, ThreadID: "th-1"}
-			st, _ := dbScript{row: &mockRow{b: &bld}, chunks: tc.chunks}.open()
-			bo := NewBuildObject("", nil).WithAuthority(st, executor.NewExecutor("", wakes.client(), pubsub.NewMemoryBus(), "token", "azylman", nil))
+			st, _ := open(dbScript{Row: &sqltest.Row{Build: &bld}, Chunks: tc.chunks})
+			bo := NewBuildObject("", nil).WithAuthority(st, executor.NewExecutor("", wakes.client(), pubsub.NewMemoryBus(), "token", "example-owner", nil))
 			out, err := bo.executeAuthoritativeTransition(context.Background(), "b1", nil, tc.prior, nil, false)
 			require.NoError(t, err)
 			assert.Equal(t, tc.wantStatus, out.BuildStatus)
@@ -232,7 +233,7 @@ func TestPublishChunkFailed(t *testing.T) {
 			if tc.faultErr != nil {
 				bus = &pubsubtest.FaultBus{Bus: rec, PublishErr: tc.faultErr}
 			}
-			exec := executor.NewExecutor("", nil, bus, "token", "azylman", nil)
+			exec := executor.NewExecutor("", nil, bus, "token", "example-owner", nil)
 			bo := NewBuildObject("", nil).WithAuthority(nil, exec)
 			bo.publishChunkFailed(context.Background(), tc.chunk)
 			var gotTargets []string

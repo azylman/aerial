@@ -16,6 +16,7 @@ import (
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/executor"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
+	"github.com/azylman/aerial/services/vanadis-restate/internal/sqltest"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
 )
 
@@ -30,27 +31,27 @@ func TestExecutePRAttachment(t *testing.T) {
 		wantMessage string
 		wantErr     bool
 	}{
-		{"missing action repo", attachRequest("c1", ""), dbScript{routes: attachRoutes("action", true, false)}, 400, "repo is required", true},
-		{"blank action repo", attachRequest("c1", "  "), dbScript{routes: attachRoutes("action", true, false)}, 400, "repo is required", true},
+		{"missing action repo", attachRequest("c1", ""), dbScript{Routes: sqltest.AttachRoutes("action", true, false)}, 400, "repo is required", true},
+		{"blank action repo", attachRequest("c1", "  "), dbScript{Routes: sqltest.AttachRoutes("action", true, false)}, 400, "repo is required", true},
 		{"standalone repo", attachRequest("", ""), dbScript{}, 400, "repo is required", true},
 		{"invalid number", store.AttachChunkPRRequest{PRNumber: -1}, dbScript{}, 400, "valid pr number", true},
-		{"transient database error", attachRequest("c1", "aerial"), dbScript{row: errRow(errors.New("connection interrupted"))}, 0, "connection interrupted", true},
+		{"transient database error", attachRequest("c1", "aerial"), dbScript{Row: sqltest.ErrRow(errors.New("connection interrupted"))}, 0, "connection interrupted", true},
 		{
 			name: "successful attach skips sync widget during attach step",
 			req:  attachRequest("c1", "aerial"),
 			db: dbScript{
-				routes: []sqlRoute{
-					{match: "SELECT status FROM vanadis_builds", row: valuesRow("running")},
-					{match: "SELECT mode FROM vanadis_chunks", row: valuesRow("pr")},
-					{match: "SELECT build_id FROM vanadis_chunks", row: valuesRow("b1")},
-					{match: "RETURNING b.id, c.id, b.thread_id", row: valuesRow("b1", "c1", "th-1")},
-					{match: "WHERE c.id = $1", row: failRow("running", "running")},
+				Routes: []sqlRoute{
+					{Match: "SELECT status FROM vanadis_builds", Row: sqltest.ValuesRow("running")},
+					{Match: "SELECT mode FROM vanadis_chunks", Row: sqltest.ValuesRow("pr")},
+					{Match: "SELECT build_id FROM vanadis_chunks", Row: sqltest.ValuesRow("b1")},
+					{Match: "RETURNING b.id, c.id, b.thread_id", Row: sqltest.ValuesRow("b1", "c1", "th-1")},
+					{Match: "WHERE c.id = $1", Row: sqltest.FailRow("running", "running")},
 				},
-				row:      valuesRow("running"),
-				buildRow: &mockRow{b: &model.VanadisBuild{ID: "b1", ThreadID: "th-1", Status: "running", Title: "Build", StatusMessageID: "msg-123"}},
-				chunks:   []model.VanadisChunk{{ID: "c1", BuildID: "b1", Status: "running", Repo: "aerial", Mode: "pr"}},
-				countRow: valuesRow(1),
-				execTag:  "UPDATE 1",
+				Row:      sqltest.ValuesRow("running"),
+				BuildRow: &sqltest.Row{Build: &model.VanadisBuild{ID: "b1", ThreadID: "th-1", Status: "running", Title: "Build", StatusMessageID: "msg-123"}},
+				Chunks:   []model.VanadisChunk{{ID: "c1", BuildID: "b1", Status: "running", Repo: "aerial", Mode: "pr"}},
+				CountRow: sqltest.ValuesRow(1),
+				ExecTag:  "UPDATE 1",
 			},
 			wantErr: false,
 		},
@@ -58,7 +59,7 @@ func TestExecutePRAttachment(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			st, _ := tc.db.open()
+			st, _ := open(tc.db)
 			var attachStepWidgetCalls atomic.Int32
 			eri := &mockEriClient{
 				widgetFn: func(ctx context.Context, req executor.StatusWidgetRequest) (string, error) {
@@ -127,7 +128,7 @@ func TestBuildObject_RefreshFailedPRWidget(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			st, _ := dbScript{buildRow: &mockRow{b: tc.build}, queryErr: tc.getErr}.open()
+			st, _ := open(dbScript{BuildRow: &sqltest.Row{Build: tc.build}, QueryErr: tc.getErr})
 			var widgetCalls int
 			var exec *executor.Executor
 			if !tc.noExec {

@@ -18,6 +18,7 @@ import (
 	"github.com/azylman/aerial/services/vanadis-restate/internal/deploygate"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/executor"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
+	"github.com/azylman/aerial/services/vanadis-restate/internal/sqltest"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
 )
 
@@ -184,23 +185,23 @@ func TestBuildObject_AuthoritativeHandlers(t *testing.T) {
 	b1 := model.VanadisBuild{ID: "b1", Title: "Build 1", Objective: "Obj 1", Status: "running", ThreadID: "th-1"}
 	c1 := model.VanadisChunk{ID: "c1", BuildID: "b1", Title: "Chunk 1", Instructions: "Inst 1", Status: "pending", Mode: "pr", Repo: "aerial", TargetFiles: []string{"pkg/a.go"}}
 	c2 := model.VanadisChunk{ID: "c2", BuildID: "b1", Title: "Chunk 2", Instructions: "Inst 2", Status: "pending", Mode: "pr", Repo: "aerial", DependsOn: []string{"c1"}, TargetFiles: []string{"pkg/b.go"}}
-	st, _ := dbScript{
-		routes: []sqlRoute{
-			{match: "SELECT status FROM vanadis_builds", row: valuesRow("running")},
-			{match: "SELECT mode FROM vanadis_chunks", row: valuesRow("pr")},
-			{match: "SELECT build_id FROM vanadis_chunks", row: valuesRow("b1")},
-			{match: "RETURNING b.id, c.id, b.thread_id", row: valuesRow("b1", "c1", "th-1")},
-			{match: "RETURNING ci_fail_count", row: valuesRow(1)},
-			{match: "WHERE c.id = $1", row: failRow("running", "running")},
-			{match: "c.repo = ANY($1) AND c.pr_number = $2", row: valuesRow("c1", "b1", 0, "medium", true)},
-			{match: "MAX(chunk_index)", row: valuesRow(1)},
+	st, _ := open(dbScript{
+		Routes: []sqlRoute{
+			{Match: "SELECT status FROM vanadis_builds", Row: sqltest.ValuesRow("running")},
+			{Match: "SELECT mode FROM vanadis_chunks", Row: sqltest.ValuesRow("pr")},
+			{Match: "SELECT build_id FROM vanadis_chunks", Row: sqltest.ValuesRow("b1")},
+			{Match: "RETURNING b.id, c.id, b.thread_id", Row: sqltest.ValuesRow("b1", "c1", "th-1")},
+			{Match: "RETURNING ci_fail_count", Row: sqltest.ValuesRow(1)},
+			{Match: "WHERE c.id = $1", Row: sqltest.FailRow("running", "running")},
+			{Match: "c.repo = ANY($1) AND c.pr_number = $2", Row: sqltest.ValuesRow("c1", "b1", 0, "medium", true)},
+			{Match: "MAX(chunk_index)", Row: sqltest.ValuesRow(1)},
 		},
-		row:      valuesRow("running"),
-		buildRow: &mockRow{b: &b1},
-		chunks:   []model.VanadisChunk{c1, c2},
-		countRow: valuesRow(1),
-		execTag:  "UPDATE 1",
-	}.open()
+		Row:      sqltest.ValuesRow("running"),
+		BuildRow: &sqltest.Row{Build: &b1},
+		Chunks:   []model.VanadisChunk{c1, c2},
+		CountRow: sqltest.ValuesRow(1),
+		ExecTag:  "UPDATE 1",
+	})
 
 	bo := NewBuildObject("", nil).WithAuthority(st, exec)
 
@@ -279,7 +280,7 @@ func TestBuildObject_AuthoritativeHandlers(t *testing.T) {
 func TestBuildObject_HandlerErrors(t *testing.T) {
 	t.Parallel()
 	ctx := makeObjectMockContext(t, "b1")
-	st, _ := dbScript{row: errRow(ErrChunkNotFound)}.open()
+	st, _ := open(dbScript{Row: sqltest.ErrRow(ErrChunkNotFound)})
 	bo := NewBuildObject("", nil).WithAuthority(st, nil)
 
 	// UpdateBuild empty
@@ -334,9 +335,9 @@ func TestBuildObject_CreateAndCancelErrors(t *testing.T) {
 
 	// Create with chunk with empty ID (generates auto ID)
 	ctxAuto := makeObjectMockContext(t, "b-auto")
-	storeCreate, _ := dbScript{routes: []sqlRoute{
-		{match: "FROM vanadis_builds WHERE id = $1", row: &mockRow{b: &model.VanadisBuild{ID: "b-auto", Status: "running"}}},
-	}}.open()
+	storeCreate, _ := open(dbScript{Routes: []sqlRoute{
+		{Match: "FROM vanadis_builds WHERE id = $1", Row: &sqltest.Row{Build: &model.VanadisBuild{ID: "b-auto", Status: "running"}}},
+	}})
 	boCreate := NewBuildObject("", nil).WithAuthority(storeCreate, nil)
 	validNoChunkIDReq := CreateBuildRequest{
 		ID:        "b-auto",
@@ -369,7 +370,7 @@ func TestBuildObject_CreateAndCancelErrors(t *testing.T) {
 
 	// Cancel terminal builds
 	bComp := model.VanadisBuild{ID: "b1", Status: "completed"}
-	storeCompleted, _ := dbScript{buildRow: &mockRow{b: &bComp}}.open()
+	storeCompleted, _ := open(dbScript{BuildRow: &sqltest.Row{Build: &bComp}})
 	rtCompleted := newFakeObjectRuntime("b1")
 	boCompleted := NewBuildObject("", nil, func(restate.ObjectContext) objectRuntime { return rtCompleted }).WithAuthority(storeCompleted, nil)
 	_, err = boCompleted.Cancel(ctx, CancelBuildRequest{})
@@ -377,7 +378,7 @@ func TestBuildObject_CreateAndCancelErrors(t *testing.T) {
 	assert.False(t, rtCompleted.cleared)
 
 	bFail := model.VanadisBuild{ID: "b1", Status: "failed"}
-	storeFailed, _ := dbScript{buildRow: &mockRow{b: &bFail}, execTag: "UPDATE 1"}.open()
+	storeFailed, _ := open(dbScript{BuildRow: &sqltest.Row{Build: &bFail}, ExecTag: "UPDATE 1"})
 	rtFailed := newFakeObjectRuntime("b1")
 	boFailed := NewBuildObject("", nil, func(restate.ObjectContext) objectRuntime { return rtFailed }).WithAuthority(storeFailed, nil)
 	canFailed, err := boFailed.Cancel(ctx, CancelBuildRequest{})
@@ -386,7 +387,7 @@ func TestBuildObject_CreateAndCancelErrors(t *testing.T) {
 	assert.True(t, rtFailed.cleared)
 
 	bCancelled := model.VanadisBuild{ID: "b1", Status: statusCancelled}
-	storeCancelled, _ := dbScript{buildRow: &mockRow{b: &bCancelled}}.open()
+	storeCancelled, _ := open(dbScript{BuildRow: &sqltest.Row{Build: &bCancelled}})
 	rtCancelled := newFakeObjectRuntime("b1")
 	boCancelled := NewBuildObject("", nil, func(restate.ObjectContext) objectRuntime { return rtCancelled }).WithAuthority(storeCancelled, nil)
 	_, err = boCancelled.Cancel(ctx, CancelBuildRequest{})
@@ -399,19 +400,19 @@ func TestBuildObject_HandlersWithAuthorityAndMockContext(t *testing.T) {
 	t.Parallel()
 	b1 := model.VanadisBuild{ID: "b-auth", Status: "running", ThreadID: "th-1"}
 	c1 := model.VanadisChunk{ID: "c1", BuildID: "b-auth", ChunkIndex: 0, Title: "C1", Status: "pending", Mode: "action"}
-	st, _ := dbScript{
-		buildRow: &mockRow{b: &b1},
-		chunks:   []model.VanadisChunk{c1},
-		routes: []sqlRoute{
-			{match: "SELECT mode FROM vanadis_chunks", row: valuesRow("action")},
-			{match: "UPDATE vanadis_chunks", row: valuesRow("b-auth", "c1", "th-1")},
-			{match: "WHERE c.repo = ANY($1) AND c.pr_number = $2", row: valuesRow("c1", "b-auth", 0, "medium", false)},
-			{match: "SELECT id, build_id, chunk_index, mode, title, status", row: valuesRow("c1", "b-auth", 0, "action", "C1", "running", 0)},
-			{match: "SELECT id, thread_id, tier", row: valuesRow("b-auth", "th-1", 1, "Build Title", "Build Obj", "running", "")},
-			{match: "SELECT COUNT(*)", row: valuesRow(1)},
+	st, _ := open(dbScript{
+		BuildRow: &sqltest.Row{Build: &b1},
+		Chunks:   []model.VanadisChunk{c1},
+		Routes: []sqlRoute{
+			{Match: "SELECT mode FROM vanadis_chunks", Row: sqltest.ValuesRow("action")},
+			{Match: "UPDATE vanadis_chunks", Row: sqltest.ValuesRow("b-auth", "c1", "th-1")},
+			{Match: "WHERE c.repo = ANY($1) AND c.pr_number = $2", Row: sqltest.ValuesRow("c1", "b-auth", 0, "medium", false)},
+			{Match: "SELECT id, build_id, chunk_index, mode, title, status", Row: sqltest.ValuesRow("c1", "b-auth", 0, "action", "C1", "running", 0)},
+			{Match: "SELECT id, thread_id, tier", Row: sqltest.ValuesRow("b-auth", "th-1", 1, "Build Title", "Build Obj", "running", "")},
+			{Match: "SELECT COUNT(*)", Row: sqltest.ValuesRow(1)},
 		},
-		execTag: "UPDATE 1",
-	}.open()
+		ExecTag: "UPDATE 1",
+	})
 	eri := &mockEriClient{}
 	exec := executor.NewExecutor(t.TempDir(), eri, nil, "token", "example-owner", nil)
 	bo := NewBuildObject("", nil).WithAuthority(st, exec)
