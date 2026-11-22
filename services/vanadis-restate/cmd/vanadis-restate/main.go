@@ -25,12 +25,12 @@ var (
 func main() {
 	cfg := loadConfigFn(os.Getenv)
 	cfg.Environ = os.Environ()
-	owner, err := app.ReadGitHubOwner(cfg.ServiceConfigPath, readFileFn)
+	settings, err := app.ReadServiceSettings(cfg.ServiceConfigPath, readFileFn)
 	if err != nil {
 		exitFn("[vanadis-restate] Error: %v", err)
 		return
 	}
-	cfg.GitHubOwner = owner
+	cfg = cfg.WithServiceSettings(settings)
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 

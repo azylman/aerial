@@ -689,8 +689,8 @@ func RunServer(ctx context.Context, cfgSrc *httpkit.Reloadable[config.Config], o
 		slog.WarnContext(ctx, "[synapse] github_owner is unset: events naming a bare repo are rejected before reaching Restate")
 	}
 	server := NewRouterServer(cfgSrc, nil, WithGitHubTokenSource(newGitHubTokenSource(cfgSrc, gitHubAppEnv{
-		AppID:          os.Getenv("GITHUB_APP_ID"),
-		InstallationID: os.Getenv("GITHUB_APP_INSTALLATION_ID"),
+		AppID:          cfg.GitHubAppID,
+		InstallationID: cfg.GitHubAppInstallationID,
 		PrivateKeyPEM:  os.Getenv("GITHUB_APP_PRIVATE_KEY"),
 	})))
 	dispatcher := NewDefaultOutboundDispatcher(cfg.BrainURL, nil)

@@ -38,22 +38,29 @@ type Config struct {
 	GitHubWebhookSecret string
 	// GitHubOwner qualifies bare repo names ("aerial" -> "<owner>/aerial")
 	// before they address a Restate PRObject/RepoObject. Bound at startup.
-	GitHubOwner          string
-	RestateURL           string
-	RestatePRService     string
-	RestateRepoService   string
-	BrainURL             string
-	EriURL               string
-	NATSURL              string
-	SystemChannelID      string
-	DiscordToken         string
-	AutoUpdatePRAuthors  []string
-	BotID                string
-	DefaultOwner         bool
-	Bots                 map[string]BotConfig
-	K8sAuthEnabled       bool
-	K8sAuthConfig        k8sauth.Config
-	CollaboratorCIAlerts []CollaboratorCIAlertRule
+	GitHubOwner string
+	// GitHubAppID and GitHubAppInstallationID identify the GitHub App
+	// (non-secret): github_app_id / github_app_installation_id from the
+	// service YAML, falling back to the GITHUB_APP_ID /
+	// GITHUB_APP_INSTALLATION_ID env while that is transitional. The token
+	// source is built once at startup, so both require a restart.
+	GitHubAppID             string
+	GitHubAppInstallationID string
+	RestateURL              string
+	RestatePRService        string
+	RestateRepoService      string
+	BrainURL                string
+	EriURL                  string
+	NATSURL                 string
+	SystemChannelID         string
+	DiscordToken            string
+	AutoUpdatePRAuthors     []string
+	BotID                   string
+	DefaultOwner            bool
+	Bots                    map[string]BotConfig
+	K8sAuthEnabled          bool
+	K8sAuthConfig           k8sauth.Config
+	CollaboratorCIAlerts    []CollaboratorCIAlertRule
 }
 
 // CollaboratorCIAlertRule defines a notification rule for unregistered collaborator pull requests.
@@ -94,6 +101,11 @@ type RouterYAMLConfig struct {
 	// default: with it unset, bare repos are rejected before any Restate
 	// request. Changing it requires a restart.
 	GitHubOwner string `yaml:"github_owner"`
+	// GitHubAppID and GitHubAppInstallationID are the GitHub App's numeric
+	// IDs (not secrets; the private key stays env). Empty falls back to the
+	// GITHUB_APP_ID / GITHUB_APP_INSTALLATION_ID env.
+	GitHubAppID             string `yaml:"github_app_id"`
+	GitHubAppInstallationID string `yaml:"github_app_installation_id"`
 }
 
 // GitHub credential choices for github_credential.
@@ -239,6 +251,8 @@ func RestartRequired(old, next *Config) bool {
 		old.RestatePRService != next.RestatePRService ||
 		old.RestateRepoService != next.RestateRepoService ||
 		old.GitHubOwner != next.GitHubOwner ||
+		old.GitHubAppID != next.GitHubAppID ||
+		old.GitHubAppInstallationID != next.GitHubAppInstallationID ||
 		old.K8sAuthEnabled != next.K8sAuthEnabled ||
 		!botsEqual(old.Bots, next.Bots)
 }
@@ -493,28 +507,30 @@ func buildConfig(fileCfg RouterYAMLConfig) Config {
 	}
 
 	return Config{
-		Port:                 strutil.FirstNonEmpty(os.Getenv("PORT"), fileCfg.Port, "4020"),
-		KubeAPIServer:        strings.TrimRight(kubeServer, "/"),
-		KubeToken:            kubeToken,
-		GitHubToken:          os.Getenv("GITHUB_PAT"),
-		GitHubAPIURL:         strings.TrimRight(strutil.FirstNonEmpty(os.Getenv("GITHUB_API_URL"), "https://api.github.com"), "/"),
-		GitHubCredential:     ghCredential,
-		GitHubWebhookSecret:  strings.TrimSpace(os.Getenv("GITHUB_WEBHOOK_SECRET")),
-		GitHubOwner:          owner,
-		BrainURL:             eriURL,
-		EriURL:               eriURL,
-		NATSURL:              strutil.FirstNonEmpty(os.Getenv("NATS_URL"), fileCfg.NATSURL, "nats://nats.aerial:4222"),
-		RestateURL:           strings.TrimRight(strings.TrimSpace(fileCfg.RestateURL), "/"),
-		RestatePRService:     strutil.FirstNonEmpty(strings.TrimSpace(fileCfg.RestatePRService), defaultRestatePRService),
-		RestateRepoService:   strutil.FirstNonEmpty(strings.TrimSpace(fileCfg.RestateRepoService), defaultRestateRepoService),
-		SystemChannelID:      strings.TrimSpace(strutil.FirstNonEmpty(os.Getenv("SYSTEM_CHANNEL_ID"), sysChan)),
-		DiscordToken:         discordToken,
-		AutoUpdatePRAuthors:  autoUpdateAuthors,
-		BotID:                botID,
-		DefaultOwner:         defaultOwner,
-		Bots:                 bots,
-		K8sAuthEnabled:       k8sAuthEnabled,
-		K8sAuthConfig:        k8sCfg,
-		CollaboratorCIAlerts: collaboratorAlerts,
+		Port:                    strutil.FirstNonEmpty(os.Getenv("PORT"), fileCfg.Port, "4020"),
+		KubeAPIServer:           strings.TrimRight(kubeServer, "/"),
+		KubeToken:               kubeToken,
+		GitHubToken:             os.Getenv("GITHUB_PAT"),
+		GitHubAPIURL:            strings.TrimRight(strutil.FirstNonEmpty(os.Getenv("GITHUB_API_URL"), "https://api.github.com"), "/"),
+		GitHubCredential:        ghCredential,
+		GitHubWebhookSecret:     strings.TrimSpace(os.Getenv("GITHUB_WEBHOOK_SECRET")),
+		GitHubOwner:             owner,
+		GitHubAppID:             strutil.FirstNonEmpty(strings.TrimSpace(fileCfg.GitHubAppID), strings.TrimSpace(os.Getenv("GITHUB_APP_ID"))),
+		GitHubAppInstallationID: strutil.FirstNonEmpty(strings.TrimSpace(fileCfg.GitHubAppInstallationID), strings.TrimSpace(os.Getenv("GITHUB_APP_INSTALLATION_ID"))),
+		BrainURL:                eriURL,
+		EriURL:                  eriURL,
+		NATSURL:                 strutil.FirstNonEmpty(os.Getenv("NATS_URL"), fileCfg.NATSURL, "nats://nats.aerial:4222"),
+		RestateURL:              strings.TrimRight(strings.TrimSpace(fileCfg.RestateURL), "/"),
+		RestatePRService:        strutil.FirstNonEmpty(strings.TrimSpace(fileCfg.RestatePRService), defaultRestatePRService),
+		RestateRepoService:      strutil.FirstNonEmpty(strings.TrimSpace(fileCfg.RestateRepoService), defaultRestateRepoService),
+		SystemChannelID:         strings.TrimSpace(strutil.FirstNonEmpty(os.Getenv("SYSTEM_CHANNEL_ID"), sysChan)),
+		DiscordToken:            discordToken,
+		AutoUpdatePRAuthors:     autoUpdateAuthors,
+		BotID:                   botID,
+		DefaultOwner:            defaultOwner,
+		Bots:                    bots,
+		K8sAuthEnabled:          k8sAuthEnabled,
+		K8sAuthConfig:           k8sCfg,
+		CollaboratorCIAlerts:    collaboratorAlerts,
 	}
 }
