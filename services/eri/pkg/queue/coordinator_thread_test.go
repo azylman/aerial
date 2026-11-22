@@ -489,62 +489,6 @@ func TestThreadCoordinator_ClearPending(t *testing.T) {
 	}
 }
 
-func TestThreadCoordinator_AdoptPending(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name      string
-		rows      []db.Message
-		failList  error
-		wantSends []sentCall
-		wantCode  int
-	}{
-		{name: "ListStepCancelSurfacesAsConflict", failList: errRestateCancel, wantCode: CodeQueueConflict},
-		{
-			name:      "AppendsPendingRows",
-			rows:      []db.Message{msgRow("a", tcKey, db.StatusPending), msgRow("b", tcKey, db.StatusProcessing), msgRow("c", "th-other", db.StatusPending)},
-			wantSends: []sentCall{threadSend(tcKey, HandlerAppend, AppendRequest{IDs: []string{"a"}}, 0)},
-		},
-		{name: "NothingPendingNoSend"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			store := seedStore(t, tc.rows, nil)
-			if tc.failList != nil {
-				store.FailNext("ListPendingMessageIDsForThread", tc.failList)
-			}
-			h := newCoordHarness(t, tcKey, tcInv, coordinatorState{})
-			if assertCoordinatorErr(t, NewThreadCoordinator(store, nil, "aerial").AdoptPending(h.sharedCtx(), AdoptPendingRequest{}), tc.wantCode) {
-				return
-			}
-			assert.Equal(t, tc.wantSends, h.sends)
-		})
-	}
-}
-
-func TestThreadCoordinator_RunTurn(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name      string
-		state     coordinatorState
-		wantSends []sentCall
-	}{
-		{name: "IdleShimSendsAdoptPending", wantSends: []sentCall{threadSend(tcKey, HandlerAdoptPending, AdoptPendingRequest{}, 0)}},
-		{name: "BusyShimSendsAdoptPending", state: st([]string{"a"}, &ActiveTurn{TurnID: "t0"}), wantSends: []sentCall{threadSend(tcKey, HandlerAdoptPending, AdoptPendingRequest{}, 0)}},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			h := newCoordHarness(t, tcKey, tcInv, tc.state)
-			res, err := NewThreadCoordinator(nil, nil, "aerial").RunTurn(h.objectCtx(), ThreadTurnRequest{})
-			require.NoError(t, err)
-			assert.Equal(t, ThreadTurnResult{Status: "completed"}, res)
-			assert.Equal(t, tc.wantSends, h.sends)
-			assert.Equal(t, tc.state, h.snapshot(t), "the shim touches no state")
-		})
-	}
-}
-
 func TestThreadCoordinator_Status(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

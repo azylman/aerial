@@ -52,7 +52,6 @@ const (
 	SubjectTranscriptsStepsPrefix  = "aerial.transcripts.steps."
 	SubjectAerialTurnCompleted     = "aerial.turn.completed"
 	SubjectCovenExtractPrefix      = "aerial.coalesced.coven_extract."
-	SubjectBuildWidgetSyncPrefix   = "aerial.coalesced.widget_sync.build."
 	SubjectProsperaReportJob       = "aerial.jobs.prospera.report"
 	SubjectProsperaVoicemailJob    = "aerial.jobs.prospera.voicemail"
 	SubjectProsperaSMSJob          = "aerial.jobs.prospera.sms"
@@ -174,15 +173,6 @@ type CovenExtractJobArgs struct {
 // EffectiveAgent returns the active agent identifier, falling back to Stack or "aerial".
 func (a CovenExtractJobArgs) EffectiveAgent() string {
 	return strutil.FirstNonEmpty(a.Agent, a.Stack, defaultAgent)
-}
-
-// WidgetSyncJobArgs contains arguments for coalesced widget sync jobs.
-type WidgetSyncJobArgs struct {
-	BuildID  string `json:"build_id,omitempty"`
-	Banner   string `json:"banner,omitempty"`
-	Repo     string `json:"repo,omitempty"`
-	PRNumber int    `json:"pr_number,omitempty"`
-	Status   string `json:"status,omitempty"`
 }
 
 // ProsperaReportJobArgs contains arguments for post-call report generation jobs.
@@ -315,23 +305,6 @@ func SubjectCovenExtractCoalescedForAgent(agent, threadID string) string {
 		return fmt.Sprintf("aerial.coalesced.coven_extract.%s.%s", a, t)
 	}
 	return fmt.Sprintf("aerial.coalesced.coven_extract.%s.%s", a, sanitizeToken(t))
-}
-
-// SubjectBuildWidgetSyncCoalesced returns the coalesced subject for build widget sync.
-func SubjectBuildWidgetSyncCoalesced(buildID string) string {
-	t := cleanSubjectToken(buildID)
-	t = strings.ReplaceAll(t, ".", "-")
-	if t == "" {
-		t = unknownSubjectToken
-	}
-	return SubjectBuildWidgetSyncPrefix + t
-}
-
-// SubjectPRWidgetSyncCoalesced returns the coalesced subject for PR widget sync.
-func SubjectPRWidgetSyncCoalesced(repo string, prNumber int) string {
-	r := strings.ReplaceAll(strings.TrimSpace(repo), "/", ".")
-	r = cleanSubjectToken(r)
-	return fmt.Sprintf("aerial.coalesced.widget_sync.pr.%s.%d", r, prNumber)
 }
 
 // PRRolloutState tracks Kubernetes / GitOps rollout progress across jobs and Kustomizations.

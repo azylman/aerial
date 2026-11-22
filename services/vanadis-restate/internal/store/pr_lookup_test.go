@@ -31,7 +31,7 @@ BEGIN
 	RETURN v;
 END $$;
 ALTER TABLE vanadis_chunks RENAME TO vanadis_chunks_base;
-CREATE VIEW vanadis_chunks AS SELECT id, build_id, chunk_index, bm_boom(mode, banner) AS mode, repo, title, instructions, target_files, target_symbols, effort, acceptance_criteria, status, pr_number, stall_nudges, depends_on, ci_fail_count, ci_checks, rollout_state, banner, merge_awakeable_id, deploy_awakeable_id, started_at, completed_at, created_at, updated_at FROM vanadis_chunks_base;`
+CREATE VIEW vanadis_chunks AS SELECT id, build_id, chunk_index, bm_boom(mode, banner) AS mode, repo, title, instructions, target_files, target_symbols, effort, acceptance_criteria, status, pr_number, stall_nudges, depends_on, ci_fail_count, ci_checks, rollout_state, banner, started_at, completed_at, created_at, updated_at FROM vanadis_chunks_base;`
 
 // bmNullChunkIDSQL lets a stored chunk id be NULL so scanning it into a
 // string fails.
@@ -142,6 +142,11 @@ func TestPostgresVanadisStore_GetChunkByPR(t *testing.T) {
 func TestPostgresVanadisStore_UpdateChunkBannerAndStatus(t *testing.T) {
 	t.Parallel()
 	running := bmBuilds("running")
+	failedBuilds := bmBuilds("failed")
+	stamp := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
+	failedPR := bmPRChunk("c1", 0, "aerial", 123, "failed")
+	failedPR.CompletedAt = stamp
+	failedPR.Banner = "old banner"
 	tests := []struct {
 		name, chunkID, status string
 		db                    bmFixture
@@ -149,6 +154,8 @@ func TestPostgresVanadisStore_UpdateChunkBannerAndStatus(t *testing.T) {
 		wantErr               bool
 		// wantStatus/wantBanner are c1's stored values after the call ("" skips).
 		wantStatus, wantBanner string
+		wantBuildStatus        string
+		wantCompletedAtNil     bool
 	}{
 		{name: "nil db", chunkID: "c1", status: "status", db: bmFixture{nilDB: true}, wantErr: true},
 		{name: "empty chunk id", chunkID: "", status: "status", db: bmFixture{builds: running}, wantErr: true},
@@ -159,6 +166,48 @@ func TestPostgresVanadisStore_UpdateChunkBannerAndStatus(t *testing.T) {
 		{name: "terminal chunk skipped", chunkID: "c1", status: "status", db: bmFixture{builds: running, chunks: mutateChunks(ch("c1", "pr", "completed"))}, wantErrIs: ErrPRTransitionSkipped, wantStatus: "completed"},
 		{name: "cancelled build skipped", chunkID: "c1", status: "status", db: bmFixture{builds: bmBuilds("cancelled"), chunks: mutateChunks(ch("c1", "pr", "running"))}, wantErrIs: ErrPRTransitionSkipped, wantStatus: "running"},
 		{name: "ci failure after merge skipped", chunkID: "c1", status: "ci_failed", db: bmFixture{builds: running, chunks: mutateChunks(ch("c1", "pr", "merged"))}, wantErrIs: ErrPRTransitionSkipped, wantStatus: "merged"},
+		{
+			name:    "failed pr chunk transitions to conflict, clears completed_at, and reopens build",
+			chunkID: "c1", status: "conflict",
+			db:                 bmFixture{builds: failedBuilds, chunks: mutateChunks(failedPR)},
+			wantStatus:         "conflict",
+			wantBanner:         "banner",
+			wantBuildStatus:    "running",
+			wantCompletedAtNil: true,
+		},
+		{
+			name:    "failed pr chunk transitions to deploy_failed and reopens build",
+			chunkID: "c1", status: "deploy_failed",
+			db:                 bmFixture{builds: failedBuilds, chunks: mutateChunks(failedPR)},
+			wantStatus:         "deploy_failed",
+			wantBanner:         "banner",
+			wantBuildStatus:    "running",
+			wantCompletedAtNil: true,
+		},
+		{
+			name:    "failed pr chunk transition to ci_failed is skipped",
+			chunkID: "c1", status: "ci_failed",
+			db:         bmFixture{builds: failedBuilds, chunks: mutateChunks(failedPR)},
+			wantErrIs:  ErrPRTransitionSkipped,
+			wantStatus: "failed",
+			wantBanner: "old banner",
+		},
+		{
+			name:    "failed action chunk transition to conflict is skipped",
+			chunkID: "c1", status: "conflict",
+			db:         bmFixture{builds: failedBuilds, chunks: mutateChunks(ch("c1", "action", "failed"))},
+			wantErrIs:  ErrPRTransitionSkipped,
+			wantStatus: "failed",
+		},
+		{
+			name:    "failed pr chunk with failed sibling does not reopen build",
+			chunkID: "c1", status: "conflict",
+			db:                 bmFixture{builds: failedBuilds, chunks: mutateChunks(failedPR, bmPRChunk("c2", 1, "aerial", 124, "failed"))},
+			wantStatus:         "conflict",
+			wantBanner:         "banner",
+			wantBuildStatus:    "failed",
+			wantCompletedAtNil: true,
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -171,6 +220,14 @@ func TestPostgresVanadisStore_UpdateChunkBannerAndStatus(t *testing.T) {
 			}
 			if c := loadChunk(t, pool, "c1"); c.Status != tc.wantStatus || c.Banner != tc.wantBanner {
 				t.Errorf("stored status/banner = %q/%q, want %q/%q", c.Status, c.Banner, tc.wantStatus, tc.wantBanner)
+			} else if tc.wantCompletedAtNil && !c.CompletedAt.IsZero() {
+				t.Errorf("stored completed_at = %v, want zero", c.CompletedAt)
+			}
+			if tc.wantBuildStatus != "" {
+				b := loadBuild(t, pool, "b1")
+				if b.Status != tc.wantBuildStatus {
+					t.Errorf("stored build status = %q, want %q", b.Status, tc.wantBuildStatus)
+				}
 			}
 		})
 	}
@@ -192,6 +249,9 @@ func TestPostgresVanadisStore_FailChunkCancelledBuild(t *testing.T) {
 func TestPostgresVanadisStore_RecordPRRolloutState(t *testing.T) {
 	t.Parallel()
 	running := bmBuilds("running")
+	failedBuilds := bmBuilds("failed")
+	failedPR := bmPRChunk("c1", 0, "aerial", 123, "failed")
+	failedPR.Banner = "deploy failed"
 	eri := &pubsub.PRRolloutState{ExpectedJobs: []string{"eri"}}
 	tests := []struct {
 		name, chunkID, status string
@@ -200,8 +260,11 @@ func TestPostgresVanadisStore_RecordPRRolloutState(t *testing.T) {
 		wantErrIs             error
 		wantErr               bool
 		// wantStatus is c1's stored status after the call ("" skips).
-		wantStatus string
-		wantJobs   []string
+		wantStatus      string
+		wantJobs        []string
+		wantBanner      string
+		checkBanner     bool
+		wantBuildStatus string
 	}{
 		{name: "nil db", chunkID: "c1", status: "open", db: bmFixture{nilDB: true}, wantErr: true},
 		{name: "empty chunk id", chunkID: "", status: "open", db: bmFixture{builds: running}, wantErr: true},
@@ -210,6 +273,40 @@ func TestPostgresVanadisStore_RecordPRRolloutState(t *testing.T) {
 		{name: "records state and status", chunkID: " c1 ", status: " deploying ", state: eri, db: bmFixture{builds: running, chunks: mutateChunks(ch("c1", "pr", "merged"))}, wantStatus: "deploying", wantJobs: []string{"eri"}},
 		{name: "nil state clears rollout and keeps status", chunkID: "c1", db: bmFixture{builds: running, chunks: mutateChunks(ch("c1", "pr", "merged"))}, wantStatus: "merged"},
 		{name: "terminal chunk keeps status and state", chunkID: "c1", status: "deploying", state: eri, db: bmFixture{builds: running, chunks: mutateChunks(ch("c1", "pr", "completed"))}, wantStatus: "completed"},
+		{
+			name:    "failed pr chunk updates state and status, clears banner, and reopens failed build",
+			chunkID: " c1 ", status: " deploying ", state: eri,
+			db:              bmFixture{builds: failedBuilds, chunks: mutateChunks(failedPR)},
+			wantStatus:      "deploying",
+			wantJobs:        []string{"eri"},
+			wantBanner:      "",
+			checkBanner:     true,
+			wantBuildStatus: "running",
+		},
+		{
+			name:    "failed pr chunk without status keeps failed status and banner",
+			chunkID: "c1", status: "", state: eri,
+			db:              bmFixture{builds: failedBuilds, chunks: mutateChunks(failedPR)},
+			wantStatus:      "failed",
+			wantJobs:        []string{"eri"},
+			wantBanner:      "deploy failed",
+			checkBanner:     true,
+			wantBuildStatus: "failed",
+		},
+		{
+			name:    "failed action chunk keeps status and state",
+			chunkID: "c1", status: "deploying", state: eri,
+			db:         bmFixture{builds: failedBuilds, chunks: mutateChunks(ch("c1", "action", "failed"))},
+			wantStatus: "failed",
+		},
+		{
+			name:    "failed pr chunk with failed sibling chunk updates status but keeps build failed",
+			chunkID: "c1", status: "deploying", state: eri,
+			db:              bmFixture{builds: failedBuilds, chunks: mutateChunks(failedPR, bmPRChunk("c2", 1, "aerial", 124, "failed"))},
+			wantStatus:      "deploying",
+			wantJobs:        []string{"eri"},
+			wantBuildStatus: "failed",
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -227,6 +324,15 @@ func TestPostgresVanadisStore_RecordPRRolloutState(t *testing.T) {
 			}
 			if c.Status != tc.wantStatus || len(jobs) != len(tc.wantJobs) || (len(jobs) > 0 && jobs[0] != tc.wantJobs[0]) {
 				t.Errorf("stored status/jobs = %q/%v, want %q/%v", c.Status, jobs, tc.wantStatus, tc.wantJobs)
+			}
+			if tc.checkBanner && c.Banner != tc.wantBanner {
+				t.Errorf("stored banner = %q, want %q", c.Banner, tc.wantBanner)
+			}
+			if tc.wantBuildStatus != "" {
+				b := loadBuild(t, pool, "b1")
+				if b.Status != tc.wantBuildStatus {
+					t.Errorf("stored build status = %q, want %q", b.Status, tc.wantBuildStatus)
+				}
 			}
 		})
 	}

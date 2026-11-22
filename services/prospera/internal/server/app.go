@@ -255,6 +255,7 @@ func RunApp(ctx context.Context, cfgSrc *httpkit.Reloadable[config.Config]) erro
 
 	tokenMgr := twilio.NewStreamTokenManager(time.Now, nil)
 	consultClient := gemini.NewHTTPContextConsultClient(cfg.GoogleMCPURL, cfg.CovenURL)
+	defer httpkit.CloseWarn(consultClient, "prospera consult client on shutdown")
 	sessionMgr := mediastream.NewCallSessionManager(cfgSrc, st, twilioClient, consultClient, tokenMgr,
 		mediastream.WithSessionFactory(newProsperaMediaSession))
 	reporter := delivery.NewReporter(cfgSrc, st, twilioClient, delivery.WithReporterRecordingProvider(sessionMgr.GetRecordingWAV))
