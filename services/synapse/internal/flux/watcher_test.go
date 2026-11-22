@@ -559,22 +559,42 @@ func TestKubeWatchSourcesEdgeCases(t *testing.T) {
 func TestRunRolloutRechecks(t *testing.T) {
 	t.Parallel()
 	list := kubeRoute{body: `{"metadata":{"resourceVersion":"3"},"items":[{"metadata":{"name":"aerial-core","namespace":"flux-system"}}]}`}
-	fixture := &watchFixture{lists: []kubeRoute{list, list}, cancel: func() {}}
-	ts := httptest.NewServer(fixture)
-	defer ts.Close()
+	tests := []struct {
+		name         string
+		pending      bool
+		ticks        int
+		lists        []kubeRoute
+		wantRequests []string
+		wantEvents   []string
+	}{
+		{name: "every tick re-lists kustomizations while a rollout is pending", pending: true, ticks: 2, lists: []kubeRoute{list, list}, wantRequests: []string{"LIST kustomizations", "LIST kustomizations"}, wantEvents: []string{"pending? true", "list flux-system [aerial-core]", "pending? true", "list flux-system [aerial-core]"}},
+		{name: "ticks without pending rollouts list nothing", ticks: 2, wantEvents: []string{"pending? false", "pending? false"}},
+		{name: "a failed re-list is logged and the next tick retries", pending: true, ticks: 2, lists: []kubeRoute{{status: http.StatusInternalServerError, body: `boom`}, list}, wantRequests: []string{"LIST kustomizations", "LIST kustomizations"}, wantEvents: []string{"pending? true", "pending? true", "list flux-system [aerial-core]"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			fixture := &watchFixture{lists: tc.lists, cancel: func() {}}
+			ts := httptest.NewServer(fixture)
+			defer ts.Close()
+			client := kube.NewClient(ts.Client())
+			client.SetKubeConfig(ts.URL, "test-token")
+			sink := &recordingSink{pending: tc.pending}
+			ticks := make(chan time.Time, tc.ticks)
+			for range tc.ticks {
+				ticks <- time.Time{}
+			}
+			close(ticks)
 
-	client := kube.NewClient(ts.Client())
-	client.SetKubeConfig(ts.URL, "test-token")
-	sink := &recordingSink{pending: true}
-	ticks := make(chan time.Time, 2)
-	ticks <- time.Time{}
-	ticks <- time.Time{}
-	close(ticks)
+			RunRolloutRechecks(t.Context(), client, sink, ticks)
 
-	RunRolloutRechecks(context.Background(), client, sink, ticks)
-
-	if len(sink.events) == 0 {
-		t.Errorf("expected recheck events to be recorded")
+			if got := fixture.requests; !slices.Equal(got, tc.wantRequests) {
+				t.Errorf("requests = %v, want %v", got, tc.wantRequests)
+			}
+			if !slices.Equal(sink.events, tc.wantEvents) {
+				t.Errorf("events = %q, want %q", sink.events, tc.wantEvents)
+			}
+		})
 	}
 }
 

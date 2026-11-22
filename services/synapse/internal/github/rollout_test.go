@@ -1,17 +1,18 @@
 package github
 
 import (
+	"cmp"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/azylman/aerial/pkg/githubapi"
+	"github.com/azylman/aerial/pkg/githubapitest"
 )
 
 func TestExtractLogErrorLines(t *testing.T) {
@@ -65,45 +66,119 @@ func TestSanitizeDetailsForPrompt(t *testing.T) {
 	}
 }
 
-func TestFormatPromptsAndCollaboratorMessages(t *testing.T) {
+func TestFormatCheckFailurePrompt(t *testing.T) {
 	t.Parallel()
-	checkPrompt := FormatCheckFailurePrompt("azylman/aerial", 42, "headsha", "test-unit", "details text", "https://check.url")
-	if !strings.Contains(checkPrompt, "test-unit") || !strings.Contains(checkPrompt, "https://check.url") {
-		t.Errorf("unexpected check failure prompt: %s", checkPrompt)
+	tests := []struct {
+		name     string
+		details  string
+		checkURL string
+		want     string
+	}{
+		{"url and details", "details text", " https://check.url ", "CI check \"test-unit\" failed on acme/widgets#42 (commit headsha).\nCheck URL: https://check.url\nDetails:\n```\ndetails text\n```\n"},
+		{"no url or details", "", "", "CI check \"test-unit\" failed on acme/widgets#42 (commit headsha).\n"},
 	}
-	emptyCheckPrompt := FormatCheckFailurePrompt("azylman/aerial", 42, "headsha", "test-unit", "", "")
-	if strings.Contains(emptyCheckPrompt, "Details:") {
-		t.Errorf("expected no details block for empty details")
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := FormatCheckFailurePrompt(" acme/widgets ", 42, "headsha", "test-unit", tc.details, tc.checkURL); got != tc.want {
+				t.Errorf("FormatCheckFailurePrompt() = %q, want %q", got, tc.want)
+			}
+		})
 	}
+}
 
-	rrPrompt := FormatRoboRevPrompt("azylman/aerial", 42, "headsha", "review comments")
-	if !strings.Contains(rrPrompt, "RoboRev review failed") || !strings.Contains(rrPrompt, "review comments") {
-		t.Errorf("unexpected roborev prompt: %s", rrPrompt)
+func TestFormatRoboRevPrompt(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		comment string
+		want    string
+	}{
+		{"findings", "review comments", "RoboRev review failed on acme/widgets#42 (commit headsha).\nReview Findings:\n```\nreview comments\n```\n"},
+		{"no findings", "  ", "RoboRev review failed on acme/widgets#42 (commit headsha).\n"},
 	}
-	emptyRRPrompt := FormatRoboRevPrompt("azylman/aerial", 42, "headsha", "")
-	if strings.Contains(emptyRRPrompt, "Review Findings:") {
-		t.Errorf("expected no findings block for empty comments")
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := FormatRoboRevPrompt("acme/widgets", 42, "headsha", tc.comment); got != tc.want {
+				t.Errorf("FormatRoboRevPrompt() = %q, want %q", got, tc.want)
+			}
+		})
 	}
+}
 
-	alertMsg := BuildCollaboratorAlertMessage("@collaborator", "azylman/aerial", 42, "PR Title", "feat/branch", "headsha123", "lint", "https://url")
-	if !strings.Contains(alertMsg, "@collaborator") || !strings.Contains(alertMsg, "PR Title") || !strings.Contains(alertMsg, "lint") {
-		t.Errorf("unexpected alert message: %s", alertMsg)
+func TestFormatCollaboratorPRTarget(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		repo    string
+		prTitle string
+		branch  string
+		headSHA string
+		want    string
+	}{
+		{name: "full pr target formatted with markdown link and metadata", repo: "acme/widgets", prTitle: "feat: add feature", branch: "refs/heads/feat/something", headSHA: "abcdef1234567890", want: `[acme/widgets#42](https://github.com/acme/widgets/pull/42) ("feat: add feature", branch: feat/something, commit: abcdef1)`},
+		{name: "missing repo falls back to plain pr format", want: "PR #42"},
+		{name: "repo without extra metadata formats plain link", repo: "acme/widgets", want: "[acme/widgets#42](https://github.com/acme/widgets/pull/42)"},
 	}
-
-	// Empty mention and empty checkURL and empty checkName
-	alertNoMention := BuildCollaboratorAlertMessage("", "azylman/aerial", 42, "", "", "", "", "")
-	if strings.Contains(alertNoMention, "@") || strings.Contains(alertNoMention, "Check URL:") {
-		t.Errorf("unexpected alert without mention: %s", alertNoMention)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := FormatCollaboratorPRTarget(tc.repo, 42, tc.prTitle, tc.branch, tc.headSHA); got != tc.want {
+				t.Errorf("FormatCollaboratorPRTarget() = %q, want %q", got, tc.want)
+			}
+		})
 	}
+}
 
-	conflictMsg := BuildCollaboratorConflictMessage("@collaborator", "azylman/aerial", 42, "PR Title", "feat/branch", "headsha123")
-	if !strings.Contains(conflictMsg, "@collaborator") || !strings.Contains(conflictMsg, "Merge conflict with `main`") {
-		t.Errorf("unexpected conflict message: %s", conflictMsg)
+func TestBuildCollaboratorAlertMessage(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		mention   string
+		prTitle   string
+		branch    string
+		headSHA   string
+		checkName string
+		checkURL  string
+		want      string
+	}{
+		{name: "named check failure with url", mention: "<@123>", prTitle: "fix: something", branch: "fix/something", headSHA: "1234567890abcdef", checkName: "Lint", checkURL: "https://example.com/runs/1", want: "<@123> CI check \"Lint\" failed for [acme/widgets#42](https://github.com/acme/widgets/pull/42) (\"fix: something\", branch: fix/something, commit: 1234567).\nCheck URL: https://example.com/runs/1"},
+		{name: "generic check failure without check name or url", mention: "<@123>", want: "<@123> CI check failed for [acme/widgets#42](https://github.com/acme/widgets/pull/42)."},
+		{name: "no mention omits the leading mention", checkName: "lint", want: "CI check \"lint\" failed for [acme/widgets#42](https://github.com/acme/widgets/pull/42)."},
 	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := BuildCollaboratorAlertMessage(tc.mention, "acme/widgets", 42, tc.prTitle, tc.branch, tc.headSHA, tc.checkName, tc.checkURL); got != tc.want {
+				t.Errorf("BuildCollaboratorAlertMessage() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
 
-	conflictNoMention := BuildCollaboratorConflictMessage("", "", 42, "", "", "")
-	if !strings.Contains(conflictNoMention, "PR #42") {
-		t.Errorf("unexpected conflict message without mention: %s", conflictNoMention)
+func TestBuildCollaboratorConflictMessage(t *testing.T) {
+	t.Parallel()
+	const tail = " — automatic branch update could not resolve conflicts. Please rebase or merge `origin/main` and push."
+	tests := []struct {
+		name    string
+		mention string
+		repo    string
+		prTitle string
+		branch  string
+		headSHA string
+		want    string
+	}{
+		{name: "conflict message formatted with mention and target", mention: "<@123>", repo: "acme/widgets", prTitle: "feat: cool thing", branch: "feat/cool", headSHA: "abcdef123456", want: "<@123> Merge conflict with `main` detected on [acme/widgets#42](https://github.com/acme/widgets/pull/42) (\"feat: cool thing\", branch: feat/cool, commit: abcdef1)" + tail},
+		{name: "no mention or repo", want: "Merge conflict with `main` detected on PR #42" + tail},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := BuildCollaboratorConflictMessage(tc.mention, tc.repo, 42, tc.prTitle, tc.branch, tc.headSHA); got != tc.want {
+				t.Errorf("BuildCollaboratorConflictMessage() = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 
@@ -142,15 +217,7 @@ func TestVerifySignature(t *testing.T) {
 
 func TestClientGetJSON(t *testing.T) {
 	t.Parallel()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/ok" {
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
-		w.Header().Set("X-Seen-Auth", r.Header.Get("Authorization"))
-		_, _ = w.Write([]byte(`{"id":123,"body":"hello"}`))
-	}))
-	t.Cleanup(srv.Close)
+	srv := githubapitest.New(t, map[string][]githubapitest.Response{"GET /ok": {{Body: `{"id":123,"body":"hello"}`}}})
 	tests := []struct {
 		name       string
 		client     *Client
@@ -159,9 +226,9 @@ func TestClientGetJSON(t *testing.T) {
 		wantStatus int
 		wantErrSub string
 	}{
-		{name: "bound URL and http client decode", client: NewClient(srv.Client(), srv.URL, ""), path: "/ok", wantID: 123},
-		{name: "nil http client falls back to default client", client: NewClient(nil, srv.URL, "tok"), path: "/ok", wantID: 123},
-		{name: "non-200 surfaces githubapi status error", client: NewClient(srv.Client(), srv.URL, ""), path: "/missing", wantStatus: http.StatusNotFound},
+		{name: "bound URL and http client decode", client: NewClient(srv.Client(), srv.URL(), ""), path: "/ok", wantID: 123},
+		{name: "nil http client falls back to default client", client: NewClient(nil, srv.URL(), "tok"), path: "/ok", wantID: 123},
+		{name: "non-200 surfaces githubapi status error", client: NewClient(srv.Client(), srv.URL(), ""), path: "/missing", wantStatus: http.StatusNotFound},
 		{name: "invalid API URL fails request creation", client: NewClient(srv.Client(), "http://bad host", ""), path: "/ok", wantErrSub: "create github api request"},
 	}
 	for _, tc := range tests {
@@ -213,144 +280,146 @@ func TestClientNewRequest(t *testing.T) {
 	}
 }
 
-func TestConflicts_FetchSinglePR(t *testing.T) {
+// conflictRoutes is the fake GitHub API the FetchSinglePR tests read: 42 has no
+// mergeability yet, 43 is unknown, 44 is clean, 45 fails and 46 is unknown and
+// then fails.
+var conflictRoutes = map[string][]githubapitest.Response{
+	"GET /repos/acme/widgets/pulls/42": {{Body: `{"number":42,"state":"open","title":"Test PR","head":{"ref":"feat/branch","sha":"head42"}}`}},
+	"GET /repos/acme/widgets/pulls/43": {{Body: `{"number":43,"state":"open","mergeable":null,"mergeable_state":"unknown"}`}},
+	"GET /repos/acme/widgets/pulls/44": {{Body: `{"number":44,"state":"open","mergeable":true,"mergeable_state":"clean"}`}},
+	"GET /repos/acme/widgets/pulls/45": {{Status: http.StatusInternalServerError, Body: `{}`}},
+	"GET /repos/acme/widgets/pulls/46": {{Body: `{"number":46,"mergeable_state":"unknown"}`}, {Status: http.StatusInternalServerError, Body: `{}`}},
+}
+
+func TestFetchSinglePR(t *testing.T) {
 	t.Parallel()
-
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		switch r.URL.Path {
-		case "/repos/azylman/aerial/pulls/42":
-			_, _ = w.Write([]byte(`{"number":42,"state":"open","title":"Test PR","head":{"ref":"feat/branch","sha":"head42"}}`))
-		case "/repos/azylman/aerial/pulls/43":
-			// PR with unknown mergeable state
-			_, _ = w.Write([]byte(`{"number":43,"state":"open","mergeable":null,"mergeable_state":"unknown"}`))
-		case "/repos/azylman/aerial/pulls/44":
-			// PR with mergeable=true
-			_, _ = w.Write([]byte(`{"number":44,"state":"open","mergeable":true,"mergeable_state":"clean"}`))
-		case "/repos/azylman/aerial/pulls/45":
-			w.WriteHeader(http.StatusInternalServerError)
-		default:
-			w.WriteHeader(http.StatusNotFound)
-		}
-	}))
-	defer srv.Close()
-
-	client := NewClient(srv.Client(), srv.URL, "token")
-
-	// FetchSinglePR guards
-	if _, err := FetchSinglePR(context.Background(), client, "", 42); err == nil {
-		t.Errorf("expected error for empty repo in FetchSinglePR")
+	tests := []struct {
+		name     string
+		noClient bool
+		repo     string
+		pr       int
+		want     int
+		wantErr  string
+	}{
+		{name: "empty repo", repo: " ", pr: 42, wantErr: "invalid arguments for fetch single pr"},
+		{name: "zero pr", repo: "acme/widgets", wantErr: "invalid arguments for fetch single pr"},
+		{name: "nil client", noClient: true, repo: "acme/widgets", pr: 42, wantErr: "invalid arguments for fetch single pr"},
+		{name: "fetches the pr", repo: "acme/widgets", pr: 42, want: 42},
+		{name: "api failure", repo: "acme/widgets", pr: 45, wantErr: "github api returned status 500"},
 	}
-	if _, err := FetchSinglePR(context.Background(), client, "azylman/aerial", 0); err == nil {
-		t.Errorf("expected error for zero pr in FetchSinglePR")
-	}
-	if _, err := FetchSinglePR(context.Background(), nil, "azylman/aerial", 42); err == nil {
-		t.Errorf("expected error for nil client in FetchSinglePR")
-	}
-
-	// FetchSinglePR
-	pr, err := FetchSinglePR(context.Background(), client, "azylman/aerial", 42)
-	if err != nil || pr.Number != 42 {
-		t.Fatalf("FetchSinglePR failed: %v, %+v", err, pr)
-	}
-
-	// FetchSinglePRWithMergeabilityRetry
-	prRetry, errRetry := FetchSinglePRWithMergeabilityRetry(context.Background(), client, "azylman/aerial", 42, 2)
-	if errRetry != nil || prRetry.Number != 42 {
-		t.Fatalf("FetchSinglePRWithMergeabilityRetry failed: %v", errRetry)
-	}
-	// Fetch unknown mergeable state retries and completes
-	prUnknown, errUnknown := FetchSinglePRWithMergeabilityRetry(context.Background(), client, "azylman/aerial", 43, 0)
-	if errUnknown != nil || prUnknown.Number != 43 {
-		t.Fatalf("FetchSinglePRWithMergeabilityRetry for unknown failed: %v", errUnknown)
-	}
-	// Fetch clean mergeable PR immediately succeeds without retrying
-	prClean, errClean := FetchSinglePRWithMergeabilityRetry(context.Background(), client, "azylman/aerial", 44, 2)
-	if errClean != nil || prClean.Number != 44 {
-		t.Fatalf("FetchSinglePRWithMergeabilityRetry for clean PR failed: %v", errClean)
-	}
-	// Fetch failing PR returns fetch error
-	if _, errFail := FetchSinglePRWithMergeabilityRetry(context.Background(), client, "azylman/aerial", 45, 2); errFail == nil {
-		t.Errorf("expected error on failing PR in FetchSinglePRWithMergeabilityRetry")
-	}
-	// Context cancelled returns error
-	ctxC, cancelC := context.WithCancel(context.Background())
-	cancelC()
-	if _, errC := FetchSinglePRWithMergeabilityRetry(ctxC, client, "azylman/aerial", 43, 2); errC == nil {
-		t.Errorf("expected context cancellation error")
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			api := githubapitest.New(t, conflictRoutes)
+			client := NewClient(api.Client(), api.URL(), "token")
+			if tc.noClient {
+				client = nil
+			}
+			got, err := FetchSinglePR(context.Background(), client, tc.repo, tc.pr)
+			if got.Number != tc.want || (tc.wantErr == "") != (err == nil) || (err != nil && err.Error() != tc.wantErr) {
+				t.Errorf("FetchSinglePR() = (#%d, %v), want (#%d, %q)", got.Number, err, tc.want, tc.wantErr)
+			}
+		})
 	}
 }
 
-func TestConflicts_ResolvePRFromCommitSHA(t *testing.T) {
+func TestFetchSinglePRWithMergeabilityRetry(t *testing.T) {
 	t.Parallel()
-
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		switch r.URL.Path {
-		case "/repos/azylman/aerial/pulls":
-			_, _ = w.Write([]byte(`[
-				{"number":41,"state":"closed","title":"Closed PR","head":{"ref":"feat/branch","sha":"head-fallback"}},
-				{"number":42,"state":"open","title":"Test PR","head":{"ref":"feat/branch","sha":"head42"}}
-			]`))
-		case "/repos/azylman/aerial/commits/head42/pulls":
-			_, _ = w.Write([]byte(`[
-				{"number":40,"state":"open","head":{"ref":"feat/old","sha":"head42"}},
-				{"number":42,"state":"closed","head":{"ref":"feat/branch","sha":"head42"}}
-			]`))
-		case "/repos/azylman/aerial/commits/head-fallback/pulls", "/repos/azylman/aerial/commits/head-empty/pulls":
-			_, _ = w.Write([]byte(`[]`))
-		default:
-			w.WriteHeader(http.StatusNotFound)
-		}
-	}))
-	defer srv.Close()
-
-	client := NewClient(srv.Client(), srv.URL, "token")
-
-	// ResolvePRFromCommitSHA guards
-	if _, _, err := ResolvePRFromCommitSHA(context.Background(), client, "", "head42"); err == nil {
-		t.Errorf("expected error for empty repo in ResolvePRFromCommitSHA")
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	tests := []struct {
+		name         string
+		ctx          context.Context
+		pr           int
+		retries      int
+		want         int
+		wantErr      string
+		wantRequests int
+	}{
+		{name: "missing mergeability refetches every retry", ctx: context.Background(), pr: 42, retries: 2, want: 42, wantRequests: 3},
+		{name: "unknown state retries at least once", ctx: context.Background(), pr: 43, want: 43, wantRequests: 2},
+		{name: "clean pr returns without refetching", ctx: context.Background(), pr: 44, retries: 2, want: 44, wantRequests: 1},
+		{name: "first fetch failure", ctx: context.Background(), pr: 45, retries: 2, wantErr: "github api returned status 500", wantRequests: 1},
+		{name: "refetch failure keeps the first pr", ctx: context.Background(), pr: 46, retries: 2, want: 46, wantErr: "github api returned status 500", wantRequests: 2},
+		{name: "cancelled context", ctx: cancelled, pr: 43, retries: 2, wantErr: "context canceled"},
 	}
-	if _, _, err := ResolvePRFromCommitSHA(context.Background(), client, "azylman/aerial", ""); err == nil {
-		t.Errorf("expected error for empty sha in ResolvePRFromCommitSHA")
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			api := githubapitest.New(t, conflictRoutes)
+			got, err := FetchSinglePRWithMergeabilityRetry(tc.ctx, NewClient(api.Client(), api.URL(), "token"), "acme/widgets", tc.pr, tc.retries)
+			if got.Number != tc.want || (tc.wantErr == "") != (err == nil) || (err != nil && !strings.Contains(err.Error(), tc.wantErr)) {
+				t.Errorf("FetchSinglePRWithMergeabilityRetry() = (#%d, %v), want (#%d, %q)", got.Number, err, tc.want, tc.wantErr)
+			}
+			if n := len(api.Requests()); n != tc.wantRequests {
+				t.Errorf("requests = %d, want %d", n, tc.wantRequests)
+			}
+		})
 	}
-	if _, _, err := ResolvePRFromCommitSHA(context.Background(), nil, "azylman/aerial", "head42"); err == nil {
-		t.Errorf("expected error for nil client")
-	}
+}
 
-	// ResolvePRFromCommitSHA: selects closed PR 42 over open PR 40
-	prNum, branch, errResolve := ResolvePRFromCommitSHA(context.Background(), client, "azylman/aerial", "head42")
-	if errResolve != nil || prNum != 42 || branch != "feat/branch" {
-		t.Errorf("ResolvePRFromCommitSHA failed: (%d, %q, %v)", prNum, branch, errResolve)
+func TestResolvePRFromCommitSHA(t *testing.T) {
+	t.Parallel()
+	const openPulls = "GET /repos/acme/widgets/pulls?state=open&per_page=100"
+	tests := []struct {
+		name       string
+		noClient   bool
+		apiURL     string
+		repo       string
+		sha        string
+		pulls      githubapitest.Response
+		open       string
+		wantPR     int
+		wantBranch string
+		wantErr    string
+	}{
+		{name: "empty repo", sha: "sha123", wantErr: "invalid repo or sha"},
+		{name: "empty sha", repo: "acme/widgets", wantErr: "invalid repo or sha"},
+		{name: "empty repo and sha", wantErr: "invalid repo or sha"},
+		{name: "zero sha", repo: "acme/widgets", sha: "0000000000000000000000000000000000000000", wantErr: "invalid repo or sha"},
+		{name: "short zero sha", repo: "acme/widgets", sha: "0000", wantErr: "invalid repo or sha"},
+		{name: "nil client", noClient: true, repo: "acme/widgets", sha: "sha123", wantErr: "github client required"},
+		{name: "invalid api url", apiURL: "::bad-url::", repo: "acme/widgets", sha: "sha123", wantErr: "create github api request"},
+		{name: "403 rate limit", repo: "acme/widgets", sha: "sha403", pulls: githubapitest.Response{Status: http.StatusForbidden, Body: `{"message":"API rate limit exceeded"}`}, wantErr: "rate limit"},
+		{name: "404 not found", repo: "acme/widgets", sha: "sha404", pulls: githubapitest.Response{Status: http.StatusNotFound, Body: `{"message":"Not Found"}`}, wantErr: "404"},
+		{name: "malformed json", repo: "acme/widgets", sha: "shamalformed", pulls: githubapitest.Response{Body: `{not-an-array`}, wantErr: "invalid character"},
+		{name: "empty pr list", repo: "acme/widgets", sha: "shaempty", pulls: githubapitest.Response{Body: `[]`}, wantErr: "no pull requests associated with commit shaempty"},
+		{name: "closed pr wins over open pr", repo: "acme/widgets", sha: "shaclosed", pulls: githubapitest.Response{Body: `[{"number":10,"state":"open","head":{"ref":"feat/open"}},{"number":20,"state":"closed","head":{"ref":"feat/closed"}}]`}, wantPR: 20, wantBranch: "feat/closed"},
+		{name: "closed pr is kept over a later open pr", repo: "acme/widgets", sha: "shaold", pulls: githubapitest.Response{Body: `[{"number":42,"state":"closed","head":{"ref":"feat/branch"}},{"number":50,"state":"open","head":{"ref":"feat/old"}}]`}, wantPR: 42, wantBranch: "feat/branch"},
+		{name: "higher number wins when states match", repo: "acme/widgets", sha: "shahigher", pulls: githubapitest.Response{Body: `[{"number":10,"state":"closed","head":{"ref":"feat/ten"}},{"number":30,"state":"closed","head":{"ref":"feat/thirty"}},{"number":20,"state":"closed","head":{"ref":"feat/twenty"}}]`}, wantPR: 30, wantBranch: "feat/thirty"},
+		{name: "fork pr fallback scans open pulls", repo: "acme/widgets", sha: "forksha123", pulls: githubapitest.Response{Body: `[]`}, open: `[{"number":456,"state":"open","head":{"ref":"fork-feature","sha":" forksha123 "}},{"number":455,"state":"open","head":{"ref":"other","sha":"diffsha"}}]`, wantPR: 456, wantBranch: "fork-feature"},
+		{name: "open pull fallback without a head match", repo: "acme/widgets", sha: "notfoundsha", pulls: githubapitest.Response{Body: `[]`}, open: `[{"number":123,"state":"open","head":{"ref":"foo","sha":"other"}}]`, wantErr: "no pull requests associated"},
 	}
-
-	// Fallback to open PRs list when pulls endpoint is empty (finds PR 41)
-	prNumFb, branchFb, errFb := ResolvePRFromCommitSHA(context.Background(), client, "azylman/aerial", "head-fallback")
-	if errFb != nil || prNumFb != 41 || branchFb != "feat/branch" {
-		t.Errorf("expected open PRs fallback to find PR 41: (%d, %q, %v)", prNumFb, branchFb, errFb)
-	}
-
-	// When neither endpoint finds any PR
-	if _, _, errEmpty := ResolvePRFromCommitSHA(context.Background(), client, "azylman/aerial", "head-empty"); errEmpty == nil {
-		t.Errorf("expected error when no PRs associated with commit")
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			routes := map[string][]githubapitest.Response{"GET /repos/acme/widgets/commits/" + tc.sha + "/pulls": {tc.pulls}}
+			if tc.open != "" {
+				routes[openPulls] = []githubapitest.Response{{Body: tc.open}}
+			}
+			api := githubapitest.New(t, routes)
+			client := NewClient(api.Client(), cmp.Or(tc.apiURL, api.URL()), "token")
+			if tc.noClient {
+				client = nil
+			}
+			prNum, branch, err := ResolvePRFromCommitSHA(context.Background(), client, tc.repo, tc.sha)
+			if (tc.wantErr == "") != (err == nil) || (err != nil && !strings.Contains(err.Error(), tc.wantErr)) {
+				t.Fatalf("ResolvePRFromCommitSHA() err = %v, want %q", err, tc.wantErr)
+			}
+			if prNum != tc.wantPR || branch != tc.wantBranch {
+				t.Errorf("ResolvePRFromCommitSHA() = (%d, %q), want (%d, %q)", prNum, branch, tc.wantPR, tc.wantBranch)
+			}
+		})
 	}
 }
 
 func TestResolveCommitPR(t *testing.T) {
 	t.Parallel()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		switch r.URL.Path {
-		case "/repos/azylman/aerial/commits/merge2327/pulls":
-			_, _ = w.Write([]byte(`[{"number":2327,"state":"closed","head":{"ref":"feat/purge","sha":" head2327 "},"merged_at":"2026-11-21T08:38:21Z","merge_commit_sha":"merge2327"}]`))
-		case "/repos/azylman/aerial/commits/head50/pulls":
-			_, _ = w.Write([]byte(`[{"number":50,"state":"open","head":{"ref":"feat/open","sha":"head50"},"merged_at":null,"merge_commit_sha":"testmerge50"}]`))
-		default:
-			w.WriteHeader(http.StatusNotFound)
-		}
-	}))
-	t.Cleanup(srv.Close)
-	client := NewClient(srv.Client(), srv.URL, "token")
+	api := githubapitest.New(t, map[string][]githubapitest.Response{
+		"GET /repos/acme/widgets/commits/merge2327/pulls": {{Body: `[{"number":2327,"state":"closed","head":{"ref":"feat/purge","sha":" head2327 "},"merged_at":"2026-11-21T08:38:21Z","merge_commit_sha":"merge2327"}]`}},
+		"GET /repos/acme/widgets/commits/head50/pulls":    {{Body: `[{"number":50,"state":"open","head":{"ref":"feat/open","sha":"head50"},"merged_at":null,"merge_commit_sha":"testmerge50"}]`}},
+	})
+	client := NewClient(api.Client(), api.URL(), "token")
 	tests := []struct {
 		name    string
 		sha     string
@@ -365,7 +434,7 @@ func TestResolveCommitPR(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got, err := ResolveCommitPR(context.Background(), client, "azylman/aerial", tc.sha)
+			got, err := ResolveCommitPR(context.Background(), client, "acme/widgets", tc.sha)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("ResolveCommitPR() err = %v, wantErr %v", err, tc.wantErr)
 			}
