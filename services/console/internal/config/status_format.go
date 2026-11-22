@@ -1,6 +1,7 @@
-package main
+package config
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"mime"
@@ -40,7 +41,7 @@ const (
 	agentFilterAll        = "all"
 )
 
-var sensitiveKeys = []string{
+var SensitiveKeys = []string{
 	"GEMINI_HARNESS_API_KEY",
 	"AERIAL_GEMINI_API_KEY",
 	"GEMINI_API_KEY",
@@ -326,9 +327,12 @@ func BuildVanadisBuildDetailUpstreamURL(vanadisBaseURL string, requestPath strin
 	return target.String(), buildID, nil
 }
 
-// errInvalidDocketRequest marks client-side request validation failures (bad task ID or
+// ErrInvalidDocketRequest marks client-side request validation failures (bad task ID or
 // search parameters) so docket handlers can answer 400 instead of a configuration error.
-var errInvalidDocketRequest = errors.New("invalid docket request")
+var (
+	ErrInvalidDocketRequest = errors.New("invalid docket request")
+	errInvalidDocketRequest = ErrInvalidDocketRequest
+)
 
 // maxDocketSearchQueryLen bounds the free-text search query forwarded to docket-mcp.
 const maxDocketSearchQueryLen = 200
@@ -893,4 +897,391 @@ func StampTaskAgent(tasks []ActiveTaskStatus, agent string) []ActiveTaskStatus {
 		out[i] = t
 	}
 	return out
+}
+
+type ServiceStatus struct {
+	Name          string    `json:"name"`
+	Status        string    `json:"status"`
+	UptimeSeconds int64     `json:"uptime_seconds"`
+	LastCheckTime time.Time `json:"last_check_time"`
+	// Commit is the full commit SHA from the Deployment's image tag (k8s mode only).
+	Commit string `json:"commit,omitempty"`
+	// Image is the Deployment's image reference (k8s mode only).
+	Image string `json:"image,omitempty"`
+}
+
+type ActiveTaskStatus struct {
+	ID          string    `json:"id"`
+	ThreadID    string    `json:"thread_id"`
+	SessionID   string    `json:"session_id,omitempty"`
+	AuthorName  string    `json:"author_name"`
+	Prompt      string    `json:"prompt"`
+	Summary     string    `json:"summary"`
+	Status      string    `json:"status"`
+	RetryCount  int       `json:"retry_count"`
+	TriggerType string    `json:"trigger_type"`
+	CreatedAt   time.Time `json:"created_at"`
+	StartedAt   time.Time `json:"started_at"`
+	Agent       string    `json:"agent,omitempty"`
+}
+
+type BrainTasksAPIResponse struct {
+	Status string `json:"status"`
+	Total  int    `json:"total"`
+	Tasks  []struct {
+		ID          string    `json:"id"`
+		ThreadID    string    `json:"thread_id"`
+		SessionID   string    `json:"session_id"`
+		AuthorName  string    `json:"author_name"`
+		Prompt      string    `json:"prompt"`
+		Summary     string    `json:"summary"`
+		Status      string    `json:"status"`
+		RetryCount  int       `json:"retry_count"`
+		TriggerType string    `json:"trigger_type"`
+		CreatedAt   time.Time `json:"created_at"`
+		UpdatedAt   time.Time `json:"updated_at"`
+		Agent       string    `json:"agent,omitempty"`
+	} `json:"tasks"`
+}
+
+type HeadCommit struct {
+	Message   string    `json:"message"`
+	Timestamp time.Time `json:"timestamp"`
+}
+
+type GitHubRun struct {
+	ID      int64  `json:"id"`
+	Name    string `json:"name"`
+	RepoObj *struct {
+		FullName string `json:"full_name"`
+	} `json:"repository,omitempty"`
+	Repository string      `json:"-"`
+	HeadSHA    string      `json:"head_sha"`
+	HeadBranch string      `json:"head_branch"`
+	Event      string      `json:"event,omitempty"`
+	HeadCommit *HeadCommit `json:"head_commit,omitempty"`
+	Status     string      `json:"status"`     // "queued", "in_progress", "completed"
+	Conclusion string      `json:"conclusion"` // "success", "failure", "cancelled"
+	CreatedAt  time.Time   `json:"created_at"`
+	UpdatedAt  time.Time   `json:"updated_at"`
+	HTMLURL    string      `json:"html_url"`
+	// MergedFromBranch is the head branch of the pull request a push-to-main
+	// run merged, resolved by the poller so the run shares its PR's card.
+	MergedFromBranch string `json:"-"`
+}
+
+type GitHubJob struct {
+	ID          int64     `json:"id"`
+	RunID       int64     `json:"run_id"`
+	Name        string    `json:"name"`
+	Status      string    `json:"status"`
+	Conclusion  string    `json:"conclusion"`
+	StartedAt   time.Time `json:"started_at"`
+	CompletedAt time.Time `json:"completed_at"`
+	HTMLURL     string    `json:"html_url"`
+}
+
+type GitHubRunsResponse struct {
+	TotalCount   int         `json:"total_count"`
+	WorkflowRuns []GitHubRun `json:"workflow_runs"`
+}
+
+type GitHubJobsResponse struct {
+	TotalCount int         `json:"total_count"`
+	Jobs       []GitHubJob `json:"jobs"`
+}
+
+type MergedPullRequest struct {
+	MergedAt *time.Time `json:"merged_at"`
+	Head     struct {
+		Ref string `json:"ref"`
+	} `json:"head"`
+}
+
+// ParseMergedPullHeadRef returns the head branch of the first merged pull
+// request in a commits/{sha}/pulls response, or "" when none was merged.
+func ParseMergedPullHeadRef(body []byte) (string, error) {
+	var pulls []MergedPullRequest
+	if err := json.Unmarshal(body, &pulls); err != nil {
+		return "", fmt.Errorf("decode commit pulls: %w", err)
+	}
+	for _, pr := range pulls {
+		if pr.MergedAt != nil && pr.Head.Ref != "" {
+			return pr.Head.Ref, nil
+		}
+	}
+	return "", nil
+}
+
+// FactItem represents a semantic memory item received from brain
+type FactItem struct {
+	ID               int64     `json:"id"`
+	FactText         string    `json:"fact_text"`
+	ReinforceCount   int       `json:"reinforce_count"`
+	LastReinforcedAt time.Time `json:"last_reinforced_at,omitzero"`
+	CreatedAt        time.Time `json:"created_at"`
+	Agent            string    `json:"agent,omitempty"`
+}
+
+// UnmarshalJSON handles decoding facts reading source_agent as agent if agent is missing.
+func (f *FactItem) UnmarshalJSON(data []byte) error {
+	type Alias FactItem
+	var aux struct {
+		Alias
+
+		SourceAgent string `json:"source_agent,omitempty"`
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	*f = FactItem(aux.Alias)
+	if f.Agent == "" && aux.SourceAgent != "" {
+		f.Agent = aux.SourceAgent
+	}
+	return nil
+}
+
+type FactsAPIResponse struct {
+	Facts  []FactItem `json:"facts"`
+	Total  int        `json:"total"`
+	Limit  int        `json:"limit"`
+	Offset int        `json:"offset"`
+	Status string     `json:"status,omitempty"`
+	Error  string     `json:"error,omitempty"`
+}
+
+// UnmarshalJSON decodes facts and applies FactItem custom unmarshaling to raw items.
+func (r *FactsAPIResponse) UnmarshalJSON(data []byte) error {
+	type Alias FactsAPIResponse
+	var aux struct {
+		*Alias
+
+		Facts []json.RawMessage `json:"facts"`
+	}
+	aux.Alias = (*Alias)(r)
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	*r = FactsAPIResponse(*aux.Alias)
+	if len(aux.Facts) > 0 {
+		r.Facts = make([]FactItem, len(aux.Facts))
+		for i, raw := range aux.Facts {
+			if err := r.Facts[i].UnmarshalJSON(raw); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// ScheduleSummaryMetrics represents aggregated schedule execution metrics
+type ScheduleSummaryMetrics struct {
+	TotalActive    int     `json:"total_active"`
+	CronCount      int     `json:"cron_count"`
+	OneShotCount   int     `json:"one_shot_count"`
+	TotalRuns24h   int     `json:"total_runs_24h"`
+	SuccessRate24h float64 `json:"success_rate_24h"`
+}
+
+// CronSchedule represents a recurring cron schedule
+type CronSchedule struct {
+	ID              string    `json:"id"`
+	TargetID        string    `json:"target_id,omitempty"`
+	ChannelID       string    `json:"channel_id"`
+	TitlePrefix     string    `json:"title_prefix"`
+	CronExpr        string    `json:"cron_expr"`
+	CronDescription string    `json:"cron_description"`
+	Prompt          string    `json:"prompt"`
+	Timezone        string    `json:"timezone"`
+	NextRunAt       time.Time `json:"next_run_at"`
+	Enabled         bool      `json:"enabled"`
+	CreatedAt       time.Time `json:"created_at"`
+	Agent           string    `json:"agent,omitempty"`
+}
+
+// OneShotSchedule represents a one-time scheduled reminder
+type OneShotSchedule struct {
+	ID        string    `json:"id"`
+	ThreadID  string    `json:"thread_id"`
+	Prompt    string    `json:"prompt"`
+	RunAt     time.Time `json:"run_at"`
+	CreatedAt time.Time `json:"created_at"`
+	Agent     string    `json:"agent,omitempty"`
+}
+
+// SchedulesAPIResponse represents the response payload for schedules and summary metrics
+type SchedulesAPIResponse struct {
+	Status     string                 `json:"status"`
+	SystemTime time.Time              `json:"system_time,omitempty"`
+	Summary    ScheduleSummaryMetrics `json:"summary"`
+	Crons      []CronSchedule         `json:"crons"`
+	OneShots   []OneShotSchedule      `json:"one_shots"`
+	Error      string                 `json:"error,omitempty"`
+}
+
+// ScheduleRun represents a logged schedule execution run
+type ScheduleRun struct {
+	ID           string     `json:"id"`
+	ScheduleID   string     `json:"schedule_id"`
+	ScheduleType string     `json:"schedule_type"`
+	MessageID    string     `json:"message_id,omitempty"`
+	TargetID     string     `json:"target_id,omitempty"`
+	ThreadID     string     `json:"thread_id,omitempty"`
+	Title        string     `json:"title,omitempty"`
+	Prompt       string     `json:"prompt"`
+	Status       string     `json:"status"`
+	StartedAt    time.Time  `json:"started_at"`
+	CompletedAt  *time.Time `json:"completed_at,omitempty"`
+	DurationMs   int64      `json:"duration_ms"`
+	Error        string     `json:"error,omitempty"`
+	Agent        string     `json:"agent,omitempty"`
+}
+
+// ScheduleRunsAPIResponse represents paginated execution run logs
+type ScheduleRunsAPIResponse struct {
+	Status string        `json:"status"`
+	Total  int           `json:"total"`
+	Limit  int           `json:"limit"`
+	Offset int           `json:"offset"`
+	Runs   []ScheduleRun `json:"runs"`
+	Error  string        `json:"error,omitempty"`
+}
+
+// VanadisChunkDTO represents an individual task chunk within a Vanadis build.
+type VanadisChunkDTO struct {
+	ID                 string    `json:"id"`
+	BuildID            string    `json:"build_id"`
+	ChunkIndex         int       `json:"chunk_index"`
+	Repo               string    `json:"repo,omitempty"`
+	Title              string    `json:"title"`
+	Instructions       string    `json:"instructions,omitempty"`
+	TargetFiles        []string  `json:"target_files,omitempty"`
+	TargetSymbols      []string  `json:"target_symbols,omitempty"`
+	Effort             string    `json:"effort,omitempty"`
+	AcceptanceCriteria []string  `json:"acceptance_criteria,omitempty"`
+	DependsOn          []string  `json:"depends_on"`
+	Status             string    `json:"status"`
+	PRNumber           int       `json:"pr_number,omitempty"`
+	StartedAt          time.Time `json:"started_at,omitempty"`
+	CompletedAt        time.Time `json:"completed_at,omitempty"`
+	CreatedAt          time.Time `json:"created_at"`
+	UpdatedAt          time.Time `json:"updated_at"`
+	Agent              string    `json:"agent,omitempty"`
+}
+
+// VanadisBuildDTO represents a Vanadis build run or build entry.
+type VanadisBuildDTO struct {
+	ID              string            `json:"id"`
+	ThreadID        string            `json:"thread_id"`
+	Tier            int               `json:"tier"`
+	Title           string            `json:"title"`
+	Objective       string            `json:"objective"`
+	SharedContext   string            `json:"shared_context,omitempty"`
+	Status          string            `json:"status"`
+	StatusMessageID string            `json:"status_message_id,omitempty"`
+	CreatedAt       time.Time         `json:"created_at"`
+	UpdatedAt       time.Time         `json:"updated_at"`
+	QueueState      string            `json:"queue_state,omitempty"`
+	TotalChunks     int               `json:"total_chunks,omitempty"`
+	CompletedChunks int               `json:"completed_chunks,omitempty"`
+	RunningChunks   int               `json:"running_chunks,omitempty"`
+	PendingChunks   int               `json:"pending_chunks,omitempty"`
+	FailedChunks    int               `json:"failed_chunks,omitempty"`
+	Chunks          []VanadisChunkDTO `json:"chunks,omitempty"`
+	Agent           string            `json:"agent,omitempty"`
+}
+
+// BuildsAPIResponse represents the response payload for listing Vanadis builds.
+type BuildsAPIResponse struct {
+	Status         string            `json:"status"`
+	Total          int               `json:"total"`
+	RunningCount   int               `json:"running_count"`
+	QueuedCount    int               `json:"queued_count"`
+	CompletedCount int               `json:"completed_count"`
+	Builds         []VanadisBuildDTO `json:"builds"`
+	Error          string            `json:"error,omitempty"`
+}
+
+// BuildDetailAPIResponse represents the response payload for inspecting a single Vanadis build and its chunks.
+type BuildDetailAPIResponse struct {
+	Status string            `json:"status"`
+	Build  *VanadisBuildDTO  `json:"build,omitempty"`
+	Chunks []VanadisChunkDTO `json:"chunks"`
+	Entry  *VanadisBuildDTO  `json:"entry,omitempty"`
+	Error  string            `json:"error,omitempty"`
+}
+
+// DocketTaskSummaryDTO mirrors docket-mcp's TaskSummary.
+type DocketTaskSummaryDTO struct {
+	ID        int64   `json:"id"`
+	Title     string  `json:"title"`
+	Status    string  `json:"status"`
+	ParentID  *int64  `json:"parent_id,omitempty"`
+	BlockedBy []int64 `json:"blocked_by,omitempty"`
+	Blocks    []int64 `json:"blocks,omitempty"`
+}
+
+// DocketScoredTaskDTO mirrors docket-mcp's ScoredTaskSummary.
+type DocketScoredTaskDTO struct {
+	ID       int64   `json:"id"`
+	Title    string  `json:"title"`
+	Status   string  `json:"status"`
+	ParentID *int64  `json:"parent_id,omitempty"`
+	Score    float64 `json:"score"`
+}
+
+// DocketTaskCommentDTO mirrors docket-mcp's TaskComment.
+type DocketTaskCommentDTO struct {
+	ID        int64     `json:"id"`
+	Author    string    `json:"author,omitempty"`
+	Comment   string    `json:"comment"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// DocketTaskDTO mirrors docket-mcp's HydratedTask.
+type DocketTaskDTO struct {
+	ID          int64                  `json:"id"`
+	Title       string                 `json:"title"`
+	Status      string                 `json:"status"`
+	Description string                 `json:"description,omitempty"`
+	CreatedAt   time.Time              `json:"created_at"`
+	UpdatedAt   time.Time              `json:"updated_at"`
+	ClosedAt    *time.Time             `json:"closed_at,omitempty"`
+	Parent      *DocketTaskSummaryDTO  `json:"parent,omitempty"`
+	Subtasks    []DocketTaskSummaryDTO `json:"subtasks,omitempty"`
+	Blocks      []DocketTaskSummaryDTO `json:"blocks,omitempty"`
+	BlockedBy   []DocketTaskSummaryDTO `json:"blocked_by,omitempty"`
+	Related     []DocketTaskSummaryDTO `json:"related,omitempty"`
+	Comments    []DocketTaskCommentDTO `json:"comments,omitempty"`
+}
+
+// DocketTasksAPIResponse is the console envelope for GET /api/docket/tasks.
+type DocketTasksAPIResponse struct {
+	Status string                 `json:"status"`
+	Tasks  []DocketTaskSummaryDTO `json:"tasks"`
+	Error  string                 `json:"error,omitempty"`
+}
+
+// UnmarshalJSON decodes docket-mcp's bare task-summary array into the envelope's Tasks.
+func (d *DocketTasksAPIResponse) UnmarshalJSON(data []byte) error {
+	return json.Unmarshal(data, &d.Tasks)
+}
+
+// DocketSearchAPIResponse is the console envelope for GET /api/docket/search.
+type DocketSearchAPIResponse struct {
+	Status  string                `json:"status"`
+	Results []DocketScoredTaskDTO `json:"results"`
+	Error   string                `json:"error,omitempty"`
+}
+
+// UnmarshalJSON decodes docket-mcp's bare scored-hit array into the envelope's Results.
+func (d *DocketSearchAPIResponse) UnmarshalJSON(data []byte) error {
+	return json.Unmarshal(data, &d.Results)
+}
+
+// DocketTaskDetailAPIResponse is the console envelope for GET /api/docket/tasks/{id}.
+type DocketTaskDetailAPIResponse struct {
+	Status string         `json:"status"`
+	Task   *DocketTaskDTO `json:"task,omitempty"`
+	Error  string         `json:"error,omitempty"`
 }
