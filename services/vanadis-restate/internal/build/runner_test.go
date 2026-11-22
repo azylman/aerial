@@ -184,6 +184,7 @@ func TestBuildObject_CreateRecordsOwnRunner(t *testing.T) {
 	}{
 		{name: "default object runs unowned build", wantAgent: "aerial", wantRunner: "aerial"},
 		{name: "default object runs default-owned build", reqAgent: "aerial", wantAgent: "aerial", wantRunner: "aerial"},
+		{name: "default object runs sibling-owned build", reqAgent: "agent-beta", wantAgent: "agent-beta", wantRunner: "aerial"},
 		{name: "sibling object runs its own build", ownAgent: "Agent-Alpha", reqAgent: "agent-alpha", wantAgent: "agent-alpha", wantRunner: "agent-alpha"},
 	}
 	for _, tc := range tests {
@@ -210,7 +211,6 @@ func TestBuildObject_CreateRefusesForeignOwner(t *testing.T) {
 		ownAgent string
 		reqAgent string
 	}{
-		{name: "default object refuses sibling-owned build", reqAgent: "agent-beta"},
 		{name: "sibling object refuses unowned build", ownAgent: "agent-alpha"},
 		{name: "sibling object refuses default-owned build", ownAgent: "agent-alpha", reqAgent: "aerial"},
 		{name: "sibling object refuses other sibling build", ownAgent: "agent-alpha", reqAgent: "agent-beta"},

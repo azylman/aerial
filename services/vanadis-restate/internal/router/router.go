@@ -207,10 +207,10 @@ func (s *BuildRouterService) RouteAttachPR(ctx restate.Context, req store.Attach
 		return model.AttachChunkPRResponse{}, restate.ToTerminalError(err, restate.WithErrorCode(400))
 	}
 
-	// A new standalone build runs on the caller agent's own Build service;
-	// an empty caller means the default agent.
+	// A new standalone build runs on the canonical default Build runner
+	// while retaining req.Agent as the build owner.
 	newBuild := func() store.BuildRoute {
-		return store.BuildRoute{BuildID: buildplan.GenerateBuildID(), RunnerAgent: store.NormalizeRunnerAgent(req.Agent)}
+		return store.BuildRoute{BuildID: buildplan.GenerateBuildID(), RunnerAgent: store.NormalizeRunnerAgent("")}
 	}
 	route, err := build.RunJournaled(ctx, build.LabelRouteAttachPR, "resolve-attach-build-id", func(rc restate.RunContext) (store.BuildRoute, error) {
 		if s.store == nil {

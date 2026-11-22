@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -312,10 +313,10 @@ func TestDelivererNilAndEmptyGuards(t *testing.T) {
 	require.Error(t, dErr)
 	require.ErrorIs(t, dErr, ErrNoSenderForAgent)
 
-	assert.Equal(t, "", d.redirectChannelIfNoBuildUpdates(""))
-	assert.Equal(t, "fallback", d.resolveChannelID("", "fallback"))
-	assert.Equal(t, "123456789012345678", d.resolveChannelID("123456789012345678", "fallback"))
-	assert.Equal(t, "fallback", d.resolveChannelID("nonexistent-chan", "fallback"))
+	assert.Equal(t, "", d.redirectChannelIfNoBuildUpdates("", ""))
+	assert.Equal(t, "fallback", d.resolveChannelID("", "", "fallback"))
+	assert.Equal(t, "123456789012345678", d.resolveChannelID("", "123456789012345678", "fallback"))
+	assert.Equal(t, "fallback", d.resolveChannelID("", "nonexistent-chan", "fallback"))
 
 	sess, err := discordgo.New("Bot fake-token")
 	require.NoError(t, err)
@@ -1297,6 +1298,145 @@ func TestDiscoverAgentTokens(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			assert.Equal(t, tc.want, discoverAgentTokens(tc.runner, tc.environ))
+		})
+	}
+}
+
+func TestDiscordWidgetDeliverer_PerAgentConfigRedirection(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	rootCfgPath := filepath.Join(dir, "config.yaml")
+	rootCfg := `system_channel: aerial-dev
+`
+	require.NoError(t, os.WriteFile(rootCfgPath, []byte(rootCfg), 0o600))
+
+	agentAlphaDir := filepath.Join(dir, "services", "agent-alpha")
+	require.NoError(t, os.MkdirAll(agentAlphaDir, 0o755))
+	alphaCfg := `system_channel: agent-alpha-dev
+channels:
+  general:
+    no_build_updates: true
+`
+	require.NoError(t, os.WriteFile(filepath.Join(agentAlphaDir, "config.yaml"), []byte(alphaCfg), 0o600))
+
+	tests := []struct {
+		name          string
+		agent         string
+		channelID     string
+		wantChannelID string
+	}{
+		{name: "default agent uses root config without redirect", agent: "aerial", channelID: "general", wantChannelID: "general"},
+		{name: "unspecified agent uses root config without redirect", agent: "", channelID: "general", wantChannelID: "general"},
+		{name: "agent-alpha redirects no_build_updates to agent-alpha-dev", agent: "agent-alpha", channelID: "general", wantChannelID: "111111111111111111"},
+		{name: "agent-alpha does not redirect regular channel", agent: "agent-alpha", channelID: "lounge", wantChannelID: "lounge"},
+		{name: "unconfigured sibling agent falls back to root config", agent: "agent-beta", channelID: "general", wantChannelID: "general"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			d, err := NewDiscordWidgetDeliverer("", "", "azylman", nil, rootCfgPath)
+			require.NoError(t, err)
+			d.channelResolver = func(nameOrID string) (string, error) {
+				switch nameOrID {
+				case "agent-alpha-dev":
+					return "111111111111111111", nil
+				case "aerial-dev":
+					return "222222222222222222", nil
+				default:
+					return "", errors.New("channel not found")
+				}
+			}
+
+			mockAlpha := &mockWidgetSender{sendMsg: &discordgo.Message{ID: "msg-alpha"}}
+			mockAerial := &mockWidgetSender{sendMsg: &discordgo.Message{ID: "msg-aerial"}}
+			mockBeta := &mockWidgetSender{sendMsg: &discordgo.Message{ID: "msg-beta"}}
+			d.agentSenders = map[string]DiscordWidgetSender{
+				"agent-alpha": mockAlpha,
+				"aerial":      mockAerial,
+				"agent-beta":  mockBeta,
+			}
+
+			redirected := d.redirectChannelIfNoBuildUpdates(tc.agent, tc.channelID)
+			assert.Equal(t, tc.wantChannelID, redirected)
+
+			_, sErr := d.DeliverStatusWidget(context.Background(), ericlient.StatusWidgetRequest{
+				Agent:     tc.agent,
+				ChannelID: tc.channelID,
+				Title:     "Build",
+			})
+			require.NoError(t, sErr)
+
+			dmErr := d.DeliverDirectMessageWithAgent(context.Background(), tc.agent, tc.channelID, "alert")
+			require.NoError(t, dmErr)
+
+			var activeMock *mockWidgetSender
+			switch tc.agent {
+			case "agent-alpha":
+				activeMock = mockAlpha
+			case "agent-beta":
+				activeMock = mockBeta
+			default:
+				activeMock = mockAerial
+			}
+			assert.Equal(t, tc.wantChannelID, activeMock.lastSendChannelID)
+		})
+	}
+}
+
+func TestDiscordWidgetDeliverer_SessionResolutionForAgent(t *testing.T) {
+	t.Parallel()
+	alphaSess, err := discordgo.New("Bot fake-alpha-token")
+	require.NoError(t, err)
+	alphaSess.State = discordgo.NewState()
+	require.NoError(t, alphaSess.State.GuildAdd(&discordgo.Guild{
+		ID: "g-alpha",
+		Channels: []*discordgo.Channel{
+			{ID: "111111111111111111", Name: "agent-alpha-dev"},
+		},
+	}))
+	for _, ch := range alphaSess.State.Guilds[0].Channels {
+		require.NoError(t, alphaSess.State.ChannelAdd(ch))
+	}
+
+	aerialSess, err := discordgo.New("Bot fake-aerial-token")
+	require.NoError(t, err)
+	aerialSess.State = discordgo.NewState()
+	require.NoError(t, aerialSess.State.GuildAdd(&discordgo.Guild{
+		ID: "g-aerial",
+		Channels: []*discordgo.Channel{
+			{ID: "222222222222222222", Name: "aerial-dev"},
+		},
+	}))
+	for _, ch := range aerialSess.State.Guilds[0].Channels {
+		require.NoError(t, aerialSess.State.ChannelAdd(ch))
+	}
+
+	d := &DiscordWidgetDeliverer{
+		session: aerialSess,
+		agentSenders: map[string]DiscordWidgetSender{
+			"aerial":      aerialSess,
+			"agent-alpha": alphaSess,
+		},
+	}
+
+	tests := []struct {
+		name          string
+		agent         string
+		target        string
+		fallback      string
+		wantChannelID string
+	}{
+		{name: "agent-alpha resolves from its own session", agent: "agent-alpha", target: "agent-alpha-dev", fallback: "fb", wantChannelID: "111111111111111111"},
+		{name: "aerial resolves from default session", agent: "aerial", target: "aerial-dev", fallback: "fb", wantChannelID: "222222222222222222"},
+		{name: "unknown agent falls back to default session", agent: "agent-beta", target: "aerial-dev", fallback: "fb", wantChannelID: "222222222222222222"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			resolved := d.resolveChannelID(tc.agent, tc.target, tc.fallback)
+			assert.Equal(t, tc.wantChannelID, resolved)
 		})
 	}
 }

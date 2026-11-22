@@ -271,16 +271,14 @@ func TestVanadisServer_HandleChunkByID(t *testing.T) {
 
 // mockRestateMisrouted rejects Build object calls that miss the build's
 // runner: builds whose ID contains "runner-alpha" run on agent-alpha, Create
-// must target the requested agent, and every other build runs on Build.
+// always targets canonical Build, and every other build runs on Build.
 func mockRestateMisrouted(w http.ResponseWriter, path string, bodyBytes []byte) bool {
 	if strings.HasPrefix(path, "/BuildRouter") {
 		return false
 	}
 	want := "/Build/"
 	if strings.HasSuffix(path, "/Create") {
-		var createReq CreateBuildRequest
-		_ = json.Unmarshal(bodyBytes, &createReq)
-		want = "/" + buildplan.BuildServiceName(createReq.Agent) + "/"
+		want = "/Build/"
 	} else if strings.Contains(path, "runner-alpha") {
 		want = "/Build-agent-alpha/"
 	}
