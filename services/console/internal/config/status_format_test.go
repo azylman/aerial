@@ -1,89 +1,14 @@
-package main
+package config
 
 import (
+	"encoding/json"
 	"errors"
-	"fmt"
 	"net/url"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 )
-
-var (
-	testRefTime    = time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
-	testCommitTime = testRefTime.Add(-10 * time.Minute)
-)
-
-func mkRuns(runs ...GitHubRun) []GitHubRun {
-	return runs
-}
-
-func mkRun(id int64, repo, sha, status, conclusion, msg string, createdOff, updatedOff time.Duration) GitHubRun {
-	r := GitHubRun{
-		ID:         id,
-		Repository: repo,
-		Name:       "Continuous Delivery",
-		HeadSHA:    sha,
-		Status:     status,
-		Conclusion: conclusion,
-		CreatedAt:  testRefTime.Add(createdOff),
-		UpdatedAt:  testRefTime.Add(updatedOff),
-	}
-	if repo == "" {
-		r.HTMLURL = fmt.Sprintf("https://github.com/azylman/aerial/actions/runs/%d", id)
-	} else {
-		r.HTMLURL = fmt.Sprintf("https://github.com/%s/actions/runs/%d", repo, id)
-	}
-	if msg != "" {
-		r.HeadCommit = &struct {
-			Message   string    `json:"message"`
-			Timestamp time.Time `json:"timestamp"`
-		}{Message: msg, Timestamp: testRefTime.Add(-10 * time.Minute)}
-	}
-	return r
-}
-
-func mkPRRun(id int64, repo, branch, sha, status, conclusion string, createdOff, updatedOff time.Duration) GitHubRun {
-	r := mkRun(id, repo, sha, status, conclusion, "", createdOff, updatedOff)
-	r.Event = "pull_request"
-	r.HeadBranch = branch
-	return r
-}
-
-func mkJob(id, runID int64, name, status, conclusion string, startOff, endOff time.Duration) GitHubJob {
-	j := GitHubJob{ID: id, RunID: runID, Name: name, Status: status, Conclusion: conclusion}
-	if startOff != 0 {
-		j.StartedAt = testRefTime.Add(startOff)
-	}
-	if endOff != 0 {
-		j.CompletedAt = testRefTime.Add(endOff)
-	}
-	return j
-}
-
-// mkCont builds a container in the shape synthesizeContainersFromServices produces
-// for a service without image metadata; the service defaults to the name minus "aerial-".
-func mkCont(name, service, sha, state, health string, createdOff time.Duration) DockerContainerJSON {
-	if service == "" {
-		service = strings.TrimPrefix(name, "aerial-")
-	}
-	c := DockerContainerJSON{
-		State:   state,
-		Created: testRefTime.Add(createdOff).Unix(),
-		Labels:  map[string]string{"aerial.service": service},
-	}
-	if sha != "" {
-		c.Labels["aerial.commit_sha"] = sha
-	}
-	if health != "" {
-		c.Health = &DockerContainerHealth{Status: health}
-	}
-	return c
-}
-
-func mkLabeledCont(state string, labels map[string]string) DockerContainerJSON {
-	return DockerContainerJSON{State: state, Labels: labels}
-}
 
 func TestBuildFactsUpstreamURL_TableDriven(t *testing.T) {
 	const facts = "http://brain:8080/facts"
@@ -533,317 +458,6 @@ func TestCalculateDeployStatus_TableDriven(t *testing.T) {
 	}
 }
 
-type wantDep struct {
-	ID               string
-	Service          string
-	Repository       string
-	Commit           string
-	CommitMsgSubstr  string
-	Stage            string
-	Progress         int
-	HTMLURL          string
-	StepStatuses     []string
-	StepStatusMap    map[int]string
-	MatrixJobCount   int
-	HasContainerChip bool
-	HasCIChip        bool
-	CheckCommitTime  *time.Time
-}
-
-func TestMergeClusterDeployments_PureTableDriven(t *testing.T) {
-	t.Parallel()
-	tests := make([]mergeClusterTestCase, 0, 70)
-	tests = append(tests, mergeClusterBatch1Cases()...)
-	tests = append(tests, mergeClusterBatch2Cases()...)
-	tests = append(tests, mergeClusterBatch3Cases()...)
-	tests = append(tests, mergeClusterBatch4Cases()...)
-	tests = append(tests, mergeClusterBatch5Cases()...)
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			runMergeClusterDeploymentsCase(t, tt, testRefTime)
-		})
-	}
-}
-
-func mergeClusterBatch1Cases() []mergeClusterTestCase {
-	var cardinalityRuns []GitHubRun
-	for i := 1; i <= 8; i++ {
-		cardinalityRuns = append(cardinalityRuns, mkRun(int64(600+i), "", fmt.Sprintf("%07d000000000000000000000000000000000", i), "in_progress", "", "", time.Duration(-i)*time.Minute, time.Duration(-i)*time.Minute))
-	}
-
-	sortRuns := mkRuns(
-		mkRun(100, "", "1111111111111111111111111111111111111111", "completed", "success", "", -10*time.Minute, -2*time.Minute),
-		mkRun(101, "", "3333333333333333333333333333333333333333", "in_progress", "", "", -4*time.Minute, -3*time.Minute),
-		mkRun(102, "", "5555555555555555555555555555555555555555", "completed", "success", "", -10*time.Minute, -2*time.Minute),
-		mkRun(103, "", "2222222222222222222222222222222222222222", "queued", "", "", -1*time.Minute, -1*time.Minute),
-	)
-	sortContainers := []DockerContainerJSON{
-		mkCont("proxy", "proxy", "1111111111111111111111111111111111111111", "running", "", -40*time.Second),
-		mkCont("brain", "brain", "6666666666666666666666666666666666666666", "running", "", -300*time.Second),
-	}
-
-	return []mergeClusterTestCase{
-		// 2. AwaitingPullBridge
-		{name: "AwaitingPullBridge", runs: mkRuns(mkRun(301, "", "cccccccccccccccccccccccccccccccccccccccc", "completed", "success", "chore: updated docs", -10*time.Minute, -5*time.Minute)), currentCommit: "oldcommit", wantList: []wantDep{{Commit: "ccccccc", Stage: "awaiting_pull", StepStatusMap: map[int]string{1: "completed", 2: "active"}}}},
-
-		// 3. DeterministicSort
-		{name: "DeterministicSort", runs: sortRuns, containers: sortContainers, currentCommit: "6666666", wantCount: 4, wantList: []wantDep{{Stage: "swapping"}, {Stage: "building"}, {Stage: "awaiting_pull"}, {Stage: "queued"}}, wantRepeats: 10},
-
-		// 4. MultiCommitContainerGrouping
-		{name: "MultiCommitContainerGrouping", runs: mkRuns(mkRun(1, "", "aaaaaaa123456789", "completed", "success", "", -10*time.Minute, -5*time.Minute), mkRun(2, "", "bbbbbbb123456789", "completed", "success", "", -2*time.Minute, -1*time.Minute)), containers: []DockerContainerJSON{mkCont("aerial-brain", "brain", "aaaaaaa123456789", "running", "", -300*time.Second), mkCont("aerial-proxy", "proxy", "bbbbbbb123456789", "running", "", -30*time.Second)}, currentCommit: "aaaaaaa", wantList: []wantDep{{Commit: "bbbbbbb", Stage: "swapping"}, {Commit: "aaaaaaa", Stage: "live"}}},
-
-		// 5. ChipScoping
-		{name: "ChipScoping", runs: mkRuns(mkRun(401, "", "7777777aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "in_progress", "", "", -2*time.Minute, -1*time.Minute)), jobs: map[int64][]GitHubJob{401: {mkJob(1, 401, "build (brain)", "in_progress", "", -90*time.Second, 0)}}, containers: []DockerContainerJSON{mkCont("aerial-brain", "brain", "7777777aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "running", "", -30*time.Second)}, currentCommit: "7777777", wantList: []wantDep{{HasCIChip: true, HasContainerChip: true}}},
-
-		// 6. SafeNilHandling
-		{name: "SafeNilHandling", runs: mkRuns(mkRun(501, "", "", "queued", "", "", -10*time.Second, 0), mkRun(502, "", "abc", "in_progress", "", "", -20*time.Second, 0), mkRun(503, "", "not-a-valid-hex-sha!@#$%^&*()", "completed", "failure", "", -30*time.Second, -25*time.Second)), wantCount: 3},
-
-		// 7. CardinalityClamp
-		{name: "CardinalityClamp", runs: cardinalityRuns, wantCount: 5},
-
-		// 9. DegradedAndFailedBranches_DegradedContainer
-		{name: "DegradedAndFailedBranches_DegradedContainer", runs: mkRuns(mkRun(801, "", "8888888888888888888888888888888888888888", "completed", "success", "", -5*time.Minute, -2*time.Minute)), containers: []DockerContainerJSON{mkCont("aerial-dashboard", "", "8888888888888888888888888888888888888888", "exited", "", -60*time.Second)}, wantList: []wantDep{{Stage: "degraded", StepStatusMap: map[int]string{4: "failed"}}}},
-
-		// 12. MultiRunSameCommitAndSortTies_SameCommit
-		{name: "MultiRunSameCommitAndSortTies_SameCommit", runs: mkRuns(mkRun(111, "", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "completed", "success", "", -10*time.Minute, -5*time.Minute), mkRun(112, "", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "in_progress", "", "", -1*time.Minute, -30*time.Second)), wantList: []wantDep{{Stage: "building"}}},
-
-		// 13. MultiRunSameCommitAndSortTies_SortTiesLexicographical
-		{name: "MultiRunSameCommitAndSortTies_SortTiesLexicographical", runs: mkRuns(mkRun(201, "", "ffffffffffffffffffffffffffffffffffffffff", "in_progress", "", "", -2*time.Minute, -1*time.Minute), mkRun(202, "", "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", "in_progress", "", "", -2*time.Minute, -1*time.Minute)), wantList: []wantDep{{Commit: "eeeeeee"}, {Commit: "fffffff"}}},
-
-		// 14. MultiRunSameCommitAndSortTies_FailedPrecedesDegraded
-		{name: "MultiRunSameCommitAndSortTies_FailedPrecedesDegraded", runs: mkRuns(mkRun(301, "", "1111111111111111111111111111111111111111", "completed", "failure", "", -5*time.Minute, -5*time.Minute), mkRun(302, "", "2222222222222222222222222222222222222222", "completed", "success", "", -5*time.Minute, -5*time.Minute)), containers: []DockerContainerJSON{mkCont("aerial-proxy", "", "2222222222222222222222222222222222222222", "exited", "", -5*time.Minute)}, wantList: []wantDep{{Stage: "failed"}, {Stage: "degraded"}}},
-
-		// 15. MultiRunSameCommitAndSortTies_ExpiredIgnored
-		{name: "MultiRunSameCommitAndSortTies_ExpiredIgnored", runs: mkRuns(mkRun(401, "", "3333333333333333333333333333333333333333", "completed", "success", "", -40*time.Minute, -35*time.Minute)), wantCount: 0},
-
-		// 16. UnparentedContainersDoNotSpawnCards
-		{name: "UnparentedContainersDoNotSpawnCards", containers: []DockerContainerJSON{mkLabeledCont("running", map[string]string{"aerial.service": "postgres"}), mkLabeledCont("exited", map[string]string{"aerial.service": "vector"})}, currentCommit: "livecommit", wantCount: 0},
-
-		// 17. ActiveCIRun
-		{name: "ActiveCIRun", runs: mkRuns(mkRun(481, "", "7a9f1b234567", "in_progress", "", "feat(brain): live github actions tracking", -2*time.Minute, -10*time.Second)), jobs: map[int64][]GitHubJob{481: {mkJob(1, 481, "Build & Push Images to GHCR (brain, ., ./brain/Dockerfile, aerial-brain)", "in_progress", "", -40*time.Second, 0), mkJob(2, 481, "Build & Push Images to GHCR (dashboard, ./dashboard, ./dashboard/Dockerfile, aerial-dashboard)", "completed", "success", -60*time.Second, -10*time.Second)}}, currentCommit: "7a9f1b2", wantList: []wantDep{{Stage: "building", Commit: "7a9f1b2", MatrixJobCount: 2, HTMLURL: "https://github.com/azylman/aerial/actions/runs/481"}}},
-
-		// 18. FailedCIRun
-		{name: "FailedCIRun", runs: mkRuns(mkRun(482, "", "abc1234567", "completed", "failure", "", -5*time.Minute, -4*time.Minute)), currentCommit: "abc1234", wantList: []wantDep{{Stage: "failed", StepStatusMap: map[int]string{1: "failed"}}}},
-
-		// 19. AwaitingPullUntilRolloutObserved
-		{name: "AwaitingPullUntilRolloutObserved", containers: []DockerContainerJSON{mkCont("aerial-brain", "brain", "", "running", "", -10*time.Hour)}, runs: mkRuns(mkRun(483, "", "def5678901", "completed", "success", "", -4*time.Minute, -45*time.Second)), jobs: map[int64][]GitHubJob{483: {mkJob(0, 483, "Build & Push Images to GHCR (brain)", "completed", "success", 0, 0)}}, currentCommit: "old1234", wantList: []wantDep{{Stage: "awaiting_pull", StepStatusMap: map[int]string{2: "active"}}}},
-	}
-}
-
-func mergeClusterBatch2Cases() []mergeClusterTestCase {
-	return []mergeClusterTestCase{
-		// 21. NoContainerBuilds_ImmediateLive
-		{name: "NoContainerBuilds_ImmediateLive", runs: mkRuns(mkRun(485, "", "purecode1234", "completed", "success", "", -10*time.Minute, -150*time.Second)), jobs: map[int64][]GitHubJob{485: {mkJob(0, 485, "Run Service Unit Tests", "completed", "success", 0, 0), mkJob(0, 485, "Lint Microservices & Frontend", "completed", "success", 0, 0), mkJob(0, 485, "Build & Push Images to GHCR (brain)", "completed", "skipped", 0, 0)}}, containers: []DockerContainerJSON{mkCont("aerial-brain", "brain", "", "running", "", -1*time.Hour)}, currentCommit: "old1234", wantList: []wantDep{{Stage: "live", Progress: 100, StepStatusMap: map[int]string{2: "completed"}}}},
-
-		// 22. RollingSwap
-		{name: "RollingSwap", runs: mkRuns(mkRun(101, "", "abc9999999", "completed", "success", "", -2*time.Minute, -1*time.Minute)), containers: []DockerContainerJSON{mkCont("aerial-brain", "brain", "abc9999999", "running", "starting", -30*time.Second), mkCont("aerial-dashboard", "dashboard", "", "running", "", -10*time.Second)}, currentCommit: "abc9999", wantList: []wantDep{{Stage: "swapping", Commit: "abc9999", MatrixJobCount: 2}}},
-
-		// 23. SyncedGrace
-		{name: "SyncedGrace", runs: mkRuns(mkRun(102, "", "live123", "completed", "success", "", -5*time.Minute, -4*time.Minute)), containers: []DockerContainerJSON{mkCont("aerial-brain", "brain", "", "running", "healthy", -3*time.Minute), mkCont("aerial-dashboard", "dashboard", "", "running", "healthy", -3*time.Minute)}, currentCommit: "live123", wantList: []wantDep{{Stage: "live", Progress: 100, StepStatuses: []string{"completed", "completed", "completed", "completed", "completed"}}}},
-
-		// 24. DegradedState
-		{name: "DegradedState", runs: mkRuns(mkRun(103, "", "deg1234", "completed", "success", "", -5*time.Minute, -3*time.Minute)), containers: []DockerContainerJSON{mkCont("aerial-brain", "brain", "", "running", "unhealthy", -2*time.Minute), mkCont("aerial-dashboard", "dashboard", "", "running", "healthy", -2*time.Minute)}, currentCommit: "deg1234", wantList: []wantDep{{Stage: "degraded", StepStatusMap: map[int]string{4: "failed"}}}},
-
-		// 25. Idle
-		{name: "Idle", containers: []DockerContainerJSON{mkCont("aerial-brain", "brain", "", "running", "healthy", -2*time.Hour)}, currentCommit: "idle123", wantCount: 0},
-
-		// 26. AdversarialNilLabelsAndNilHealth
-		{name: "AdversarialNilLabelsAndNilHealth", runs: mkRuns(mkRun(104, "", "test1234", "completed", "success", "", -2*time.Minute, -1*time.Minute)), containers: []DockerContainerJSON{mkCont("aerial-brain", "", "", "running", "", -30*time.Second), mkCont("aerial-dashboard", "", "", "running", "", -30*time.Second)}, currentCommit: "test1234", wantList: []wantDep{{Stage: "swapping", MatrixJobCount: 2}}},
-
-		// 27. AdversarialClockSkewFutureTimestamp
-		{name: "AdversarialClockSkewFutureTimestamp", runs: mkRuns(mkRun(999, "", "future1234", "completed", "success", "", 10*time.Second, 15*time.Second)), containers: []DockerContainerJSON{mkCont("aerial-brain", "brain", "", "running", "", 2*time.Hour)}, currentCommit: "old1234", wantList: []wantDep{{Stage: "awaiting_pull"}}},
-
-		// 28. CommitTimeAcrossAllStages_Queued
-		{name: "CommitTimeAcrossAllStages_Queued", runs: mkRuns(mkRun(501, "", "1111aaa", "queued", "", "feat: queued", -2*time.Minute, 0)), currentCommit: "1111aaa", wantList: []wantDep{{CheckCommitTime: &testCommitTime}}},
-
-		// 29. CommitTimeAcrossAllStages_Building
-		{name: "CommitTimeAcrossAllStages_Building", runs: mkRuns(mkRun(502, "", "2222bbb", "in_progress", "", "feat: building", -1*time.Minute, 0)), currentCommit: "2222bbb", wantList: []wantDep{{CheckCommitTime: &testCommitTime}}},
-
-		// 30. CommitTimeAcrossAllStages_Failed
-		{name: "CommitTimeAcrossAllStages_Failed", runs: mkRuns(mkRun(503, "", "3333ccc", "completed", "failure", "feat: failed", -5*time.Minute, -4*time.Minute)), currentCommit: "3333ccc", wantList: []wantDep{{CheckCommitTime: &testCommitTime}}},
-
-		// 31. CommitTimeAcrossAllStages_Swapping
-		{name: "CommitTimeAcrossAllStages_Swapping", runs: mkRuns(mkRun(504, "", "4444ddd", "completed", "success", "feat: success", -2*time.Minute, -1*time.Minute)), containers: []DockerContainerJSON{mkCont("aerial-brain", "brain", "", "running", "starting", -30*time.Second)}, currentCommit: "4444ddd", wantList: []wantDep{{CheckCommitTime: &testCommitTime}}},
-
-		// 32. EmptyAndFuture_Empty
-		{name: "EmptyAndFuture_Empty", currentCommit: "commit123", wantCount: 0},
-
-		// 33. EmptyAndFuture_FutureContainers
-		{name: "EmptyAndFuture_FutureContainers", runs: mkRuns(mkRun(123, "", "sha1234567890", "completed", "success", "", -10*time.Minute, 0)), containers: []DockerContainerJSON{mkCont("aerial-brain", "brain", "", "running", "", 2*time.Hour)}, wantCount: 1},
-
-		// 37. UnhealthyContainerDegradesCard
-		{name: "UnhealthyContainerDegradesCard", runs: mkRuns(mkRun(105, "", "commit123", "completed", "success", "", -15*time.Minute, -12*time.Minute)), containers: []DockerContainerJSON{mkCont("aerial-brain", "brain", "", "running", "unhealthy", -10*time.Minute)}, currentCommit: "commit123", wantList: []wantDep{{Stage: "degraded", StepStatusMap: map[int]string{3: "completed", 4: "failed"}}}},
-
-		// 38. MultiRepoActiveFanout
-		{name: "MultiRepoActiveFanout", runs: mkRuns(mkRun(101, "azylman/aerial", "1111aaa", "in_progress", "", "", -2*time.Minute, 0), mkRun(201, "azylman/aerial-sidecars", "2222bbb", "in_progress", "", "", -1*time.Minute, 0)), currentCommit: "0000000", wantList: []wantDep{{Repository: "azylman/aerial-sidecars", Service: "aerial-sidecars", Stage: "building"}, {Repository: "azylman/aerial", Service: "aerial-stack", Stage: "building"}}},
-	}
-}
-
-func mergeClusterBatch3Cases() []mergeClusterTestCase {
-	return []mergeClusterTestCase{
-		// 39. NonContainerRepoNoTimeout
-		{name: "NonContainerRepoNoTimeout", runs: mkRuns(mkRun(301, "azylman/aerial-config", "3333ccc", "completed", "success", "", -5*time.Minute, -150*time.Second)), containers: []DockerContainerJSON{mkCont("aerial-brain", "brain", "", "running", "", -10*time.Hour)}, currentCommit: "oldcorecommit", wantList: []wantDep{{Service: "aerial-config", Stage: "awaiting_pull"}}},
-
-		// 40. ActivePRRunShowsBuilding
-		{name: "ActivePRRunShowsBuilding", runs: mkRuns(mkPRRun(9001, "azylman/aerial-sidecars", "feat/sidecars-pr", "aabbccdd1122", "in_progress", "", -1*time.Minute, -30*time.Second)), jobs: map[int64][]GitHubJob{9001: {mkJob(0, 9001, "Run Sidecar Tests & Lint", "completed", "success", 0, 0), mkJob(0, 9001, "Build & Push Sidecar Images to GHCR (aura-farming)", "in_progress", "", 0, 0)}}, currentCommit: "0000000", wantList: []wantDep{{Repository: "azylman/aerial-sidecars", Stage: "building", MatrixJobCount: 2}}},
-
-		// 41. CompletedPRRunDoesNotTimeout
-		{name: "CompletedPRRunDoesNotTimeout", runs: mkRuns(mkPRRun(9002, "azylman/aerial-sidecars", "feat/sidecars-pr", "aabbccdd1122", "completed", "success", -300*time.Second, -200*time.Second)), jobs: map[int64][]GitHubJob{9002: {mkJob(0, 9002, "Build & Push Sidecar Images to GHCR (aura-farming)", "completed", "success", 0, 0)}}, containers: []DockerContainerJSON{mkCont("aerial-brain", "brain", "", "running", "", -10*time.Hour)}, currentCommit: "oldcorecommit", wantCount: 0},
-
-		// 54. Prefix40CharSHA_MatchedBy7CharPrefixContainer
-		{name: "Prefix40CharSHA_MatchedBy7CharPrefixContainer", runs: mkRuns(mkRun(888, "", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "in_progress", "", "", -3*time.Minute, 0)), containers: []DockerContainerJSON{mkCont("aerial-proxy", "proxy", "bbbbbbb", "running", "", -20*time.Second)}, wantList: []wantDep{{Commit: "bbbbbbb"}}},
-
-		// 55. SortTieBreaker_FailedPrecedesDegraded_BothPositions
-		{name: "SortTieBreaker_FailedPrecedesDegraded_BothPositions", runs: mkRuns(mkRun(901, "", "1111111111111111111111111111111111111111", "completed", "failure", "", -5*time.Minute, -5*time.Minute), mkRun(902, "", "2222222222222222222222222222222222222222", "completed", "success", "", -5*time.Minute, -5*time.Minute)), containers: []DockerContainerJSON{mkCont("aerial-brain", "", "2222222222222222222222222222222222222222", "exited", "", -5*time.Minute)}, wantList: []wantDep{{Stage: "failed", Commit: "1111111"}, {Stage: "degraded", Commit: "2222222"}}},
-	}
-}
-
-type mergeClusterTestCase struct {
-	name          string
-	runs          []GitHubRun
-	jobs          map[int64][]GitHubJob
-	containers    []DockerContainerJSON
-	currentCommit string
-	refTime       time.Time
-	useZeroTime   bool
-	wantCount     int
-	wantList      []wantDep
-	wantRepeats   int
-}
-
-func runMergeClusterDeploymentsCase(t *testing.T, tt mergeClusterTestCase, defaultRefTime time.Time) {
-	t.Helper()
-	ref := tt.refTime
-	if ref.IsZero() && !tt.useZeroTime {
-		ref = defaultRefTime
-	}
-	deps := MergeClusterDeployments(tt.runs, tt.jobs, tt.containers, tt.currentCommit, ref)
-
-	expectedCount := tt.wantCount
-	if expectedCount == 0 && len(tt.wantList) > 0 {
-		expectedCount = len(tt.wantList)
-	}
-	if len(deps) != expectedCount {
-		t.Fatalf("expected %d deployments, got %d: %+v", expectedCount, len(deps), deps)
-	}
-	for i, want := range tt.wantList {
-		if i >= len(deps) {
-			break
-		}
-		assertMergeClusterDeploymentItem(t, i, deps[i], want)
-	}
-	if tt.wantRepeats > 0 {
-		assertMergeClusterDeploymentRepeats(t, tt, ref)
-	}
-}
-
-func assertMergeClusterDeploymentItem(t *testing.T, i int, got DeploymentStatus, want wantDep) {
-	t.Helper()
-	if want.ID != "" && got.ID != want.ID {
-		t.Errorf("dep[%d].ID = %q, want %q", i, got.ID, want.ID)
-	}
-	if want.Service != "" && got.Service != want.Service {
-		t.Errorf("dep[%d].Service = %q, want %q", i, got.Service, want.Service)
-	}
-	if want.Repository != "" && got.Repository != want.Repository {
-		t.Errorf("dep[%d].Repository = %q, want %q", i, got.Repository, want.Repository)
-	}
-	if want.Commit != "" && got.Commit != want.Commit {
-		t.Errorf("dep[%d].Commit = %q, want %q", i, got.Commit, want.Commit)
-	}
-	if want.Stage != "" && got.Stage != want.Stage {
-		t.Errorf("dep[%d].Stage = %q, want %q", i, got.Stage, want.Stage)
-	}
-	if want.Progress != 0 && got.Progress != want.Progress {
-		t.Errorf("dep[%d].Progress = %d, want %d", i, got.Progress, want.Progress)
-	}
-	if want.CommitMsgSubstr != "" && !strings.Contains(got.CommitMsg, want.CommitMsgSubstr) {
-		t.Errorf("dep[%d].CommitMsg = %q, want containing %q", i, got.CommitMsg, want.CommitMsgSubstr)
-	}
-	if want.HTMLURL != "" && got.HTMLURL != want.HTMLURL {
-		t.Errorf("dep[%d].HTMLURL = %q, want %q", i, got.HTMLURL, want.HTMLURL)
-	}
-	assertMergeClusterDeploymentSteps(t, i, got, want)
-	assertMergeClusterDeploymentChips(t, i, got, want)
-	if want.CheckCommitTime != nil {
-		if got.CommitTime == nil || !got.CommitTime.Equal(*want.CheckCommitTime) {
-			t.Errorf("dep[%d].CommitTime = %v, want %v", i, got.CommitTime, *want.CheckCommitTime)
-		}
-	}
-}
-
-func assertMergeClusterDeploymentSteps(t *testing.T, i int, got DeploymentStatus, want wantDep) {
-	t.Helper()
-	if len(want.StepStatuses) > 0 {
-		if len(got.Steps) != len(want.StepStatuses) {
-			t.Errorf("dep[%d].Steps len = %d, want %d", i, len(got.Steps), len(want.StepStatuses))
-		} else {
-			for sIdx, expStatus := range want.StepStatuses {
-				if got.Steps[sIdx].Status != expStatus {
-					t.Errorf("dep[%d].Steps[%d].Status = %q, want %q", i, sIdx, got.Steps[sIdx].Status, expStatus)
-				}
-			}
-		}
-	}
-	for sIdx, expStatus := range want.StepStatusMap {
-		if sIdx < len(got.Steps) {
-			if got.Steps[sIdx].Status != expStatus {
-				t.Errorf("dep[%d].Steps[%d].Status = %q, want %q", i, sIdx, got.Steps[sIdx].Status, expStatus)
-			}
-		} else {
-			t.Errorf("dep[%d].Steps has len %d, cannot check index %d", i, len(got.Steps), sIdx)
-		}
-	}
-}
-
-func assertMergeClusterDeploymentChips(t *testing.T, i int, got DeploymentStatus, want wantDep) {
-	t.Helper()
-	if want.MatrixJobCount > 0 && len(got.MatrixJobs) != want.MatrixJobCount {
-		t.Errorf("dep[%d].MatrixJobs count = %d, want %d", i, len(got.MatrixJobs), want.MatrixJobCount)
-	}
-	if want.HasContainerChip {
-		found := false
-		for _, c := range got.MatrixJobs {
-			if c.Type == "container" {
-				found = true
-				break
-			}
-		}
-		if !found {
-			t.Errorf("dep[%d] expected container chip, got %+v", i, got.MatrixJobs)
-		}
-	}
-	if want.HasCIChip {
-		found := false
-		for _, c := range got.MatrixJobs {
-			if c.Type == "ci" {
-				found = true
-				break
-			}
-		}
-		if !found {
-			t.Errorf("dep[%d] expected CI chip, got %+v", i, got.MatrixJobs)
-		}
-	}
-}
-
-func assertMergeClusterDeploymentRepeats(t *testing.T, tt mergeClusterTestCase, ref time.Time) {
-	t.Helper()
-	for iter := range tt.wantRepeats {
-		iterDeps := MergeClusterDeployments(tt.runs, tt.jobs, tt.containers, tt.currentCommit, ref)
-		if len(iterDeps) != len(tt.wantList) {
-			t.Fatalf("iteration %d: expected %d deployments, got %d", iter, len(tt.wantList), len(iterDeps))
-		}
-		for idx, want := range tt.wantList {
-			if iterDeps[idx].Stage != want.Stage {
-				t.Fatalf("iteration %d at index %d: expected stage %q, got %q", iter, idx, want.Stage, iterDeps[idx].Stage)
-			}
-		}
-	}
-}
-
 func TestIsDeployOngoing_TableDriven(t *testing.T) {
 	ongoingDep := DeploymentStatus{Stage: "pulling"}
 	idleDep := DeploymentStatus{Stage: "live"}
@@ -1001,5 +615,320 @@ func runDocketTaskDetailCase(t *testing.T, tc docketTaskDetailTestCase) {
 	}
 	if gotURL != tc.wantURL || gotID != tc.wantID {
 		t.Errorf("got (%q, %q), want (%q, %q)", gotURL, gotID, tc.wantURL, tc.wantID)
+	}
+}
+
+func TestNormalizeAgent_TableDriven(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{name: "clean lowercase slug", input: "agent-alpha", want: "agent-alpha"},
+		{name: "uppercase and whitespace", input: "  AGENT-Alpha  ", want: "agent-alpha"},
+		{name: "disallowed symbols stripped", input: "agent_alpha!@#$", want: "agentalpha"},
+		{name: "numbers and hyphens kept", input: "agent-007-beta", want: "agent-007-beta"},
+		{name: "empty input", input: "", want: ""},
+		{name: "whitespace only", input: "   ", want: ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := NormalizeAgent(tc.input)
+			if got != tc.want {
+				t.Errorf("NormalizeAgent(%q) = %q, want %q", tc.input, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestMatchAgent_TableDriven(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		itemAgent   string
+		filterAgent string
+		want        bool
+	}{
+		{name: "empty filter matches any", itemAgent: "agent-alpha", filterAgent: "", want: true},
+		{name: "all filter matches any", itemAgent: "agent-alpha", filterAgent: "all", want: true},
+		{name: "ALL uppercase matches any", itemAgent: "agent-alpha", filterAgent: "ALL", want: true},
+		{name: "exact match", itemAgent: "agent-alpha", filterAgent: "agent-alpha", want: true},
+		{name: "normalized case match", itemAgent: "Agent-Alpha", filterAgent: "agent-alpha", want: true},
+		{name: "mismatch", itemAgent: "agent-alpha", filterAgent: "agent-beta", want: false},
+		{name: "empty item defaults to aerial - aerial filter matches", itemAgent: "", filterAgent: "aerial", want: true},
+		{name: "empty item defaults to aerial - non-aerial filter mismatches", itemAgent: "", filterAgent: "agent-alpha", want: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := MatchAgent(tc.itemAgent, tc.filterAgent)
+			if got != tc.want {
+				t.Errorf("MatchAgent(%q, %q) = %v, want %v", tc.itemAgent, tc.filterAgent, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestSortConfiguredAgents_TableDriven(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		agents []string
+		want   []string
+	}{
+		{name: "nil returns aerial", agents: nil, want: []string{"aerial"}},
+		{name: "empty returns aerial", agents: []string{}, want: []string{"aerial"}},
+		{name: "aerial only", agents: []string{"aerial"}, want: []string{"aerial"}},
+		{name: "aerial preserved first and others sorted alphabetically", agents: []string{"agent-beta", "aerial", "agent-alpha"}, want: []string{"aerial", "agent-alpha", "agent-beta"}},
+		{name: "duplicates and all and empty skipped", agents: []string{"", "all", "ALL", "agent-alpha", "agent-alpha", "agent-beta"}, want: []string{"aerial", "agent-alpha", "agent-beta"}},
+		{name: "missing aerial automatically prepended", agents: []string{"agent-beta", "agent-alpha"}, want: []string{"aerial", "agent-alpha", "agent-beta"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := SortConfiguredAgents(tc.agents)
+			if len(got) != len(tc.want) {
+				t.Fatalf("SortConfiguredAgents(%v) len = %d, want %d: %v", tc.agents, len(got), len(tc.want), got)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Errorf("SortConfiguredAgents(%v)[%d] = %q, want %q", tc.agents, i, got[i], tc.want[i])
+				}
+			}
+		})
+	}
+}
+
+func TestFilterByAgent_TableDriven(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		filter    string
+		itemAgent string
+		wantKept  bool
+	}{
+		{name: "matching agent kept by every wrapper", filter: "agent-alpha", itemAgent: "agent-alpha", wantKept: true},
+		{name: "other agent dropped by every wrapper", filter: "agent-alpha", itemAgent: "aerial", wantKept: false},
+		{name: "all filter short-circuits every wrapper", filter: "all", itemAgent: "agent-alpha", wantKept: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			wantLen := 0
+			if tc.wantKept {
+				wantLen = 1
+			}
+
+			if got := len(FilterFactsByAgent([]FactItem{{ID: 1, Agent: tc.itemAgent}}, tc.filter)); got != wantLen {
+				t.Errorf("FilterFactsByAgent len = %d, want %d", got, wantLen)
+			}
+			if got := len(FilterCronsByAgent([]CronSchedule{{ID: "c", Agent: tc.itemAgent}}, tc.filter)); got != wantLen {
+				t.Errorf("FilterCronsByAgent len = %d, want %d", got, wantLen)
+			}
+			if got := len(FilterOneShotsByAgent([]OneShotSchedule{{ID: "o", Agent: tc.itemAgent}}, tc.filter)); got != wantLen {
+				t.Errorf("FilterOneShotsByAgent len = %d, want %d", got, wantLen)
+			}
+			if got := len(FilterScheduleRunsByAgent([]ScheduleRun{{ID: "r", Agent: tc.itemAgent}}, tc.filter)); got != wantLen {
+				t.Errorf("FilterScheduleRunsByAgent len = %d, want %d", got, wantLen)
+			}
+			if got := len(FilterBuildsByAgent([]VanadisBuildDTO{{ID: "b", Agent: tc.itemAgent}}, tc.filter)); got != wantLen {
+				t.Errorf("FilterBuildsByAgent len = %d, want %d", got, wantLen)
+			}
+			if got := len(FilterActiveTasksByAgent([]ActiveTaskStatus{{ID: "t", Agent: tc.itemAgent}}, tc.filter)); got != wantLen {
+				t.Errorf("FilterActiveTasksByAgent len = %d, want %d", got, wantLen)
+			}
+		})
+	}
+}
+
+func TestFactItemUnmarshalJSON_TableDriven(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		rawJSON   string
+		wantAgent string
+		wantText  string
+	}{
+		{name: "agent field present", rawJSON: `{"id":1,"fact_text":"dark mode","agent":"agent-alpha"}`, wantAgent: "agent-alpha", wantText: "dark mode"},
+		{name: "source_agent fallback", rawJSON: `{"id":2,"fact_text":"voice setting","source_agent":"agent-beta"}`, wantAgent: "agent-beta", wantText: "voice setting"},
+		{name: "agent wins", rawJSON: `{"id":3,"fact_text":"both","agent":"agent-alpha","source_agent":"agent-beta"}`, wantAgent: "agent-alpha", wantText: "both"},
+		{name: "neither present leaves agent empty", rawJSON: `{"id":4,"fact_text":"neither"}`, wantText: "neither"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var item FactItem
+			if err := json.Unmarshal([]byte(tc.rawJSON), &item); err != nil {
+				t.Fatalf("json.Unmarshal error = %v", err)
+			}
+			if item.Agent != tc.wantAgent {
+				t.Errorf("item.Agent = %q, want %q", item.Agent, tc.wantAgent)
+			}
+			if item.FactText != tc.wantText {
+				t.Errorf("item.FactText = %q, want %q", item.FactText, tc.wantText)
+			}
+		})
+	}
+}
+
+func TestFactsAPIResponseUnmarshalJSON_TableDriven(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		rawJSON   string
+		wantTotal int
+		wantAgent string
+		wantErr   bool
+	}{
+		{
+			name:      "valid response with facts",
+			rawJSON:   `{"total":1,"facts":[{"id":1,"fact_text":"voice","source_agent":"agent-1"}]}`,
+			wantTotal: 1,
+			wantAgent: "agent-1",
+		},
+		{
+			name:      "empty facts",
+			rawJSON:   `{"total":0,"facts":[]}`,
+			wantTotal: 0,
+		},
+		{
+			name:    "invalid response json",
+			rawJSON: `{"total":`,
+			wantErr: true,
+		},
+		{
+			name:    "invalid item json",
+			rawJSON: `{"total":1,"facts":[{"id":"not-an-int"}]}`,
+			wantErr: true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var resp FactsAPIResponse
+			err := json.Unmarshal([]byte(tc.rawJSON), &resp)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, got nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error = %v", err)
+			}
+			if resp.Total != tc.wantTotal {
+				t.Errorf("Total = %d, want %d", resp.Total, tc.wantTotal)
+			}
+			if tc.wantAgent != "" {
+				if len(resp.Facts) != 1 || resp.Facts[0].Agent != tc.wantAgent {
+					t.Errorf("Facts[0].Agent = %q, want %q", resp.Facts[0].Agent, tc.wantAgent)
+				}
+			}
+		})
+	}
+}
+
+func TestAgentBrainURL_TableDriven(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name         string
+		defaultURL   string
+		defaultAgent string
+		agent        string
+		want         string
+	}{
+		{name: "default agent keeps configured host", defaultURL: "http://eri.aerial", defaultAgent: "aerial", agent: "aerial", want: "http://eri.aerial"},
+		{name: "default agent match is normalized", defaultURL: "http://eri.aerial", defaultAgent: "aerial", agent: " Aerial ", want: "http://eri.aerial"},
+		{name: "sibling replaces first label", defaultURL: "http://eri.aerial", defaultAgent: "aerial", agent: "agent-alpha", want: "http://eri-agent-alpha.aerial"},
+		{name: "sibling agent normalized", defaultURL: "http://eri.aerial", defaultAgent: "aerial", agent: "  Agent-Beta! ", want: "http://eri-agent-beta.aerial"},
+		{name: "port and scheme preserved", defaultURL: "https://eri.default.svc.cluster.local:8080", defaultAgent: "aerial", agent: "agent-alpha", want: "https://eri-agent-alpha.default.svc.cluster.local:8080"},
+		{name: "bare host with port", defaultURL: "http://eri:80", defaultAgent: "aerial", agent: "agent-alpha", want: "http://eri-agent-alpha:80"},
+		{name: "default stack not named aerial", defaultURL: "http://eri.aerial", defaultAgent: "agent-alpha", agent: "aerial", want: "http://eri-aerial.aerial"},
+		{name: "first label not eri is underivable", defaultURL: "http://brain.aerial", defaultAgent: "aerial", agent: "agent-alpha", want: ""},
+		{name: "eri only in later label is underivable", defaultURL: "http://x.eri.aerial", defaultAgent: "aerial", agent: "agent-alpha", want: ""},
+		{name: "empty configured url", defaultURL: "", defaultAgent: "aerial", agent: "agent-alpha", want: ""},
+		{name: "empty agent", defaultURL: "http://eri.aerial", defaultAgent: "aerial", agent: "  ", want: ""},
+		{name: "unparseable url", defaultURL: "http://eri.aerial:bad port", defaultAgent: "aerial", agent: "agent-alpha", want: ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := AgentBrainURL(tc.defaultURL, tc.defaultAgent, tc.agent); got != tc.want {
+				t.Errorf("AgentBrainURL(%q, %q, %q) = %q, want %q", tc.defaultURL, tc.defaultAgent, tc.agent, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestSiblingBrainTargets_TableDriven(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name         string
+		defaultURL   string
+		defaultAgent string
+		agents       []string
+		want         []AgentBrainTarget
+	}{
+		{
+			name: "default excluded, duplicates collapsed", defaultURL: "http://eri.aerial", defaultAgent: "aerial",
+			agents: []string{"aerial", "agent-alpha", "Agent-Alpha", "agent-beta", ""},
+			want:   []AgentBrainTarget{{Agent: "agent-alpha", URL: "http://eri-agent-alpha.aerial"}, {Agent: "agent-beta", URL: "http://eri-agent-beta.aerial"}},
+		},
+		{name: "underivable host yields none", defaultURL: "http://127.0.0.1:9999", defaultAgent: "aerial", agents: []string{"agent-alpha"}, want: []AgentBrainTarget{}},
+		{name: "no agents", defaultURL: "http://eri.aerial", defaultAgent: "aerial", agents: nil, want: []AgentBrainTarget{}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := SiblingBrainTargets(tc.defaultURL, tc.defaultAgent, tc.agents); !slices.Equal(got, tc.want) {
+				t.Errorf("SiblingBrainTargets() = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestDefaultAgentFromTasks_TableDriven(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		tasks []ActiveTaskStatus
+		want  string
+	}{
+		{name: "no tasks falls back to default tenant", tasks: nil, want: "aerial"},
+		{name: "rows without agent fall back", tasks: []ActiveTaskStatus{{ID: "1"}}, want: "aerial"},
+		{name: "first reported agent wins", tasks: []ActiveTaskStatus{{ID: "1"}, {ID: "2", Agent: " Agent-Alpha "}}, want: "agent-alpha"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := DefaultAgentFromTasks(tc.tasks); got != tc.want {
+				t.Errorf("DefaultAgentFromTasks() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestStampTaskAgent_TableDriven(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		tasks []ActiveTaskStatus
+		agent string
+		want  []ActiveTaskStatus
+	}{
+		{name: "nil yields empty", tasks: nil, agent: "aerial", want: []ActiveTaskStatus{}},
+		{name: "fills empty, keeps reported", tasks: []ActiveTaskStatus{{ID: "1"}, {ID: "2", Agent: "agent-alpha"}}, agent: "aerial", want: []ActiveTaskStatus{{ID: "1", Agent: "aerial"}, {ID: "2", Agent: "agent-alpha"}}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := StampTaskAgent(tc.tasks, tc.agent)
+			if got == nil || !slices.Equal(got, tc.want) {
+				t.Errorf("StampTaskAgent() = %+v, want %+v", got, tc.want)
+			}
+		})
 	}
 }

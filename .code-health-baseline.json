@@ -1,8 +1,6 @@
 {
   "root_files": {
-    "services/console": 19,
     "services/coven": 32,
-    "services/eri": 20,
-    "services/transcripts": 16
+    "services/eri": 20
   }
 }
