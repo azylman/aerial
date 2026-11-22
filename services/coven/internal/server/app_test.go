@@ -908,14 +908,15 @@ func TestCovenDreamer_Dream(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name       string
-		key        string
-		nilWorker  bool
-		nilDreamer bool
-		failOp     string
-		wantStack  string
-		wantDelay  time.Duration
-		wantErr    bool
+		name            string
+		key             string
+		nilWorker       bool
+		nilDreamer      bool
+		failOp          string
+		initialFailures int
+		wantStack       string
+		wantDelay       time.Duration
+		wantErr         bool
 	}{
 		{
 			name:       "nil dreamer returns error",
@@ -945,6 +946,15 @@ func TestCovenDreamer_Dream(t *testing.T) {
 			wantErr:   false,
 		},
 		{
+			name:            "consolidate facts consecutive errors applies exponential backoff",
+			key:             "stack-err-backoff",
+			failOp:          "GetAllFactsWithEmbeddings",
+			initialFailures: 2,
+			wantStack:       "stack-err-backoff",
+			wantDelay:       4 * DefaultDreamingRetryInterval,
+			wantErr:         false,
+		},
+		{
 			name:      "consolidate skills error logs failure and schedules retry",
 			key:       "stack-err-skills",
 			failOp:    "GetPendingProceduralCandidates",
@@ -961,6 +971,20 @@ func TestCovenDreamer_Dream(t *testing.T) {
 			mc := mocks.NewMockContext(t)
 			mc.On("Key").Return(tc.key).Maybe()
 			mc.On("Set", "armed", true).Maybe()
+			failureCount := tc.initialFailures
+			mc.On("Get", "failures", mock.Anything).Run(func(args mock.Arguments) {
+				if outPtr, ok := args.Get(1).(*int); ok && outPtr != nil {
+					*outPtr = failureCount
+				}
+			}).Return(true, nil).Maybe()
+			mc.On("Set", "failures", mock.Anything).Run(func(args mock.Arguments) {
+				if val, ok := args.Get(1).(int); ok {
+					failureCount = val
+				}
+			}).Return().Maybe()
+			mc.On("Clear", "failures").Run(func(args mock.Arguments) {
+				failureCount = 0
+			}).Return().Maybe()
 			sends := captureCovenSends(t, mc)
 			stubCovenRun(mc, true)
 
@@ -1160,6 +1184,11 @@ func TestWorker_StartDreamerArm_ErrorAndFallbacks(t *testing.T) {
 	ctxNoIngress, cancelNoIngress := context.WithCancel(context.Background())
 	time.AfterFunc(20*time.Millisecond, cancelNoIngress)
 	require.ErrorIs(t, wNoIngress.Start(ctxNoIngress), context.Canceled)
+
+	// When fallbackMu is held, runDaily skips immediately without overlapping
+	wNoIngress.fallbackMu.Lock()
+	wNoIngress.runDaily(context.Background())
+	wNoIngress.fallbackMu.Unlock()
 }
 
 func TestAdminExtract_RestateIngressExtractFn(t *testing.T) {

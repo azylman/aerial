@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	restate "github.com/restatedev/sdk-go"
@@ -62,6 +63,7 @@ type Worker struct {
 	restateIngressURL string
 	httpClient        *http.Client
 	armRetryInterval  time.Duration
+	fallbackMu        sync.Mutex
 }
 
 // NewWorker initializes a new background Worker instance.
@@ -137,6 +139,10 @@ func (w *Worker) HTTPClient() *http.Client {
 func (w *Worker) ExtractThread(ctx context.Context, threadID string, agent ...string) error {
 	if w == nil {
 		return errors.New("coven worker is nil")
+	}
+	if w.restateIngressURL == "" {
+		w.fallbackMu.Lock()
+		defer w.fallbackMu.Unlock()
 	}
 	timeout := w.extractTimeout
 	if timeout <= 0 {
@@ -243,6 +249,11 @@ func (w *Worker) runDaily(ctx context.Context) {
 	if w.store == nil {
 		return
 	}
+	if !w.fallbackMu.TryLock() {
+		log.Printf("[Memory Worker] Skipping daily dreaming: consolidation already in progress")
+		return
+	}
+	defer w.fallbackMu.Unlock()
 	if !w.shouldRunDailyDreaming(ctx) {
 		log.Printf("[Memory Worker] Skipping daily dreaming: already completed within the last %s", DefaultDreamingMinInterval)
 		return
@@ -380,7 +391,48 @@ func (d *CovenDreamer) Arm(ctx restate.ObjectContext, _ struct{}) error {
 	return nil
 }
 
-// Dream executes fact and skill consolidation and self-arms the next cycle.
+func (d *CovenDreamer) runConsolidateFacts(rc restate.RunContext) (int, error) {
+	if d.worker == nil || d.worker.store == nil || d.worker.ollama == nil || d.worker.llmClient == nil {
+		return 0, nil
+	}
+	spanCtx, span := tracing.Tracer().Start(rc, "coven.consolidate", trace.WithNewRoot())
+	defer span.End()
+	consolidated, err := ConsolidateFactClusters(spanCtx, d.worker.store, d.worker.ollama, d.worker.llmClient)
+	if err != nil {
+		span.SetStatus(codes.Error, "scheduled run failed")
+		if !errors.Is(err, context.Canceled) {
+			log.Printf("[Memory Worker] Fact consolidation dreaming failed: %v", err)
+		}
+		return 0, err
+	}
+	log.Printf("[Memory Worker] Fact consolidation dreaming completed: %d clusters consolidated", consolidated)
+	return consolidated, nil
+}
+
+func (d *CovenDreamer) runConsolidateSkills(rc restate.RunContext) (int, error) {
+	if d.worker == nil || d.worker.store == nil || d.worker.publisher == nil || d.worker.llmClient == nil {
+		return 0, nil
+	}
+	spanCtx, span := tracing.Tracer().Start(rc, "coven.consolidate_skills", trace.WithNewRoot())
+	defer span.End()
+	prNum, err := ConsolidateProceduralSkills(spanCtx, d.worker.store, d.worker.ollama, d.worker.llmClient, d.worker.publisher, d.worker.customSkillsDir)
+	if err != nil {
+		span.SetStatus(codes.Error, "scheduled run failed")
+		if !errors.Is(err, context.Canceled) {
+			log.Printf("[Memory Worker] Procedural skill consolidation failed: %v", err)
+		}
+		return 0, err
+	}
+	if prNum > 0 {
+		log.Printf("[Memory Worker] Procedural skill consolidation opened PR #%d", prNum)
+	}
+	return prNum, nil
+}
+
+// Dream executes daily fact and skill consolidation and self-arms the next cycle.
+// Both fact cluster consolidation and procedural skill consolidation are idempotent:
+// fact cluster merges are deterministic, and procedural skill candidates update
+// candidate status rows in PostgreSQL on success.
 func (d *CovenDreamer) Dream(ctx restate.ObjectContext, _ struct{}) error {
 	if d == nil {
 		return errors.New("coven dreamer is nil")
@@ -394,54 +446,26 @@ func (d *CovenDreamer) Dream(ctx restate.ObjectContext, _ struct{}) error {
 	restate.Set(ctx, "armed", true)
 
 	var runErr error
-	_, err := restate.Run(ctx, func(rc restate.RunContext) (int, error) {
-		if d.worker == nil || d.worker.store == nil || d.worker.ollama == nil || d.worker.llmClient == nil {
-			return 0, nil
-		}
-		spanCtx, span := tracing.Tracer().Start(rc, "coven.consolidate", trace.WithNewRoot())
-		defer span.End()
-		consolidated, err := ConsolidateFactClusters(spanCtx, d.worker.store, d.worker.ollama, d.worker.llmClient)
-		if err != nil {
-			span.SetStatus(codes.Error, "scheduled run failed")
-			if !errors.Is(err, context.Canceled) {
-				log.Printf("[Memory Worker] Fact consolidation dreaming failed: %v", err)
-			}
-			return 0, err
-		}
-		log.Printf("[Memory Worker] Fact consolidation dreaming completed: %d clusters consolidated", consolidated)
-		return consolidated, nil
-	}, restate.WithName("consolidate-facts"), restate.WithMaxRetryAttempts(2))
-	if err != nil {
+	if _, err := restate.Run(ctx, d.runConsolidateFacts, restate.WithName("consolidate-facts"), restate.WithMaxRetryAttempts(2)); err != nil {
 		runErr = err
 	}
 
-	_, err = restate.Run(ctx, func(rc restate.RunContext) (int, error) {
-		if d.worker == nil || d.worker.store == nil || d.worker.publisher == nil || d.worker.llmClient == nil {
-			return 0, nil
-		}
-		spanCtx, span := tracing.Tracer().Start(rc, "coven.consolidate_skills", trace.WithNewRoot())
-		defer span.End()
-		prNum, err := ConsolidateProceduralSkills(spanCtx, d.worker.store, d.worker.ollama, d.worker.llmClient, d.worker.publisher, d.worker.customSkillsDir)
-		if err != nil {
-			span.SetStatus(codes.Error, "scheduled run failed")
-			if !errors.Is(err, context.Canceled) {
-				log.Printf("[Memory Worker] Procedural skill consolidation failed: %v", err)
-			}
-			return 0, err
-		}
-		if prNum > 0 {
-			log.Printf("[Memory Worker] Procedural skill consolidation opened PR #%d", prNum)
-		}
-		return prNum, nil
-	}, restate.WithName("consolidate-skills"), restate.WithMaxRetryAttempts(2))
-	if err != nil && runErr == nil {
+	if _, err := restate.Run(ctx, d.runConsolidateSkills, restate.WithName("consolidate-skills"), restate.WithMaxRetryAttempts(2)); err != nil && runErr == nil {
 		runErr = err
 	}
 
 	nextDelay := DefaultDreamingMinInterval
 	if runErr != nil {
-		nextDelay = DefaultDreamingRetryInterval
-		log.Printf("[coven-dreamer] consolidation error occurred; scheduling retry in %s: %v", nextDelay, runErr)
+		failures, _ := restate.Get[int](ctx, "failures")
+		failures++
+		restate.Set(ctx, "failures", failures)
+		RecordOperation("consolidate", "error", 0)
+		shift := min(failures-1, 4)
+		nextDelay = min(DefaultDreamingRetryInterval*(1<<shift), DefaultDreamingMinInterval)
+		log.Printf("[coven-dreamer] ERROR: consolidation failed (consecutive failures=%d): %v; scheduling retry in %s", failures, runErr, nextDelay)
+	} else {
+		restate.Clear(ctx, "failures")
+		RecordOperation("consolidate", statusSuccess, 0)
 	}
 	restate.ObjectSend(ctx, "CovenDreamer", stack, "Dream").Send(struct{}{}, restate.WithDelay(nextDelay))
 	return nil

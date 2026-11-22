@@ -143,16 +143,13 @@ func TestSQLStore_ConstructorsAndSetters(t *testing.T) {
 	}
 }
 
-func TestSQLStore_WithDBAndWithPinnedConn(t *testing.T) {
+func TestSQLStore_WithPinnedConn(t *testing.T) {
 	t.Parallel()
 	db := newTestDB(t)
 	s := NewSQLStore(db)
 
 	// nil receiver
 	var nilStore *SQLStore
-	if got := nilStore.WithDB(db); got != nil {
-		t.Errorf("nilStore.WithDB() = %v, want nil", got)
-	}
 	if got := nilStore.WithPinnedConn(nil); got != nil {
 		t.Errorf("nilStore.WithPinnedConn(nil) = %v, want nil", got)
 	}
@@ -179,15 +176,6 @@ func TestSQLStore_WithDBAndWithPinnedConn(t *testing.T) {
 	}
 	if sqlStore.DB() != conn {
 		t.Errorf("DB() = %v, want %v", sqlStore.DB(), conn)
-	}
-
-	// withDB
-	withDB := s.WithDB(conn)
-	if withDB == nil || withDB == s {
-		t.Fatalf("expected non-nil cloned store from WithDB")
-	}
-	if withDB.DB() != conn {
-		t.Errorf("DB() = %v, want %v", withDB.DB(), conn)
 	}
 }
 

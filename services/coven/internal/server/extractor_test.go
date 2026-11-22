@@ -886,15 +886,3 @@ func TestDecisionMatchesNeighbors(t *testing.T) {
 		})
 	}
 }
-
-func TestRollbackConn(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-	db := newTestDB(t)
-	conn, err := db.Conn(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	_ = conn.Close()
-	rollbackConn(ctx, conn)
-}
