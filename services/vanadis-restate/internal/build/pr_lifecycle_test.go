@@ -24,6 +24,7 @@ import (
 	"github.com/azylman/aerial/services/vanadis-restate/internal/deploygate"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/executor"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
+	"github.com/azylman/aerial/services/vanadis-restate/internal/restatetest"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
 )
 
@@ -544,7 +545,7 @@ func TestRecordDeploymentPREvent(t *testing.T) {
 			t.Parallel()
 			st := &deadlineLifecycleStore{writeErr: tc.writeErr, checkStatusSpyStore: &checkStatusSpyStore{chunks: []model.VanadisChunk{tc.chunk}}}
 			ev := pubsub.PRLifecycleEvent{Event: prEventDeployStarted, Repo: "owner/repo", PRNumber: 1, MergeSHA: "sha", RolloutState: tc.rollout}
-			_, err := (&BuildObject{store: st}).recordDeploymentPREvent(mockRunContext{Context: context.Background()}, "b1", ev)
+			_, err := (&BuildObject{store: st}).recordDeploymentPREvent(restatetest.MockRunContext{Context: context.Background()}, "b1", ev)
 			if tc.wantErr != "" {
 				require.ErrorContains(t, err, tc.wantErr)
 			} else {
@@ -567,7 +568,7 @@ func TestDeploymentDeadlineRepeatedMerge(t *testing.T) {
 	st := &deadlineLifecycleStore{checkStatusSpyStore: &checkStatusSpyStore{chunks: []model.VanadisChunk{{ID: "c1", PRNumber: 1, Repo: "owner/repo", MergeSHA: "sha", Status: statusMerged}}}}
 	b := &BuildObject{store: st}
 	ev := pubsub.PRLifecycleEvent{Event: prEventDeployStarted, Repo: "owner/repo", PRNumber: 1, MergeSHA: "sha", OccurredAt: now}
-	rc := mockRunContext{Context: context.Background()}
+	rc := restatetest.MockRunContext{Context: context.Background()}
 	_, err := b.recordDeploymentPREvent(rc, "b1", ev)
 	require.NoError(t, err)
 	require.NoError(t, b.armDeploymentStart(rt, "b", ev))

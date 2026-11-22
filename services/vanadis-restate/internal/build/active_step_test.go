@@ -14,6 +14,7 @@ import (
 
 	"github.com/azylman/aerial/services/vanadis-restate/internal/executor"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
+	"github.com/azylman/aerial/services/vanadis-restate/internal/restatetest"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
 )
 
@@ -104,7 +105,7 @@ func executeUpdateActiveStepTestCase(t *testing.T, tc updateActiveStepTestCase) 
 	mc := mocks.NewMockContext(t)
 	if tc.req.ChunkID != "" || len(tc.req.ActiveSteps) > 0 || tc.req.ActiveSteps != nil || tc.req.ClearAll {
 		mc.EXPECT().Key().Return(tc.buildID)
-		observeJournalCallback(t, mc, nil, tc.expectCode)
+		restatetest.ObserveJournalCallback(t, mc, nil, tc.expectCode)
 	}
 
 	resp, err := bo.UpdateActiveStep(restate.WithMockContext(mc), tc.req)
@@ -359,11 +360,11 @@ func TestUpdateActiveStep_ConcurrentCoalesce(t *testing.T) {
 
 			mc1 := mocks.NewMockContext(t)
 			mc1.EXPECT().Key().Return(tc.buildID)
-			observeJournalCallback(t, mc1, nil, 0)
+			restatetest.ObserveJournalCallback(t, mc1, nil, 0)
 
 			mc2 := mocks.NewMockContext(t)
 			mc2.EXPECT().Key().Return(tc.buildID)
-			observeJournalCallback(t, mc2, nil, 0)
+			restatetest.ObserveJournalCallback(t, mc2, nil, 0)
 
 			var wg sync.WaitGroup
 			wg.Go(func() {

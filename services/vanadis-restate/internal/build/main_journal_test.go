@@ -19,34 +19,9 @@ import (
 	"github.com/azylman/aerial/services/vanadis-restate/internal/deploygate"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/executor"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
+	"github.com/azylman/aerial/services/vanadis-restate/internal/restatetest"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
 )
-
-// observeJournalCallback inspects the callback error before the SDK mock adapter
-// terminates execution. It does not simulate Restate scheduling or retries.
-func observeJournalCallback(t *testing.T, mc *mocks.MockContext, want error, code restate.Code) {
-	t.Helper()
-	mc.EXPECT().Run(mock.Anything, mock.Anything, mock.Anything).RunAndReturn(func(fn func(restate.RunContext) (any, error), output any, opts ...restate.RunOption) restate.TerminalError {
-		res, err := fn(mockRunContext{Context: context.Background()})
-		if code != 0 {
-			var terminal restate.TerminalError
-			require.ErrorAs(t, err, &terminal)
-			assert.Equal(t, code, terminal.Code())
-		} else {
-			assert.False(t, restate.IsTerminalError(err))
-		}
-		switch {
-		case want != nil && code != 0:
-			assert.EqualError(t, err, want.Error())
-		case want != nil:
-			assert.ErrorIs(t, err, want)
-		default:
-			assert.NoError(t, err)
-		}
-		// Only adapt after observing the raw callback error above.
-		return runMockRunContext(func(restate.RunContext) (any, error) { return res, err }, output, opts...)
-	})
-}
 
 func TestRunJournaledCallback(t *testing.T) {
 	t.Parallel()
@@ -69,7 +44,7 @@ func TestRunJournaledCallback(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			mc := mocks.NewMockContext(t)
-			observeJournalCallback(t, mc, tc.err, tc.code)
+			restatetest.ObserveJournalCallback(t, mc, tc.err, tc.code)
 			got, err := RunJournaled(restate.WithMockContext(mc), labelUpdateBuild, "update-build-postgres", func(restate.RunContext) (string, error) {
 				return "payload", tc.err
 			})
@@ -81,23 +56,10 @@ func TestRunJournaledCallback(t *testing.T) {
 	}
 }
 
-type metadataMutationStore struct {
-	store.VanadisStore
-
-	err error
-}
-
-func (s *metadataMutationStore) UpdateBuild(_ context.Context, id string, req store.UpdateBuildRequest) (*model.VanadisBuild, error) {
-	if s.err != nil {
-		return nil, s.err
-	}
-	return &model.VanadisBuild{ID: id, Title: req.Title}, nil
-}
-
 //nolint:tparallel // Requests must run in order against the same object after a conflict.
 func TestUpdateBuildConflictThenValid(t *testing.T) {
 	t.Parallel()
-	st := &metadataMutationStore{err: store.ErrBuildConflict}
+	st := &restatetest.MetadataMutationStore{Err: store.ErrBuildConflict}
 	bo := NewBuildObject("", nil).WithAuthority(st, nil)
 	rt := newFakeObjectRuntime("build")
 	bo.runtimeFactory = func(restate.ObjectContext) objectRuntime { return rt }
@@ -111,10 +73,10 @@ func TestUpdateBuildConflictThenValid(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			st.err = tc.err
+			st.Err = tc.err
 			mc := mocks.NewMockContext(t)
 			mc.EXPECT().Key().Return("build")
-			observeJournalCallback(t, mc, tc.err, tc.code)
+			restatetest.ObserveJournalCallback(t, mc, tc.err, tc.code)
 			got, err := bo.UpdateBuild(restate.WithMockContext(mc), store.UpdateBuildRequest{Title: "Updated"})
 			if tc.err == nil {
 				require.NoError(t, err)
@@ -124,14 +86,6 @@ func TestUpdateBuildConflictThenValid(t *testing.T) {
 			}
 		})
 	}
-}
-
-func (s *metadataMutationStore) LookupChunkBuildID(context.Context, string) (store.BuildRoute, error) {
-	return store.BuildRoute{}, s.err
-}
-
-func (s *metadataMutationStore) LookupPRChunk(context.Context, string, int) (store.BuildRoute, string, error) {
-	return store.BuildRoute{}, "", s.err
 }
 
 // createConflictSetupSQL seeds build b0 owning chunk c1 titled "Chunk".
@@ -162,7 +116,7 @@ CREATE TRIGGER pgtest_raise BEFORE INSERT ON vanadis_chunks FOR EACH ROW EXECUTE
 func observeCreateCallback(t *testing.T, mc *mocks.MockContext, code restate.Code, sqlState, wantErr string) {
 	t.Helper()
 	mc.EXPECT().Run(mock.Anything, mock.Anything, mock.Anything).RunAndReturn(func(fn func(restate.RunContext) (any, error), output any, opts ...restate.RunOption) restate.TerminalError {
-		res, err := fn(mockRunContext{Context: context.Background()})
+		res, err := fn(restatetest.MockRunContext{Context: context.Background()})
 		require.Error(t, err)
 		var terminal restate.TerminalError
 		if code != 0 {
@@ -180,7 +134,7 @@ func observeCreateCallback(t *testing.T, mc *mocks.MockContext, code restate.Cod
 				assert.False(t, errors.As(err, &pgErr))
 			}
 		}
-		return runMockRunContext(func(restate.RunContext) (any, error) { return res, err }, output, opts...)
+		return restatetest.RunMockRunContext(func(restate.RunContext) (any, error) { return res, err }, output, opts...)
 	})
 }
 
@@ -247,7 +201,7 @@ func TestCreateBuildCommitAcknowledgementReplay(t *testing.T) {
 			var accepted bool
 			var err error
 			for range tc.calls {
-				accepted, err = bo.persistBuildCreation(mockRunContext{Context: context.Background()}, build, chunks)
+				accepted, err = bo.persistBuildCreation(restatetest.MockRunContext{Context: context.Background()}, build, chunks)
 			}
 			if tc.wantErr != "" {
 				require.ErrorContains(t, err, tc.wantErr)
@@ -330,7 +284,7 @@ func makeCreateJournalContext(t *testing.T, key string, journal *createJournal, 
 			*cursor++
 			return nil
 		}
-		res, err := fn(mockRunContext{Context: context.Background()})
+		res, err := fn(restatetest.MockRunContext{Context: context.Background()})
 		journal.results = append(journal.results, res)
 		journal.executed = append(journal.executed, true)
 		*cursor++
@@ -400,10 +354,6 @@ func TestCreate_JournaledClockIdentityAcrossReplay(t *testing.T) {
 			assert.Equal(t, got1.CreatedAt, state2.Build.CreatedAt)
 		})
 	}
-}
-
-func (*metadataMutationStore) GetBuild(_ context.Context, id string) (*model.VanadisBuild, []model.VanadisChunk, error) {
-	return &model.VanadisBuild{ID: id}, nil, nil
 }
 
 // makeDeferralJournalContext replays one journaled reconcile step and records
@@ -553,7 +503,7 @@ func TestOnDispatchOutcome_VerdictCutoverJournalCommandSequence(t *testing.T) {
 				labelReconcileAfterNoPRFail:        transition,
 			}
 			ctx := makeOutcomeJournalContext(t, journal, &commands)
-			bo := NewBuildObject("", nil).WithAuthority(&metadataMutationStore{}, executor.NewExecutor("", &mockEriClient{}, nil, "token", "example-owner", nil))
+			bo := NewBuildObject("", nil).WithAuthority(&restatetest.MetadataMutationStore{}, executor.NewExecutor("", &mockEriClient{}, nil, "token", "example-owner", nil))
 			dispatchID := tc.dispatchID
 			if dispatchID == "" {
 				dispatchID = "vanadis-c1-turn-0"
@@ -591,7 +541,7 @@ func TestOnPREvent_DeploySuccessJournalCommandSequence(t *testing.T) {
 				labelReconcileAfterPREvent: transition,
 			}
 			ctx := makeOutcomeJournalContext(t, journal, &commands)
-			bo := NewBuildObject("", nil).WithAuthority(&metadataMutationStore{}, executor.NewExecutor("", &mockEriClient{}, nil, "token", "example-owner", nil))
+			bo := NewBuildObject("", nil).WithAuthority(&restatetest.MetadataMutationStore{}, executor.NewExecutor("", &mockEriClient{}, nil, "token", "example-owner", nil))
 			err := bo.OnPREvent(ctx, pubsub.PRLifecycleEvent{Repo: "aerial", PRNumber: 9, Event: "deploy_success"})
 			require.NoError(t, err)
 			assert.Equal(t, tc.want, commands)
