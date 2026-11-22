@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -14,7 +15,6 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/azylman/aerial/pkg/httpkit"
-	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/pkg/pubsubtest"
 	"github.com/azylman/aerial/services/prospera/internal/config"
 	"github.com/azylman/aerial/services/prospera/internal/delivery"
@@ -1168,83 +1168,300 @@ func TestServerInstructions(t *testing.T) {
 	}
 }
 
-// ---- bus setup tests (bus/consumer lifecycle) ----
+// WithServerHTTPClient configures an HTTP client for Server outbound calls in tests.
+func WithServerHTTPClient(client *http.Client) ServerOption {
+	return func(s *Server) {
+		s.httpClient = client
+	}
+}
 
-func TestSetupProsperaBus(t *testing.T) {
-	tests := []struct {
-		name    string
-		natsURL string
-		busMode string
-		wantNil bool
-	}{
+type triggerPostCallReportTestCase struct {
+	name          string
+	callID        string
+	ingressStatus int
+	emptyIngress  bool
+	noReporter    bool
+	wantIngress   bool
+	wantPath      string
+	wantKey       string
+	wantDelivered bool
+	wantErr       bool
+}
+
+func runTriggerPostCallReportTest(t *testing.T, tc triggerPostCallReportTestCase) {
+	t.Helper()
+	var calledIngress bool
+	var receivedPath string
+	var receivedKey string
+	var mu sync.Mutex
+
+	ingressCode := tc.ingressStatus
+	if ingressCode == 0 {
+		ingressCode = http.StatusOK
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "ProsperaReport") {
+			mu.Lock()
+			calledIngress = true
+			receivedPath = r.URL.Path
+			receivedKey = r.Header.Get("Idempotency-Key")
+			mu.Unlock()
+			w.WriteHeader(ingressCode)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	ingressURL := srv.URL
+	if tc.emptyIngress {
+		ingressURL = ""
+	}
+
+	cfg := &config.Config{
+		Port:                  "4019",
+		RestateIngressURL:     ingressURL,
+		DefaultDiscordChannel: "prospera",
+		BrainURL:              srv.URL,
+	}
+	st := fakes.NewFakeStore()
+	if strings.TrimSpace(tc.callID) != "" {
+		_ = st.CreateOutboundCall(context.Background(), model.VoiceCall{
+			CallID:       tc.callID,
+			ReportStatus: "pending",
+		}, 5)
+	}
+	var rep *delivery.Reporter
+	if !tc.noReporter {
+		rep = delivery.NewReporter(fakes.StaticConfig{Cfg: cfg}, st, &fakes.FakeTwilio{})
+	}
+	var serverOpts []ServerOption
+	if tc.name != "successful restate ingress invocation" {
+		serverOpts = append(serverOpts, WithServerHTTPClient(srv.Client()))
+	}
+	server := NewServer(newTestConfigSource(cfg), st, &fakes.FakeTwilio{}, nil, nil, rep, serverOpts...)
+
+	err := server.triggerPostCallReport(context.Background(), tc.callID)
+	if (err != nil) != tc.wantErr {
+		t.Fatalf("triggerPostCallReport err = %v, wantErr = %v", err, tc.wantErr)
+	}
+	server.Wait()
+
+	mu.Lock()
+	gotIngress := calledIngress
+	path := receivedPath
+	key := receivedKey
+	mu.Unlock()
+
+	if gotIngress != tc.wantIngress {
+		t.Errorf("calledIngress = %v, want %v", gotIngress, tc.wantIngress)
+	}
+	if tc.wantPath != "" && path != tc.wantPath {
+		t.Errorf("path = %q, want %q", path, tc.wantPath)
+	}
+	if tc.wantKey != "" && key != tc.wantKey {
+		t.Errorf("key = %q, want %q", key, tc.wantKey)
+	}
+
+	if tc.wantDelivered {
+		call, _ := st.GetCall(context.Background(), tc.callID)
+		if call.ReportStatus != "delivered" {
+			t.Errorf("call report status = %q, want delivered", call.ReportStatus)
+		}
+	}
+}
+
+func TestServer_TriggerPostCallReport_RestateIngress(t *testing.T) {
+	t.Parallel()
+
+	tests := []triggerPostCallReportTestCase{
 		{
-			name:    "empty url returns nil",
-			natsURL: "   ",
-			wantNil: true,
+			name:          "empty call id returns nil",
+			callID:        "   ",
+			ingressStatus: http.StatusOK,
+			wantIngress:   false,
+			wantDelivered: false,
 		},
 		{
-			name:    "bus factory error returns nil",
-			natsURL: "nats://127.0.0.1:4222",
-			busMode: "dial_err",
-			wantNil: true,
+			name:          "successful restate ingress invocation",
+			callID:        "call-restate-ok",
+			ingressStatus: http.StatusOK,
+			wantIngress:   true,
+			wantPath:      "/ProsperaReport/call-restate-ok/DeliverReport/send",
+			wantKey:       "prospera:report:call-restate-ok",
 		},
 		{
-			name:    "successful bus sets event bus and consumers",
-			natsURL: "nats://127.0.0.1:4222",
-			busMode: "memory",
-			wantNil: false,
+			name:          "restate ingress failure falls back to direct delivery",
+			callID:        "call-restate-fail",
+			ingressStatus: http.StatusInternalServerError,
+			wantIngress:   true,
+			wantDelivered: true,
 		},
 		{
-			name:    "consumer start failure logs and returns bus",
-			natsURL: "nats://127.0.0.1:4222",
-			busMode: "fail_consumer",
-			wantNil: false,
+			name:          "empty restate ingress url delivers directly",
+			callID:        "call-no-ingress",
+			emptyIngress:  true,
+			wantIngress:   false,
+			wantDelivered: true,
 		},
 		{
-			name:    "ensure streams failure logs and returns bus",
-			natsURL: "nats://127.0.0.1:4222",
-			busMode: "fail_streams",
-			wantNil: false,
+			name:         "no delivery mechanism available returns error and logs in triggerPostCallReportIfPending",
+			callID:       "call-no-mech",
+			emptyIngress: true,
+			noReporter:   true,
+			wantIngress:  false,
+			wantErr:      true,
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			origBusFn := newProsperaBusFn
-			defer func() { newProsperaBusFn = origBusFn }()
-			switch tc.busMode {
-			case "":
-				// keep default newProsperaBusFn
-			case "dial_err":
-				newProsperaBusFn = func(context.Context, string) (pubsub.Bus, error) {
-					return nil, errors.New("connection failed")
-				}
-			case "memory":
-				newProsperaBusFn = func(context.Context, string) (pubsub.Bus, error) {
-					return pubsub.NewMemoryBus(), nil
-				}
-			case "fail_consumer":
-				newProsperaBusFn = func(context.Context, string) (pubsub.Bus, error) {
-					return &pubsubtest.FaultBus{Bus: pubsub.NewMemoryBus(), ConsumeErr: errors.New("consume queue failed")}, nil
-				}
-			case "fail_streams":
-				newProsperaBusFn = func(context.Context, string) (pubsub.Bus, error) {
-					return &pubsubtest.FaultBus{Bus: pubsub.NewMemoryBus(), EnsureErr: errors.New("ensure streams failed")}, nil
-				}
-			default:
-				t.Fatalf("unknown busMode %q", tc.busMode)
-			}
-
-			server, _, _ := setupTestServer()
-			bus := setupProsperaBus(context.Background(), server, tc.natsURL)
-			if (bus == nil) != tc.wantNil {
-				t.Fatalf("setupProsperaBus() nil = %v, wantNil = %v", bus == nil, tc.wantNil)
-			}
-			if !tc.wantNil {
-				if server.EventBus() != bus {
-					t.Fatalf("server.EventBus() = %v, want %v", server.EventBus(), bus)
-				}
-			}
+			t.Parallel()
+			runTriggerPostCallReportTest(t, tc)
 		})
+	}
+}
+
+type handleReportJobTestCase struct {
+	name          string
+	callID        string
+	ingressStatus int
+	wantIngress   bool
+	wantDelivered bool
+}
+
+func runHandleReportJobTest(t *testing.T, tc handleReportJobTestCase) {
+	t.Helper()
+	var calledIngress bool
+	var mu sync.Mutex
+
+	ingressCode := tc.ingressStatus
+	if ingressCode == 0 {
+		ingressCode = http.StatusOK
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "ProsperaReport") {
+			mu.Lock()
+			calledIngress = true
+			mu.Unlock()
+			w.WriteHeader(ingressCode)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	cfg := &config.Config{
+		Port:                  "4019",
+		RestateIngressURL:     srv.URL,
+		BrainURL:              srv.URL,
+		DefaultDiscordChannel: "prospera",
+	}
+	st := fakes.NewFakeStore()
+	_ = st.CreateOutboundCall(context.Background(), model.VoiceCall{
+		CallID:       tc.callID,
+		ReportStatus: "pending",
+	}, 5)
+
+	rep := delivery.NewReporter(fakes.StaticConfig{Cfg: cfg}, st, &fakes.FakeTwilio{})
+	server := NewServer(newTestConfigSource(cfg), st, &fakes.FakeTwilio{}, nil, nil, rep, WithServerHTTPClient(srv.Client()))
+
+	msg := &pubsubtest.Message{
+		Payload: []byte(`{"call_id":"` + tc.callID + `"}`),
+	}
+	err := server.HandleReportJob(context.Background(), msg)
+	if err != nil {
+		t.Fatalf("HandleReportJob() err = %v", err)
+	}
+
+	mu.Lock()
+	gotIngress := calledIngress
+	mu.Unlock()
+	if gotIngress != tc.wantIngress {
+		t.Errorf("calledIngress = %v, want %v", gotIngress, tc.wantIngress)
+	}
+
+	call, _ := st.GetCall(context.Background(), tc.callID)
+	if (call.ReportStatus == "delivered") != tc.wantDelivered {
+		t.Errorf("call report status = %q, wantDelivered = %v", call.ReportStatus, tc.wantDelivered)
+	}
+}
+
+func TestServer_HandleReportJob_RestateIngress(t *testing.T) {
+	t.Parallel()
+
+	tests := []handleReportJobTestCase{
+		{
+			name:          "restate ingress succeeds without fallback",
+			callID:        "call-job-restate-ok",
+			ingressStatus: http.StatusOK,
+			wantIngress:   true,
+			wantDelivered: false,
+		},
+		{
+			name:          "restate ingress failure falls back to direct reporter delivery",
+			callID:        "call-job-restate-fallback",
+			ingressStatus: http.StatusInternalServerError,
+			wantIngress:   true,
+			wantDelivered: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			runHandleReportJobTest(t, tc)
+		})
+	}
+}
+
+func TestServer_HangupActiveSessions(t *testing.T) {
+	t.Parallel()
+
+	// 1. Nil server or nil session manager returns cleanly
+	var nilS *Server
+	nilS.HangupActiveSessions()
+	nilS.Drain(context.Background())
+	emptyS := &Server{}
+	emptyS.HangupActiveSessions()
+	emptyS.Drain(context.Background())
+
+	// 2. Active sessions have hangup initiated
+	server, _, _ := setupTestServer()
+	server.Drain(nil)
+	server.Drain(context.Background())
+
+	sess := &stubSession{}
+	server.sessionMgr.RegisterSession("call-hangup-1", sess)
+	if server.sessionMgr.ActiveCount() != 1 {
+		t.Fatalf("active count = %d, want 1", server.sessionMgr.ActiveCount())
+	}
+	server.HangupActiveSessions()
+	if sess.hangupCount() != 1 {
+		t.Fatalf("hangup count = %d, want 1", sess.hangupCount())
+	}
+}
+
+func TestServer_ResolveAndBindCall_ErrorBranches(t *testing.T) {
+	t.Parallel()
+
+	// 1. Nil store returns nil
+	serverNoStore := NewServer(newTestConfigSource(&config.Config{}), nil, nil, nil, nil, nil)
+	req := httptest.NewRequest(http.MethodGet, "/?call_id=c1", http.NoBody)
+	if call := serverNoStore.resolveAndBindCall(context.Background(), req, "CA1"); call != nil {
+		t.Fatalf("expected nil call with nil store, got %+v", call)
+	}
+
+	// 2. BindProviderCallSID error logs warning
+	st := fakes.NewFakeStore()
+	st.BindErr = errors.New("bind failure")
+	_ = st.CreateOutboundCall(context.Background(), model.VoiceCall{
+		CallID: "call-bind-err",
+	}, 5)
+	server := NewServer(newTestConfigSource(&config.Config{}), st, nil, nil, nil, nil)
+	reqBind := httptest.NewRequest(http.MethodGet, "/?call_id=call-bind-err", http.NoBody)
+	call := server.resolveAndBindCall(context.Background(), reqBind, "CA-bind-err")
+	if call == nil || call.CallID != "call-bind-err" {
+		t.Fatalf("expected call-bind-err, got %+v", call)
 	}
 }

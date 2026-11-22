@@ -41,6 +41,7 @@ type Store interface {
 	AppendOwnerInstruction(ctx context.Context, callID string, instr model.OwnerInstruction) error
 	SetVoicemailRecording(ctx context.Context, callID, recordingURL string) error
 	TransitionReportStatus(ctx context.Context, callID string, allowedFrom []string, toStatus, summary string) (bool, error)
+	ListUnfinishedReportCalls(ctx context.Context, limit int) ([]model.VoiceCall, error)
 	ReconcileOrphanedCalls(ctx context.Context, checkActive func(ctx context.Context, providerSID string) (bool, error)) (int, error)
 	SaveVoiceMessage(ctx context.Context, msg model.VoiceMessage) (bool, error)
 	MarkVoiceMessageDelivered(ctx context.Context, messageSID string) error
