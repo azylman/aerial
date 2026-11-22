@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
-	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -15,50 +14,9 @@ import (
 
 	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/pkg/pubsubtest"
 	"github.com/azylman/aerial/services/vanadis-nats/internal/config"
 )
-
-type testBus struct {
-	ensureErr   error
-	consumeErrs map[string]error
-	subscribed  map[string]bool
-	mu          sync.Mutex
-	closed      bool
-}
-
-func (*testBus) Publish(context.Context, string, string, any) error { return nil }
-
-func (*testBus) Subscribe(context.Context, string, string, pubsub.Handler) (pubsub.Subscription, error) {
-	return nil, nil
-}
-
-func (b *testBus) ConsumeQueue(_ context.Context, subject, queue string, _ pubsub.Handler) (pubsub.Subscription, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if b.consumeErrs != nil {
-		if err, ok := b.consumeErrs[subject]; ok && err != nil {
-			return nil, err
-		}
-	}
-	if b.subscribed == nil {
-		b.subscribed = make(map[string]bool)
-	}
-	b.subscribed[subject+":"+queue] = true
-	return &testSub{}, nil
-}
-
-func (b *testBus) EnsureCoreStreams(context.Context) error { return b.ensureErr }
-
-func (b *testBus) Close() error {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	b.closed = true
-	return nil
-}
-
-type testSub struct{}
-
-func (*testSub) Unsubscribe() error { return nil }
 
 func TestSetupHealthMux(t *testing.T) {
 	origMeta, origCounters := httpkit.WriteMetaDirFn, httpkit.WriteCountersDirFn
@@ -77,32 +35,10 @@ func TestSetupHealthMux(t *testing.T) {
 		wantStatus int
 		wantBody   string
 	}{
-		{
-			name:       "GET /health",
-			method:     http.MethodGet,
-			path:       "/health",
-			wantStatus: http.StatusOK,
-			wantBody:   `{"status":"ok"}`,
-		},
-		{
-			name:       "GET /healthz",
-			method:     http.MethodGet,
-			path:       "/healthz",
-			wantStatus: http.StatusOK,
-			wantBody:   `{"status":"ok"}`,
-		},
-		{
-			name:       "GET /metrics",
-			method:     http.MethodGet,
-			path:       "/metrics",
-			wantStatus: http.StatusOK,
-		},
-		{
-			name:       "POST /debug/coverage/flush",
-			method:     http.MethodPost,
-			path:       "/debug/coverage/flush",
-			wantStatus: http.StatusOK,
-		},
+		{name: "GET /health", method: http.MethodGet, path: "/health", wantStatus: http.StatusOK, wantBody: `{"status":"ok"}`},
+		{name: "GET /healthz", method: http.MethodGet, path: "/healthz", wantStatus: http.StatusOK, wantBody: `{"status":"ok"}`},
+		{name: "GET /metrics", method: http.MethodGet, path: "/metrics", wantStatus: http.StatusOK},
+		{name: "POST /debug/coverage/flush", method: http.MethodPost, path: "/debug/coverage/flush", wantStatus: http.StatusOK},
 	}
 
 	for _, tc := range tests {
@@ -129,81 +65,24 @@ func getFreePort(t *testing.T) string {
 }
 
 func TestRunApp(t *testing.T) {
+	local := config.Config{Port: "0", NATSURL: "nats://localhost:4222"}
 	tests := []struct {
 		name          string
 		cfg           config.Config
-		fakeBus       *testBus
+		bus           *pubsubtest.FaultBus
 		connectErr    error
 		useDefaultBus bool
 		cancelEarly   bool
 		failServe     bool
 		wantErrMsg    string
 	}{
-		{
-			name: "empty nats url returns error from default bus factory",
-			cfg: config.Config{
-				Port:    "0",
-				NATSURL: "",
-			},
-			useDefaultBus: true,
-			wantErrMsg:    "nats_url is required",
-		},
-		{
-			name: "default bus factory connects and fails on invalid url",
-			cfg: config.Config{
-				Port:    "0",
-				NATSURL: "://",
-			},
-			useDefaultBus: true,
-			wantErrMsg:    "connect to nats",
-		},
-		{
-			name: "invalid health port causes listen error",
-			cfg: config.Config{
-				Port:    "invalid-port",
-				NATSURL: "nats://localhost:4222",
-			},
-			fakeBus:    &testBus{},
-			wantErrMsg: "listening on health port",
-		},
-		{
-			name: "connect to nats failure",
-			cfg: config.Config{
-				Port:    "0",
-				NATSURL: "nats://invalid:4222",
-			},
-			connectErr: errors.New("cannot connect"),
-			wantErrMsg: "connect to nats",
-		},
-		{
-			name: "start consumers failure",
-			cfg: config.Config{
-				Port:    "0",
-				NATSURL: "nats://localhost:4222",
-			},
-			fakeBus:    &testBus{ensureErr: errors.New("streams fail")},
-			wantErrMsg: "start consumers",
-		},
-		{
-			name: "clean shutdown on cancel",
-			cfg: config.Config{
-				Port:    "0",
-				NATSURL: "nats://localhost:4222",
-			},
-			fakeBus:     &testBus{},
-			cancelEarly: true,
-			wantErrMsg:  "",
-		},
-		{
-			name: "health serve failure returns serve error",
-			cfg: config.Config{
-				Port:    "0",
-				NATSURL: "nats://localhost:4222",
-			},
-			fakeBus:    &testBus{},
-			failServe:  true,
-			wantErrMsg: "closed network connection",
-		},
+		{name: "default bus rejects empty url", cfg: config.Config{Port: "0"}, useDefaultBus: true, wantErrMsg: "nats_url is required"},
+		{name: "default bus rejects bad url", cfg: config.Config{Port: "0", NATSURL: "://"}, useDefaultBus: true, wantErrMsg: "connect to nats"},
+		{name: "invalid health port causes listen error", cfg: config.Config{Port: "invalid-port"}, wantErrMsg: "listening on health port"},
+		{name: "connect to nats failure", cfg: local, connectErr: errors.New("cannot connect"), wantErrMsg: "connect to nats"},
+		{name: "start consumers failure", cfg: local, bus: &pubsubtest.FaultBus{EnsureErr: errors.New("streams")}, wantErrMsg: "start consumers"},
+		{name: "clean shutdown on cancel", cfg: local, cancelEarly: true},
+		{name: "health serve failure returns serve error", cfg: local, failServe: true, wantErrMsg: "closed network connection"},
 	}
 
 	for _, tc := range tests {
@@ -227,10 +106,12 @@ func TestRunApp(t *testing.T) {
 					if tc.connectErr != nil {
 						return nil, tc.connectErr
 					}
-					if tc.fakeBus != nil {
-						return tc.fakeBus, nil
+					bus := tc.bus
+					if bus == nil {
+						bus = &pubsubtest.FaultBus{}
 					}
-					return &testBus{}, nil
+					bus.Bus = pubsub.NewMemoryBus()
+					return bus, nil
 				}
 			}
 

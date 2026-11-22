@@ -14,55 +14,6 @@ import (
 
 func TestRunMain(t *testing.T) {
 	origLoad, origRun, origExit, origTracing := loadConfigFn, runAppFn, exitFn, initTracingFn
-	defer func() {
-		loadConfigFn, runAppFn, exitFn, initTracingFn = origLoad, origRun, origExit, origTracing
-	}()
-
-	loadConfigFn = func() config.Config {
-		return config.Config{Port: "4027", NATSURL: "nats://localhost:4222"}
-	}
-	initTracingFn = func(context.Context, string, string) (tracing.Config, func()) {
-		return tracing.Config{}, func() {}
-	}
-
-	tests := []struct {
-		name       string
-		runAppErr  error
-		wantErr    bool
-		wantErrMsg string
-	}{
-		{
-			name:      "success case",
-			runAppErr: nil,
-			wantErr:   false,
-		},
-		{
-			name:       "failure case returns error",
-			runAppErr:  errors.New("fatal run app error"),
-			wantErr:    true,
-			wantErrMsg: "fatal run app error",
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			runAppFn = func(context.Context, config.Config) error {
-				return tc.runAppErr
-			}
-
-			err := runMain()
-			if tc.wantErr {
-				require.Error(t, err)
-				assert.Contains(t, err.Error(), tc.wantErrMsg)
-			} else {
-				assert.NoError(t, err)
-			}
-		})
-	}
-}
-
-func TestMain_Execution(t *testing.T) {
-	origLoad, origRun, origExit, origTracing := loadConfigFn, runAppFn, exitFn, initTracingFn
 	t.Cleanup(func() {
 		loadConfigFn, runAppFn, exitFn, initTracingFn = origLoad, origRun, origExit, origTracing
 	})
@@ -74,19 +25,30 @@ func TestMain_Execution(t *testing.T) {
 		return tracing.Config{}, func() {}
 	}
 
-	runAppFn = func(context.Context, config.Config) error {
-		return nil
+	tests := []struct {
+		name      string
+		runAppErr error
+		wantErr   string
+		wantExit  bool
+	}{
+		{name: "success returns nil and main does not exit", runAppErr: nil, wantErr: "", wantExit: false},
+		{name: "run app error is returned and main exits", runAppErr: errors.New("fatal run app error"), wantErr: "fatal run app error", wantExit: true},
 	}
-	var exitCalled bool
-	exitFn = func(string, ...any) {
-		exitCalled = true
-	}
-	main()
-	assert.False(t, exitCalled)
 
-	runAppFn = func(context.Context, config.Config) error {
-		return errors.New("startup error")
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			runAppFn = func(context.Context, config.Config) error { return tc.runAppErr }
+			var exited bool
+			exitFn = func(string, ...any) { exited = true }
+
+			err := runMain()
+			if tc.wantErr == "" {
+				require.NoError(t, err)
+			} else {
+				require.EqualError(t, err, tc.wantErr)
+			}
+			main()
+			assert.Equal(t, tc.wantExit, exited)
+		})
 	}
-	main()
-	assert.True(t, exitCalled)
 }
