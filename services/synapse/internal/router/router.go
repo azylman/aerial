@@ -17,6 +17,7 @@ import (
 
 	"github.com/bwmarrin/discordgo"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/azylman/aerial/pkg/githubapi"
 	"github.com/azylman/aerial/pkg/githubauth"
@@ -44,6 +45,93 @@ var (
 
 type BotConfig = config.BotConfig
 
+type (
+	ConfigSource                 = config.ConfigSource
+	Config                       = config.Config
+	CollaboratorCIAlertRule      = config.CollaboratorCIAlertRule
+	OutboundDispatcher           = model.OutboundDispatcher
+	ConsumerStatsQuerier         = metrics.ConsumerStatsQuerier
+	workloadRollout              = model.WorkloadRollout
+	configMapChange              = model.ConfigMapChange
+	fluxCondition                = model.FluxCondition
+	prRolloutInput               = flux.PRRolloutInput
+	fluxKustomizationRef         = model.FluxKustomizationRef
+	DeployEvent                  = model.DeployEvent
+	DeployWebhookArgs            = model.DeployWebhookArgs
+	GitHubWebhookArgs            = model.GitHubWebhookArgs
+	DiscordIngressArgs           = model.DiscordIngressArgs
+	DiscordInteractionArgs       = model.DiscordInteractionArgs
+	DiscordMessageIngressRequest = model.DiscordMessageIngressRequest
+	PromptRequest                = model.PromptRequest
+	DispatchRequest              = model.DispatchRequest
+	DirectMessageRequest         = model.DirectMessageRequest
+	PRBuildLifecycle             = model.PRBuildLifecycle
+	DeployingPR                  = model.DeployingPR
+	PRRegisterRequest            = model.PRRegisterRequest
+	FluxAlertEvent               = model.FluxAlertEvent
+	FluxInvolvedObject           = model.FluxInvolvedObject
+	EventWebhookRequest          = alerts.EventWebhookRequest
+	VMAlertNotification          = alerts.VMAlertNotification
+	WorkloadRollout              = model.WorkloadRollout
+	ConfigMapChange              = model.ConfigMapChange
+	FluxKustomizationRef         = model.FluxKustomizationRef
+	KustomizationObservation     = model.KustomizationObservation
+)
+
+const (
+	deployedKustomizationsKey = "deployed_kustomizations"
+	kustomizationRequestsKey  = "kustomization_requests"
+	fluxSystemNamespace       = "flux-system"
+	eventDeploySuccess        = "deploy_success"
+	eventDeployFailed         = "deploy_failed"
+	eventDeployStarted        = "deploy_started"
+	eventDeployRollback       = "deploy_rollback"
+	eventSyncSuccess          = "sync_success"
+	eventSyncFailed           = "sync_failed"
+	kindKustomization         = "Kustomization"
+	kindHelmRelease           = "HelmRelease"
+	statusAccepted            = "accepted"
+	prConflict                = "conflict"
+	prSynced                  = "synced"
+	fieldStatus               = "status"
+	fieldError                = "error"
+	fieldEvent                = "event"
+	fieldJobName              = "job_name"
+	fieldPRNumber             = "pr_number"
+	errMsgInvalidJSONPayload  = "invalid json payload"
+	jobGitSync                = "git-sync"
+	jobGitMerge               = "git-merge"
+	maxRoboRevCommentRunes    = model.MaxRoboRevCommentRunes
+)
+
+const (
+	QueueDiscordIngress     = metrics.QueueDiscordIngress
+	QueueDiscordInteraction = metrics.QueueDiscordInteraction
+	QueueDefault            = metrics.QueueDefault
+)
+
+var (
+	runServer = RunServer
+	runApp    = RunApp
+)
+
+// tracedIngress wraps a webhook or internal ingress handler in a server span that starts (or
+// continues) a trace. Probes and metrics scrapes stay untraced.
+func tracedIngress(h http.HandlerFunc) http.Handler {
+	return tracing.Middleware("synapse", h)
+}
+
+// discordJobSpanOptions configure the consumer span a Discord job opens under the gateway trace
+// persisted on its args.
+func discordJobSpanOptions(queue string) []trace.SpanStartOption {
+	return discord.DiscordJobSpanOptions(queue)
+}
+
+// markDiscordJobSpan records the job outcome without error text.
+func markDiscordJobSpan(span trace.Span, err error) {
+	discord.MarkDiscordJobSpan(span, err)
+}
+
 // RouterServer handles webhook requests and orchestrates secret synchronization.
 type RouterServer struct {
 	cfgSrc                   ConfigSource
@@ -60,6 +148,20 @@ type RouterServer struct {
 	alertTracker             alerts.Tracker
 	authMu                   sync.Mutex
 	authenticator            *k8sauth.Authenticator
+}
+
+func (s *RouterServer) hasCollaboratorCIAlertsForRepo(repo string) bool {
+	if s == nil || s.cfgSrc == nil {
+		return false
+	}
+	return config.HasCollaboratorCIAlertsForRepo(s.cfgSrc.Current(), repo)
+}
+
+func (s *RouterServer) lookupCollaboratorCIAlert(repo, author string) (channelID, mention string, ok bool) {
+	if s == nil || s.cfgSrc == nil {
+		return "", "", false
+	}
+	return config.LookupCollaboratorCIAlert(s.cfgSrc.Current(), repo, author)
 }
 
 func (s *RouterServer) GetGitHubJSON(ctx context.Context, path string, maxBytes int64, out any) error {
