@@ -2,63 +2,30 @@ package store
 
 import (
 	"context"
-	"database/sql"
-	"database/sql/driver"
-	"errors"
-	"fmt"
+	"os"
 	"strings"
-	"sync/atomic"
+	"sync"
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5/stdlib"
-	_ "modernc.org/sqlite"
-
+	"github.com/azylman/aerial/pkg/pgtest"
+	"github.com/azylman/aerial/pkg/pgutil"
 	"github.com/azylman/aerial/pkg/transcriptwire"
 )
 
-const transcriptsTestSchema = `CREATE TABLE session_summaries (
-    agent TEXT NOT NULL,
-    session_id TEXT NOT NULL,
-    engine TEXT NOT NULL DEFAULT '',
-    thread_id TEXT NOT NULL DEFAULT '',
-    summary TEXT NOT NULL DEFAULT '',
-    last_indexed_step INT NOT NULL DEFAULT -1,
-    last_mtime DATETIME,
-    summary_step_watermark INT NOT NULL DEFAULT -1,
-    is_settled BOOLEAN NOT NULL DEFAULT 0,
-    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY (agent, session_id)
-);
-CREATE TABLE transcript_steps (
-    agent TEXT NOT NULL,
-    session_id TEXT NOT NULL,
-    step_index INT NOT NULL,
-    step_type TEXT NOT NULL DEFAULT '',
-    tool_name TEXT NOT NULL DEFAULT '',
-    tool_kind TEXT NOT NULL DEFAULT '',
-    tool_call_id TEXT NOT NULL DEFAULT '',
-    content TEXT NOT NULL DEFAULT '',
-    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY (agent, session_id, step_index)
-);`
+func TestMain(m *testing.M) {
+	os.Exit(pgtest.Main(m))
+}
 
-var testStoreSeq atomic.Int64
-
+// newTestStore opens a private clone of the production schema through the
+// production constructor (pgutil.OpenSQL, as RunApp does).
 func newTestStore(t *testing.T, stack string) *Store {
 	t.Helper()
-	// A unique shared-cache in-memory database per fixture: same schema and
-	// queries as a file DB without the per-fixture fsync cost.
-	dsn := fmt.Sprintf("file:transcripts-%d?mode=memory&cache=shared", testStoreSeq.Add(1))
-	db, err := sql.Open("sqlite", dsn)
+	db, err := pgutil.OpenSQL(context.Background(), pgtest.NewDSN(t), pgutil.SQLOptions{})
 	if err != nil {
-		t.Fatalf("open sqlite fixture: %v", err)
+		t.Fatalf("open test database: %v", err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	if _, err := db.Exec(transcriptsTestSchema); err != nil {
-		t.Fatalf("create fixture schema: %v", err)
-	}
 	return NewStore(db, stack)
 }
 
@@ -268,6 +235,37 @@ func TestApplyBatchConcurrentDuplicateFirstBatch(t *testing.T) {
 	}
 }
 
+func TestApplyBatchRacingFirstBatches(t *testing.T) {
+	t.Parallel()
+	store := newTestStore(t, "aerial")
+	ctx := context.Background()
+	epoch := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
+	batch := testBatch("sess-race", epoch, 0, 3, false, false)
+
+	// Two deliveries of the same first batch race on separate connections:
+	// the summary insert and step inserts collide on primary keys, so
+	// exactly four steps land and are counted once in total.
+	var wg sync.WaitGroup
+	outcomes := make([]BatchOutcome, 2)
+	errs := make([]error, 2)
+	for i := range outcomes {
+		wg.Go(func() { outcomes[i], errs[i] = store.ApplyBatch(ctx, batch) })
+	}
+	wg.Wait()
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("delivery %d ApplyBatch() err = %v", i, err)
+		}
+	}
+	if total := outcomes[0].StepsIndexed + outcomes[1].StepsIndexed; total != 4 {
+		t.Errorf("deliveries indexed %d + %d steps, want 4 in total", outcomes[0].StepsIndexed, outcomes[1].StepsIndexed)
+	}
+	steps, err := store.GetSteps(ctx, "aerial", "sess-race", 0, 10)
+	if err != nil || len(steps) != 4 {
+		t.Fatalf("steps = %d (%v), want exactly 4", len(steps), err)
+	}
+}
+
 func TestApplyBatchRedeliveredResetPreservesAppends(t *testing.T) {
 	t.Parallel()
 	store := newTestStore(t, "aerial")
@@ -334,31 +332,75 @@ func TestAcquireThreadSummaryLockNilStore(t *testing.T) {
 	}
 }
 
-func TestParseDBTime(t *testing.T) {
-	t.Parallel()
-	fixed := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
-	tests := []struct {
-		name  string
-		value any
-		want  bool
-	}{
-		{"time value", fixed, true},
-		{"zero time", time.Time{}, false},
-		{"rfc3339 string", "2026-11-18T12:00:00Z", true},
-		{"sqlite datetime string", "2026-11-18 12:00:00", true},
-		{"sqlite datetime nanos", "2026-11-18 12:00:00.123456789+00", true},
-		{"byte string", []byte("2026-11-18T12:00:00Z"), true},
-		{"garbage string", "not-a-time", false},
-		{"nil", nil, false},
-		{"other type", 42, false},
+// advisoryLocks counts advisory locks currently granted in the test database.
+func advisoryLocks(t *testing.T, store *Store) int {
+	t.Helper()
+	var n int
+	if err := store.db.QueryRowContext(context.Background(),
+		`SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND granted AND database = (SELECT oid FROM pg_database WHERE datname = current_database())`).Scan(&n); err != nil {
+		t.Fatalf("count advisory locks: %v", err)
 	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			if _, ok := ParseDBTime(tc.value); ok != tc.want {
-				t.Errorf("ParseDBTime(%v) ok = %v, want %v", tc.value, ok, tc.want)
-			}
-		})
+	return n
+}
+
+func TestAcquireThreadSummaryLockExclusion(t *testing.T) {
+	t.Parallel()
+	store := newTestStore(t, "aerial")
+	ctx := context.Background()
+	release, err := store.AcquireThreadSummaryLock(ctx, "thread-1")
+	if err != nil {
+		t.Fatalf("AcquireThreadSummaryLock() err = %v", err)
+	}
+	if n := advisoryLocks(t, store); n != 1 {
+		t.Fatalf("advisory locks held = %d, want 1", n)
+	}
+	// A second summarizer for the same thread blocks until its deadline.
+	waitCtx, cancel := context.WithTimeout(ctx, 200*time.Millisecond)
+	defer cancel()
+	if _, waitErr := store.AcquireThreadSummaryLock(waitCtx, "thread-1"); waitErr == nil || !strings.Contains(waitErr.Error(), "acquire summary lock") {
+		t.Fatalf("contended AcquireThreadSummaryLock() err = %v, want acquire summary lock failure", waitErr)
+	}
+	other, err := store.AcquireThreadSummaryLock(ctx, "thread-2")
+	if err != nil {
+		t.Fatalf("other thread AcquireThreadSummaryLock() err = %v", err)
+	}
+	other()
+	release()
+	if n := advisoryLocks(t, store); n != 0 {
+		t.Fatalf("advisory locks held after release = %d, want 0", n)
+	}
+	again, err := store.AcquireThreadSummaryLock(ctx, "thread-1")
+	if err != nil {
+		t.Fatalf("re-acquire after release err = %v", err)
+	}
+	again()
+}
+
+func TestAcquireThreadSummaryLockTerminatedSession(t *testing.T) {
+	t.Parallel()
+	store := newTestStore(t, "aerial")
+	ctx := context.Background()
+	release, err := store.AcquireThreadSummaryLock(ctx, "thread-term")
+	if err != nil {
+		t.Fatalf("AcquireThreadSummaryLock() err = %v", err)
+	}
+	// Kill the lock holder's backend so the release's unlock fails and the
+	// connection is destroyed instead of returned to the pool.
+	if _, killErr := store.db.ExecContext(ctx,
+		`SELECT pg_terminate_backend(pid, 5000) FROM pg_locks WHERE locktype = 'advisory' AND pid <> pg_backend_pid() AND database = (SELECT oid FROM pg_database WHERE datname = current_database())`); killErr != nil {
+		t.Fatalf("terminate lock holder: %v", killErr)
+	}
+	release()
+	release()
+	reacquireCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	again, err := store.AcquireThreadSummaryLock(reacquireCtx, "thread-term")
+	if err != nil {
+		t.Fatalf("re-acquire after terminated holder err = %v", err)
+	}
+	again()
+	if n := advisoryLocks(t, store); n != 0 {
+		t.Fatalf("advisory locks held = %d, want 0", n)
 	}
 }
 
@@ -437,52 +479,36 @@ func TestParseStepCreatedAt(t *testing.T) {
 	}
 }
 
+// abortFn is a trigger function each sabotage row installs in its own
+// cloned database to make one production statement fail.
+const abortFn = `CREATE FUNCTION abort_write() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'sabotaged write'; END $$;`
+
 func TestApplyBatchExecFailures(t *testing.T) {
+	t.Parallel()
 	epoch := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
 	plainSeed := testBatch("sess-x", epoch, 0, 1, false, false)
 	newInsert := testBatch("sess-new", epoch, 0, 1, false, false)
 	appendBatch := testBatch("sess-x", epoch.Add(time.Hour), 2, 3, false, false)
 	resetBatch := rewrittenResetBatch("sess-x", epoch)
 	tests := []struct {
-		name    string
-		seed    bool
-		batch   transcriptwire.TranscriptStepBatch
-		trigger string
-		wantSub string
+		name        string
+		seed        bool
+		batch       transcriptwire.TranscriptStepBatch
+		sabotageSQL string
+		wantSub     string
 	}{
-		{
-			"reset delete fails", true, resetBatch,
-			`CREATE TRIGGER abort_delete BEFORE DELETE ON transcript_steps WHEN OLD.session_id = 'sess-x' BEGIN SELECT RAISE(ABORT, 'no delete'); END;`,
-			"reset transcript steps",
-		},
-		{
-			"reset upsert fails", true, resetBatch,
-			`CREATE TRIGGER abort_summary_insert BEFORE INSERT ON session_summaries WHEN NEW.session_id = 'sess-x' BEGIN SELECT RAISE(ABORT, 'no insert'); END;`,
-			"upsert reset session summary",
-		},
-		{
-			"insert summary fails", false, newInsert,
-			`CREATE TRIGGER abort_summary_insert BEFORE INSERT ON session_summaries WHEN NEW.session_id = 'sess-new' BEGIN SELECT RAISE(ABORT, 'no insert'); END;`,
-			"insert session summary",
-		},
-		{
-			"insert step fails", true, appendBatch,
-			`CREATE TRIGGER abort_step_insert BEFORE INSERT ON transcript_steps WHEN NEW.session_id = 'sess-x' BEGIN SELECT RAISE(ABORT, 'no step'); END;`,
-			"insert transcript step",
-		},
-		{
-			"insert advance fails", false, newInsert,
-			`CREATE TRIGGER abort_summary_update BEFORE UPDATE ON session_summaries WHEN NEW.session_id = 'sess-new' BEGIN SELECT RAISE(ABORT, 'no update'); END;`,
-			"advance session summary",
-		},
-		{
-			"append advance fails", true, appendBatch,
-			`CREATE TRIGGER abort_summary_update BEFORE UPDATE ON session_summaries WHEN NEW.session_id = 'sess-x' BEGIN SELECT RAISE(ABORT, 'no update'); END;`,
-			"advance session summary",
-		},
+		{"lock row fails", false, newInsert, `DROP TABLE session_summaries CASCADE`, "lock session summary row"},
+		{"reset delete fails", true, resetBatch, abortFn + `CREATE TRIGGER abort_delete BEFORE DELETE ON transcript_steps FOR EACH ROW WHEN (OLD.session_id = 'sess-x') EXECUTE FUNCTION abort_write();`, "reset transcript steps"},
+		{"reset upsert fails", true, resetBatch, abortFn + `CREATE TRIGGER abort_summary_insert BEFORE INSERT ON session_summaries FOR EACH ROW WHEN (NEW.session_id = 'sess-x') EXECUTE FUNCTION abort_write();`, "upsert reset session summary"},
+		{"insert summary fails", false, newInsert, abortFn + `CREATE TRIGGER abort_summary_insert BEFORE INSERT ON session_summaries FOR EACH ROW WHEN (NEW.session_id = 'sess-new') EXECUTE FUNCTION abort_write();`, "insert session summary"},
+		{"insert path step fails", false, newInsert, abortFn + `CREATE TRIGGER abort_step_insert BEFORE INSERT ON transcript_steps FOR EACH ROW WHEN (NEW.session_id = 'sess-new') EXECUTE FUNCTION abort_write();`, "insert transcript step"},
+		{"append path step fails", true, appendBatch, abortFn + `CREATE TRIGGER abort_step_insert BEFORE INSERT ON transcript_steps FOR EACH ROW WHEN (NEW.session_id = 'sess-x') EXECUTE FUNCTION abort_write();`, "insert transcript step"},
+		{"insert advance fails", false, newInsert, abortFn + `CREATE TRIGGER abort_summary_update BEFORE UPDATE ON session_summaries FOR EACH ROW WHEN (NEW.session_id = 'sess-new') EXECUTE FUNCTION abort_write();`, "advance session summary"},
+		{"append advance fails", true, appendBatch, abortFn + `CREATE TRIGGER abort_summary_update BEFORE UPDATE ON session_summaries FOR EACH ROW WHEN (NEW.session_id = 'sess-x') EXECUTE FUNCTION abort_write();`, "advance session summary"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			store := newTestStore(t, "aerial")
 			ctx := context.Background()
 			if tc.seed {
@@ -490,25 +516,13 @@ func TestApplyBatchExecFailures(t *testing.T) {
 					t.Fatalf("seed: %v", err)
 				}
 			}
-			if _, err := store.db.ExecContext(ctx, tc.trigger); err != nil {
-				t.Fatalf("create trigger: %v", err)
+			if _, err := store.db.ExecContext(ctx, tc.sabotageSQL); err != nil {
+				t.Fatalf("sabotage: %v", err)
 			}
 			if _, err := store.ApplyBatch(ctx, tc.batch); err == nil || !strings.Contains(err.Error(), tc.wantSub) {
 				t.Errorf("ApplyBatch() err = %v, want substring %q", err, tc.wantSub)
 			}
 		})
-	}
-}
-
-func TestApplyBatchLockScanError(t *testing.T) {
-	store := newTestStore(t, "aerial")
-	ctx := context.Background()
-	if _, err := store.db.ExecContext(ctx, `DROP TABLE session_summaries`); err != nil {
-		t.Fatalf("drop: %v", err)
-	}
-	epoch := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
-	if _, err := store.ApplyBatch(ctx, testBatch("s", epoch, 0, 0, false, false)); err == nil {
-		t.Errorf("expected lock row error on missing table")
 	}
 }
 
@@ -538,18 +552,6 @@ func TestDestroyConnClosed(t *testing.T) {
 		t.Fatalf("close: %v", err)
 	}
 	destroyConn(conn)
-}
-
-func TestApplyBatchInsertStepFailure(t *testing.T) {
-	store := newTestStore(t, "aerial")
-	ctx := context.Background()
-	epoch := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
-	if _, err := store.db.ExecContext(ctx, `CREATE TRIGGER abort_step_insert BEFORE INSERT ON transcript_steps WHEN NEW.session_id = 'sess-fresh' BEGIN SELECT RAISE(ABORT, 'no step'); END;`); err != nil {
-		t.Fatalf("create trigger: %v", err)
-	}
-	if _, err := store.ApplyBatch(ctx, testBatch("sess-fresh", epoch, 0, 1, false, false)); err == nil {
-		t.Errorf("expected step insert error on insert path")
-	}
 }
 
 func TestApplyBatchEmptySteps(t *testing.T) {
@@ -680,121 +682,4 @@ func TestStoreClosedDBErrors(t *testing.T) {
 	if err := store.SaveSummary(context.Background(), "aerial", "s", "sum", 1); err == nil {
 		t.Errorf("expected SaveSummary error on closed db")
 	}
-}
-
-type mockLockConnector struct {
-	d       driver.Driver
-	connErr error
-	conn    *mockLockConn
-}
-
-func (m mockLockConnector) Connect(context.Context) (driver.Conn, error) {
-	if m.connErr != nil {
-		return nil, m.connErr
-	}
-	if m.conn != nil {
-		return m.conn, nil
-	}
-	return &mockLockConn{}, nil
-}
-
-func (m mockLockConnector) Driver() driver.Driver {
-	return m.d
-}
-
-type mockLockConn struct {
-	lockErr   error
-	unlockErr error
-	queries   []string
-	args      [][]driver.NamedValue
-	closed    bool
-	rawCalled bool
-}
-
-func (*mockLockConn) Prepare(string) (driver.Stmt, error) {
-	return nil, errors.New("not implemented")
-}
-
-func (c *mockLockConn) Close() error {
-	c.closed = true
-	return nil
-}
-
-func (*mockLockConn) Begin() (driver.Tx, error) {
-	return nil, errors.New("not implemented")
-}
-
-func (c *mockLockConn) ExecContext(_ context.Context, query string, args []driver.NamedValue) (driver.Result, error) {
-	c.queries = append(c.queries, query)
-	c.args = append(c.args, args)
-	if strings.Contains(query, "pg_advisory_lock") && c.lockErr != nil {
-		return nil, c.lockErr
-	}
-	if strings.Contains(query, "pg_advisory_unlock") && c.unlockErr != nil {
-		return nil, c.unlockErr
-	}
-	return driver.RowsAffected(1), nil
-}
-
-func (c *mockLockConn) Raw(f func(driverConn any) error) error {
-	c.rawCalled = true
-	return f(c)
-}
-
-func TestAcquireThreadSummaryLockPostgresDriver(t *testing.T) {
-	t.Parallel()
-	pgDriver := stdlib.GetDefaultDriver()
-
-	t.Run("connect failure returns error", func(t *testing.T) {
-		t.Parallel()
-		db := sql.OpenDB(mockLockConnector{d: pgDriver, connErr: errors.New("connect fail")})
-		t.Cleanup(func() { _ = db.Close() })
-		store := NewStore(db, "aerial")
-		if _, err := store.AcquireThreadSummaryLock(context.Background(), "thread-1"); err == nil {
-			t.Errorf("expected error on failed connection")
-		}
-	})
-
-	t.Run("lock failure returns error", func(t *testing.T) {
-		t.Parallel()
-		conn := &mockLockConn{lockErr: errors.New("advisory lock fail")}
-		db := sql.OpenDB(mockLockConnector{d: pgDriver, conn: conn})
-		t.Cleanup(func() { _ = db.Close() })
-		store := NewStore(db, "aerial")
-		if _, err := store.AcquireThreadSummaryLock(context.Background(), "thread-1"); err == nil {
-			t.Errorf("expected error on failed advisory lock")
-		}
-		if len(conn.queries) != 1 || !strings.Contains(conn.queries[0], "pg_advisory_lock") {
-			t.Errorf("expected lock query, got %v", conn.queries)
-		}
-	})
-
-	t.Run("lock and unlock success verifies sql and lock key", func(t *testing.T) {
-		t.Parallel()
-		conn := &mockLockConn{}
-		db := sql.OpenDB(mockLockConnector{d: pgDriver, conn: conn})
-		t.Cleanup(func() { _ = db.Close() })
-		store := NewStore(db, "aerial")
-		release, err := store.AcquireThreadSummaryLock(context.Background(), "thread-test")
-		if err != nil {
-			t.Fatalf("AcquireThreadSummaryLock err = %v", err)
-		}
-		release()
-		if len(conn.queries) != 2 {
-			t.Fatalf("expected 2 queries (lock + unlock), got %d: %v", len(conn.queries), conn.queries)
-		}
-		if !strings.Contains(conn.queries[0], "pg_advisory_lock") {
-			t.Errorf("first query should be lock, got %q", conn.queries[0])
-		}
-		if !strings.Contains(conn.queries[1], "pg_advisory_unlock") {
-			t.Errorf("second query should be unlock, got %q", conn.queries[1])
-		}
-		expectedKey := summaryLockKey("thread-test")
-		if len(conn.args) < 2 || len(conn.args[0]) < 1 || conn.args[0][0].Value != expectedKey {
-			t.Errorf("lock arg = %v, want %q", conn.args, expectedKey)
-		}
-		if len(conn.args[1]) < 1 || conn.args[1][0].Value != expectedKey {
-			t.Errorf("unlock arg = %v, want %q", conn.args[1], expectedKey)
-		}
-	})
 }

@@ -80,27 +80,21 @@ func collectReadRows[T any](ctx context.Context, s *Store, op, query string, sca
 
 func scanSessionResult(r *sql.Rows) (SessionResult, error) {
 	var out SessionResult
-	var rawMtime any
-	if err := r.Scan(&out.Stack, &out.SessionID, &out.Engine, &out.ThreadID, &out.LastIndexedStep, &rawMtime, &out.IsSettled); err != nil {
+	var lastMtime sql.NullTime
+	if err := r.Scan(&out.Stack, &out.SessionID, &out.Engine, &out.ThreadID, &out.LastIndexedStep, &lastMtime, &out.IsSettled); err != nil {
 		return SessionResult{}, fmt.Errorf("scan session result: %w", err)
 	}
 	out.Agent = out.Stack
-	if t, ok := ParseDBTime(rawMtime); ok {
-		out.LastMtime = t
-	}
+	out.LastMtime = lastMtime.Time
 	return out, nil
 }
 
 func scanStepResult(r *sql.Rows) (StepResult, error) {
 	var out StepResult
-	var rawCreatedAt any
-	if err := r.Scan(&out.Stack, &out.SessionID, &out.Engine, &out.StepIndex, &out.StepType, &out.ToolName, &out.ToolKind, &out.Content, &rawCreatedAt); err != nil {
+	if err := r.Scan(&out.Stack, &out.SessionID, &out.Engine, &out.StepIndex, &out.StepType, &out.ToolName, &out.ToolKind, &out.Content, &out.CreatedAt); err != nil {
 		return StepResult{}, fmt.Errorf("scan step result: %w", err)
 	}
 	out.Agent = out.Stack
-	if t, ok := ParseDBTime(rawCreatedAt); ok {
-		out.CreatedAt = t
-	}
 	return out, nil
 }
 
@@ -115,37 +109,13 @@ func scanStackStat(r *sql.Rows) (StackStats, error) {
 
 func scanSessionWatermark(r *sql.Rows) (SessionWatermark, error) {
 	var out SessionWatermark
-	var rawMtime any
-	if err := r.Scan(&out.Stack, &out.SessionID, &out.LastIndexedStep, &rawMtime); err != nil {
+	var lastMtime sql.NullTime
+	if err := r.Scan(&out.Stack, &out.SessionID, &out.LastIndexedStep, &lastMtime); err != nil {
 		return SessionWatermark{}, fmt.Errorf("scan watermark: %w", err)
 	}
 	out.Agent = out.Stack
-	if t, ok := ParseDBTime(rawMtime); ok {
-		out.LastMtime = t
-	}
+	out.LastMtime = lastMtime.Time
 	return out, nil
-}
-
-// ParseDBTime normalizes driver time representations without failing the row.
-func ParseDBTime(v any) (time.Time, bool) {
-	switch t := v.(type) {
-	case time.Time:
-		return t, !t.IsZero()
-	case []byte:
-		return parseDBTimeString(string(t))
-	case string:
-		return parseDBTimeString(t)
-	}
-	return time.Time{}, false
-}
-
-func parseDBTimeString(s string) (time.Time, bool) {
-	for _, layout := range []string{time.RFC3339Nano, time.RFC3339, "2006-01-02 15:04:05.999999999-07", "2006-01-02 15:04:05-07", "2006-01-02 15:04:05"} {
-		if t, err := time.Parse(layout, strings.TrimSpace(s)); err == nil {
-			return t, true
-		}
-	}
-	return time.Time{}, false
 }
 
 // SearchSessions finds indexed sessions by summary text. An empty stack
@@ -179,7 +149,7 @@ func (s *Store) SearchSteps(ctx context.Context, stack, queryText, sessionFilter
 	if err := s.checkDB(); err != nil {
 		return nil, err
 	}
-	query, args := buildStepsQuery(stack, queryText, sessionFilter, toolFilter, limit, isPostgresDriver(s.db.Driver()), since...)
+	query, args := buildStepsQuery(stack, queryText, sessionFilter, toolFilter, limit, since...)
 	return collectReadRows(ctx, s, "search steps query failed", query, scanStepResult, args...)
 }
 
@@ -187,20 +157,15 @@ const stepsSelectClause = `SELECT t.agent, t.session_id, s.engine, t.step_index,
 	FROM transcript_steps t JOIN session_summaries s ON s.agent = t.agent AND s.session_id = t.session_id`
 
 // buildStepsQuery renders the filtered steps query; the empty stack matches
-// every stack while a set stack narrows to that stack's rows. PostgreSQL
-// matches content through the fts_tokens GIN index (the same
-// websearch_to_tsquery shape the eri store and coven use); hermetic SQLite
-// fixtures keep the LIKE scan since they carry no FTS index.
-func buildStepsQuery(stack, queryText, sessionFilter, toolFilter string, limit int, useFTS bool, since ...time.Time) (string, []any) {
+// every stack while a set stack narrows to that stack's rows. Content matches
+// through the fts_tokens GIN index (the same websearch_to_tsquery shape the
+// eri store and coven use).
+func buildStepsQuery(stack, queryText, sessionFilter, toolFilter string, limit int, since ...time.Time) (string, []any) {
 	var clauses []string
 	var args []any
 	if queryText != "" {
 		args = append(args, queryText)
-		if useFTS {
-			clauses = append(clauses, fmt.Sprintf("t.fts_tokens @@ websearch_to_tsquery('simple', $%d)", len(args)))
-		} else {
-			clauses = append(clauses, fmt.Sprintf("t.content LIKE '%%' || $%d || '%%'", len(args)))
-		}
+		clauses = append(clauses, fmt.Sprintf("t.fts_tokens @@ websearch_to_tsquery('simple', $%d)", len(args)))
 	}
 	if stack != "" {
 		args = append(args, stack)
