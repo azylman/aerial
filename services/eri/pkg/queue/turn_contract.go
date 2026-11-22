@@ -45,8 +45,6 @@ const (
 	HandlerCancelTurn   = "CancelTurn"
 	HandlerCancel       = "Cancel"
 	HandlerStatus       = "Status"
-	HandlerAdoptPending = "AdoptPending"
-	HandlerRunTurn      = "RunTurn"
 	HandlerRunBurst     = "RunBurst"
 	HandlerRunDispatch  = "RunDispatch"
 )
@@ -57,7 +55,6 @@ const (
 	StepResolveTargetThread  = "resolve-target-thread"
 	StepRecordSkipped        = "record-skipped"
 	StepRecordCancelled      = "record-cancelled"
-	StepAdoptPending         = "adopt-pending"
 	StepRecordStarted        = "record-started"
 	StepPrep                 = "prep"
 	StepRecordOutcome        = "record-outcome"
@@ -125,8 +122,6 @@ type ClearPendingRequest struct {
 	CancelActive bool     `json:"cancel_active"`
 	TurnID       string   `json:"turn_id"`
 }
-
-type AdoptPendingRequest struct{}
 
 type CoordinatorStatus struct {
 	Pending []string    `json:"pending"`

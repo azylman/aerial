@@ -94,8 +94,7 @@ type itRow struct {
 type itCase struct {
 	name     string
 	dispatch bool     // items are dispatches on itSessionKey, else messages on itThreadKey
-	seed     []string // rows inserted PENDING straight into the store
-	runTurn  bool     // send a legacy RunTurn payload after seeding
+	seed     []string // rows inserted PENDING straight into the store, then sent in one Append
 	enqueue  []string // items enqueued through Enqueue at the start
 	agent    []itAgent
 	preTurn  []string // scripted pre_turn answers: retry, allow (nil: no hook)
@@ -179,7 +178,7 @@ func turnQueueCases() []itCase {
 			wantDelivered: []string{"reply-ab"}, wantAgentCalls: 1, wantMinHookGap: itPreTurnDelay,
 		},
 		{
-			name: "RecordStartedRetriedAfterPartialClaim", seed: []string{"a", "b", "c"}, runTurn: true, agent: []itAgent{itReply("reply-abc")},
+			name: "RecordStartedRetriedAfterPartialClaim", seed: []string{"a", "b", "c"}, agent: []itAgent{itReply("reply-abc")},
 			steps: []itStep{{at: "ClaimPendingMessage:2", do: "restart"}},
 			wantRows: map[string]itRow{
 				"a": {status: completed, reply: "reply-abc", retry: 1},
@@ -255,12 +254,6 @@ func turnQueueCases() []itCase {
 			wantDelivered: []string{"reply-a"}, wantNoFailWrite: true, wantAgentCalls: 2, wantKilled: 1,
 		},
 		{
-			name: "RunTurnShimAdoptsPendingRows", seed: []string{"a", "b"}, runTurn: true, agent: []itAgent{itReply("reply-ab")},
-			wantRows:      map[string]itRow{"a": {status: completed, reply: "reply-ab", retry: 1}, "b": {status: completed, reply: "reply-ab", retry: 1}},
-			wantDone:      []TurnOutcome{OutcomeCompleted},
-			wantDelivered: []string{"reply-ab"}, wantAgentCalls: 1,
-		},
-		{
 			name: "DispatchHappyPath", dispatch: true, enqueue: []string{"d1"}, agent: []itAgent{itReply("reply-d1")},
 			wantRows:      map[string]itRow{"d1": {status: completed, retry: 1}},
 			wantDone:      []TurnOutcome{OutcomeCompleted},
@@ -286,8 +279,8 @@ func runIntegrationCase(t *testing.T, tc itCase) {
 	for _, id := range tc.seed {
 		env.seed(id)
 	}
-	if tc.runTurn {
-		env.h.Send(env.service(), env.key(), HandlerRunTurn, ThreadTurnRequest{})
+	if len(tc.seed) > 0 {
+		env.h.Send(env.service(), env.key(), HandlerAppend, AppendRequest{IDs: tc.seed})
 	}
 	for _, id := range tc.enqueue {
 		env.enqueue(id, false)
