@@ -1,4 +1,4 @@
-package main
+package config
 
 import (
 	"context"
@@ -32,7 +32,7 @@ func TestUnmarshalOptional(t *testing.T) {
 				Val string `json:"val"`
 			}
 			dest.Val = tc.initialVal
-			unmarshalOptional(tc.input, &dest)
+			UnmarshalOptional(tc.input, &dest)
 			if dest.Val != tc.expectedVal {
 				t.Fatalf("expected val %q, got %q", tc.expectedVal, dest.Val)
 			}
@@ -313,9 +313,9 @@ func TestParseURLHostPort(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			h, p := parseURLHostPort(tc.raw)
+			h, p := ParseURLHostPort(tc.raw)
 			if h != tc.wantHost || p != tc.wantPort {
-				t.Fatalf("parseURLHostPort(%q) = (%q, %q), want (%q, %q)", tc.raw, h, p, tc.wantHost, tc.wantPort)
+				t.Fatalf("ParseURLHostPort(%q) = (%q, %q), want (%q, %q)", tc.raw, h, p, tc.wantHost, tc.wantPort)
 			}
 		})
 	}

@@ -1,4 +1,4 @@
-package main
+package server
 
 import (
 	"context"
@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+
+	"github.com/azylman/aerial/mcp/kernel-mcp/internal/config"
 )
 
 const (
@@ -43,7 +45,7 @@ type cdpError struct {
 
 // CDPClient manages a WebSocket connection to Chromium CDP.
 type CDPClient struct {
-	cfg        *Config
+	cfg        *config.Config
 	httpClient *http.Client
 	dialer     *websocket.Dialer
 
@@ -59,7 +61,7 @@ type CDPClient struct {
 }
 
 // NewCDPClient creates a new CDP client.
-func NewCDPClient(cfg *Config) *CDPClient {
+func NewCDPClient(cfg *config.Config) *CDPClient {
 	return &CDPClient{
 		cfg: cfg,
 		httpClient: &http.Client{
@@ -77,7 +79,7 @@ func (c *CDPClient) getActivePageTarget(ctx context.Context) (string, string, er
 	if c.cfg == nil || strings.TrimSpace(c.cfg.CDPHost) == "" {
 		return "", "", errors.New("cdp host is not configured")
 	}
-	resolvedHost := ResolveCDPHost(ctx, c.cfg.CDPHost, net.DefaultResolver.LookupHost)
+	resolvedHost := config.ResolveCDPHost(ctx, c.cfg.CDPHost, net.DefaultResolver.LookupHost)
 	listURL := fmt.Sprintf("http://%s/json/list", net.JoinHostPort(resolvedHost, c.cfg.CDPPort))
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, listURL, http.NoBody)
@@ -124,7 +126,7 @@ func (c *CDPClient) getActivePageTarget(ctx context.Context) (string, string, er
 		return "", "", errors.New("no open page target found in browser")
 	}
 
-	wsURL := RewriteWSUrl(selected.WebSocketDebuggerURL, resolvedHost, c.cfg.CDPPort)
+	wsURL := config.RewriteWSUrl(selected.WebSocketDebuggerURL, resolvedHost, c.cfg.CDPPort)
 	return selected.ID, wsURL, nil
 }
 
@@ -405,7 +407,7 @@ func (c *CDPClient) EvaluateJS(ctx context.Context, expr string, awaitPromise, r
 
 // Navigate tells CDP to navigate to url with per-host pacing and waits for settle delay.
 func (c *CDPClient) Navigate(ctx context.Context, destURL string) error {
-	host, _ := parseURLHostPort(destURL)
+	host, _ := config.ParseURLHostPort(destURL)
 	c.stateMu.Lock()
 	sameHost := host != "" && c.lastNavHost == host
 	c.stateMu.Unlock()
