@@ -323,7 +323,6 @@ func runProcessBurstTraceCase(t *testing.T, tc processBurstTraceCase, i int) {
 		ProcessPool:    procPool,
 		SessionManager: session.New(tmpHome, tempData),
 		Store:          store,
-		TimeoutMinutes: 1,
 		TracerProvider: sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(sig)),
 		Logger:         slog.New(tracing.SlogHandler(slog.NewJSONHandler(logs, nil))),
 		AgentName:      "aerial",
@@ -431,7 +430,6 @@ func TestProcessBurst_RegistersActiveTurnDuringExecution(t *testing.T) {
 				ProcessPool:    procPool,
 				SessionManager: session.New(tmpHome, tempData),
 				Store:          store,
-				TimeoutMinutes: 1,
 				TracerProvider: sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(sig)),
 				ActiveTurns:    registry,
 			})

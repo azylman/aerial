@@ -493,48 +493,62 @@ func TestTurnExecution_ResolveAttemptConfig(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name      string
-		burst     []db.Message
-		dispatch  *db.Dispatch
-		override  string
-		isEphem   bool
-		lowModel  string
-		medModel  string
-		wantModel string
+		name           string
+		burst          []db.Message
+		dispatch       *db.Dispatch
+		override       string
+		isEphem        bool
+		lowModel       string
+		medModel       string
+		wantModel      string
+		turnTimeout    int
+		wantRunTimeout time.Duration
 	}{
 		{
-			name:      "dispatch with explicit model overrides effort tier",
-			dispatch:  &db.Dispatch{Model: "custom-gemini-pro", Effort: "low"},
-			lowModel:  "gemini-flash-low",
-			medModel:  "gemini-flash-medium",
-			wantModel: "custom-gemini-pro",
+			name:           "dispatch with explicit model overrides effort tier",
+			dispatch:       &db.Dispatch{Model: "custom-gemini-pro", Effort: "low"},
+			lowModel:       "gemini-flash-low",
+			medModel:       "gemini-flash-medium",
+			wantModel:      "custom-gemini-pro",
+			wantRunTimeout: 121 * time.Minute,
 		},
 		{
-			name:      "dispatch with low effort selects low effort model",
-			dispatch:  &db.Dispatch{Effort: "low"},
-			lowModel:  "gemini-flash-low",
-			medModel:  "gemini-flash-medium",
-			wantModel: "gemini-flash-low",
+			name:           "dispatch with low effort selects low effort model",
+			dispatch:       &db.Dispatch{Effort: "low"},
+			lowModel:       "gemini-flash-low",
+			medModel:       "gemini-flash-medium",
+			wantModel:      "gemini-flash-low",
+			wantRunTimeout: 121 * time.Minute,
 		},
 		{
-			name:      "dispatch with medium effort selects medium effort model",
-			dispatch:  &db.Dispatch{Effort: "medium"},
-			lowModel:  "gemini-flash-low",
-			medModel:  "gemini-flash-medium",
-			wantModel: "gemini-flash-medium",
+			name:           "dispatch with medium effort selects medium effort model",
+			dispatch:       &db.Dispatch{Effort: "medium"},
+			lowModel:       "gemini-flash-low",
+			medModel:       "gemini-flash-medium",
+			wantModel:      "gemini-flash-medium",
+			wantRunTimeout: 121 * time.Minute,
 		},
 		{
-			name:      "dispatch ephemeral defaults to medium effort model",
-			dispatch:  &db.Dispatch{},
-			isEphem:   true,
-			lowModel:  "gemini-flash-low",
-			medModel:  "gemini-flash-medium",
-			wantModel: "gemini-flash-medium",
+			name:           "dispatch ephemeral defaults to medium effort model",
+			dispatch:       &db.Dispatch{},
+			isEphem:        true,
+			lowModel:       "gemini-flash-low",
+			medModel:       "gemini-flash-medium",
+			wantModel:      "gemini-flash-medium",
+			wantRunTimeout: 121 * time.Minute,
 		},
 		{
-			name:      "burst message with model override",
-			burst:     []db.Message{{Content: "hello", Model: "burst-model"}},
-			wantModel: "burst-model",
+			name:           "burst message with model override",
+			burst:          []db.Message{{Content: "hello", Model: "burst-model"}},
+			wantModel:      "burst-model",
+			wantRunTimeout: 121 * time.Minute,
+		},
+		{
+			name:           "configured turn timeout 90 gives a 91 minute run context",
+			burst:          []db.Message{{Content: "hello", Model: "burst-model"}},
+			turnTimeout:    90,
+			wantModel:      "burst-model",
+			wantRunTimeout: 91 * time.Minute,
 		},
 	}
 
@@ -542,8 +556,9 @@ func TestTurnExecution_ResolveAttemptConfig(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			appCfg := config.NewFromData(&config.ConfigData{
-				LowEffortModel:    tc.lowModel,
-				MediumEffortModel: tc.medModel,
+				LowEffortModel:     tc.lowModel,
+				MediumEffortModel:  tc.medModel,
+				TurnTimeoutMinutes: tc.turnTimeout,
 			})
 			te := &turnExecution{
 				burst:       tc.burst,
@@ -556,6 +571,9 @@ func TestTurnExecution_ResolveAttemptConfig(t *testing.T) {
 			cfg := te.resolveAttemptConfig(t.Context(), 0)
 			if cfg.model != tc.wantModel {
 				t.Fatalf("cfg.model = %q, want %q", cfg.model, tc.wantModel)
+			}
+			if got := attemptRunTimeout(cfg.timeoutMinutes); got != tc.wantRunTimeout {
+				t.Fatalf("attemptRunTimeout(cfg.timeoutMinutes) = %v, want %v", got, tc.wantRunTimeout)
 			}
 		})
 	}
