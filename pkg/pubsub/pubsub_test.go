@@ -977,23 +977,6 @@ func TestMemoryBus_HandlerReturnsError(t *testing.T) {
 func TestJetStreamBus_SnoozeWithDelay(t *testing.T) {
 	t.Parallel()
 
-	dialer := &mockNatsDialer{}
-	nc, err := nats.Connect("nats://127.0.0.1:4222",
-		nats.SetCustomDialer(dialer),
-		nats.Timeout(1*time.Second),
-		nats.NoReconnect(),
-		nats.MaxReconnects(0),
-	)
-	if err != nil {
-		t.Fatalf("nats.Connect failed: %v", err)
-	}
-	defer nc.Close()
-
-	sub, err := nc.SubscribeSync("aerial.jobs.delaytest")
-	if err != nil {
-		t.Fatalf("nc.SubscribeSync failed: %v", err)
-	}
-
 	published := make(chan *nats.Msg, 1)
 	mjs := &mockJetStream{
 		onPublish: func(msg *nats.Msg) {
@@ -1003,13 +986,11 @@ func TestJetStreamBus_SnoozeWithDelay(t *testing.T) {
 			}
 		},
 	}
-	bus := newJetStreamBusWithContext(nc, mjs)
+	bus := newJetStreamBusWithContext(nil, mjs)
 	msg := &jsMessage{
-		raw: &nats.Msg{
-			Subject: "aerial.jobs.delaytest",
-			Reply:   "test.reply.inbox",
-			Sub:     sub,
-			Header:  nats.Header{HeaderMsgID: []string{"msg-1"}, HeaderSnoozeSeq: []string{"4"}},
+		raw: &fakeMsg{
+			subject: "aerial.jobs.delaytest",
+			header:  nats.Header{HeaderMsgID: []string{"msg-1"}, HeaderSnoozeSeq: []string{"4"}},
 		},
 		bus: bus,
 	}
