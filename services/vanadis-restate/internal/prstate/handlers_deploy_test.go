@@ -22,43 +22,37 @@ func seedPRSlot() *PRState {
 	return s
 }
 
+func seedSHAJob(job, sha string) *PRState {
+	s := seedFresh()
+	s.RecordDeployedSHAJob(job, sha)
+	return s
+}
+
 func TestWasDispatchedDeployKeys(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name     string
-		seed     func() *PRState
+		state    *PRState
 		repo     string
 		job      string
 		sha      string
 		prNumber int
 		want     bool
 	}{
-		{name: "empty state never dispatched", seed: seedFresh, repo: "azylman/aerial", job: "flux-a", sha: "aaa111", prNumber: 7, want: false},
-		{name: "pr slot alone reports dispatched", seed: seedPRSlot, repo: "azylman/aerial", job: "other-job", sha: "other-sha", prNumber: 7, want: true},
-		{name: "job plus sha alone reports dispatched", seed: func() *PRState {
-			s := seedFresh()
-			s.RecordDeployedSHAJob("flux-a", "aaa111")
-			return s
-		}, repo: "azylman/aerial", job: "flux-a", sha: "aaa111", prNumber: 99, want: true},
-		{name: "different job not dispatched", seed: func() *PRState {
-			s := seedFresh()
-			s.RecordDeployedSHAJob("flux-a", "aaa111")
-			return s
-		}, repo: "azylman/aerial", job: "flux-b", sha: "aaa111", prNumber: 99, want: false},
-		{name: "empty job never dispatched", seed: seedFresh, repo: "azylman/aerial", job: "", sha: "aaa111", prNumber: 99, want: false},
-		{name: "zero sha never dispatched", seed: seedFresh, repo: "azylman/aerial", job: "flux-a", sha: "0000", prNumber: 99, want: false},
-		{name: "nil dedup map never dispatched", seed: func() *PRState { return &PRState{Repo: "azylman/aerial", PRNumber: 7} }, repo: "azylman/aerial", job: "flux-a", sha: "aaa111", prNumber: 99, want: false},
-		{name: "nil state not dispatched", seed: func() *PRState { return nil }, repo: "azylman/aerial", job: "flux-a", sha: "aaa111", prNumber: 7, want: false},
-		{name: "unscoped repo matches owner form", seed: func() *PRState {
-			s := deployState("azylman/aerial", 7, "aaa111", 2)
-			s.RecordDeployedSHAJob("flux-a", "aaa111")
-			return s
-		}, repo: "azylman/aerial", job: "flux-a", sha: "aaa111", prNumber: 99, want: true},
+		{name: "empty state never dispatched", state: seedFresh(), repo: "azylman/aerial", job: "flux-a", sha: "aaa111", prNumber: 7, want: false},
+		{name: "pr slot alone reports dispatched", state: seedPRSlot(), repo: "azylman/aerial", job: "other-job", sha: "other-sha", prNumber: 7, want: true},
+		{name: "job plus sha alone reports dispatched", state: seedSHAJob("flux-a", "aaa111"), repo: "azylman/aerial", job: "flux-a", sha: "aaa111", prNumber: 99, want: true},
+		{name: "different job not dispatched", state: seedSHAJob("flux-a", "aaa111"), repo: "azylman/aerial", job: "flux-b", sha: "aaa111", prNumber: 99, want: false},
+		{name: "empty job never dispatched", state: seedFresh(), repo: "azylman/aerial", job: "", sha: "aaa111", prNumber: 99, want: false},
+		{name: "zero sha never dispatched", state: seedFresh(), repo: "azylman/aerial", job: "flux-a", sha: "0000", prNumber: 99, want: false},
+		{name: "nil dedup map never dispatched", state: &PRState{Repo: "azylman/aerial", PRNumber: 7}, repo: "azylman/aerial", job: "flux-a", sha: "aaa111", prNumber: 99, want: false},
+		{name: "nil state not dispatched", state: nil, repo: "azylman/aerial", job: "flux-a", sha: "aaa111", prNumber: 7, want: false},
+		{name: "unscoped repo matches owner form", state: seedSHAJob("flux-a", "aaa111"), repo: "azylman/aerial", job: "flux-a", sha: "aaa111", prNumber: 99, want: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if got := WasDispatched(tc.seed(), tc.repo, tc.job, tc.sha, tc.prNumber); got != tc.want {
+			if got := WasDispatched(tc.state, tc.repo, tc.job, tc.sha, tc.prNumber); got != tc.want {
 				t.Fatalf("WasDispatched = %v, want %v", got, tc.want)
 			}
 		})

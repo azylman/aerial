@@ -60,25 +60,29 @@ func TestConnectorOpen(t *testing.T) {
 		name         string
 		driver       string
 		ctx          context.Context
-		after        func(time.Duration) <-chan time.Time
+		neverFire    bool
 		dsn          string
 		opts         SQLOptions
 		wantErr      string
 		wantMaxOpen  int
 		wantCanceled bool
 	}{
-		{name: "empty", driver: "pgutil-fake", ctx: context.Background(), after: immediateAfter, dsn: "  ", wantErr: "connection string cannot be empty"},
-		{name: "bad scheme redacts dsn", driver: "pgutil-fake", ctx: context.Background(), after: immediateAfter, dsn: "mysql://u:hunter2@db/app?password=x", wantErr: `unsupported database scheme in "mysql://u:xxxxx@db/app": only postgres:// or postgresql:// supported`},
-		{name: "first attempt succeeds with defaults", driver: "pgutil-fake", ctx: context.Background(), after: immediateAfter, dsn: " postgresql://ok@db/app ", wantMaxOpen: 0},
-		{name: "retry then success applies options", driver: "pgutil-fake", ctx: context.Background(), after: immediateAfter, dsn: "postgres://retry@db/app", opts: SQLOptions{MaxOpenConns: 10, MaxIdleConns: 5, ConnMaxLifetime: 30 * time.Minute, ConnMaxIdleTime: 5 * time.Minute}, wantMaxOpen: 10},
-		{name: "exhausted retries", driver: "pgutil-fake", ctx: context.Background(), after: immediateAfter, dsn: "postgres://exhausted@db/app", wantErr: "failed to connect to PostgreSQL after 3 attempts: fake: connection refused"},
-		{name: "unknown driver exhausts retries", driver: "pgutil-missing", ctx: context.Background(), after: immediateAfter, dsn: "postgres://ok@db/app", wantErr: `failed to connect to PostgreSQL after 3 attempts: sql: unknown driver "pgutil-missing"`},
-		{name: "ctx cancel stops retrying", driver: "pgutil-fake", ctx: cancelled, after: neverAfter, dsn: "postgres://cancel@db/app", wantErr: "gave up waiting for PostgreSQL after 1 attempts", wantCanceled: true},
+		{name: "empty", driver: "pgutil-fake", ctx: context.Background(), dsn: "  ", wantErr: "connection string cannot be empty"},
+		{name: "bad scheme redacts dsn", driver: "pgutil-fake", ctx: context.Background(), dsn: "mysql://u:hunter2@db/app?password=x", wantErr: `unsupported database scheme in "mysql://u:xxxxx@db/app": only postgres:// or postgresql:// supported`},
+		{name: "first attempt succeeds with defaults", driver: "pgutil-fake", ctx: context.Background(), dsn: " postgresql://ok@db/app ", wantMaxOpen: 0},
+		{name: "retry then success applies options", driver: "pgutil-fake", ctx: context.Background(), dsn: "postgres://retry@db/app", opts: SQLOptions{MaxOpenConns: 10, MaxIdleConns: 5, ConnMaxLifetime: 30 * time.Minute, ConnMaxIdleTime: 5 * time.Minute}, wantMaxOpen: 10},
+		{name: "exhausted retries", driver: "pgutil-fake", ctx: context.Background(), dsn: "postgres://exhausted@db/app", wantErr: "failed to connect to PostgreSQL after 3 attempts: fake: connection refused"},
+		{name: "unknown driver exhausts retries", driver: "pgutil-missing", ctx: context.Background(), dsn: "postgres://ok@db/app", wantErr: `failed to connect to PostgreSQL after 3 attempts: sql: unknown driver "pgutil-missing"`},
+		{name: "ctx cancel stops retrying", driver: "pgutil-fake", ctx: cancelled, neverFire: true, dsn: "postgres://cancel@db/app", wantErr: "gave up waiting for PostgreSQL after 1 attempts", wantCanceled: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			c := connector{driver: tc.driver, maxAttempts: 3, retryBase: time.Millisecond, pingTimeout: time.Second, after: tc.after}
+			after := immediateAfter
+			if tc.neverFire {
+				after = neverAfter
+			}
+			c := connector{driver: tc.driver, maxAttempts: 3, retryBase: time.Millisecond, pingTimeout: time.Second, after: after}
 			db, err := c.open(tc.ctx, tc.dsn, tc.opts)
 			if tc.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {

@@ -95,7 +95,6 @@ channels:
 	const inbound = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
 	tests := []struct {
 		name        string
-		handler     func(db.Store, *queue.WorkerPool) http.HandlerFunc
 		path        string
 		body        string
 		traceparent string
@@ -103,19 +102,19 @@ channels:
 		want        string
 	}{
 		{
-			name: "prompt", handler: handlePrompt, path: "/prompt", traceparent: inbound, rowID: "msg-tp-1", want: inbound,
+			name: "prompt", path: "/prompt", traceparent: inbound, rowID: "msg-tp-1", want: inbound,
 			body: `{"prompt":"check","channel_id":"1542423172400291873","message_id":"msg-tp-1"}`,
 		},
 		{
-			name: "prompt without trace context", handler: handlePrompt, path: "/prompt", rowID: "msg-tp-2", want: "",
+			name: "prompt without trace context", path: "/prompt", rowID: "msg-tp-2", want: "",
 			body: `{"prompt":"check","channel_id":"1542423172400291873","message_id":"msg-tp-2"}`,
 		},
 		{
-			name: "dispatch", handler: handleDispatch, path: "/dispatch", traceparent: inbound, rowID: "disp-tp-1", want: inbound,
+			name: "dispatch", path: "/dispatch", traceparent: inbound, rowID: "disp-tp-1", want: inbound,
 			body: `{"id":"disp-tp-1","source":"heartbeat","session_id":"heartbeat-tp","prompt":"poll"}`,
 		},
 		{
-			name: "discord message", handler: handleInternalDiscordMessage, path: "/internal/discord/message", traceparent: inbound,
+			name: "discord message", path: "/internal/discord/message", traceparent: inbound,
 			rowID: "123456789012345679", want: inbound,
 			body: `{"bot_user_id":"bot-1","message":{"id":"123456789012345679","channel_id":"ch-1","author":{"id":"u-1","username":"alice"},"content":"hey aerial"}}`,
 		},
@@ -125,7 +124,18 @@ channels:
 			store := dbtest.NewFakeStore()
 			pool := newTestWorkerPool(store)
 			mux := http.NewServeMux()
-			mux.HandleFunc(tc.path, tc.handler(store, pool))
+			var handler func(db.Store, *queue.WorkerPool) http.HandlerFunc
+			switch tc.path {
+			case "/prompt":
+				handler = handlePrompt
+			case "/dispatch":
+				handler = handleDispatch
+			case "/internal/discord/message":
+				handler = handleInternalDiscordMessage
+			default:
+				t.Fatalf("unknown path %q", tc.path)
+			}
+			mux.HandleFunc(tc.path, handler(store, pool))
 
 			req := httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(tc.body))
 			if tc.traceparent != "" {
