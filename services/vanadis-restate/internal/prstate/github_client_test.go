@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -152,7 +153,7 @@ func TestGitHubErrorClassification(t *testing.T) {
 	}{
 		{name: "nil error", err: nil},
 		{name: "transport failure retries", err: &GitHubError{Message: "dial"}, wantRetryable: true, wantMessage: "dial"},
-		{name: "rate limit retries", err: &GitHubError{Status: 403, RateLimited: true, Message: "rl"}, wantRetryable: true, wantMessage: "rl"},
+		{name: "rate limit retries", err: &GitHubError{Status: 403, RateLimited: true, RetryAfter: 45 * time.Second, Message: "rl"}, wantRetryable: true, wantMessage: "rl"},
 		{name: "server error retries", err: &GitHubError{Status: 502, Message: "bad gateway"}, wantRetryable: true, wantMessage: "bad gateway"},
 		{name: "not found is terminal", err: &GitHubError{Status: 404, Message: "nf"}, wantNotFound: true, wantMessage: "nf"},
 		{name: "validation is terminal", err: &GitHubError{Status: 422, Message: "invalid"}, wantMessage: "invalid"},
@@ -211,6 +212,7 @@ func TestGitHubClientUpdateBranch(t *testing.T) {
 		want            UpdateBranchOutcome
 		wantErrStatus   int
 		wantRateLimited bool
+		wantRetryAfter  time.Duration
 		wantRequests    int
 		wantMessage     string
 	}{
@@ -218,11 +220,11 @@ func TestGitHubClientUpdateBranch(t *testing.T) {
 		{name: "conflict", repo: "azylman/aerial", prNumber: 7, routes: map[string][]apiResponse{updateBranchRoute: {{status: 409}}}, want: UpdateBranchConflict, wantRequests: 1},
 		{
 			name: "rate limited", repo: "azylman/aerial", prNumber: 7, routes: map[string][]apiResponse{updateBranchRoute: {{status: 403, remaining: "0", body: `{"message":"API rate limit exceeded for installation."}`}}},
-			wantErrStatus: 403, wantRateLimited: true, wantRequests: 1, wantMessage: "github api rate limited (status 403, remaining: 0): API rate limit exceeded for installation.",
+			wantErrStatus: 403, wantRateLimited: true, wantRetryAfter: time.Minute, wantRequests: 1, wantMessage: "github api rate limited (status 403, remaining: 0): API rate limit exceeded for installation.",
 		},
 		{
 			name: "secondary rate limit", repo: "azylman/aerial", prNumber: 7, routes: map[string][]apiResponse{updateBranchRoute: {{status: 403, retryAfter: "60", body: `{"message":"You have exceeded a secondary rate limit."}`}}},
-			wantErrStatus: 403, wantRateLimited: true, wantRequests: 1, wantMessage: "github api rate limited (status 403, remaining: ): You have exceeded a secondary rate limit.",
+			wantErrStatus: 403, wantRateLimited: true, wantRetryAfter: 60 * time.Second, wantRequests: 1, wantMessage: "github api rate limited (status 403, remaining: ): You have exceeded a secondary rate limit.",
 		},
 		{
 			name: "permission 403 is terminal with github message", repo: "azylman/aerial", prNumber: 7, routes: map[string][]apiResponse{updateBranchRoute: {{status: 403, remaining: "4999", body: `{"message":"Resource not accessible by integration","documentation_url":"https://docs.github.com"}`}}},
@@ -234,7 +236,7 @@ func TestGitHubClientUpdateBranch(t *testing.T) {
 		},
 		{
 			name: "too many requests", repo: "azylman/aerial", prNumber: 7, routes: map[string][]apiResponse{updateBranchRoute: {{status: 429, body: `{"message":""}`}}},
-			wantErrStatus: 429, wantRateLimited: true, wantRequests: 1, wantMessage: "github api rate limited (status 429, remaining: ): no message",
+			wantErrStatus: 429, wantRateLimited: true, wantRetryAfter: time.Minute, wantRequests: 1, wantMessage: "github api rate limited (status 429, remaining: ): no message",
 		},
 		{name: "invalid input never calls github", repo: "", prNumber: 7, wantErrStatus: 400},
 	}
@@ -253,6 +255,7 @@ func TestGitHubClientUpdateBranch(t *testing.T) {
 			require.Equal(t, tc.wantErrStatus, gerr.Status)
 			require.Equal(t, tc.wantRateLimited, gerr.RateLimited)
 			require.Equal(t, tc.wantRateLimited, gerr.Retryable())
+			require.Equal(t, tc.wantRetryAfter, gerr.RetryAfter)
 			if tc.wantMessage != "" {
 				require.Equal(t, tc.wantMessage, gerr.Message)
 			}

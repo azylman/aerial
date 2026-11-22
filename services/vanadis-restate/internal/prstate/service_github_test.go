@@ -154,6 +154,15 @@ func TestRepoObjectServiceGitHubEffects(t *testing.T) {
 			wantSends: retrySend(prwire.RepoHandlerAutoUpdate, RepoEvent{Repo: "azylman/aerial", MainSHA: "m1", AutoUpdate: policy, Attempt: 3}),
 		},
 		{
+			name: "rate limit failure schedules a delayed retry with rate limit reset delay", handler: prwire.RepoHandlerAutoUpdate,
+			gh: &fakeGitHub{listErr: &GitHubError{Status: 403, RateLimited: true, RetryAfter: 5 * time.Minute, Message: "rate limit"}},
+			ev: RepoEvent{Repo: "azylman/aerial", MainSHA: "m1", AutoUpdate: policy, Attempt: 2}, wantRun: true,
+			wantSends: []sentCall{{
+				service: "RepoObject", key: "azylman/aerial", method: prwire.RepoHandlerAutoUpdate,
+				input: RepoEvent{Repo: "azylman/aerial", MainSHA: "m1", AutoUpdate: policy, Attempt: 3}, delayed: true,
+			}},
+		},
+		{
 			name: "spent retry budget drops", handler: prwire.RepoHandlerAutoUpdate, gh: &fakeGitHub{listErr: errGHServer},
 			ev: RepoEvent{Repo: "azylman/aerial", MainSHA: "m1", AutoUpdate: policy, Attempt: maxRepoEffectRetries}, wantRun: true,
 		},

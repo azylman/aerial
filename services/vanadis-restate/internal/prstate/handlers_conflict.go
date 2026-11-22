@@ -116,7 +116,11 @@ func (h *ConflictHandlers) HandleConflictCheck(ctx context.Context, prKey string
 	}
 	conflicted, err := h.conflicts.CheckConflict(ctx, pr.Repo, pr.PRNumber, headSHA)
 	if err != nil {
-		if schedErr := h.reschedule.ScheduleConflictRecheck(ctx, ConflictRecheckDelay, ev); schedErr != nil {
+		delay := ConflictRecheckDelay
+		if gerr, ok := errors.AsType[*GitHubError](err); ok && gerr.RateLimited && gerr.RetryAfter > delay {
+			delay = gerr.RetryAfter
+		}
+		if schedErr := h.reschedule.ScheduleConflictRecheck(ctx, delay, ev); schedErr != nil {
 			return ConflictOutcome{Disposition: DispositionApply}, fmt.Errorf("conflict check and recheck schedule failed: %w", errors.Join(err, schedErr))
 		}
 		return ConflictOutcome{Disposition: DispositionApply, RecheckScheduled: true}, err
