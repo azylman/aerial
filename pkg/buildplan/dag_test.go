@@ -303,6 +303,32 @@ func TestIsTerminalChunkStatus(t *testing.T) {
 	}
 }
 
+func TestIsTerminalBuildStatus(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		status string
+		want   bool
+	}{
+		{status: "pending", want: false},
+		{status: "running", want: false},
+		{status: "queued", want: false},
+		{status: "", want: false},
+		{status: "other", want: false},
+		{status: "completed", want: true},
+		{status: "failed", want: true},
+		{status: "cancelled", want: true},
+		{status: "  COMPLETED  ", want: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.status, func(t *testing.T) {
+			t.Parallel()
+			if got := IsTerminalBuildStatus(tc.status); got != tc.want {
+				t.Errorf("IsTerminalBuildStatus(%q) = %v, want %v", tc.status, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestBuildTransitiveClosure(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

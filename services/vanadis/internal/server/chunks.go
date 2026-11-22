@@ -2,11 +2,11 @@ package server
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net/http"
 	"strings"
 	"time"
@@ -175,10 +175,161 @@ func (s *VanadisServer) mutateBuildObject(ctx context.Context, build *VanadisBui
 	return s.callRestateIngress(ctx, s.restateObjectPath("", build.ID, handler), req, out)
 }
 
+const maxTrackedActiveStepBuilds = 256
+
 func (s *VanadisServer) forwardActiveStep(ctx context.Context, build *VanadisBuild, req UpdateActiveStepRequest) error {
-	path := s.restateObjectPath("", build.ID, "UpdateActiveStep") + "/send"
-	idempotencyKey := fmt.Sprintf("active-step:%s:%s:%x", build.ID, strings.TrimSpace(req.ChunkID), sha256.Sum256([]byte(strutil.FirstNonEmpty(strings.TrimSpace(req.ActiveStep), strings.TrimSpace(req.Step)))))
-	return s.callRestateIngressKeyed(ctx, path, idempotencyKey, req, nil)
+	path := s.restateObjectPath("", build.ID, "UpdateActiveStep")
+	return s.callRestateIngress(ctx, path, req, nil)
+}
+
+func (s *VanadisServer) clearBuildStepMapLocked(buildID, chunkID string) {
+	m := s.stepsByBuild[buildID]
+	if m == nil {
+		return
+	}
+	delete(m, chunkID)
+	if len(m) > 0 {
+		return
+	}
+	delete(s.stepsByBuild, buildID)
+	if tm := s.trailingTimer[buildID]; tm != nil {
+		tm.Stop()
+		delete(s.trailingTimer, buildID)
+	}
+	if !s.inFlightBuilds[buildID] {
+		delete(s.lastForwardedAt, buildID)
+		delete(s.dirtyBuilds, buildID)
+	}
+}
+
+func (s *VanadisServer) updateBuildStepMapLocked(buildID, chunkID, stepText string) {
+	if stepText == "" {
+		s.clearBuildStepMapLocked(buildID, chunkID)
+		return
+	}
+	m := s.stepsByBuild[buildID]
+	if m == nil {
+		m = make(map[string]string)
+		s.stepsByBuild[buildID] = m
+	}
+	m[chunkID] = stepText
+}
+
+func (s *VanadisServer) pruneStaleBuildsLocked(now time.Time) {
+	if len(s.lastForwardedAt) <= maxTrackedActiveStepBuilds {
+		return
+	}
+	for bID, ts := range s.lastForwardedAt {
+		if s.inFlightBuilds[bID] || (now.Sub(ts) <= time.Hour && len(s.lastForwardedAt) <= maxTrackedActiveStepBuilds) {
+			continue
+		}
+		delete(s.lastForwardedAt, bID)
+		delete(s.stepsByBuild, bID)
+		delete(s.dirtyBuilds, bID)
+		if tm := s.trailingTimer[bID]; tm != nil {
+			tm.Stop()
+			delete(s.trailingTimer, bID)
+		}
+	}
+}
+
+func (s *VanadisServer) scheduleTrailingFlushLocked(ctx context.Context, build *VanadisBuild, remaining time.Duration) {
+	if remaining < 10*time.Millisecond {
+		remaining = 10 * time.Millisecond
+	}
+	if s.trailingTimer == nil {
+		s.trailingTimer = make(map[string]*time.Timer)
+	}
+	if s.trailingTimer[build.ID] == nil {
+		b := build
+		trailingCtx := context.WithoutCancel(ctx)
+		s.trailingTimer[build.ID] = time.AfterFunc(remaining, func() {
+			s.flushTrailingActiveStep(trailingCtx, b)
+		})
+	}
+}
+
+func (s *VanadisServer) forwardActiveStepLoop(ctx context.Context, build *VanadisBuild) error {
+	for {
+		s.activeStepMu.Lock()
+		now := time.Now()
+		if s.nowFn != nil {
+			now = s.nowFn()
+		}
+		s.lastForwardedAt[build.ID] = now
+		delete(s.dirtyBuilds, build.ID)
+		activeSteps := s.stepsByBuild[build.ID]
+		isClearAll := len(activeSteps) == 0
+		req := UpdateActiveStepRequest{
+			ActiveSteps: maps.Clone(activeSteps),
+			ClearAll:    isClearAll,
+		}
+		s.activeStepMu.Unlock()
+
+		if err := s.forwardActiveStep(ctx, build, req); err != nil {
+			s.activeStepMu.Lock()
+			delete(s.inFlightBuilds, build.ID)
+			delete(s.dirtyBuilds, build.ID)
+			s.activeStepMu.Unlock()
+			return err
+		}
+
+		s.activeStepMu.Lock()
+		if !s.dirtyBuilds[build.ID] {
+			delete(s.inFlightBuilds, build.ID)
+			if len(s.stepsByBuild[build.ID]) == 0 {
+				delete(s.stepsByBuild, build.ID)
+				delete(s.lastForwardedAt, build.ID)
+				delete(s.dirtyBuilds, build.ID)
+			}
+			s.activeStepMu.Unlock()
+			return nil
+		}
+		s.activeStepMu.Unlock()
+	}
+}
+
+func (s *VanadisServer) flushTrailingActiveStep(ctx context.Context, build *VanadisBuild) {
+	s.activeStepMu.Lock()
+	delete(s.trailingTimer, build.ID)
+	if s.inFlightBuilds[build.ID] {
+		s.dirtyBuilds[build.ID] = true
+		s.activeStepMu.Unlock()
+		return
+	}
+	if len(s.stepsByBuild[build.ID]) == 0 {
+		s.activeStepMu.Unlock()
+		return
+	}
+	s.inFlightBuilds[build.ID] = true
+	s.activeStepMu.Unlock()
+
+	defer func() {
+		s.activeStepMu.Lock()
+		delete(s.inFlightBuilds, build.ID)
+		s.activeStepMu.Unlock()
+	}()
+
+	if err := s.forwardActiveStepLoop(ctx, build); err != nil {
+		slog.WarnContext(ctx, "[vanadis] trailing active step forward warning", "build_id", build.ID, "error", err)
+	}
+}
+
+func (s *VanadisServer) shouldDebounceActiveStepLocked(ctx context.Context, build *VanadisBuild, isClear bool, now time.Time, minInterval time.Duration) bool {
+	buildID := build.ID
+	if s.inFlightBuilds[buildID] {
+		s.dirtyBuilds[buildID] = true
+		return true
+	}
+	if isClear {
+		return false
+	}
+	last := s.lastForwardedAt[buildID]
+	if !last.IsZero() && now.Sub(last) < minInterval {
+		s.scheduleTrailingFlushLocked(ctx, build, minInterval-now.Sub(last))
+		return true
+	}
+	return false
 }
 
 func (s *VanadisServer) processActiveStepUpdate(w http.ResponseWriter, r *http.Request, build *VanadisBuild, req UpdateActiveStepRequest) {
@@ -186,10 +337,68 @@ func (s *VanadisServer) processActiveStepUpdate(w http.ResponseWriter, r *http.R
 		k8sauth.WriteError(w, err)
 		return
 	}
-	if err := s.forwardActiveStep(r.Context(), build, req); err != nil {
+
+	chunkID := strings.TrimSpace(req.ChunkID)
+	stepText := strutil.FirstNonEmpty(strings.TrimSpace(req.ActiveStep), strings.TrimSpace(req.Step))
+
+	now := time.Now()
+	if s.nowFn != nil {
+		now = s.nowFn()
+	}
+	minInterval := s.minActiveStepInterval
+	if minInterval <= 0 {
+		minInterval = 2 * time.Second
+	}
+
+	s.activeStepMu.Lock()
+	if s.stepsByBuild == nil {
+		s.stepsByBuild = make(map[string]map[string]string)
+	}
+	if s.inFlightBuilds == nil {
+		s.inFlightBuilds = make(map[string]bool)
+	}
+	if s.lastForwardedAt == nil {
+		s.lastForwardedAt = make(map[string]time.Time)
+	}
+	if s.dirtyBuilds == nil {
+		s.dirtyBuilds = make(map[string]bool)
+	}
+
+	s.pruneStaleBuildsLocked(now)
+
+	if stepText != "" && s.stepsByBuild[build.ID] != nil && s.stepsByBuild[build.ID][chunkID] == stepText {
+		s.activeStepMu.Unlock()
+		httpkit.WriteJSON(w, http.StatusOK, map[string]string{fieldStatus: "ok"})
+		return
+	}
+
+	s.updateBuildStepMapLocked(build.ID, chunkID, stepText)
+
+	if s.shouldDebounceActiveStepLocked(r.Context(), build, stepText == "", now, minInterval) {
+		s.activeStepMu.Unlock()
+		httpkit.WriteJSON(w, http.StatusOK, map[string]string{fieldStatus: "ok"})
+		return
+	}
+
+	if tm := s.trailingTimer[build.ID]; tm != nil {
+		tm.Stop()
+		delete(s.trailingTimer, build.ID)
+	}
+
+	s.inFlightBuilds[build.ID] = true
+	s.activeStepMu.Unlock()
+
+	defer func() {
+		s.activeStepMu.Lock()
+		delete(s.inFlightBuilds, build.ID)
+		s.activeStepMu.Unlock()
+	}()
+
+	if err := s.forwardActiveStepLoop(r.Context(), build); err != nil {
 		writeStoreErr(r.Context(), w, err)
 		return
 	}
+
 	httpkit.WriteJSON(w, http.StatusOK, map[string]string{fieldStatus: "ok"})
 }
 

@@ -15,7 +15,6 @@ import (
 	"github.com/azylman/aerial/services/vanadis-restate/internal/executor"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
-	"github.com/azylman/aerial/services/vanadis-restate/internal/widget"
 )
 
 type mockActiveStepStore struct {
@@ -57,65 +56,142 @@ var (
 	}
 )
 
+type updateActiveStepTestCase struct {
+	name            string
+	buildID         string
+	req             UpdateActiveStepRequest
+	nilStore        bool
+	storeBuild      *model.VanadisBuild
+	storeChunks     []model.VanadisChunk
+	storeGetErr     error
+	widgetErr       error
+	expectCode      restate.Code
+	expectErrSub    string
+	expectStep      string
+	expectOtherStep string
+	expectCleared   bool
+	expectWidget    bool
+}
+
+func executeUpdateActiveStepTestCase(t *testing.T, tc updateActiveStepTestCase) {
+	t.Helper()
+	t.Parallel()
+	var widgetTimedOut bool
+	var remainingTimeout time.Duration
+	eri := &mockEriClient{
+		widgetFn: func(ctx context.Context, _ executor.StatusWidgetRequest) (string, error) {
+			if deadline, ok := ctx.Deadline(); ok {
+				widgetTimedOut = true
+				remainingTimeout = time.Until(deadline)
+			}
+			return "msg-123", tc.widgetErr
+		},
+	}
+	exec := executor.NewExecutor("", eri, nil, "", "azylman", nil)
+
+	var bo *BuildObject
+	if tc.nilStore {
+		bo = NewBuildObject("", nil)
+	} else {
+		st := &mockActiveStepStore{
+			build:  tc.storeBuild,
+			chunks: tc.storeChunks,
+			getErr: tc.storeGetErr,
+		}
+		bo = NewBuildObject("", nil).WithAuthority(st, exec)
+	}
+
+	mc := mocks.NewMockContext(t)
+	if tc.req.ChunkID != "" || len(tc.req.ActiveSteps) > 0 || tc.req.ActiveSteps != nil || tc.req.ClearAll {
+		mc.EXPECT().Key().Return(tc.buildID)
+		observeJournalCallback(t, mc, nil, tc.expectCode)
+	}
+
+	resp, err := bo.UpdateActiveStep(restate.WithMockContext(mc), tc.req)
+	if tc.expectErrSub != "" {
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), tc.expectErrSub)
+		return
+	}
+	require.NoError(t, err)
+	assert.Equal(t, AckResponse{Status: "ok"}, resp)
+	if tc.expectCleared {
+		for i := range tc.storeChunks {
+			assert.Empty(t, tc.storeChunks[i].ActiveStep)
+		}
+	} else {
+		if tc.expectStep != "" && len(tc.storeChunks) > 0 {
+			assert.Equal(t, tc.expectStep, tc.storeChunks[0].ActiveStep)
+		}
+		if tc.expectOtherStep != "" && len(tc.storeChunks) > 1 {
+			assert.Equal(t, tc.expectOtherStep, tc.storeChunks[1].ActiveStep)
+		}
+	}
+	if tc.expectWidget {
+		assertSyncedWidgetStep(t, eri, tc.req.ChunkID, tc.expectStep, tc.expectCleared)
+		assert.True(t, widgetTimedOut, "expected bounded context timeout on widget sync")
+		assert.LessOrEqual(t, remainingTimeout, 3*time.Second)
+		assert.Positive(t, remainingTimeout)
+	}
+}
+
 func TestUpdateActiveStep(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
-		name         string
-		buildID      string
-		req          UpdateActiveStepRequest
-		nilStore     bool
-		storeBuild   *model.VanadisBuild
-		storeChunks  []model.VanadisChunk
-		storeGetErr  error
-		widgetErr    error
-		expectCode   restate.Code
-		expectErrSub string
-		expectStep   string
-		expectWidget bool
-	}{
+	tests := []updateActiveStepTestCase{
 		{
-			name:         "empty chunk_id returns 400 terminal error",
+			name:         "empty chunk_id and empty active_steps returns 400 terminal error",
 			buildID:      "b-active",
-			req:          UpdateActiveStepRequest{ChunkID: "", ActiveStep: "⚡ Compiling..."},
+			req:          UpdateActiveStepRequest{ChunkID: ""},
 			expectCode:   400,
-			expectErrSub: "chunk_id cannot be empty",
+			expectErrSub: "chunk_id cannot be empty without active_steps",
 		},
 		{
-			name:       "nil store and executor succeeds and updates live registry",
-			buildID:    "b-active",
-			req:        UpdateActiveStepRequest{ChunkID: "chunk-nil", ActiveStep: "⚡ Running `verify.sh`..."},
-			nilStore:   true,
-			expectStep: "⚡ Running `verify.sh`...",
+			name:    "empty chunk_id with non-empty active_steps map succeeds",
+			buildID: "b-active",
+			req: UpdateActiveStepRequest{
+				ActiveSteps: map[string]string{
+					"chunk-step": "⚡ Compiling...",
+				},
+			},
+			storeBuild:  testActiveBuild,
+			storeChunks: []model.VanadisChunk{{ID: "chunk-step", BuildID: "b-active", Title: "Step Chunk", Status: "running"}},
+			expectStep:  "⚡ Compiling...",
 		},
 		{
-			name:       "step fallback field updates live registry",
-			buildID:    "b-active",
-			req:        UpdateActiveStepRequest{ChunkID: "chunk-step", Step: "⚡ Running `go test`..."},
-			nilStore:   true,
-			expectStep: "⚡ Running `go test`...",
+			name:     "nil store and executor succeeds without panicking",
+			buildID:  "b-active",
+			req:      UpdateActiveStepRequest{ChunkID: "chunk-nil", ActiveStep: "⚡ Running `verify.sh`..."},
+			nilStore: true,
 		},
 		{
-			name:        "store build not found ignores widget sync and does not update registry",
+			name:         "step fallback field updates chunk active step",
+			buildID:      "b-active",
+			req:          UpdateActiveStepRequest{ChunkID: "chunk-step", Step: "⚡ Running `go test`..."},
+			storeBuild:   testActiveBuild,
+			storeChunks:  []model.VanadisChunk{{ID: "chunk-step", BuildID: "b-active", Title: "Step Chunk", Status: "running"}},
+			expectStep:   "⚡ Running `go test`...",
+			expectWidget: true,
+		},
+		{
+			name:        "store build not found ignores widget sync",
 			buildID:     "b-active",
 			req:         UpdateActiveStepRequest{ChunkID: "chunk-notfound", ActiveStep: "⚡ Compiling..."},
 			storeGetErr: store.ErrBuildNotFound,
-			expectStep:  "",
 		},
 		{
-			name:        "empty step clears active step in registry",
+			name:        "empty step clears active step on chunk",
 			buildID:     "b-active",
 			req:         UpdateActiveStepRequest{ChunkID: "chunk-clear", ActiveStep: ""},
 			storeBuild:  testActiveBuild,
-			storeChunks: []model.VanadisChunk{{ID: "chunk-clear", BuildID: "b-active", Title: "Chunk Clear", Status: "running"}},
+			storeChunks: []model.VanadisChunk{{ID: "chunk-clear", BuildID: "b-active", Title: "Chunk Clear", Status: "running", ActiveStep: "old"}},
 			expectStep:  "",
 		},
 		{
-			name:        "store get error logs warning, returns ok, and preserves active step in registry",
+			name:        "store get error logs warning and returns ok",
 			buildID:     "b-active",
 			req:         UpdateActiveStepRequest{ChunkID: "chunk-err", ActiveStep: "⚡ Compiling..."},
 			storeGetErr: errors.New("db connection failure"),
-			expectStep:  "⚡ Compiling...",
 		},
 		{
 			name:        "quiet build skips widget delivery",
@@ -144,62 +220,68 @@ func TestUpdateActiveStep(t *testing.T) {
 			expectStep:   "⚡ Running tests...",
 			expectWidget: true,
 		},
+		{
+			name:    "active steps map updates multiple chunks",
+			buildID: "b-active",
+			req: UpdateActiveStepRequest{
+				ChunkID:    "chunk-1",
+				ActiveStep: "⚡ Compiling binary...",
+				ActiveSteps: map[string]string{
+					"chunk-1": "⚡ Compiling binary...",
+					"chunk-2": "⚡ Linting code...",
+				},
+			},
+			storeBuild: testActiveBuild,
+			storeChunks: []model.VanadisChunk{
+				{ID: "chunk-1", BuildID: "b-active", Title: "C1", Status: "running"},
+				{ID: "chunk-2", BuildID: "b-active", Title: "C2", Status: "running"},
+			},
+			expectStep:   "⚡ Compiling binary...",
+			expectWidget: true,
+		},
+		{
+			name:       "empty chunk_id with clear_all=true clears active steps",
+			buildID:    "b-active",
+			req:        UpdateActiveStepRequest{ClearAll: true},
+			storeBuild: testActiveBuild,
+			storeChunks: []model.VanadisChunk{
+				{ID: "chunk-1", BuildID: "b-active", Title: "Chunk 1", Status: "running", ActiveStep: "old-1"},
+				{ID: "chunk-2", BuildID: "b-active", Title: "Chunk 2", Status: "running", ActiveStep: "old-2"},
+			},
+			expectStep:    "",
+			expectCleared: true,
+			expectWidget:  true,
+		},
+		{
+			name:       "empty chunk_id with empty active_steps map clears active steps",
+			buildID:    "b-active",
+			req:        UpdateActiveStepRequest{ActiveSteps: map[string]string{}},
+			storeBuild: testActiveBuild,
+			storeChunks: []model.VanadisChunk{
+				{ID: "chunk-1", BuildID: "b-active", Title: "Chunk 1", Status: "running", ActiveStep: "old-1"},
+			},
+			expectStep:    "",
+			expectCleared: true,
+			expectWidget:  true,
+		},
+		{
+			name:       "single-chunk fallback update preserves other chunk active steps",
+			buildID:    "b-active",
+			req:        UpdateActiveStepRequest{ChunkID: "chunk-1", ActiveStep: "new step"},
+			storeBuild: testActiveBuild,
+			storeChunks: []model.VanadisChunk{
+				{ID: "chunk-1", BuildID: "b-active", Title: "Chunk 1", Status: "running", ActiveStep: "old-1"},
+				{ID: "chunk-2", BuildID: "b-active", Title: "Chunk 2", Status: "running", ActiveStep: "preserve-2"},
+			},
+			expectStep:      "new step",
+			expectOtherStep: "preserve-2",
+			expectWidget:    true,
+		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			var widgetTimedOut bool
-			var remainingTimeout time.Duration
-			eri := &mockEriClient{
-				widgetFn: func(ctx context.Context, _ executor.StatusWidgetRequest) (string, error) {
-					if deadline, ok := ctx.Deadline(); ok {
-						widgetTimedOut = true
-						remainingTimeout = time.Until(deadline)
-					}
-					return "msg-123", tc.widgetErr
-				},
-			}
-			exec := executor.NewExecutor("", eri, nil, "", "azylman", nil)
-
-			var bo *BuildObject
-			if tc.nilStore {
-				bo = NewBuildObject("", nil)
-			} else {
-				st := &mockActiveStepStore{
-					build:  tc.storeBuild,
-					chunks: tc.storeChunks,
-					getErr: tc.storeGetErr,
-				}
-				bo = NewBuildObject("", nil).WithAuthority(st, exec)
-			}
-
-			mc := mocks.NewMockContext(t)
-			if tc.req.ChunkID != "" {
-				mc.EXPECT().Key().Return(tc.buildID)
-				observeJournalCallback(t, mc, nil, tc.expectCode)
-			}
-
-			resp, err := bo.UpdateActiveStep(restate.WithMockContext(mc), tc.req)
-			if tc.expectErrSub != "" {
-				require.Error(t, err)
-				assert.Contains(t, err.Error(), tc.expectErrSub)
-				if tc.req.ChunkID != "" {
-					assert.Empty(t, widget.GetChunkActiveStep(tc.req.ChunkID))
-				}
-				return
-			}
-			require.NoError(t, err)
-			assert.Equal(t, AckResponse{Status: "ok"}, resp)
-			if tc.expectStep != "" {
-				assert.Equal(t, tc.expectStep, widget.GetChunkActiveStep(tc.req.ChunkID))
-			}
-			if tc.expectWidget {
-				assertSyncedWidgetStep(t, eri, tc.req.ChunkID, tc.expectStep)
-				assert.True(t, widgetTimedOut, "expected bounded context timeout on widget sync")
-				assert.LessOrEqual(t, remainingTimeout, 3*time.Second)
-				assert.Positive(t, remainingTimeout)
-			}
+			executeUpdateActiveStepTestCase(t, tc)
 		})
 	}
 }
@@ -317,10 +399,17 @@ func TestUpdateActiveStep_ConcurrentCoalesce(t *testing.T) {
 	}
 }
 
-func assertSyncedWidgetStep(t *testing.T, eri *mockEriClient, chunkID, expectStep string) {
+func assertSyncedWidgetStep(t *testing.T, eri *mockEriClient, chunkID, expectStep string, expectCleared ...bool) {
 	t.Helper()
 	require.NotNil(t, eri.LastWidget)
-	if expectStep == "" {
+	assert.True(t, eri.LastWidget.SkipSink, "active step widget sync must set SkipSink = true")
+	if len(expectCleared) > 0 && expectCleared[0] {
+		for _, ch := range eri.LastWidget.Chunks {
+			assert.Empty(t, ch.ActiveStep, "expected chunk %s active step to be cleared", ch.ID)
+		}
+		return
+	}
+	if chunkID == "" || expectStep == "" {
 		return
 	}
 	for _, ch := range eri.LastWidget.Chunks {
@@ -330,4 +419,33 @@ func assertSyncedWidgetStep(t *testing.T, eri *mockEriClient, chunkID, expectSte
 		}
 	}
 	t.Fatalf("expected chunk %s in synced widget chunks", chunkID)
+}
+
+func TestSyncBuildWidget_PreservesActiveStep(t *testing.T) {
+	t.Parallel()
+
+	var lastWidget executor.StatusWidgetRequest
+	eri := &mockEriClient{
+		widgetFn: func(_ context.Context, req executor.StatusWidgetRequest) (string, error) {
+			lastWidget = req
+			return "msg-123", nil
+		},
+	}
+	exec := executor.NewExecutor("", eri, nil, "", "azylman", nil)
+	exec.SetActiveSteps("b-test", map[string]string{
+		"c-running": "⚡ Compiling packages...",
+	})
+
+	bld := model.VanadisBuild{ID: "b-test", Title: "Build", Status: "running"}
+	// Non-active-step widget sync: caller passes chunks with empty ActiveStep (e.g. loaded fresh from DB)
+	chunks := []model.VanadisChunk{
+		{ID: "c-running", BuildID: "b-test", Title: "Chunk 1", Status: "running", ActiveStep: ""},
+		{ID: "c-other", BuildID: "b-test", Title: "Chunk 2", Status: "pending", ActiveStep: ""},
+	}
+
+	_, err := exec.SyncBuildWidget(context.Background(), nil, bld, chunks, "Status changed")
+	require.NoError(t, err)
+	require.Len(t, lastWidget.Chunks, 2)
+	assert.Equal(t, "⚡ Compiling packages...", lastWidget.Chunks[0].ActiveStep, "non-active-step widget sync must preserve active step from executor overlay")
+	assert.Empty(t, lastWidget.Chunks[1].ActiveStep)
 }
