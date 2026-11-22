@@ -22,6 +22,7 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/db"
 	"github.com/azylman/aerial/services/eri/pkg/db/dbtest"
 	"github.com/azylman/aerial/services/eri/pkg/interactions"
+	"github.com/azylman/aerial/services/eri/pkg/metrics"
 	"github.com/azylman/aerial/services/eri/pkg/queue"
 )
 
@@ -156,7 +157,15 @@ channels:
 
 	// Default funcs verification
 	_ = discordSessionOpener(&discordgo.Session{})
-	_, _ = funnelMemberFetcher(s, "g1", "u1")
+	memberSess := newMockDiscordSession(t, func(req *http.Request) (*http.Response, error) {
+		if strings.HasSuffix(req.URL.Path, "/guilds/g1/members/u1") {
+			return jsonHTTPResponse(http.StatusOK, `{"user":{"id":"u1"},"roles":["r-1"]}`), nil
+		}
+		return jsonHTTPResponse(http.StatusNotFound, `{"message":"not found"}`), nil
+	})
+	if member, err := defaultFunnelMemberFetcher(memberSess, "g1", "u1"); err != nil || member == nil || member.User == nil || member.User.ID != "u1" || !slices.Equal(member.Roles, []string{"r-1"}) {
+		t.Errorf("default member fetcher = %+v, %v; want user u1 with role r-1", member, err)
+	}
 
 	// ResolveGuildID extended edge cases
 	if id := resolveGuildID(nil, nil); id != "" {
@@ -493,6 +502,7 @@ channels:
 	}{
 		{"200 thread created successfully", "msg-200-ok", "deploy service", 200, `{"id":"th-created-200","guild_id":"g-rest-1","parent_id":"ch-rest-parent","name":"deploy-service","type":11}`, 0, "", "th-created-200", true, true, parentChanID},
 		{"200 thread created with missing parent and guild", "msg-200-empty-parent", "start missing parent thread", 200, `{"id":"th-created-empty-parent","type":11}`, 0, "", "th-created-empty-parent", true, true, parentChanID},
+		{"200 thread in guild missing from session state", "msg-200-other-guild", "start other guild thread", 200, `{"id":"th-created-other-guild","guild_id":"g-not-in-state","parent_id":"ch-rest-parent","type":11}`, 0, "", "th-created-other-guild", true, true, parentChanID},
 		{"160004 thread already exists with channel re-fetch success", "200300400500600701", "test 160004 refetch", 400, `{"code":160004,"message":"Thread already exists"}`, 200, `{"id":"200300400500600701","guild_id":"g-rest-1","parent_id":"ch-rest-parent","type":11}`, "200300400500600701", true, true, parentChanID},
 		{"160004 thread already exists with channel error fallback", "200300400500600702", "test 160004 fallback", 400, `{"code":160004,"message":"Thread already exists"}`, 0, "", "200300400500600702", true, true, parentChanID},
 		{"160004 non-numeric message ID falls back without recovery", "not-a-numeric-snowflake", "test non-numeric", 400, `{"code":160004,"message":"Thread already exists"}`, 0, "", parentChanID, false, false, ""},
@@ -613,6 +623,9 @@ func TestConnectDiscordFunnel_DisabledAndLifecycle(t *testing.T) {
 	pool.Start()
 	defer pool.Stop()
 
+	SetFunnelQuotaProvider(func() metrics.QuotaSnapshot { return metrics.QuotaSnapshot{} })
+	t.Cleanup(func() { SetFunnelQuotaProvider(nil) })
+
 	s := connectDiscordFunnel(cancelCtx, store, pool, "mock-valid-token")
 	if s == nil {
 		t.Fatalf("Expected non-nil discordgo.Session")
@@ -681,8 +694,9 @@ func assertHydrateDiscordSessionCase(t *testing.T, tc hydrateDiscordSessionCase)
 		t.Fatalf("failed to create session: %v", err)
 	}
 	s.StateEnabled = true
-	if !tc.nilState {
-		s.State = discordgo.NewState()
+	s.State = discordgo.NewState()
+	if tc.nilState {
+		s.State = nil
 	}
 
 	s.Client = &http.Client{
@@ -798,6 +812,28 @@ func TestHydrateDiscordSessionREST(t *testing.T) {
 	hydrateGuildRoles(errSess, "g1")
 	hydrateGuildChannels(errSess, "g1")
 	hydrateGuildThreads(errSess, "g1")
+
+	// REST returns roles, channels and threads for a guild the session state has
+	// never seen: state inserts fail, but channels still reach the shared cache.
+	queue.InvalidateChannelCache("ch-hydrated-1")
+	queue.InvalidateChannelCache("th-hydrated-1")
+	unknownGuildSess := newMockDiscordSession(t, func(req *http.Request) (*http.Response, error) {
+		return runHydrateSessionRoundTrip(req, hydrateDiscordSessionCase{})
+	})
+	hydrateGuildRoles(unknownGuildSess, "g-unknown")
+	hydrateGuildChannels(unknownGuildSess, "g-unknown")
+	hydrateGuildThreads(unknownGuildSess, "g-unknown")
+	for _, id := range []string{"ch-hydrated-1", "th-hydrated-1"} {
+		if _, ok := queue.GetCachedChannel(id); !ok {
+			t.Errorf("expected %s in channel cache despite state insert failure", id)
+		}
+		if _, err := unknownGuildSess.State.Channel(id); err == nil {
+			t.Errorf("expected %s to be absent from session state for unknown guild", id)
+		}
+	}
+	if _, err := unknownGuildSess.State.Role("g-unknown", "role-hydrated-1"); err == nil {
+		t.Error("expected role to be absent from session state for unknown guild")
+	}
 }
 
 func TestSyncBotMemberRoles(t *testing.T) {

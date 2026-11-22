@@ -175,6 +175,7 @@ func TestHandlePromptValidation(t *testing.T) {
 		{"whitespace prompt", http.MethodPost, store, pool, strings.NewReader(`{"prompt":"   "}`), http.StatusBadRequest, "Invalid payload: 'prompt' field is required and cannot be empty"},
 		{"missing channel_id", http.MethodPost, store, pool, strings.NewReader(`{"prompt":"hello"}`), http.StatusBadRequest, "Invalid payload: 'channel_id' field is required and cannot be empty"},
 		{"non-snowflake channel_id", http.MethodPost, store, pool, strings.NewReader(`{"prompt":"hello","channel_id":"not-a-snowflake"}`), http.StatusBadRequest, "Invalid payload: 'channel_id' must be a valid numeric Discord snowflake"},
+		{"unknown effort", http.MethodPost, store, pool, strings.NewReader(`{"prompt":"hello","channel_id":"1542423172400291873","effort":"extreme"}`), http.StatusBadRequest, "Invalid payload: 'effort' must be 'low', 'medium', or 'high'"},
 		{"channel name resolution prospera", http.MethodPost, store, prosperaPromptPool, strings.NewReader(`{"prompt":"hello","channel_id":"prospera"}`), http.StatusAccepted, "1564150557705248879"},
 		{"channel name resolution hash prospera", http.MethodPost, store, prosperaPromptPool, strings.NewReader(`{"prompt":"hello","channel_id":"#prospera"}`), http.StatusAccepted, "1564150557705248879"},
 		{"channel name unresolvable falls back to snowflake validation", http.MethodPost, store, prosperaPromptPool, strings.NewReader(`{"prompt":"hello","channel_id":"unknown-channel"}`), http.StatusBadRequest, "must be a valid numeric Discord snowflake"},
@@ -446,6 +447,12 @@ func TestHandleDirectMessage(t *testing.T) {
 		},
 	})
 
+	opaqueErrPool := queue.New(nil, queue.WorkerPoolConfig{
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
+			return errors.New("gateway exploded")
+		},
+	})
+
 	oversizedB64 := base64.StdEncoding.EncodeToString(make([]byte, 8*1024*1024+1))
 
 	for _, tc := range []directMessageCase{
@@ -468,6 +475,7 @@ func TestHandleDirectMessage(t *testing.T) {
 		{"discord session not connected", http.MethodPost, &queue.WorkerPool{}, strings.NewReader(`{"channel_id":"1542423172400291873","content":"hello"}`), http.StatusServiceUnavailable, "Discord session not connected"},
 		{"discord client RESTError", http.MethodPost, restErrPool, strings.NewReader(`{"channel_id":"1542423172400291873","content":"hello"}`), http.StatusForbidden, "Discord client error"},
 		{"discord client cannot send", http.MethodPost, sendErrPool, strings.NewReader(`{"channel_id":"1542423172400291873","content":"hello"}`), http.StatusBadRequest, "Discord client error"},
+		{"opaque delivery error", http.MethodPost, opaqueErrPool, strings.NewReader(`{"channel_id":"1542423172400291873","content":"hello"}`), http.StatusInternalServerError, "Failed to deliver message: gateway exploded"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			assertDirectMessageCase(t, tc)
@@ -925,15 +933,40 @@ func TestMetricsMiddleware(t *testing.T) {
 
 	handler := metricsMiddleware(mux)
 
-	if w := runHTTP(handler.ServeHTTP, http.MethodGet, "/health", nil); w.Code != http.StatusOK {
-		t.Fatalf("expected status 200, got %d", w.Code)
+	tests := []struct {
+		name     string
+		method   string
+		path     string
+		wantCode int
+	}{
+		{"explicit 200", http.MethodGet, "/health", http.StatusOK},
+		{"explicit 404", http.MethodGet, "/unknown", http.StatusNotFound},
+		{"implicit 200 on write", http.MethodGet, "/implicit", http.StatusOK},
+		{"empty method served as GET", "", "/health", http.StatusOK},
 	}
-	if w := runHTTP(handler.ServeHTTP, http.MethodGet, "/unknown", nil); w.Code != http.StatusNotFound {
-		t.Fatalf("expected status 404, got %d", w.Code)
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			req := httptest.NewRequest(http.MethodGet, tc.path, http.NoBody)
+			req.Method = tc.method
+			w := httptest.NewRecorder()
+			handler.ServeHTTP(w, req)
+			if w.Code != tc.wantCode {
+				t.Fatalf("status = %d, want %d", w.Code, tc.wantCode)
+			}
+		})
 	}
-	if w := runHTTP(handler.ServeHTTP, http.MethodGet, "/implicit", nil); w.Code != http.StatusOK {
-		t.Errorf("expected 200 for implicit write, got %d", w.Code)
-	}
+}
+
+// errWriteRecorder is a flushable recorder whose body writes always fail, as
+// when the client connection has gone away mid-response.
+type errWriteRecorder struct {
+	*httptest.ResponseRecorder
+}
+
+func (errWriteRecorder) Write([]byte) (int, error) {
+	return 0, errors.New("simulated client write failure")
 }
 
 type mockFlusherRecorder struct {
@@ -1104,6 +1137,11 @@ func TestSetupBrainMux_And_Endpoints(t *testing.T) {
 	}
 	if w := runHTTP(mux.ServeHTTP, http.MethodGet, "/healthz", nil); w.Code != http.StatusOK {
 		t.Errorf("Expected 200 from /healthz, got %d", w.Code)
+	}
+	failedHealth := errWriteRecorder{httptest.NewRecorder()}
+	mux.ServeHTTP(failedHealth, httptest.NewRequest(http.MethodGet, "/health", http.NoBody))
+	if failedHealth.Code != http.StatusOK || failedHealth.Body.Len() != 0 {
+		t.Errorf("health with failing writer = %d %q, want 200 with no body", failedHealth.Code, failedHealth.Body.String())
 	}
 
 	if w := runHTTP(mux.ServeHTTP, http.MethodGet, "/tasks", nil); w.Code != http.StatusOK {
