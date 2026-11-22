@@ -3,11 +3,13 @@ package githubapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/azylman/aerial/pkg/githubauth"
 )
@@ -25,10 +27,21 @@ type StatusError struct {
 	StatusCode  int
 	Message     string
 	RateLimited bool
+	RetryAfter  time.Duration
 }
 
 func (e *StatusError) Error() string {
 	return e.Message
+}
+
+// RateLimitDelay extracts the rate-limit retry delay from err if it wraps or is
+// a rate-limited StatusError.
+func RateLimitDelay(err error) (time.Duration, bool) {
+	var se *StatusError
+	if errors.As(err, &se) && se.RateLimited {
+		return se.RetryAfter, true
+	}
+	return 0, false
 }
 
 // GetJSON executes req with client (http.DefaultClient when nil) and decodes
@@ -78,6 +91,7 @@ func classifyForbidden(ctx context.Context, resp *http.Response, path string) er
 			StatusCode:  resp.StatusCode,
 			Message:     fmt.Sprintf("github api rate limit (status %d, remaining: %s)", resp.StatusCode, resp.Header.Get("X-Ratelimit-Remaining")),
 			RateLimited: true,
+			RetryAfter:  githubauth.RateLimitDelay(resp, time.Now()),
 		}
 	}
 	if resp.StatusCode != http.StatusForbidden {

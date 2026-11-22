@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -654,13 +655,22 @@ func TestRolloutFromView(t *testing.T) {
 }
 
 // TestDispatchOwnedWorkflowRunImages pins the image-resolution outcomes of a
-// restate-owned main-branch build: a non-image workflow is skipped, and a
+// restate-owned main-branch build: a non-image workflow is skipped, a
+// rate-limited resolution retries without arming deploy_failed, and a
 // failed resolution reports the deploy attempt to PRObject and retries.
 func TestDispatchOwnedWorkflowRunImages(t *testing.T) {
 	t.Parallel()
+	rateLimitServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Retry-After", "60")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"message":"rate limited"}`))
+	}))
+	t.Cleanup(rateLimitServer.Close)
+
 	tests := []struct {
 		name       string
 		ghBody     string
+		ghURL      string
 		pr         int
 		wantPaths  []string
 		wantBodies []string
@@ -672,11 +682,13 @@ func TestDispatchOwnedWorkflowRunImages(t *testing.T) {
 			wantPaths: []string{ownedPRKey + "HandleDeployAttemptFailed/send"}, wantBodies: []string{`"event":"deploy_failed"`},
 		},
 		{name: "pr-less failed resolution only retries", ghBody: `nope`, wantErr: true},
+		{name: "rate-limited resolution retries without reporting deploy attempt failure", ghURL: rateLimitServer.URL, pr: 42, wantErr: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			h := newOwnedHarness(t, Config{}, &ownedIngress{sendCode: http.StatusAccepted, callCode: http.StatusOK, callBody: "{}"}, tc.ghBody)
+			cfg := Config{GitHubAPIURL: tc.ghURL}
+			h := newOwnedHarness(t, cfg, &ownedIngress{sendCode: http.StatusAccepted, callCode: http.StatusOK, callBody: "{}"}, tc.ghBody)
 			res := &ResolvedGitHubEvent{Repo: "azylman/aerial", PRNumber: tc.pr, HeadSHA: ownedMerge}
 			err := h.srv.dispatchOwnedWorkflowRunImages(ownedCtx(), workflowRunEvent{ID: 7, Attempt: 1, HeadSHA: ownedMerge}, res, "feat")
 			if (err != nil) != tc.wantErr {

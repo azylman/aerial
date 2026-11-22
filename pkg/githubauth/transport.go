@@ -6,6 +6,8 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync/atomic"
+	"time"
 )
 
 // Transport injects the TokenSource credential into requests bound for the
@@ -14,10 +16,11 @@ import (
 // It never retries and never swaps credentials on a rate limit: a 429 or a
 // rate-limited 403 is returned to the caller as is (see IsRateLimited).
 type Transport struct {
-	base    http.RoundTripper
-	src     TokenSource
-	apiHost string
-	metrics Metrics
+	base               http.RoundTripper
+	src                TokenSource
+	apiHost            string
+	metrics            Metrics
+	rateLimitResetUnix atomic.Int64
 }
 
 // TransportOption configures a Transport.
@@ -78,6 +81,12 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	}
 	if remaining, perr := strconv.ParseFloat(resp.Header.Get("X-Ratelimit-Remaining"), 64); perr == nil {
 		t.metrics.SetRateLimitRemaining(source, remaining)
+		if resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices && remaining > 0 {
+			t.rateLimitResetUnix.Store(0)
+		}
+	}
+	if IsRateLimited(resp) {
+		t.rateLimitResetUnix.Store(time.Now().Add(RateLimitDelay(resp, time.Now())).Unix())
 	}
 	if resp.StatusCode == http.StatusUnauthorized && value != "" {
 		t.src.Invalidate(value)
@@ -90,6 +99,78 @@ func (t *Transport) CloseIdleConnections() {
 	if c, ok := t.base.(interface{ CloseIdleConnections() }); ok {
 		c.CloseIdleConnections()
 	}
+}
+
+// RateLimitResetAt returns the timestamp at which the rate limit resets, or time.Time{} when not rate limited.
+func (t *Transport) RateLimitResetAt() time.Time {
+	sec := t.rateLimitResetUnix.Load()
+	if sec <= 0 {
+		return time.Time{}
+	}
+	return time.Unix(sec, 0)
+}
+
+// Unwrap returns the underlying RoundTripper.
+func (t *Transport) Unwrap() http.RoundTripper {
+	return t.base
+}
+
+// RateLimitResetAt returns the rate-limit reset timestamp reported by rt or by any
+// transport in its Unwrap() chain, or time.Time{} if none is found or recorded.
+func RateLimitResetAt(rt http.RoundTripper) time.Time {
+	curr := rt
+	for curr != nil {
+		if rlr, ok := curr.(interface{ RateLimitResetAt() time.Time }); ok {
+			return rlr.RateLimitResetAt()
+		}
+		u, ok := curr.(interface{ Unwrap() http.RoundTripper })
+		if !ok {
+			break
+		}
+		curr = u.Unwrap()
+	}
+	return time.Time{}
+}
+
+// RateLimitDelay calculates the duration to wait based on Retry-After or X-Ratelimit-Reset
+// headers when resp is rate-limited. When !IsRateLimited(resp), it returns 0.
+// If neither header yields a positive duration, it defaults to time.Minute;
+// any positive result is clamped to a maximum of time.Hour.
+func RateLimitDelay(resp *http.Response, now time.Time) time.Duration {
+	if !IsRateLimited(resp) {
+		return 0
+	}
+	d := parseRetryAfter(resp.Header.Get("Retry-After"))
+	if d <= 0 {
+		d = parseResetDelay(resp.Header.Get("X-Ratelimit-Reset"), now)
+	}
+	if d <= 0 {
+		d = time.Minute
+	}
+	if d > time.Hour {
+		d = time.Hour
+	}
+	return d
+}
+
+func parseRetryAfter(header string) time.Duration {
+	sec, err := strconv.ParseInt(strings.TrimSpace(header), 10, 64)
+	if err != nil || sec <= 0 {
+		return 0
+	}
+	return time.Duration(sec) * time.Second
+}
+
+func parseResetDelay(header string, now time.Time) time.Duration {
+	sec, err := strconv.ParseInt(strings.TrimSpace(header), 10, 64)
+	if err != nil {
+		return 0
+	}
+	diff := time.Unix(sec, 0).Sub(now)
+	if diff <= 0 {
+		return 0
+	}
+	return diff
 }
 
 // IsRateLimited reports whether resp is a GitHub rate-limit rejection: any
