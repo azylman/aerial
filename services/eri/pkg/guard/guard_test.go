@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 // mapEnv returns a getenv backed by m so tests never read the real process environment.
@@ -19,10 +20,11 @@ func mapEnv(m map[string]string) func(string) string {
 }
 
 // testOptions returns hermetic guard Options: a fresh temp batch dir, an empty environment and no
-// SQL describer, so no test touches the live /tmp/aerial-batch-guard directory or Postgres.
+// SQL describer, so no test touches the live /tmp/aerial-batch-guard directory or Postgres. The
+// allow-all fake egress scanner keeps MCP calls in every mode from failing closed.
 func testOptions(t *testing.T) Options {
 	t.Helper()
-	return Options{BatchDir: t.TempDir(), Getenv: mapEnv(nil)}
+	return Options{BatchDir: t.TempDir(), Getenv: mapEnv(nil), EgressScanner: fakeEgressScanner{}}
 }
 
 func runGuard(t *testing.T, opts Options, mode string, input string) Decision {
@@ -158,10 +160,11 @@ func TestGuardProcess_EndToEnd(t *testing.T) {
 		{"empty tokens between semicolons in share", "share", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "echo 1; ; echo 2", "Cwd": "/data"}}}`, false, 0, "", ""},
 		{"safe output redirect in share", "share", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "echo safe > /data/scratch/output.txt", "Cwd": "/data"}}}`, false, 0, "", ""},
 		{"claude read small span expanded", "batch", `{"session_id": "s1", "hook_event_name": "PreToolUse", "tool_name": "Read", "tool_input": {"file_path": "/data/main.go", "offset": 10, "limit": 3}}`, false, 0, "", "/data/main.go"},
-		{"claude short mcp tool allowed", "all", `{"session_id": "s1", "hook_event_name": "PreToolUse", "tool_name": "mcp__short", "tool_input": {}}`, false, 0, "", ""},
+		{"claude short mcp tool denied as unparsed MCP shape", "all", `{"session_id": "s1", "hook_event_name": "PreToolUse", "tool_name": "mcp__short", "tool_input": {}}`, true, 0, "", ""},
+		{"codex payload namespace resolves the MCP server", "commit", `{"session_id": "s1", "hook_event_name": "PreToolUse", "tool_name": "mcp_create", "namespace": "mcp__docket", "tool_input": {}}`, false, 0, "", ""},
 		{"claude victorialogs unbounded query denied", "all", `{"session_id": "s1", "hook_event_name": "PreToolUse", "tool_name": "mcp__victorialogs__query", "tool_input": {"query": "* | limit 10"}}`, true, 0, "", ""},
 		{"claude victorialogs bounded query allowed", "search", `{"session_id": "s1", "hook_event_name": "PreToolUse", "tool_name": "mcp__victorialogs__query", "tool_input": {"query": "kubernetes.container_name:eri | limit 10", "start": "2026-11-12T00:00:00Z", "end": "2026-11-12T01:00:00Z"}}`, false, 0, "", ""},
-		{"claude mcp tool call scanned for outbound secrets", "commit", `{"session_id": "s1", "hook_event_name": "PreToolUse", "tool_name": "mcp__github__add_issue_comment", "tool_input": {"body": "` + testPAT + `"}}`, true, 0, "", ""},
+		{"claude mcp tool call delegated to the egress scanner", "commit", `{"session_id": "s1", "hook_event_name": "PreToolUse", "tool_name": "mcp__github__add_issue_comment", "tool_input": {"body": "` + testPAT + `"}}`, false, 0, "", ""},
 		{"claude bash relative rm in share cwd denied", "share", `{"session_id": "s1", "hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": "rm -rf scripts"}, "cwd": "/share/aerial"}`, true, 0, "", ""},
 		{"claude bash relative rm in tmp cwd allowed", "share", `{"session_id": "s1", "hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": "rm -rf scripts"}, "cwd": "/tmp/work"}`, false, 0, "", ""},
 		{"claude bash relative rm in live-state cwd denied", "live-state", `{"session_id": "s1", "hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": "rm -f config"}, "cwd": "/data/ssh"}`, true, 0, "", ""},
@@ -637,6 +640,10 @@ func TestOptionsFromEnv(t *testing.T) {
 			opts := OptionsFromEnv(mapEnv(tc.env))
 			if opts.BatchDir != tc.wantBatchDir || (opts.SQL != nil) != tc.wantSQL || opts.Getenv("SCRATCH_DIR") != tc.wantScratch {
 				t.Fatalf("OptionsFromEnv = {BatchDir:%q SQL:%v SCRATCH_DIR:%q}, want {%q %v %q}", opts.BatchDir, opts.SQL != nil, opts.Getenv("SCRATCH_DIR"), tc.wantBatchDir, tc.wantSQL, tc.wantScratch)
+			}
+			scanner, ok := opts.EgressScanner.(*HTTPEgressScanner)
+			if !ok || scanner.URL != "http://127.0.0.1:4028/internal/guard/egress-scan" || scanner.Client == nil || scanner.Client.Timeout != 2*time.Second {
+				t.Fatalf("OptionsFromEnv EgressScanner = %#v, want HTTP scanner on loopback 4028 with 2s timeout", opts.EgressScanner)
 			}
 		})
 	}

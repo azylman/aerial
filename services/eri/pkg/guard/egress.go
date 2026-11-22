@@ -3,9 +3,14 @@ package guard
 import (
 	"bytes"
 	"cmp"
+	"context"
 	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/azylman/aerial/pkg/sanitizer"
 )
@@ -112,4 +117,57 @@ func collectJSONStrings(v any, out []string, depth int) []string {
 		}
 	}
 	return out
+}
+
+// EgressScanURL is eri-restate's loopback-only egress scan endpoint, reachable from agent turns
+// running in the same pod.
+const EgressScanURL = "http://127.0.0.1:4028/internal/guard/egress-scan"
+
+// egressScanTimeout bounds one scan so a stalled endpoint fails the MCP call closed quickly.
+const egressScanTimeout = 2 * time.Second
+
+// maxEgressResponseBytes caps how much of the endpoint's response is read.
+const maxEgressResponseBytes = 1 << 20
+
+// EgressScanner decides whether an MCP call's arguments carry a secret.
+type EgressScanner interface {
+	Scan(ctx context.Context, req EgressScanRequest) (EgressScanResult, error)
+}
+
+// HTTPEgressScanner calls the eri-restate egress scan endpoint at URL. Any non-200 status,
+// transport error or decode error is returned as an error.
+type HTTPEgressScanner struct {
+	URL    string
+	Client *http.Client
+}
+
+// NewHTTPEgressScanner returns the production scanner targeting EgressScanURL with a 2s timeout.
+func NewHTTPEgressScanner() *HTTPEgressScanner {
+	return &HTTPEgressScanner{URL: EgressScanURL, Client: &http.Client{Timeout: egressScanTimeout}}
+}
+
+// Scan posts req to the endpoint and decodes the result.
+func (s *HTTPEgressScanner) Scan(ctx context.Context, req EgressScanRequest) (EgressScanResult, error) {
+	body, err := json.Marshal(req)
+	if err != nil {
+		return EgressScanResult{}, fmt.Errorf("encode egress scan request: %w", err)
+	}
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, s.URL, bytes.NewReader(body))
+	if err != nil {
+		return EgressScanResult{}, fmt.Errorf("build egress scan request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	resp, err := s.Client.Do(httpReq)
+	if err != nil {
+		return EgressScanResult{}, fmt.Errorf("egress scan request failed: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return EgressScanResult{}, fmt.Errorf("egress scan returned HTTP %d", resp.StatusCode)
+	}
+	var result EgressScanResult
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxEgressResponseBytes)).Decode(&result); err != nil {
+		return EgressScanResult{}, fmt.Errorf("decode egress scan response: %w", err)
+	}
+	return result, nil
 }

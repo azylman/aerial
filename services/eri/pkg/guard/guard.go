@@ -141,17 +141,20 @@ func mergeClaudeOverwrite(toolInput json.RawMessage, overwrite map[string]any) m
 // Options carries every environment-dependent input of the guards so library code never reads
 // the process environment: BatchDir holds batch-guard state, Getenv resolves the remaining
 // settings (SCRATCH_DIR, AERIAL_COMMIT_GUARD_PATTERNS, HOME, ...) and SQL describes psql
-// queries (nil skips plan validation).
+// queries (nil skips plan validation). EgressScanner scans MCP call arguments bound for
+// blocklisted destinations; nil counts as unavailable, so MCP calls are denied.
 type Options struct {
-	BatchDir string
-	Getenv   func(string) string
-	SQL      SQLDescriber
+	BatchDir      string
+	Getenv        func(string) string
+	SQL           SQLDescriber
+	EgressScanner EgressScanner
 }
 
 // OptionsFromEnv builds the production Options from getenv (os.Getenv in hook-guard's main): the batch directory from
-// AERIAL_BATCH_GUARD_DIR (default DefaultBatchDir) and a describer from DATABASE_URL.
+// AERIAL_BATCH_GUARD_DIR (default DefaultBatchDir), a describer from DATABASE_URL and the HTTP
+// egress scanner targeting eri-restate's loopback egress scan endpoint.
 func OptionsFromEnv(getenv func(string) string) Options {
-	return Options{BatchDir: GetBatchDir(getenv), Getenv: getenv, SQL: DefaultSQLDescriber(getenv)}
+	return Options{BatchDir: GetBatchDir(getenv), Getenv: getenv, SQL: DefaultSQLDescriber(getenv), EgressScanner: NewHTTPEgressScanner()}
 }
 
 // ProcessWithOptions reads an Antigravity PreToolUse hook payload from r, evaluates guards per
@@ -201,6 +204,7 @@ func ProcessWithOptions(r io.Reader, w io.Writer, mode string, opts Options) (er
 	if args.Cwd == "" {
 		args.Cwd = payload.Cwd
 	}
+	args.Namespace = payload.Namespace
 
 	switch mode {
 	case string(ModeInv), "invocation":
@@ -232,7 +236,7 @@ func evaluateGuardMode(payload Payload, args ToolArgs, mode string, opts Options
 	case "search":
 		return CheckSearchWithSQL(payload.ToolCall.Name, args, opts.SQL)
 	case string(ModeCommit):
-		return CheckOutboundSecrets(payload.ToolCall.Name, args, opts.Getenv)
+		return CheckOutboundSecrets(payload.ToolCall.Name, payload.ToolCall.Args, args, opts.Getenv, opts.EgressScanner)
 	default:
 		return evaluateAllGuards(payload, args, opts)
 	}
@@ -245,7 +249,9 @@ func evaluateAllGuards(payload Payload, args ToolArgs, opts Options) *Decision {
 		func() *Decision { return CheckSchedule(payload, args) },
 		func() *Decision { return CheckBatchWithDir(payload, args, opts.BatchDir, time.Now(), opts.Getenv) },
 		func() *Decision { return CheckSearchWithSQL(payload.ToolCall.Name, args, opts.SQL) },
-		func() *Decision { return CheckOutboundSecrets(payload.ToolCall.Name, args, opts.Getenv) },
+		func() *Decision {
+			return CheckOutboundSecrets(payload.ToolCall.Name, payload.ToolCall.Args, args, opts.Getenv, opts.EgressScanner)
+		},
 	}
 	var lastDecision *Decision
 	var mergedOverwrite map[string]any
