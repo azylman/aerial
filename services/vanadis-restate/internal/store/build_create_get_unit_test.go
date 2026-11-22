@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -19,18 +20,19 @@ func TestInsertBuildChunkCases(t *testing.T) {
 		return fmt.Errorf("wrapped: %w", &pgconn.PgError{Code: code, ConstraintName: constraint})
 	}
 	tests := []struct {
-		name      string
-		chunk     model.VanadisChunk
-		execErr   error
-		wantErrIs error
-		wantErr   bool
+		name       string
+		chunk      model.VanadisChunk
+		execErr    error
+		wantErrIs  error
+		wantErr    bool
+		wantErrSub string
 	}{
 		{name: "invalid mode", chunk: model.VanadisChunk{ID: "c1", Mode: "bogus"}, wantErr: true},
-		{name: "pr requires repo", chunk: model.VanadisChunk{ID: "c1", Mode: "pr"}, wantErr: true},
-		{name: "action rejects repo", chunk: model.VanadisChunk{ID: "c1", Mode: "action", Repo: "aerial"}, wantErr: true},
-		{name: "action rejects target files", chunk: model.VanadisChunk{ID: "c1", Mode: "action", TargetFiles: []string{"f.go"}}, wantErr: true},
+		{name: "pr requires repo", chunk: model.VanadisChunk{ID: "c1", Mode: "pr"}, wantErr: true, wantErrSub: "repo is required for pr mode"},
+		{name: "action rejects repo", chunk: model.VanadisChunk{ID: "c1", Mode: "action", Repo: "aerial"}, wantErr: true, wantErrSub: "action chunk must have empty repo"},
+		{name: "action rejects target files", chunk: model.VanadisChunk{ID: "c1", Mode: "action", TargetFiles: []string{"f.go"}}, wantErr: true, wantErrSub: "action chunk must not specify target files or symbols"},
 		{name: "action rejects target symbols", chunk: model.VanadisChunk{ID: "c1", Mode: "action", TargetSymbols: []string{"S"}}, wantErr: true},
-		{name: "invalid effort", chunk: model.VanadisChunk{ID: "c1", Mode: "pr", Repo: "aerial", Effort: "ultra"}, wantErr: true},
+		{name: "invalid effort", chunk: model.VanadisChunk{ID: "c1", Mode: "pr", Repo: "aerial", Effort: "ultra"}, wantErr: true, wantErrSub: "invalid chunk effort"},
 		{name: "pr success", chunk: model.VanadisChunk{ID: "c1", Mode: "pr", Repo: "aerial", Status: "pending", Effort: "medium"}},
 		{name: "action running success", chunk: model.VanadisChunk{ID: "c2", Mode: "action", Status: "running"}},
 		{name: "terminal status success", chunk: model.VanadisChunk{ID: "c3", Mode: "pr", Repo: "aerial", Status: "completed"}},
@@ -51,7 +53,9 @@ func TestInsertBuildChunkCases(t *testing.T) {
 				}
 			}
 			err := InsertBuildChunk(context.Background(), tx, "b1", tc.chunk, InsertChunkSQL)
-			assertStoreErr(t, err, tc.wantErrIs, tc.wantErr)
+			if assertStoreErr(t, err, tc.wantErrIs, tc.wantErr) && !strings.Contains(err.Error(), tc.wantErrSub) {
+				t.Fatalf("err = %v, want containing %q", err, tc.wantErrSub)
+			}
 		})
 	}
 }
@@ -99,6 +103,8 @@ func TestSameBuildCreationCases(t *testing.T) {
 	badMode := chunk("c1", "T", "bogus")
 	renamed := chunk("c9", "T", "pr")
 	changed := chunk("c1", "Changed", "pr")
+	badEffort := chunk("c1", "T", "pr")
+	badEffort.Effort = "ultra"
 	good := []model.VanadisChunk{chunk("c1", "T", "pr")}
 	tests := []struct {
 		name string
@@ -118,6 +124,7 @@ func TestSameBuildCreationCases(t *testing.T) {
 		{name: "changed chunk", a: base, ac: good, b: base, bc: []model.VanadisChunk{changed}},
 		{name: "renamed chunk", a: base, ac: good, b: base, bc: []model.VanadisChunk{renamed}},
 		{name: "invalid mode", a: base, ac: good, b: base, bc: []model.VanadisChunk{badMode}},
+		{name: "invalid effort on both sides", a: base, ac: []model.VanadisChunk{badEffort}, b: base, bc: []model.VanadisChunk{badEffort}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -152,55 +159,5 @@ func TestMarshalJSONBOrEmptyCases(t *testing.T) {
 				t.Errorf("marshalJSONBOrEmpty = %q, want %q", got, tc.want)
 			}
 		})
-	}
-}
-
-func TestGetBuildGuards(t *testing.T) {
-	t.Parallel()
-	b1 := model.VanadisBuild{ID: "b1", ThreadID: "th1", Title: "Build 1"}
-	c1 := []model.VanadisChunk{{ID: "c1", BuildID: "b1", Title: "C1", Status: "running", Mode: "pr", Repo: "aerial", TargetFiles: []string{"f.go"}, DependsOn: []string{}, Effort: "medium"}}
-	t.Run("empty id", func(t *testing.T) {
-		t.Parallel()
-		st, _ := dbScript{}.open()
-		if _, _, err := st.GetBuild(context.Background(), "  "); err == nil {
-			t.Fatal("expected error, got nil")
-		}
-	})
-	t.Run("scan error", func(t *testing.T) {
-		t.Parallel()
-		st, _ := dbScript{row: &mockRow{b: &b1}, chunks: c1, scanErr: errors.New("scan failed")}.open()
-		if _, _, err := st.GetBuild(context.Background(), "b1"); err == nil {
-			t.Fatal("expected error, got nil")
-		}
-	})
-}
-
-func TestStoreNilGuards(t *testing.T) {
-	t.Parallel()
-	var nilStore *Store
-	if err := nilStore.CreateBuild(context.Background(), model.VanadisBuild{}, nil); err == nil {
-		t.Error("expected CreateBuild nil error, got nil")
-	}
-	if _, _, err := nilStore.GetBuild(context.Background(), "b1"); err == nil {
-		t.Error("expected GetBuild nil error, got nil")
-	}
-	empty := New(&mockDB{}, "azylman")
-	empty.db = nil
-	if err := empty.CreateBuild(context.Background(), model.VanadisBuild{ID: "b1"}, nil); err == nil {
-		t.Error("expected CreateBuild nil-db error, got nil")
-	}
-}
-
-func TestSameBuildCreationEffortMismatch(t *testing.T) {
-	t.Parallel()
-	b := model.VanadisBuild{ID: "b1", ThreadID: "t1", Objective: "o"}
-	bad := model.VanadisChunk{ID: "c1", Title: "T", Instructions: "I", Mode: "pr", Repo: "aerial", Effort: "ultra", DependsOn: []string{}}
-	if sameBuildCreation(b, []model.VanadisChunk{bad}, b, []model.VanadisChunk{bad}) {
-		t.Error("expected false for invalid effort, got true")
-	}
-	good := model.VanadisChunk{ID: "c1", Title: "T", Instructions: "I", Mode: "pr", Repo: "aerial", Effort: "medium", DependsOn: []string{}}
-	other := model.VanadisChunk{ID: "c2", Title: "T", Instructions: "I", Mode: "pr", Repo: "aerial", Effort: "medium", DependsOn: []string{}}
-	if sameBuildCreation(b, []model.VanadisChunk{good}, b, []model.VanadisChunk{other}) {
-		t.Error("expected false for disjoint ids, got true")
 	}
 }
