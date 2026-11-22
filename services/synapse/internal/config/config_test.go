@@ -15,7 +15,6 @@ var synapseConfigKeysToClear = []string{
 	"HARO_URL", "HANGAR_URL", "NATS_URL",
 	"SYSTEM_CHANNEL_ID", "AUTO_UPDATE_PR_AUTHORS",
 	"WEBHOOK_FORWARD_URLS", "SYNAPSE_DEFAULT_OWNER", "DEFAULT_OWNER", "AERIAL_DEFAULT_OWNER",
-	"GITHUB_APP_ID", "GITHUB_APP_INSTALLATION_ID",
 }
 
 func TestLoadConfig_EnvAndFallbacks(t *testing.T) {
@@ -449,29 +448,19 @@ func loadConfigYAMLAdvancedCases() []loadConfigCase {
 			},
 		},
 		{
-			name:               "github app ids from yaml win over env",
+			name:               "github app ids from yaml",
 			localYAML:          "github_app_id: 1111\ngithub_app_installation_id: \" 2222 \"\n",
-			env:                map[string]string{"GITHUB_APP_ID": "9991", "GITHUB_APP_INSTALLATION_ID": "9992"},
 			wantAppID:          "1111",
 			wantInstallationID: "2222",
-		},
-		{
-			name:               "empty yaml github app ids fall back to env",
-			localYAML:          "github_app_id: \" \"\n",
-			env:                map[string]string{"GITHUB_APP_ID": " 9991 ", "GITHUB_APP_INSTALLATION_ID": "9992"},
-			wantAppID:          "9991",
-			wantInstallationID: "9992",
 		},
 		{
 			name:      "github app ids unset in yaml and env stay empty",
 			localYAML: "port: \"4020\"\n",
 		},
 		{
-			name:               "non-integer yaml github app id passes through verbatim",
-			localYAML:          "github_app_id: not-a-number\n",
-			env:                map[string]string{"GITHUB_APP_ID": "9991", "GITHUB_APP_INSTALLATION_ID": "9992"},
-			wantAppID:          "not-a-number",
-			wantInstallationID: "9992",
+			name:      "non-integer yaml github app id passes through verbatim",
+			localYAML: "github_app_id: not-a-number\n",
+			wantAppID: "not-a-number",
 		},
 		{
 			name:       "collaborator_ci_alerts loaded from aerial config fallback",
