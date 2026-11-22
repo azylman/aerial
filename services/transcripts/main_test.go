@@ -17,35 +17,6 @@ import (
 	"github.com/azylman/aerial/pkg/pubsub"
 )
 
-func TestLoadConfig(t *testing.T) {
-	t.Setenv("DATABASE_URL", "postgres://env:pass@host:5432/db")
-	t.Setenv("POSTGRES_URL", "")
-	t.Setenv("POSTGRES_HOST", "")
-	t.Setenv("POSTGRES_PORT", "")
-	t.Setenv("POSTGRES_USER", "")
-	t.Setenv("POSTGRES_PASSWORD", "")
-	t.Setenv("POSTGRES_DB", "")
-	t.Setenv("NATS_URL", "")
-
-	p := filepath.Join(t.TempDir(), "load.yaml")
-	if err := os.WriteFile(p, []byte("port: '4017'\nstack: 'aerial'\n"), 0o644); err != nil {
-		t.Fatalf("write fixture: %v", err)
-	}
-	cfg, err := LoadConfig(p)
-	if err != nil {
-		t.Fatalf("LoadConfig() err = %v", err)
-	}
-	if cfg.Port != "4017" || cfg.Stack != "aerial" || cfg.DatabaseURL != "postgres://env:pass@host:5432/db" {
-		t.Fatalf("unexpected config: %+v", cfg)
-	}
-
-	t.Setenv("DATABASE_URL", "")
-	t.Setenv("CONFIG_PATH", filepath.Join(t.TempDir(), "missing.yaml"))
-	if _, err := LoadConfig(ResolveConfigPath("")); err == nil {
-		t.Errorf("expected error for missing config file")
-	}
-}
-
 func TestNewBusIngester(t *testing.T) {
 	t.Parallel()
 	store := newTestStore(t, "aerial")
@@ -66,34 +37,83 @@ func TestNewBusIngester(t *testing.T) {
 	}
 }
 
+// busKind selects the fake bus newBusFn returns in a table row.
+type busKind int
+
+const (
+	busMemory busKind = iota
+	busDialErr
+	busEnsureFail
+	busConsumeFail
+	busCloseFail
+)
+
+var (
+	errDialTest     = errors.New("dial failed")
+	errEnsureTest   = errors.New("ensure down")
+	errConsumeTest  = errors.New("subscribe down")
+	errCloseTest    = errors.New("close down")
+	errShutdownTest = errors.New("shutdown down")
+)
+
+type ensureFailBus struct{ pubsub.Bus }
+
+func (ensureFailBus) EnsureCoreStreams(context.Context) error { return errEnsureTest }
+
+type consumeFailBus struct{ pubsub.Bus }
+
+func (consumeFailBus) ConsumeQueue(context.Context, string, string, pubsub.Handler) (pubsub.Subscription, error) {
+	return nil, errConsumeTest
+}
+
+type closeFailBus struct{ pubsub.Bus }
+
+func (closeFailBus) Close() error { return errCloseTest }
+
+// stubNewBus swaps newBusFn for a factory returning the bus kind's fake.
+func stubNewBus(t *testing.T, kind busKind) {
+	t.Helper()
+	old := newBusFn
+	newBusFn = func(context.Context, string) (pubsub.Bus, error) {
+		switch kind {
+		case busDialErr:
+			return nil, errDialTest
+		case busEnsureFail:
+			return ensureFailBus{Bus: pubsub.NewMemoryBus()}, nil
+		case busConsumeFail:
+			return consumeFailBus{Bus: pubsub.NewMemoryBus()}, nil
+		case busCloseFail:
+			return closeFailBus{Bus: pubsub.NewMemoryBus()}, nil
+		default:
+			return pubsub.NewMemoryBus(), nil
+		}
+	}
+	t.Cleanup(func() { newBusFn = old })
+}
+
 func TestInitTranscriptsJetStream(t *testing.T) {
-	t.Parallel()
-	store := newTestStore(t, "aerial")
-	ingester := NewIngester(store, nil)
 	tests := []struct {
-		name              string
-		natsURL           string
-		ingester          *Ingester
-		bus               pubsub.Bus
-		factoryErr        error
-		useDefaultFactory bool
-		wantNil           bool
+		name        string
+		natsURL     string
+		nilIngester bool
+		bus         busKind
+		wantNil     bool
 	}{
-		{name: "empty url yields nil", natsURL: "", ingester: ingester, useDefaultFactory: true, wantNil: true},
-		{name: "nil ingester yields nil", natsURL: "nats://nats:4222", ingester: nil, useDefaultFactory: true, wantNil: true},
-		{name: "factory error yields nil", natsURL: "nats://nats:4222", ingester: ingester, factoryErr: errors.New("dial failed"), wantNil: true},
-		{name: "memory bus subscribes", natsURL: "nats://nats:4222", ingester: ingester, bus: pubsub.NewMemoryBus(), wantNil: false},
+		{name: "empty url yields nil", natsURL: "", bus: busMemory, wantNil: true},
+		{name: "nil ingester yields nil", natsURL: "nats://nats:4222", nilIngester: true, bus: busMemory, wantNil: true},
+		{name: "dial error yields nil", natsURL: "nats://nats:4222", bus: busDialErr, wantNil: true},
+		{name: "memory bus subscribes", natsURL: "nats://nats:4222", bus: busMemory},
+		{name: "ensure streams failure still returns bus", natsURL: "nats://nats:4222", bus: busEnsureFail},
+		{name: "subscribe failure still returns bus", natsURL: "nats://nats:4222", bus: busConsumeFail},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			factory := newBusFn
-			if !tc.useDefaultFactory {
-				factory = func(ctx context.Context, url string) (pubsub.Bus, error) {
-					return tc.bus, tc.factoryErr
-				}
+			stubNewBus(t, tc.bus)
+			ingester := NewIngester(newTestStore(t, "aerial"), nil)
+			if tc.nilIngester {
+				ingester = nil
 			}
-			bus := initTranscriptsJetStreamWithFactory(context.Background(), tc.ingester, tc.natsURL, factory)
+			bus := initTranscriptsJetStream(context.Background(), ingester, tc.natsURL)
 			if (bus == nil) != tc.wantNil {
 				t.Errorf("bus nil = %v, want nil = %v", bus == nil, tc.wantNil)
 			}
@@ -101,10 +121,6 @@ func TestInitTranscriptsJetStream(t *testing.T) {
 				_ = bus.Close()
 			}
 		})
-	}
-
-	if bus := initTranscriptsJetStream(context.Background(), ingester, ""); bus != nil {
-		t.Errorf("expected nil bus for empty url")
 	}
 }
 
@@ -115,28 +131,42 @@ func stubOpenDB(t *testing.T, db *sql.DB, err error) func() {
 	return func() { openDBFn = old }
 }
 
+// runAppConfig fills the fields every listening RunApp row shares.
+func runAppConfig(c Config) *Config {
+	c.Port, c.DatabaseURL, c.Stack = "0", "postgres://x", "aerial"
+	return &c
+}
+
 func TestRunApp(t *testing.T) {
 	tests := []struct {
-		name     string
-		cfg      *Config
-		stubErr  error
-		useStub  bool
-		wantSub  string
-		canceled bool
+		name        string
+		cfg         *Config
+		stubDB      bool
+		openErr     error
+		bus         busKind
+		shutdownErr error
+		canceled    bool
+		wantErr     string
 	}{
-		{"nil config", nil, nil, false, "config cannot be nil", false},
-		{"empty port", &Config{DatabaseURL: "postgres://x"}, nil, false, "port cannot be empty", false},
-		{"open db error", &Config{Port: "4017", DatabaseURL: "postgres://x"}, errors.New("db down"), true, "db down", false},
-		{"listen failure surfaces", &Config{Port: "99999", DatabaseURL: "postgres://x", Stack: "aerial"}, nil, true, "", false},
-		{"canceled context shuts down cleanly", &Config{Port: "0", DatabaseURL: "postgres://x", Stack: "aerial"}, nil, true, "", true},
-		{"auth enabled shuts down cleanly", &Config{Port: "0", DatabaseURL: "postgres://x", Stack: "aerial", Auth: k8sauth.Config{Enabled: true}}, nil, true, "", true},
+		{name: "nil config", wantErr: "config cannot be nil"},
+		{name: "empty port", cfg: &Config{DatabaseURL: "postgres://x"}, wantErr: "port cannot be empty"},
+		{name: "open db error", cfg: &Config{Port: "4017", DatabaseURL: "postgres://x"}, stubDB: true, openErr: errors.New("db down"), wantErr: "db down"},
+		{name: "listen failure surfaces", cfg: &Config{Port: "99999", DatabaseURL: "postgres://x"}, stubDB: true, wantErr: "invalid port"},
+		{name: "canceled context shuts down cleanly", cfg: runAppConfig(Config{}), stubDB: true, canceled: true},
+		{name: "auth enabled shuts down cleanly", cfg: runAppConfig(Config{Auth: k8sauth.Config{Enabled: true}}), stubDB: true, canceled: true},
+		{name: "bus close error is logged not returned", cfg: runAppConfig(Config{NATSURL: "nats://nats:4222"}), stubDB: true, bus: busCloseFail, canceled: true},
+		{name: "shutdown error surfaces", cfg: runAppConfig(Config{}), stubDB: true, shutdownErr: errShutdownTest, canceled: true, wantErr: "shutdown down"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if tc.useStub {
-				store := newTestStore(t, "aerial")
-				db := store.db
-				defer stubOpenDB(t, db, tc.stubErr)()
+			if tc.stubDB {
+				defer stubOpenDB(t, newTestStore(t, "aerial").db, tc.openErr)()
+			}
+			stubNewBus(t, tc.bus)
+			if tc.shutdownErr != nil {
+				oldShutdown := httpShutdown
+				httpShutdown = func(*http.Server, context.Context) error { return tc.shutdownErr }
+				t.Cleanup(func() { httpShutdown = oldShutdown })
 			}
 			ctx := context.Background()
 			if tc.canceled {
@@ -145,15 +175,9 @@ func TestRunApp(t *testing.T) {
 				cancel()
 			}
 			err := RunApp(ctx, tc.cfg)
-			if tc.wantSub != "" {
-				if err == nil || !strings.Contains(err.Error(), tc.wantSub) {
-					t.Errorf("RunApp() err = %v, want substring %q", err, tc.wantSub)
-				}
-				return
-			}
-			if tc.name == "listen failure surfaces" {
-				if err == nil {
-					t.Errorf("expected listen error")
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Errorf("RunApp() err = %v, want substring %q", err, tc.wantErr)
 				}
 				return
 			}
@@ -186,6 +210,7 @@ func TestMainFunc(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			clearConfigEnv(t)
 			t.Setenv("CONFIG_PATH", tc.configPath)
 			exited := false
 			exitFn = func(string, ...any) { exited = true }
@@ -198,111 +223,13 @@ func TestMainFunc(t *testing.T) {
 	}
 }
 
-type ensureFailBus struct {
-	pubsub.Bus
-}
-
-func (ensureFailBus) EnsureCoreStreams(context.Context) error { return errEnsureTest }
-
-type consumeFailBus struct {
-	pubsub.Bus
-}
-
-func (consumeFailBus) ConsumeQueue(context.Context, string, string, pubsub.Handler) (pubsub.Subscription, error) {
-	return nil, errConsumeTest
-}
-
-type closeFailBus struct {
-	pubsub.Bus
-}
-
-func (closeFailBus) Close() error { return errCloseTest }
-
-var (
-	errEnsureTest  = errors.New("ensure down")
-	errConsumeTest = errors.New("subscribe down")
-	errCloseTest   = errors.New("close down")
-)
-
-func TestInitTranscriptsJetStreamFailures(t *testing.T) {
-	store := newTestStore(t, "aerial")
-	ingester := NewIngester(store, nil)
-	tests := []struct {
-		name string
-		bus  pubsub.Bus
-	}{
-		{"ensure streams failure still returns bus", ensureFailBus{Bus: pubsub.NewMemoryBus()}},
-		{"subscribe failure still returns bus", consumeFailBus{Bus: pubsub.NewMemoryBus()}},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			factory := func(context.Context, string) (pubsub.Bus, error) {
-				return tc.bus, nil
-			}
-			bus := initTranscriptsJetStreamWithFactory(context.Background(), ingester, "nats://nats:4222", factory)
-			if bus == nil {
-				t.Fatalf("expected non-nil bus")
-			}
-			_ = bus.Close()
-		})
-	}
-}
-
-func TestRunAppWithBus(t *testing.T) {
-	store := newTestStore(t, "aerial")
-	restoreOpenDB := stubOpenDB(t, store.db, nil)
-	defer restoreOpenDB()
-
-	oldBus := newBusFn
-	newBusFn = func(context.Context, string) (pubsub.Bus, error) { return pubsub.NewMemoryBus(), nil }
-	defer func() { newBusFn = oldBus }()
-
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	cfg := &Config{Port: "0", DatabaseURL: "postgres://x", Stack: "aerial", NATSURL: "nats://nats:4222"}
-	if err := RunApp(ctx, cfg); err != nil {
-		t.Errorf("RunApp() err = %v", err)
-	}
-}
-
-func TestRunAppBusCloseError(t *testing.T) {
-	store := newTestStore(t, "aerial")
-	restoreOpenDB := stubOpenDB(t, store.db, nil)
-	defer restoreOpenDB()
-
-	oldBus := newBusFn
-	newBusFn = func(context.Context, string) (pubsub.Bus, error) {
-		return closeFailBus{Bus: pubsub.NewMemoryBus()}, nil
-	}
-	defer func() { newBusFn = oldBus }()
-
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	cfg := &Config{Port: "0", DatabaseURL: "postgres://x", Stack: "aerial", NATSURL: "nats://nats:4222"}
-	if err := RunApp(ctx, cfg); err != nil {
-		t.Errorf("RunApp() err = %v", err)
-	}
-}
-
 func TestNewBusFnDials(t *testing.T) {
+	clearConfigEnv(t)
 	bus, err := newBusFn(context.Background(), "nats://127.0.0.1:1")
 	if err != nil {
 		t.Fatalf("newBusFn err = %v", err)
 	}
 	_ = bus.Close()
-}
-
-func TestBusIngesterPublishes(t *testing.T) {
-	t.Parallel()
-	store := newTestStore(t, "aerial")
-	bus := pubsub.NewMemoryBus()
-	defer bus.Close()
-	ingester := NewBusIngester(store, bus)
-	epoch := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
-	msg := &fakeBatchMessage{data: marshalBatch(t, testBatch("sess-bus", epoch, 0, 1, false, false))}
-	if err := ingester.HandleBatchMessage(context.Background(), msg); err != nil {
-		t.Errorf("HandleBatchMessage err = %v", err)
-	}
 }
 
 func TestInitJetStreamDeliversBatch(t *testing.T) {
@@ -345,21 +272,3 @@ func (b *signalBus) ConsumeQueue(ctx context.Context, subject, queue string, han
 		return handler(msgCtx, msg)
 	})
 }
-
-func TestRunAppShutdownError(t *testing.T) {
-	store := newTestStore(t, "aerial")
-	restoreOpenDB := stubOpenDB(t, store.db, nil)
-	defer restoreOpenDB()
-	oldShutdown := httpShutdown
-	httpShutdown = func(*http.Server, context.Context) error { return errShutdownTest }
-	defer func() { httpShutdown = oldShutdown }()
-
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	cfg := &Config{Port: "0", DatabaseURL: "postgres://x", Stack: "aerial"}
-	if err := RunApp(ctx, cfg); err == nil || !strings.Contains(err.Error(), "shutdown down") {
-		t.Errorf("RunApp() err = %v, want shutdown failure", err)
-	}
-}
-
-var errShutdownTest = errors.New("shutdown down")

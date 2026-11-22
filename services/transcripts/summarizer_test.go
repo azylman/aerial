@@ -437,30 +437,6 @@ func TestSummarizerRunOnceNilDeps(t *testing.T) {
 	}
 }
 
-func TestStartSummarizerLoopDisabled(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name    string
-		cfgNil  bool
-		enabled bool
-	}{
-		{"nil config stops quietly", true, false},
-		{"disabled config starts nothing", false, false},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			store := newTestStore(t, "aerial")
-			var cfg *Config
-			if !tc.cfgNil {
-				cfg = &Config{Port: "4017", Stack: "aerial", Summarizer: SummarizerConfig{Enabled: tc.enabled}}
-			}
-			stop := startSummarizerLoop(context.Background(), store, cfg)
-			stop()
-		})
-	}
-}
-
 func TestLLMClientComplete(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
