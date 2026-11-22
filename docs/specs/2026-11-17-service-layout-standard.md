@@ -41,7 +41,7 @@ Restate Virtual Objects, workflows, and plain services require durable execution
 
 - A struct holds exported handlers taking `restate.ObjectContext` (exclusive, read-write), `restate.ObjectSharedContext` (shared, read-only), `restate.WorkflowContext`, or `restate.Context`.
 - `restate.Reflect(MyObject{})` dynamically reflects exported methods into RPC handlers reachable at `<RESTATE_INGRESS_URL>/<StructName>/<HandlerName>`.
-- Reflected services configure explicit lifecycle timeouts: `restate.WithInactivityTimeout(...)` and `restate.WithAbortTimeout(...)` to prevent zombie executions.
+- Reflected services can configure explicit lifecycle timeouts: `restate.WithInactivityTimeout(...)` and `restate.WithAbortTimeout(...)` to prevent zombie executions.
 - `server.NewRestate().Bind(restate.Reflect(...)).Start(ctx, "0.0.0.0:9080")` binds and serves reflected handlers.
 - Non-deterministic operations (PostgreSQL queries, HTTP calls, NATS events, Discord webhooks, wall-clock time, random generation, and UUIDs) must be wrapped inside journaled execution steps (`restate.Run(ctx, func(rc restate.RunContext) (T, error) { ... }, restate.WithName("<step>"))`).
 - Restate services isolate models (`internal/model`), persistence (`internal/store`), journaled domain execution (`internal/build` / `internal/workflow`), and server binding (`internal/app`).
@@ -297,7 +297,7 @@ services/<name>/
     │   ├── router.go
     │   └── router_test.go
     └── app/                    # L3: Server binding & health admin mux
-        ├── app.go              # Bind(restate.Reflect(...)) with timeouts
+        ├── app.go              # Bind(restate.Reflect(...))
         └── app_test.go
 ```
 
@@ -313,7 +313,7 @@ services/<name>/
   - **Error Taxonomy:** Distinguishes terminal errors (`restate.ToTerminalError`) from retryable transient errors.
 - **`internal/app` (L3):**
   - Restate service reflection and registration via `server.NewRestate()`.
-  - **Mandatory Timeout Configuration:** Service reflection MUST configure explicit service timeouts via `restate.WithInactivityTimeout(...)` and `restate.WithAbortTimeout(...)` on `restate.Reflect(...)`:
+  - **Service Timeout Configuration:** Service reflection should configure explicit service timeouts via `restate.WithInactivityTimeout(...)` and `restate.WithAbortTimeout(...)` on `restate.Reflect(...)` to ensure deterministic lifecycle termination (implemented in `services/eri-restate`, with adoption planned for `services/vanadis-restate`):
     ```go
     server.NewRestate().
         Bind(restate.Reflect(
@@ -342,8 +342,8 @@ The following aspects of deployed Restate services represent immutable wire cont
 
 ### 7.4 Current Examples
 
-- `services/vanadis-restate`: Durable build queue Virtual Object (`Build`) and router service (`BuildRouter`). Structured under `cmd/vanadis-restate/main.go` and `internal/{model,store,executor,build,router,app,prompt,prflow,ericlient,prstate,deploygate,cilog,widget}`. Reflects services with explicit inactivity and abort timeouts.
-- `services/eri-restate`: Restate execution workflow service structured under `cmd/eri-restate/main.go` and `internal/app`. Reflects handlers with explicit timeouts.
+- `services/vanadis-restate`: Durable build queue Virtual Object (`Build`) and router service (`BuildRouter`). Structured under `cmd/vanadis-restate/main.go` and `internal/{model,store,executor,build,router,app,prompt,prflow,ericlient,prstate,deploygate,cilog,widget}` (explicit reflection timeouts pending adoption in `internal/app`).
+- `services/eri-restate`: Restate execution workflow service structured under `cmd/eri-restate/main.go` and `internal/app`. Reflects handlers with explicit inactivity and abort timeouts (`restate.WithInactivityTimeout` and `restate.WithAbortTimeout`).
 
 ---
 
@@ -440,7 +440,7 @@ The current inventory of services and MCP servers, categorized by archetype and 
 - **`services/vanadis-restate`** (Archetype D — Restate Virtual Object & Workflow Service):
   - Root Entrypoint: `cmd/vanadis-restate/main.go`
   - Internal Packages: `internal/model` (L0), `internal/store` (L1), `internal/executor` (L2), `internal/build` (L2), `internal/prompt` (L2), `internal/prflow` (L2), `internal/ericlient` (L2), `internal/prstate` (L2), `internal/deploygate` (L2), `internal/cilog` (L2), `internal/widget` (L2), `internal/router` (L3), `internal/app` (L3)
-  - Responsibilities: Durable build DAG orchestrator implementing `Build` Virtual Object and `BuildRouter` plain service.
+  - Responsibilities: Durable build DAG orchestrator implementing `Build` Virtual Object and `BuildRouter` plain service (explicit reflection timeouts pending adoption in `internal/app`).
 
 - **`services/eri`** (Archetype E — Multi-Binary Module Exception):
   - Root Entrypoint: `main.go`, `cmd/hook-guard/main.go`, `cmd/transcript-search/main.go`
@@ -488,7 +488,7 @@ The architecture reflects key ratified engineering decisions:
 - **Adoption of the `L0 -> L3` Layer Ratchet:**  
   Dependencies must flow strictly downward. Low-level models and configuration (`L0`) remain leaf packages. Infrastructure (`L1`) owns persistence and cluster clients. Domain logic and consumers (`L2`) own business workflows. Application assembly (`L3`) wires routes, tools, and Restate reflection.
 - **Restate Timeout Ratification:**  
-  Reflected services bind handlers with explicit timeouts (`restate.WithInactivityTimeout` and `restate.WithAbortTimeout`) to prevent orphaned workflows and ensure deterministic failure handling.
+  Reflected services target binding handlers with explicit timeouts (`restate.WithInactivityTimeout` and `restate.WithAbortTimeout`) to prevent orphaned workflows and ensure deterministic failure handling, as currently implemented in `services/eri-restate`.
 - **Preservation of the `eri` Exception:**  
   `services/eri/` remains the documented multi-binary exception utilizing `services/eri/pkg/*` and concern files to avoid mass import rewrites across its auxiliary binaries.
 - **Phased Service Migration:**  
@@ -504,7 +504,7 @@ A service is compliant with this standard when:
 - [ ] Subpackages live under `internal/` and conform to the **`L0 -> L3` layer hierarchy** with strictly downward-flowing imports.
 - [ ] No file exceeds 1,500 lines and no function exceeds a nesting depth of 5.
 - [ ] Persistence logic lives in `internal/store` or `internal/db`; handlers invoke store methods, never the reverse.
-- [ ] Restate Virtual Objects and services wrap non-deterministic I/O in named `restate.Run` blocks and declare explicit inactivity and abort timeouts on reflection.
+- [ ] Restate Virtual Objects and services wrap non-deterministic I/O in named `restate.Run` blocks and configure explicit inactivity and abort timeouts on reflection where adopted (as in `services/eri-restate`).
 - [ ] NATS consumers encapsulate subscription loops in `internal/bridge` or `internal/consumer` and issue `msg.Ack()` only after durable processing succeeds.
 - [ ] Shared cross-service logic resides in `pkg/*`; `pkg/*` never imports service modules.
 - [ ] Health (`/health`, `/healthz`), metrics (`/metrics`), and coverage (`/debug/coverage/flush`) endpoints are mounted via `pkg/httpkit`.
