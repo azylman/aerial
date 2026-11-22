@@ -15,6 +15,7 @@ import (
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/deploygate"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
+	"github.com/azylman/aerial/services/vanadis-restate/internal/restatetest"
 )
 
 // TestDeploymentDeadlineRuntime pins the Restate glue for the deployment gate:
@@ -37,7 +38,7 @@ func TestDeploymentDeadlineRuntime(t *testing.T) {
 			mc.EXPECT().Get(deploygate.PendingDeploymentKey, mock.Anything).Return(false, nil)
 			mc.EXPECT().Set(deploygate.PendingDeploymentKey, map[string]deploygate.PendingStart{}, mock.Anything).Return()
 			mc.EXPECT().Set(deploygate.DeploymentDeadlineKey, mock.Anything, mock.Anything).Return().Maybe()
-			mc.EXPECT().Run(mock.Anything, mock.Anything, mock.Anything).RunAndReturn(runMockRunContext).Maybe()
+			mc.EXPECT().Run(mock.Anything, mock.Anything, mock.Anything).RunAndReturn(restatetest.RunMockRunContext).Maybe()
 			client := mocks.NewMockClient(t)
 			invocation := mocks.NewMockInvocation(t)
 			mc.EXPECT().Object("Build", "b", "DeploymentDeadline").Return(client)
@@ -66,7 +67,7 @@ func TestDeploymentDeadlineRuntime(t *testing.T) {
 func TestDeploymentGateRunStepJournal(t *testing.T) {
 	t.Parallel()
 	mc := mocks.NewMockContext(t)
-	mc.EXPECT().Run(mock.Anything, mock.Anything, mock.Anything).RunAndReturn(runMockRunContext)
+	mc.EXPECT().Run(mock.Anything, mock.Anything, mock.Anything).RunAndReturn(restatetest.RunMockRunContext)
 	ctx := restate.WithMockContext(mc)
 	rt := restateObjectRuntime{ctx: ctx}
 	out, err := rt.RunStep("deployment-retry-reset", func(context.Context) (deploygate.StepOutput, error) {

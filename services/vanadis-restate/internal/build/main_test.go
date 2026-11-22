@@ -2,9 +2,7 @@ package build
 
 import (
 	"context"
-	"log/slog"
 	"maps"
-	"reflect"
 	"slices"
 	"strconv"
 	"testing"
@@ -20,6 +18,7 @@ import (
 	"github.com/azylman/aerial/services/vanadis-restate/internal/deploygate"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/executor"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
+	"github.com/azylman/aerial/services/vanadis-restate/internal/restatetest"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
 )
 
@@ -127,28 +126,6 @@ func TestBuildObject_ReflectionAndInterface(t *testing.T) {
 	})
 }
 
-type mockRunContext struct {
-	context.Context
-}
-
-func (mockRunContext) Log() *slog.Logger         { return slog.Default() }
-func (mockRunContext) Request() *restate.Request { return nil }
-
-func runMockRunContext(fn func(restate.RunContext) (any, error), output any, _ ...restate.RunOption) restate.TerminalError {
-	res, err := fn(mockRunContext{Context: context.Background()})
-	if err != nil {
-		return restate.TerminalErrorf("%v", err)
-	}
-	if output != nil && res != nil {
-		outVal := reflect.ValueOf(output)
-		resVal := reflect.ValueOf(res)
-		if outVal.Kind() == reflect.Pointer && !outVal.IsNil() && outVal.Elem().Type() == resVal.Type() {
-			outVal.Elem().Set(resVal)
-		}
-	}
-	return nil
-}
-
 func makeObjectMockContext(t *testing.T, key string) restate.ObjectContext {
 	t.Helper()
 	mc := mocks.NewMockContext(t)
@@ -158,7 +135,7 @@ func makeObjectMockContext(t *testing.T, key string) restate.ObjectContext {
 	mc.EXPECT().Get("state", mock.Anything).Return(false, nil).Maybe()
 	mc.EXPECT().Get("launched", mock.Anything).Return(false, nil).Maybe()
 	mc.EXPECT().Get(deploygate.PendingDeploymentKey, mock.Anything).Return(false, nil).Maybe()
-	mc.EXPECT().Run(mock.Anything, mock.Anything, mock.Anything).RunAndReturn(runMockRunContext).Maybe()
+	mc.EXPECT().Run(mock.Anything, mock.Anything, mock.Anything).RunAndReturn(restatetest.RunMockRunContext).Maybe()
 	mc.EXPECT().Set("state", mock.Anything, mock.Anything).Return().Maybe()
 	mc.EXPECT().Set("launched", mock.Anything, mock.Anything).Return().Maybe()
 	mc.EXPECT().ClearAll().Return().Maybe()
