@@ -158,10 +158,11 @@ func sharedDeployJob(a, b model.VanadisChunk) bool {
 }
 
 // sweepPreDeployStatus reports whether a chunk is still pre-deploy (merged,
-// synced, or deploying). Terminal and never-merged chunks are never swept.
+// synced, deploying, or deploy_failed). Terminal and never-merged chunks are
+// never swept.
 func sweepPreDeployStatus(status string) bool {
 	switch strings.ToLower(strings.TrimSpace(status)) {
-	case statusMerged, "synced", "deploying":
+	case statusMerged, "synced", "deploying", statusDeployFailed:
 		return true
 	default:
 		return false
@@ -266,7 +267,7 @@ func (s *Store) SweepEarlierDeploymentsAcrossBuilds(ctx context.Context, deployi
 	if len(repos) == 0 {
 		return nil, nil, nil
 	}
-	rows, err := s.db.Query(ctx, `SELECT c.id, c.build_id, c.chunk_index, c.mode, c.repo, c.title, c.instructions, c.target_files, c.target_symbols, COALESCE(c.effort, 'medium'), c.acceptance_criteria, c.status, COALESCE(c.pr_number, 0), COALESCE(c.stall_nudges, 0), c.depends_on, c.ci_fail_count, c.ci_checks, c.rollout_state, c.banner, c.merge_awakeable_id, c.deploy_awakeable_id, c.started_at, c.completed_at, c.created_at, c.updated_at FROM vanadis_chunks AS c JOIN vanadis_builds AS b ON b.id = c.build_id WHERE c.build_id != $1 AND c.mode = 'pr' AND COALESCE(c.pr_number, 0) > 0 AND c.status IN ('merged', 'synced', 'deploying', 'completed') AND c.repo = ANY($2) AND b.status NOT IN ('cancelled', 'completed') ORDER BY c.build_id ASC, c.chunk_index ASC;`, deploying.BuildID, repos)
+	rows, err := s.db.Query(ctx, `SELECT c.id, c.build_id, c.chunk_index, c.mode, c.repo, c.title, c.instructions, c.target_files, c.target_symbols, COALESCE(c.effort, 'medium'), c.acceptance_criteria, c.status, COALESCE(c.pr_number, 0), COALESCE(c.stall_nudges, 0), c.depends_on, c.ci_fail_count, c.ci_checks, c.rollout_state, c.banner, c.merge_awakeable_id, c.deploy_awakeable_id, c.started_at, c.completed_at, c.created_at, c.updated_at FROM vanadis_chunks AS c JOIN vanadis_builds AS b ON b.id = c.build_id WHERE c.build_id != $1 AND c.mode = 'pr' AND COALESCE(c.pr_number, 0) > 0 AND c.status IN ('merged', 'synced', 'deploying', 'deploy_failed', 'completed') AND c.repo = ANY($2) AND b.status NOT IN ('cancelled', 'completed') ORDER BY c.build_id ASC, c.chunk_index ASC;`, deploying.BuildID, repos)
 	if err != nil {
 		return nil, nil, fmt.Errorf("query cross-build sweep candidates: %w", err)
 	}
@@ -407,8 +408,6 @@ func (s *Store) RecordPRCheckStatus(ctx context.Context, chunkID, headSHA, check
 	const q = `UPDATE vanadis_chunks
 SET ci_checks = jsonb_set(
         CASE
-            WHEN (status IN ('merged', 'synced', 'deploy_failed') OR COALESCE(ci_checks->>'_merge_sha', '') != '') AND $4 != '' AND COALESCE(ci_checks->>'_merge_sha', '') = ''
-                THEN jsonb_set(COALESCE(ci_checks, '{}'::jsonb) - '_head_sha', '{_merge_sha}', to_jsonb($4::text), true)
             WHEN status NOT IN ('merged', 'synced', 'deploy_failed') AND COALESCE(ci_checks->>'_merge_sha', '') = '' AND $4 != '' AND COALESCE(ci_checks->>'_head_sha', '') = ''
                 THEN jsonb_set(COALESCE(ci_checks, '{}'::jsonb), '{_head_sha}', to_jsonb($4::text), true)
             ELSE COALESCE(ci_checks, '{}'::jsonb)
@@ -435,15 +434,21 @@ SET ci_checks = jsonb_set(
 WHERE id = $3
   AND status NOT IN ('deploying', 'deployed', 'completed', 'failed', 'cancelled')
   AND (
-      $4 = ''
-      OR ((status IN ('merged', 'synced', 'deploy_failed') OR COALESCE(ci_checks->>'_merge_sha', '') != '') AND (
-          COALESCE(ci_checks->>'_merge_sha', '') = $4
-          OR (COALESCE(ci_checks->>'_merge_sha', '') = '' AND COALESCE(ci_checks->>'_head_sha', '') IS DISTINCT FROM $4)
-      ))
-      OR (status NOT IN ('merged', 'synced', 'deploy_failed') AND COALESCE(ci_checks->>'_merge_sha', '') = '' AND (
-          COALESCE(ci_checks->>'_head_sha', '') = ''
-          OR ci_checks->>'_head_sha' = $4
-      ))
+      (
+          (status IN ('merged', 'synced', 'deploy_failed') OR COALESCE(ci_checks->>'_merge_sha', '') != '')
+          AND $2 != 'failed'
+          AND COALESCE(ci_checks->>'_merge_sha', '') != ''
+          AND ci_checks->>'_merge_sha' = $4
+      )
+      OR (
+          status NOT IN ('merged', 'synced', 'deploy_failed')
+          AND COALESCE(ci_checks->>'_merge_sha', '') = ''
+          AND (
+              $4 = ''
+              OR COALESCE(ci_checks->>'_head_sha', '') = ''
+              OR ci_checks->>'_head_sha' = $4
+          )
+      )
   );`
 	tag, err := s.db.Exec(ctx, q, name, strings.TrimSpace(checkState), id, sha)
 	switch {
