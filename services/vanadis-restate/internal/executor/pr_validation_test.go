@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 
@@ -60,20 +61,27 @@ func TestDispatchAccepted(t *testing.T) {
 func TestFetchGitHubPullRequest(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name      string
-		nilExec   bool
-		repo      string
-		number    int
-		status    int
-		body      string
-		wantOwner string
-		wantFull  string
-		wantErr   bool
+		name        string
+		nilExec     bool
+		repo        string
+		number      int
+		status      int
+		headerKey   string
+		headerVal   string
+		body        string
+		wantOwner   string
+		wantFull    string
+		wantErr     bool
+		wantSkipped bool
 	}{
 		{name: "nil executor", nilExec: true, repo: "owner/repo", number: 12, wantErr: true},
 		{name: "empty repo", repo: "", number: 12, wantErr: true},
 		{name: "zero pr number", repo: "owner/repo", number: 0, wantErr: true},
-		{name: "api error", repo: "owner/repo", number: 12, status: 404, body: `{}`, wantErr: true},
+		{name: "404 skips transition", repo: "owner/repo", number: 12, status: 404, body: `{"message":"Not Found"}`, wantErr: true, wantSkipped: true},
+		{name: "plain 403 skips transition", repo: "owner/repo", number: 12, status: 403, body: `{"message":"Forbidden"}`, wantErr: true, wantSkipped: true},
+		{name: "rate limited 403 returns error without skip", repo: "owner/repo", number: 12, status: 403, headerKey: "X-Ratelimit-Remaining", headerVal: "0", body: `{"message":"rate limit"}`, wantErr: true},
+		{name: "rate limited 429 returns error without skip", repo: "owner/repo", number: 12, status: 429, headerKey: "Retry-After", headerVal: "60", body: `{"message":"too many requests"}`, wantErr: true},
+		{name: "server 500 error returns error without skip", repo: "owner/repo", number: 12, status: 500, body: `{}`, wantErr: true},
 		{name: "invalid json", repo: "owner/repo", number: 12, status: 200, body: `invalid`, wantErr: true},
 		{name: "ok", repo: "owner/repo", number: 12, status: 200, body: `{"state":"open"}`, wantOwner: "owner", wantFull: "owner/repo"},
 		{name: "bare repo resolves owner", repo: "aerial", number: 12, status: 200, body: `{"state":"open"}`, wantOwner: "azylman", wantFull: "azylman/aerial"},
@@ -82,6 +90,9 @@ func TestFetchGitHubPullRequest(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				if tc.headerKey != "" {
+					w.Header().Set(tc.headerKey, tc.headerVal)
+				}
 				w.WriteHeader(tc.status)
 				_, _ = w.Write([]byte(tc.body))
 			}))
@@ -92,14 +103,49 @@ func TestFetchGitHubPullRequest(t *testing.T) {
 				exec.GitHubAPIURL = srv.URL
 			}
 			pr, owner, full, err := exec.fetchGitHubPullRequest(context.Background(), tc.repo, tc.number)
+			if tc.wantSkipped {
+				assert.ErrorIs(t, err, store.ErrPRTransitionSkipped)
+				return
+			}
 			if tc.wantErr {
 				assert.Error(t, err)
+				assert.NotErrorIs(t, err, store.ErrPRTransitionSkipped)
 				return
 			}
 			assert.NoError(t, err)
 			assert.NotNil(t, pr)
 			assert.Equal(t, tc.wantOwner, owner)
 			assert.Equal(t, tc.wantFull, full)
+		})
+	}
+}
+
+func TestExecutor_RateLimitDelay(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 21, 12, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name      string
+		exec      *Executor
+		now       time.Time
+		wantDelay time.Duration
+	}{
+		{
+			name:      "nil executor",
+			exec:      nil,
+			now:       now,
+			wantDelay: 0,
+		},
+		{
+			name:      "nil http client",
+			exec:      &Executor{},
+			now:       now,
+			wantDelay: 0,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tc.wantDelay, tc.exec.RateLimitDelay(tc.now))
 		})
 	}
 }

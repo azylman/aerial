@@ -135,18 +135,27 @@ func TestFirstWorkerFailure(t *testing.T) {
 	tests := []struct {
 		name, mode, status string
 		previous, failures int
+		reqPR              int
 		want               bool
 	}{
-		{"eligible", "pr", "failed", 0, 0, true},
-		{"already attached", "pr", "failed", 101, 0, false},
-		{"CI attempts", "pr", "failed", 0, 3, false},
-		{"action", "action", "failed", 0, 0, false},
-		{"running", "pr", "running", 0, 0, false},
+		{"eligible unattached", "pr", "failed", 0, 0, 0, true},
+		{"already attached no req", "pr", "failed", 101, 0, 0, false},
+		{"already attached matching req", "pr", "failed", 101, 0, 101, true},
+		{"already attached mismatched req", "pr", "failed", 101, 0, 102, false},
+		{"CI attempts", "pr", "failed", 0, 3, 0, false},
+		{"action", "action", "failed", 0, 0, 0, false},
+		{"running", "pr", "running", 0, 0, 0, false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := firstWorkerFailure(model.VanadisChunk{Mode: tc.mode, Status: tc.status, PRNumber: tc.previous, CIFailCount: tc.failures})
+			chunk := model.VanadisChunk{Mode: tc.mode, Status: tc.status, PRNumber: tc.previous, CIFailCount: tc.failures}
+			var got bool
+			if tc.reqPR > 0 {
+				got = firstWorkerFailure(chunk, tc.reqPR)
+			} else {
+				got = firstWorkerFailure(chunk)
+			}
 			if got != tc.want {
 				t.Fatalf("eligible = %v, want %v", got, tc.want)
 			}

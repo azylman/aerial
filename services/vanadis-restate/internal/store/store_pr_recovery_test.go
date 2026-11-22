@@ -16,6 +16,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
+	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 )
 
@@ -272,5 +273,86 @@ func TestPostgresVanadisStore_PRRecoveryHeadUpdates(t *testing.T) {
 				t.Fatalf("after sibling recovery parent=%s head=%s", parent, chunks[0].HeadSHA)
 			}
 		})
+	}
+}
+
+func TestPostgresVanadisStore_UpdatePRLifecycleStatus_RecoveryQuery(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		chunkID    string
+		status     string
+		wantCTE    string
+		wantWhere  string
+		wantBanner string
+	}{
+		{
+			name:       "merged lifecycle status contains CTE and recovery where clause",
+			chunkID:    "c1",
+			status:     "merged",
+			wantCTE:    "WITH reopened_build AS (UPDATE vanadis_builds",
+			wantWhere:  "AND status NOT IN ('completed', 'failed', 'cancelled')",
+			wantBanner: "banner = CASE WHEN status = 'failed' THEN '' ELSE banner END",
+		},
+		{
+			name:       "deploying lifecycle status contains CTE and recovery where clause",
+			chunkID:    "c1",
+			status:     "deploying",
+			wantCTE:    "WITH reopened_build AS (UPDATE vanadis_builds",
+			wantWhere:  "AND status NOT IN ('completed', 'failed', 'cancelled')",
+			wantBanner: "banner = CASE WHEN status = 'failed' THEN '' ELSE banner END",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var capturedQuery string
+			var capturedArgs []any
+			st := New(mockDB{execFn: func(_ context.Context, q string, args ...any) (pgconn.CommandTag, error) {
+				capturedQuery = q
+				capturedArgs = args
+				return pgconn.NewCommandTag("UPDATE 1"), nil
+			}}, "azylman")
+			err := st.UpdatePRLifecycleStatus(context.Background(), tc.chunkID, tc.status)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if !strings.Contains(capturedQuery, tc.wantCTE) {
+				t.Fatalf("query missing CTE: %s", capturedQuery)
+			}
+			if !strings.Contains(capturedQuery, tc.wantWhere) {
+				t.Fatalf("query missing where: %s", capturedQuery)
+			}
+			if !strings.Contains(capturedQuery, tc.wantBanner) {
+				t.Fatalf("query missing banner: %s", capturedQuery)
+			}
+			if len(capturedArgs) != 2 || capturedArgs[0] != tc.status || capturedArgs[1] != tc.chunkID {
+				t.Fatalf("unexpected args: %v", capturedArgs)
+			}
+		})
+	}
+}
+
+func TestPostgresVanadisStore_CompletePRDeployment_RecoveryQuery(t *testing.T) {
+	t.Parallel()
+	var capturedQuery string
+	var capturedArgs []any
+	st := New(mockDB{execFn: func(_ context.Context, q string, args ...any) (pgconn.CommandTag, error) {
+		capturedQuery = q
+		capturedArgs = args
+		return pgconn.NewCommandTag("UPDATE 1"), nil
+	}}, "azylman")
+	err := st.CompletePRDeployment(context.Background(), "c1", &pubsub.PRRolloutState{ExpectedJobs: []string{"test"}})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(capturedQuery, "WITH reopened_build AS (UPDATE vanadis_builds") {
+		t.Fatalf("query missing CTE: %s", capturedQuery)
+	}
+	if !strings.Contains(capturedQuery, "c.status != 'cancelled' AND (c.status != 'failed' OR COALESCE(c.pr_number, 0) > 0)") {
+		t.Fatalf("query missing recovery condition: %s", capturedQuery)
+	}
+	if len(capturedArgs) != 2 || capturedArgs[1] != "c1" {
+		t.Fatalf("unexpected args: %v", capturedArgs)
 	}
 }
