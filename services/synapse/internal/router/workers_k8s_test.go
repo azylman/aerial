@@ -287,7 +287,8 @@ func TestDefaultOutboundDispatcher_DiscoverRepoKustomizations(t *testing.T) {
 		wantErr   string
 	}{
 		{name: "matches every unsuspended kustomization of the repo sorted", apiServer: true, repo: "azylman/aerial-config", routes: sourceRoutes, want: []fluxKustomizationRef{{Namespace: "flux-system", Name: "alpha-config"}, {Namespace: "flux-system", Name: "zeta-config"}}},
-		{name: "bare repo name normalizes to the default owner", apiServer: true, repo: "aerial", routes: sourceRoutes, want: []fluxKustomizationRef{{Namespace: "flux-system", Name: "aerial-core"}}},
+		{name: "bare repo name matches no owner-qualified source", apiServer: true, repo: "aerial", routes: sourceRoutes},
+		{name: "spaces around the repo are trimmed", apiServer: true, repo: " azylman/aerial ", routes: sourceRoutes, want: []fluxKustomizationRef{{Namespace: "flux-system", Name: "aerial-core"}}},
 		{name: "cross-namespace source resolves in its own namespace", apiServer: true, repo: "acme/stack", routes: sourceRoutes, want: []fluxKustomizationRef{{Namespace: "flux-system", Name: "stack"}}},
 		{name: "repo with no flux source finds nothing", apiServer: true, repo: "azylman/mirrormere", routes: sourceRoutes},
 		{name: "kube api not configured finds nothing", repo: "azylman/aerial-config"},

@@ -30,21 +30,14 @@ func RandomNonce() string {
 	return hex.EncodeToString(b)
 }
 
-// NormalizeRepo ensures repository names are normalized with the owner prefix.
-func NormalizeRepo(repo string) string {
+// CleanRepoName strips any owner prefix ("owner/name" -> "name") for
+// concise Discord notifications.
+func CleanRepoName(repo string) string {
 	repo = strings.TrimSpace(repo)
-	if repo == "" {
-		return ""
-	}
-	if !strings.Contains(repo, "/") {
-		return "azylman/" + repo
+	if idx := strings.LastIndex(repo, "/"); idx >= 0 {
+		return repo[idx+1:]
 	}
 	return repo
-}
-
-// CleanRepoName strips the owner prefix (e.g. "azylman/") for concise Discord notifications.
-func CleanRepoName(repo string) string {
-	return strings.TrimPrefix(strings.TrimSpace(repo), "azylman/")
 }
 
 // FormatDirectMessagePrefix formats the bold PR and repo prefix for direct Discord messages.

@@ -27,12 +27,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/azylman/aerial/pkg/githubapi"
 	"github.com/azylman/aerial/pkg/prwire"
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/pkg/restateingress"
 	"github.com/azylman/aerial/pkg/strutil"
 	"github.com/azylman/aerial/pkg/tracing"
-	"github.com/azylman/aerial/services/synapse/internal/model"
 )
 
 // Frozen PRObject handler surface from chunk-01. SendPREvent rejects any
@@ -110,18 +110,6 @@ func IsTerminal(err error) bool {
 	}
 }
 
-// PRObjectKey returns the Restate key for a PR object: repo#prNumber.
-// It mirrors the chunk-01 PRObjectKey normalization exactly.
-func PRObjectKey(repo string, prNumber int) string {
-	return fmt.Sprintf("%s#%d", model.NormalizeRepo(repo), prNumber)
-}
-
-// RepoObjectKey returns the Restate key for a repo object: repo.
-// It mirrors the chunk-01 RepoObjectKey normalization exactly.
-func RepoObjectKey(repo string) string {
-	return model.NormalizeRepo(repo)
-}
-
 type contextKey int
 
 const (
@@ -164,6 +152,7 @@ func SendIdempotencyKey(identity, handler string, payload []byte) string {
 // Client invokes Restate Virtual Object handlers over the ingress HTTP API.
 type Client struct {
 	baseURL     string
+	owner       string
 	prService   string
 	repoService string
 	httpClient  *http.Client
@@ -172,18 +161,35 @@ type Client struct {
 // NewClient constructs a Client for the Restate ingress baseURL (for
 // example http://restate.aerial:8080) with explicit Virtual Object service
 // names. Empty service names fall back to the frozen PRObject/RepoObject
-// defaults. An empty baseURL leaves the client disabled: every send fails
-// closed without emitting a request. A nil httpClient gets a default.
-func NewClient(baseURL, prService, repoService string, httpClient *http.Client) *Client {
+// defaults. owner qualifies bare repo names before they key an object; with
+// an empty owner a bare repo is rejected with ErrInvalidEvent. An empty
+// baseURL leaves the client disabled: every send fails closed without
+// emitting a request. A nil httpClient gets a default.
+func NewClient(baseURL, owner, prService, repoService string, httpClient *http.Client) *Client {
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: 15 * time.Second}
 	}
 	return &Client{
 		baseURL:     strings.TrimRight(strings.TrimSpace(baseURL), "/"),
+		owner:       strings.TrimSpace(owner),
 		prService:   strutil.FirstNonEmpty(strings.TrimSpace(prService), prwire.PRObjectServiceName),
 		repoService: strutil.FirstNonEmpty(strings.TrimSpace(repoService), prwire.RepoObjectServiceName),
 		httpClient:  tracing.Client(httpClient),
 	}
+}
+
+// qualifyRepo owner-qualifies repo with the configured GitHub owner. An
+// empty repo, or one still bare because no owner is configured, cannot key
+// a Restate object and is rejected before any request.
+func (c *Client) qualifyRepo(repo string) (string, error) {
+	qualified := githubapi.QualifyRepo(c.owner, repo)
+	if qualified == "" {
+		return "", fmt.Errorf("%w: repo is required", ErrInvalidEvent)
+	}
+	if !strings.Contains(qualified, "/") {
+		return "", fmt.Errorf("%w: repo %q has no owner and github_owner is unset", ErrInvalidEvent, qualified)
+	}
+	return qualified, nil
 }
 
 // SendPREvent enqueues ev at one frozen PRObject handler for repo#prNumber
@@ -200,14 +206,15 @@ func (c *Client) SendPREvent(ctx context.Context, handler string, ev prwire.PREv
 	if strings.TrimSpace(c.baseURL) == "" {
 		return errors.New("restate is not configured")
 	}
-	ev.Repo = model.NormalizeRepo(ev.Repo)
-	if ev.Repo == "" {
-		return fmt.Errorf("%w: repo is required", ErrInvalidEvent)
+	repo, err := c.qualifyRepo(ev.Repo)
+	if err != nil {
+		return err
 	}
+	ev.Repo = repo
 	if ev.PRNumber <= 0 {
 		return fmt.Errorf("%w: pr_number is required", ErrInvalidEvent)
 	}
-	return c.send(ctx, c.prService, PRObjectKey(ev.Repo, ev.PRNumber), handler, ev)
+	return c.send(ctx, c.prService, prwire.PRObjectKey(ev.Repo, ev.PRNumber), handler, ev)
 }
 
 // SendRepoEvent enqueues ev at one frozen RepoObject handler for repo as a
@@ -219,11 +226,12 @@ func (c *Client) SendRepoEvent(ctx context.Context, handler string, ev prwire.Re
 	if strings.TrimSpace(c.baseURL) == "" {
 		return errors.New("restate is not configured")
 	}
-	ev.Repo = model.NormalizeRepo(ev.Repo)
-	if ev.Repo == "" {
-		return fmt.Errorf("%w: repo is required", ErrInvalidEvent)
+	repo, err := c.qualifyRepo(ev.Repo)
+	if err != nil {
+		return err
 	}
-	return c.send(ctx, c.repoService, RepoObjectKey(ev.Repo), handler, ev)
+	ev.Repo = repo
+	return c.send(ctx, c.repoService, prwire.RepoObjectKey(ev.Repo), handler, ev)
 }
 
 // SendSHAEvent enqueues one SHA-only event at a RepoObject SHA handler as a
@@ -240,16 +248,17 @@ func (c *Client) SendSHAEvent(ctx context.Context, handler string, ev prwire.SHA
 	if strings.TrimSpace(c.baseURL) == "" {
 		return errors.New("restate is not configured")
 	}
-	ev.Repo = model.NormalizeRepo(ev.Repo)
-	ev.SHA = strings.TrimSpace(ev.SHA)
-	if ev.Repo == "" {
-		return fmt.Errorf("%w: repo is required", ErrInvalidEvent)
+	repo, err := c.qualifyRepo(ev.Repo)
+	if err != nil {
+		return err
 	}
+	ev.Repo = repo
+	ev.SHA = strings.TrimSpace(ev.SHA)
 	if ev.SHA == "" || prwire.IsZeroSHA(ev.SHA) {
 		return fmt.Errorf("%w: sha is required", ErrInvalidEvent)
 	}
 	ev.Event.Repo = ev.Repo
-	return c.send(ctx, c.repoService, RepoObjectKey(ev.Repo), handler, ev)
+	return c.send(ctx, c.repoService, prwire.RepoObjectKey(ev.Repo), handler, ev)
 }
 
 // ResolvePRBySHA invokes the shared, read-only RepoObject.ResolvePRBySHA
@@ -258,13 +267,16 @@ func (c *Client) ResolvePRBySHA(ctx context.Context, repo, sha string) (prwire.R
 	if strings.TrimSpace(c.baseURL) == "" {
 		return prwire.ResolveSHAResponse{}, errors.New("restate is not configured")
 	}
-	repo = model.NormalizeRepo(repo)
+	repo, err := c.qualifyRepo(repo)
+	if err != nil {
+		return prwire.ResolveSHAResponse{}, err
+	}
 	sha = strings.TrimSpace(sha)
-	if repo == "" || sha == "" {
-		return prwire.ResolveSHAResponse{}, fmt.Errorf("%w: repo and sha are required", ErrInvalidEvent)
+	if sha == "" {
+		return prwire.ResolveSHAResponse{}, fmt.Errorf("%w: sha is required", ErrInvalidEvent)
 	}
 	var out prwire.ResolveSHAResponse
-	if err := c.callService(ctx, c.repoService, RepoObjectKey(repo), prwire.RepoHandlerResolvePRBySHA, struct {
+	if err := c.callService(ctx, c.repoService, prwire.RepoObjectKey(repo), prwire.RepoHandlerResolvePRBySHA, struct {
 		Repo string `json:"repo"`
 		SHA  string `json:"sha"`
 	}{Repo: repo, SHA: sha}, &out); err != nil {
@@ -284,11 +296,14 @@ func queryPR[T any](ctx context.Context, c *Client, repo string, prNumber int, h
 	if strings.TrimSpace(c.baseURL) == "" {
 		return out, errors.New("restate is not configured")
 	}
-	repo = model.NormalizeRepo(repo)
-	if repo == "" || prNumber <= 0 {
-		return out, fmt.Errorf("%w: repo and pr_number are required", ErrInvalidEvent)
+	repo, err := c.qualifyRepo(repo)
+	if err != nil {
+		return out, err
 	}
-	if err := c.call(ctx, PRObjectKey(repo, prNumber), handler, struct{}{}, &out); err != nil {
+	if prNumber <= 0 {
+		return out, fmt.Errorf("%w: pr_number is required", ErrInvalidEvent)
+	}
+	if err := c.call(ctx, prwire.PRObjectKey(repo, prNumber), handler, struct{}{}, &out); err != nil {
 		var zero T
 		return zero, err
 	}
@@ -322,12 +337,16 @@ func (c *Client) Register(ctx context.Context, req prwire.RegisterRequest) (prwi
 	if strings.TrimSpace(c.baseURL) == "" {
 		return prwire.RegisterResponse{}, errors.New("restate is not configured")
 	}
-	req.Repo = model.NormalizeRepo(req.Repo)
-	if req.Repo == "" || req.PRNumber <= 0 {
-		return prwire.RegisterResponse{}, fmt.Errorf("%w: repo and pr_number are required", ErrInvalidEvent)
+	repo, err := c.qualifyRepo(req.Repo)
+	if err != nil {
+		return prwire.RegisterResponse{}, err
+	}
+	req.Repo = repo
+	if req.PRNumber <= 0 {
+		return prwire.RegisterResponse{}, fmt.Errorf("%w: pr_number is required", ErrInvalidEvent)
 	}
 	var out prwire.RegisterResponse
-	if err := c.call(ctx, PRObjectKey(req.Repo, req.PRNumber), prwire.PRHandlerRegister, req, &out); err != nil {
+	if err := c.call(ctx, prwire.PRObjectKey(req.Repo, req.PRNumber), prwire.PRHandlerRegister, req, &out); err != nil {
 		return prwire.RegisterResponse{}, err
 	}
 	return out, nil
@@ -347,12 +366,15 @@ func (c *Client) RetryReadiness(ctx context.Context, repo string, prNumber int, 
 	if strings.TrimSpace(c.baseURL) == "" {
 		return prwire.RetryReadinessResponse{}, errors.New("restate is not configured")
 	}
-	repo = model.NormalizeRepo(repo)
-	if repo == "" || prNumber <= 0 {
-		return prwire.RetryReadinessResponse{}, fmt.Errorf("%w: repo and pr_number are required", ErrInvalidEvent)
+	repo, err := c.qualifyRepo(repo)
+	if err != nil {
+		return prwire.RetryReadinessResponse{}, err
+	}
+	if prNumber <= 0 {
+		return prwire.RetryReadinessResponse{}, fmt.Errorf("%w: pr_number is required", ErrInvalidEvent)
 	}
 	var out prwire.RetryReadinessResponse
-	if err := c.call(ctx, PRObjectKey(repo, prNumber), prwire.PRHandlerRetryReadiness, req, &out); err != nil {
+	if err := c.call(ctx, prwire.PRObjectKey(repo, prNumber), prwire.PRHandlerRetryReadiness, req, &out); err != nil {
 		return prwire.RetryReadinessResponse{}, err
 	}
 	return out, nil

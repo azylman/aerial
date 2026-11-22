@@ -6,7 +6,6 @@ import (
 	"strings"
 
 	"github.com/azylman/aerial/pkg/strutil"
-	"github.com/azylman/aerial/services/synapse/internal/model"
 )
 
 const (
@@ -20,67 +19,6 @@ const (
 )
 
 var ansiEscapeRegex = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
-
-// IsRoboRevCheck returns true if the check run name corresponds to the RoboRev review gate.
-func IsRoboRevCheck(checkName string) bool {
-	trimmed := strings.TrimSpace(checkName)
-	return strings.EqualFold(trimmed, "roborev") || strings.EqualFold(trimmed, "RoboRev Code Review")
-}
-
-// IsGateAggregatorCheck returns true if the check run represents an overarching gate check.
-func IsGateAggregatorCheck(checkName string) bool {
-	lower := strings.ToLower(strings.TrimSpace(checkName))
-	return lower == "ci gate" || strings.HasSuffix(lower, " gate")
-}
-
-// ClassifyCheckState maps GitHub check-run status and conclusion into canonical state ("passed", "failed", "pending", or "").
-func ClassifyCheckState(status, conclusion string) string {
-	s := strings.ToLower(strings.TrimSpace(status))
-	c := strings.ToLower(strings.TrimSpace(conclusion))
-	if s == GHStatusCompleted {
-		switch c {
-		case ConclusionSuccess, "neutral", "skipped":
-			return StatusPassed
-		case ConclusionFailure, ConclusionTimedOut, "cancelled", "action_required":
-			return StatusFailed
-		default:
-			return ""
-		}
-	}
-	switch s {
-	case "queued", "in_progress", "waiting", "requested", StatusPending:
-		return StatusPending
-	default:
-		if s != "" {
-			return StatusPending
-		}
-		return ""
-	}
-}
-
-// ExtractAutoMergeBlockReason inspects PR mergeable state and returns the block reason.
-func ExtractAutoMergeBlockReason(mergeableState string, mergeable *bool) string {
-	cleanState := strings.ToLower(strings.TrimSpace(mergeableState))
-	if cleanState == "dirty" || (mergeable != nil && !*mergeable) {
-		return "merge_conflict"
-	}
-	if cleanState == "blocked" {
-		return "checks_or_reviews_blocked"
-	}
-	if cleanState == "behind" {
-		return "branch_behind_base"
-	}
-	if cleanState != "" && cleanState != "clean" && cleanState != "unstable" && cleanState != "has_hooks" {
-		return cleanState
-	}
-	return ""
-}
-
-// IsActionableAutoMergeBlock returns true if the block reason requires automated branch rebase or conflict alerting.
-func IsActionableAutoMergeBlock(reason string) bool {
-	clean := strings.ToLower(strings.TrimSpace(reason))
-	return clean == "merge_conflict" || clean == "dirty" || strings.Contains(clean, "conflict") || clean == "branch_behind_base"
-}
 
 // ExtractLogErrorLines extracts relevant error lines from raw command or job execution logs.
 func ExtractLogErrorLines(rawLog string, maxLines int) []string {
@@ -140,7 +78,7 @@ func SanitizeDetailsForPrompt(details string, maxRunes int) string {
 // FormatCheckFailurePrompt formats a prompt describing a check failure for remediation.
 func FormatCheckFailurePrompt(repo string, prNumber int, headSHA, checkName, details, checkURL string) string {
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "CI check %q failed on %s#%d (commit %s).\n", checkName, model.NormalizeRepo(repo), prNumber, headSHA)
+	fmt.Fprintf(&sb, "CI check %q failed on %s#%d (commit %s).\n", checkName, strings.TrimSpace(repo), prNumber, headSHA)
 	if strings.TrimSpace(checkURL) != "" {
 		fmt.Fprintf(&sb, "Check URL: %s\n", strings.TrimSpace(checkURL))
 	}
@@ -153,7 +91,7 @@ func FormatCheckFailurePrompt(repo string, prNumber int, headSHA, checkName, det
 // FormatRoboRevPrompt formats a prompt describing RoboRev findings for automated remediation.
 func FormatRoboRevPrompt(repo string, prNumber int, headSHA, comment string) string {
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "RoboRev review failed on %s#%d (commit %s).\n", model.NormalizeRepo(repo), prNumber, headSHA)
+	fmt.Fprintf(&sb, "RoboRev review failed on %s#%d (commit %s).\n", strings.TrimSpace(repo), prNumber, headSHA)
 	if strings.TrimSpace(comment) != "" {
 		fmt.Fprintf(&sb, "Review Findings:\n```\n%s\n```\n", SanitizeDetailsForPrompt(comment, 3000))
 	}
@@ -162,7 +100,7 @@ func FormatRoboRevPrompt(repo string, prNumber int, headSHA, comment string) str
 
 // FormatCollaboratorPRTarget builds a markdown link and metadata summary for a PR.
 func FormatCollaboratorPRTarget(repo string, prNumber int, prTitle, branch, headSHA string) string {
-	normRepo := model.NormalizeRepo(repo)
+	normRepo := strings.TrimSpace(repo)
 	cleanTitle := strings.TrimSpace(prTitle)
 	cleanBranch := strings.TrimPrefix(strings.TrimSpace(branch), "refs/heads/")
 	shortSHA := strings.TrimSpace(headSHA)

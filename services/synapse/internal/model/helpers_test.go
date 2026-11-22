@@ -13,23 +13,19 @@ func TestRepoHelpers(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		in       string
-		norm     string
 		clean    string
 		prefixPR int
 		dmPrefix string
 	}{
-		{"aerial", "azylman/aerial", "aerial", 42, "**(PR: #42, repo: aerial)** "},
-		{"azylman/aerial", "azylman/aerial", "aerial", 0, "**(repo: aerial)** "},
-		{"other/repo", "other/repo", "other/repo", 10, "**(PR: #10, repo: other/repo)** "},
-		{"", "", "", 5, "**(PR: #5)** "},
-		{"", "", "", 0, ""},
+		{"aerial", "aerial", 42, "**(PR: #42, repo: aerial)** "},
+		{" acme/aerial ", "aerial", 0, "**(repo: aerial)** "},
+		{"other/repo", "repo", 10, "**(PR: #10, repo: repo)** "},
+		{"", "", 5, "**(PR: #5)** "},
+		{"", "", 0, ""},
 	}
 	for _, tc := range tests {
 		t.Run(tc.in+"_pr"+strconv.Itoa(tc.prefixPR), func(t *testing.T) {
 			t.Parallel()
-			if got := NormalizeRepo(tc.in); got != tc.norm {
-				t.Fatalf("NormalizeRepo(%q) = %q, want %q", tc.in, got, tc.norm)
-			}
 			if got := CleanRepoName(tc.in); got != tc.clean {
 				t.Fatalf("CleanRepoName(%q) = %q, want %q", tc.in, got, tc.clean)
 			}

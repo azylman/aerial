@@ -18,6 +18,7 @@ import (
 	"github.com/bwmarrin/discordgo"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
+	"github.com/azylman/aerial/pkg/githubapi"
 	"github.com/azylman/aerial/pkg/githubauth"
 	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/pkg/k8sauth"
@@ -503,6 +504,9 @@ func (s *RouterServer) handleFluxWebhook(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	// A bare payload repo, or the bare default for an alert naming none,
+	// gets the configured owner like every webhook repo.
+	deployEvt.Repo = githubapi.QualifyRepo(s.currentConfig().GitHubOwner, deployEvt.Repo)
 	s.enqueueOrProcessDeployEvent(w, r, deployEvt, "flux")
 }
 
@@ -680,6 +684,9 @@ func RunServer(ctx context.Context, cfgSrc *httpkit.Reloadable[config.Config], o
 	cfg := cfgSrc.Current()
 	if err := config.ValidateRequired(cfg); err != nil {
 		return fmt.Errorf("invalid synapse config: %w", err)
+	}
+	if strings.TrimSpace(cfg.GitHubOwner) == "" {
+		slog.WarnContext(ctx, "[synapse] github_owner is unset: events naming a bare repo are rejected before reaching Restate")
 	}
 	server := NewRouterServer(cfgSrc, nil, WithGitHubTokenSource(newGitHubTokenSource(cfgSrc, gitHubAppEnv{
 		AppID:          os.Getenv("GITHUB_APP_ID"),

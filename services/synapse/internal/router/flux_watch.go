@@ -220,7 +220,7 @@ func (s *RouterServer) gateKustomizationRequest(ctx context.Context, pr Deployin
 		slog.InfoContext(ctx, "[synapse] [flux-watch] waiting on kustomization: no merge commit recorded", "kustomization", name, "repo", pr.Repo, "pr", pr.PRNumber)
 		return nil
 	}
-	if state.SourceRepo != "" && strings.EqualFold(model.NormalizeRepo(state.SourceRepo), model.NormalizeRepo(pr.Repo)) {
+	if state.SourceRepo != "" && strings.EqualFold(strings.TrimSpace(state.SourceRepo), strings.TrimSpace(pr.Repo)) {
 		applied := flux.CleanRevisionSHA(obs.LastAppliedRevision)
 		live, err := s.revisionIncludes(ctx, pr.Repo, applied, commitSHA)
 		if err != nil {
@@ -255,7 +255,7 @@ func (s *RouterServer) gateKustomizationRequest(ctx context.Context, pr Deployin
 
 // commitTime returns the committer date of sha in repo, which for a merge commit is when it merged.
 func (s *RouterServer) commitTime(ctx context.Context, repo, sha string) (time.Time, error) {
-	repo = model.NormalizeRepo(repo)
+	repo = strings.TrimSpace(repo)
 	key := repo + "@" + sha
 	if at, ok := s.gitHistory.CommitTime(key); ok {
 		return at, nil
@@ -284,7 +284,7 @@ func (s *RouterServer) revisionIncludes(ctx context.Context, repo, revision, com
 	if revision == commit {
 		return true, nil
 	}
-	repo = model.NormalizeRepo(repo)
+	repo = strings.TrimSpace(repo)
 	key := repo + "@" + commit + "..." + revision
 	if verdict, ok := s.gitHistory.IncludesVerdict(key); ok {
 		return verdict, nil

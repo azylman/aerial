@@ -12,6 +12,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/azylman/aerial/pkg/discordutil"
+	"github.com/azylman/aerial/pkg/githubapi"
 	"github.com/azylman/aerial/pkg/k8sauth"
 	"github.com/azylman/aerial/pkg/strutil"
 	"github.com/azylman/aerial/services/synapse/internal/model"
@@ -28,13 +29,16 @@ type BotConfig struct {
 
 // Config holds runtime configuration for synapse.
 type Config struct {
-	Port                 string
-	KubeAPIServer        string
-	KubeToken            string
-	GitHubToken          string
-	GitHubAPIURL         string
-	GitHubCredential     string
-	GitHubWebhookSecret  string
+	Port                string
+	KubeAPIServer       string
+	KubeToken           string
+	GitHubToken         string
+	GitHubAPIURL        string
+	GitHubCredential    string
+	GitHubWebhookSecret string
+	// GitHubOwner qualifies bare repo names ("aerial" -> "<owner>/aerial")
+	// before they address a Restate PRObject/RepoObject. Bound at startup.
+	GitHubOwner          string
 	RestateURL           string
 	RestatePRService     string
 	RestateRepoService   string
@@ -86,6 +90,10 @@ type RouterYAMLConfig struct {
 	// "app" also stays on the PAT. A hot reload carrying any other value is
 	// rejected and the last good config stays live.
 	GitHubCredential string `yaml:"github_credential"`
+	// GitHubOwner is the GitHub account that owns bare repo names. No code
+	// default: with it unset, bare repos are rejected before any Restate
+	// request. Changing it requires a restart.
+	GitHubOwner string `yaml:"github_owner"`
 }
 
 // GitHub credential choices for github_credential.
@@ -230,6 +238,7 @@ func RestartRequired(old, next *Config) bool {
 		old.RestateURL != next.RestateURL ||
 		old.RestatePRService != next.RestatePRService ||
 		old.RestateRepoService != next.RestateRepoService ||
+		old.GitHubOwner != next.GitHubOwner ||
 		old.K8sAuthEnabled != next.K8sAuthEnabled ||
 		!botsEqual(old.Bots, next.Bots)
 }
@@ -239,7 +248,7 @@ func HasCollaboratorCIAlertsForRepo(cfg *Config, repo string) bool {
 	if cfg == nil || len(cfg.CollaboratorCIAlerts) == 0 {
 		return false
 	}
-	targetRepo := model.NormalizeRepo(repo)
+	targetRepo := githubapi.QualifyRepo(cfg.GitHubOwner, repo)
 	if targetRepo == "" {
 		return false
 	}
@@ -256,7 +265,7 @@ func LookupCollaboratorCIAlert(cfg *Config, repo, author string) (channelID, men
 	if cfg == nil || len(cfg.CollaboratorCIAlerts) == 0 {
 		return "", "", false
 	}
-	targetRepo := model.NormalizeRepo(repo)
+	targetRepo := githubapi.QualifyRepo(cfg.GitHubOwner, repo)
 	cleanAuthor := strings.ToLower(strings.TrimSpace(author))
 	if targetRepo == "" || cleanAuthor == "" {
 		return "", "", false
@@ -271,13 +280,15 @@ func LookupCollaboratorCIAlert(cfg *Config, repo, author string) (channelID, men
 	return "", "", false
 }
 
-func NormalizeCollaboratorCIAlerts(rules []CollaboratorCIAlertRule) []CollaboratorCIAlertRule {
+// NormalizeCollaboratorCIAlerts drops incomplete rules and qualifies each
+// rule repo with owner, so rule matching compares owner-qualified names.
+func NormalizeCollaboratorCIAlerts(owner string, rules []CollaboratorCIAlertRule) []CollaboratorCIAlertRule {
 	if len(rules) == 0 {
 		return nil
 	}
 	var out []CollaboratorCIAlertRule
 	for _, rule := range rules {
-		repo := model.NormalizeRepo(rule.Repo)
+		repo := githubapi.QualifyRepo(owner, rule.Repo)
 		chanID := model.NormalizeDiscordTargetID(rule.ChannelID)
 		if repo == "" || !model.IsValidDiscordSnowflake(chanID) {
 			continue
@@ -333,7 +344,7 @@ func readRouterYAML(configPath string) (RouterYAMLConfig, error) {
 	return fileCfg, nil
 }
 
-func loadAerialConfigFallback(path, sysChan, botID string, autoUpdateAuthors []string, collaboratorAlerts []CollaboratorCIAlertRule) (string, string, []string, []CollaboratorCIAlertRule) {
+func loadAerialConfigFallback(path, owner, sysChan, botID string, autoUpdateAuthors []string, collaboratorAlerts []CollaboratorCIAlertRule) (string, string, []string, []CollaboratorCIAlertRule) {
 	data, err := os.ReadFile(path)
 	if err != nil && path == "/share/aerial-config/config.yaml" {
 		data, err = os.ReadFile("/config/config.yaml")
@@ -355,7 +366,7 @@ func loadAerialConfigFallback(path, sysChan, botID string, autoUpdateAuthors []s
 		autoUpdateAuthors = model.DedupeTrimmedStrings(aerialCfg.AutoUpdatePRAuthors)
 	}
 	if len(collaboratorAlerts) == 0 {
-		collaboratorAlerts = NormalizeCollaboratorCIAlerts(aerialCfg.CollaboratorCIAlerts)
+		collaboratorAlerts = NormalizeCollaboratorCIAlerts(owner, aerialCfg.CollaboratorCIAlerts)
 	}
 	return sysChan, botID, autoUpdateAuthors, collaboratorAlerts
 }
@@ -441,10 +452,11 @@ func resolveK8sAuthConfig(fileCfg RouterYAMLConfig, kubeServer string) (bool, k8
 func buildConfig(fileCfg RouterYAMLConfig) Config {
 	autoUpdateAuthors := model.DedupeTrimmedStrings(fileCfg.AutoUpdatePRAuthors)
 	sysChan := strutil.FirstNonEmpty(fileCfg.SystemChannelID, fileCfg.SystemChannel)
-	collaboratorAlerts := NormalizeCollaboratorCIAlerts(fileCfg.CollaboratorCIAlerts)
+	owner := strings.TrimSpace(fileCfg.GitHubOwner)
+	collaboratorAlerts := NormalizeCollaboratorCIAlerts(owner, fileCfg.CollaboratorCIAlerts)
 	var aerialBotID string
 	if (sysChan == "" || len(autoUpdateAuthors) == 0 || aerialBotID == "" || len(collaboratorAlerts) == 0) && SynapseAerialConfigPath != "" {
-		sysChan, aerialBotID, autoUpdateAuthors, collaboratorAlerts = loadAerialConfigFallback(SynapseAerialConfigPath, sysChan, aerialBotID, autoUpdateAuthors, collaboratorAlerts)
+		sysChan, aerialBotID, autoUpdateAuthors, collaboratorAlerts = loadAerialConfigFallback(SynapseAerialConfigPath, owner, sysChan, aerialBotID, autoUpdateAuthors, collaboratorAlerts)
 	}
 
 	botID := strings.TrimSpace(strutil.FirstNonEmpty(os.Getenv("AERIAL_BOT_ID"), fileCfg.BotID, aerialBotID, defaultAgentName))
@@ -488,6 +500,7 @@ func buildConfig(fileCfg RouterYAMLConfig) Config {
 		GitHubAPIURL:         strings.TrimRight(strutil.FirstNonEmpty(os.Getenv("GITHUB_API_URL"), "https://api.github.com"), "/"),
 		GitHubCredential:     ghCredential,
 		GitHubWebhookSecret:  strings.TrimSpace(os.Getenv("GITHUB_WEBHOOK_SECRET")),
+		GitHubOwner:          owner,
 		BrainURL:             eriURL,
 		EriURL:               eriURL,
 		NATSURL:              strutil.FirstNonEmpty(os.Getenv("NATS_URL"), fileCfg.NATSURL, "nats://nats.aerial:4222"),

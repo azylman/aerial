@@ -509,7 +509,7 @@ func TestEvaluateGitHubEventTriggers(t *testing.T) {
 				Event:      "check_run",
 				Action:     "completed",
 				Conclusion: "success",
-				Repo:       "aerial",
+				Repo:       " azylman/aerial ",
 				Branch:     "",
 			},
 			body:          `{"check_run":{"check_suite":{"head_branch":"refs/heads/feat/auto-extract"}}}`,
@@ -519,7 +519,7 @@ func TestEvaluateGitHubEventTriggers(t *testing.T) {
 			wantTargets:   []string{"azylman/aerial", "azylman/aerial:feat/auto-extract"},
 		},
 		{
-			name: "workflow_run completed failure with bare repo",
+			name: "workflow_run completed failure with qualified repo",
 			res: &ResolvedGitHubEvent{
 				Event:      "workflow_run",
 				Action:     "completed",

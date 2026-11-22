@@ -367,7 +367,7 @@ func (c *Client) gitRepositorySlug(ctx context.Context, source model.FluxSourceR
 
 // DiscoverRepoKustomizations returns the sorted Kustomizations whose GitRepository source is repo.
 func (c *Client) DiscoverRepoKustomizations(ctx context.Context, repo string) ([]model.FluxKustomizationRef, error) {
-	repo = model.NormalizeRepo(repo)
+	repo = strings.TrimSpace(repo)
 	if c.kubeAPIServer == "" || repo == "" {
 		return nil, nil
 	}
@@ -389,7 +389,7 @@ func (c *Client) DiscoverRepoKustomizations(ctx context.Context, repo string) ([
 				}
 				slugs[obs.SourceRef] = slug
 			}
-			if slug != "" && strings.EqualFold(model.NormalizeRepo(slug), repo) {
+			if slug != "" && strings.EqualFold(strings.TrimSpace(slug), repo) {
 				refs = append(refs, obs.Ref)
 			}
 		}

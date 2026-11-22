@@ -14,6 +14,7 @@ import (
 
 	"github.com/azylman/aerial/pkg/githubapi"
 	"github.com/azylman/aerial/pkg/httpkit"
+	"github.com/azylman/aerial/pkg/prwire"
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/synapse/internal/github"
 	"github.com/azylman/aerial/services/synapse/internal/model"
@@ -45,7 +46,7 @@ func (s *RouterServer) publishPRLifecycleEvent(ctx context.Context, ev pubsub.PR
 	if s == nil || s.bus == nil {
 		return nil
 	}
-	ev.Repo = model.NormalizeRepo(ev.Repo)
+	ev.Repo = strings.TrimSpace(ev.Repo)
 	if ev.OccurredAt.IsZero() {
 		ev.OccurredAt = time.Now().UTC()
 	}
@@ -91,8 +92,8 @@ type (
 )
 
 func isPRMergeConflict(pr GitHubPullRequest) bool {
-	reason := github.ExtractAutoMergeBlockReason(pr.MergeableState, pr.Mergeable)
-	return github.IsActionableAutoMergeBlock(reason)
+	reason := prwire.AutoMergeBlockReason(pr.MergeableState, pr.Mergeable)
+	return prwire.IsActionableAutoMergeBlock(reason)
 }
 
 func isPRMergeabilityUnknown(pr GitHubPullRequest) bool {

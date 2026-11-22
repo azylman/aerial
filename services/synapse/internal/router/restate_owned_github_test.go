@@ -328,6 +328,7 @@ func TestHandlePRRegisterRestateOwned(t *testing.T) {
 		k8s         bool
 		token       string
 		noURL       bool
+		owner       string
 		bots        map[string]BotConfig
 		body        string
 		callCode    int
@@ -337,6 +338,8 @@ func TestHandlePRRegisterRestateOwned(t *testing.T) {
 		wantCallSub string
 		wantCalls   int
 	}{
+		{name: "bare repo is qualified with the configured owner", owner: "azylman", body: `{"repo":"aerial","pr_number":42,"branch":"feat","head_sha":"sha1","target_id":"100000000000000001"}`, callCode: 200, callBody: okBody, wantStatus: http.StatusOK, wantCallSub: `"repo":"azylman/aerial"`, wantCalls: 1},
+		{name: "bare repo without an owner never reaches restate", body: `{"repo":"aerial","pr_number":42,"branch":"feat","head_sha":"sha1","target_id":"100000000000000001"}`, wantStatus: http.StatusInternalServerError},
 		{name: "valid register returns the restate target", body: validReq, callCode: 200, callBody: okBody, wantStatus: http.StatusOK, wantRespSub: `"target_id":"100000000000000001"`, wantCallSub: `"fallback_target_id":"` + sysTarget + `"`, wantCalls: 1},
 		{name: "headless target travels empty for restate to resolve", body: `{"repo":"azylman/aerial","pr_number":42,"branch":"feat","head_sha":"sha1","target_id":"dispatch-uuid-1"}`, callCode: 200, callBody: okBody, wantStatus: http.StatusOK, wantCallSub: `"target_id":""`, wantCalls: 1},
 		{name: "agent metadata is forwarded", body: `{"repo":"azylman/aerial","pr_number":42,"branch":"feat","head_sha":"sha1","target_id":"100000000000000001","metadata":"{\"widget_state\":\"w1\"}"}`, callCode: 200, callBody: okBody, wantStatus: http.StatusOK, wantCallSub: `"widget_state":"w1"`, wantCalls: 1},
@@ -358,7 +361,7 @@ func TestHandlePRRegisterRestateOwned(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			ingress := &ownedIngress{sendCode: http.StatusAccepted, callCode: tc.callCode, callBody: tc.callBody}
-			cfg := Config{SystemChannelID: sysTarget, Bots: tc.bots}
+			cfg := Config{SystemChannelID: sysTarget, GitHubOwner: tc.owner, Bots: tc.bots}
 			if !tc.noURL {
 				cfg.RestateURL = ingress.serve(t)
 			}
