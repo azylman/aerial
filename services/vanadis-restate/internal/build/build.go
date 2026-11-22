@@ -281,26 +281,19 @@ func (r restateObjectRuntime) SendCrossBuildDeploySuccess(service, buildID, chun
 type BuildObject struct {
 	store           store.VanadisStore
 	executor        *executor.Executor
-	vanadisURL      string
-	httpClient      *http.Client
 	runtimeFactory  func(restate.ObjectContext) objectRuntime
 	agentName       string
 	activeStepSyncs sync.Map
 }
 
-// NewBuildObject creates a new BuildObject bound to vanadisURL with an optional HTTP client.
-// vanadisURL is retained for signature compatibility and is no longer used for transitions.
-func NewBuildObject(vanadisURL string, httpClient *http.Client, runtimeFactory ...func(restate.ObjectContext) objectRuntime) *BuildObject {
-	if httpClient == nil {
-		httpClient = &http.Client{Timeout: 30 * time.Second}
-	}
+// NewBuildObject creates a new BuildObject.
+// vanadisURL and httpClient are retained for signature compatibility.
+func NewBuildObject(_ string, _ *http.Client, runtimeFactory ...func(restate.ObjectContext) objectRuntime) *BuildObject {
 	var rf func(restate.ObjectContext) objectRuntime
 	if len(runtimeFactory) > 0 {
 		rf = runtimeFactory[0]
 	}
 	return &BuildObject{
-		vanadisURL:     strings.TrimRight(strings.TrimSpace(vanadisURL), "/"),
-		httpClient:     httpClient,
 		runtimeFactory: rf,
 	}
 }

@@ -794,11 +794,6 @@ func compileSkillBatch(ctx context.Context, s store.Store, llmFunc LLMClientFunc
 // ConsolidateProceduralSkills scans pending procedural friction candidates, clusters and compiles
 // them into validated SKILL.md changes, and publishes an auto-merging PR to aerial-config.
 func ConsolidateProceduralSkills(ctx context.Context, s store.Store, ollama store.OllamaClient, llmFunc LLMClientFunc, publisher SkillPublisher, customSkillsDir string) (int, error) {
-	if !extractionMutex.TryLock() {
-		return 0, nil
-	}
-	defer extractionMutex.Unlock()
-
 	if s == nil || publisher == nil || llmFunc == nil {
 		return 0, fmt.Errorf("store, publisher, and llmFunc cannot be nil")
 	}

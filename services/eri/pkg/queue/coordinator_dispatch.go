@@ -16,7 +16,7 @@ import (
 
 const cancelledDispatchReason = "cancelled dispatch"
 
-// DispatchCoordinator is the coordinator-mode DispatchSession Virtual Object keyed by dispatch
+// DispatchCoordinator is the DispatchSession Virtual Object keyed by dispatch
 // session key. It runs one dispatch per turn through TurnRunner RunDispatch.
 type DispatchCoordinator struct {
 	store     coordinatorStore
@@ -59,10 +59,6 @@ func (dispatchRecords) runnerRequest(key, turnID string, ids []string) any {
 }
 
 func (dispatchRecords) turnCap() int { return maxCoalescedDispatchItems }
-
-func (r dispatchRecords) listPending(ctx context.Context, key string) ([]string, error) {
-	return r.store.ListPendingDispatchIDsForSession(ctx, key)
-}
 
 func (r dispatchRecords) failIfPending(ctx context.Context, ids []string, reason string) ([]string, error) {
 	return r.store.FailDispatchesIfPending(ctx, ids, reason)
@@ -187,15 +183,4 @@ func (d *DispatchCoordinator) ClearPending(ctx restate.ObjectContext, req ClearP
 // Status returns the coordinator state.
 func (d *DispatchCoordinator) Status(ctx restate.ObjectSharedContext) (CoordinatorStatus, error) {
 	return d.core.status(ctx)
-}
-
-// AdoptPending appends the key's PENDING dispatches (rows queued by the legacy path).
-func (d *DispatchCoordinator) AdoptPending(ctx restate.ObjectSharedContext, _ AdoptPendingRequest) error {
-	return d.core.adoptPending(ctx)
-}
-
-// RunTurn accepts legacy RunTurn payloads and only defers to AdoptPending.
-func (d *DispatchCoordinator) RunTurn(ctx restate.ObjectContext, _ eriwire.BrainDispatchRequest) (DispatchTurnResult, error) {
-	d.core.adoptViaShim(ctx)
-	return DispatchTurnResult{Status: statusCompleted}, nil
 }

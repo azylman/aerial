@@ -723,16 +723,6 @@ func TestContracts_JSONWireFormat(t *testing.T) {
 			wantJSON: `{"stack":"aerial","session_id":"s1","thread_id":"t1","file_mtime":"2026-11-14T16:00:00Z","first_step":0,"last_step":9,"steps_indexed":10,"final":true,"indexed_at":"2026-11-14T16:00:00Z"}`,
 		},
 		{
-			name:     "WidgetSyncJobArgs_build",
-			payload:  WidgetSyncJobArgs{BuildID: "b1", Status: "ok"},
-			wantJSON: `{"build_id":"b1","status":"ok"}`,
-		},
-		{
-			name:     "WidgetSyncJobArgs_pr",
-			payload:  WidgetSyncJobArgs{Repo: "r1", PRNumber: 1, Status: "open"},
-			wantJSON: `{"repo":"r1","pr_number":1,"status":"open"}`,
-		},
-		{
 			name:     "ProsperaReportJobArgs",
 			payload:  ProsperaReportJobArgs{CallID: "c1"},
 			wantJSON: `{"call_id":"c1"}`,
