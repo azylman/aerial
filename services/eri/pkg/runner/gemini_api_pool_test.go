@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -89,16 +90,45 @@ func TestGeminiAPIPool_ContextCancellation(t *testing.T) {
 	}
 }
 
+// geminiSSEReply is a declarative fake streamGenerateContent response: optional SSE content type,
+// a status (0 = 200), SSE chunks written and flushed in order, a chunk formatted with the
+// per-server turn number, a raw body, or (hang) a flushed stream held open until the client goes away.
+type geminiSSEReply struct {
+	sse          bool
+	status       int
+	chunks       []string
+	countedChunk string
+	body         string
+	hang         bool
+}
+
+var (
+	geminiReplyStreaming = geminiSSEReply{sse: true, chunks: []string{
+		`data: {"candidates":[{"content":{"parts":[{"text":"Hello "}],"role":"model"}}],"index":0}` + "\n\n",
+		`data: {"candidates":[{"content":{"parts":[{"text":"world!"}],"role":"model"}}],"finishReason":"STOP","index":0,"usageMetadata":{"promptTokenCount":12,"candidatesTokenCount":6,"totalTokenCount":18}}` + "\n\n",
+	}}
+	geminiReplyThinking   = geminiSSEReply{sse: true, chunks: []string{`data: {"candidates":[{"content":{"parts":[{"text":"Thinking budget tested"}],"role":"model"}}]}` + "\n\n"}}
+	geminiReplyNumbered   = geminiSSEReply{sse: true, countedChunk: `data: {"candidates":[{"content":{"parts":[{"text":"Response %d"}],"role":"model"}}]}` + "\n\n"}
+	geminiReplyRateLimit  = geminiSSEReply{status: http.StatusTooManyRequests, body: `{"error":{"code":429,"message":"Resource has been exhausted","status":"RESOURCE_EXHAUSTED"}}`}
+	geminiReplyLeakedKey  = geminiSSEReply{status: http.StatusInternalServerError, body: `{"error":"internal error occurred with key AIzaSySuperSecretKey123456789"}`}
+	geminiReplyServerErr  = geminiSSEReply{status: http.StatusInternalServerError, body: "server error\n"}
+	geminiReplyMalformed  = geminiSSEReply{sse: true, chunks: []string{"data: {malformed_json\n\n"}}
+	geminiReplyHang       = geminiSSEReply{sse: true, hang: true}
+	geminiReplyEmptyParts = geminiSSEReply{sse: true, chunks: []string{`data: {"candidates":[{"content":{"parts":[{"text":""}],"role":"model"}}],"finishReason":"STOP","index":0}` + "\n\n"}}
+)
+
 type sendTestCase struct {
-	name, serverMode, device, prompt, expectErrMsg, expectSinkErrMsg, expectSinkResult, expectHistFirst, expectHistLast, verifySanitizeKey string
-	cfg                                                                                                                                    GeminiAPIPoolConfig
-	preCancelCtx, badURL, cancelOnFlush, nilSink, expectErr, checkThinkingBody, expectEmptyHist                                            bool
-	expectDeltas                                                                                                                           []string
-	expectPromptToken, expectCandToken, expectTotalToken, runSequential, expectMaxHistory                                                  int
+	name, device, prompt, expectErrMsg, expectSinkErrMsg, expectSinkResult, expectHistFirst, expectHistLast, verifySanitizeKey string
+	server                                                                                                                     *geminiSSEReply
+	cfg                                                                                                                        GeminiAPIPoolConfig
+	preCancelCtx, badURL, cancelOnFlush, nilSink, expectErr, checkThinkingBody, expectEmptyHist                                bool
+	expectDeltas                                                                                                               []string
+	expectPromptToken, expectCandToken, expectTotalToken, runSequential, expectMaxHistory                                      int
 }
 
 func makeSendSuiteHandler(tc sendTestCase, lastReqBody *[]byte) http.HandlerFunc {
-	if tc.serverMode == "" {
+	reply := tc.server
+	if reply == nil {
 		return nil
 	}
 	var turnCounter atomic.Int32
@@ -106,54 +136,28 @@ func makeSendSuiteHandler(tc sendTestCase, lastReqBody *[]byte) http.HandlerFunc
 		if tc.checkThinkingBody && lastReqBody != nil {
 			*lastReqBody, _ = io.ReadAll(r.Body)
 		}
-		switch tc.serverMode {
-		case "streaming_success":
-			if r.Method != http.MethodPost {
-				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-				return
-			}
-			w.Header().Set("Content-Type", "text/event-stream")
-			w.WriteHeader(http.StatusOK)
-			flusher, _ := w.(http.Flusher)
-			_, _ = w.Write([]byte(`data: {"candidates":[{"content":{"parts":[{"text":"Hello "}],"role":"model"}}],"index":0}` + "\n\n"))
-			if flusher != nil {
-				flusher.Flush()
-			}
-			_, _ = w.Write([]byte(`data: {"candidates":[{"content":{"parts":[{"text":"world!"}],"role":"model"}}],"finishReason":"STOP","index":0,"usageMetadata":{"promptTokenCount":12,"candidatesTokenCount":6,"totalTokenCount":18}}` + "\n\n"))
-			if flusher != nil {
-				flusher.Flush()
-			}
-		case "zero_thinking":
-			w.Header().Set("Content-Type", "text/event-stream")
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(`data: {"candidates":[{"content":{"parts":[{"text":"Thinking budget tested"}],"role":"model"}}]}` + "\n\n"))
-		case "sliding_window":
-			w.Header().Set("Content-Type", "text/event-stream")
-			w.WriteHeader(http.StatusOK)
-			_, _ = fmt.Fprintf(w, "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Response %d\"}],\"role\":\"model\"}}]}\n\n", turnCounter.Add(1))
-		case "rate_limit_429":
-			w.WriteHeader(http.StatusTooManyRequests)
-			_, _ = w.Write([]byte(`{"error":{"code":429,"message":"Resource has been exhausted","status":"RESOURCE_EXHAUSTED"}}`))
-		case "sanitize_key":
-			w.WriteHeader(http.StatusInternalServerError)
-			_, _ = w.Write([]byte(`{"error":"internal error occurred with key AIzaSySuperSecretKey123456789"}`))
-		case "server_error":
-			http.Error(w, "server error", http.StatusInternalServerError)
-		case "malformed_sse":
-			w.Header().Set("Content-Type", "text/event-stream")
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte("data: {malformed_json\n\n"))
-		case "cancel_on_flush":
-			w.Header().Set("Content-Type", "text/event-stream")
-			if f, ok := w.(http.Flusher); ok {
-				f.Flush()
-			}
-			<-r.Context().Done()
-		case "empty_response":
-			w.Header().Set("Content-Type", "text/event-stream")
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(`data: {"candidates":[{"content":{"parts":[{"text":""}],"role":"model"}}],"finishReason":"STOP","index":0}` + "\n\n"))
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
 		}
+		if reply.sse {
+			w.Header().Set("Content-Type", "text/event-stream")
+		}
+		flusher, _ := w.(http.Flusher)
+		if reply.hang {
+			flusher.Flush()
+			<-r.Context().Done()
+			return
+		}
+		w.WriteHeader(cmp.Or(reply.status, http.StatusOK))
+		for _, chunk := range reply.chunks {
+			_, _ = w.Write([]byte(chunk))
+			flusher.Flush()
+		}
+		if reply.countedChunk != "" {
+			_, _ = fmt.Fprintf(w, reply.countedChunk, turnCounter.Add(1))
+		}
+		_, _ = w.Write([]byte(reply.body))
 	}
 }
 
@@ -248,7 +252,7 @@ func runGeminiAPIPoolSendCase(t *testing.T, tc sendTestCase) {
 	if ts != nil {
 		cfg.BaseURL, cfg.HTTPClient = ts.URL, ts.Client()
 	} else if tc.badURL {
-		cfg.BaseURL = "http://127.0.0.1:1"
+		cfg.BaseURL = closedLoopbackURL(t)
 	}
 	pool := NewGeminiAPIPool(cfg)
 	defer pool.Close()
@@ -293,20 +297,20 @@ func runGeminiAPIPoolSendCase(t *testing.T, tc sendTestCase) {
 func TestGeminiAPIPool_Send_Suite(t *testing.T) {
 	t.Parallel()
 	tests := []sendTestCase{
-		{name: "StreamingSuccess", device: "kiosk-living-room", prompt: "Say hello", cfg: GeminiAPIPoolConfig{APIKey: "test-key", Model: "gemini-2.5-flash"}, serverMode: "streaming_success", expectDeltas: []string{"Hello ", "world!"}, expectSinkResult: "Hello world!", expectPromptToken: 12, expectCandToken: 6, expectTotalToken: 18},
-		{name: "ZeroThinkingBudget", device: "voice-device", prompt: "Check thinking budget", cfg: GeminiAPIPoolConfig{APIKey: "key-abc", Model: "gemini-2.5-flash", SystemPrompt: "You are Aerial."}, serverMode: "zero_thinking", checkThinkingBody: true, expectSinkResult: "Thinking budget tested"},
-		{name: "SlidingWindowHistory", device: "history-device", prompt: "Prompt", cfg: GeminiAPIPoolConfig{APIKey: "history-key", Model: "gemini-2.5-flash", MaxHistoryTurns: 10}, serverMode: "sliding_window", runSequential: 15, expectMaxHistory: 20, expectHistFirst: "Prompt 6", expectHistLast: "Response 15"},
-		{name: "RateLimit429", device: "rate-limited-device", prompt: "Hello under limit", cfg: GeminiAPIPoolConfig{APIKey: "ratelimit-key", Model: "gemini-2.5-flash"}, serverMode: "rate_limit_429", expectErr: true, expectErrMsg: "rate limit exceeded: please try again shortly", expectSinkErrMsg: "rate limit exceeded: please try again shortly"},
+		{name: "StreamingSuccess", device: "kiosk-living-room", prompt: "Say hello", cfg: GeminiAPIPoolConfig{APIKey: "test-key", Model: "gemini-2.5-flash"}, server: &geminiReplyStreaming, expectDeltas: []string{"Hello ", "world!"}, expectSinkResult: "Hello world!", expectPromptToken: 12, expectCandToken: 6, expectTotalToken: 18},
+		{name: "ZeroThinkingBudget", device: "voice-device", prompt: "Check thinking budget", cfg: GeminiAPIPoolConfig{APIKey: "key-abc", Model: "gemini-2.5-flash", SystemPrompt: "You are Aerial."}, server: &geminiReplyThinking, checkThinkingBody: true, expectSinkResult: "Thinking budget tested"},
+		{name: "SlidingWindowHistory", device: "history-device", prompt: "Prompt", cfg: GeminiAPIPoolConfig{APIKey: "history-key", Model: "gemini-2.5-flash", MaxHistoryTurns: 10}, server: &geminiReplyNumbered, runSequential: 15, expectMaxHistory: 20, expectHistFirst: "Prompt 6", expectHistLast: "Response 15"},
+		{name: "RateLimit429", device: "rate-limited-device", prompt: "Hello under limit", cfg: GeminiAPIPoolConfig{APIKey: "ratelimit-key", Model: "gemini-2.5-flash"}, server: &geminiReplyRateLimit, expectErr: true, expectErrMsg: "rate limit exceeded: please try again shortly", expectSinkErrMsg: "rate limit exceeded: please try again shortly"},
 		{name: "EmptyPrompt_Empty", device: "device-empty-1", prompt: "", cfg: GeminiAPIPoolConfig{APIKey: "test-key", Model: "gemini-2.5-flash"}, expectErr: true},
 		{name: "EmptyPrompt_Whitespace", device: "device-empty-2", prompt: "   \t\n\r  ", cfg: GeminiAPIPoolConfig{APIKey: "test-key", Model: "gemini-2.5-flash"}, expectErr: true},
-		{name: "SanitizeAPIKey", device: "sanitize-device", prompt: "trigger error", cfg: GeminiAPIPoolConfig{APIKey: "AIzaSySuperSecretKey123456789", Model: "gemini-2.5-flash"}, serverMode: "sanitize_key", expectErr: true, verifySanitizeKey: "AIzaSySuperSecretKey123456789"},
-		{name: "Send_WithNilSinkAndServerError", device: "nil-sink-device", prompt: "hello", cfg: GeminiAPIPoolConfig{APIKey: "test-key", Model: "gemini-2.5-flash"}, serverMode: "server_error", nilSink: true, expectErr: true},
+		{name: "SanitizeAPIKey", device: "sanitize-device", prompt: "trigger error", cfg: GeminiAPIPoolConfig{APIKey: "AIzaSySuperSecretKey123456789", Model: "gemini-2.5-flash"}, server: &geminiReplyLeakedKey, expectErr: true, verifySanitizeKey: "AIzaSySuperSecretKey123456789"},
+		{name: "Send_WithNilSinkAndServerError", device: "nil-sink-device", prompt: "hello", cfg: GeminiAPIPoolConfig{APIKey: "test-key", Model: "gemini-2.5-flash"}, server: &geminiReplyServerErr, nilSink: true, expectErr: true},
 		{name: "Send_WithNilSinkAndCancelledCtx", device: "nil-sink-cancel", prompt: "hello", preCancelCtx: true, cfg: GeminiAPIPoolConfig{APIKey: "test-key", Model: "gemini-2.5-flash"}, nilSink: true, expectErr: true},
-		{name: "Send_SSEMalformedChunk", device: "malformed-sse", prompt: "trigger malformed", cfg: GeminiAPIPoolConfig{APIKey: "test-key", Model: "gemini-2.5-flash"}, serverMode: "malformed_sse", expectErr: true},
+		{name: "Send_SSEMalformedChunk", device: "malformed-sse", prompt: "trigger malformed", cfg: GeminiAPIPoolConfig{APIKey: "test-key", Model: "gemini-2.5-flash"}, server: &geminiReplyMalformed, expectErr: true},
 		{name: "Send_PreCancelledContext", device: "precancel-device", prompt: "hi", preCancelCtx: true, cfg: GeminiAPIPoolConfig{APIKey: "test-key"}, expectErr: true},
 		{name: "Send_NetworkDoError", device: "net-err-device", prompt: "hi", badURL: true, cfg: GeminiAPIPoolConfig{APIKey: "test-key"}, expectErr: true},
-		{name: "Send_CancelledDuringStream", device: "stream-cancel-device", prompt: "hi", cancelOnFlush: true, cfg: GeminiAPIPoolConfig{APIKey: "test-key"}, serverMode: "cancel_on_flush", expectErr: true},
-		{name: "EmptyResponse_NotPoisoned", device: "voice-kiosk-empty", prompt: "empty test", cfg: GeminiAPIPoolConfig{APIKey: "test-key", Model: "gemini-2.5-flash"}, serverMode: "empty_response", expectEmptyHist: true},
+		{name: "Send_CancelledDuringStream", device: "stream-cancel-device", prompt: "hi", cancelOnFlush: true, cfg: GeminiAPIPoolConfig{APIKey: "test-key"}, server: &geminiReplyHang, expectErr: true},
+		{name: "EmptyResponse_NotPoisoned", device: "voice-kiosk-empty", prompt: "empty test", cfg: GeminiAPIPoolConfig{APIKey: "test-key", Model: "gemini-2.5-flash"}, server: &geminiReplyEmptyParts, expectEmptyHist: true},
 	}
 
 	for _, tc := range tests {
@@ -907,7 +911,7 @@ func TestDefaultMCPDispatcher_AllowedToolsFilteringAndExecution(t *testing.T) {
 	poolTS := newAllowedToolsMockServer()
 	t.Cleanup(poolTS.Close)
 	pool := NewGeminiAPIPool(GeminiAPIPoolConfig{
-		APIKey: "test-key", Model: "gemini-2.5-flash", BaseURL: "http://127.0.0.1:1",
+		APIKey: "test-key", Model: "gemini-2.5-flash", BaseURL: closedLoopbackURL(t),
 		MCPServers:   []MCPServerConfig{{Name: "test-mcp", ServerURL: poolTS.URL}},
 		AllowedTools: []string{"ha_call_read_tool"},
 	})

@@ -20,7 +20,6 @@ func envValue(env []string, key string) string {
 // TestUnifiedProcessPool_LeaseActiveTurnMatchesDaemonEnv proves the key the worker registers
 // (the lease's ActiveTurn) is the ERI_DAEMON_ID the daemon's MCP calls and hooks carry.
 func TestUnifiedProcessPool_LeaseActiveTurnMatchesDaemonEnv(t *testing.T) {
-	t.Parallel()
 	tests := []struct {
 		name         string
 		proxyPort    string
@@ -33,7 +32,7 @@ func TestUnifiedProcessPool_LeaseActiveTurnMatchesDaemonEnv(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
+			setTurnSATokenSrc(t, "token")
 			var mu sync.Mutex
 			var firstEnv []string
 			home := filepath.Join(t.TempDir(), "runtimes", "discord")
