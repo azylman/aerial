@@ -82,7 +82,7 @@ func (p *WorkerPool) flushActiveStepToRestateIngress(ctx context.Context, buildI
 	}
 	serviceName := BuildServiceName(agentName)
 	ingressURL := p.resolveRestateIngressURL()
-	targetURL := fmt.Sprintf("%s/%s/%s/UpdateActiveStep/send", ingressURL, serviceName, url.PathEscape(buildID))
+	targetURL := fmt.Sprintf("%s/%s/%s/UpdateActiveStep", ingressURL, serviceName, url.PathEscape(buildID))
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, bytes.NewReader(body))
 	if err != nil {
@@ -138,7 +138,7 @@ func (p *WorkerPool) flushActiveStepToVanadisAPI(ctx context.Context, vanadisURL
 
 // FlushChunkActiveStepToRestate forwards the active step for a running chunk.
 // When RestateIngressURL is explicitly configured on PoolConfig and VanadisURL is empty,
-// it falls back to direct Restate ingress (<ingressURL>/<BuildServiceName>/<buildID>/UpdateActiveStep/send)
+// it falls back to direct Restate ingress (<ingressURL>/<BuildServiceName>/<buildID>/UpdateActiveStep)
 // for backward compatibility and hermetic unit tests. Otherwise, it routes through the vanadis
 // HTTP API (<vanadisURL>/builds/<buildID>/active-step or <vanadisURL>/chunks/active-step) using a ServiceAccount Bearer token.
 // With neither URL configured the update is skipped (logged once); it never dials a default host.

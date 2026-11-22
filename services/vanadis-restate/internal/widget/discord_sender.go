@@ -30,69 +30,7 @@ const (
 
 	configCacheTTL         = 1 * time.Minute
 	channelResolveCacheTTL = 5 * time.Minute
-	MaxChunkActiveSteps    = 500
 )
-
-// Active step storage for live build chunks.
-var (
-	chunkActiveStepsMu sync.RWMutex
-	chunkActiveSteps   = make(map[string]string)
-	chunkActiveOrder   []string
-)
-
-func removeChunkFromOrderLocked(id string) {
-	n := 0
-	for _, chunkID := range chunkActiveOrder {
-		if chunkID != id {
-			chunkActiveOrder[n] = chunkID
-			n++
-		}
-	}
-	chunkActiveOrder = chunkActiveOrder[:n]
-}
-
-// SetChunkActiveStep sets the live active step description for a chunk.
-func SetChunkActiveStep(chunkID, step string) {
-	chunkActiveStepsMu.Lock()
-	defer chunkActiveStepsMu.Unlock()
-	clean := strings.TrimSpace(step)
-	if clean == "" {
-		delete(chunkActiveSteps, chunkID)
-		removeChunkFromOrderLocked(chunkID)
-		return
-	}
-	if _, exists := chunkActiveSteps[chunkID]; !exists {
-		for len(chunkActiveSteps) >= MaxChunkActiveSteps {
-			if len(chunkActiveOrder) > 0 {
-				oldest := chunkActiveOrder[0]
-				chunkActiveOrder = chunkActiveOrder[1:]
-				delete(chunkActiveSteps, oldest)
-			} else {
-				for k := range chunkActiveSteps {
-					delete(chunkActiveSteps, k)
-					break
-				}
-			}
-		}
-		chunkActiveOrder = append(chunkActiveOrder, chunkID)
-	}
-	chunkActiveSteps[chunkID] = clean
-}
-
-// GetChunkActiveStep retrieves the live active step description for a chunk.
-func GetChunkActiveStep(chunkID string) string {
-	chunkActiveStepsMu.RLock()
-	defer chunkActiveStepsMu.RUnlock()
-	return chunkActiveSteps[chunkID]
-}
-
-// ClearChunkActiveStep clears the live active step description for a chunk.
-func ClearChunkActiveStep(chunkID string) {
-	chunkActiveStepsMu.Lock()
-	defer chunkActiveStepsMu.Unlock()
-	delete(chunkActiveSteps, chunkID)
-	removeChunkFromOrderLocked(chunkID)
-}
 
 // DiscordWidgetSender defines the interface required by DeliverStatusWidget to send, edit, query, and delete Discord messages.
 type DiscordWidgetSender interface {
@@ -1112,10 +1050,7 @@ func buildWidgetChunkComponent(owner string, c ericlient.StatusWidgetChunk) disc
 	rowText := fmt.Sprintf("%s **`%s`**: %s%s", badge, repoTag, strings.TrimSpace(c.Title), formatChunkRuntimeSuffix(c))
 	step := c.ActiveStep
 	if isChunkTerminal(c.Status) {
-		ClearChunkActiveStep(c.ID)
 		step = ""
-	} else if step == "" {
-		step = GetChunkActiveStep(c.ID)
 	}
 	rowText += formatChunkActiveStepLines(step)
 
@@ -1352,14 +1287,6 @@ func dropLastWidgetRow(rows []widgetRow, keep []bool) bool {
 // BuildStatusWidgetComponents constructs a Components V2 Container message
 // component; owner qualifies bare chunk repos in PR links.
 func BuildStatusWidgetComponents(owner string, req ericlient.StatusWidgetRequest, now time.Time) ([]discordgo.MessageComponent, error) {
-	// Evict stale active step entries for terminal chunks or completed widgets.
-	completed := isWidgetCompleted(req)
-	for _, c := range req.Chunks {
-		if completed || isChunkTerminal(c.Status) {
-			ClearChunkActiveStep(c.ID)
-		}
-	}
-
 	color := AccentColor(req.Status)
 	var containerComponents []discordgo.MessageComponent
 

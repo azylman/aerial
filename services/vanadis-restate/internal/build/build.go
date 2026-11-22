@@ -587,6 +587,8 @@ func (b *BuildObject) Cancel(ctx restate.ObjectContext, req CancelBuildRequest) 
 			if _, sErr := b.executor.SyncBuildWidget(cancelCtx, b.store, *bld, chunks, "Build cancelled"); sErr != nil {
 				slog.WarnContext(cancelCtx, "[vanadis-restate] sync widget warning", "error", sErr)
 			}
+			b.executor.ClearActiveSteps(buildID)
+			b.activeStepSyncs.Delete(buildID)
 			if pErr := b.executor.PublishExternalEvent(cancelCtx, "vanadis_build", "cancelled", []string{buildID}, req.Reason); pErr != nil {
 				slog.WarnContext(cancelCtx, "[vanadis-restate] publish event warning", "error", pErr)
 			}
