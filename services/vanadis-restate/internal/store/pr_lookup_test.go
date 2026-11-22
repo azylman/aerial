@@ -11,6 +11,7 @@ import (
 
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
+	"github.com/azylman/aerial/services/vanadis-restate/internal/sqltest"
 )
 
 func TestPostgresVanadisStore_LookupPRChunk(t *testing.T) {
@@ -21,13 +22,13 @@ func TestPostgresVanadisStore_LookupPRChunk(t *testing.T) {
 		wantErrIs error
 		wantRoute BuildRoute
 	}{
-		{name: "not found", db: dbScript{row: errRow(pgx.ErrNoRows)}, wantErrIs: ErrChunkNotFound},
-		{name: "success", db: dbScript{row: valuesRow("c1", "b1", 0, "medium", false)}, wantRoute: BuildRoute{BuildID: "b1"}},
+		{name: "not found", db: dbScript{Row: sqltest.ErrRow(pgx.ErrNoRows)}, wantErrIs: ErrChunkNotFound},
+		{name: "success", db: dbScript{Row: sqltest.ValuesRow("c1", "b1", 0, "medium", false)}, wantRoute: BuildRoute{BuildID: "b1"}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			st, _ := tc.db.open()
+			st, _ := open(tc.db)
 			route, _, err := st.LookupPRChunk(context.Background(), "aerial", 123)
 			if !assertStoreErr(t, err, tc.wantErrIs, false) && route != tc.wantRoute {
 				t.Errorf("LookupPRChunk = %+v, want %+v", route, tc.wantRoute)
@@ -44,13 +45,13 @@ func TestPostgresVanadisStore_LookupChunkBuildID(t *testing.T) {
 		wantErrIs error
 		wantRoute BuildRoute
 	}{
-		{name: "not found", db: dbScript{row: errRow(pgx.ErrNoRows)}, wantErrIs: ErrChunkNotFound},
-		{name: "success", db: dbScript{row: valuesRow("b1")}, wantRoute: BuildRoute{BuildID: "b1"}},
+		{name: "not found", db: dbScript{Row: sqltest.ErrRow(pgx.ErrNoRows)}, wantErrIs: ErrChunkNotFound},
+		{name: "success", db: dbScript{Row: sqltest.ValuesRow("b1")}, wantRoute: BuildRoute{BuildID: "b1"}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			st, _ := tc.db.open()
+			st, _ := open(tc.db)
 			route, err := st.LookupChunkBuildID(context.Background(), "c1")
 			if !assertStoreErr(t, err, tc.wantErrIs, false) && route != tc.wantRoute {
 				t.Errorf("LookupChunkBuildID = %+v, want %+v", route, tc.wantRoute)
@@ -63,11 +64,11 @@ func TestPostgresVanadisStore_BannerAndLookups(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 
-	st, _ := dbScript{bare: nilDB}.open()
+	st, _ := open(nilDB)
 	if err := st.UpdateChunkBannerAndStatus(ctx, "c1", "status", "banner"); err == nil {
 		t.Error("expected error with nilDB")
 	}
-	storeActive, _ := dbScript{execTag: "UPDATE 0"}.open()
+	storeActive, _ := open(dbScript{ExecTag: "UPDATE 0"})
 	if err := storeActive.UpdateChunkBannerAndStatus(ctx, "", "status", "banner"); err == nil {
 		t.Error("expected error with empty chunkID")
 	}
@@ -80,12 +81,12 @@ func TestPostgresVanadisStore_BannerAndLookups(t *testing.T) {
 	if lookup, err := storeActive.GetChunkByPR(ctx, "aerial", 0); err != nil || lookup.Matched {
 		t.Errorf("expected unmatched with 0 pr: %+v, %v", lookup, err)
 	}
-	storeFindErr, _ := dbScript{row: errRow(errors.New("db find err"))}.open()
+	storeFindErr, _ := open(dbScript{Row: sqltest.ErrRow(errors.New("db find err"))})
 	if _, err := storeFindErr.GetChunkByPR(ctx, "aerial", 101); err == nil {
 		t.Error("expected error when findChunkPRMatch fails")
 	}
 
-	storeFailCancelledBuild, _ := dbScript{row: failRow("running", "cancelled"), execTag: "UPDATE 1"}.open()
+	storeFailCancelledBuild, _ := open(dbScript{Row: sqltest.FailRow("running", "cancelled"), ExecTag: "UPDATE 1"})
 	if _, _, failed, err := storeFailCancelledBuild.FailChunk(ctx, "c1", "reason", ""); err != nil || failed {
 		t.Errorf("FailChunk on cancelled build: failed=%v, err=%v", failed, err)
 	}
@@ -95,18 +96,18 @@ func TestPostgresVanadisStore_StatusAndRolloutUpdates(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 
-	storeNil, _ := dbScript{bare: nilDB}.open()
+	storeNil, _ := open(nilDB)
 	if err := storeNil.RecordPRRolloutState(ctx, "c1", "open", nil); err == nil {
 		t.Error("expected error with nil db")
 	}
-	storeActive, _ := dbScript{execTag: "UPDATE 0"}.open()
+	storeActive, _ := open(dbScript{ExecTag: "UPDATE 0"})
 	if err := storeActive.RecordPRRolloutState(ctx, "", "open", nil); err == nil {
 		t.Error("expected error with empty chunkID")
 	}
 	if err := storeActive.RecordPRRolloutState(ctx, "c1", "open", &pubsub.PRRolloutState{}); !errors.Is(err, ErrChunkNotFound) {
 		t.Errorf("expected ErrChunkNotFound, got %v", err)
 	}
-	storeRolloutOK, _ := dbScript{execTag: "UPDATE 1"}.open()
+	storeRolloutOK, _ := open(dbScript{ExecTag: "UPDATE 1"})
 	if err := storeRolloutOK.RecordPRRolloutState(ctx, "c1", "open", &pubsub.PRRolloutState{}); err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
@@ -118,7 +119,7 @@ func TestPostgresVanadisStore_StatusAndRolloutUpdates(t *testing.T) {
 		t.Error("expected error with empty chunkID")
 	}
 
-	storeExecErr, _ := dbScript{failExec: "UPDATE vanadis_chunks", execErr: errors.New("exec error")}.open()
+	storeExecErr, _ := open(dbScript{FailExec: "UPDATE vanadis_chunks", ExecErr: errors.New("exec error")})
 	if err := storeExecErr.RecordPRRolloutState(ctx, "c1", "open", nil); err == nil {
 		t.Error("expected error on exec failure")
 	}
@@ -141,24 +142,24 @@ func TestPostgresVanadisStore_LookupUnattachedChunkByThreadAndRepo(t *testing.T)
 		wantErrIs error
 		wantErr   bool
 	}{
-		{name: "nil db", threadID: "123", repo: "aerial", db: dbScript{bare: nilDB}, wantErr: true},
+		{name: "nil db", threadID: "123", repo: "aerial", db: nilDB, wantErr: true},
 		{name: "empty thread id", threadID: "", repo: "aerial", db: dbScript{}, wantErrIs: ErrChunkNotFound},
 		{name: "empty repo", threadID: "123", repo: "", db: dbScript{}, wantErrIs: ErrChunkNotFound},
-		{name: "query error", threadID: "123", repo: "aerial", db: dbScript{queryErr: errors.New("query failed")}, wantErr: true},
-		{name: "scan error", threadID: "123", repo: "aerial", db: dbScript{chunks: []model.VanadisChunk{{BuildID: "b1", ID: "c1"}}, scanErr: errors.New("scan failed")}, wantErr: true},
-		{name: "rows error", threadID: "123", repo: "aerial", db: dbScript{chunks: []model.VanadisChunk{{BuildID: "b1", ID: "c1"}}, rowsErr: errors.New("rows failed")}, wantErr: true},
-		{name: "0 rows not found", threadID: "123", repo: "aerial", db: dbScript{chunks: []model.VanadisChunk{}}, wantErrIs: ErrChunkNotFound},
+		{name: "query error", threadID: "123", repo: "aerial", db: dbScript{QueryErr: errors.New("query failed")}, wantErr: true},
+		{name: "scan error", threadID: "123", repo: "aerial", db: dbScript{Chunks: []model.VanadisChunk{{BuildID: "b1", ID: "c1"}}, ScanErr: errors.New("scan failed")}, wantErr: true},
+		{name: "rows error", threadID: "123", repo: "aerial", db: dbScript{Chunks: []model.VanadisChunk{{BuildID: "b1", ID: "c1"}}, RowsErr: errors.New("rows failed")}, wantErr: true},
+		{name: "0 rows not found", threadID: "123", repo: "aerial", db: dbScript{Chunks: []model.VanadisChunk{}}, wantErrIs: ErrChunkNotFound},
 		{name: "1 row unambiguous match", threadID: "123", repo: "aerial", db: dbScript{
-			chunks: []model.VanadisChunk{{BuildID: "b1", ID: "c1"}},
+			Chunks: []model.VanadisChunk{{BuildID: "b1", ID: "c1"}},
 		}, wantBuild: "b1", wantChunk: "c1"},
 		{name: "2 rows ambiguous rejection", threadID: "123", repo: "aerial", db: dbScript{
-			chunks: []model.VanadisChunk{{BuildID: "b1", ID: "c1"}, {BuildID: "b1", ID: "c2"}},
+			Chunks: []model.VanadisChunk{{BuildID: "b1", ID: "c1"}, {BuildID: "b1", ID: "c2"}},
 		}, wantErrIs: ErrChunkNotFound},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			st, _ := tc.db.open()
+			st, _ := open(tc.db)
 			route, cID, err := st.LookupUnattachedChunkByThreadAndRepo(ctx, tc.threadID, tc.repo)
 			if assertStoreErr(t, err, tc.wantErrIs, tc.wantErr) {
 				return

@@ -14,6 +14,7 @@ import (
 
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
+	"github.com/azylman/aerial/services/vanadis-restate/internal/sqltest"
 )
 
 func TestRepoMatchCandidates(t *testing.T) {
@@ -367,8 +368,8 @@ func TestCrossBuildDeploymentSweepIDs(t *testing.T) {
 }
 
 func sweepMockStore(queryErr, execErr bool, execTag, failChunk string, candidates []model.VanadisChunk, updates *int) *Store {
-	return New(mockDB{
-		execFn: func(_ context.Context, _ string, args ...any) (pgconn.CommandTag, error) {
+	return New(sqltest.DB{
+		ExecFn: func(_ context.Context, _ string, args ...any) (pgconn.CommandTag, error) {
 			*updates++
 			if execErr {
 				return pgconn.CommandTag{}, errors.New("database unavailable")
@@ -378,11 +379,11 @@ func sweepMockStore(queryErr, execErr bool, execTag, failChunk string, candidate
 			}
 			return pgconn.NewCommandTag(execTag), nil
 		},
-		queryFn: func(_ context.Context, _ string, _ ...any) (pgx.Rows, error) {
+		QueryFn: func(_ context.Context, _ string, _ ...any) (pgx.Rows, error) {
 			if queryErr {
 				return nil, errors.New("database unavailable")
 			}
-			return &mockRows{items: candidates}, nil
+			return &sqltest.Rows{Items: candidates}, nil
 		},
 	}, "example-org")
 }

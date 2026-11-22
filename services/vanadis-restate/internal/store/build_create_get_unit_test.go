@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
+	"github.com/azylman/aerial/services/vanadis-restate/internal/sqltest"
 )
 
 func TestInsertBuildChunkCases(t *testing.T) {
@@ -46,9 +47,9 @@ func TestInsertBuildChunkCases(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			tx := &mockTx{}
+			tx := &sqltest.Tx{}
 			if tc.execErr != nil {
-				tx.execFn = func(context.Context, string, ...any) (pgconn.CommandTag, error) {
+				tx.ExecFn = func(context.Context, string, ...any) (pgconn.CommandTag, error) {
 					return pgconn.CommandTag{}, tc.execErr
 				}
 			}
