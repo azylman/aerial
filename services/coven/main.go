@@ -324,12 +324,18 @@ var (
 )
 
 func main() {
+	runMain(os.Getenv, tracing.DefaultConfigPath)
+}
+
+// runMain loads configuration through getenv, initializes tracing from
+// tracingConfigPath and runs the app until a signal arrives.
+func runMain(getenv func(string) string, tracingConfigPath string) {
 	slog.SetDefault(slog.New(tracing.SlogHandler(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
 	}))))
 
 	resolvedPath := ResolveConfigPath(configPath)
-	cfg, err := LoadConfig(resolvedPath, os.Getenv)
+	cfg, err := LoadConfig(resolvedPath, getenv)
 	if err != nil {
 		exitFn("Fatal configuration error: %v", err)
 		return
@@ -337,7 +343,7 @@ func main() {
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
-	_, flushTracing := tracing.Init(ctx, "coven", tracing.DefaultConfigPath)
+	_, flushTracing := tracing.Init(ctx, "coven", tracingConfigPath)
 
 	err = runAppFn(ctx, cfg)
 	flushTracing()
