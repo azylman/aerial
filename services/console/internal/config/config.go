@@ -1,4 +1,4 @@
-package main
+package config
 
 import (
 	"fmt"
@@ -79,8 +79,8 @@ func loadRawUserConfig(configPath string) (rawUserConfig, bool) {
 	return cfg, true
 }
 
-// loadConsoleRepos parses the list of GitHub repositories configured for console monitoring.
-func loadConsoleRepos(configPath string) []string {
+// LoadConsoleRepos parses the list of GitHub repositories configured for console monitoring.
+func LoadConsoleRepos(configPath string) []string {
 	cfg, ok := loadRawUserConfig(configPath)
 	if !ok {
 		return nil
@@ -108,8 +108,8 @@ func loadConsoleRepos(configPath string) []string {
 	return repos
 }
 
-// loadQuickLaunchLinks merges default core links with custom links defined in config.yaml.
-func loadQuickLaunchLinks(configPath string) []QuickLaunchLink {
+// LoadQuickLaunchLinks merges default core links with custom links defined in config.yaml.
+func LoadQuickLaunchLinks(configPath string) []QuickLaunchLink {
 	links := DefaultQuickLaunchLinks()
 
 	cfg, ok := loadRawUserConfig(configPath)

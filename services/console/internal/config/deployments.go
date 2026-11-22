@@ -1,4 +1,4 @@
-package main
+package config
 
 import (
 	"fmt"
@@ -796,3 +796,107 @@ func MergeClusterDeployments(
 	}
 	return result
 }
+
+type MatrixJobChip struct {
+	Name       string `json:"name"`                 // e.g. "brain", "console", "proxy"
+	Status     string `json:"status"`               // "completed", "active", "pending", "failed"
+	Conclusion string `json:"conclusion,omitempty"` // "success", "failure", "skipped", ""
+	Duration   string `json:"duration,omitempty"`   // e.g. "45s"
+	Type       string `json:"type,omitempty"`       // "ci" | "container"
+}
+
+type DeploymentStep struct {
+	Name   string `json:"name"`
+	Icon   string `json:"icon"`
+	Status string `json:"status"` // "completed", "active", "pending", "failed"
+}
+
+type DeploymentStatus struct {
+	ID               string           `json:"id"`
+	Service          string           `json:"service"`
+	Repository       string           `json:"repository,omitempty"`
+	Commit           string           `json:"commit"`
+	CommitMsg        string           `json:"commit_msg,omitempty"`
+	CommitTime       *time.Time       `json:"commit_time,omitempty"`
+	Stage            string           `json:"stage"` // "queued", "building", "failed", "awaiting_pull", "swapping", "live", "degraded"
+	Progress         int              `json:"progress"`
+	Steps            []DeploymentStep `json:"steps"`
+	MatrixJobs       []MatrixJobChip  `json:"matrix_jobs,omitempty"`
+	HTMLURL          string           `json:"html_url,omitempty"`
+	StartedAt        time.Time        `json:"started_at"`
+	MergedFromBranch string           `json:"merged_from_branch,omitempty"`
+}
+
+type ClusterResponse struct {
+	SystemTime       time.Time          `json:"system_time"`
+	ClusterStatus    string             `json:"cluster_status"`
+	ActiveTasksCount int                `json:"active_tasks_count"`
+	ActiveTasks      []ActiveTaskStatus `json:"active_tasks"`
+	Services         []ServiceStatus    `json:"services"`
+	Deployments      []DeploymentStatus `json:"deployments"`
+	QuickLaunchLinks []QuickLaunchLink  `json:"quick_launch_links"`
+	OngoingDeploy    string             `json:"ongoing_deploy"`
+	IsDeploying      bool               `json:"is_deploying"`
+	ConfiguredAgents []string           `json:"configured_agents,omitempty"`
+	GitCommit        string             `json:"git_commit,omitempty"`
+}
+
+// ImageCommitSHA returns the image tag when it is a full 40-char hex commit SHA, else "".
+func ImageCommitSHA(image string) string {
+	_, tag, found := strings.CutLast(image, ":")
+	if !found {
+		return ""
+	}
+	if len(tag) == 40 && isHexSHA(tag) {
+		return strings.ToLower(tag)
+	}
+	return ""
+}
+
+// ImageName returns the last path segment of an image reference without tag or digest.
+func ImageName(image string) string {
+	ref := image
+	if idx := strings.Index(ref, "@"); idx != -1 {
+		ref = ref[:idx]
+	}
+	if idx := strings.LastIndex(ref, ":"); idx != -1 {
+		ref = ref[:idx]
+	}
+	if idx := strings.LastIndex(ref, "/"); idx != -1 {
+		return ref[idx+1:]
+	}
+	return ref
+}
+
+// SynthesizeContainersFromServices converts ServiceStatus entries into DockerContainerJSON
+// records. aerial.commit_sha and aerial.image are stamped from the Deployment image tag when
+// known; services without them fall back to currentCommit in resolveContainerCommit.
+func SynthesizeContainersFromServices(services []ServiceStatus, now time.Time) []DockerContainerJSON {
+	out := make([]DockerContainerJSON, 0, len(services))
+	for _, svc := range services {
+		state := containerStateRunning
+		if svc.Status == healthUnhealthy {
+			state = "exited"
+		}
+		labels := map[string]string{"aerial.service": svc.Name}
+		if svc.Commit != "" {
+			labels[labelCommitSHA] = svc.Commit
+		}
+		if svc.Image != "" {
+			labels[labelImage] = ImageName(svc.Image)
+		}
+		out = append(out, DockerContainerJSON{
+			Created: now.Unix() - svc.UptimeSeconds,
+			State:   state,
+			Labels:  labels,
+			Health:  &DockerContainerHealth{Status: svc.Status},
+		})
+	}
+	return out
+}
+
+var (
+	imageCommitSHA                   = ImageCommitSHA
+	imageName                        = ImageName
+	synthesizeContainersFromServices = SynthesizeContainersFromServices
+)

@@ -1,4 +1,4 @@
-package main
+package server
 
 import (
 	"context"
@@ -196,38 +196,6 @@ func isDeploymentRolloutUnfinished(dep k8sDeployment, desired int32) bool {
 	return dep.Status.UpdatedReplicas < desired ||
 		dep.Status.Replicas > dep.Status.UpdatedReplicas ||
 		dep.Status.ObservedGeneration < dep.Metadata.Generation
-}
-
-// imageCommitSHA returns the image tag when it is a full 40-char hex commit SHA, else "".
-func imageCommitSHA(image string) string {
-	if strings.Contains(image, "@") {
-		return ""
-	}
-	lastSlash := strings.LastIndex(image, "/")
-	colon := strings.LastIndex(image, ":")
-	if colon <= lastSlash {
-		return ""
-	}
-	tag := image[colon+1:]
-	if len(tag) != 40 || !isHexSHA(tag) {
-		return ""
-	}
-	return strings.ToLower(tag)
-}
-
-// imageName returns the last path segment of an image reference without tag or digest.
-func imageName(image string) string {
-	ref := image
-	if at := strings.Index(ref, "@"); at >= 0 {
-		ref = ref[:at]
-	}
-	if slash := strings.LastIndex(ref, "/"); slash >= 0 {
-		ref = ref[slash+1:]
-	}
-	if colon := strings.Index(ref, ":"); colon >= 0 {
-		ref = ref[:colon]
-	}
-	return ref
 }
 
 // deploymentImage picks the image representing a Deployment: the container named like
