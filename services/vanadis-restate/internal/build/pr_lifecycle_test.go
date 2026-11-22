@@ -20,6 +20,7 @@ import (
 	"github.com/azylman/aerial/pkg/eriwire"
 	"github.com/azylman/aerial/pkg/githubapi"
 	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/pkg/pubsubtest"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/deploygate"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/executor"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
@@ -106,16 +107,6 @@ func (*checkStatusSpyStore) GetChunkByPR(_ context.Context, _ string, _ int) (*s
 	return &store.VanadisChunkPRLookup{ChunkID: "c1", BuildID: "b1", Matched: true}, nil
 }
 
-type mockBusError struct {
-	pubsub.Bus
-
-	err error
-}
-
-func (m *mockBusError) Publish(context.Context, string, string, any) error {
-	return m.err
-}
-
 func TestBuildObject_ExecutorErrorBranches(t *testing.T) {
 	t.Parallel()
 	b1 := model.VanadisBuild{ID: "b-err", Status: "running", ThreadID: "th-1"}
@@ -133,7 +124,7 @@ func TestBuildObject_ExecutorErrorBranches(t *testing.T) {
 		},
 		messageFn: func(context.Context, string, string) error { return errors.New("msg err") },
 	}
-	mockBusErr := &mockBusError{err: errors.New("pub err")}
+	mockBusErr := &pubsubtest.FaultBus{PublishErr: errors.New("pub err")}
 	execErr := executor.NewExecutor(t.TempDir(), eriErr, mockBusErr, "token", "example-owner", nil)
 	boErr := NewBuildObject("", nil).WithAuthority(st, execErr)
 
@@ -197,7 +188,7 @@ func newRemediationTestHarness(t *testing.T, spy *checkStatusSpyStore, dispatchE
 		eri.cancelFn = func(context.Context, string) error { return notifyErr }
 		eri.messageFn = func(context.Context, string, string) error { return notifyErr }
 		eri.widgetFn = func(context.Context, executor.StatusWidgetRequest) (string, error) { return "", notifyErr }
-		bus = &mockBusError{err: notifyErr}
+		bus = &pubsubtest.FaultBus{PublishErr: notifyErr}
 	}
 	exec := executor.NewExecutor(t.TempDir(), eri, bus, "token", "example-owner", nil)
 	bo := NewBuildObject("", nil).WithAuthority(spy, exec)
@@ -467,23 +458,13 @@ func TestBuildObject_AuthoritativeFailureContinuation(t *testing.T) {
 	assert.False(t, fakeRTOk.cleared, "ClearState must not be called when FailChunk succeeds on failed build")
 }
 
-type deploymentStartStore struct {
+// deadlineLifecycleStore applies lifecycle, banner and rollout writes to the
+// spy's chunks; writeErr fails RecordPRRolloutState.
+type deadlineLifecycleStore struct {
 	*checkStatusSpyStore
 
 	writeErr error
 }
-
-func (s *deploymentStartStore) RecordPRRolloutState(_ context.Context, id, status string, rollout *pubsub.PRRolloutState) error {
-	if s.writeErr != nil {
-		return s.writeErr
-	}
-	c := s.chunk(id)
-	c.Status = status
-	c.RolloutState = rollout
-	return nil
-}
-
-type deadlineLifecycleStore struct{ *checkStatusSpyStore }
 
 func (s *deadlineLifecycleStore) GetBuild(ctx context.Context, id string) (*model.VanadisBuild, []model.VanadisChunk, error) {
 	b, c, err := s.checkStatusSpyStore.GetBuild(ctx, id)
@@ -504,6 +485,9 @@ func (s *deadlineLifecycleStore) UpdatePRLifecycleStatus(_ context.Context, id, 
 }
 
 func (s *deadlineLifecycleStore) RecordPRRolloutState(_ context.Context, id, status string, rollout *pubsub.PRRolloutState) error {
+	if s.writeErr != nil {
+		return s.writeErr
+	}
 	c := s.chunk(id)
 	if status != "" {
 		c.Status = status
@@ -551,84 +535,69 @@ func (r *deploymentGateFakeRuntime) RunStep(name string, fn func(ctx context.Con
 	return deploygate.StepOutput(out), err
 }
 
-func TestDeploymentStartEvent(t *testing.T) {
+func TestRecordDeploymentPREvent(t *testing.T) {
 	t.Parallel()
+	web := &pubsub.PRRolloutState{ExpectedJobs: []string{"web"}}
+	worker := &pubsub.PRRolloutState{ExpectedJobs: []string{"web", "worker"}, StartedJobs: []string{"worker"}}
+	merged := model.VanadisChunk{ID: "c1", PRNumber: 1, Repo: "owner/repo", MergeSHA: "sha", Status: statusMerged}
+	expired := model.VanadisChunk{ID: "c1", PRNumber: 1, Repo: "owner/repo", MergeSHA: "sha", Status: statusDeployFailed, Banner: "expired"}
 	tests := []struct {
-		name          string
-		rollout       *pubsub.PRRolloutState
-		writeErr      error
-		wantLifecycle string
+		name                   string
+		chunk                  model.VanadisChunk
+		rollout                *pubsub.PRRolloutState
+		writeErr               error
+		wantErr                string
+		wantStatus, wantBanner string
+		wantRollout            *pubsub.PRRolloutState
 	}{
-		{"without snapshot", nil, nil, statusDeploying},
-		{"with snapshot", &pubsub.PRRolloutState{ExpectedJobs: []string{"web"}}, nil, ""},
-		{"snapshot write unavailable", &pubsub.PRRolloutState{ExpectedJobs: []string{"web"}}, errors.New("write unavailable"), ""},
+		{name: "start without snapshot", chunk: merged, wantStatus: statusDeploying},
+		{name: "start with snapshot", chunk: merged, rollout: web, wantStatus: statusDeploying, wantRollout: web},
+		{name: "snapshot write unavailable", chunk: merged, rollout: web, writeErr: errors.New("write unavailable"), wantErr: "write unavailable", wantStatus: statusMerged},
+		{name: "duplicate start without evidence preserves failure", chunk: expired, wantStatus: statusDeployFailed, wantBanner: "expired"},
+		{name: "additional job evidence preserves failure", chunk: expired, rollout: worker, wantStatus: statusDeployFailed, wantBanner: "expired", wantRollout: worker},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			st := &deploymentStartStore{writeErr: tc.writeErr, checkStatusSpyStore: &checkStatusSpyStore{chunks: []model.VanadisChunk{{ID: "c1", PRNumber: 1, MergeSHA: "sha", Status: statusMerged}}}}
-			_, err := (&BuildObject{store: st}).recordDeploymentPREvent(mockRunContext{Context: context.Background()}, "b1", pubsub.PRLifecycleEvent{Event: prEventDeployStarted, MergeSHA: "sha", RolloutState: tc.rollout})
-			require.Equal(t, tc.writeErr != nil, err != nil)
-			require.Equal(t, tc.wantLifecycle, st.lifecycleStatus)
-			if tc.writeErr == nil {
-				require.Equal(t, tc.rollout, st.chunks[0].RolloutState)
+			st := &deadlineLifecycleStore{writeErr: tc.writeErr, checkStatusSpyStore: &checkStatusSpyStore{chunks: []model.VanadisChunk{tc.chunk}}}
+			ev := pubsub.PRLifecycleEvent{Event: prEventDeployStarted, Repo: "owner/repo", PRNumber: 1, MergeSHA: "sha", RolloutState: tc.rollout}
+			_, err := (&BuildObject{store: st}).recordDeploymentPREvent(mockRunContext{Context: context.Background()}, "b1", ev)
+			if tc.wantErr != "" {
+				require.ErrorContains(t, err, tc.wantErr)
 			} else {
-				require.Nil(t, st.chunks[0].RolloutState)
+				require.NoError(t, err)
 			}
+			assert.Equal(t, tc.wantStatus, st.chunks[0].Status)
+			assert.Equal(t, tc.wantBanner, st.chunks[0].Banner)
+			assert.Equal(t, tc.wantRollout, st.chunks[0].RolloutState)
 		})
 	}
 }
 
-func TestDeploymentStartPreservesFailure(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name    string
-		rollout *pubsub.PRRolloutState
-	}{
-		{"duplicate without evidence", nil},
-		{"additional job evidence", &pubsub.PRRolloutState{ExpectedJobs: []string{"web", "worker"}, StartedJobs: []string{"worker"}}},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			st := &deadlineLifecycleStore{checkStatusSpyStore: &checkStatusSpyStore{chunks: []model.VanadisChunk{{ID: "c1", PRNumber: 1, Repo: "owner/repo", MergeSHA: "sha", Status: statusDeployFailed, Banner: "expired"}}}}
-			b := &BuildObject{store: st}
-			_, err := b.recordDeploymentPREvent(mockRunContext{Context: context.Background()}, "b1", pubsub.PRLifecycleEvent{Event: prEventDeployStarted, Repo: "owner/repo", PRNumber: 1, MergeSHA: "sha", RolloutState: tc.rollout})
-			require.NoError(t, err)
-			require.Equal(t, statusDeployFailed, st.chunks[0].Status)
-			require.Equal(t, "expired", st.chunks[0].Banner)
-			require.Equal(t, tc.rollout, st.chunks[0].RolloutState)
-		})
-	}
-}
-
+// TestDeploymentDeadlineRepeatedMerge pins the ordering of a deploy start,
+// a redelivered merge and the deadline expiry through the BuildObject
+// wrappers: the repeated merge must not disarm the deadline.
 func TestDeploymentDeadlineRepeatedMerge(t *testing.T) {
 	t.Parallel()
-	tests := []struct{ name string }{{"start then repeated merge then expiry"}}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-			rt := &deploymentGateFakeRuntime{fakeObjectRuntime: newFakeObjectRuntime("b"), now: now}
-			st := &deadlineLifecycleStore{checkStatusSpyStore: &checkStatusSpyStore{chunks: []model.VanadisChunk{{ID: "c1", PRNumber: 1, Repo: "owner/repo", MergeSHA: "sha", Status: statusMerged}}}}
-			b := &BuildObject{store: st}
-			ev := pubsub.PRLifecycleEvent{Event: prEventDeployStarted, Repo: "owner/repo", PRNumber: 1, MergeSHA: "sha", OccurredAt: now}
-			rc := mockRunContext{Context: context.Background()}
-			_, err := b.recordDeploymentPREvent(rc, "b1", ev)
-			require.NoError(t, err)
-			require.NoError(t, b.armDeploymentStart(rt, "b", ev))
-			require.Equal(t, now.Add(15*time.Minute), rt.attempts["c1"].Deadline)
-			require.NoError(t, b.handlePREventType(rc, "b", "c1", "merged", pubsub.PRLifecycleEvent{MergeSHA: "sha"}))
-			require.Equal(t, statusMerged, st.chunks[0].Status)
-			eri := &mockEriClient{}
-			b.executor = &executor.Executor{EriClient: eri}
-			rt.now = now.Add(15 * time.Minute)
-			require.NoError(t, b.expireDeploymentDeadline(rt, deploygate.DeploymentDeadlineRequest{ChunkID: "c1", Revision: "sha", Generation: 1}))
-			require.Equal(t, statusDeployFailed, st.chunks[0].Status)
-			require.NotNil(t, eri.LastDispatch)
-			require.True(t, rt.attempts["c1"].Delivered)
-		})
-	}
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	rt := &deploymentGateFakeRuntime{fakeObjectRuntime: newFakeObjectRuntime("b"), now: now}
+	st := &deadlineLifecycleStore{checkStatusSpyStore: &checkStatusSpyStore{chunks: []model.VanadisChunk{{ID: "c1", PRNumber: 1, Repo: "owner/repo", MergeSHA: "sha", Status: statusMerged}}}}
+	b := &BuildObject{store: st}
+	ev := pubsub.PRLifecycleEvent{Event: prEventDeployStarted, Repo: "owner/repo", PRNumber: 1, MergeSHA: "sha", OccurredAt: now}
+	rc := mockRunContext{Context: context.Background()}
+	_, err := b.recordDeploymentPREvent(rc, "b1", ev)
+	require.NoError(t, err)
+	require.NoError(t, b.armDeploymentStart(rt, "b", ev))
+	require.Equal(t, now.Add(15*time.Minute), rt.attempts["c1"].Deadline)
+	require.NoError(t, b.handlePREventType(rc, "b", "c1", "merged", pubsub.PRLifecycleEvent{MergeSHA: "sha"}))
+	require.Equal(t, statusMerged, st.chunks[0].Status)
+	eri := &mockEriClient{}
+	b.executor = &executor.Executor{EriClient: eri}
+	rt.now = now.Add(15 * time.Minute)
+	require.NoError(t, b.expireDeploymentDeadline(rt, deploygate.DeploymentDeadlineRequest{ChunkID: "c1", Revision: "sha", Generation: 1}))
+	require.Equal(t, statusDeployFailed, st.chunks[0].Status)
+	require.NotNil(t, eri.LastDispatch)
+	require.True(t, rt.attempts["c1"].Delivered)
 }
 
 func TestBuildObject_PRRecoveryWidget(t *testing.T) {
@@ -747,287 +716,4 @@ func (b *recordingChunkBus) Publish(_ context.Context, subject, _ string, data a
 		b.events = append(b.events, ev)
 	}
 	return nil
-}
-
-func (b *recordingChunkBus) sweptEvent(chunkID string) bool {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	for _, ev := range b.events {
-		if ev.Source != "vanadis_chunk" || ev.EventType != "completed" {
-			continue
-		}
-		if slices.Contains(ev.Targets, chunkID) {
-			return true
-		}
-	}
-	return false
-}
-
-type errPublishBus struct{ recordingChunkBus }
-
-func (*errPublishBus) Publish(context.Context, string, string, any) error {
-	return errors.New("bus unavailable")
-}
-
-type crossBuildSweepSpyStore struct {
-	store.VanadisStore
-
-	ownBuild        *model.VanadisBuild
-	ownChunks       []model.VanadisChunk
-	foreignBuilds   []model.VanadisBuild
-	foreignChunks   []model.VanadisChunk
-	crossSwept      []store.SweptChunk
-	crossErr        bool
-	crossCalled     bool
-	crossRecovered  []store.SweptChunk
-	crossDeployJobs []string
-	ownCompleted    []string
-	ownRepaired     []string
-	statusUpdates   []string
-	foreignReads    []string
-}
-
-func (s *crossBuildSweepSpyStore) GetBuild(_ context.Context, buildID string) (*model.VanadisBuild, []model.VanadisChunk, error) {
-	if buildID == "b1" {
-		return s.ownBuild, s.ownChunks, nil
-	}
-	s.foreignReads = append(s.foreignReads, buildID)
-	for i := range s.foreignBuilds {
-		if s.foreignBuilds[i].ID != buildID {
-			continue
-		}
-		var chunks []model.VanadisChunk
-		for _, c := range s.foreignChunks {
-			if c.BuildID == buildID {
-				chunks = append(chunks, c)
-			}
-		}
-		b := s.foreignBuilds[i]
-		return &b, chunks, nil
-	}
-	return nil, nil, store.ErrBuildNotFound
-}
-
-func (s *crossBuildSweepSpyStore) CompletePRDeployment(_ context.Context, chunkID string, _ *pubsub.PRRolloutState) error {
-	for i := range s.ownChunks {
-		if s.ownChunks[i].ID != chunkID {
-			continue
-		}
-		if (s.ownChunks[i].Status == statusFailed && (s.ownChunks[i].Mode != "pr" || s.ownChunks[i].PRNumber <= 0)) || s.ownChunks[i].Status == statusCancelled || s.ownBuild.Status == statusCancelled {
-			return store.ErrPRTransitionSkipped
-		}
-		s.ownChunks[i].Status = statusCompleted
-		s.ownCompleted = append(s.ownCompleted, chunkID)
-		return nil
-	}
-	return store.ErrPRTransitionSkipped
-}
-
-func (s *crossBuildSweepSpyStore) MarkActionRepairDeployed(_ context.Context, chunkID string, _ *pubsub.PRRolloutState) error {
-	for i := range s.ownChunks {
-		if s.ownChunks[i].ID == chunkID && s.ownChunks[i].Mode == "action" {
-			s.ownChunks[i].Status = statusRunning
-			s.ownRepaired = append(s.ownRepaired, chunkID)
-			return nil
-		}
-	}
-	return store.ErrPRTransitionSkipped
-}
-
-func (s *crossBuildSweepSpyStore) SweepEarlierDeploymentsAcrossBuilds(_ context.Context, deploying model.VanadisChunk) ([]store.SweptChunk, []store.SweptChunk, error) {
-	s.crossCalled = true
-	if deploying.RolloutState != nil {
-		s.crossDeployJobs = append([]string(nil), deploying.RolloutState.ExpectedJobs...)
-	}
-	for _, sw := range s.crossSwept {
-		for i := range s.foreignChunks {
-			if s.foreignChunks[i].ID == sw.ChunkID {
-				s.foreignChunks[i].Status = statusCompleted
-			}
-		}
-	}
-	for _, sw := range s.crossRecovered {
-		for i := range s.foreignChunks {
-			if s.foreignChunks[i].ID == sw.ChunkID {
-				s.foreignChunks[i].Status = statusCompleted
-			}
-		}
-	}
-	if s.crossErr {
-		return s.crossSwept, nil, errors.New("cross build sweep unavailable")
-	}
-	return s.crossSwept, s.crossRecovered, nil
-}
-
-func (*crossBuildSweepSpyStore) CompareAndSwapBuildStatusMessageID(context.Context, string, string, string) (bool, error) {
-	return true, nil
-}
-
-func (s *crossBuildSweepSpyStore) UpdateBuildStatus(_ context.Context, buildID, status string) error {
-	s.statusUpdates = append(s.statusUpdates, buildID+"="+status)
-	for i := range s.foreignBuilds {
-		if s.foreignBuilds[i].ID == buildID {
-			s.foreignBuilds[i].Status = status
-		}
-	}
-	return nil
-}
-
-type crossBuildSweepTestCase struct {
-	name                                                         string
-	deployingMode                                                string
-	deployingStatus                                              string
-	deployingPR                                                  int
-	buildStatus                                                  string
-	foreignChunks                                                []model.VanadisChunk
-	crossSwept                                                   []store.SweptChunk
-	crossErr, publishErr, withExecutor, wantErr, wantCrossCalled bool
-	wantOwnCompleted                                             []string
-	wantOwnRepaired                                              []string
-	wantReconciles                                               []store.BuildRoute
-	wantEvents                                                   []string
-	wantNoEvent                                                  string
-}
-
-func runCrossBuildSweepTest(t *testing.T, tc crossBuildSweepTestCase) {
-	t.Helper()
-	t.Parallel()
-	mergeLater := time.Date(2026, 5, 1, 14, 0, 0, 0, time.UTC)
-	ownChunks := []model.VanadisChunk{{ID: "deploying", BuildID: "b1", ChunkIndex: 1, Mode: "pr", Repo: "aerial", Status: statusDeploying, PRNumber: 7, CompletedAt: mergeLater, RolloutState: &pubsub.PRRolloutState{ExpectedJobs: []string{"eri"}}}}
-	if tc.deployingMode != "" {
-		ownChunks[0].Mode = tc.deployingMode
-	}
-	if tc.deployingStatus != "" {
-		ownChunks[0].Status = tc.deployingStatus
-	}
-	if tc.deployingPR > 0 {
-		ownChunks[0].PRNumber = tc.deployingPR
-	} else if tc.deployingPR == -1 {
-		ownChunks[0].PRNumber = 0
-	}
-	spy := &crossBuildSweepSpyStore{ownBuild: &model.VanadisBuild{ID: "b1", Status: tc.buildStatus}, ownChunks: ownChunks, foreignBuilds: []model.VanadisBuild{{ID: "b2", Status: statusRunning}}, foreignChunks: tc.foreignChunks, crossSwept: tc.crossSwept, crossErr: tc.crossErr}
-	bus := &recordingChunkBus{}
-	var busPub pubsub.Bus = bus
-	if tc.publishErr {
-		busPub = &errPublishBus{}
-	}
-	var exec *executor.Executor
-	if tc.withExecutor {
-		exec = executor.NewExecutor("", &mockEriClient{}, busPub, "token", "example-owner", nil)
-	}
-	bo := NewBuildObject("", nil).WithAuthority(spy, exec)
-	ctx, crossBuild := withCrossBuildReconciles(context.Background())
-	err := bo.completePRDeploymentMutation(ctx, "b1", &BuildMutationRequest{Action: mutationChunkDeploySuccess, ChunkID: "deploying"})
-	if tc.wantErr {
-		assert.Error(t, err)
-	} else {
-		assert.NoError(t, err)
-	}
-	assert.Equal(t, tc.wantCrossCalled, spy.crossCalled)
-	assert.Equal(t, tc.wantOwnCompleted, spy.ownCompleted)
-	assert.Equal(t, tc.wantOwnRepaired, spy.ownRepaired)
-	if tc.wantNoEvent != "" {
-		assert.False(t, bus.sweptEvent(tc.wantNoEvent), "action chunk %q must never publish completed on deploy, got %+v", tc.wantNoEvent, bus.events)
-	}
-	assert.Equal(t, tc.wantReconciles, crossBuild.list())
-	assert.Empty(t, spy.statusUpdates, "other builds must never be evaluated by this runner")
-	assert.Empty(t, spy.foreignReads, "other builds must never be read for local evaluation")
-	for _, id := range tc.wantEvents {
-		assert.True(t, bus.sweptEvent(id), "expected vanadis_chunk completed event for %q, got %+v", id, bus.events)
-	}
-}
-
-func TestCompletePRDeploymentMutation_SweepsAcrossBuilds(t *testing.T) {
-	t.Parallel()
-	tests := []crossBuildSweepTestCase{
-		{
-			name: "failed pr chunk with pr_number in running build completes", deployingStatus: statusFailed, deployingPR: 7, buildStatus: statusRunning,
-			foreignChunks: crossBuildForeignChunks(),
-			crossSwept:    []store.SweptChunk{{ChunkID: "f1", BuildID: "b2"}}, withExecutor: true,
-			wantCrossCalled: true, wantOwnCompleted: []string{"deploying"},
-			wantReconciles: []store.BuildRoute{{BuildID: "b2"}}, wantEvents: []string{"deploying", "f1"},
-		},
-		{
-			name: "failed pr chunk with pr_number in failed build completes", deployingStatus: statusFailed, deployingPR: 7, buildStatus: statusFailed,
-			foreignChunks: crossBuildForeignChunks(),
-			crossSwept:    []store.SweptChunk{{ChunkID: "f1", BuildID: "b2"}}, withExecutor: true,
-			wantCrossCalled: true, wantOwnCompleted: []string{"deploying"},
-			wantReconciles: []store.BuildRoute{{BuildID: "b2"}}, wantEvents: []string{"deploying", "f1"},
-		},
-		{
-			name: "failed pr chunk without pr_number returns early", deployingStatus: statusFailed, deployingPR: -1, buildStatus: statusRunning,
-			foreignChunks: crossBuildForeignChunks(),
-		},
-		{
-			name: "failed action chunk with pr returns early", deployingMode: "action", deployingStatus: statusFailed, deployingPR: 7, buildStatus: statusRunning,
-			foreignChunks: crossBuildForeignChunks(),
-		},
-		{
-			name: "deployed action repair stays running and still sweeps other builds", deployingMode: "action", buildStatus: statusRunning,
-			foreignChunks: crossBuildForeignChunks(),
-			crossSwept:    []store.SweptChunk{{ChunkID: "f1", BuildID: "b2"}}, withExecutor: true,
-			wantCrossCalled: true, wantOwnRepaired: []string{"deploying"},
-			wantReconciles: []store.BuildRoute{{BuildID: "b2"}}, wantEvents: []string{"f1"}, wantNoEvent: "deploying",
-		},
-		{
-			name: "action repair cross sweep error aborts", deployingMode: "action", buildStatus: statusRunning,
-			foreignChunks: crossBuildForeignChunks(),
-			crossErr:      true, wantErr: true, wantCrossCalled: true, wantOwnRepaired: []string{"deploying"},
-		},
-		{
-			name: "foreign earlier merged completes and its runner reconciles the build", buildStatus: statusRunning,
-			foreignChunks:   crossBuildForeignChunks(),
-			crossSwept:      []store.SweptChunk{{ChunkID: "f1", BuildID: "b2"}},
-			wantCrossCalled: true, wantOwnCompleted: []string{"deploying"},
-			wantReconciles: []store.BuildRoute{{BuildID: "b2"}},
-		},
-		{
-			name: "foreign build on sibling runner is reconciled by that runner", buildStatus: statusRunning,
-			foreignChunks:   crossBuildForeignChunks(),
-			crossSwept:      []store.SweptChunk{{ChunkID: "f1", BuildID: "b2"}},
-			wantCrossCalled: true, wantOwnCompleted: []string{"deploying"},
-			wantReconciles: []store.BuildRoute{{BuildID: "b2"}},
-		},
-		{
-			name: "foreign deploying and synced complete with one reconcile", buildStatus: statusRunning,
-			foreignChunks:   crossBuildRunningChunks(),
-			crossSwept:      []store.SweptChunk{{ChunkID: "f1", BuildID: "b2"}, {ChunkID: "f2", BuildID: "b2"}},
-			wantCrossCalled: true, wantOwnCompleted: []string{"deploying"},
-			wantReconciles: []store.BuildRoute{{BuildID: "b2"}},
-		},
-		{
-			name: "no foreign sweep touches nothing", buildStatus: statusRunning,
-			foreignChunks:   crossBuildForeignChunks(),
-			wantCrossCalled: true, wantOwnCompleted: []string{"deploying"},
-		},
-		{
-			name: "cross sweep error aborts", buildStatus: statusRunning,
-			foreignChunks: crossBuildForeignChunks(),
-			crossErr:      true, wantErr: true, wantCrossCalled: true, wantOwnCompleted: []string{"deploying"},
-		},
-		{
-			name: "cancelled own build skips cross sweep", buildStatus: statusCancelled,
-			foreignChunks: crossBuildForeignChunks(),
-			crossSwept:    []store.SweptChunk{{ChunkID: "f1", BuildID: "b2"}},
-		},
-		{
-			name: "swept foreign chunks publish completed events", buildStatus: statusRunning,
-			foreignChunks: crossBuildForeignChunks(),
-			crossSwept:    []store.SweptChunk{{ChunkID: "f1", BuildID: "b2"}}, withExecutor: true,
-			wantCrossCalled: true, wantOwnCompleted: []string{"deploying"},
-			wantReconciles: []store.BuildRoute{{BuildID: "b2"}}, wantEvents: []string{"deploying", "f1"},
-		},
-		{
-			name: "publish error warns without aborting", buildStatus: statusRunning,
-			foreignChunks: crossBuildForeignChunks(),
-			crossSwept:    []store.SweptChunk{{ChunkID: "f1", BuildID: "b2"}}, publishErr: true, withExecutor: true,
-			wantCrossCalled: true, wantOwnCompleted: []string{"deploying"},
-			wantReconciles: []store.BuildRoute{{BuildID: "b2"}},
-		},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			runCrossBuildSweepTest(t, tc)
-		})
-	}
 }
