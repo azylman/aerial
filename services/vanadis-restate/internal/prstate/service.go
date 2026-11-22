@@ -6,7 +6,8 @@ package prstate
 // state; RepoObject (key repo) holds only repo-level state: the bounded
 // main-push index, dispatched-SHA tombstones, the SHA->PR routing index with
 // open and deploying sets, and SHA-only events held until indexed. Postgres
-// pr_registry stays a read-only projection synced by a journaled send after
+// pr_registry (row, metadata, typed columns and child tables) stays a
+// read-only projection synced by one journaled transactional send after
 // the state commit and is never consulted to decide a transition.
 //
 // The services bind beside BuildRouter so the Restate deployment discovers
