@@ -187,11 +187,26 @@ type DeployFailureDeadlineRequest struct {
 	Seq uint64 `json:"seq"`
 }
 
+// isRateLimitDeployFailure reports whether the event's banner or carried facts
+// indicate a GitHub API rate limit error.
+func isRateLimitDeployFailure(ev PREvent) bool {
+	if strings.Contains(strings.ToLower(ev.Banner), "rate limit") {
+		return true
+	}
+	for _, f := range ev.Facts {
+		if strings.Contains(strings.ToLower(f.Details), "rate limit") {
+			return true
+		}
+	}
+	return false
+}
+
 // ArmDeployFailure arms a deploy-failure deadline for ev and returns its
 // sequence number. An already-armed deadline keeps its timer and only
 // refreshes the banner and facts to the newest failure (armed false).
+// If ev indicates a GitHub API rate limit, it returns 0, false without arming.
 func (s *PRState) ArmDeployFailure(ev PREvent) (uint64, bool) {
-	if s == nil {
+	if s == nil || isRateLimitDeployFailure(ev) {
 		return 0, false
 	}
 	if p := s.PendingDeployFailure; p != nil {
@@ -240,7 +255,7 @@ func (s *PRState) TakeDeployFailure(seq uint64) (*PendingDeployFailure, bool) {
 // deploy-failure deadline as a delayed self-send; the deadline, not a
 // delivery count, decides deploy_failed.
 func (s *PRObjectService) HandleDeployAttemptFailed(ctx restate.ObjectContext, ev PREvent) error {
-	if strings.TrimSpace(ev.Repo) == "" || ev.PRNumber <= 0 {
+	if strings.TrimSpace(ev.Repo) == "" || ev.PRNumber <= 0 || isRateLimitDeployFailure(ev) {
 		return nil
 	}
 	st, stored, err := s.loadPRState(ctx, ev)

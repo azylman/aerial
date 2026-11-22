@@ -232,7 +232,11 @@ func (s *RepoObjectService) scheduleRepoEffectRetry(ctx restate.ObjectContext, h
 	}, restate.WithName("retry-"+kind))
 	next := ev
 	next.Attempt++
-	restate.ObjectSend(ctx, prwire.RepoObjectServiceName, prwire.RepoObjectKey(ev.Repo), handler).Send(next, restate.WithDelay(s.retryDelay))
+	delay := s.retryDelay
+	if out.Err != nil && out.Err.RateLimited && out.Err.RetryAfter > delay {
+		delay = out.Err.RetryAfter
+	}
+	restate.ObjectSend(ctx, prwire.RepoObjectServiceName, prwire.RepoObjectKey(ev.Repo), handler).Send(next, restate.WithDelay(delay))
 }
 
 // WithGitHub injects the GitHub boundary and returns s. Without it
