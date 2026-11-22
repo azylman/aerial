@@ -186,6 +186,22 @@ func TestConfigSampleRatio(t *testing.T) {
 	}
 }
 
+// setupEnvKeys are the OTEL variables the SDK reads; TestSetup blanks them so the ambient env cannot change a row.
+var setupEnvKeys = []string{
+	"OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "OTEL_EXPORTER_OTLP_PROTOCOL",
+	"OTEL_EXPORTER_OTLP_TRACES_PROTOCOL", "OTEL_EXPORTER_OTLP_HEADERS", "OTEL_EXPORTER_OTLP_TRACES_HEADERS",
+	"OTEL_EXPORTER_OTLP_TIMEOUT", "OTEL_EXPORTER_OTLP_TRACES_TIMEOUT", "OTEL_EXPORTER_OTLP_COMPRESSION",
+	"OTEL_EXPORTER_OTLP_TRACES_COMPRESSION", "OTEL_EXPORTER_OTLP_CERTIFICATE", "OTEL_EXPORTER_OTLP_TRACES_CERTIFICATE",
+	"OTEL_TRACES_SAMPLER", "OTEL_TRACES_SAMPLER_ARG", "OTEL_SERVICE_NAME",
+}
+
+func blankSetupEnv(t *testing.T) {
+	t.Helper()
+	for _, k := range setupEnvKeys {
+		t.Setenv(k, "")
+	}
+}
+
 // TestSetup mutates the global provider, propagator and environment, so it is not parallel.
 func TestSetup(t *testing.T) {
 	tests := []struct {
@@ -220,6 +236,7 @@ func TestSetup(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			blankSetupEnv(t)
 			for k, v := range tc.env {
 				t.Setenv(k, v)
 			}
