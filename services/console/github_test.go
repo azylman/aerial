@@ -448,59 +448,51 @@ func runGitHubPollAndDecodeCase(t *testing.T, tc githubPollTestCase) {
 }
 
 func TestGitHubPoller_StartStopTickerLoop(t *testing.T) {
-	ctx := t.Context()
-
-	var pollCount atomic.Int32
-	secondPollCh := make(chan struct{}, 4)
-
-	ghMock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		count := pollCount.Add(1)
-		if count >= 2 {
-			select {
-			case secondPollCh <- struct{}{}:
-			default:
-			}
-		}
-
-		resp := GitHubRunsResponse{
-			WorkflowRuns: []GitHubRun{
-				{
-					ID:        100,
-					Status:    "in_progress",
-					UpdatedAt: time.Now().UTC(),
-					HeadCommit: &struct {
-						Message   string    `json:"message"`
-						Timestamp time.Time `json:"timestamp"`
-					}{
-						Message: "feat: adaptive timing test",
-					},
-				},
-			},
-		}
-		_ = json.NewEncoder(w).Encode(resp)
-	}))
-	defer ghMock.Close()
-
-	p := NewMultiGitHubPoller([]string{"azylman/aerial"}, "token")
-	p.apiBaseURL = ghMock.URL
-	p.pollInterval = time.Millisecond
-
-	// Start background loop
-	p.Start(ctx)
-
-	// Wait deterministically for the second poll request via buffered channel without arbitrary sleep
-	select {
-	case <-secondPollCh:
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for second poll tick in Start(ctx)")
+	tests := []struct {
+		name         string
+		repos        []string
+		pollInterval time.Duration
+		wantPolls    int32
+	}{
+		{name: "ticker repolls until stopped", repos: []string{"example/repo"}, pollInterval: time.Millisecond, wantPolls: 2},
+		{name: "stop with idle ticker returns via stopCh", repos: []string{"example/repo"}, pollInterval: time.Hour, wantPolls: 1},
+		{name: "no repos returns without polling", repos: []string{}, pollInterval: time.Millisecond, wantPolls: 0},
 	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var pollCount atomic.Int32
+			polled := make(chan struct{}, 1)
+			ghMock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				if pollCount.Add(1) >= tc.wantPolls {
+					select {
+					case polled <- struct{}{}:
+					default:
+					}
+				}
+				_, _ = w.Write([]byte(`{"workflow_runs":[{"id":100,"status":"in_progress"}]}`))
+			}))
+			defer ghMock.Close()
 
-	close(p.stopCh)
+			p := NewMultiGitHubPoller(tc.repos, "token")
+			p.apiBaseURL = ghMock.URL
+			p.pollInterval = tc.pollInterval
 
-	// Empty repo poller Start returns early
-	emptyPoller := NewMultiGitHubPoller([]string{}, "")
-	emptyPoller.Start(ctx)
+			// The context is never canceled, so once stopCh closes it is the loop's only exit.
+			p.Start(context.WithoutCancel(t.Context()))
+			if tc.wantPolls > 0 {
+				select {
+				case <-polled:
+				case <-time.After(2 * time.Second):
+					t.Fatalf("timed out waiting for %d polls, got %d", tc.wantPolls, pollCount.Load())
+				}
+			}
+			close(p.stopCh)
+			if tc.wantPolls == 0 && pollCount.Load() != 0 {
+				t.Errorf("polls = %d, want 0", pollCount.Load())
+			}
+		})
+	}
 }
 
 func TestGitHubPoller_MultiRepoAndDiscovery_TableDriven(t *testing.T) {

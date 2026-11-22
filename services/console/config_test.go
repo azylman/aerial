@@ -41,7 +41,7 @@ invalid: [yaml: broken
 console:
   quick_launch_links:
     - name: "HOME"
-      url: "https://home.zylman.com"
+      url: "https://home.example.com"
       icon: "🏠"
       description: "Home Infrastructure Hub"
     - name: ""
@@ -52,7 +52,7 @@ console:
 			wantLinks: []QuickLaunchLink{
 				{
 					Name:        "HOME",
-					URL:         "https://home.zylman.com",
+					URL:         "https://home.example.com",
 					Icon:        "🏠",
 					Description: "Home Infrastructure Hub",
 					Target:      "_blank",
@@ -65,13 +65,13 @@ console:
 			yamlData: `
 quick_links:
   - name: "HOME_ROOT"
-    url: "https://home.root.zylman.com"
+    url: "https://home.root.example.com"
     target: "_self"
 `,
 			wantLinks: []QuickLaunchLink{
 				{
 					Name:     "HOME_ROOT",
-					URL:      "https://home.root.zylman.com",
+					URL:      "https://home.root.example.com",
 					Target:   "_self",
 					IsCustom: true,
 				},
@@ -82,14 +82,14 @@ quick_links:
 			yamlData: `
 quick_launch_links:
   - name: "GRAFANA"
-    url: "https://grafana.zylman.com"
+    url: "https://grafana.example.com"
     icon: "📊"
     description: "Grafana Telemetry"
 `,
 			wantLinks: []QuickLaunchLink{
 				{
 					Name:        "GRAFANA",
-					URL:         "https://grafana.zylman.com",
+					URL:         "https://grafana.example.com",
 					Icon:        "📊",
 					Description: "Grafana Telemetry",
 					Target:      "_blank",
@@ -515,8 +515,15 @@ type loadConfigFileTestCase struct {
 	wantConfigPath    string
 }
 
+// loadConfigEnvKeys are the env vars LoadConfig and a nil-lookup LoadConfigFile read from the
+// process env; every row pins them so the pod's own values never leak into a result.
+var loadConfigEnvKeys = []string{"ERI_URL", "GITHUB_PAT", "KUBE_API_SERVER", "KUBERNETES_SERVICE_HOST", "KUBERNETES_SERVICE_PORT"}
+
 func runLoadConfigFileCase(t *testing.T, tc loadConfigFileTestCase) {
 	t.Helper()
+	for _, k := range loadConfigEnvKeys {
+		t.Setenv(k, "")
+	}
 	if tc.callLoadConfig {
 		for k, v := range tc.env {
 			t.Setenv(k, v)
