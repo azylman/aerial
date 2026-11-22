@@ -18,24 +18,11 @@ import (
 type sharedAssetsCase struct {
 	name              string
 	fallbackCopy      bool
-	linkAssetFail     bool
 	existingSymlink   bool
 	existingDirFiles  bool
 	destinationExists bool
 	existingPlainFile bool
 	emptyDataDir      bool
-}
-
-func runSharedAssetsLinkFail(t *testing.T, p *Provisioner, tmpHome string) {
-	t.Helper()
-	srcFile := writeTestFile(t, filepath.Join(tmpHome, "src.txt"), "src-data")
-	dstDir := filepath.Join(tmpHome, "dst_dir")
-	writeTestFile(t, filepath.Join(dstDir, "c"), "c")
-	p.linkOrCopyAsset(srcFile, dstDir)
-
-	symlinkRuntimeAsset = func(oldname, newname string) error { return errors.New("symlink fail") }
-	writeTestFile(t, filepath.Join(tmpHome, "file_blocker"), "f")
-	p.linkOrCopyAsset(srcFile, filepath.Join(tmpHome, "file_blocker", "target.txt"))
 }
 
 func assertIsolatedEphemeralStorage(t *testing.T, p *Provisioner, tmpData string) {
@@ -85,11 +72,6 @@ func runProvisionRuntimeSharedAssetsCase(t *testing.T, tc sharedAssetsCase) {
 	runtimeHome := filepath.Join(t.TempDir(), "runtime")
 	runtimeGemini := filepath.Join(runtimeHome, ".gemini")
 
-	if tc.linkAssetFail {
-		runSharedAssetsLinkFail(t, p, tmpHome)
-		return
-	}
-
 	if tc.destinationExists && !tc.emptyDataDir {
 		writeTestFile(t, filepath.Join(tmpData, "brain", "migrated_turn.jsonl"), "canon copy")
 	}
@@ -138,7 +120,6 @@ func TestProvisionRuntimeSharedAssetsAndStorage(t *testing.T) {
 	tests := []sharedAssetsCase{
 		{name: "standard symlinks and shared storage"},
 		{name: "fallback copy when symlink fails", fallbackCopy: true},
-		{name: "linkOrCopyAsset destination remove and write failures", linkAssetFail: true},
 		{name: "migrate existing directory contents to canonical storage", existingDirFiles: true},
 		{name: "migrate skips file when destination already exists", existingDirFiles: true, destinationExists: true},
 		{name: "replace outdated symlinks and regular files", existingSymlink: true, existingPlainFile: true},
@@ -152,102 +133,143 @@ func TestProvisionRuntimeSharedAssetsAndStorage(t *testing.T) {
 	}
 }
 
-type mcpProvisioningCase struct {
-	name               string
-	target             RuleTarget
-	withPAT            bool
-	withFileConf       bool
-	withCustomSrv      bool
-	withRawNonObj      bool
-	withRawInvalidJSON bool
-	withEphemeralSrv   bool
-	withMCPCfgStr      bool
-	withHeaderSrv      bool
-	strRaw             bool
-	blockDir           bool
-	syncFail           bool
-	syncRuntimeFail    bool
-	wantScheduler      bool
-	wantDiscord        bool
-	wantGitHub         bool
-	wantURL            map[string]string
-	wantHeaders        map[string]map[string]any
-}
-
-func testEnsureTargetMcpConfigEdgeCases(t *testing.T, p *Provisioner, tmpHome string) {
-	t.Helper()
-	var pNil *Provisioner
-	if err := pNil.EnsureTargetMcpConfig(tmpHome, json.RawMessage(`{}`)); err != nil {
-		t.Errorf("expected nil on nil receiver")
+func TestLinkOrCopyAsset(t *testing.T) {
+	tests := []struct {
+		name       string
+		files      map[string]string // written under the temp root; src is always src.txt
+		dst        string
+		symlinkErr error
+	}{
+		{name: "non-empty destination dir defeats remove, link and copy", files: map[string]string{"dst_dir/c": "c"}, dst: "dst_dir"},
+		{
+			name:       "symlink failure falls back to copy that fails under a file blocker",
+			files:      map[string]string{"file_blocker": "f"},
+			dst:        "file_blocker/target.txt",
+			symlinkErr: errors.New("symlink fail"),
+		},
 	}
-	if err := p.EnsureTargetMcpConfig("", json.RawMessage(`{}`)); err != nil {
-		t.Errorf("expected nil on empty target dir")
-	}
-	if err := p.EnsureTargetMcpConfig(tmpHome, json.RawMessage(``)); err != nil {
-		t.Errorf("expected nil on empty rawConfig")
-	}
-	if err := p.EnsureTargetMcpConfig(tmpHome, json.RawMessage(`""`)); err != nil {
-		t.Errorf("expected nil on empty quote rawConfig")
-	}
-
-	strJSON := json.RawMessage(`"{\"mcpServers\":{\"str_srv\":{}}}"`)
-	if err := p.EnsureTargetMcpConfig(tmpHome, strJSON); err != nil {
-		t.Fatalf("EnsureTargetMcpConfig failed on json string: %v", err)
-	}
-}
-
-func buildTestMCPConfig(tc mcpProvisioningCase) *config.Config {
-	return newTestConfig(func(c *config.ConfigData) {
-		if !tc.withRawInvalidJSON {
-			c.McpServers.Common = map[string]json.RawMessage{
-				"scheduler": json.RawMessage(`{"serverUrl":"http://haro.aerial/mcp"}`),
-				"memory":    json.RawMessage(`{"serverUrl":"http://coven.aerial/mcp"}`),
-				"github":    json.RawMessage(`{"serverUrl":"http://github-mcp:4003/mcp"}`),
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			origSymlink := symlinkRuntimeAsset
+			t.Cleanup(func() { symlinkRuntimeAsset = origSymlink })
+			if tc.symlinkErr != nil {
+				symlinkRuntimeAsset = func(string, string) error { return tc.symlinkErr }
 			}
-			c.McpServers.Discord = map[string]json.RawMessage{
-				"discord": json.RawMessage(`{"serverUrl":"http://discord-mcp:4001/mcp"}`),
-				"vanadis": json.RawMessage(`{"serverUrl":"http://vanadis.aerial/mcp"}`),
+			tmpHome := t.TempDir()
+			src := writeTestFile(t, filepath.Join(tmpHome, "src.txt"), "src-data")
+			for rel, content := range tc.files {
+				writeTestFile(t, filepath.Join(tmpHome, rel), content)
+			}
+			dst := filepath.Join(tmpHome, tc.dst)
+			newDisabledProvisioner(t, tmpHome, "").linkOrCopyAsset(src, dst)
+			if fi, err := os.Lstat(dst); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+				t.Errorf("linkOrCopyAsset() linked %s despite the blocked destination", dst)
+			}
+		})
+	}
+}
+
+type mcpProvisioningCase struct {
+	name          string
+	target        RuleTarget
+	nilCfg        bool
+	withPAT       bool
+	noDefaults    bool                   // drop the default common and discord servers
+	servers       config.TargetMcpConfig // merged over the defaults
+	mcpConfig     string                 // cfg.Current().MCPConfig fallback string
+	fileConf      string                 // dataDir/mcp.config.json contents
+	blocker       string                 // file written at this home- or data-relative path
+	wantSyncErr   bool
+	wantScheduler bool
+	wantDiscord   bool
+	wantGitHub    bool
+	wantPresent   []string
+	wantEmpty     bool
+	wantURL       map[string]string
+	wantHeaders   map[string]map[string]any
+}
+
+// mcpRaw builds a server map from name, raw-JSON pairs.
+func mcpRaw(kv ...string) map[string]json.RawMessage {
+	m := make(map[string]json.RawMessage, len(kv)/2)
+	for i := 0; i+1 < len(kv); i += 2 {
+		m[kv[i]] = json.RawMessage(kv[i+1])
+	}
+	return m
+}
+
+func newMCPTestConfig(withPAT, noDefaults bool, mcpConfig string, extra config.TargetMcpConfig) *config.Config {
+	return newTestConfig(func(c *config.ConfigData) {
+		if !noDefaults {
+			c.McpServers.Common = mcpRaw("scheduler", `{"serverUrl":"http://haro.aerial/mcp"}`, "memory", `{"serverUrl":"http://coven.aerial/mcp"}`,
+				"github", `{"serverUrl":"http://github-mcp:4003/mcp"}`)
+			c.McpServers.Discord = mcpRaw("discord", `{"serverUrl":"http://discord-mcp:4001/mcp"}`, "vanadis", `{"serverUrl":"http://vanadis.aerial/mcp"}`)
+		}
+		for _, sec := range []struct {
+			dst *map[string]json.RawMessage
+			src map[string]json.RawMessage
+		}{
+			{&c.McpServers.Common, extra.Common},
+			{&c.McpServers.Discord, extra.Discord},
+			{&c.McpServers.Voice, extra.Voice},
+			{&c.McpServers.Ephemeral, extra.Ephemeral},
+		} {
+			for k, v := range sec.src {
+				if *sec.dst == nil {
+					*sec.dst = make(map[string]json.RawMessage)
+				}
+				(*sec.dst)[k] = v
 			}
 		}
-		if tc.withPAT {
+		if withPAT {
 			c.GitHubPAT = "ghp_" + "12345678901234567890"
 		}
-		if tc.withCustomSrv {
-			if c.McpServers.Common == nil {
-				c.McpServers.Common = make(map[string]json.RawMessage)
-			}
-			c.McpServers.Common["custom_common"] = json.RawMessage(`{"serverUrl":"http://common:8080"}`)
-			c.McpServers.Voice = map[string]json.RawMessage{
-				"custom_voice": json.RawMessage(`{"serverUrl":"http://voice:8080"}`),
-			}
-			c.McpServers.Ephemeral = map[string]json.RawMessage{
-				"custom_eph": json.RawMessage(`{"serverUrl":"http://eph:8080"}`),
-			}
-		}
-		if tc.withEphemeralSrv {
-			c.McpServers.Ephemeral = map[string]json.RawMessage{
-				"custom_eph": json.RawMessage(`{"serverUrl":"http://eph:8080"}`),
-			}
-		}
-		if tc.withRawNonObj {
-			if c.McpServers.Discord == nil {
-				c.McpServers.Discord = make(map[string]json.RawMessage)
-			}
-			c.McpServers.Discord["raw_srv"] = json.RawMessage(`"string_only_value"`)
-		}
-		if tc.withRawInvalidJSON {
-			if c.McpServers.Discord == nil {
-				c.McpServers.Discord = make(map[string]json.RawMessage)
-			}
-			c.McpServers.Discord["invalid_srv"] = json.RawMessage(`{not-valid-json`)
-		}
-		if tc.withHeaderSrv {
-			c.McpServers.Common["ubereats"] = json.RawMessage(`{"serverUrl":"https://mcp.example.com/mcp?key=abc","headers":{"Authorization":"Bearer tok-123","X-Tenant":"home"}}`)
-		}
-		if tc.withMCPCfgStr {
-			c.MCPConfig = `{"mcpServers":{"fallback_srv":{"serverUrl":"http://fallback:80"}}}`
-		}
+		c.MCPConfig = mcpConfig
 	})
+}
+
+func TestEnsureTargetMcpConfig(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		nilProv     bool
+		emptyDir    bool
+		raw         string
+		wantWritten string // substring of config/mcp_config.json; "" = no file written
+	}{
+		{name: "nil receiver is a no-op", nilProv: true, raw: `{}`},
+		{name: "empty target dir is a no-op", emptyDir: true, raw: `{}`},
+		{name: "empty raw config is a no-op", raw: ``},
+		{name: "empty quoted raw config is a no-op", raw: `""`},
+		{name: "json string payload is unwrapped and written", raw: `"{\"mcpServers\":{\"str_srv\":{}}}"`, wantWritten: `"str_srv"`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			tmpHome := t.TempDir()
+			var p *Provisioner
+			if !tc.nilProv {
+				p = newDisabledProvisioner(t, tmpHome, t.TempDir())
+			}
+			targetDir := tmpHome
+			if tc.emptyDir {
+				targetDir = ""
+			}
+			if err := p.EnsureTargetMcpConfig(targetDir, json.RawMessage(tc.raw)); err != nil {
+				t.Fatalf("EnsureTargetMcpConfig() error = %v", err)
+			}
+			data, err := os.ReadFile(filepath.Join(tmpHome, "config", "mcp_config.json"))
+			if tc.wantWritten == "" {
+				if !os.IsNotExist(err) {
+					t.Errorf("expected no mcp_config.json, got %q, err=%v", string(data), err)
+				}
+				return
+			}
+			if !strings.Contains(string(data), tc.wantWritten) {
+				t.Errorf("mcp_config.json = %q, %v; want substring %s", string(data), err, tc.wantWritten)
+			}
+		})
+	}
 }
 
 func assertTargetStandardServers(t *testing.T, tc mcpProvisioningCase, servers map[string]any) {
@@ -294,22 +316,13 @@ func assertTargetCustomServers(t *testing.T, tc mcpProvisioningCase, servers map
 		}
 		assertMCPHeaders(t, name, srv, tc.wantHeaders[name])
 	}
-	if tc.withFileConf && servers["custom_override"] == nil {
-		t.Errorf("expected custom_override from file-based config")
-	}
-	if tc.withEphemeralSrv && servers["custom_eph"] == nil {
-		t.Errorf("expected custom_eph server for ephemeral target")
-	}
-	if tc.withRawInvalidJSON && len(servers) != 0 {
-		t.Errorf("expected empty servers when marshal fails on invalid raw JSON, got %v", servers)
-	}
-	if tc.withCustomSrv {
-		if servers["custom_common"] == nil || servers["custom_voice"] == nil {
-			t.Errorf("expected custom servers from McpServers struct: %+v", servers)
+	for _, name := range tc.wantPresent {
+		if servers[name] == nil {
+			t.Errorf("expected server %q in %s config: %+v", name, tc.target, servers)
 		}
 	}
-	if tc.withMCPCfgStr && servers["fallback_srv"] == nil {
-		t.Errorf("expected fallback_srv from MCPConfig string")
+	if tc.wantEmpty && len(servers) != 0 {
+		t.Errorf("expected empty servers when marshal fails on invalid raw JSON, got %v", servers)
 	}
 }
 
@@ -357,28 +370,23 @@ func runMCPProvisioningCase(t *testing.T, tc mcpProvisioningCase) {
 	tmpData := t.TempDir()
 	p := newDisabledProvisioner(t, tmpHome, tmpData)
 
-	cfg := buildTestMCPConfig(tc)
-
-	if tc.withFileConf {
-		writeTestFile(t, filepath.Join(tmpData, "mcp.config.json"), `{"mcpServers":{"custom_override":{"serverUrl":"http://override:80"}}}`)
+	var cfg *config.Config
+	if !tc.nilCfg {
+		cfg = newMCPTestConfig(tc.withPAT, tc.noDefaults, tc.mcpConfig, tc.servers)
 	}
-	if tc.syncFail {
-		writeTestFile(t, filepath.Join(tmpHome, ".gemini", "config"), "blocker")
+	if tc.fileConf != "" {
+		writeTestFile(t, filepath.Join(tmpData, "mcp.config.json"), tc.fileConf)
+	}
+	if rel, ok := strings.CutPrefix(tc.blocker, "home/"); ok {
+		writeTestFile(t, filepath.Join(tmpHome, rel), "blocker")
+	}
+	if rel, ok := strings.CutPrefix(tc.blocker, "data/"); ok {
+		writeTestFile(t, filepath.Join(tmpData, rel), "blocker")
+	}
+	if tc.wantSyncErr {
 		if err := p.SyncMCP(context.Background(), cfg); err == nil {
-			t.Fatalf("expected error on blocked config directory in SyncMCP")
+			t.Fatalf("expected SyncMCP error with blocker %s", tc.blocker)
 		}
-		return
-	}
-	if tc.syncRuntimeFail {
-		writeTestFile(t, filepath.Join(tmpData, "runtimes", "discord", ".gemini", "config"), "blocker")
-		if err := p.SyncMCP(context.Background(), cfg); err == nil {
-			t.Fatalf("expected error on blocked runtime config directory in SyncMCP")
-		}
-		return
-	}
-
-	if tc.strRaw || tc.blockDir {
-		testEnsureTargetMcpConfigEdgeCases(t, p, tmpHome)
 		return
 	}
 
@@ -399,21 +407,52 @@ func TestMCPProvisioning(t *testing.T) {
 			wantHeaders: map[string]map[string]any{"github": nil},
 		},
 		{
-			name: "config server headers pass through verbatim", target: TargetVoice, withHeaderSrv: true, wantScheduler: true, wantGitHub: true,
+			name: "config server headers pass through verbatim", target: TargetVoice, wantScheduler: true, wantGitHub: true,
+			servers: config.TargetMcpConfig{Common: mcpRaw("ubereats",
+				`{"serverUrl":"https://mcp.example.com/mcp?key=abc","headers":{"Authorization":"Bearer tok-123","X-Tenant":"home"}}`)},
 			wantURL:     map[string]string{"ubereats": "https://mcp.example.com/mcp?key=abc"},
 			wantHeaders: map[string]map[string]any{"ubereats": {"Authorization": "Bearer tok-123", "X-Tenant": "home"}},
 		},
-		{name: "voice target isolates scheduler and excludes discord services", target: TargetVoice, withPAT: true, wantScheduler: true, wantGitHub: true},
+		{
+			name: "voice target isolates scheduler and excludes discord services", target: TargetVoice, withPAT: true, wantScheduler: true,
+			wantGitHub: true,
+		},
 		{name: "ephemeral target excludes scheduler and discord services", target: TargetEphemeral},
-		{name: "ephemeral target includes ephemeral servers", target: TargetEphemeral, withEphemeralSrv: true},
-		{name: "discord target overlays file-based mcp configuration", target: TargetDiscord, withFileConf: true, wantScheduler: true, wantDiscord: true, wantGitHub: true},
-		{name: "overlay custom mcp servers across targets", target: TargetVoice, withCustomSrv: true, wantScheduler: true, wantGitHub: true},
-		{name: "overlay custom mcp server with raw non-obj value", target: TargetDiscord, withRawNonObj: true, wantScheduler: true, wantDiscord: true, wantGitHub: true},
-		{name: "overlay custom mcp server with invalid json raw value", target: TargetDiscord, withRawInvalidJSON: true},
-		{name: "cfg.Current().MCPConfig string fallback", target: TargetDiscord, withMCPCfgStr: true, wantScheduler: true, wantDiscord: true, wantGitHub: true},
-		{name: "EnsureTargetMcpConfig handles raw JSON string and invalid paths", strRaw: true, blockDir: true},
-		{name: "SyncMCP error bubbles up when primary config write fails", syncFail: true},
-		{name: "SyncMCP error bubbles up when runtime config write fails", syncRuntimeFail: true},
+		{name: "nil config yields no servers", target: TargetVoice, nilCfg: true},
+		{
+			name: "ephemeral target includes ephemeral servers", target: TargetEphemeral,
+			servers:     config.TargetMcpConfig{Ephemeral: mcpRaw("custom_eph", `{"serverUrl":"http://eph:8080"}`)},
+			wantPresent: []string{"custom_eph"},
+		},
+		{
+			name: "discord target overlays file-based mcp configuration", target: TargetDiscord, wantScheduler: true, wantDiscord: true, wantGitHub: true,
+			fileConf:    `{"mcpServers":{"custom_override":{"serverUrl":"http://override:80"}}}`,
+			wantPresent: []string{"custom_override"},
+		},
+		{
+			name: "overlay custom mcp servers across targets", target: TargetVoice, wantScheduler: true, wantGitHub: true,
+			servers: config.TargetMcpConfig{
+				Common:    mcpRaw("custom_common", `{"serverUrl":"http://common:8080"}`),
+				Voice:     mcpRaw("custom_voice", `{"serverUrl":"http://voice:8080"}`),
+				Ephemeral: mcpRaw("custom_eph", `{"serverUrl":"http://eph:8080"}`),
+			},
+			wantPresent: []string{"custom_common", "custom_voice"},
+		},
+		{
+			name: "overlay custom mcp server with raw non-obj value", target: TargetDiscord, wantScheduler: true, wantDiscord: true, wantGitHub: true,
+			servers: config.TargetMcpConfig{Discord: mcpRaw("raw_srv", `"string_only_value"`)},
+		},
+		{
+			name: "invalid json raw value is preserved verbatim and fails the marshal", target: TargetDiscord, noDefaults: true,
+			servers: config.TargetMcpConfig{Discord: mcpRaw("invalid_srv", `{not-valid-json`)}, wantEmpty: true,
+		},
+		{
+			name: "cfg.Current().MCPConfig string fallback", target: TargetDiscord, wantScheduler: true, wantDiscord: true, wantGitHub: true,
+			mcpConfig:   `{"mcpServers":{"fallback_srv":{"serverUrl":"http://fallback:80"}}}`,
+			wantPresent: []string{"fallback_srv"},
+		},
+		{name: "SyncMCP error bubbles up when primary config write fails", blocker: "home/.gemini/config", wantSyncErr: true},
+		{name: "SyncMCP error bubbles up when runtime config write fails", blocker: "data/runtimes/discord/.gemini/config", wantSyncErr: true},
 	}
 
 	for _, tc := range tests {
@@ -438,133 +477,91 @@ func assertMCPHeaders(t *testing.T, name string, srv map[string]any, want map[st
 }
 
 type skillsProvisioningCase struct {
-	name               string
-	target             RuleTarget
-	superpowers        bool
-	tornRead           bool
-	flatSkillWarning   bool
-	pruneUnauthorized  bool
-	legacySymlinkDir   bool
-	legacyCleanup      bool
-	legacyCleanupErr   bool
-	targetBlocked      bool
-	symlinkTmpFallback bool
-	symlinkTotalFail   bool
-	renameFailFallback bool
-	replaceExistingDir bool
-	renameTotalFail    bool
-	orphanSymlinkSweep bool
+	name             string
+	target           RuleTarget
+	superpowers      bool
+	customFiles      map[string]string // extra files in the custom skills dir
+	targetFiles      map[string]string // files pre-seeded in the target skills dir
+	homeDirs         []string          // legacy dirs pre-created under home
+	blockTarget      bool              // target skills dir is a regular file
+	legacySymlinkDir bool              // target skills dir is a legacy symlink
+	symlinkFail      string            // symlinkSkill fails for links with this suffix; "*" fails all
+	renameFail       int               // renameSkill fails the first N calls; -1 fails all
+	removeAllErr     bool
+	wantLinked       bool // the target's skill set is linked
+	wantAbsent       []string
+	wantSymlink      []string
 }
 
-func testOrphanSymlinkSweep(t *testing.T, origRemove func(string) error) {
+// installSkillFaults swaps the skill filesystem seams for failing fakes and restores them on cleanup.
+func installSkillFaults(t *testing.T, symlinkFail string, renameFail int, removeAllErr bool) {
 	t.Helper()
-	tmpTarget := t.TempDir()
-	validSrc := t.TempDir()
-	writeTestFile(t, filepath.Join(validSrc, "file.txt"), "ok")
-	validLink := filepath.Join(tmpTarget, "valid")
-	_ = os.Symlink(validSrc, validLink)
-	brokenLink := filepath.Join(tmpTarget, "broken")
-	_ = os.Symlink(filepath.Join(t.TempDir(), "nonexistent"), brokenLink)
-	plainFile := writeTestFile(t, filepath.Join(tmpTarget, "regular.txt"), "keep")
-
-	sweepOrphanedSymlinks([]string{filepath.Join(tmpTarget, "missing_dir"), tmpTarget})
-
-	removeSkill = func(path string) error {
-		return errors.New("simulated sweep remove error")
+	origRemoveAll, origSymlink, origRename := removeAllSkills, symlinkSkill, renameSkill
+	t.Cleanup(func() { removeAllSkills, symlinkSkill, renameSkill = origRemoveAll, origSymlink, origRename })
+	if removeAllErr {
+		removeAllSkills = func(string) error { return errors.New("simulated removeAll error") }
 	}
-	sweepOrphanedSymlinks([]string{tmpTarget})
-	removeSkill = origRemove
-
-	sweepOrphanedSymlinks([]string{tmpTarget})
-
-	if _, err := os.Lstat(brokenLink); !os.IsNotExist(err) {
-		t.Fatalf("broken symlink was not removed: %v", err)
-	}
-	if _, err := os.Lstat(validLink); err != nil {
-		t.Fatalf("valid symlink was improperly removed: %v", err)
-	}
-	if _, err := os.Stat(plainFile); err != nil {
-		t.Fatalf("plain file was improperly removed: %v", err)
-	}
-}
-
-func setupSkillTestMocks(t *testing.T, tc skillsProvisioningCase, targetSkillsDir, tmpHome string, origRename, origSymlink func(string, string) error) {
-	t.Helper()
-	if tc.targetBlocked {
-		writeTestFile(t, targetSkillsDir, "file blocker")
-	}
-	if tc.legacySymlinkDir {
-		_ = os.MkdirAll(filepath.Dir(targetSkillsDir), 0o755)
-		_ = os.Symlink(t.TempDir(), targetSkillsDir)
-	}
-	if tc.pruneUnauthorized {
-		writeTestFile(t, filepath.Join(targetSkillsDir, "unauthorized-rogue-skill"), "rogue")
-		writeTestFile(t, filepath.Join(targetSkillsDir, "stale-skill.tmp"), "tmp")
-	}
-	if tc.legacyCleanup {
-		_ = os.MkdirAll(filepath.Join(tmpHome, ".gemini", "skills"), 0o755)
-		_ = os.MkdirAll(filepath.Join(tmpHome, ".gemini", "config", "plugins", "superpowers"), 0o755)
-	}
-	if tc.legacyCleanupErr {
-		removeAllSkills = func(path string) error { return errors.New("simulated removeAll error") }
-		_ = os.MkdirAll(filepath.Join(tmpHome, ".gemini", "skills"), 0o755)
-	}
-	if tc.symlinkTmpFallback {
+	if symlinkFail != "" {
 		symlinkSkill = func(oldname, newname string) error {
-			if strings.HasSuffix(newname, ".tmp") {
-				return errors.New("simulated tmp symlink error")
+			if symlinkFail == "*" || strings.HasSuffix(newname, symlinkFail) {
+				return errors.New("simulated symlink error")
 			}
 			return origSymlink(oldname, newname)
 		}
 	}
-	if tc.symlinkTotalFail {
-		symlinkSkill = func(oldname, newname string) error { return errors.New("simulated total symlink error") }
-	}
-	if tc.renameFailFallback {
-		writeTestFile(t, filepath.Join(targetSkillsDir, "custom-skill"), "existing")
-		renameCalls := 0
+	if renameFail != 0 {
+		calls := 0
 		renameSkill = func(oldpath, newpath string) error {
-			renameCalls++
-			if renameCalls == 1 {
-				return errors.New("simulated initial rename error")
+			calls++
+			if renameFail < 0 || calls <= renameFail {
+				return errors.New("simulated rename error")
 			}
 			return origRename(oldpath, newpath)
 		}
 	}
-	if tc.replaceExistingDir {
-		existingDir := filepath.Join(targetSkillsDir, "custom-skill")
-		if err := os.MkdirAll(existingDir, 0o755); err != nil {
-			t.Fatalf("failed to create existing skill directory: %v", err)
-		}
-		writeTestFile(t, filepath.Join(existingDir, "stale.txt"), "old content")
-	}
-	if tc.renameTotalFail {
-		renameSkill = func(oldpath, newpath string) error {
-			return errors.New("simulated fatal rename error")
-		}
-	}
 }
 
-func assertSkillRenameAndReplace(t *testing.T, tc skillsProvisioningCase, targetSkillsDir string) {
-	t.Helper()
-	if tc.replaceExistingDir {
-		tmpLink := filepath.Join(targetSkillsDir, "custom-skill.tmp")
-		if _, err := os.Lstat(tmpLink); !os.IsNotExist(err) {
-			t.Fatalf("expected tmp symlink %s to be cleaned up, got err: %v", tmpLink, err)
-		}
-		fi, err := os.Lstat(filepath.Join(targetSkillsDir, "custom-skill"))
-		if err != nil {
-			t.Fatalf("expected custom-skill to exist: %v", err)
-		}
-		if fi.Mode()&os.ModeSymlink == 0 {
-			t.Fatalf("expected custom-skill to be symlink, got mode: %v", fi.Mode())
-		}
+func TestSweepOrphanedSymlinks(t *testing.T) {
+	tests := []struct {
+		name           string
+		removeErr      error
+		wantBrokenGone bool
+	}{
+		{name: "removes broken links, keeps valid links and files, skips missing dirs", wantBrokenGone: true},
+		{name: "remove error leaves broken link in place", removeErr: errors.New("simulated sweep remove error")},
 	}
-	if tc.renameTotalFail {
-		tmpLink := filepath.Join(targetSkillsDir, "custom-skill.tmp")
-		if _, err := os.Lstat(tmpLink); !os.IsNotExist(err) {
-			t.Fatalf("expected tmp symlink %s to be removed on failure, got err: %v", tmpLink, err)
-		}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			origRemove := removeSkill
+			t.Cleanup(func() { removeSkill = origRemove })
+			if tc.removeErr != nil {
+				removeSkill = func(string) error { return tc.removeErr }
+			}
+			tmpTarget := t.TempDir()
+			validSrc := t.TempDir()
+			writeTestFile(t, filepath.Join(validSrc, "file.txt"), "ok")
+			validLink := filepath.Join(tmpTarget, "valid")
+			brokenLink := filepath.Join(tmpTarget, "broken")
+			if err := os.Symlink(validSrc, validLink); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(filepath.Join(t.TempDir(), "nonexistent"), brokenLink); err != nil {
+				t.Fatal(err)
+			}
+			plainFile := writeTestFile(t, filepath.Join(tmpTarget, "regular.txt"), "keep")
+
+			sweepOrphanedSymlinks([]string{filepath.Join(tmpTarget, "missing_dir"), tmpTarget})
+
+			if _, err := os.Lstat(brokenLink); os.IsNotExist(err) != tc.wantBrokenGone {
+				t.Errorf("broken symlink removed = %v, want %v", os.IsNotExist(err), tc.wantBrokenGone)
+			}
+			if _, err := os.Lstat(validLink); err != nil {
+				t.Errorf("valid symlink was improperly removed: %v", err)
+			}
+			if _, err := os.Stat(plainFile); err != nil {
+				t.Errorf("plain file was improperly removed: %v", err)
+			}
+		})
 	}
 }
 
@@ -586,111 +583,123 @@ func assertSkillTargetRules(t *testing.T, target RuleTarget, superpowers bool, f
 	}
 }
 
-func assertSkillEntries(t *testing.T, tc skillsProvisioningCase, found map[string]bool, targetSkillsDir string) {
+func assertSkillEntries(t *testing.T, tc skillsProvisioningCase, installed int, targetSkillsDir string) {
 	t.Helper()
-	assertSkillRenameAndReplace(t, tc, targetSkillsDir)
-
-	if tc.flatSkillWarning && found["flat-root-skill"] {
-		t.Errorf("flat un-nested root skill should not be linked")
+	if tc.wantLinked && installed == 0 && tc.target != TargetEphemeral {
+		t.Fatalf("expected installed skills > 0 for target %s", tc.target)
 	}
-	if tc.tornRead && found["torn-skill"] {
-		t.Errorf("torn 0-byte skill should not be linked")
+	found := make(map[string]bool)
+	entries, _ := os.ReadDir(targetSkillsDir)
+	for _, e := range entries {
+		found[e.Name()] = true
 	}
-	if tc.pruneUnauthorized && found["unauthorized-rogue-skill"] {
-		t.Errorf("unauthorized skill was not pruned")
+	for _, name := range tc.wantAbsent {
+		if found[name] {
+			t.Errorf("expected %s absent from target skills dir: %v", name, found)
+		}
 	}
-
-	if !tc.symlinkTotalFail && !tc.targetBlocked && !tc.renameTotalFail {
+	for _, name := range tc.wantSymlink {
+		if fi, err := os.Lstat(filepath.Join(targetSkillsDir, name)); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+			t.Errorf("expected %s to be a symlink: fi=%v err=%v", name, fi, err)
+		}
+	}
+	if tc.wantLinked {
 		assertSkillTargetRules(t, tc.target, tc.superpowers, found)
 	}
 }
 
 func runSkillsProvisioningCase(t *testing.T, tc skillsProvisioningCase) {
 	t.Helper()
-	origRemoveAll := removeAllSkills
-	origSymlink := symlinkSkill
-	origRename := renameSkill
-	origRemove := removeSkill
-	defer func() {
-		removeAllSkills = origRemoveAll
-		symlinkSkill = origSymlink
-		renameSkill = origRename
-		removeSkill = origRemove
-	}()
-
-	if tc.orphanSymlinkSweep {
-		testOrphanSymlinkSweep(t, origRemove)
-		return
-	}
-
 	tmpHome := t.TempDir()
 	tmpData := t.TempDir()
 	p := newDisabledProvisioner(t, tmpHome, tmpData)
 
 	customDir := t.TempDir()
 	writeTestFile(t, filepath.Join(customDir, "README.txt"), "readme")
-
 	writeSkillFixture(t, customDir, "common/custom-skill/SKILL.md", "---\nname: custom-skill\n---\nCustom skill body")
 	writeSkillFixture(t, customDir, "discord/discord-skill/SKILL.md", "---\nname: discord-skill\n---\nDiscord only body")
 	writeSkillFixture(t, customDir, "voice/voice-skill/SKILL.md", "---\nname: voice-skill\n---\nVoice only body")
 	writeSkillFixture(t, customDir, "ephemeral/eph-skill/SKILL.md", "---\nname: eph-skill\n---\nEphemeral only body")
+	for rel, content := range tc.customFiles {
+		writeSkillFixture(t, customDir, rel, content)
+	}
 	p.SetCustomSkillsDir(customDir)
 
-	if tc.flatSkillWarning {
-		writeSkillFixture(t, customDir, "flat-root-skill/SKILL.md", "---\nname: flat\n---\nFlat body")
-	}
-
+	p.SetSuperpowersDir("")
 	if tc.superpowers {
 		spDir := t.TempDir()
 		writeSkillFixture(t, spDir, "brainstorming/SKILL.md", "---\nname: brainstorming\n---\nSuperpower body")
 		p.SetSuperpowersDir(spDir)
-	} else {
-		p.SetSuperpowersDir("")
-	}
-
-	if tc.tornRead {
-		writeSkillFixture(t, customDir, "common/torn-skill/SKILL.md", "")
 	}
 
 	targetSkillsDir := filepath.Join(tmpHome, ".gemini", "config", "skills")
-	setupSkillTestMocks(t, tc, targetSkillsDir, tmpHome, origRename, origSymlink)
+	if tc.blockTarget {
+		writeTestFile(t, targetSkillsDir, "file blocker")
+	}
+	if tc.legacySymlinkDir {
+		if err := os.MkdirAll(filepath.Dir(targetSkillsDir), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(t.TempDir(), targetSkillsDir); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for rel, content := range tc.targetFiles {
+		writeTestFile(t, filepath.Join(targetSkillsDir, rel), content)
+	}
+	for _, rel := range tc.homeDirs {
+		if err := os.MkdirAll(filepath.Join(tmpHome, rel), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	installSkillFaults(t, tc.symlinkFail, tc.renameFail, tc.removeAllErr)
 
 	if err := p.SyncSkills(); err != nil {
 		t.Fatalf("SyncSkills failed: %v", err)
 	}
-
 	installed := p.LinkTargetSkills(targetSkillsDir, tc.target)
-	if installed == 0 && tc.target != TargetEphemeral && !tc.symlinkTotalFail && !tc.targetBlocked && !tc.renameTotalFail {
-		t.Fatalf("expected installed skills > 0 for target %s", tc.target)
-	}
-
-	found := make(map[string]bool)
-	entries, _ := os.ReadDir(targetSkillsDir)
-	for _, e := range entries {
-		found[e.Name()] = true
-	}
-
-	assertSkillEntries(t, tc, found, targetSkillsDir)
+	assertSkillEntries(t, tc, installed, targetSkillsDir)
 }
 
 func TestSkillsProvisioning(t *testing.T) {
 	tests := []skillsProvisioningCase{
-		{name: "discord target receives common and target skills and superpowers", target: TargetDiscord, superpowers: true},
-		{name: "voice target excludes superpowers and discord skills", target: TargetVoice, superpowers: true},
-		{name: "ephemeral target links exclusively ephemeral skills", target: TargetEphemeral, superpowers: true},
-		{name: "torn read skips zero-byte SKILL.md", target: TargetDiscord, tornRead: true},
-		{name: "flat skill warning on un-nested root skill", target: TargetDiscord, flatSkillWarning: true},
-		{name: "active reconciliation prunes unauthorized skills", target: TargetDiscord, pruneUnauthorized: true},
-		{name: "target skills directory is existing legacy symlink", target: TargetDiscord, legacySymlinkDir: true},
-		{name: "cleans up legacy skills and plugins directories", target: TargetDiscord, legacyCleanup: true},
-		{name: "logs warning and handles legacy remove errors", target: TargetDiscord, legacyCleanupErr: true},
-		{name: "target skills directory creation blocked by file", target: TargetDiscord, targetBlocked: true},
-		{name: "symlink tmp fails and triggers direct symlink fallback", target: TargetDiscord, symlinkTmpFallback: true},
-		{name: "both tmp and direct symlink fail gracefully", target: TargetDiscord, symlinkTotalFail: true},
-		{name: "rename fails and triggers destination removal fallback", target: TargetDiscord, renameFailFallback: true},
-		{name: "replacing existing skill directory does not leave tmp symlink", target: TargetDiscord, replaceExistingDir: true},
-		{name: "rename total failure cleans up tmp symlink", target: TargetDiscord, renameTotalFail: true},
-		{name: "sweepOrphanedSymlinks removes broken links and retains valid links", orphanSymlinkSweep: true},
+		{name: "discord target receives common and target skills and superpowers", target: TargetDiscord, superpowers: true, wantLinked: true},
+		{name: "voice target excludes superpowers and discord skills", target: TargetVoice, superpowers: true, wantLinked: true},
+		{name: "ephemeral target links exclusively ephemeral skills", target: TargetEphemeral, superpowers: true, wantLinked: true},
+		{
+			name: "torn read skips zero-byte SKILL.md", target: TargetDiscord, wantLinked: true,
+			customFiles: map[string]string{"common/torn-skill/SKILL.md": ""}, wantAbsent: []string{"torn-skill"},
+		},
+		{
+			name: "flat skill warning on un-nested root skill", target: TargetDiscord, wantLinked: true,
+			customFiles: map[string]string{"flat-root-skill/SKILL.md": "---\nname: flat\n---\nFlat body"}, wantAbsent: []string{"flat-root-skill"},
+		},
+		{
+			name: "active reconciliation prunes unauthorized skills", target: TargetDiscord, wantLinked: true,
+			targetFiles: map[string]string{"unauthorized-rogue-skill": "rogue", "stale-skill.tmp": "tmp"}, wantAbsent: []string{"unauthorized-rogue-skill"},
+		},
+		{name: "target skills directory is existing legacy symlink", target: TargetDiscord, legacySymlinkDir: true, wantLinked: true},
+		{
+			name: "cleans up legacy skills and plugins directories", target: TargetDiscord, wantLinked: true,
+			homeDirs: []string{".gemini/skills", ".gemini/config/plugins/superpowers"},
+		},
+		{
+			name: "logs warning and handles legacy remove errors", target: TargetDiscord, homeDirs: []string{".gemini/skills"}, removeAllErr: true,
+			wantLinked: true,
+		},
+		{name: "target skills directory creation blocked by file", target: TargetDiscord, blockTarget: true},
+		{name: "symlink tmp fails and triggers direct symlink fallback", target: TargetDiscord, symlinkFail: ".tmp", wantLinked: true},
+		{name: "both tmp and direct symlink fail gracefully", target: TargetDiscord, symlinkFail: "*"},
+		{
+			name: "rename fails and triggers destination removal fallback", target: TargetDiscord, wantLinked: true,
+			targetFiles: map[string]string{"custom-skill": "existing"}, renameFail: 1,
+		},
+		{
+			name: "replacing existing skill directory does not leave tmp symlink", target: TargetDiscord, wantLinked: true,
+			targetFiles: map[string]string{"custom-skill/stale.txt": "old content"},
+			wantAbsent:  []string{"custom-skill.tmp"}, wantSymlink: []string{"custom-skill"},
+		},
+		{name: "rename total failure cleans up tmp symlink", target: TargetDiscord, renameFail: -1, wantAbsent: []string{"custom-skill.tmp"}},
 	}
 
 	for _, tc := range tests {
@@ -854,244 +863,160 @@ func TestSyncHooks(t *testing.T) {
 	}
 }
 
-type codexAuthCase struct {
-	name          string
-	nilProv       bool
-	emptyHome     bool
-	noDataDir     bool
-	sourceContent string
-	existingAuth  string
-	existingSHA   string
-	blockDir      bool
-	wantErr       bool
-	wantAuth      string
-	wantSHA       string
+// authEngineLayout is the per-engine credential layout shared by the codex and muse seeding contract.
+type authEngineLayout struct {
+	dataSub   string // canonical dir under dataDir
+	homeSub   string // canonical dir under home (no dataDir) and the primary link dir
+	setSource func(p *Provisioner, path string)
+	provision func(p *Provisioner) error
 }
 
-func assertCodexAuthOutput(t *testing.T, tc codexAuthCase, canonicalCodexDir, tmpHome, tmpData string, p *Provisioner) {
+var authEngineLayouts = map[string]authEngineLayout{
+	config.EngineCodex: {"codex", ".codex", (*Provisioner).SetCodexAuthSourcePath, (*Provisioner).provisionCodexAuthState},
+	config.EngineMuse:  {"muse", filepath.Join(".config", "muse"), (*Provisioner).SetMuseAuthSourcePath, (*Provisioner).provisionMuseAuthState},
+}
+
+type authStateCase struct {
+	name         string
+	engine       string
+	nilProv      bool
+	emptyHome    bool
+	noDataDir    bool
+	source       string
+	existingAuth string
+	existingSHA  string // "match_source" = sha256 of source
+	blockDir     bool
+	wantErr      bool
+	wantAuth     string
+	wantSHA      string // "match_source" = sha256 of source
+}
+
+func resolveAuthSHA(sha, source string) string {
+	if sha == "match_source" {
+		return fmt.Sprintf("%x", sha256.Sum256([]byte(source)))
+	}
+	return sha
+}
+
+func assertAuthStateOutput(t *testing.T, tc authStateCase, layout authEngineLayout, canonicalDir, tmpHome, tmpData string, p *Provisioner) {
 	t.Helper()
-	data, rErr := os.ReadFile(filepath.Join(canonicalCodexDir, "auth.json"))
+	data, rErr := os.ReadFile(filepath.Join(canonicalDir, "auth.json"))
 	if rErr != nil || string(data) != tc.wantAuth {
 		t.Fatalf("auth.json = %q, %v; want %q", string(data), rErr, tc.wantAuth)
 	}
-	expectedSHA := tc.wantSHA
-	if expectedSHA == "match_source" {
-		expectedSHA = fmt.Sprintf("%x", sha256.Sum256([]byte(tc.sourceContent)))
-	}
-	shaData, sErr := os.ReadFile(filepath.Join(canonicalCodexDir, ".auth.seed-sha256"))
-	if sErr != nil || strings.TrimSpace(string(shaData)) != expectedSHA {
-		t.Fatalf(".auth.seed-sha256 = %q, %v; want %q", string(shaData), sErr, expectedSHA)
+	wantSHA := resolveAuthSHA(tc.wantSHA, tc.source)
+	shaData, sErr := os.ReadFile(filepath.Join(canonicalDir, ".auth.seed-sha256"))
+	if sErr != nil || strings.TrimSpace(string(shaData)) != wantSHA {
+		t.Fatalf(".auth.seed-sha256 = %q, %v; want %q", string(shaData), sErr, wantSHA)
 	}
 	if tmpData == "" {
 		return
 	}
-	primaryLink := filepath.Join(tmpHome, ".codex", "auth.json")
-	if fi, lErr := os.Lstat(primaryLink); lErr != nil || fi.Mode()&os.ModeSymlink == 0 {
-		t.Fatalf("expected symlink at primary codex auth: %v", lErr)
-	}
+	links := []string{filepath.Join(tmpHome, layout.homeSub, "auth.json")}
 	for _, target := range allRuntimeTargets {
-		rtLink := filepath.Join(p.runtimeHomeDir(target), ".codex", "auth.json")
-		if fi, lErr := os.Lstat(rtLink); lErr != nil || fi.Mode()&os.ModeSymlink == 0 {
-			t.Fatalf("expected symlink at %s runtime codex auth: %v", target, lErr)
+		links = append(links, filepath.Join(p.runtimeHomeDir(target), layout.homeSub, "auth.json"))
+	}
+	for _, link := range links {
+		if fi, lErr := os.Lstat(link); lErr != nil || fi.Mode()&os.ModeSymlink == 0 {
+			t.Fatalf("expected %s auth symlink at %s: %v", tc.engine, link, lErr)
 		}
 	}
 }
 
-func runCodexAuthCase(t *testing.T, tc codexAuthCase) {
+func runAuthStateCase(t *testing.T, tc authStateCase) {
 	t.Helper()
-	if tc.nilProv {
-		var pNil *Provisioner
-		if err := pNil.provisionCodexAuthState(); err != nil {
-			t.Fatalf("expected nil error on nil provisioner: %v", err)
+	layout := authEngineLayouts[tc.engine]
+	if tc.nilProv || tc.emptyHome {
+		var p *Provisioner
+		if tc.emptyHome {
+			p = newDisabledProvisioner(t, "", "")
 		}
-		return
-	}
-	if tc.emptyHome {
-		pEmpty := newDisabledProvisioner(t, "", "")
-		if err := pEmpty.provisionCodexAuthState(); err != nil {
-			t.Fatalf("expected nil error on empty home: %v", err)
+		if err := layout.provision(p); err != nil {
+			t.Fatalf("provision %s auth: expected nil error, got %v", tc.engine, err)
 		}
 		return
 	}
 
 	tmpHome := t.TempDir()
 	var tmpData string
+	canonicalDir := filepath.Join(tmpHome, layout.homeSub)
 	if !tc.noDataDir {
 		tmpData = t.TempDir()
+		canonicalDir = filepath.Join(tmpData, layout.dataSub)
 	}
 	p := newDisabledProvisioner(t, tmpHome, tmpData)
 
-	var canonicalCodexDir string
-	if tmpData != "" {
-		canonicalCodexDir = filepath.Join(tmpData, "codex")
-	} else {
-		canonicalCodexDir = filepath.Join(tmpHome, ".codex")
-	}
-
 	if tc.blockDir {
-		writeTestFile(t, canonicalCodexDir, "blocker")
+		writeTestFile(t, canonicalDir, "blocker")
 	}
 	if tc.existingAuth != "" {
-		writeTestFile(t, filepath.Join(canonicalCodexDir, "auth.json"), tc.existingAuth)
+		writeTestFile(t, filepath.Join(canonicalDir, "auth.json"), tc.existingAuth)
 	}
 	if tc.existingSHA != "" {
-		existingSHA := tc.existingSHA
-		if existingSHA == "match_source" {
-			existingSHA = fmt.Sprintf("%x", sha256.Sum256([]byte(tc.sourceContent)))
-		}
-		writeTestFile(t, filepath.Join(canonicalCodexDir, ".auth.seed-sha256"), existingSHA)
+		writeTestFile(t, filepath.Join(canonicalDir, ".auth.seed-sha256"), resolveAuthSHA(tc.existingSHA, tc.source))
 	}
-	if tc.sourceContent != "" {
-		src := writeTestFile(t, filepath.Join(tmpHome, "source-auth.json"), tc.sourceContent)
-		p.SetCodexAuthSourcePath(src)
-	} else {
-		p.SetCodexAuthSourcePath("")
+	layout.setSource(p, "")
+	if tc.source != "" {
+		layout.setSource(p, writeTestFile(t, filepath.Join(tmpHome, "source-auth.json"), tc.source))
 	}
 
-	err := p.provisionCodexAuthState()
+	err := layout.provision(p)
 	if (err != nil) != tc.wantErr {
-		t.Fatalf("provisionCodexAuthState() error = %v, wantErr %v", err, tc.wantErr)
+		t.Fatalf("provision %s auth error = %v, wantErr %v", tc.engine, err, tc.wantErr)
 	}
 	if !tc.wantErr && tc.wantAuth != "" {
-		assertCodexAuthOutput(t, tc, canonicalCodexDir, tmpHome, tmpData, p)
+		assertAuthStateOutput(t, tc, layout, canonicalDir, tmpHome, tmpData, p)
 	}
 }
 
-func TestProvisionCodexAuthState(t *testing.T) {
-	tests := []codexAuthCase{
-		{name: "nil provisioner", nilProv: true},
-		{name: "empty home", emptyHome: true},
-		{name: "missing auth seeds from source", sourceContent: `{"tokens":"seed1"}`, wantAuth: `{"tokens":"seed1"}`, wantSHA: "match_source"},
-		{name: "preserves live rotated refresh tokens when seed sha matches", sourceContent: `{"tokens":"seed1"}`, existingAuth: `{"tokens":"refreshed"}`, existingSHA: "match_source", wantAuth: `{"tokens":"refreshed"}`, wantSHA: "match_source"},
-		{name: "overwrites auth when source seed sha differs", sourceContent: `{"tokens":"seed2"}`, existingAuth: `{"tokens":"old"}`, existingSHA: "old-sha", wantAuth: `{"tokens":"seed2"}`, wantSHA: "match_source"},
-		{name: "seeds into home .codex when dataDir is empty", noDataDir: true, sourceContent: `{"tokens":"home-seed"}`, wantAuth: `{"tokens":"home-seed"}`, wantSHA: "match_source"},
-		{name: "empty source content is skipped", sourceContent: "   "},
-		{name: "mkdir failure returns error when codex dir is file blocker", sourceContent: `{"tokens":"seed"}`, blockDir: true, wantErr: true},
+func TestProvisionAuthState(t *testing.T) {
+	tests := []authStateCase{
+		{name: "codex nil provisioner", engine: config.EngineCodex, nilProv: true},
+		{name: "codex empty home", engine: config.EngineCodex, emptyHome: true},
+		{
+			name: "codex missing auth seeds from source", engine: config.EngineCodex, source: `{"tokens":"seed1"}`, wantAuth: `{"tokens":"seed1"}`,
+			wantSHA: "match_source",
+		},
+		{
+			name: "codex preserves live rotated refresh tokens when seed sha matches", engine: config.EngineCodex, source: `{"tokens":"seed1"}`,
+			existingAuth: `{"tokens":"refreshed"}`, existingSHA: "match_source", wantAuth: `{"tokens":"refreshed"}`, wantSHA: "match_source",
+		},
+		{
+			name: "codex overwrites auth when source seed sha differs", engine: config.EngineCodex, source: `{"tokens":"seed2"}`,
+			existingAuth: `{"tokens":"old"}`, existingSHA: "old-sha", wantAuth: `{"tokens":"seed2"}`, wantSHA: "match_source",
+		},
+		{
+			name: "codex seeds into home .codex when dataDir is empty", engine: config.EngineCodex, noDataDir: true,
+			source: `{"tokens":"home-seed"}`, wantAuth: `{"tokens":"home-seed"}`, wantSHA: "match_source",
+		},
+		{name: "codex empty source content is skipped", engine: config.EngineCodex, source: "   "},
+		{
+			name: "codex mkdir failure returns error when dir is file blocker", engine: config.EngineCodex, source: `{"tokens":"seed"}`,
+			blockDir: true, wantErr: true,
+		},
+		{name: "muse nil provisioner", engine: config.EngineMuse, nilProv: true},
+		{name: "muse empty home", engine: config.EngineMuse, emptyHome: true},
+		{
+			name: "muse missing auth seeds from source", engine: config.EngineMuse, source: `{"jwt":"muse1"}`, wantAuth: `{"jwt":"muse1"}`,
+			wantSHA: "match_source",
+		},
+		{
+			name: "muse overwrites auth when source seed sha differs", engine: config.EngineMuse, source: `{"jwt":"muse2"}`,
+			existingAuth: `{"jwt":"stale"}`, existingSHA: "stale-digest", wantAuth: `{"jwt":"muse2"}`, wantSHA: "match_source",
+		},
+		{
+			name: "muse seeds into home config when dataDir is empty", engine: config.EngineMuse, noDataDir: true,
+			source: `{"jwt":"home-token"}`, wantAuth: `{"jwt":"home-token"}`, wantSHA: "match_source",
+		},
+		{
+			name: "muse mkdir failure returns error when dir is file blocker", engine: config.EngineMuse, source: `{"jwt":"token"}`, blockDir: true,
+			wantErr: true,
+		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			runCodexAuthCase(t, tc)
-		})
-	}
-}
-
-type museProvisionAuthCase struct {
-	desc            string
-	unallocatedProv bool
-	blankHome       bool
-	standalone      bool
-	payload         string
-	preexistingAuth string
-	preexistingSHA  string
-	blockedFS       bool
-	shouldErr       bool
-	expectedAuth    string
-	expectedSHA     string
-}
-
-func assertMuseAuthOutput(t *testing.T, tc museProvisionAuthCase, canonicalMuseDir, tmpHome, tmpData string, p *Provisioner) {
-	t.Helper()
-	data, rErr := os.ReadFile(filepath.Join(canonicalMuseDir, "auth.json"))
-	if rErr != nil || string(data) != tc.expectedAuth {
-		t.Fatalf("auth.json = %q, %v; want %q", string(data), rErr, tc.expectedAuth)
-	}
-	expectedSHA := tc.expectedSHA
-	if expectedSHA == "match_source" {
-		expectedSHA = fmt.Sprintf("%x", sha256.Sum256([]byte(tc.payload)))
-	}
-	shaData, sErr := os.ReadFile(filepath.Join(canonicalMuseDir, ".auth.seed-sha256"))
-	if sErr != nil || strings.TrimSpace(string(shaData)) != expectedSHA {
-		t.Fatalf(".auth.seed-sha256 = %q, %v; want %q", string(shaData), sErr, expectedSHA)
-	}
-	if tmpData == "" {
-		return
-	}
-	primaryLink := filepath.Join(tmpHome, ".config", "muse", "auth.json")
-	if fi, lErr := os.Lstat(primaryLink); lErr != nil || fi.Mode()&os.ModeSymlink == 0 {
-		t.Fatalf("expected symlink at primary muse auth: %v", lErr)
-	}
-	for _, target := range allRuntimeTargets {
-		rtLink := filepath.Join(p.runtimeHomeDir(target), ".config", "muse", "auth.json")
-		if fi, lErr := os.Lstat(rtLink); lErr != nil || fi.Mode()&os.ModeSymlink == 0 {
-			t.Fatalf("expected symlink at %s runtime muse auth: %v", target, lErr)
-		}
-	}
-}
-
-func runMuseAuthCase(t *testing.T, tc museProvisionAuthCase) {
-	t.Helper()
-	if tc.unallocatedProv {
-		var pNil *Provisioner
-		if err := pNil.provisionMuseAuthState(); err != nil {
-			t.Fatalf("expected nil error on nil provisioner: %v", err)
-		}
-		return
-	}
-	if tc.blankHome {
-		pEmpty := newDisabledProvisioner(t, "", "")
-		if err := pEmpty.provisionMuseAuthState(); err != nil {
-			t.Fatalf("expected nil error on empty home: %v", err)
-		}
-		return
-	}
-
-	tmpHome := t.TempDir()
-	var tmpData string
-	if !tc.standalone {
-		tmpData = t.TempDir()
-	}
-	p := newDisabledProvisioner(t, tmpHome, tmpData)
-
-	var canonicalMuseDir string
-	if tmpData != "" {
-		canonicalMuseDir = filepath.Join(tmpData, "muse")
-	} else {
-		canonicalMuseDir = filepath.Join(tmpHome, ".config", "muse")
-	}
-
-	if tc.blockedFS {
-		writeTestFile(t, canonicalMuseDir, "blocker")
-	}
-	if tc.preexistingAuth != "" {
-		writeTestFile(t, filepath.Join(canonicalMuseDir, "auth.json"), tc.preexistingAuth)
-	}
-	if tc.preexistingSHA != "" {
-		shaVal := tc.preexistingSHA
-		if shaVal == "match_source" {
-			shaVal = fmt.Sprintf("%x", sha256.Sum256([]byte(tc.payload)))
-		}
-		writeTestFile(t, filepath.Join(canonicalMuseDir, ".auth.seed-sha256"), shaVal)
-	}
-	if tc.payload != "" {
-		src := writeTestFile(t, filepath.Join(tmpHome, "source-auth.json"), tc.payload)
-		p.SetMuseAuthSourcePath(src)
-	} else {
-		p.SetMuseAuthSourcePath("")
-	}
-
-	err := p.provisionMuseAuthState()
-	if (err != nil) != tc.shouldErr {
-		t.Fatalf("provisionMuseAuthState() error = %v, shouldErr %v", err, tc.shouldErr)
-	}
-	if !tc.shouldErr && tc.expectedAuth != "" {
-		assertMuseAuthOutput(t, tc, canonicalMuseDir, tmpHome, tmpData, p)
-	}
-}
-
-func TestProvisionMuseAuthState(t *testing.T) {
-	tests := []museProvisionAuthCase{
-		{desc: "unallocated provisioner returns nil", unallocatedProv: true},
-		{desc: "blank home returns nil", blankHome: true},
-		{desc: "seed new credentials from file", payload: `{"jwt":"muse1"}`, expectedAuth: `{"jwt":"muse1"}`, expectedSHA: "match_source"},
-		{desc: "overwrite on source digest change", payload: `{"jwt":"muse2"}`, preexistingAuth: `{"jwt":"stale"}`, preexistingSHA: "stale-digest", expectedAuth: `{"jwt":"muse2"}`, expectedSHA: "match_source"},
-		{desc: "seed into home config when standalone", standalone: true, payload: `{"jwt":"home-token"}`, expectedAuth: `{"jwt":"home-token"}`, expectedSHA: "match_source"},
-		{desc: "blocked muse filesystem path causes error", payload: `{"jwt":"token"}`, blockedFS: true, shouldErr: true},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.desc, func(t *testing.T) {
-			runMuseAuthCase(t, tc)
+			runAuthStateCase(t, tc)
 		})
 	}
 }
@@ -1129,10 +1054,7 @@ func TestPruneAgyLogDirs(t *testing.T) {
 		wantRemoved   []string
 		wantPreserved []string
 	}{
-		{
-			name:    "nil provisioner is safe",
-			nilProv: true,
-		},
+		{name: "nil provisioner is safe", nilProv: true},
 		{
 			name:        "removes cli-*.log and preserves other entries across primary and runtimes",
 			withDataDir: true,

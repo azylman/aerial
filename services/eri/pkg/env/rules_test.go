@@ -27,9 +27,6 @@ type compileAndDiscoverRulesCase struct {
 	userEngineIsFile    bool
 	aerialEngineTorn    bool
 	userEngineOversized bool
-	statErrorSubfolder  bool
-	emptyDirTest        bool
-	testResolve         bool
 	wantErr             bool
 	wantPromptMD        bool
 	wantPersona         bool
@@ -37,49 +34,77 @@ type compileAndDiscoverRulesCase struct {
 	wantExcludedPrefix  string
 }
 
-func testResolveDir(t *testing.T) {
-	t.Helper()
-	tmpDir := t.TempDir()
-	candDir := filepath.Join(tmpDir, "cand")
-	_ = os.Mkdir(candDir, 0o755)
-
-	if r := resolveDir(candDir, nil); r != candDir {
-		t.Errorf("resolveDir configured mismatch: %q", r)
+func TestResolveDir(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		configured string
+		candidates []string
+		want       string
+	}{
+		{"existing configured dir wins", "cand", nil, "cand"},
+		{"missing configured falls back to existing candidate", "missing", []string{"cand"}, "cand"},
+		{"no existing dir returns configured default", "nonexistent", []string{"nonexistent2"}, "nonexistent"},
 	}
-	if r := resolveDir(filepath.Join(tmpDir, "missing"), []string{candDir}); r != candDir {
-		t.Errorf("resolveDir candidate fallback mismatch: %q", r)
-	}
-	missing := filepath.Join(tmpDir, "nonexistent")
-	if r := resolveDir(missing, []string{filepath.Join(tmpDir, "nonexistent2")}); r != missing {
-		t.Errorf("resolveDir default mismatch: %q", r)
-	}
-}
-
-func testEmptyDirDiscovery(t *testing.T) {
-	t.Helper()
-	res, err := discoverRuleFiles("", "common", "00_")
-	if res != nil || err != nil {
-		t.Errorf("expected nil, nil for empty dir, got %v, %v", res, err)
-	}
-
-	tmpDir := t.TempDir()
-	commonDir := filepath.Join(tmpDir, "common")
-	_ = os.MkdirAll(filepath.Join(commonDir, "nested_dir"), 0o755)
-	_ = os.WriteFile(filepath.Join(commonDir, "notes.txt"), []byte("not a rule"), 0o644)
-	_ = os.WriteFile(filepath.Join(commonDir, "01.md"), []byte("valid rule"), 0o644)
-	files, err := discoverRuleFiles(tmpDir, "common", "00_")
-	if err != nil || len(files) != 1 {
-		t.Errorf("expected 1 file discovered, got %d, err: %v", len(files), err)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			tmpDir := t.TempDir()
+			if err := os.Mkdir(filepath.Join(tmpDir, "cand"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			var candidates []string
+			for _, c := range tc.candidates {
+				candidates = append(candidates, filepath.Join(tmpDir, c))
+			}
+			if got := resolveDir(filepath.Join(tmpDir, tc.configured), candidates); got != filepath.Join(tmpDir, tc.want) {
+				t.Errorf("resolveDir() = %q, want %q", got, filepath.Join(tmpDir, tc.want))
+			}
+		})
 	}
 }
 
-func runStatErrorSubfolderTest(t *testing.T) {
-	t.Helper()
-	tmpDir := t.TempDir()
-	blocker := filepath.Join(tmpDir, "file_blocker")
-	_ = os.WriteFile(blocker, []byte("f"), 0o644)
-	if _, err := discoverRuleFiles(blocker, "subfolder", "00_"); err == nil {
-		t.Fatalf("expected error from ENOTDIR stat on subfolder")
+func TestDiscoverRuleFiles(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		files     map[string]string // written under a temp root
+		dir       string            // relative to the temp root; "-" passes an empty dir
+		subfolder string
+		wantFiles int
+		wantErr   bool
+	}{
+		{name: "empty dir returns nil", dir: "-", subfolder: "common"},
+		{
+			name:      "skips nested dirs and non-md files",
+			files:     map[string]string{"common/nested_dir/02.md": "nested", "common/notes.txt": "not a rule", "common/01.md": "valid rule"},
+			subfolder: "common",
+			wantFiles: 1,
+		},
+		{
+			name: "ENOTDIR stat on subfolder errors", files: map[string]string{"file_blocker": "f"}, dir: "file_blocker", subfolder: "subfolder",
+			wantErr: true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			root := t.TempDir()
+			for rel, content := range tc.files {
+				writeTestFile(t, filepath.Join(root, rel), content)
+			}
+			dir := filepath.Join(root, tc.dir)
+			if tc.dir == "-" {
+				dir = ""
+			}
+			files, err := discoverRuleFiles(dir, tc.subfolder, "00_")
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("discoverRuleFiles() error = %v, wantErr %v", err, tc.wantErr)
+			}
+			if len(files) != tc.wantFiles {
+				t.Errorf("discoverRuleFiles() returned %d files, want %d", len(files), tc.wantFiles)
+			}
+		})
 	}
 }
 
@@ -166,19 +191,6 @@ func assertCompileDiscoveryOutput(t *testing.T, tc compileAndDiscoverRulesCase, 
 
 func runCompileAndDiscoverRulesCase(t *testing.T, tc compileAndDiscoverRulesCase) {
 	t.Helper()
-	if tc.statErrorSubfolder {
-		runStatErrorSubfolderTest(t)
-		return
-	}
-	if tc.emptyDirTest {
-		testEmptyDirDiscovery(t)
-		return
-	}
-	if tc.testResolve {
-		testResolveDir(t)
-		return
-	}
-
 	content := "Standard rule body"
 	if tc.fileSizeLimit {
 		content = strings.Repeat("A", MaxSourceRuleFileSizeBytes+100)
@@ -230,9 +242,6 @@ func TestCompileAndDiscoverRules(t *testing.T) {
 		{name: "user target subfolder is regular file triggers discovery error", target: TargetDiscord, userSubIsFile: true, wantErr: true},
 		{name: "aerial persona subfolder is regular file triggers error", target: TargetDiscord, aerialPersonaIsFile: true, wantErr: true},
 		{name: "config persona subfolder is regular file triggers error", target: TargetDiscord, configPersonaIsFile: true, wantErr: true},
-		{name: "statErr ENOTDIR on subfolder triggers discovery error", statErrorSubfolder: true, wantErr: true},
-		{name: "discoverRuleFiles empty dir and non-md skipping", emptyDirTest: true},
-		{name: "resolveDir candidate fallback and defaults", testResolve: true},
 		{
 			name:               "discord target with claude engine compiles engine rules in prefix order",
 			target:             TargetDiscord,

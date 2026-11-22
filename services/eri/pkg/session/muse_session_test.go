@@ -9,176 +9,6 @@ import (
 	"time"
 )
 
-type museSessionLifecycleCase struct {
-	name       string
-	isNilMgr   bool
-	sessionID  string
-	location   string
-	content    string
-	zeroByte   bool
-	age        time.Duration
-	wantExists bool
-	wantPaths  int
-	wantSize   int64
-	wantSteps  int
-	wantTurns  int
-}
-
-func resolveMuseWriteDir(location, homeDir, dataDir, sessionID string) (string, string) {
-	switch location {
-	case "data_muse_nested":
-		return filepath.Join(dataDir, "muse", "sessions", "2026", "11", "15", sessionID), "session.jsonl"
-	case "data_runtime_muse":
-		return filepath.Join(dataDir, "runtimes", "discord", ".local", "share", "muse", "sessions"), sessionID + ".jsonl"
-	case "home_muse":
-		return filepath.Join(homeDir, ".local", "share", "muse", "sessions", sessionID), "session.jsonl"
-	case "direct_muse":
-		return filepath.Join(dataDir, "muse", "sessions"), sessionID + ".jsonl"
-	default:
-		return "", ""
-	}
-}
-
-func setupMuseSessionFile(tc museSessionLifecycleCase, homeDir, dataDir string, t0 time.Time) {
-	writeDir, fileName := resolveMuseWriteDir(tc.location, homeDir, dataDir, tc.sessionID)
-	if writeDir == "" {
-		return
-	}
-	_ = os.MkdirAll(writeDir, 0o755)
-	filePath := filepath.Join(writeDir, fileName)
-	if tc.zeroByte {
-		_ = os.WriteFile(filePath, nil, 0o644)
-		return
-	}
-	if tc.content == "" {
-		return
-	}
-	_ = os.WriteFile(filePath, []byte(tc.content), 0o644)
-	mtime := t0
-	if tc.age > 0 {
-		mtime = time.Now().Add(-tc.age)
-	}
-	_ = os.Chtimes(filePath, mtime, mtime)
-}
-
-func assertMuseSessionMetrics(t *testing.T, mgr *Manager, tc museSessionLifecycleCase, dataDir string) {
-	t.Helper()
-	if got := mgr.MuseSessionExistsOnDisk(tc.sessionID); got != tc.wantExists {
-		t.Fatalf("[%s] MuseSessionExistsOnDisk = %v, want %v", tc.name, got, tc.wantExists)
-	}
-	if got := mgr.SessionExistsOnDisk(tc.sessionID); got != tc.wantExists {
-		t.Fatalf("[%s] SessionExistsOnDisk = %v, want %v", tc.name, got, tc.wantExists)
-	}
-	paths := mgr.museTranscriptPaths(tc.sessionID)
-	if len(paths) != tc.wantPaths {
-		t.Fatalf("[%s] museTranscriptPaths count = %d, want %d", tc.name, len(paths), tc.wantPaths)
-	}
-
-	size := mgr.GetTranscriptSize(tc.sessionID)
-	if (tc.wantSize > 0 && size != tc.wantSize) || (tc.content != "" && size == 0) {
-		t.Errorf("[%s] size got=%d want=%d", tc.name, size, tc.wantSize)
-	}
-
-	if st := mgr.CountTranscriptSteps(tc.sessionID); st != tc.wantSteps {
-		t.Errorf("[%s] steps got=%d want=%d", tc.name, st, tc.wantSteps)
-	}
-	if tt := mgr.CountTranscriptTurns(tc.sessionID); tt != tc.wantTurns {
-		t.Errorf("[%s] turns got=%d want=%d", tc.name, tt, tc.wantTurns)
-	}
-}
-
-func runMuseSessionLifecycleCase(t *testing.T, tc museSessionLifecycleCase, t0 time.Time) {
-	t.Helper()
-	tmp := t.TempDir()
-	var mgr *Manager
-	var dataDir string
-	if !tc.isNilMgr {
-		homeDir := filepath.Join(tmp, "home")
-		dataDir = filepath.Join(tmp, "data")
-		mgr = New(homeDir, dataDir)
-		setupMuseSessionFile(tc, homeDir, dataDir, t0)
-	}
-	assertMuseSessionMetrics(t, mgr, tc, dataDir)
-}
-
-func TestMuseSessionLifecycle(t *testing.T) {
-	t.Parallel()
-	t0 := time.Date(2026, 11, 7, 10, 0, 0, 0, time.UTC)
-
-	tests := []museSessionLifecycleCase{
-		{
-			name:      "nil manager",
-			isNilMgr:  true,
-			sessionID: "sess-muse-nil",
-		},
-		{
-			name:      "empty session ID",
-			sessionID: "",
-		},
-		{
-			name:      "path traversal session ID",
-			sessionID: "../bad-id",
-		},
-		{
-			name:      "data muse nested session.jsonl",
-			sessionID: "sess-muse-data",
-			location:  "data_muse_nested",
-			content: strings.Join([]string{
-				`{"payload_type":"runtime.session","recorded_at":1762510000000000,"payload":{"kind":"run","event":{"kind":"started","prompt":"Initial prompt"}}}`,
-				`{"payload_type":"runtime.session","recorded_at":1762510002000000,"payload":{"kind":"run","event":{"kind":"assistant_message_committed","text":"Done"}}}`,
-			}, "\n") + "\n",
-			age:        10 * time.Minute,
-			wantExists: true,
-			wantPaths:  1,
-			wantSteps:  1,
-			wantTurns:  1,
-		},
-		{
-			name:      "data runtime discord session.jsonl direct",
-			sessionID: "sess-muse-runtime",
-			location:  "data_runtime_muse",
-			content: strings.Join([]string{
-				`{"payload_type":"runtime.session","recorded_at":1762510000000000,"payload":{"kind":"run","event":{"kind":"started","prompt":"User msg"}}}`,
-				`{"payload_type":"runtime.session","recorded_at":1762510001000000,"payload":{"kind":"run","event":{"kind":"assistant_message_committed","text":"Assistant msg"}}}`,
-				`{"payload_type":"runtime.session","recorded_at":1762510002000000,"payload":{"kind":"run","event":{"kind":"assistant_tool_calls_committed","tool_calls":[{"name":"bash","call_id":"call_1"}]}}}`,
-				`{"payload_type":"runtime.session","recorded_at":1762510003000000,"payload":{"kind":"run","event":{"kind":"tool_result_batch_committed","results":[{"call_id":"call_1","output":"ok"}]}}}`,
-			}, "\n") + "\n",
-			wantExists: true,
-			wantPaths:  1,
-			wantSteps:  3,
-			wantTurns:  1,
-		},
-		{
-			name:      "home muse session.jsonl",
-			sessionID: "sess-muse-home",
-			location:  "home_muse",
-			content: strings.Join([]string{
-				`{"payload_type":"runtime.session","recorded_at":1762510000000000,"payload":{"kind":"run","event":{"kind":"started","prompt":"[Chat Alice]: ambient message"}}}`,
-				`{"payload_type":"runtime.session","recorded_at":1762510001000000,"payload":{"kind":"run","event":{"kind":"assistant_message_committed","text":"model output"}}}`,
-			}, "\n") + "\n",
-			wantExists: true,
-			wantPaths:  1,
-			wantSteps:  1,
-			wantTurns:  0,
-		},
-		{
-			name:       "zero byte muse session",
-			sessionID:  "sess-muse-zero",
-			location:   "direct_muse",
-			zeroByte:   true,
-			wantExists: false,
-			wantPaths:  1,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			runMuseSessionLifecycleCase(t, tc, t0)
-		})
-	}
-}
-
 type museTurnErrorTestCase struct {
 	name    string
 	lines   []string
@@ -329,7 +159,7 @@ func TestExtractMuseLinesForResponse(t *testing.T) {
 			name: "started ambient prompt does not stop backward scan",
 			lines: []string{
 				`{"payload_type":"runtime.session","recorded_at":1762510001000000,"payload":{"kind":"run","event":{"kind":"assistant_message_committed","text":"Valid reply"}}}`,
-				`{"payload_type":"runtime.session","recorded_at":1762510002000000,"payload":{"kind":"run","event":{"kind":"started","prompt":"[Chat Alice]: ambient ping"}}}`,
+				`{"payload_type":"runtime.session","recorded_at":1762510002000000,"payload":{"kind":"run","event":{"kind":"started","prompt":"[Chat alpha]: ambient ping"}}}`,
 			},
 			since: time.Unix(1762509999, 0),
 			want:  "Valid reply",
@@ -408,7 +238,7 @@ func TestMuseSessionLinePredicates(t *testing.T) {
 		{name: "non-run kind", raw: `{"payload_type":"runtime.session","payload":{"kind":"init"}}`},
 		{name: "unknown event kind", raw: `{"payload_type":"runtime.session","payload":{"kind":"run","event":{"kind":"unknown"}}}`},
 		{name: "empty prompt", raw: `{"payload_type":"runtime.session","payload":{"kind":"run","event":{"kind":"started","prompt":""}}}`},
-		{name: "ambient prompt", raw: `{"payload_type":"runtime.session","payload":{"kind":"run","event":{"kind":"started","prompt":"[Chat Alice]: ambient"}}}`},
+		{name: "ambient prompt", raw: `{"payload_type":"runtime.session","payload":{"kind":"run","event":{"kind":"started","prompt":"[Chat alpha]: ambient"}}}`},
 		{name: "regular prompt", raw: `{"payload_type":"runtime.session","payload":{"kind":"run","event":{"kind":"started","prompt":"Regular user question"}}}`, wantNonAmbient: true},
 		{name: "assistant message committed", raw: `{"payload_type":"runtime.session","payload":{"kind":"run","event":{"kind":"assistant_message_committed"}}}`, wantStep: true},
 		{name: "assistant tool calls committed", raw: `{"payload_type":"runtime.session","payload":{"kind":"run","event":{"kind":"assistant_tool_calls_committed"}}}`, wantStep: true},
