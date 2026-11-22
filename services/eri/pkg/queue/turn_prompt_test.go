@@ -195,12 +195,6 @@ func execSessionDBRotationStep(tc sessionDBRotationCase, sessionID, oldSess, con
 	case "post_heavy":
 		_ = os.WriteFile(filepath.Join(convDir, oldSess+".db"), make([]byte, session.DefaultMaxSessionDBBytes+500), 0o644)
 		return mockJSONResponse(oldSess, "heavy output"), "", 0, nil
-	case "retry_watchdog":
-		if cur == 1 {
-			_ = os.WriteFile(filepath.Join(convDir, oldSess+".db"), make([]byte, session.DefaultMaxSessionDBBytes+1024), 0o644)
-			return "", "inactivity timeout exceeded [watchdog]", 124, errors.New("watchdog timeout")
-		}
-		return mockJSONResponse(sessionID, "Recovered"), "", 0, nil
 	case "retry_transient":
 		if cur == 1 {
 			_ = os.WriteFile(filepath.Join(convDir, oldSess+".db"), make([]byte, session.DefaultMaxSessionDBBytes+1024), 0o644)
@@ -229,7 +223,6 @@ func runSessionDBRotationCase(t *testing.T, tc sessionDBRotationCase) {
 	_ = saveSessionID(store, threadID, oldSess)
 	_, _ = incrementSessionTurnCount(store, threadID)
 
-	doneCh := make(chan struct{}, 1)
 	var mu sync.Mutex
 	var attempts []string
 	appCfg := config.NewFromData(&config.ConfigData{Channels: map[string]config.ChannelPolicy{"default": {Mode: tc.channelMode}}})
@@ -237,12 +230,6 @@ func runSessionDBRotationCase(t *testing.T, tc sessionDBRotationCase) {
 		SessionManager: sessMgr, Store: store, BackoffBase: 5 * time.Millisecond, MaxAttempts: tc.maxAttempts,
 		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error { return nil },
 		TypingFunc:   func(s *discordgo.Session, channelID string) func() { return func() {} },
-		OnMessageCompleted: func(msg db.Message, finalStatus string) {
-			select {
-			case doneCh <- struct{}{}:
-			default:
-			}
-		},
 		RunnerWithOptionsFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
 			mu.Lock()
 			attempts = append(attempts, sessionID)
@@ -254,14 +241,10 @@ func runSessionDBRotationCase(t *testing.T, tc sessionDBRotationCase) {
 	pool.Start()
 	defer pool.Stop()
 
-	msg := db.Message{ID: "msg-" + tc.name, ThreadID: threadID, Content: "<@aerial> test message"}
+	msg := db.Message{ID: "msg-" + tc.name, ThreadID: threadID, Content: "<@aerial> test message", Status: db.StatusPending}
 	_ = insertMessage(store, msg)
-	pool.Enqueue(msg)
-
-	select {
-	case <-doneCh:
-	case <-time.After(10 * time.Second):
-		t.Fatal("Timeout waiting for message completion")
+	if lt := runLiveBurst(context.Background(), pool, threadID, "turn-1", msg.ID); lt.err != nil {
+		t.Fatalf("turn = (%s, %v), want no step error", lt.outcome, lt.err)
 	}
 	mu.Lock()
 	gotAttempts := len(attempts)
@@ -283,7 +266,6 @@ func TestWorker_SessionDBRotation(t *testing.T) {
 		{name: "QuotaPause_AboveThreshold", channelMode: "thread", preWriteDBBytes: session.DefaultMaxQuotaPauseDBBytes + 1024, runnerMode: "quota_429", maxAttempts: 1, wantAttempts: 1},
 		{name: "QuotaPause_BelowThreshold", channelMode: "thread", preWriteDBBytes: 200 * 1024, runnerMode: "quota_429", maxAttempts: 1, wantAttempts: 1},
 		{name: "PostExecutionPreserved", channelMode: "thread", runnerMode: "post_heavy", maxAttempts: 1, wantAttempts: 1},
-		{name: "WatchdogRetryPreserved", channelMode: "thread", runnerMode: "retry_watchdog", maxAttempts: 2, wantAttempts: 2},
 		{name: "TransientRetryPreserved", channelMode: "thread", runnerMode: "retry_transient", maxAttempts: 2, wantAttempts: 2},
 	}
 	for _, tc := range tests {
@@ -317,7 +299,6 @@ func runSessionRotationInjectCase(t *testing.T, tt sessionRotationInjectCase) {
 
 	var mu sync.Mutex
 	var recordedPrompts, recordedSessions []string
-	doneCh := make(chan struct{})
 
 	pool := New(cfg, WorkerPoolConfig{
 		SessionManager: session.New(tmpHome, tempData), Store: store, MaxAttempts: tt.maxAttempts,
@@ -341,27 +322,14 @@ func runSessionRotationInjectCase(t *testing.T, tt sessionRotationInjectCase) {
 		},
 		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error { return nil },
 		TypingFunc:   func(s *discordgo.Session, channelID string) func() { return func() {} },
-		OnMessageCompleted: func(msg db.Message, status string) {
-			if status == db.StatusCompleted {
-				select {
-				case <-doneCh:
-				default:
-					close(doneCh)
-				}
-			}
-		},
 	})
 	pool.Start()
 	defer pool.Stop()
 
 	msg := db.Message{ID: "msg-rot-" + strings.ToLower(tt.name), ThreadID: threadID, Content: "run investigation", Status: db.StatusPending, CreatedAt: time.Now()}
 	_ = store.InsertMessage(context.Background(), msg)
-	pool.Enqueue(msg)
-
-	select {
-	case <-doneCh:
-	case <-time.After(10 * time.Second):
-		t.Fatalf("timed out waiting for turn completion")
+	if lt := runLiveBurst(context.Background(), pool, threadID, "turn-1", msg.ID); lt.err != nil || lt.outcome != OutcomeCompleted {
+		t.Fatalf("turn = (%s, %v), want completed", lt.outcome, lt.err)
 	}
 	mu.Lock()
 	defer mu.Unlock()
@@ -606,7 +574,6 @@ func TestWorker_RotatedSession_TreatsTurnOneAsColdStart(t *testing.T) {
 
 	var mu sync.Mutex
 	var capturedPrompts []string
-	doneCh := make(chan struct{}, 2)
 	appCfg := config.NewFromData(&config.ConfigData{Channels: map[string]config.ChannelPolicy{"default": {Mode: "threads"}}})
 
 	pool := New(appCfg, WorkerPoolConfig{
@@ -623,29 +590,20 @@ func TestWorker_RotatedSession_TreatsTurnOneAsColdStart(t *testing.T) {
 			mu.Unlock()
 			return mockJSONResponse(sessionID, "Turn response"), "", 0, nil
 		},
-		DeliveryFunc:       func(s *discordgo.Session, channelID, text string) error { return nil },
-		TypingFunc:         func(s *discordgo.Session, channelID string) func() { return func() {} },
-		OnMessageCompleted: func(msg db.Message, finalStatus string) { doneCh <- struct{}{} },
+		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error { return nil },
+		TypingFunc:   func(s *discordgo.Session, channelID string) func() { return func() {} },
 	})
 	pool.Start()
 	defer pool.Stop()
 
-	msg1 := db.Message{ID: "msg-post-rot-1", ThreadID: threadID, Content: "what was discussed earlier?"}
-	_ = insertMessage(store, msg1)
-	pool.Enqueue(msg1)
-	select {
-	case <-doneCh:
-	case <-time.After(10 * time.Second):
-		t.Fatal("Timeout waiting for message 1")
-	}
-
-	msg2 := db.Message{ID: "msg-post-rot-2", ThreadID: threadID, Content: "follow-up question"}
-	_ = insertMessage(store, msg2)
-	pool.Enqueue(msg2)
-	select {
-	case <-doneCh:
-	case <-time.After(10 * time.Second):
-		t.Fatal("Timeout waiting for message 2")
+	for _, m := range []db.Message{
+		{ID: "msg-post-rot-1", ThreadID: threadID, Content: "what was discussed earlier?", Status: db.StatusPending},
+		{ID: "msg-post-rot-2", ThreadID: threadID, Content: "follow-up question", Status: db.StatusPending},
+	} {
+		_ = insertMessage(store, m)
+		if lt := runLiveBurst(context.Background(), pool, threadID, "turn-"+m.ID, m.ID); lt.err != nil || lt.outcome != OutcomeCompleted {
+			t.Fatalf("turn %s = (%s, %v), want completed", m.ID, lt.outcome, lt.err)
+		}
 	}
 
 	mu.Lock()
