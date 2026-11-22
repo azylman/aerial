@@ -1,7 +1,8 @@
-package main
+package config
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/url"
@@ -19,6 +20,15 @@ var (
 	asinPattern        = regexp.MustCompile(`^[A-Za-z0-9]{10}$`)
 	evalBlockedPattern = regexp.MustCompile(`(?i)\b(?:fetch\s*\(|XMLHttpRequest\b)|(?:\.\s*|\?\.\s*)click\s*\(`)
 )
+
+// UnmarshalOptional decodes raw into dst when present, leaving dst untouched on empty or invalid input.
+func UnmarshalOptional(raw []byte, dst any) {
+	if len(raw) > 0 {
+		if err := json.Unmarshal(raw, dst); err != nil {
+			return
+		}
+	}
+}
 
 // ValidateEvaluateExpression blocks in-page scraping bursts (fetch/XMLHttpRequest) and untrusted synthetic DOM clicks (.click()).
 func ValidateEvaluateExpression(expr string) error {
@@ -337,8 +347,8 @@ type ConfigYAML struct {
 	SettleDelay string `yaml:"settle_delay"`
 }
 
-// parseURLHostPort extracts host and port from a URL string if valid.
-func parseURLHostPort(raw string) (string, string) {
+// ParseURLHostPort extracts host and port from a URL string if valid.
+func ParseURLHostPort(raw string) (string, string) {
 	if raw == "" {
 		return "", ""
 	}
@@ -415,7 +425,7 @@ func applyYAMLFile(cfg *Config, configPath string) error {
 func applyEnvOverrides(cfg *Config, getenv func(string) string) {
 	for _, envURL := range []string{"KERNEL_CDP_URL", "KERNEL_API_URL"} {
 		if val := strings.TrimSpace(getenv(envURL)); val != "" {
-			h, p := parseURLHostPort(val)
+			h, p := ParseURLHostPort(val)
 			if h != "" {
 				cfg.CDPHost = h
 			}
