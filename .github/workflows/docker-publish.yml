@@ -148,6 +148,12 @@ jobs:
             [ "$FAILED_ANY" -eq 0 ]
           fi
 
+      # Real-Restate tests (build tag restateintegration) run against a pinned
+      # restate-server binary; the script fetches and sha256-checks it.
+      - name: Run Real-Restate Integration Tests
+        if: needs.changes.outputs.eri == 'true' || needs.changes.outputs.eri-restate == 'true' || inputs.force_all == true
+        run: bash scripts/restate-integration-test.sh
+
       - name: Hold Failure Until RoboRev Completes
         if: failure() && github.event_name == 'pull_request' && github.actor != 'dependabot[bot]'
         env:
