@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -136,97 +138,47 @@ func TestRewriteWSUrl(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name     string
-		rawWS    string
-		host     string
-		port     string
-		expected string
+		name, rawWS, host, port, want string
 	}{
 		{
-			"url with no path and no trailing slash",
-			"http://example.com",
-			"browser.aerial",
-			"9222",
-			"ws://browser.aerial:9222",
+			name:  "url with no path and no trailing slash",
+			rawWS: "http://example.com", host: "browser.aerial", port: "9222", want: "ws://browser.aerial:9222",
 		},
 		{
-			"standard cdp ws url",
-			"ws://127.0.0.1:9222/devtools/page/abc123",
-			"browser.aerial",
-			"9222",
-			"ws://browser.aerial:9222/devtools/page/abc123",
+			name:  "standard cdp ws url",
+			rawWS: "ws://127.0.0.1:9222/devtools/page/abc123", host: "browser.aerial", port: "9222", want: "ws://browser.aerial:9222/devtools/page/abc123",
 		},
 		{
-			"relative path only",
-			"/devtools/page/target1",
-			"localhost",
-			"4000",
-			"ws://localhost:4000/devtools/page/target1",
+			name:  "relative path only",
+			rawWS: "/devtools/page/target1", host: "localhost", port: "4000", want: "ws://localhost:4000/devtools/page/target1",
+		},
+		{name: "scheme with empty path", rawWS: "ws://", host: "localhost", port: "4000", want: "ws://localhost:4000"},
+		{
+			name:  "url with query params",
+			rawWS: "ws://oldhost:9000/ws?token=xyz", host: "newhost", port: "9222", want: "ws://newhost:9222/ws?token=xyz",
+		},
+		{name: "empty port", rawWS: "ws://oldhost/path", host: "newhost", want: "ws://newhost/path"},
+		{name: "empty raw url", host: "host.aerial", port: "9222", want: "ws://host.aerial:9222"},
+		{name: "invalid raw url fallback", rawWS: "http://[::1]:namedport", host: "browser.aerial", port: "9222", want: "ws://browser.aerial:9222"},
+		{
+			name:  "invalid raw url with slash prefix",
+			rawWS: "http://[::1]:namedport/dev/page", host: "browser.aerial", port: "9222", want: "ws://browser.aerial:9222",
 		},
 		{
-			"scheme with empty path",
-			"ws://",
-			"localhost",
-			"4000",
-			"ws://localhost:4000",
+			name:  "non-url path with leading slash",
+			rawWS: "/dev/page", host: "browser.aerial", port: "9222", want: "ws://browser.aerial:9222/dev/page",
 		},
 		{
-			"url with query params",
-			"ws://oldhost:9000/ws?token=xyz",
-			"newhost",
-			"9222",
-			"ws://newhost:9222/ws?token=xyz",
-		},
-		{
-			"empty port",
-			"ws://oldhost/path",
-			"newhost",
-			"",
-			"ws://newhost/path",
-		},
-		{
-			"empty raw url",
-			"",
-			"host.aerial",
-			"9222",
-			"ws://host.aerial:9222",
-		},
-		{
-			"invalid raw url fallback",
-			"http://[::1]:namedport",
-			"browser.aerial",
-			"9222",
-			"ws://browser.aerial:9222",
-		},
-		{
-			"invalid raw url with slash prefix",
-			"http://[::1]:namedport/dev/page",
-			"browser.aerial",
-			"9222",
-			"ws://browser.aerial:9222",
-		},
-		{
-			"non-url path with leading slash",
-			"/dev/page",
-			"browser.aerial",
-			"9222",
-			"ws://browser.aerial:9222/dev/page",
-		},
-		{
-			"invalid url parse with leading slash and newline",
-			"/devtools/page\n",
-			"browser.aerial",
-			"9222",
-			"ws://browser.aerial:9222/devtools/page\n",
+			name:  "invalid url parse with leading slash and newline",
+			rawWS: "/devtools/page\n", host: "browser.aerial", port: "9222", want: "ws://browser.aerial:9222/devtools/page\n",
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := RewriteWSUrl(tc.rawWS, tc.host, tc.port)
-			if got != tc.expected {
-				t.Fatalf("RewriteWSUrl(%q, %q, %q) = %q, want %q", tc.rawWS, tc.host, tc.port, got, tc.expected)
+			if got := RewriteWSUrl(tc.rawWS, tc.host, tc.port); got != tc.want {
+				t.Fatalf("RewriteWSUrl(%q, %q, %q) = %q, want %q", tc.rawWS, tc.host, tc.port, got, tc.want)
 			}
 		})
 	}
@@ -235,34 +187,36 @@ func TestRewriteWSUrl(t *testing.T) {
 func TestResolveCDPHost(t *testing.T) {
 	t.Parallel()
 
+	errLookup := errors.New("lookup failed")
 	tests := []struct {
-		name     string
-		host     string
-		expected string
+		name        string
+		host        string
+		lookupAddrs []string
+		lookupErr   error
+		want        string
 	}{
-		{"empty string defaults to 127.0.0.1", "", "127.0.0.1"},
-		{"localhost passes through", "localhost", "localhost"},
-		{"::1 passes through", "::1", "::1"},
-		{"literal IPv4 passes through", "192.0.2.100", "192.0.2.100"},
-		{"literal IPv6 passes through", "2001:db8::1", "2001:db8::1"},
-		{"unresolvable domain returns host", "nonexistent.domain.invalid", "nonexistent.domain.invalid"},
+		{name: "empty string defaults to 127.0.0.1", want: "127.0.0.1"},
+		{name: "localhost passes through", host: "localhost", want: "localhost"},
+		{name: "::1 passes through", host: "::1", want: "::1"},
+		{name: "literal IPv4 passes through", host: "192.0.2.100", want: "192.0.2.100"},
+		{name: "literal IPv6 passes through", host: "2001:db8::1", want: "2001:db8::1"},
+		{
+			name: "mixed v6 and v4 returns first IPv4",
+			host: "browser.example.com", lookupAddrs: []string{"2001:db8::2", "192.0.2.7", "192.0.2.8"}, want: "192.0.2.7",
+		},
+		{name: "v6 only returns first addr", host: "browser.example.com", lookupAddrs: []string{"2001:db8::3", "2001:db8::4"}, want: "2001:db8::3"},
+		{name: "lookup error returns host", host: "browser.example.com", lookupErr: errLookup, want: "browser.example.com"},
+		{name: "empty lookup result returns host", host: "browser.example.com", lookupAddrs: []string{}, want: "browser.example.com"},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := ResolveCDPHost(context.Background(), tc.host)
-			if got != tc.expected {
-				t.Fatalf("ResolveCDPHost(%q) = %q, want %q", tc.host, got, tc.expected)
+			lookup := func(context.Context, string) ([]string, error) { return tc.lookupAddrs, tc.lookupErr }
+			if got := ResolveCDPHost(context.Background(), tc.host, lookup); got != tc.want {
+				t.Fatalf("ResolveCDPHost(%q) = %q, want %q", tc.host, got, tc.want)
 			}
 		})
-	}
-
-	if h, err := os.Hostname(); err == nil && h != "" {
-		res := ResolveCDPHost(context.Background(), h)
-		if res == "" {
-			t.Fatalf("expected non-empty IP for hostname %s", h)
-		}
 	}
 }
 
@@ -367,202 +321,75 @@ func TestParseURLHostPort(t *testing.T) {
 	}
 }
 
-type kernelLoadConfigCase struct {
-	name        string
-	path        string
-	envKey      string
-	envVal      string
-	wantPort    string
-	wantHost    string
-	wantCDPPort string
-	wantDelay   time.Duration
-	wantErr     bool
-}
-
-func kernelLoadConfigTestCases(tmpDir, validYAMLPath, emptyYAMLPath, invalidYAMLPath string) []kernelLoadConfigCase {
-	return []kernelLoadConfigCase{
-		{
-			name:        "nonexistent path returns default config",
-			path:        filepath.Join(tmpDir, "does-not-exist.yaml"),
-			wantPort:    "4018",
-			wantHost:    "",
-			wantCDPPort: "9222",
-			wantDelay:   500 * time.Millisecond,
-			wantErr:     false,
-		},
-		{
-			name:        "empty path returns default config",
-			path:        "",
-			wantPort:    "4018",
-			wantHost:    "",
-			wantCDPPort: "9222",
-			wantDelay:   500 * time.Millisecond,
-			wantErr:     false,
-		},
-		{
-			name:        "empty file returns default config",
-			path:        emptyYAMLPath,
-			wantPort:    "4018",
-			wantHost:    "",
-			wantCDPPort: "9222",
-			wantDelay:   500 * time.Millisecond,
-			wantErr:     false,
-		},
-		{
-			name:        "valid YAML loaded successfully",
-			path:        validYAMLPath,
-			wantPort:    "4099",
-			wantHost:    "custom.aerial",
-			wantCDPPort: "9333",
-			wantDelay:   250 * time.Millisecond,
-			wantErr:     false,
-		},
-		{
-			name:    "invalid YAML returns error",
-			path:    invalidYAMLPath,
-			wantErr: true,
-		},
-		{
-			name:    "directory path returns read error",
-			path:    tmpDir,
-			wantErr: true,
-		},
-		{
-			name:        "env PORT override",
-			path:        validYAMLPath,
-			envKey:      "PORT",
-			envVal:      "5055",
-			wantPort:    "5055",
-			wantHost:    "custom.aerial",
-			wantCDPPort: "9333",
-			wantDelay:   250 * time.Millisecond,
-			wantErr:     false,
-		},
-		{
-			name:        "env CDP_HOST override",
-			path:        validYAMLPath,
-			envKey:      "CDP_HOST",
-			envVal:      "env-cdp.lan",
-			wantPort:    "4099",
-			wantHost:    "env-cdp.lan",
-			wantCDPPort: "9333",
-			wantDelay:   250 * time.Millisecond,
-			wantErr:     false,
-		},
-		{
-			name:        "env CDP_PORT override",
-			path:        validYAMLPath,
-			envKey:      "CDP_PORT",
-			envVal:      "9876",
-			wantPort:    "4099",
-			wantHost:    "custom.aerial",
-			wantCDPPort: "9876",
-			wantDelay:   250 * time.Millisecond,
-			wantErr:     false,
-		},
-		{
-			name:        "env KERNEL_CDP_URL override",
-			path:        validYAMLPath,
-			envKey:      "KERNEL_CDP_URL",
-			envVal:      "http://cdp.lan:9999",
-			wantPort:    "4099",
-			wantHost:    "cdp.lan",
-			wantCDPPort: "9999",
-			wantDelay:   250 * time.Millisecond,
-			wantErr:     false,
-		},
-		{
-			name:        "env KERNEL_API_URL override",
-			path:        validYAMLPath,
-			envKey:      "KERNEL_API_URL",
-			envVal:      "http://kernel.lan:9111",
-			wantPort:    "4099",
-			wantHost:    "kernel.lan",
-			wantCDPPort: "9111",
-			wantDelay:   250 * time.Millisecond,
-			wantErr:     false,
-		},
-		{
-			name:        "env SETTLE_DELAY override",
-			path:        validYAMLPath,
-			envKey:      "SETTLE_DELAY",
-			envVal:      "10ms",
-			wantPort:    "4099",
-			wantHost:    "custom.aerial",
-			wantCDPPort: "9333",
-			wantDelay:   10 * time.Millisecond,
-			wantErr:     false,
-		},
-		{
-			name:        "nonexistent YAML file returns default config",
-			path:        filepath.Join(tmpDir, "does-not-exist.yaml"),
-			wantPort:    "4018",
-			wantHost:    "",
-			wantCDPPort: "9222",
-			wantDelay:   500 * time.Millisecond,
-			wantErr:     false,
-		},
-	}
-}
-
-func runKernelLoadConfigCase(t *testing.T, tc kernelLoadConfigCase) {
-	t.Helper()
-	env := map[string]string{}
-	if tc.envKey != "" {
-		env[tc.envKey] = tc.envVal
-	}
-	cfg, err := LoadConfig(tc.path, func(k string) string { return env[k] })
-	if tc.wantErr {
-		if err == nil {
-			t.Fatalf("LoadConfig(%q) expected error, got nil", tc.path)
-		}
-		return
-	}
-	if err != nil {
-		t.Fatalf("LoadConfig(%q) unexpected error: %v", tc.path, err)
-	}
-	if cfg.Port != tc.wantPort {
-		t.Fatalf("Port = %q, want %q", cfg.Port, tc.wantPort)
-	}
-	if cfg.CDPHost != tc.wantHost {
-		t.Fatalf("CDPHost = %q, want %q", cfg.CDPHost, tc.wantHost)
-	}
-	if cfg.CDPPort != tc.wantCDPPort {
-		t.Fatalf("CDPPort = %q, want %q", cfg.CDPPort, tc.wantCDPPort)
-	}
-	if cfg.SettleDelay != tc.wantDelay {
-		t.Fatalf("SettleDelay = %v, want %v", cfg.SettleDelay, tc.wantDelay)
-	}
-}
-
 func TestLoadConfig(t *testing.T) {
+	t.Parallel()
+
+	const ms = time.Millisecond
 	tmpDir := t.TempDir()
-
-	validYAMLPath := filepath.Join(tmpDir, "config.yaml")
-	if err := os.WriteFile(validYAMLPath, []byte(`
-port: "4099"
-cdp_host: "custom.aerial"
-cdp_port: "9333"
-settle_delay: "250ms"
-`), 0o600); err != nil {
-		t.Fatal(err)
+	files := map[string]string{
+		"config.yaml": "port: \"4099\"\ncdp_host: \"custom.aerial\"\ncdp_port: \"9333\"\nsettle_delay: \"250ms\"\n",
+		"empty.yaml":  "",
+		"bad.yaml":    "port: [invalid",
 	}
-
-	emptyYAMLPath := filepath.Join(tmpDir, "empty.yaml")
-	if err := os.WriteFile(emptyYAMLPath, []byte(""), 0o600); err != nil {
-		t.Fatal(err)
+	for name, body := range files {
+		if err := os.WriteFile(filepath.Join(tmpDir, name), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
 	}
+	valid := filepath.Join(tmpDir, "config.yaml")
+	defaults := Config{"4018", "", "9222", 500 * ms}
+	fromYAML := Config{"4099", "custom.aerial", "9333", 250 * ms}
 
-	invalidYAMLPath := filepath.Join(tmpDir, "bad.yaml")
-	if err := os.WriteFile(invalidYAMLPath, []byte(`port: [invalid`), 0o600); err != nil {
-		t.Fatal(err)
+	tests := []struct {
+		name           string
+		path           string
+		envKey, envVal string
+		want           Config
+		wantErr        string
+	}{
+		{name: "nonexistent path returns default config", path: filepath.Join(tmpDir, "does-not-exist.yaml"), want: defaults},
+		{name: "empty path returns default config", want: defaults},
+		{name: "empty file returns default config", path: filepath.Join(tmpDir, "empty.yaml"), want: defaults},
+		{name: "valid YAML loaded successfully", path: valid, want: fromYAML},
+		{name: "invalid YAML returns error", path: filepath.Join(tmpDir, "bad.yaml"), wantErr: "failed to parse config YAML from"},
+		{name: "directory path returns read error", path: tmpDir, wantErr: "failed to read config file"},
+		{name: "env PORT override", path: valid, envKey: "PORT", envVal: "5055", want: Config{"5055", "custom.aerial", "9333", 250 * ms}},
+		{
+			name: "env CDP_HOST override",
+			path: valid, envKey: "CDP_HOST", envVal: "env-cdp.lan", want: Config{"4099", "env-cdp.lan", "9333", 250 * ms},
+		},
+		{name: "env CDP_PORT override", path: valid, envKey: "CDP_PORT", envVal: "9876", want: Config{"4099", "custom.aerial", "9876", 250 * ms}},
+		{
+			name: "env KERNEL_CDP_URL override",
+			path: valid, envKey: "KERNEL_CDP_URL", envVal: "http://cdp.lan:9999", want: Config{"4099", "cdp.lan", "9999", 250 * ms},
+		},
+		{
+			name: "env KERNEL_API_URL override",
+			path: valid, envKey: "KERNEL_API_URL", envVal: "http://kernel.lan:9111", want: Config{"4099", "kernel.lan", "9111", 250 * ms},
+		},
+		{
+			name: "env SETTLE_DELAY override",
+			path: valid, envKey: "SETTLE_DELAY", envVal: "10ms", want: Config{"4099", "custom.aerial", "9333", 10 * ms},
+		},
 	}
-
-	tests := kernelLoadConfigTestCases(tmpDir, validYAMLPath, emptyYAMLPath, invalidYAMLPath)
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			runKernelLoadConfigCase(t, tc)
+			t.Parallel()
+			env := map[string]string{tc.envKey: tc.envVal}
+			cfg, err := LoadConfig(tc.path, func(k string) string { return env[k] })
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("LoadConfig(%q) error = %v, want substring %q", tc.path, err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("LoadConfig(%q) unexpected error: %v", tc.path, err)
+			}
+			if !reflect.DeepEqual(*cfg, tc.want) {
+				t.Fatalf("LoadConfig(%q) = %+v, want %+v", tc.path, *cfg, tc.want)
+			}
 		})
 	}
 }
