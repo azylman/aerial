@@ -34,8 +34,7 @@
             "metadata": {
               "agent": "miorine",
               "bot_id": "miorine"
-            },
-            "effects_owner": "restate"
+            }
           }
         }
       ],
@@ -58,8 +57,7 @@
             "branch": "feat/miorine-stale-head",
             "title": "Miorine stale head",
             "target_id": "100000000000000002",
-            "agent": "miorine",
-            "effects_owner": "legacy"
+            "agent": "miorine"
           }
         },
         {
@@ -72,8 +70,7 @@
             "before_sha": "79e9dfc200000000000000000000000000002308",
             "branch": "feat/miorine-stale-head",
             "title": "Miorine stale head",
-            "agent": "miorine",
-            "effects_owner": "legacy"
+            "agent": "miorine"
           }
         }
       ],
@@ -88,7 +85,6 @@
             "before_sha": "79e9dfc200000000000000000000000000002308",
             "branch": "feat/miorine-stale-head",
             "title": "Miorine stale head",
-            "effects_owner": "restate",
             "facts": [
               {
                 "event": "synchronize",
@@ -110,8 +106,7 @@
           "event": {
             "repo": "azylman/aerial",
             "head_sha": "701c341c00000000000000000000000000002308",
-            "check_name": "ci",
-            "effects_owner": "legacy"
+            "check_name": "ci"
           }
         }
       },
@@ -174,8 +169,7 @@
             "metadata": {
               "agent": "miorine",
               "bot_id": "miorine"
-            },
-            "effects_owner": "restate"
+            }
           }
         },
         {
@@ -187,8 +181,7 @@
             "head_sha": "79e9dfc200000000000000000000000000002308",
             "before_sha": "c00b710c00000000000000000000000000002308",
             "branch": "feat/miorine-stale-head",
-            "title": "Miorine stale head",
-            "effects_owner": "restate"
+            "title": "Miorine stale head"
           }
         },
         {
@@ -200,8 +193,7 @@
             "head_sha": "701c341c00000000000000000000000000002308",
             "before_sha": "79e9dfc200000000000000000000000000002308",
             "branch": "feat/miorine-stale-head",
-            "title": "Miorine stale head",
-            "effects_owner": "restate"
+            "title": "Miorine stale head"
           }
         }
       ],
@@ -224,8 +216,7 @@
             "branch": "feat/miorine-stale-head",
             "title": "Miorine stale head",
             "target_id": "100000000000000002",
-            "agent": "miorine",
-            "effects_owner": "legacy"
+            "agent": "miorine"
           }
         },
         {
@@ -238,8 +229,7 @@
             "before_sha": "c00b710c00000000000000000000000000002308",
             "branch": "feat/miorine-stale-head",
             "title": "Miorine stale head",
-            "agent": "miorine",
-            "effects_owner": "legacy"
+            "agent": "miorine"
           }
         }
       ],
@@ -254,7 +244,6 @@
             "before_sha": "c00b710c00000000000000000000000000002308",
             "branch": "feat/miorine-stale-head",
             "title": "Miorine stale head",
-            "effects_owner": "restate",
             "facts": [
               {
                 "event": "synchronize",
@@ -321,8 +310,7 @@
             "metadata": {
               "agent": "miorine",
               "bot_id": "miorine"
-            },
-            "effects_owner": "restate"
+            }
           }
         }
       ],
@@ -345,8 +333,7 @@
             "branch": "feat/miorine-stale-head",
             "title": "Miorine stale head",
             "target_id": "100000000000000002",
-            "agent": "miorine",
-            "effects_owner": "legacy"
+            "agent": "miorine"
           }
         },
         {
@@ -359,8 +346,7 @@
             "before_sha": "c00b710c00000000000000000000000000002308",
             "branch": "feat/miorine-stale-head",
             "title": "Miorine stale head",
-            "agent": "miorine",
-            "effects_owner": "legacy"
+            "agent": "miorine"
           }
         }
       ],
@@ -375,7 +361,6 @@
             "before_sha": "c00b710c00000000000000000000000000002308",
             "branch": "feat/miorine-stale-head",
             "title": "Miorine stale head",
-            "effects_owner": "restate",
             "facts": [
               {
                 "event": "synchronize",
@@ -397,8 +382,7 @@
           "event": {
             "repo": "azylman/aerial",
             "head_sha": "79e9dfc200000000000000000000000000002308",
-            "check_name": "ci",
-            "effects_owner": "legacy"
+            "check_name": "ci"
           }
         }
       },

@@ -20,7 +20,7 @@ import (
 // reads PR state only from Restate (PRObject.GetDeployView,
 // GetBuildLifecycle, RepoObject.ListRollouts and ResolvePRBySHA), and sends
 // one-way observations. PRObject/RepoObject apply the transitions, publish
-// the facts, run the Flux/image/GitHub effects and write the pr_registry
+// the facts, run the Flux/image/GitHub effects and write the registry
 // projection.
 //
 //   - Kustomization watcher: the deploying set comes from the Restate

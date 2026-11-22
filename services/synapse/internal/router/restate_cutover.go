@@ -18,7 +18,7 @@ import (
 //
 // Restate PRObject (key repo#pr) and RepoObject (key repo), in the prstate
 // Restate service, are the only PR lifecycle authority:
-// they hold the state, write every pr_registry row as a journaled
+// they hold the state, write every registry row as a journaled
 // projection, and run every PR- or repo-keyed effect (eri wakes, BuildRouter
 // routes, aerial.pr.> facts, GitHub calls, Flux reconciles, image
 // promotion). Synapse has no database connection and no registry.

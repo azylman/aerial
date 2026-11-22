@@ -29,8 +29,7 @@
       "head_sha": "dbab232900000000000000000000000000002329",
       "branch": "dependabot/npm_and_yarn/services/console/ui/console-ui-npm-4f1c2e",
       "title": "chore(deps-dev): bump the console-ui-npm group",
-      "target_id": "100000000000000009",
-      "effects_owner": "legacy"
+      "target_id": "100000000000000009"
      }
     }
    ],
@@ -44,8 +43,7 @@
       "head_sha": "dbab232900000000000000000000000000002329",
       "branch": "dependabot/npm_and_yarn/services/console/ui/console-ui-npm-4f1c2e",
       "title": "chore(deps-dev): bump the console-ui-npm group",
-      "target_id": "100000000000000009",
-      "effects_owner": "restate"
+      "target_id": "100000000000000009"
      }
     },
     {
@@ -56,7 +54,6 @@
       "pr_number": 2329,
       "head_sha": "dbab232900000000000000000000000000002329",
       "branch": "dependabot/npm_and_yarn/services/console/ui/console-ui-npm-4f1c2e",
-      "effects_owner": "restate",
       "facts": [
        {
         "event": "opened",
@@ -82,7 +79,6 @@
       "pr_number": 2329,
       "head_sha": "dbab232900000000000000000000000000002329",
       "check_name": "ci",
-      "effects_owner": "legacy",
       "agent": "aerial"
      }
     },
@@ -95,7 +91,6 @@
       "head_sha": "dbab232900000000000000000000000000002329",
       "merge_sha": "81e9d8c000000000000000000000000000002329",
       "branch": "dependabot/npm_and_yarn/services/console/ui/console-ui-npm-4f1c2e",
-      "effects_owner": "legacy",
       "agent": "aerial"
      }
     },
@@ -108,7 +103,6 @@
       "head_sha": "81e9d8c000000000000000000000000000002329",
       "branch": "main",
       "agent": "aerial",
-      "effects_owner": "legacy",
       "jobs": [
        "console"
       ],
@@ -129,7 +123,6 @@
       "head_sha": "dbab232900000000000000000000000000002329",
       "merge_sha": "81e9d8c000000000000000000000000000002329",
       "job_name": "aerial-core",
-      "effects_owner": "legacy",
       "deployed_jobs": [
        "console",
        "aerial-core"
@@ -148,7 +141,6 @@
       "head_sha": "dbab232900000000000000000000000000002329",
       "merge_sha": "81e9d8c000000000000000000000000000002329",
       "job_name": "aerial-core",
-      "effects_owner": "legacy",
       "facts": [
        {
         "event": "deploy_success",
@@ -172,8 +164,7 @@
       "repo": "azylman/aerial",
       "pr_number": 2329,
       "head_sha": "dbab232900000000000000000000000000002329",
-      "check_name": "ci",
-      "effects_owner": "restate"
+      "check_name": "ci"
      }
     },
     {
@@ -184,8 +175,7 @@
       "pr_number": 2329,
       "head_sha": "dbab232900000000000000000000000000002329",
       "merge_sha": "81e9d8c000000000000000000000000000002329",
-      "branch": "dependabot/npm_and_yarn/services/console/ui/console-ui-npm-4f1c2e",
-      "effects_owner": "restate"
+      "branch": "dependabot/npm_and_yarn/services/console/ui/console-ui-npm-4f1c2e"
      }
     },
     {
@@ -197,7 +187,6 @@
       "head_sha": "81e9d8c000000000000000000000000000002329",
       "branch": "main",
       "agent": "aerial",
-      "effects_owner": "restate",
       "jobs": [
        "console"
       ],
@@ -218,7 +207,6 @@
       "head_sha": "dbab232900000000000000000000000000002329",
       "merge_sha": "81e9d8c000000000000000000000000000002329",
       "job_name": "aerial-core",
-      "effects_owner": "restate",
       "deployed_jobs": [
        "console",
        "aerial-core"
@@ -237,7 +225,6 @@
       "head_sha": "dbab232900000000000000000000000000002329",
       "merge_sha": "81e9d8c000000000000000000000000000002329",
       "job_name": "aerial-core",
-      "effects_owner": "restate",
       "facts": [
        {
         "event": "deploy_success",
@@ -331,7 +318,6 @@
       "pr_number": 2330,
       "head_sha": "aaaa230000000000000000000000000000002330",
       "branch": "feat/fix-typo",
-      "effects_owner": "restate",
       "facts": [
        {
         "event": "opened",

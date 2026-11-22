@@ -66,12 +66,11 @@ pipeline used to run, so prstate is still proven against it.
   envelope for a push with no resolved PR. The synapse
   `TestRestateOwnedLifecycleEdge` test drives each golden through the real
   accept points. It asserts that the sends match this stream handler for
-  handler, that none carries an `effects_owner` stamp, and that synapse
-  performs no effect.
+  handler and that synapse performs no effect.
 
 ## Shadow goldens (`../shadow/`)
 
-`shadow/*.json` pin the wire the deleted legacy synapse path sent with
-`effects_owner=legacy`. Synapse no longer reads them; the prstate test
+`shadow/*.json` pin the wire the deleted legacy synapse path sent, minus the
+retired ownership stamp. Synapse no longer reads them; the prstate test
 still replays `setup` plus those `shadow` sends through PRObject and
 asserts `want_state` until the prstate cleanup chunk removes them.

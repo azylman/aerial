@@ -2,8 +2,8 @@ package prstate
 
 // Shadow goldens, prstate side: testdata/prlifecycle/shadow/ pins the
 // legacy-owned wire synapse sent while it still wrote pr_registry. prstate
-// now owns every effect and ignores the retired effects_owner stamp the
-// captures still carry, so each captured event stream replays under
+// now owns every effect (the retired ownership stamp is stripped from the
+// captures), so each captured event stream replays under
 // restate ownership and must still land on the hand-derived state and
 // effects.
 // The projection-compare fields the goldens carry (divergent, superseded,

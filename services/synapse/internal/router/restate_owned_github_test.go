@@ -193,7 +193,7 @@ func aerialBody(agent, target string) string {
 
 // TestProcessGitHubEventRestateOwned proves the restate-owned GitHub path is
 // a Postgres-free edge: each webhook becomes its PRObject or RepoObject
-// sends carrying the rendered facts, with zero pr_registry calls, zero
+// sends carrying the rendered facts, with zero registry calls, zero
 // lifecycle publishes and zero outbound dispatches.
 func TestProcessGitHubEventRestateOwned(t *testing.T) {
 	t.Parallel()

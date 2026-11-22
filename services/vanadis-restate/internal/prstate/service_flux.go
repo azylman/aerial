@@ -19,10 +19,6 @@ package prstate
 // survives the step retries leaves the effect key uncommitted and schedules
 // a delayed self-send, so no exclusive object lock is held across a long
 // backoff.
-//
-// effects_owner=legacy triggers never touch the cluster: they commit the
-// effect key, record an IntendedEffect, and log [prstate-shadow] with the
-// match key synapse logs as [synapse-effect] for the write it really made.
 
 import (
 	"context"

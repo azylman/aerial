@@ -22,7 +22,7 @@ import (
 // number go to PRObject (key repo#pr), SHA-only events go to the RepoObject
 // SHA handlers, which resolve the PR from their own durable index. It asks
 // Restate for no verdicts and performs no lifecycle effect: PRObject/RepoObject decide, commit, publish facts, wake
-// agents, run GitHub/Flux effects and write the pr_registry projection.
+// agents, run GitHub/Flux effects and write the registry projection.
 //
 // Stateless reads stay here: the "(#N)" commit-message parse, the GitHub
 // commits-API PR lookup, the mergeability fetch for auto_merge_disabled, the

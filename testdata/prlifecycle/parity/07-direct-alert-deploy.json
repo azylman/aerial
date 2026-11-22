@@ -68,8 +68,7 @@
         "metadata": {
           "agent": "aerial",
           "bot_id": "aerial"
-        },
-        "effects_owner": "restate"
+        }
       }
     },
     {
@@ -88,8 +87,7 @@
             "job_name": "eri"
           }
         ],
-        "repo": "azylman/aerial",
-        "effects_owner": "restate"
+        "repo": "azylman/aerial"
       }
     },
     {
@@ -109,8 +107,7 @@
             "merge_sha": "m107"
           }
         ],
-        "repo": "azylman/aerial",
-        "effects_owner": "restate"
+        "repo": "azylman/aerial"
       }
     }
   ],

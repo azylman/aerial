@@ -27,7 +27,7 @@ type parityEffect struct {
 	Key  string `json:"key"`
 }
 
-// parityRow is the pr_registry row a lifecycle ends on.
+// parityRow is the registry row a lifecycle ends on.
 type parityRow struct {
 	Repo     string         `json:"repo"`
 	PRNumber int            `json:"pr_number"`

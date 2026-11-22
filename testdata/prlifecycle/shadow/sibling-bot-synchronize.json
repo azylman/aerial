@@ -27,8 +27,7 @@
             "title": "Miorine sibling sync",
             "agent": "miorine",
             "bot_id": "miorine",
-            "metadata": {"agent": "miorine", "bot_id": "miorine"},
-            "effects_owner": "restate"
+            "metadata": {"agent": "miorine", "bot_id": "miorine"}
           }
         }
       ],
@@ -47,8 +46,7 @@
             "branch": "feat/miorine-sibling-sync",
             "title": "Miorine sibling sync",
             "target_id": "100000000000000002",
-            "agent": "miorine",
-            "effects_owner": "legacy"
+            "agent": "miorine"
           }
         },
         {
@@ -61,8 +59,7 @@
             "before_sha": "c00b710c00000000000000000000000000002308",
             "branch": "feat/miorine-sibling-sync",
             "title": "Miorine sibling sync",
-            "agent": "miorine",
-            "effects_owner": "legacy"
+            "agent": "miorine"
           }
         }
       ],
@@ -108,8 +105,7 @@
             "title": "Gundam foreign sync",
             "agent": "gundam",
             "bot_id": "gundam",
-            "metadata": {"agent": "gundam", "bot_id": "gundam"},
-            "effects_owner": "restate"
+            "metadata": {"agent": "gundam", "bot_id": "gundam"}
           }
         }
       ],

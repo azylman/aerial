@@ -75,8 +75,7 @@
         "metadata": {
           "agent": "aerial",
           "bot_id": "aerial"
-        },
-        "effects_owner": "restate"
+        }
       }
     },
     {
@@ -84,8 +83,7 @@
       "handler": "HandleMainPush",
       "event": {
         "main_sha": "c112",
-        "repo": "azylman/aerial",
-        "effects_owner": "restate"
+        "repo": "azylman/aerial"
       }
     },
     {
@@ -104,8 +102,7 @@
             "merge_sha": "c112"
           }
         ],
-        "repo": "azylman/aerial",
-        "effects_owner": "restate"
+        "repo": "azylman/aerial"
       }
     },
     {
@@ -119,8 +116,7 @@
           ],
           "default_owner": true
         },
-        "repo": "azylman/aerial",
-        "effects_owner": "restate"
+        "repo": "azylman/aerial"
       }
     },
     {
@@ -131,8 +127,7 @@
         "pr_number": 112,
         "ref": "refs/heads/main",
         "target_id": "100000000000000001",
-        "repo": "azylman/aerial",
-        "effects_owner": "restate"
+        "repo": "azylman/aerial"
       }
     },
     {
@@ -152,8 +147,7 @@
             "merge_sha": "c112"
           }
         ],
-        "repo": "azylman/aerial",
-        "effects_owner": "restate"
+        "repo": "azylman/aerial"
       }
     }
   ],

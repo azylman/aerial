@@ -41,8 +41,7 @@
             "jobs": ["gateway-api-crds"],
             "kustomization_requests": {
               "gateway-api-crds": {"namespace": "flux-system", "requested_at": "2026-11-21T04:55:46Z"}
-            },
-            "effects_owner": "legacy"
+            }
           }
         },
         {
@@ -54,8 +53,7 @@
             "jobs": ["gateway-api-crds"],
             "kustomization_requests": {
               "gateway-api-crds": {"namespace": "flux-system", "requested_at": "2026-11-21T05:57:27Z"}
-            },
-            "effects_owner": "legacy"
+            }
           }
         }
       ],
@@ -80,8 +78,7 @@
             },
             "facts": [
               {"event": "deploy_started", "repo": "kubernetes-sigs/gateway-api", "pr_number": 5433, "status": "deploying"}
-            ],
-            "effects_owner": "restate"
+            ]
           }
         }
       ],
@@ -102,8 +99,7 @@
             "job_name": "gateway-api-crds",
             "facts": [
               {"event": "deploy_started", "repo": "kubernetes-sigs/gateway-api", "pr_number": 5433, "job_name": "gateway-api-crds", "status": "deploying"}
-            ],
-            "effects_owner": "restate"
+            ]
           }
         },
         {
@@ -114,8 +110,7 @@
             "pr_number": 5433,
             "job_name": "gateway-api-crds",
             "deployed_jobs": ["gateway-api-crds"],
-            "deployed_kustomizations": ["gateway-api-crds"],
-            "effects_owner": "restate"
+            "deployed_kustomizations": ["gateway-api-crds"]
           }
         },
         {
@@ -127,8 +122,7 @@
             "job_name": "gateway-api-crds",
             "facts": [
               {"event": "deploy_success", "repo": "kubernetes-sigs/gateway-api", "pr_number": 5433, "job_name": "gateway-api-crds", "status": "deployed"}
-            ],
-            "effects_owner": "restate"
+            ]
           }
         },
         {
@@ -140,8 +134,7 @@
             "banner": "gateway-api-crds failed",
             "facts": [
               {"event": "deploy_failed", "repo": "kubernetes-sigs/gateway-api", "pr_number": 5433, "job_name": "gateway-api-crds", "status": "deploy_failed"}
-            ],
-            "effects_owner": "restate"
+            ]
           }
         },
         {
@@ -150,8 +143,7 @@
           "event": {
             "repo": "kubernetes-sigs/gateway-api",
             "pr_number": 5433,
-            "job_name": "gateway-api-crds",
-            "effects_owner": "restate"
+            "job_name": "gateway-api-crds"
           }
         },
         {
@@ -160,8 +152,7 @@
           "event": {
             "repo": "kubernetes-sigs/gateway-api",
             "pr_number": 5433,
-            "merge_sha": "c0ffee5433",
-            "effects_owner": "restate"
+            "merge_sha": "c0ffee5433"
           }
         },
         {
@@ -170,8 +161,7 @@
           "event": {
             "repo": "kubernetes-sigs/gateway-api",
             "pr_number": 5433,
-            "job_name": "gateway-api-crds",
-            "effects_owner": "restate"
+            "job_name": "gateway-api-crds"
           }
         }
       ],
@@ -193,8 +183,7 @@
             "head_sha": "h2302",
             "target_id": "100000000000000001",
             "title": "Prospera fix",
-            "agent": "miorine",
-            "effects_owner": "legacy"
+            "agent": "miorine"
           }
         },
         {
@@ -205,8 +194,7 @@
             "pr_number": 2302,
             "head_sha": "h2302",
             "merge_sha": "m2302",
-            "branch": "feat/prospera",
-            "effects_owner": "legacy"
+            "branch": "feat/prospera"
           }
         }
       ],
@@ -220,8 +208,7 @@
             "jobs": ["aerial-core"],
             "kustomization_requests": {
               "aerial-core": {"namespace": "flux-system", "requested_at": "2026-11-21T04:55:46Z"}
-            },
-            "effects_owner": "legacy"
+            }
           }
         },
         {
@@ -233,8 +220,7 @@
             "jobs": ["aerial-core"],
             "kustomization_requests": {
               "aerial-core": {"namespace": "flux-system", "requested_at": "2026-11-21T05:57:27Z"}
-            },
-            "effects_owner": "legacy"
+            }
           }
         }
       ],
@@ -264,8 +250,7 @@
             "head_sha": "h2302",
             "target_id": "100000000000000001",
             "title": "Prospera fix",
-            "agent": "miorine",
-            "effects_owner": "restate"
+            "agent": "miorine"
           }
         },
         {
@@ -276,8 +261,7 @@
             "pr_number": 2302,
             "head_sha": "h2302",
             "merge_sha": "m2302",
-            "branch": "feat/prospera",
-            "effects_owner": "restate"
+            "branch": "feat/prospera"
           }
         }
       ],
@@ -291,8 +275,7 @@
             "jobs": ["aerial-core"],
             "kustomization_requests": {
               "aerial-core": {"namespace": "flux-system", "requested_at": "2026-11-21T04:55:46Z"}
-            },
-            "effects_owner": "restate"
+            }
           }
         }
       ],

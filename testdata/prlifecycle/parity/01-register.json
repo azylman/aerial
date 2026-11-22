@@ -31,8 +31,7 @@
         "metadata": {
           "agent": "aerial",
           "bot_id": "aerial"
-        },
-        "effects_owner": "restate"
+        }
       }
     }
   ],

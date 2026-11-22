@@ -67,8 +67,7 @@
         "metadata": {
           "agent": "aerial",
           "bot_id": "aerial"
-        },
-        "effects_owner": "restate"
+        }
       }
     },
     {
@@ -88,8 +87,7 @@
             "merge_sha": "m108"
           }
         ],
-        "repo": "azylman/aerial-config",
-        "effects_owner": "restate"
+        "repo": "azylman/aerial-config"
       }
     },
     {
@@ -108,8 +106,7 @@
             "job_name": "git-sync"
           }
         ],
-        "repo": "azylman/aerial-config",
-        "effects_owner": "restate"
+        "repo": "azylman/aerial-config"
       }
     }
   ],

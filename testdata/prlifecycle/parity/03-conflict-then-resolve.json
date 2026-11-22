@@ -81,8 +81,7 @@
         "metadata": {
           "agent": "aerial",
           "bot_id": "aerial"
-        },
-        "effects_owner": "restate"
+        }
       }
     },
     {
@@ -100,8 +99,7 @@
             "head_sha": "h103"
           }
         ],
-        "repo": "azylman/aerial",
-        "effects_owner": "restate"
+        "repo": "azylman/aerial"
       }
     },
     {
@@ -121,8 +119,7 @@
             "head_sha": "h103b"
           }
         ],
-        "repo": "azylman/aerial",
-        "effects_owner": "restate"
+        "repo": "azylman/aerial"
       }
     }
   ],
