@@ -1,4 +1,4 @@
-package main
+package config
 
 import (
 	"os"
@@ -60,8 +60,8 @@ func TestLoadQuickLaunchLinks(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if got := loadQuickLaunchLinks(configTestPath(t, tc.file, tc.yaml)); !slices.Equal(got, tc.want) {
-				t.Errorf("loadQuickLaunchLinks() = %+v, want %+v", got, tc.want)
+			if got := LoadQuickLaunchLinks(configTestPath(t, tc.file, tc.yaml)); !slices.Equal(got, tc.want) {
+				t.Errorf("LoadQuickLaunchLinks() = %+v, want %+v", got, tc.want)
 			}
 		})
 	}
@@ -90,8 +90,8 @@ func TestLoadConsoleRepos(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if got := loadConsoleRepos(configTestPath(t, tc.file, tc.yaml)); !slices.Equal(got, tc.want) {
-				t.Errorf("loadConsoleRepos() = %q, want %q", got, tc.want)
+			if got := LoadConsoleRepos(configTestPath(t, tc.file, tc.yaml)); !slices.Equal(got, tc.want) {
+				t.Errorf("LoadConsoleRepos() = %q, want %q", got, tc.want)
 			}
 		})
 	}
