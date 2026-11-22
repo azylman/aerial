@@ -43,7 +43,7 @@ func TestProjectRegistry(t *testing.T) {
 		},
 		{
 			name:         "ci failed pr projects",
-			snap:         ProjectionSnapshot{Repo: "aerial", PRNumber: 103, Branch: "feat/z", HeadSHA: "abc123", Title: "z", TargetID: "123", Status: "ci_failed", Generation: 1, Metadata: ProjectionMetadata{CIChecks: map[string]string{"lint": "failed"}}},
+			snap:         ProjectionSnapshot{Repo: "azylman/aerial", PRNumber: 103, Branch: "feat/z", HeadSHA: "abc123", Title: "z", TargetID: "123", Status: "ci_failed", Generation: 1, Metadata: ProjectionMetadata{CIChecks: map[string]string{"lint": "failed"}}},
 			wantErr:      false,
 			wantRecorded: 1,
 		},
@@ -142,7 +142,7 @@ func (f *FakeProjectionStore) RecordedCount() int {
 
 // fullState is a PRState carrying every registry row field.
 func fullState() *PRState {
-	s := NewPRState("aerial", 101)
+	s := NewPRState("azylman/aerial", 101)
 	s.Agent, s.BotID = "agent-beta", "agent-beta"
 	s.Branch, s.HeadSHA, s.MergeSHA, s.Title, s.TargetID = " feat/x ", "h1", "m1", "T", snowA
 	s.Status, s.Terminal, s.GateGeneration, s.ReopenEpoch = RegistryStatusDeploying, TerminalMerged, 2, 1
@@ -200,7 +200,7 @@ func TestBuildProjection(t *testing.T) {
 // readable prefix names agent, PR, head, generation, and epoch.
 func TestProjectionJournalKey(t *testing.T) {
 	t.Parallel()
-	base := ProjectionSnapshot{Repo: "aerial", PRNumber: 101, Agent: "agent-beta", HeadSHA: "h1", Status: "open", Generation: 2, MetaEpoch: 1, Metadata: ProjectionMetadata{Jobs: []string{"a", "b"}}}
+	base := ProjectionSnapshot{Repo: "azylman/aerial", PRNumber: 101, Agent: "agent-beta", HeadSHA: "h1", Status: "open", Generation: 2, MetaEpoch: 1, Metadata: ProjectionMetadata{Jobs: []string{"a", "b"}}}
 	reordered := base
 	reordered.Metadata = ProjectionMetadata{Jobs: []string{"b", "a", "a"}}
 	retitled := base
@@ -247,7 +247,7 @@ func TestProjectionUpsertQuery(t *testing.T) {
 	}{
 		{
 			name: "full snapshot",
-			snap: ProjectionSnapshot{Repo: "aerial", PRNumber: 101, Agent: "agent-beta", Branch: " feat ", HeadSHA: "h1", MergeSHA: "m1", TargetID: snowA, Title: "T", Status: "merged", Metadata: ProjectionMetadata{Jobs: []string{"eri", "coven"}, DeploySuccessPending: true}},
+			snap: ProjectionSnapshot{Repo: "azylman/aerial", PRNumber: 101, Agent: "agent-beta", Branch: " feat ", HeadSHA: "h1", MergeSHA: "m1", TargetID: snowA, Title: "T", Status: "merged", Metadata: ProjectionMetadata{Jobs: []string{"eri", "coven"}, DeploySuccessPending: true}},
 			wantArgs: append([]any{
 				"azylman/aerial", 101, "agent-beta", "feat", "h1", "m1", snowA, "T", "merged",
 				"", "", 0, false, true, "", "",
@@ -260,7 +260,7 @@ func TestProjectionUpsertQuery(t *testing.T) {
 		},
 		{
 			name: "typed scalars and a pre-final build snapshot",
-			snap: ProjectionSnapshot{Repo: "aerial", PRNumber: 6, Agent: "miorine", Status: "ci_failed", Metadata: ProjectionMetadata{
+			snap: ProjectionSnapshot{Repo: "azylman/aerial", PRNumber: 6, Agent: "miorine", Status: "ci_failed", Metadata: ProjectionMetadata{
 				VanadisChunkID: "c1", BotID: "miorine", CIFailCount: 3, DeployFailedPublished: true, Banner: "b", WidgetState: "w",
 				BuildMetadata: &BuildMetadata{Version: 1, Kind: "pre", Repository: "azylman/aerial", WorkflowPath: "ci.yml", RunID: 9, RunNumber: 8, RunAttempt: 2, Event: "pull_request", SourceSHA: "s1", ExecutionSHA: "e1"},
 			}},
@@ -273,7 +273,7 @@ func TestProjectionUpsertQuery(t *testing.T) {
 		},
 		{
 			name: "final build snapshot projects omitempty fields",
-			snap: ProjectionSnapshot{Repo: "aerial", PRNumber: 7, Status: "open", Metadata: ProjectionMetadata{
+			snap: ProjectionSnapshot{Repo: "azylman/aerial", PRNumber: 7, Status: "open", Metadata: ProjectionMetadata{
 				BuildMetadata: &BuildMetadata{Version: 1, Kind: "final", PRNumber: new(7), Service: "eri", ImageName: "aerial-eri", State: "pushed", Pushed: true, SourceAttempt: 1, ImageRefs: []string{"ghcr.io/x:1"}, Digest: "sha256:d"},
 			}},
 			wantArgs: []any{
@@ -361,7 +361,7 @@ func (f *fakeProjectionDB) Begin(context.Context) (pgx.Tx, error) {
 // on the first failure, errors wrapped, nil database refused.
 func TestPgProjectionStoreUpsert(t *testing.T) {
 	t.Parallel()
-	snap := ProjectionSnapshot{Repo: "aerial", PRNumber: 101, Status: "open"}
+	snap := ProjectionSnapshot{Repo: "azylman/aerial", PRNumber: 101, Status: "open"}
 	tests := []struct {
 		name      string
 		nilDB     bool
@@ -372,8 +372,8 @@ func TestPgProjectionStoreUpsert(t *testing.T) {
 		wantEnded string
 	}{
 		{name: "writes row and child tables then commits", wantExecs: 10, wantEnded: "commit"},
-		{name: "child failure rolls back the row", failAt: 4, wantErr: "upsert pr_registry projection aerial#101: fake projection store error", wantExecs: 4, wantEnded: "rollback"},
-		{name: "begin failure wraps", beginErr: errFakeProjection, wantErr: "upsert pr_registry projection aerial#101: fake projection store error"},
+		{name: "child failure rolls back the row", failAt: 4, wantErr: "upsert pr_registry projection azylman/aerial#101: fake projection store error", wantExecs: 4, wantEnded: "rollback"},
+		{name: "begin failure wraps", beginErr: errFakeProjection, wantErr: "upsert pr_registry projection azylman/aerial#101: fake projection store error"},
 		{name: "nil database refused", nilDB: true, wantErr: "projection database is nil"},
 	}
 	for _, tc := range tests {
@@ -412,7 +412,7 @@ func errString(err error) string {
 // empty), and one upsert per build result. Empty sets bind empty arrays.
 func TestProjectionStatements(t *testing.T) {
 	t.Parallel()
-	full := ProjectionSnapshot{Repo: "aerial", PRNumber: 9, Status: "deploying", Metadata: ProjectionMetadata{
+	full := ProjectionSnapshot{Repo: "azylman/aerial", PRNumber: 9, Status: "deploying", Metadata: ProjectionMetadata{
 		CIChecks:               map[string]string{"test": "passed", "lint": "failed"},
 		Jobs:                   []string{"eri"},
 		StartedJobs:            []string{"eri", "coven"},
@@ -437,7 +437,7 @@ func TestProjectionStatements(t *testing.T) {
 	}{
 		{
 			name: "empty metadata clears every child table",
-			snap: ProjectionSnapshot{Repo: "aerial", PRNumber: 5, Status: "open"},
+			snap: ProjectionSnapshot{Repo: "azylman/aerial", PRNumber: 5, Status: "open"},
 			want: [][]any{
 				{"azylman/aerial", 5, []string{}},
 				{"azylman/aerial", 5, []string{}, []string{}},

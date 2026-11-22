@@ -15,15 +15,10 @@ func TestPRStateContracts(t *testing.T) {
 		got  string
 		want string
 	}{
-		{name: "pr object key", got: PRObjectKey("aerial", 101), want: "azylman/aerial#101"},
-		{name: "pr object key normalizes bare repo", got: PRObjectKey("aerial", 7), want: "azylman/aerial#7"},
-		{name: "repo object key", got: RepoObjectKey("aerial"), want: "azylman/aerial"},
-		{name: "deploy sha job key", got: DeploySHAJobKey("aerial", "eri", "abc123"), want: "sha:azylman/aerial:eri:abc123"},
-		{name: "canonical roborev", got: CanonicalFailedCheckKey("RoboRev Code Review"), want: "roborev"},
-		{name: "canonical trims and lowers", got: CanonicalFailedCheckKey("  Lint  "), want: "lint"},
-		{name: "effect key string", got: EffectKey{Repo: "aerial", PRNumber: 101, HeadSHA: "abc123", GateGeneration: 3, Kind: prwire.EffectDiscordAlert}.String(), want: "azylman/aerial#101@abc123:gen3:discord_alert"},
-		{name: "effect key deploy carries job", got: EffectKey{Repo: "aerial", PRNumber: 101, HeadSHA: "abc123", GateGeneration: 1, Kind: prwire.EffectDeployDispatch, JobName: "eri"}.String(), want: "azylman/aerial#101@abc123:gen1:deploy_dispatch:job=eri"},
-		{name: "effect key ci carries check", got: EffectKey{Repo: "aerial", PRNumber: 101, HeadSHA: "abc123", GateGeneration: 1, Kind: prwire.EffectGitHubRerun, CheckName: "Lint"}.String(), want: "azylman/aerial#101@abc123:gen1:github_rerun:check=lint"},
+		{name: "deploy sha job key", got: DeploySHAJobKey("azylman/aerial", "eri", "abc123"), want: "sha:azylman/aerial:eri:abc123"},
+		{name: "effect key string", got: EffectKey{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "abc123", GateGeneration: 3, Kind: prwire.EffectDiscordAlert}.String(), want: "azylman/aerial#101@abc123:gen3:discord_alert"},
+		{name: "effect key deploy carries job", got: EffectKey{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "abc123", GateGeneration: 1, Kind: prwire.EffectDeployDispatch, JobName: "eri"}.String(), want: "azylman/aerial#101@abc123:gen1:deploy_dispatch:job=eri"},
+		{name: "effect key ci carries check", got: EffectKey{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "abc123", GateGeneration: 1, Kind: prwire.EffectGitHubRerun, CheckName: "Lint"}.String(), want: "azylman/aerial#101@abc123:gen1:github_rerun:check=lint"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

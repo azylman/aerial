@@ -7,7 +7,7 @@
       "pr_number": 101,
       "fact": {
         "event": "conflict",
-        "repo": "aerial",
+        "repo": "azylman/aerial",
         "pr_number": 101,
         "head_sha": "h1",
         "status": "conflict",
@@ -32,11 +32,11 @@
     },
     {
       "name": "event name is trimmed and lowercased and the check canonicalized",
-      "repo": "aerial",
+      "repo": "azylman/aerial",
       "pr_number": 7,
       "fact": {
         "event": " CI_Failed ",
-        "repo": "aerial",
+        "repo": "azylman/aerial",
         "pr_number": 7,
         "head_sha": " h7 ",
         "merge_sha": "m7",

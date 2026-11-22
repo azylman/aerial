@@ -202,9 +202,9 @@ func objectKey(t *testing.T, inv parityInvocation) string {
 	}
 	require.NoError(t, json.Unmarshal(inv.Event, &addr))
 	if inv.Object == prwire.RepoObjectServiceName {
-		return RepoObjectKey(addr.Repo)
+		return prwire.RepoObjectKey(addr.Repo)
 	}
-	return PRObjectKey(addr.Repo, addr.PRNumber)
+	return prwire.PRObjectKey(addr.Repo, addr.PRNumber)
 }
 
 // send runs one top-level invocation and everything it causes.
@@ -311,7 +311,7 @@ func (s *paritySim) currentRepoKey(kind string) string {
 func (s *paritySim) currentPRKey(kind string) string {
 	ev, err := decodeInput[PREvent](s.current.input)
 	require.NoError(s.t, err)
-	return EffectKey{Repo: NormalizeRepo(ev.Repo), PRNumber: ev.PRNumber, HeadSHA: usableHeadSHA(ev.HeadSHA), Kind: kind}.MatchKey()
+	return EffectKey{Repo: strings.TrimSpace(ev.Repo), PRNumber: ev.PRNumber, HeadSHA: usableHeadSHA(ev.HeadSHA), Kind: kind}.MatchKey()
 }
 
 func (s *paritySim) PublishFact(_ context.Context, _ string, f pubsub.PRLifecycleEvent) error {
@@ -331,7 +331,7 @@ func (s *paritySim) DeliverEri(_ context.Context, _ string, key EffectKey, _ Eri
 }
 
 func (s *paritySim) UpsertProjection(_ context.Context, snap ProjectionSnapshot) error {
-	s.rows[PRObjectKey(snap.Repo, snap.PRNumber)] = snap
+	s.rows[prwire.PRObjectKey(snap.Repo, snap.PRNumber)] = snap
 	return nil
 }
 
@@ -418,7 +418,7 @@ func TestRestateOwnershipParity(t *testing.T) {
 			require.ElementsMatch(t, tc.FactRolloutStates, sim.facts, "published fact rollout states")
 			wantRows := make(map[string]parityRow, len(tc.Rows))
 			for _, r := range tc.Rows {
-				wantRows[PRObjectKey(r.Repo, r.PRNumber)] = r
+				wantRows[prwire.PRObjectKey(r.Repo, r.PRNumber)] = r
 			}
 			gotRows := make(map[string]parityRow, len(sim.rows))
 			for key, snap := range sim.rows {

@@ -32,13 +32,6 @@ const (
 	RegistryStatusDeployFailed = "deploy_failed"
 )
 
-// Check states recorded into CIChecks, matching metadata.ci_checks values.
-const (
-	CheckStatePassed  = "passed"
-	CheckStateFailed  = "failed"
-	CheckStatePending = "pending"
-)
-
 // Register metadata keys PRObject records as typed row fields.
 const (
 	MetaVanadisChunkID = "vanadis_chunk_id"
@@ -117,7 +110,7 @@ func (s *PRState) clearHeadScoped() {
 // authorizeExistingPROwner (a stored owner must equal the owner synapse
 // authorized the caller for).
 func (s *PRState) ResolveRegister(req RegisterRequest) (RegisterVerdict, string) {
-	if s == nil || NormalizeRepo(req.Repo) == "" || req.PRNumber <= 0 || strings.TrimSpace(req.Branch) == "" || strings.TrimSpace(req.HeadSHA) == "" {
+	if s == nil || strings.TrimSpace(req.Repo) == "" || req.PRNumber <= 0 || strings.TrimSpace(req.Branch) == "" || strings.TrimSpace(req.HeadSHA) == "" {
 		return RegisterInvalid, ""
 	}
 	if req.EnforceOwner {
@@ -622,7 +615,7 @@ func sameSelection(a, b []BuildSelection) bool {
 // same identity fields mismatched. Result snapshots never record. Returns
 // true when stored.
 func (s *PRState) RecordBuildMetadata(m *BuildMetadata) bool {
-	if s == nil || m == nil || m.Kind == "result" || NormalizeRepo(m.Repository) != s.Repo || (m.PRNumber != nil && *m.PRNumber != s.PRNumber) {
+	if s == nil || m == nil || m.Kind == "result" || strings.TrimSpace(m.Repository) != s.Repo || (m.PRNumber != nil && *m.PRNumber != s.PRNumber) {
 		return false
 	}
 	if !s.buildMetadataRevisionMatches(strings.TrimSpace(m.SourceSHA)) {

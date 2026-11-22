@@ -101,12 +101,12 @@ func TestRolloutIndexStateApply(t *testing.T) {
 		wantChanged bool
 		wantActive  []RolloutRef
 	}{
-		{name: "first activation indexes the pr", st: &RolloutIndexState{}, ev: RolloutIndexEvent{Repo: "aerial", PRNumber: 7, Seq: 1, Active: true}, wantChanged: true, wantActive: []RolloutRef{{Repo: "azylman/aerial", PRNumber: 7}}},
-		{name: "older sequence is dropped", st: seeded(), ev: RolloutIndexEvent{Repo: "aerial", PRNumber: 101, Seq: 1}, wantActive: []RolloutRef{{Repo: "azylman/aerial", PRNumber: 101}}},
-		{name: "newer deactivation tombstones the pr", st: seeded(), ev: RolloutIndexEvent{Repo: "aerial", PRNumber: 101, Seq: 3}, wantChanged: true},
+		{name: "first activation indexes the pr", st: &RolloutIndexState{}, ev: RolloutIndexEvent{Repo: "azylman/aerial", PRNumber: 7, Seq: 1, Active: true}, wantChanged: true, wantActive: []RolloutRef{{Repo: "azylman/aerial", PRNumber: 7}}},
+		{name: "older sequence is dropped", st: seeded(), ev: RolloutIndexEvent{Repo: "azylman/aerial", PRNumber: 101, Seq: 1}, wantActive: []RolloutRef{{Repo: "azylman/aerial", PRNumber: 101}}},
+		{name: "newer deactivation tombstones the pr", st: seeded(), ev: RolloutIndexEvent{Repo: "azylman/aerial", PRNumber: 101, Seq: 3}, wantChanged: true},
 		{name: "a second pr sorts by repo then number", st: seeded(), ev: RolloutIndexEvent{Repo: "azylman/aerial-config", PRNumber: 5, Seq: 1, Active: true}, wantChanged: true, wantActive: []RolloutRef{{Repo: "azylman/aerial", PRNumber: 101}, {Repo: "azylman/aerial-config", PRNumber: 5}}},
 		{name: "invalid repo is ignored", st: seeded(), ev: RolloutIndexEvent{PRNumber: 9, Seq: 1, Active: true}, wantActive: []RolloutRef{{Repo: "azylman/aerial", PRNumber: 101}}},
-		{name: "nil index ignores updates", ev: RolloutIndexEvent{Repo: "aerial", PRNumber: 9, Seq: 1, Active: true}},
+		{name: "nil index ignores updates", ev: RolloutIndexEvent{Repo: "azylman/aerial", PRNumber: 9, Seq: 1, Active: true}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -132,7 +132,7 @@ func TestRolloutIndexStateEvictsOldest(t *testing.T) {
 			t.Parallel()
 			st := &RolloutIndexState{}
 			for pr := 1; pr <= MaxRolloutIndexEntries+tc.extra; pr++ {
-				st.Apply(RolloutIndexEvent{Repo: "aerial", PRNumber: pr, Seq: 1, Active: true})
+				st.Apply(RolloutIndexEvent{Repo: "azylman/aerial", PRNumber: pr, Seq: 1, Active: true})
 			}
 			active := st.Active()
 			require.Len(t, active, tc.wantLen)
@@ -219,8 +219,8 @@ func TestSplitDeployStartedFacts(t *testing.T) {
 func TestResolvePromotionPR(t *testing.T) {
 	t.Parallel()
 	indexed := func() *RepoState {
-		st := NewRepoState("aerial")
-		st.ApplyPRIndex(PRIndexEvent{Repo: "aerial", PRNumber: 42, Branch: "feat/y", MergeSHA: "m42", Lifecycle: IndexMerged})
+		st := NewRepoState("azylman/aerial")
+		st.ApplyPRIndex(PRIndexEvent{Repo: "azylman/aerial", PRNumber: 42, Branch: "feat/y", MergeSHA: "m42", Lifecycle: IndexMerged})
 		return st
 	}
 	fact := pubsub.PRLifecycleEvent{Event: "deploy_started"}
@@ -282,9 +282,9 @@ func TestPRObjectServiceHandleDeployObserved(t *testing.T) {
 		wantEvents []string
 		wantStatus string
 	}{
-		{name: "started job publishes deploy_started", seed: svcRow("h1", "m1", RegistryStatusMerged, TerminalMerged), ev: PREvent{Repo: "aerial", PRNumber: 101, MergeSHA: "m1", JobName: "eri", Facts: []pubsub.PRLifecycleEvent{started}}, wantEvents: []string{"deploy_started"}, wantStatus: RegistryStatusDeploying},
-		{name: "already deployed job suppresses deploy_started", seed: deployed, ev: PREvent{Repo: "aerial", PRNumber: 101, MergeSHA: "m1", JobName: "eri", Facts: []pubsub.PRLifecycleEvent{started}}, wantStatus: RegistryStatusDeployed},
-		{name: "other facts always publish", seed: svcRow("h1", "m1", RegistryStatusMerged, TerminalMerged), ev: PREvent{Repo: "aerial", PRNumber: 101, MergeSHA: "m1", ExpectedJobs: []string{"eri"}, Facts: []pubsub.PRLifecycleEvent{synced}}, wantEvents: []string{"sync_success"}, wantStatus: RegistryStatusMerged},
+		{name: "started job publishes deploy_started", seed: svcRow("h1", "m1", RegistryStatusMerged, TerminalMerged), ev: PREvent{Repo: "azylman/aerial", PRNumber: 101, MergeSHA: "m1", JobName: "eri", Facts: []pubsub.PRLifecycleEvent{started}}, wantEvents: []string{"deploy_started"}, wantStatus: RegistryStatusDeploying},
+		{name: "already deployed job suppresses deploy_started", seed: deployed, ev: PREvent{Repo: "azylman/aerial", PRNumber: 101, MergeSHA: "m1", JobName: "eri", Facts: []pubsub.PRLifecycleEvent{started}}, wantStatus: RegistryStatusDeployed},
+		{name: "other facts always publish", seed: svcRow("h1", "m1", RegistryStatusMerged, TerminalMerged), ev: PREvent{Repo: "azylman/aerial", PRNumber: 101, MergeSHA: "m1", ExpectedJobs: []string{"eri"}, Facts: []pubsub.PRLifecycleEvent{synced}}, wantEvents: []string{"sync_success"}, wantStatus: RegistryStatusMerged},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -318,7 +318,7 @@ func TestPRObjectServiceHandleKustomizationRequestedStartedFact(t *testing.T) {
 			mc, _ := newStateMock(t, tc.seed)
 			stubRunKeepTerminal(mc)
 			pub := &fakeFactPublisher{}
-			ev := PREvent{Repo: "aerial", PRNumber: 101, HeadSHA: "m1", Jobs: []string{"eri"}, KustomizationRequests: coreRequests, Facts: []pubsub.PRLifecycleEvent{started}}
+			ev := PREvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "m1", Jobs: []string{"eri"}, KustomizationRequests: coreRequests, Facts: []pubsub.PRLifecycleEvent{started}}
 			require.NoError(t, NewPRObjectService().WithFactPublisher(pub).WithKube(&fakeKube{}).HandleKustomizationRequested(restate.WithMockContext(mc), ev))
 			require.Equal(t, tc.wantEvents, factEvents(pub.Calls()))
 		})
@@ -328,7 +328,7 @@ func TestPRObjectServiceHandleKustomizationRequestedStartedFact(t *testing.T) {
 func TestPRObjectServiceHandleReconcileLost(t *testing.T) {
 	t.Parallel()
 	ev := func(name string) PREvent {
-		return PREvent{Repo: "aerial", PRNumber: 101, JobName: name, ObservedReconcileAt: "t0"}
+		return PREvent{Repo: "azylman/aerial", PRNumber: 101, JobName: name, ObservedReconcileAt: "t0"}
 	}
 	tests := []struct {
 		name      string
@@ -384,12 +384,12 @@ func TestRepoObjectServiceRolloutIndex(t *testing.T) {
 		ev       RolloutIndexEvent
 		wantList []RolloutRef
 	}{
-		{name: "index key records an activation", key: RolloutIndexKey, ev: RolloutIndexEvent{Repo: "aerial", PRNumber: 3, Seq: 1, Active: true}, wantList: []RolloutRef{{Repo: "azylman/aerial", PRNumber: 3}}},
-		{name: "a repo key ignores index updates", key: "azylman/aerial", ev: RolloutIndexEvent{Repo: "aerial", PRNumber: 3, Seq: 1, Active: true}},
+		{name: "index key records an activation", key: RolloutIndexKey, ev: RolloutIndexEvent{Repo: "azylman/aerial", PRNumber: 3, Seq: 1, Active: true}, wantList: []RolloutRef{{Repo: "azylman/aerial", PRNumber: 3}}},
+		{name: "a repo key ignores index updates", key: "azylman/aerial", ev: RolloutIndexEvent{Repo: "azylman/aerial", PRNumber: 3, Seq: 1, Active: true}},
 		{
 			name: "stale update keeps the index", key: RolloutIndexKey,
 			existing: &RolloutIndexState{Entries: map[string]RolloutIndexEntry{"azylman/aerial#3": {Seq: 5, Active: true, Order: 1}}, NextOrder: 1},
-			ev:       RolloutIndexEvent{Repo: "aerial", PRNumber: 3, Seq: 4}, wantList: []RolloutRef{{Repo: "azylman/aerial", PRNumber: 3}},
+			ev:       RolloutIndexEvent{Repo: "azylman/aerial", PRNumber: 3, Seq: 4}, wantList: []RolloutRef{{Repo: "azylman/aerial", PRNumber: 3}},
 		},
 	}
 	for _, tc := range tests {

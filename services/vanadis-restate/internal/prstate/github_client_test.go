@@ -214,26 +214,26 @@ func TestGitHubClientUpdateBranch(t *testing.T) {
 		wantRequests    int
 		wantMessage     string
 	}{
-		{name: "accepted", repo: "aerial", prNumber: 7, routes: map[string][]apiResponse{updateBranchRoute: {{status: 202}}}, want: UpdateBranchUpdated, wantRequests: 1},
-		{name: "conflict", repo: "aerial", prNumber: 7, routes: map[string][]apiResponse{updateBranchRoute: {{status: 409}}}, want: UpdateBranchConflict, wantRequests: 1},
+		{name: "accepted", repo: "azylman/aerial", prNumber: 7, routes: map[string][]apiResponse{updateBranchRoute: {{status: 202}}}, want: UpdateBranchUpdated, wantRequests: 1},
+		{name: "conflict", repo: "azylman/aerial", prNumber: 7, routes: map[string][]apiResponse{updateBranchRoute: {{status: 409}}}, want: UpdateBranchConflict, wantRequests: 1},
 		{
-			name: "rate limited", repo: "aerial", prNumber: 7, routes: map[string][]apiResponse{updateBranchRoute: {{status: 403, remaining: "0", body: `{"message":"API rate limit exceeded for installation."}`}}},
+			name: "rate limited", repo: "azylman/aerial", prNumber: 7, routes: map[string][]apiResponse{updateBranchRoute: {{status: 403, remaining: "0", body: `{"message":"API rate limit exceeded for installation."}`}}},
 			wantErrStatus: 403, wantRateLimited: true, wantRequests: 1, wantMessage: "github api rate limited (status 403, remaining: 0): API rate limit exceeded for installation.",
 		},
 		{
-			name: "secondary rate limit", repo: "aerial", prNumber: 7, routes: map[string][]apiResponse{updateBranchRoute: {{status: 403, retryAfter: "60", body: `{"message":"You have exceeded a secondary rate limit."}`}}},
+			name: "secondary rate limit", repo: "azylman/aerial", prNumber: 7, routes: map[string][]apiResponse{updateBranchRoute: {{status: 403, retryAfter: "60", body: `{"message":"You have exceeded a secondary rate limit."}`}}},
 			wantErrStatus: 403, wantRateLimited: true, wantRequests: 1, wantMessage: "github api rate limited (status 403, remaining: ): You have exceeded a secondary rate limit.",
 		},
 		{
-			name: "permission 403 is terminal with github message", repo: "aerial", prNumber: 7, routes: map[string][]apiResponse{updateBranchRoute: {{status: 403, remaining: "4999", body: `{"message":"Resource not accessible by integration","documentation_url":"https://docs.github.com"}`}}},
+			name: "permission 403 is terminal with github message", repo: "azylman/aerial", prNumber: 7, routes: map[string][]apiResponse{updateBranchRoute: {{status: 403, remaining: "4999", body: `{"message":"Resource not accessible by integration","documentation_url":"https://docs.github.com"}`}}},
 			wantErrStatus: 403, wantRequests: 1, wantMessage: "github api forbidden PUT /repos/azylman/aerial/pulls/7/update-branch (status 403): Resource not accessible by integration",
 		},
 		{
-			name: "403 without json body", repo: "aerial", prNumber: 7, routes: map[string][]apiResponse{updateBranchRoute: {{status: 403, body: "forbidden"}}},
+			name: "403 without json body", repo: "azylman/aerial", prNumber: 7, routes: map[string][]apiResponse{updateBranchRoute: {{status: 403, body: "forbidden"}}},
 			wantErrStatus: 403, wantRequests: 1, wantMessage: "github api forbidden PUT /repos/azylman/aerial/pulls/7/update-branch (status 403): no message",
 		},
 		{
-			name: "too many requests", repo: "aerial", prNumber: 7, routes: map[string][]apiResponse{updateBranchRoute: {{status: 429, body: `{"message":""}`}}},
+			name: "too many requests", repo: "azylman/aerial", prNumber: 7, routes: map[string][]apiResponse{updateBranchRoute: {{status: 429, body: `{"message":""}`}}},
 			wantErrStatus: 429, wantRateLimited: true, wantRequests: 1, wantMessage: "github api rate limited (status 429, remaining: ): no message",
 		},
 		{name: "invalid input never calls github", repo: "", prNumber: 7, wantErrStatus: 400},
@@ -274,8 +274,8 @@ func TestGitHubClientListOpenPRs(t *testing.T) {
 			routes: map[string][]apiResponse{openPRsRoute: {{status: 200, body: `[{"number":7,"draft":true,"user":{"login":"dependabot[bot]"},"head":{"ref":"b7","sha":"h7"}}]`}}},
 			want:   []GitHubPR{{Number: 7, Draft: true, User: GitHubUser{Login: "dependabot[bot]"}, Head: GitHubPRRef{Ref: "b7", SHA: "h7"}}},
 		},
-		{name: "server error", repo: "aerial", routes: map[string][]apiResponse{openPRsRoute: {{status: 503}}}, wantErrStatus: 503},
-		{name: "malformed body", repo: "aerial", routes: map[string][]apiResponse{openPRsRoute: {{status: 200, body: `{`}}}, wantErrStatus: 200},
+		{name: "server error", repo: "azylman/aerial", routes: map[string][]apiResponse{openPRsRoute: {{status: 503}}}, wantErrStatus: 503},
+		{name: "malformed body", repo: "azylman/aerial", routes: map[string][]apiResponse{openPRsRoute: {{status: 200, body: `{`}}}, wantErrStatus: 200},
 		{name: "invalid repo", repo: " ", wantErrStatus: 400},
 	}
 	for _, tc := range tests {
@@ -338,7 +338,7 @@ func TestGitHubClientFetchPRMergeability(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			c, api := newFakeGitHub(t, tc.routes)
-			got, gerr := c.FetchPRMergeability(context.Background(), "aerial", tc.prNumber)
+			got, gerr := c.FetchPRMergeability(context.Background(), "azylman/aerial", tc.prNumber)
 			require.Equal(t, tc.want, got)
 			require.Len(t, api.Requests(), tc.wantRequests)
 			if tc.wantErrStatus == 0 {
@@ -363,7 +363,7 @@ func TestGitHubClientFetchPRMergeabilityCancelled(t *testing.T) {
 			t.Parallel()
 			c := NewGitHubClient(&http.Client{Transport: cancelAfterFirst{}}, "http://gh.local", "")
 			ctx, cancel := context.WithCancel(context.Background())
-			_, gerr := c.FetchPRMergeability(withCancel(ctx, cancel), "aerial", 7)
+			_, gerr := c.FetchPRMergeability(withCancel(ctx, cancel), "azylman/aerial", 7)
 			require.Equal(t, tc.wantMessage, gerr.Message)
 		})
 	}
@@ -418,7 +418,7 @@ func TestGitHubClientHeadChecksBlocked(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			c, _ := newFakeGitHub(t, tc.routes)
-			require.Equal(t, tc.want, c.HeadChecksBlocked(context.Background(), "aerial", tc.sha))
+			require.Equal(t, tc.want, c.HeadChecksBlocked(context.Background(), "azylman/aerial", tc.sha))
 		})
 	}
 }
@@ -441,7 +441,7 @@ func TestGitHubClientRerunFailedJobs(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			c, _ := newFakeGitHub(t, tc.routes)
-			gerr := c.RerunFailedJobs(context.Background(), "aerial", tc.runID)
+			gerr := c.RerunFailedJobs(context.Background(), "azylman/aerial", tc.runID)
 			if tc.wantNil {
 				require.Nil(t, gerr)
 				return
@@ -464,33 +464,9 @@ func TestGitHubClientTransportFailure(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			c := NewGitHubClient(nil, tc.apiURL, "")
-			_, gerr := c.FetchPR(context.Background(), "aerial", 7)
+			_, gerr := c.FetchPR(context.Background(), "azylman/aerial", 7)
 			require.Equal(t, 0, gerr.Status)
 			require.True(t, gerr.Retryable())
-		})
-	}
-}
-
-func TestClassifyCheckState(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name       string
-		status     string
-		conclusion string
-		want       string
-	}{
-		{name: "success passes", status: "completed", conclusion: "success", want: CheckStatePassed},
-		{name: "skipped passes", status: "Completed", conclusion: "skipped", want: CheckStatePassed},
-		{name: "timed out fails", status: "completed", conclusion: "timed_out", want: CheckStateFailed},
-		{name: "unknown conclusion is empty", status: "completed", conclusion: "stale"},
-		{name: "queued is pending", status: "queued", want: CheckStatePending},
-		{name: "any other status is pending", status: "weird", want: CheckStatePending},
-		{name: "no status is empty"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			require.Equal(t, tc.want, ClassifyCheckState(tc.status, tc.conclusion))
 		})
 	}
 }
@@ -499,23 +475,21 @@ func TestIsMergeConflict(t *testing.T) {
 	t.Parallel()
 	no, yes := false, true
 	tests := []struct {
-		name       string
-		pr         GitHubPR
-		wantReason string
-		want       bool
+		name string
+		pr   GitHubPR
+		want bool
 	}{
-		{name: "dirty conflicts", pr: GitHubPR{MergeableState: "dirty"}, wantReason: "merge_conflict", want: true},
-		{name: "unmergeable conflicts", pr: GitHubPR{Mergeable: &no}, wantReason: "merge_conflict", want: true},
-		{name: "behind base is actionable", pr: GitHubPR{MergeableState: "behind"}, wantReason: "branch_behind_base", want: true},
-		{name: "blocked is not a conflict", pr: GitHubPR{MergeableState: "blocked"}, wantReason: "checks_or_reviews_blocked"},
+		{name: "dirty conflicts", pr: GitHubPR{MergeableState: "dirty"}, want: true},
+		{name: "unmergeable conflicts", pr: GitHubPR{Mergeable: &no}, want: true},
+		{name: "behind base is actionable", pr: GitHubPR{MergeableState: "behind"}, want: true},
+		{name: "blocked is not a conflict", pr: GitHubPR{MergeableState: "blocked"}},
 		{name: "clean is no block", pr: GitHubPR{Mergeable: &yes, MergeableState: "clean"}},
 		{name: "unstable is no block", pr: GitHubPR{MergeableState: "unstable"}},
-		{name: "unknown states pass through", pr: GitHubPR{MergeableState: "draft"}, wantReason: "draft"},
+		{name: "unknown states pass through", pr: GitHubPR{MergeableState: "draft"}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			require.Equal(t, tc.wantReason, AutoMergeBlockReason(tc.pr.MergeableState, tc.pr.Mergeable))
 			require.Equal(t, tc.want, IsMergeConflict(tc.pr))
 		})
 	}

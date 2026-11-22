@@ -46,7 +46,7 @@ func viewRow(s *PRState) registryRowView {
 
 // svcRow seeds a stored PRObject state for repo#101.
 func svcRow(head, merge, status string, terminal TerminalState) *PRState {
-	s := NewPRState("aerial", 101)
+	s := NewPRState("azylman/aerial", 101)
 	s.HeadSHA, s.MergeSHA, s.Status, s.Terminal = head, merge, status, terminal
 	return s
 }
@@ -101,8 +101,8 @@ func TestPRObjectService_RegistryRow(t *testing.T) {
 	mc17, rec17 := newStateMock(t, redelivered)
 	mc19, rec19 := newStateMock(t, svcRow("h1", "", RegistryStatusOpen, TerminalNone))
 	mc18, rec18 := newStateMock(t, svcRow("h1", "m1", RegistryStatusMerged, TerminalMerged))
-	_, err12 := svc.HandleDeploySuccessPublished(restate.WithMockContext(mc12), PREvent{Repo: "aerial", PRNumber: 101, MergeSHA: "m1", JobName: "core"})
-	_, err16 := svc.HandleConflictPublished(restate.WithMockContext(mc16), PREvent{Repo: "aerial", PRNumber: 101, HeadSHA: "h1"})
+	_, err12 := svc.HandleDeploySuccessPublished(restate.WithMockContext(mc12), PREvent{Repo: "azylman/aerial", PRNumber: 101, MergeSHA: "m1", JobName: "core"})
+	_, err16 := svc.HandleConflictPublished(restate.WithMockContext(mc16), PREvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "h1"})
 	tests := []struct {
 		name    string
 		got     error
@@ -111,51 +111,51 @@ func TestPRObjectService_RegistryRow(t *testing.T) {
 		want    registryRowView
 	}{
 		{
-			name: "check failed records ci_failed and identity", got: svc.HandleCheckFailed(restate.WithMockContext(mc01), PREvent{Repo: "aerial", PRNumber: 101, HeadSHA: "h1", CheckName: "ci", Branch: "feat", Title: "T", TargetID: snowA}), rec: rec01, wantSet: true,
+			name: "check failed records ci_failed and identity", got: svc.HandleCheckFailed(restate.WithMockContext(mc01), PREvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "h1", CheckName: "ci", Branch: "feat", Title: "T", TargetID: snowA}), rec: rec01, wantSet: true,
 			want: registryRowView{Status: RegistryStatusCIFailed, HeadSHA: "h1", Branch: "feat", Title: "T", TargetID: snowA},
 		},
 		{
-			name: "check passed recovers ci_failed", got: svc.HandleCheckPassed(restate.WithMockContext(mc02), PREvent{Repo: "aerial", PRNumber: 101, HeadSHA: "h1", CheckName: "ci"}), rec: rec02, wantSet: true,
+			name: "check passed recovers ci_failed", got: svc.HandleCheckPassed(restate.WithMockContext(mc02), PREvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "h1", CheckName: "ci"}), rec: rec02, wantSet: true,
 			want: registryRowView{Status: RegistryStatusOpen, HeadSHA: "h1"},
 		},
 		{
-			name: "check status records pending", got: svc.HandleCheckStatus(restate.WithMockContext(mc03), PREvent{Repo: "aerial", PRNumber: 101, HeadSHA: "h1", CheckName: "ci", CheckState: "pending"}), rec: rec03, wantSet: true,
+			name: "check status records pending", got: svc.HandleCheckStatus(restate.WithMockContext(mc03), PREvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "h1", CheckName: "ci", CheckState: "pending"}), rec: rec03, wantSet: true,
 			want: registryRowView{Status: RegistryStatusOpen, HeadSHA: "h1", CIChecks: map[string]string{"ci": "pending"}},
 		},
 		{
-			name: "merged check status records on merge sha", got: svc.HandleCheckStatus(restate.WithMockContext(mc18), PREvent{Repo: "aerial", PRNumber: 101, HeadSHA: "m1", CheckName: "ci", CheckState: "passed"}), rec: rec18, wantSet: true,
+			name: "merged check status records on merge sha", got: svc.HandleCheckStatus(restate.WithMockContext(mc18), PREvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "m1", CheckName: "ci", CheckState: "passed"}), rec: rec18, wantSet: true,
 			want: registryRowView{Status: RegistryStatusMerged, HeadSHA: "h1", MergeSHA: "m1", CIChecks: map[string]string{"ci": "passed"}},
 		},
 		{
-			name: "conflict resolved reopens", got: svc.HandleConflictResolved(restate.WithMockContext(mc04), PREvent{Repo: "aerial", PRNumber: 101, HeadSHA: "h1"}), rec: rec04, wantSet: true,
+			name: "conflict resolved reopens", got: svc.HandleConflictResolved(restate.WithMockContext(mc04), PREvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "h1"}), rec: rec04, wantSet: true,
 			want: registryRowView{Status: RegistryStatusOpen, HeadSHA: "h1"},
 		},
 		{
-			name: "merged records merge sha", got: svc.HandleMerged(restate.WithMockContext(mc05), PREvent{Repo: "aerial", PRNumber: 101, HeadSHA: "h1", MergeSHA: "m1"}), rec: rec05, wantSet: true,
+			name: "merged records merge sha", got: svc.HandleMerged(restate.WithMockContext(mc05), PREvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "h1", MergeSHA: "m1"}), rec: rec05, wantSet: true,
 			want: registryRowView{Status: RegistryStatusMerged, HeadSHA: "h1", MergeSHA: "m1"},
 		},
 		{
-			name: "closed records closed", got: svc.HandleClosed(restate.WithMockContext(mc06), PREvent{Repo: "aerial", PRNumber: 101, HeadSHA: "h1"}), rec: rec06, wantSet: true,
+			name: "closed records closed", got: svc.HandleClosed(restate.WithMockContext(mc06), PREvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "h1"}), rec: rec06, wantSet: true,
 			want: registryRowView{Status: RegistryStatusClosed, HeadSHA: "h1"},
 		},
 		{
-			name: "merged kustomization request starts deploying", got: svc.HandleKustomizationRequested(restate.WithMockContext(mc07), PREvent{Repo: "aerial", PRNumber: 101, HeadSHA: "h1", Jobs: []string{"eri"}, KustomizationRequests: map[string]KustomizationRequest{"core": req}}), rec: rec07, wantSet: true,
+			name: "merged kustomization request starts deploying", got: svc.HandleKustomizationRequested(restate.WithMockContext(mc07), PREvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "h1", Jobs: []string{"eri"}, KustomizationRequests: map[string]KustomizationRequest{"core": req}}), rec: rec07, wantSet: true,
 			want: registryRowView{Status: RegistryStatusDeploying, HeadSHA: "h1", MergeSHA: "m1", Jobs: []string{"eri"}, StartedJobs: []string{"eri"}},
 		},
 		{
-			name: "merged rollout marks ready jobs", got: svc.HandleRolloutProgress(restate.WithMockContext(mc08), PREvent{Repo: "aerial", PRNumber: 101, MergeSHA: "m1", DeployedJobs: []string{"eri"}}), rec: rec08, wantSet: true,
+			name: "merged rollout marks ready jobs", got: svc.HandleRolloutProgress(restate.WithMockContext(mc08), PREvent{Repo: "azylman/aerial", PRNumber: 101, MergeSHA: "m1", DeployedJobs: []string{"eri"}}), rec: rec08, wantSet: true,
 			want: registryRowView{Status: RegistryStatusDeploying, HeadSHA: "h1", MergeSHA: "m1", Jobs: []string{"eri"}, StartedJobs: []string{"eri"}, DeployedJobs: []string{"eri"}},
 		},
 		{
-			name: "merged rollout completes kustomizations", got: svc.HandleRolloutProgress(restate.WithMockContext(mc09), PREvent{Repo: "aerial", PRNumber: 101, MergeSHA: "m1", DeployedKustomizations: []string{"core"}}), rec: rec09, wantSet: true,
+			name: "merged rollout completes kustomizations", got: svc.HandleRolloutProgress(restate.WithMockContext(mc09), PREvent{Repo: "azylman/aerial", PRNumber: 101, MergeSHA: "m1", DeployedKustomizations: []string{"core"}}), rec: rec09, wantSet: true,
 			want: registryRowView{Status: RegistryStatusDeployed, HeadSHA: "h1", MergeSHA: "m1", Jobs: []string{"eri"}, StartedJobs: []string{"eri"}, DeployedKustomizations: []string{"core"}, DeploySuccessPending: true},
 		},
 		{
-			name: "merged deploy failure records banner", got: svc.HandleDeployFailed(restate.WithMockContext(mc10), PREvent{Repo: "aerial", PRNumber: 101, MergeSHA: "m1", Banner: "boom"}), rec: rec10, wantSet: true,
+			name: "merged deploy failure records banner", got: svc.HandleDeployFailed(restate.WithMockContext(mc10), PREvent{Repo: "azylman/aerial", PRNumber: 101, MergeSHA: "m1", Banner: "boom"}), rec: rec10, wantSet: true,
 			want: registryRowView{Status: RegistryStatusDeployFailed, HeadSHA: "h1", MergeSHA: "m1", Jobs: []string{"eri"}, StartedJobs: []string{"eri"}, Banner: "boom"},
 		},
 		{
-			name: "deploy failure ack records published", got: svc.HandleDeployFailed(restate.WithMockContext(mc11), PREvent{Repo: "aerial", PRNumber: 101, MergeSHA: "m1", Acknowledged: true}), rec: rec11, wantSet: true,
+			name: "deploy failure ack records published", got: svc.HandleDeployFailed(restate.WithMockContext(mc11), PREvent{Repo: "azylman/aerial", PRNumber: 101, MergeSHA: "m1", Acknowledged: true}), rec: rec11, wantSet: true,
 			want: registryRowView{Status: RegistryStatusDeployFailed, HeadSHA: "h1", MergeSHA: "m1", DeployFailedPublished: true},
 		},
 		{
@@ -163,19 +163,19 @@ func TestPRObjectService_RegistryRow(t *testing.T) {
 			want: registryRowView{Status: RegistryStatusDeployed, HeadSHA: "h1", MergeSHA: "m1", DeployedKustomizations: []string{"core"}},
 		},
 		{
-			name: "merged build metadata records on merge sha", got: svc.HandleBuildMetadata(restate.WithMockContext(mc13), PREvent{Repo: "aerial", PRNumber: 101, MergeSHA: "m1", BuildMetadata: meta("final", 9, 1, 90, "m1", 1)}), rec: rec13, wantSet: true,
+			name: "merged build metadata records on merge sha", got: svc.HandleBuildMetadata(restate.WithMockContext(mc13), PREvent{Repo: "azylman/aerial", PRNumber: 101, MergeSHA: "m1", BuildMetadata: meta("final", 9, 1, 90, "m1", 1)}), rec: rec13, wantSet: true,
 			want: registryRowView{Status: RegistryStatusMerged, HeadSHA: "h1", MergeSHA: "m1", BuildRun: 9},
 		},
 		{
-			name: "synchronize from stored head syncs the row", got: svc.HandleSynchronized(restate.WithMockContext(mc14), PREvent{Repo: "aerial", PRNumber: 101, HeadSHA: "h2", BeforeSHA: "h1", Branch: "feat"}), rec: rec14, wantSet: true,
+			name: "synchronize from stored head syncs the row", got: svc.HandleSynchronized(restate.WithMockContext(mc14), PREvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "h2", BeforeSHA: "h1", Branch: "feat"}), rec: rec14, wantSet: true,
 			want: registryRowView{Status: RegistryStatusOpen, HeadSHA: "h2", Branch: "feat"},
 		},
-		{name: "late synchronize of a prior head drops stale", got: svc.HandleSynchronized(restate.WithMockContext(mc17), PREvent{Repo: "aerial", PRNumber: 101, HeadSHA: "h2", BeforeSHA: "h0"}), rec: rec17, wantSet: false},
+		{name: "late synchronize of a prior head drops stale", got: svc.HandleSynchronized(restate.WithMockContext(mc17), PREvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "h2", BeforeSHA: "h0"}), rec: rec17, wantSet: false},
 		{
-			name: "missed synchronize recovers the stale head", got: svc.HandleSynchronized(restate.WithMockContext(mc19), PREvent{Repo: "aerial", PRNumber: 101, HeadSHA: "h3", BeforeSHA: "h2"}), rec: rec19, wantSet: true,
+			name: "missed synchronize recovers the stale head", got: svc.HandleSynchronized(restate.WithMockContext(mc19), PREvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "h3", BeforeSHA: "h2"}), rec: rec19, wantSet: true,
 			want: registryRowView{Status: RegistryStatusOpen, HeadSHA: "h3"},
 		},
-		{name: "closed absorbs deploy failure", got: svc.HandleDeployFailed(restate.WithMockContext(mc15), PREvent{Repo: "aerial", PRNumber: 101, HeadSHA: "h1", Banner: "boom"}), rec: rec15, wantSet: false},
+		{name: "closed absorbs deploy failure", got: svc.HandleDeployFailed(restate.WithMockContext(mc15), PREvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "h1", Banner: "boom"}), rec: rec15, wantSet: false},
 		{
 			name: "conflict publish records conflict", got: err16, rec: rec16, wantSet: true,
 			want: registryRowView{Status: RegistryStatusConflict, HeadSHA: "h1"},
@@ -211,12 +211,12 @@ func TestPRObjectService_Register(t *testing.T) {
 		wantStatus string
 		wantSends  int
 	}{
-		{name: "new pr registers and indexes", req: RegisterRequest{Repo: "aerial", PRNumber: 101, Branch: "feat", HeadSHA: "h1", TargetID: snowA, Agent: "aerial"}, wantResp: RegisterResponse{TargetID: snowA, Agent: "aerial", Status: RegistryStatusOpen}, wantSet: true, wantStatus: RegistryStatusOpen, wantSends: 1},
-		{name: "headless target resolves stored target", existing: owned, req: RegisterRequest{Repo: "aerial", PRNumber: 101, Branch: "feat", HeadSHA: "h1", TargetID: "headless:x", EnforceOwner: true, ExpectedOwner: "agent-alpha"}, wantResp: RegisterResponse{TargetID: snowB, Agent: "agent-alpha", Status: RegistryStatusOpen}, wantSet: true, wantStatus: RegistryStatusOpen, wantSends: 1},
-		{name: "owner mismatch is a terminal 409", existing: owned, req: RegisterRequest{Repo: "aerial", PRNumber: 101, Branch: "feat", HeadSHA: "h1", TargetID: snowA, EnforceOwner: true, ExpectedOwner: "aerial"}, wantErr: true, wantCode: 409},
-		{name: "no target is a terminal 400", req: RegisterRequest{Repo: "aerial", PRNumber: 101, Branch: "feat", HeadSHA: "h1"}, wantErr: true, wantCode: 400},
-		{name: "missing branch is a terminal 400", req: RegisterRequest{Repo: "aerial", PRNumber: 101, HeadSHA: "h1", TargetID: snowA}, wantErr: true, wantCode: 400},
-		{name: "kv failure surfaces", failGet: true, req: RegisterRequest{Repo: "aerial", PRNumber: 101, Branch: "feat", HeadSHA: "h1", TargetID: snowA}, wantErr: true, wantCode: 500},
+		{name: "new pr registers and indexes", req: RegisterRequest{Repo: "azylman/aerial", PRNumber: 101, Branch: "feat", HeadSHA: "h1", TargetID: snowA, Agent: "aerial"}, wantResp: RegisterResponse{TargetID: snowA, Agent: "aerial", Status: RegistryStatusOpen}, wantSet: true, wantStatus: RegistryStatusOpen, wantSends: 1},
+		{name: "headless target resolves stored target", existing: owned, req: RegisterRequest{Repo: "azylman/aerial", PRNumber: 101, Branch: "feat", HeadSHA: "h1", TargetID: "headless:x", EnforceOwner: true, ExpectedOwner: "agent-alpha"}, wantResp: RegisterResponse{TargetID: snowB, Agent: "agent-alpha", Status: RegistryStatusOpen}, wantSet: true, wantStatus: RegistryStatusOpen, wantSends: 1},
+		{name: "owner mismatch is a terminal 409", existing: owned, req: RegisterRequest{Repo: "azylman/aerial", PRNumber: 101, Branch: "feat", HeadSHA: "h1", TargetID: snowA, EnforceOwner: true, ExpectedOwner: "aerial"}, wantErr: true, wantCode: 409},
+		{name: "no target is a terminal 400", req: RegisterRequest{Repo: "azylman/aerial", PRNumber: 101, Branch: "feat", HeadSHA: "h1"}, wantErr: true, wantCode: 400},
+		{name: "missing branch is a terminal 400", req: RegisterRequest{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "h1", TargetID: snowA}, wantErr: true, wantCode: 400},
+		{name: "kv failure surfaces", failGet: true, req: RegisterRequest{Repo: "azylman/aerial", PRNumber: 101, Branch: "feat", HeadSHA: "h1", TargetID: snowA}, wantErr: true, wantCode: 500},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

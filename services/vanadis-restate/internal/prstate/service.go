@@ -139,7 +139,7 @@ func (s *PRObjectService) dropUntrackedRollout(ctx restate.ObjectContext, st *PR
 	if !st.Untracked() {
 		return false
 	}
-	pr := PRObjectKey(st.Repo, st.PRNumber)
+	pr := prwire.PRObjectKey(st.Repo, st.PRNumber)
 	_, _ = restate.Run(ctx, func(rc restate.RunContext) (restate.Void, error) {
 		untrackedEventsTotal.WithLabelValues(handler).Inc()
 		slog.InfoContext(rc, "[prstate] dropping rollout event for untracked PR (no register, opened or merge seen)",
@@ -156,7 +156,7 @@ func (s *PRObjectService) dropUntrackedRollout(ctx restate.ObjectContext, st *PR
 // later and applies dropUntrackedRollout. A malformed event is not dropped
 // here; the handler's own validation decides.
 func (s *PRObjectService) dropUntrackedEvent(ctx restate.ObjectContext, ev PREvent, handler string) (bool, error) {
-	if NormalizeRepo(ev.Repo) == "" || ev.PRNumber <= 0 {
+	if strings.TrimSpace(ev.Repo) == "" || ev.PRNumber <= 0 {
 		return false, nil
 	}
 	st, stored, err := s.loadPRState(ctx, ev)
@@ -179,7 +179,7 @@ func (s *PRObjectService) cleanUntrackedResidue(ctx restate.ObjectContext, st *P
 	restate.Set(ctx, s.stateKey, st)
 	s.syncRolloutIndex(ctx, st)
 	if st.GateGeneration > 0 {
-		restate.ObjectSend(ctx, prwire.RepoObjectServiceName, RepoObjectKey(st.Repo), prwire.RepoHandlerPRIndex).Send(PRIndexEvent{
+		restate.ObjectSend(ctx, prwire.RepoObjectServiceName, prwire.RepoObjectKey(st.Repo), prwire.RepoHandlerPRIndex).Send(PRIndexEvent{
 			Repo: st.Repo, PRNumber: st.PRNumber, ReopenEpoch: st.ReopenEpoch, Generation: st.GateGeneration, Lifecycle: IndexDeployed,
 		})
 	}
@@ -266,7 +266,7 @@ func (s *PRObjectService) mutateRolloutPhaseEvent(ctx restate.ObjectContext, ev 
 }
 
 func (s *PRObjectService) mutateEvent(ctx restate.ObjectContext, ev PREvent, phase eventPhase, handler string, mutate func(*PRState, *PREvent)) error {
-	if NormalizeRepo(ev.Repo) == "" || ev.PRNumber <= 0 {
+	if strings.TrimSpace(ev.Repo) == "" || ev.PRNumber <= 0 {
 		return nil
 	}
 	st, stored, err := s.loadPRState(ctx, ev)
@@ -388,7 +388,7 @@ func sendPRIndex(ctx restate.ObjectContext, st *PRState, ev PREvent, lifecycle s
 	if idx.Branch == "" {
 		idx.Branch = st.Branch
 	}
-	restate.ObjectSend(ctx, prwire.RepoObjectServiceName, RepoObjectKey(st.Repo), prwire.RepoHandlerPRIndex).Send(idx)
+	restate.ObjectSend(ctx, prwire.RepoObjectServiceName, prwire.RepoObjectKey(st.Repo), prwire.RepoHandlerPRIndex).Send(idx)
 }
 
 // applyPREvent loads the PR state, drops stale and same-epoch terminal
@@ -404,7 +404,7 @@ func (s *PRObjectService) HandleCheckFailed(ctx restate.ObjectContext, ev PREven
 	return s.mutatePREvent(ctx, ev, func(st *PRState) {
 		if strings.TrimSpace(ev.CheckName) != "" {
 			st.RecordFailedCheckRunDetailed(ev.HeadSHA, ev.CheckName)
-			if !IsRoboRevCheck(ev.CheckName) {
+			if !prwire.IsRoboRevCheck(ev.CheckName) {
 				st.RecordNonRoboRevFailedSHA(ev.HeadSHA)
 			}
 		}
@@ -465,7 +465,7 @@ func (s *PRObjectService) HandleConflict(ctx restate.ObjectContext, ev PREvent) 
 // projection. Malformed events resolve the zero verdict.
 func runVerdict[D any](s *PRObjectService, ctx restate.ObjectContext, ev PREvent, resolve func(*PRState, PREvent) (D, error), fires func(D) bool, commit func(*PRState) error) (D, error) {
 	var zero D
-	if NormalizeRepo(ev.Repo) == "" || ev.PRNumber <= 0 {
+	if strings.TrimSpace(ev.Repo) == "" || ev.PRNumber <= 0 {
 		return zero, nil
 	}
 	st, err := s.loadOrCreatePRState(ctx, ev)
@@ -513,7 +513,7 @@ func (s *PRObjectService) HandleConflictDetected(ctx restate.ObjectSharedContext
 // pipeline still names it until r2 deletes that pipeline, so it stays
 // registered until r2b; like every handler it rejects a legacy stamp.
 func (s *PRObjectService) HandleConflictPublished(ctx restate.ObjectContext, ev PREvent) (ConflictPublishedOutcome, error) {
-	if NormalizeRepo(ev.Repo) == "" || ev.PRNumber <= 0 {
+	if strings.TrimSpace(ev.Repo) == "" || ev.PRNumber <= 0 {
 		return ConflictPublishedOutcome{}, nil
 	}
 	st, err := s.loadOrCreatePRState(ctx, ev)
@@ -553,7 +553,7 @@ func forwardRecoveredAutoUpdate(ctx restate.ObjectContext, st *PRState, ev PREve
 	if ev.AutoUpdate == nil {
 		return
 	}
-	restate.ObjectSend(ctx, prwire.RepoObjectServiceName, RepoObjectKey(st.Repo), prwire.RepoHandlerAutoUpdate).Send(RepoEvent{
+	restate.ObjectSend(ctx, prwire.RepoObjectServiceName, prwire.RepoObjectKey(st.Repo), prwire.RepoHandlerAutoUpdate).Send(RepoEvent{
 		Repo: st.Repo, PRNumber: st.PRNumber, HeadSHA: ev.HeadSHA, CheckName: ev.CheckName,
 		AutoUpdate: ev.AutoUpdate,
 	})
@@ -610,7 +610,7 @@ func resolveConflict(st *PRState, headSHA string) {
 // moved past it (MergeEventHead); synapse also sends it when a deploy
 // commit lookup proves a merge whose webhooks were lost.
 func (s *PRObjectService) HandleMerged(ctx restate.ObjectContext, ev PREvent) error {
-	if NormalizeRepo(ev.Repo) == "" || ev.PRNumber <= 0 {
+	if strings.TrimSpace(ev.Repo) == "" || ev.PRNumber <= 0 {
 		return nil
 	}
 	st, err := s.loadOrCreatePRState(ctx, ev)
@@ -677,7 +677,7 @@ func recoverMergedHead(ctx context.Context, st *PRState, ev PREvent) bool {
 // noteMergedHeadRecovered counts and logs one merged stale head repair.
 func noteMergedHeadRecovered(ctx context.Context, st *PRState, prev string) {
 	mergeHeadRecoveredTotal.Inc()
-	slog.WarnContext(ctx, "[prstate] merged stale head recovered", "pr", PRObjectKey(st.Repo, st.PRNumber),
+	slog.WarnContext(ctx, "[prstate] merged stale head recovered", "pr", prwire.PRObjectKey(st.Repo, st.PRNumber),
 		"stored", prev, "head", st.HeadSHA, "merge", st.MergeSHA)
 }
 
@@ -721,7 +721,7 @@ func (s *PRObjectService) HandleOpened(ctx restate.ObjectContext, ev PREvent) er
 // state). The agent is the insert's owner seed, not a lifecycle hint, so it
 // skips loadPRState's hint.
 func (s *PRObjectService) HandleSelfRegistered(ctx restate.ObjectContext, ev PREvent) error {
-	if NormalizeRepo(ev.Repo) == "" || ev.PRNumber <= 0 {
+	if strings.TrimSpace(ev.Repo) == "" || ev.PRNumber <= 0 {
 		return nil
 	}
 	st, err := restate.Get[*PRState](ctx, s.stateKey)
@@ -794,7 +794,7 @@ func init() {
 // SynchronizeDisposition) and applies the UpdatePRSync row transition. The
 // new head is indexed for RepoObject SHA routing.
 func (s *PRObjectService) HandleSynchronized(ctx restate.ObjectContext, ev PREvent) error {
-	if NormalizeRepo(ev.Repo) == "" || ev.PRNumber <= 0 {
+	if strings.TrimSpace(ev.Repo) == "" || ev.PRNumber <= 0 {
 		return nil
 	}
 	st, err := s.loadOrCreatePRState(ctx, ev)
@@ -810,7 +810,7 @@ func (s *PRObjectService) HandleSynchronized(ctx restate.ObjectContext, ev PREve
 	wasConflict := st.Status == RegistryStatusConflict
 	if disp == DispositionRecoverStale {
 		synchronizeRecoveredTotal.Inc()
-		slog.WarnContext(ctx, "[prstate] synchronize recovered stale head", "pr", PRObjectKey(st.Repo, st.PRNumber),
+		slog.WarnContext(ctx, "[prstate] synchronize recovered stale head", "pr", prwire.PRObjectKey(st.Repo, st.PRNumber),
 			"stored", prevHead, "before", strings.TrimSpace(ev.BeforeSHA), "head", strings.TrimSpace(ev.HeadSHA))
 	}
 	st.SetHead(ev.HeadSHA)
@@ -932,7 +932,7 @@ func (s *PRObjectService) HandleDeployDispatched(ctx restate.ObjectSharedContext
 // pipeline still names it until r2 deletes that pipeline, so it stays
 // registered until r2b; like every handler it rejects a legacy stamp.
 func (s *PRObjectService) HandleDeploySuccessPublished(ctx restate.ObjectContext, ev PREvent) (DeployPublishedOutcome, error) {
-	if NormalizeRepo(ev.Repo) == "" || ev.PRNumber <= 0 {
+	if strings.TrimSpace(ev.Repo) == "" || ev.PRNumber <= 0 {
 		return DeployPublishedOutcome{}, nil
 	}
 	st, stored, err := s.loadPRState(ctx, ev)
@@ -957,7 +957,7 @@ func (s *PRObjectService) HandleDeploySuccessPublished(ctx restate.ObjectContext
 // requests and bad targets fail terminally with 400, an owner mismatch
 // with 409, so no retry repeats them.
 func (s *PRObjectService) Register(ctx restate.ObjectContext, req RegisterRequest) (RegisterResponse, error) {
-	repo := NormalizeRepo(req.Repo)
+	repo := strings.TrimSpace(req.Repo)
 	st, err := restate.Get[*PRState](ctx, s.stateKey)
 	if err != nil {
 		return RegisterResponse{}, err
@@ -1111,10 +1111,10 @@ func (s *RepoObjectService) routeBySHA(ctx restate.ObjectContext, kind string, e
 		return terminalOnInvalid(err)
 	}
 	if out.Held {
-		slog.InfoContext(ctx, "[prstate] RepoObject held SHA event until indexed", "repo", NormalizeRepo(ev.Repo), "sha", ev.SHA, "kind", kind, "handler", ev.Handler, "held_id", out.HeldID)
+		slog.InfoContext(ctx, "[prstate] RepoObject held SHA event until indexed", "repo", strings.TrimSpace(ev.Repo), "sha", ev.SHA, "kind", kind, "handler", ev.Handler, "held_id", out.HeldID)
 	}
 	for _, dropped := range out.Evicted {
-		slog.WarnContext(ctx, "[prstate] RepoObject evicted held SHA event at capacity", "repo", NormalizeRepo(ev.Repo), "sha", dropped.Event.SHA, "kind", dropped.Kind, "handler", dropped.Event.Handler, "held_id", dropped.ID)
+		slog.WarnContext(ctx, "[prstate] RepoObject evicted held SHA event at capacity", "repo", strings.TrimSpace(ev.Repo), "sha", dropped.Event.SHA, "kind", dropped.Kind, "handler", dropped.Event.Handler, "held_id", dropped.ID)
 	}
 	return nil
 }
@@ -1186,7 +1186,7 @@ type restatePRSender struct {
 }
 
 func (s restatePRSender) SendPR(_ context.Context, handler string, ev PREvent) error {
-	restate.ObjectSend(s.ctx, prwire.PRObjectServiceName, PRObjectKey(ev.Repo, ev.PRNumber), handler).Send(ev)
+	restate.ObjectSend(s.ctx, prwire.PRObjectServiceName, prwire.PRObjectKey(ev.Repo, ev.PRNumber), handler).Send(ev)
 	return nil
 }
 
@@ -1197,12 +1197,12 @@ type restateSelfScheduler struct {
 }
 
 func (s restateSelfScheduler) ScheduleHeldReplay(_ context.Context, repo, sha string, delay time.Duration) error {
-	restate.ObjectSend(s.ctx, prwire.RepoObjectServiceName, RepoObjectKey(repo), prwire.RepoHandlerHeldReplay).Send(HeldReplayRequest{SHA: sha}, restate.WithDelay(delay))
+	restate.ObjectSend(s.ctx, prwire.RepoObjectServiceName, prwire.RepoObjectKey(repo), prwire.RepoHandlerHeldReplay).Send(HeldReplayRequest{SHA: sha}, restate.WithDelay(delay))
 	return nil
 }
 
 func (s restateSelfScheduler) ScheduleHeldExpiry(_ context.Context, repo string, id uint64, delay time.Duration) error {
-	restate.ObjectSend(s.ctx, prwire.RepoObjectServiceName, RepoObjectKey(repo), prwire.RepoHandlerHeldExpiry).Send(HeldExpiryRequest{ID: id}, restate.WithDelay(delay))
+	restate.ObjectSend(s.ctx, prwire.RepoObjectServiceName, prwire.RepoObjectKey(repo), prwire.RepoHandlerHeldExpiry).Send(HeldExpiryRequest{ID: id}, restate.WithDelay(delay))
 	return nil
 }
 

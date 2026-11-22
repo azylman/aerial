@@ -2,8 +2,9 @@ package prwire
 
 import "testing"
 
-// TestCheckNameClassifiers pins IsRoboRevCheck and IsGateAggregatorCheck
-// over one set of check names: both classify the same input.
+// TestCheckNameClassifiers pins IsRoboRevCheck, IsGateAggregatorCheck and
+// CanonicalFailedCheckKey over one set of check names: all classify the same
+// input.
 func TestCheckNameClassifiers(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -11,19 +12,20 @@ func TestCheckNameClassifiers(t *testing.T) {
 		checkName   string
 		wantRoboRev bool
 		wantGate    bool
+		wantKey     string
 	}{
-		{name: "roborev lowercase", checkName: "roborev", wantRoboRev: true},
-		{name: "roborev uppercase", checkName: "ROBOREV", wantRoboRev: true},
-		{name: "roborev long name", checkName: "RoboRev Code Review", wantRoboRev: true},
-		{name: "roborev long name any case", checkName: "roborev code review", wantRoboRev: true},
-		{name: "roborev surrounding spaces", checkName: "  roborev  ", wantRoboRev: true},
-		{name: "roborev substring is not exact", checkName: "roborev-lite"},
-		{name: "ci gate exact", checkName: "ci gate", wantGate: true},
-		{name: "ci gate uppercase", checkName: "CI Gate", wantGate: true},
-		{name: "pr gate suffix", checkName: "pr gate", wantGate: true},
-		{name: "gate spaces trimmed", checkName: "  CI Gate  ", wantGate: true},
-		{name: "gate prefix only", checkName: "gatekeeper"},
-		{name: "other check", checkName: "unit-tests"},
+		{name: "roborev lowercase", checkName: "roborev", wantRoboRev: true, wantKey: "roborev"},
+		{name: "roborev uppercase", checkName: "ROBOREV", wantRoboRev: true, wantKey: "roborev"},
+		{name: "roborev long name", checkName: "RoboRev Code Review", wantRoboRev: true, wantKey: "roborev"},
+		{name: "roborev long name any case", checkName: "roborev code review", wantRoboRev: true, wantKey: "roborev"},
+		{name: "roborev surrounding spaces", checkName: "  roborev  ", wantRoboRev: true, wantKey: "roborev"},
+		{name: "roborev substring is not exact", checkName: "roborev-lite", wantKey: "roborev-lite"},
+		{name: "ci gate exact", checkName: "ci gate", wantGate: true, wantKey: "ci gate"},
+		{name: "ci gate uppercase", checkName: "CI Gate", wantGate: true, wantKey: "ci gate"},
+		{name: "pr gate suffix", checkName: "pr gate", wantGate: true, wantKey: "pr gate"},
+		{name: "gate spaces trimmed", checkName: "  CI Gate  ", wantGate: true, wantKey: "ci gate"},
+		{name: "gate prefix only", checkName: "gatekeeper", wantKey: "gatekeeper"},
+		{name: "other check", checkName: "unit-tests", wantKey: "unit-tests"},
 		{name: "empty", checkName: ""},
 		{name: "blank", checkName: "  "},
 	}
@@ -35,6 +37,9 @@ func TestCheckNameClassifiers(t *testing.T) {
 			}
 			if got := IsGateAggregatorCheck(tc.checkName); got != tc.wantGate {
 				t.Errorf("IsGateAggregatorCheck(%q) = %v, want %v", tc.checkName, got, tc.wantGate)
+			}
+			if got := CanonicalFailedCheckKey(tc.checkName); got != tc.wantKey {
+				t.Errorf("CanonicalFailedCheckKey(%q) = %q, want %q", tc.checkName, got, tc.wantKey)
 			}
 		})
 	}

@@ -89,7 +89,7 @@ func (s repoSeed) empty() bool {
 func seedRepoStore(seed repoSeed, loadErr bool) *MemRepoStore {
 	store := NewMemRepoStore()
 	if !seed.empty() {
-		st := NewRepoState("aerial")
+		st := NewRepoState("azylman/aerial")
 		for _, sha := range seed.mains {
 			st.RecordMainPushSHA(sha)
 		}
@@ -113,7 +113,7 @@ func seedRepoStore(seed repoSeed, loadErr bool) *MemRepoStore {
 
 func loadRepoForTest(t *testing.T, store *MemRepoStore) *RepoState {
 	t.Helper()
-	st, err := store.LoadRepo("aerial")
+	st, err := store.LoadRepo("azylman/aerial")
 	if err != nil {
 		t.Fatalf("LoadRepo err = %v", err)
 	}
@@ -129,7 +129,7 @@ func rolloutStatus(pr int, branch string, gen uint64) sentPR {
 }
 
 func heldCheck(sha string) SHAEvent {
-	return SHAEvent{Repo: "aerial", SHA: sha, Handler: prwire.PRHandlerCheckFailed, Event: PREvent{Event: "check_failed", CheckName: "ci"}}
+	return SHAEvent{Repo: "azylman/aerial", SHA: sha, Handler: prwire.PRHandlerCheckFailed, Event: PREvent{Event: "check_failed", CheckName: "ci"}}
 }
 
 func checkErr(t *testing.T, err error, wantErr bool, wantInvalid bool) {
@@ -187,15 +187,15 @@ func TestRepoHandlers_HandleMainPush(t *testing.T) {
 		wantTouched    []string
 		wantSent       []sentPR
 	}{
-		{name: "fresh push records sha", ev: RepoEvent{Repo: "aerial", MainSHA: "MainSHA1"}, wantLatest: "mainsha1", wantIndexLen: 1, wantIndexFirst: "mainsha1"},
-		{name: "new sha fans out to open prs only", seed: repoSeed{mains: []string{"mainsha1"}, index: openTwoClosedOne}, ev: RepoEvent{Repo: "aerial", MainSHA: "mainsha2"}, wantLatest: "mainsha2", wantIndexLen: 2, wantIndexFirst: "mainsha1", wantTouched: []string{"azylman/aerial#101", "azylman/aerial#102", "azylman/aerial#103"}, wantSent: []sentPR{mainAdvanced(101), mainAdvanced(102)}},
-		{name: "duplicate sha sends nothing", seed: repoSeed{mains: []string{"mainsha1"}, index: openTwoClosedOne}, ev: RepoEvent{Repo: "aerial", MainSHA: "mainsha1"}, wantLatest: "mainsha1", wantIndexLen: 1, wantIndexFirst: "mainsha1", wantTouched: []string{"azylman/aerial#101", "azylman/aerial#102", "azylman/aerial#103"}},
-		{name: "duplicate sha still records a new pr key", seed: repoSeed{mains: []string{"mainsha1"}}, ev: RepoEvent{Repo: "aerial", MainSHA: "mainsha1", PRNumber: 104}, wantLatest: "mainsha1", wantIndexLen: 1, wantIndexFirst: "mainsha1", wantTouched: []string{"azylman/aerial#104"}},
-		{name: "index bounds at fifty", seed: repoSeed{mains: seedMainIndex50()}, ev: RepoEvent{Repo: "aerial", MainSHA: "newsha99"}, wantLatest: "newsha99", wantIndexLen: 50, wantIndexFirst: "base01"},
-		{name: "failing send never starves later prs", seed: repoSeed{mains: []string{"mainsha1"}, index: openTwoClosedOne}, failPR: 101, ev: RepoEvent{Repo: "aerial", MainSHA: "mainsha2"}, wantErr: true, wantLatest: "mainsha2", wantIndexLen: 2, wantIndexFirst: "mainsha1", wantTouched: []string{"azylman/aerial#101", "azylman/aerial#102", "azylman/aerial#103"}, wantSent: []sentPR{mainAdvanced(101), mainAdvanced(102)}},
-		{name: "load error surfaces", loadErr: true, ev: RepoEvent{Repo: "aerial", MainSHA: "mainsha1"}, wantErr: true},
-		{name: "empty sha is invalid", ev: RepoEvent{Repo: "aerial"}, wantErr: true, wantInvalid: true},
-		{name: "zero sha is invalid", ev: RepoEvent{Repo: "aerial", MainSHA: "0000000"}, wantErr: true, wantInvalid: true},
+		{name: "fresh push records sha", ev: RepoEvent{Repo: "azylman/aerial", MainSHA: "MainSHA1"}, wantLatest: "mainsha1", wantIndexLen: 1, wantIndexFirst: "mainsha1"},
+		{name: "new sha fans out to open prs only", seed: repoSeed{mains: []string{"mainsha1"}, index: openTwoClosedOne}, ev: RepoEvent{Repo: "azylman/aerial", MainSHA: "mainsha2"}, wantLatest: "mainsha2", wantIndexLen: 2, wantIndexFirst: "mainsha1", wantTouched: []string{"azylman/aerial#101", "azylman/aerial#102", "azylman/aerial#103"}, wantSent: []sentPR{mainAdvanced(101), mainAdvanced(102)}},
+		{name: "duplicate sha sends nothing", seed: repoSeed{mains: []string{"mainsha1"}, index: openTwoClosedOne}, ev: RepoEvent{Repo: "azylman/aerial", MainSHA: "mainsha1"}, wantLatest: "mainsha1", wantIndexLen: 1, wantIndexFirst: "mainsha1", wantTouched: []string{"azylman/aerial#101", "azylman/aerial#102", "azylman/aerial#103"}},
+		{name: "duplicate sha still records a new pr key", seed: repoSeed{mains: []string{"mainsha1"}}, ev: RepoEvent{Repo: "azylman/aerial", MainSHA: "mainsha1", PRNumber: 104}, wantLatest: "mainsha1", wantIndexLen: 1, wantIndexFirst: "mainsha1", wantTouched: []string{"azylman/aerial#104"}},
+		{name: "index bounds at fifty", seed: repoSeed{mains: seedMainIndex50()}, ev: RepoEvent{Repo: "azylman/aerial", MainSHA: "newsha99"}, wantLatest: "newsha99", wantIndexLen: 50, wantIndexFirst: "base01"},
+		{name: "failing send never starves later prs", seed: repoSeed{mains: []string{"mainsha1"}, index: openTwoClosedOne}, failPR: 101, ev: RepoEvent{Repo: "azylman/aerial", MainSHA: "mainsha2"}, wantErr: true, wantLatest: "mainsha2", wantIndexLen: 2, wantIndexFirst: "mainsha1", wantTouched: []string{"azylman/aerial#101", "azylman/aerial#102", "azylman/aerial#103"}, wantSent: []sentPR{mainAdvanced(101), mainAdvanced(102)}},
+		{name: "load error surfaces", loadErr: true, ev: RepoEvent{Repo: "azylman/aerial", MainSHA: "mainsha1"}, wantErr: true},
+		{name: "empty sha is invalid", ev: RepoEvent{Repo: "azylman/aerial"}, wantErr: true, wantInvalid: true},
+		{name: "zero sha is invalid", ev: RepoEvent{Repo: "azylman/aerial", MainSHA: "0000000"}, wantErr: true, wantInvalid: true},
 		{name: "empty repo is invalid", ev: RepoEvent{MainSHA: "mainsha1"}, wantErr: true, wantInvalid: true},
 	}
 	for _, tc := range tests {
@@ -233,13 +233,13 @@ func TestRepoHandlers_HandleFanout(t *testing.T) {
 		wantInvalid bool
 		wantSent    []sentPR
 	}{
-		{name: "fans out latest main to open prs", seed: repoSeed{mains: []string{"mainsha1"}, index: openTwo}, ev: RepoEvent{Repo: "aerial"}, wantSent: []sentPR{mainAdvanced(101), mainAdvanced(102)}},
-		{name: "no main push sends nothing", seed: repoSeed{index: openTwo}, ev: RepoEvent{Repo: "aerial"}},
-		{name: "already fanned out main sha sends nothing", seed: repoSeed{mains: []string{"mainsha1"}, index: openTwo, fannedOut: "mainsha1"}, ev: RepoEvent{Repo: "aerial"}},
-		{name: "stale fanned out sha fans out the newer main", seed: repoSeed{mains: []string{"mainsha1", "mainsha2"}, index: openTwo, fannedOut: "mainsha1"}, ev: RepoEvent{Repo: "aerial"}, wantSent: []sentPR{mainAdvanced(101), mainAdvanced(102)}},
-		{name: "missing repo state sends nothing", ev: RepoEvent{Repo: "aerial"}},
-		{name: "failing pr never starves later prs", seed: repoSeed{mains: []string{"mainsha1"}, index: openTwo}, failPR: 101, ev: RepoEvent{Repo: "aerial"}, wantErr: true, wantSent: []sentPR{mainAdvanced(101), mainAdvanced(102)}},
-		{name: "load error surfaces", loadErr: true, ev: RepoEvent{Repo: "aerial"}, wantErr: true},
+		{name: "fans out latest main to open prs", seed: repoSeed{mains: []string{"mainsha1"}, index: openTwo}, ev: RepoEvent{Repo: "azylman/aerial"}, wantSent: []sentPR{mainAdvanced(101), mainAdvanced(102)}},
+		{name: "no main push sends nothing", seed: repoSeed{index: openTwo}, ev: RepoEvent{Repo: "azylman/aerial"}},
+		{name: "already fanned out main sha sends nothing", seed: repoSeed{mains: []string{"mainsha1"}, index: openTwo, fannedOut: "mainsha1"}, ev: RepoEvent{Repo: "azylman/aerial"}},
+		{name: "stale fanned out sha fans out the newer main", seed: repoSeed{mains: []string{"mainsha1", "mainsha2"}, index: openTwo, fannedOut: "mainsha1"}, ev: RepoEvent{Repo: "azylman/aerial"}, wantSent: []sentPR{mainAdvanced(101), mainAdvanced(102)}},
+		{name: "missing repo state sends nothing", ev: RepoEvent{Repo: "azylman/aerial"}},
+		{name: "failing pr never starves later prs", seed: repoSeed{mains: []string{"mainsha1"}, index: openTwo}, failPR: 101, ev: RepoEvent{Repo: "azylman/aerial"}, wantErr: true, wantSent: []sentPR{mainAdvanced(101), mainAdvanced(102)}},
+		{name: "load error surfaces", loadErr: true, ev: RepoEvent{Repo: "azylman/aerial"}, wantErr: true},
 		{name: "empty repo is invalid", ev: RepoEvent{}, wantErr: true, wantInvalid: true},
 	}
 	for _, tc := range tests {
@@ -272,13 +272,13 @@ func TestRepoHandlers_HandleKustomizationStatus(t *testing.T) {
 		wantStored     bool
 		wantTombstones map[string]uint64
 	}{
-		{name: "records tombstone without deploying prs", ev: RepoEvent{Repo: "aerial", HeadSHA: "depsha1", Generation: 3}, wantStored: true, wantTombstones: map[string]uint64{"depsha1": 3}},
-		{name: "evicts older generations", seed: repoSeed{tombstones: map[string]uint64{"oldsha": 1, "peersha": 3}}, ev: RepoEvent{Repo: "aerial", HeadSHA: "depsha2", Generation: 3}, wantStored: true, wantTombstones: map[string]uint64{"peersha": 3, "depsha2": 3}},
-		{name: "forwards status to every deploying pr", seed: repoSeed{index: deployingTwo}, ev: RepoEvent{Repo: "aerial", Kustomization: " eri "}, wantSent: []sentPR{rolloutStatus(101, "feat-a", 2), rolloutStatus(102, "feat-b", 1)}, wantStored: true, wantTombstones: map[string]uint64{}},
-		{name: "status without sha persists nothing", ev: RepoEvent{Repo: "aerial", Generation: 3}},
-		{name: "zero sha persists nothing", ev: RepoEvent{Repo: "aerial", HeadSHA: "0000000", Generation: 3}},
-		{name: "failing pr never starves later prs", seed: repoSeed{index: deployingTwo}, failPR: 101, ev: RepoEvent{Repo: "aerial", Kustomization: "eri"}, wantErr: true, wantSent: []sentPR{rolloutStatus(101, "feat-a", 2), rolloutStatus(102, "feat-b", 1)}, wantStored: true, wantTombstones: map[string]uint64{}},
-		{name: "load error surfaces", loadErr: true, ev: RepoEvent{Repo: "aerial", HeadSHA: "depsha1"}, wantErr: true},
+		{name: "records tombstone without deploying prs", ev: RepoEvent{Repo: "azylman/aerial", HeadSHA: "depsha1", Generation: 3}, wantStored: true, wantTombstones: map[string]uint64{"depsha1": 3}},
+		{name: "evicts older generations", seed: repoSeed{tombstones: map[string]uint64{"oldsha": 1, "peersha": 3}}, ev: RepoEvent{Repo: "azylman/aerial", HeadSHA: "depsha2", Generation: 3}, wantStored: true, wantTombstones: map[string]uint64{"peersha": 3, "depsha2": 3}},
+		{name: "forwards status to every deploying pr", seed: repoSeed{index: deployingTwo}, ev: RepoEvent{Repo: "azylman/aerial", Kustomization: " eri "}, wantSent: []sentPR{rolloutStatus(101, "feat-a", 2), rolloutStatus(102, "feat-b", 1)}, wantStored: true, wantTombstones: map[string]uint64{}},
+		{name: "status without sha persists nothing", ev: RepoEvent{Repo: "azylman/aerial", Generation: 3}},
+		{name: "zero sha persists nothing", ev: RepoEvent{Repo: "azylman/aerial", HeadSHA: "0000000", Generation: 3}},
+		{name: "failing pr never starves later prs", seed: repoSeed{index: deployingTwo}, failPR: 101, ev: RepoEvent{Repo: "azylman/aerial", Kustomization: "eri"}, wantErr: true, wantSent: []sentPR{rolloutStatus(101, "feat-a", 2), rolloutStatus(102, "feat-b", 1)}, wantStored: true, wantTombstones: map[string]uint64{}},
+		{name: "load error surfaces", loadErr: true, ev: RepoEvent{Repo: "azylman/aerial", HeadSHA: "depsha1"}, wantErr: true},
 		{name: "empty repo is invalid", ev: RepoEvent{HeadSHA: "depsha1", Generation: 3}, wantErr: true, wantInvalid: true},
 	}
 	for _, tc := range tests {
@@ -336,7 +336,7 @@ func TestRepoHandlers_HandlePRIndex(t *testing.T) {
 			if tc.loadErr {
 				return
 			}
-			pr, _, _ := testRepoHandlers(t, store, nil, nil).ResolvePRBySHA(context.Background(), "aerial", tc.probeSHA)
+			pr, _, _ := testRepoHandlers(t, store, nil, nil).ResolvePRBySHA(context.Background(), "azylman/aerial", tc.probeSHA)
 			if pr != tc.wantPR {
 				t.Fatalf("ResolvePRBySHA(%q) = %d, want %d", tc.probeSHA, pr, tc.wantPR)
 			}
@@ -373,16 +373,16 @@ func TestRepoHandlers_RouteBySHA(t *testing.T) {
 		wantSelf       []selfCall
 		wantHeld       []string
 	}{
-		{name: "check run hit forwards with pr branch and head", seed: repoSeed{index: indexed}, kind: SHAKindCheckRun, ev: SHAEvent{Repo: "aerial", SHA: "ABC123", Handler: prwire.PRHandlerCheckFailed, Event: PREvent{Event: "check_failed", CheckName: "ci"}}, wantForwarded: true, wantPR: 101, wantSent: []sentPR{{handler: prwire.PRHandlerCheckFailed, ev: PREvent{Event: "check_failed", Repo: "azylman/aerial", PRNumber: 101, Branch: "feat-a", HeadSHA: "abc123", CheckName: "ci"}}}},
-		{name: "workflow run hit keeps event branch and head", seed: repoSeed{index: indexed}, kind: SHAKindWorkflowRun, ev: SHAEvent{Repo: "aerial", SHA: "abc123", Handler: prwire.PRHandlerCheckPassed, Event: PREvent{Event: "check_passed", Branch: "own", HeadSHA: "abc123"}}, wantForwarded: true, wantPR: 101, wantSent: []sentPR{{handler: prwire.PRHandlerCheckPassed, ev: PREvent{Event: "check_passed", Repo: "azylman/aerial", PRNumber: 101, Branch: "own", HeadSHA: "abc123"}}}},
-		{name: "push hit fills merge sha", seed: repoSeed{index: []PRIndexEvent{idxActive(101, "h1", "feat-a", 0), idxMerged(101, "h1", "m1")}}, kind: SHAKindPush, ev: SHAEvent{Repo: "aerial", SHA: "m1", Handler: prwire.PRHandlerMerged, Event: PREvent{Event: "merged"}}, wantForwarded: true, wantPR: 101, wantSent: []sentPR{{handler: prwire.PRHandlerMerged, ev: PREvent{Event: "merged", Repo: "azylman/aerial", PRNumber: 101, Branch: "feat-a", MergeSHA: "m1"}}}},
-		{name: "miss holds and schedules expiry", kind: SHAKindImageReady, ev: SHAEvent{Repo: "aerial", SHA: "m2", Handler: prwire.PRHandlerRolloutProgress}, wantHeldID: 1, wantSelf: []selfCall{{kind: "expiry", repo: "azylman/aerial", id: 1, delay: 30 * time.Minute}}, wantHeld: []string{"m2"}},
-		{name: "miss at capacity evicts oldest held", seed: repoSeed{held: heldFill(64)}, kind: SHAKindPush, ev: SHAEvent{Repo: "aerial", SHA: "m2", Handler: prwire.PRHandlerMerged}, wantHeldID: 65, wantEvictedIDs: []uint64{1}, wantSelf: []selfCall{{kind: "expiry", repo: "azylman/aerial", id: 65, delay: 30 * time.Minute}}, wantHeld: append(numberedSHAs(64)[1:], "m2")},
+		{name: "check run hit forwards with pr branch and head", seed: repoSeed{index: indexed}, kind: SHAKindCheckRun, ev: SHAEvent{Repo: "azylman/aerial", SHA: "ABC123", Handler: prwire.PRHandlerCheckFailed, Event: PREvent{Event: "check_failed", CheckName: "ci"}}, wantForwarded: true, wantPR: 101, wantSent: []sentPR{{handler: prwire.PRHandlerCheckFailed, ev: PREvent{Event: "check_failed", Repo: "azylman/aerial", PRNumber: 101, Branch: "feat-a", HeadSHA: "abc123", CheckName: "ci"}}}},
+		{name: "workflow run hit keeps event branch and head", seed: repoSeed{index: indexed}, kind: SHAKindWorkflowRun, ev: SHAEvent{Repo: "azylman/aerial", SHA: "abc123", Handler: prwire.PRHandlerCheckPassed, Event: PREvent{Event: "check_passed", Branch: "own", HeadSHA: "abc123"}}, wantForwarded: true, wantPR: 101, wantSent: []sentPR{{handler: prwire.PRHandlerCheckPassed, ev: PREvent{Event: "check_passed", Repo: "azylman/aerial", PRNumber: 101, Branch: "own", HeadSHA: "abc123"}}}},
+		{name: "push hit fills merge sha", seed: repoSeed{index: []PRIndexEvent{idxActive(101, "h1", "feat-a", 0), idxMerged(101, "h1", "m1")}}, kind: SHAKindPush, ev: SHAEvent{Repo: "azylman/aerial", SHA: "m1", Handler: prwire.PRHandlerMerged, Event: PREvent{Event: "merged"}}, wantForwarded: true, wantPR: 101, wantSent: []sentPR{{handler: prwire.PRHandlerMerged, ev: PREvent{Event: "merged", Repo: "azylman/aerial", PRNumber: 101, Branch: "feat-a", MergeSHA: "m1"}}}},
+		{name: "miss holds and schedules expiry", kind: SHAKindImageReady, ev: SHAEvent{Repo: "azylman/aerial", SHA: "m2", Handler: prwire.PRHandlerRolloutProgress}, wantHeldID: 1, wantSelf: []selfCall{{kind: "expiry", repo: "azylman/aerial", id: 1, delay: 30 * time.Minute}}, wantHeld: []string{"m2"}},
+		{name: "miss at capacity evicts oldest held", seed: repoSeed{held: heldFill(64)}, kind: SHAKindPush, ev: SHAEvent{Repo: "azylman/aerial", SHA: "m2", Handler: prwire.PRHandlerMerged}, wantHeldID: 65, wantEvictedIDs: []uint64{1}, wantSelf: []selfCall{{kind: "expiry", repo: "azylman/aerial", id: 65, delay: 30 * time.Minute}}, wantHeld: append(numberedSHAs(64)[1:], "m2")},
 		{name: "expiry schedule failure persists nothing", failSched: true, kind: SHAKindCheckRun, ev: heldCheck("m2"), wantErr: true, wantSelf: []selfCall{{kind: "expiry", repo: "azylman/aerial", id: 1, delay: 30 * time.Minute}}},
 		{name: "forward failure surfaces", seed: repoSeed{index: indexed}, failPR: 101, kind: SHAKindCheckRun, ev: heldCheck("abc123"), wantErr: true, wantSent: []sentPR{{handler: prwire.PRHandlerCheckFailed, ev: PREvent{Event: "check_failed", Repo: "azylman/aerial", PRNumber: 101, Branch: "feat-a", HeadSHA: "abc123", CheckName: "ci"}}}},
 		{name: "load error surfaces", loadErr: true, kind: SHAKindCheckRun, ev: heldCheck("abc123"), wantErr: true},
-		{name: "verdict handler is not routable", kind: SHAKindCheckRun, ev: SHAEvent{Repo: "aerial", SHA: "abc123", Handler: "HandleCIRecovery"}, wantErr: true, wantInvalid: true},
-		{name: "handler outside the kind allowlist is invalid", kind: SHAKindImageReady, ev: SHAEvent{Repo: "aerial", SHA: "abc123", Handler: prwire.PRHandlerCheckFailed}, wantErr: true, wantInvalid: true},
+		{name: "verdict handler is not routable", kind: SHAKindCheckRun, ev: SHAEvent{Repo: "azylman/aerial", SHA: "abc123", Handler: "HandleCIRecovery"}, wantErr: true, wantInvalid: true},
+		{name: "handler outside the kind allowlist is invalid", kind: SHAKindImageReady, ev: SHAEvent{Repo: "azylman/aerial", SHA: "abc123", Handler: prwire.PRHandlerCheckFailed}, wantErr: true, wantInvalid: true},
 		{name: "zero sha is invalid", kind: SHAKindCheckRun, ev: heldCheck("0000000"), wantErr: true, wantInvalid: true},
 		{name: "empty repo is invalid", kind: SHAKindCheckRun, ev: SHAEvent{SHA: "abc123", Handler: prwire.PRHandlerCheckFailed}, wantErr: true, wantInvalid: true},
 	}
@@ -417,7 +417,7 @@ func TestRepoHandlers_RouteBySHA(t *testing.T) {
 
 func TestRepoHandlers_ReplayHeld(t *testing.T) {
 	t.Parallel()
-	pushHeld := SHAEvent{Repo: "aerial", SHA: "m1", Handler: prwire.PRHandlerMerged, Event: PREvent{Event: "merged"}}
+	pushHeld := SHAEvent{Repo: "azylman/aerial", SHA: "m1", Handler: prwire.PRHandlerMerged, Event: PREvent{Event: "merged"}}
 	mergedIndex := []PRIndexEvent{idxActive(101, "h1", "feat-a", 0), idxMerged(101, "h1", "m1")}
 	tests := []struct {
 		name        string
@@ -443,7 +443,7 @@ func TestRepoHandlers_ReplayHeld(t *testing.T) {
 			t.Parallel()
 			store := seedRepoStore(tc.seed, tc.loadErr)
 			sender := &fakePRSender{failPR: tc.failPR}
-			err := testRepoHandlers(t, store, sender, nil).ReplayHeld(context.Background(), "aerial", tc.sha)
+			err := testRepoHandlers(t, store, sender, nil).ReplayHeld(context.Background(), "azylman/aerial", tc.sha)
 			checkErr(t, err, tc.wantErr, tc.wantInvalid)
 			assertSent(t, sender.calls, tc.wantSent)
 			if tc.loadErr || tc.wantInvalid {
@@ -469,10 +469,10 @@ func TestRepoHandlers_ExpireHeld(t *testing.T) {
 		wantInvalid bool
 		wantHeld    []string
 	}{
-		{name: "still held event expires", seed: repoSeed{held: []SHAEvent{heldCheck("a1"), heldCheck("b2")}}, repo: "aerial", id: 1, want: true, wantHeld: []string{"b2"}},
-		{name: "replayed id reports false", seed: repoSeed{held: []SHAEvent{heldCheck("a1")}}, repo: "aerial", id: 7, wantHeld: []string{"a1"}},
-		{name: "missing state reports false", repo: "aerial", id: 1},
-		{name: "load error surfaces", loadErr: true, repo: "aerial", id: 1, wantErr: true},
+		{name: "still held event expires", seed: repoSeed{held: []SHAEvent{heldCheck("a1"), heldCheck("b2")}}, repo: "azylman/aerial", id: 1, want: true, wantHeld: []string{"b2"}},
+		{name: "replayed id reports false", seed: repoSeed{held: []SHAEvent{heldCheck("a1")}}, repo: "azylman/aerial", id: 7, wantHeld: []string{"a1"}},
+		{name: "missing state reports false", repo: "azylman/aerial", id: 1},
+		{name: "load error surfaces", loadErr: true, repo: "azylman/aerial", id: 1, wantErr: true},
 		{name: "empty repo is invalid", repo: "", id: 1, wantErr: true, wantInvalid: true},
 	}
 	for _, tc := range tests {
@@ -514,7 +514,7 @@ func TestRepoHandlers_ResolvePRBySHA(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			pr, branch, ok := testRepoHandlers(t, seedRepoStore(tc.seed, tc.loadErr), nil, nil).ResolvePRBySHA(context.Background(), "aerial", tc.sha)
+			pr, branch, ok := testRepoHandlers(t, seedRepoStore(tc.seed, tc.loadErr), nil, nil).ResolvePRBySHA(context.Background(), "azylman/aerial", tc.sha)
 			if pr != tc.wantPR || branch != tc.wantBranch || ok != tc.wantOK {
 				t.Fatalf("ResolvePRBySHA = (%d,%q,%v), want (%d,%q,%v)", pr, branch, ok, tc.wantPR, tc.wantBranch, tc.wantOK)
 			}

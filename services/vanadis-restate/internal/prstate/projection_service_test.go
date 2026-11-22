@@ -74,7 +74,7 @@ func TestPRObjectServiceAfterCommit(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			mc, rec := newStateMock(t, openPR())
-			err := tc.svc.HandleCheckStatus(restate.WithMockContext(mc), PREvent{Repo: "aerial", PRNumber: 101, HeadSHA: "h1", CheckName: "ci", CheckState: "pending"})
+			err := tc.svc.HandleCheckStatus(restate.WithMockContext(mc), PREvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "h1", CheckName: "ci", CheckState: "pending"})
 			require.NoError(t, err)
 			require.Equal(t, tc.wantSet, rec.setCalled)
 			require.Equal(t, tc.wantSends, rec.sends.snapshot())

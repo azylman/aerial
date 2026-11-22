@@ -39,44 +39,6 @@ const DefaultAgent = "aerial"
 // MaxMainPushIndex bounds the RepoObject main-push SHA history.
 const MaxMainPushIndex = 50
 
-// NormalizeRepo normalizes repository names with the owner prefix.
-// Mirrors services/synapse/internal/model NormalizeRepo semantics.
-func NormalizeRepo(repo string) string {
-	repo = strings.TrimSpace(repo)
-	if repo == "" {
-		return ""
-	}
-	if !strings.Contains(repo, "/") {
-		return "azylman/" + repo
-	}
-	return repo
-}
-
-// PRObjectKey returns the Restate K/V key for a PR object: repo#prNumber.
-func PRObjectKey(repo string, prNumber int) string {
-	return fmt.Sprintf("%s#%d", NormalizeRepo(repo), prNumber)
-}
-
-// RepoObjectKey returns the Restate K/V key for a repo object: repo.
-func RepoObjectKey(repo string) string {
-	return NormalizeRepo(repo)
-}
-
-// IsRoboRevCheck returns true for the RoboRev review gate check names.
-// Mirrors services/synapse/internal/github IsRoboRevCheck semantics.
-func IsRoboRevCheck(checkName string) bool {
-	trimmed := strings.TrimSpace(checkName)
-	return strings.EqualFold(trimmed, "roborev") || strings.EqualFold(trimmed, "RoboRev Code Review")
-}
-
-// CanonicalFailedCheckKey canonicalizes check names, grouping roborev variants.
-func CanonicalFailedCheckKey(checkName string) string {
-	if IsRoboRevCheck(checkName) {
-		return "roborev"
-	}
-	return strings.ToLower(strings.TrimSpace(checkName))
-}
-
 // EffectKey is the journaled idempotency key for one external effect. Keys are
 // generation-scoped: repo + PR + headSHA + gateGeneration + effectKind, plus
 // jobName for deploy effects and the canonical check name for CI effects.
@@ -105,7 +67,7 @@ func (k EffectKey) MatchKey() string {
 
 func (k EffectKey) render(withGeneration bool) string {
 	sb := strings.Builder{}
-	fmt.Fprintf(&sb, "%s#%d@%s:", NormalizeRepo(k.Repo), k.PRNumber, strings.TrimSpace(k.HeadSHA))
+	fmt.Fprintf(&sb, "%s#%d@%s:", strings.TrimSpace(k.Repo), k.PRNumber, strings.TrimSpace(k.HeadSHA))
 	if withGeneration {
 		fmt.Fprintf(&sb, "gen%d:", k.GateGeneration)
 	}
@@ -113,7 +75,7 @@ func (k EffectKey) render(withGeneration bool) string {
 	if clean := strings.TrimSpace(k.JobName); clean != "" {
 		fmt.Fprintf(&sb, ":job=%s", clean)
 	}
-	if canon := CanonicalFailedCheckKey(k.CheckName); canon != "" {
+	if canon := prwire.CanonicalFailedCheckKey(k.CheckName); canon != "" {
 		fmt.Fprintf(&sb, ":check=%s", canon)
 	}
 	return sb.String()
@@ -122,7 +84,7 @@ func (k EffectKey) render(withGeneration bool) string {
 // DeploySHAJobKey returns the job-plus-SHA deploy dedup key. Mirrors the sha:
 // key in services/synapse/internal/flux DeployDedupTracker.
 func DeploySHAJobKey(repo, jobName, sha string) string {
-	return fmt.Sprintf("sha:%s:%s:%s", NormalizeRepo(repo), strings.TrimSpace(jobName), strings.TrimSpace(sha))
+	return fmt.Sprintf("sha:%s:%s:%s", strings.TrimSpace(repo), strings.TrimSpace(jobName), strings.TrimSpace(sha))
 }
 
 // IsStaleEvent reports whether an event SHA is stale against current state.
