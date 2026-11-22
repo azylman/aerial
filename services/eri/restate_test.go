@@ -665,7 +665,7 @@ func TestHandleDispatch_RestateCutover(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			runWithMockRestate(tc.statusCode, tc.serverResp, func() {
-				handler := handleDispatch(nil, nil)
+				handler := handleDispatch(nil)
 				req := httptest.NewRequest(http.MethodPost, "/dispatch", strings.NewReader(tc.reqBody))
 				rec := httptest.NewRecorder()
 				handler(rec, req)
@@ -715,7 +715,7 @@ func TestHandleCancelDispatch_RestateCutover(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			runWithMockRestate(tc.statusCode, tc.serverResp, func() {
-				handler := handleCancelDispatch(nil)
+				handler := handleCancelDispatch()
 				req := httptest.NewRequest(http.MethodPost, "/dispatch/cancel", strings.NewReader(tc.reqBody))
 				rec := httptest.NewRecorder()
 				handler(rec, req)
