@@ -505,9 +505,6 @@ spec:
             - mountPath: /config/tracing
               name: tracing-config
               readOnly: true
-            - mountPath: /etc/aerial/podinfo
-              name: podinfo
-              readOnly: true
       initContainers:
         - args:
             - --repo=${AERIAL_REPO_URL:=https://github.com/azylman/aerial.git}
@@ -733,13 +730,6 @@ spec:
             name: tracing-config
             optional: true
           name: tracing-config
-        - name: podinfo
-          downwardAPI:
-            items:
-              - fieldRef:
-                  apiVersion: v1
-                  fieldPath: metadata.annotations['aerial.dev/turn-queue']
-                path: turn-queue
 ---
 apiVersion: apps/v1
 kind: Deployment
