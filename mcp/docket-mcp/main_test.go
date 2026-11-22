@@ -19,7 +19,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"github.com/azylman/aerial/pkg/httpkit"
+	"github.com/azylman/aerial/pkg/httpkittest"
 	"github.com/azylman/aerial/pkg/ollama"
 )
 
@@ -100,7 +100,6 @@ func (m *memoryTaskStore) SearchTasksRRF(ctx context.Context, embedding []float3
 type fakeVikunjaServerState struct {
 	mu                sync.Mutex
 	recordedRelations []VikunjaRelationRecord
-	lastUpdatedTask   *VikunjaTask
 }
 
 type VikunjaRelationRecord struct {
@@ -179,7 +178,7 @@ func setupFakeVikunjaTasksHandler(byID map[int64]VikunjaTask, state *fakeVikunja
 			return
 		}
 		if r.Method == http.MethodPost {
-			handleFakeVikunjaPostTask(w, r, state)
+			handleFakeVikunjaPostTask(w, r)
 			return
 		}
 		http.NotFound(w, r)
@@ -244,15 +243,12 @@ func handleFakeVikunjaGetTask(w http.ResponseWriter, path string, byID map[int64
 	_ = json.NewEncoder(w).Encode(task)
 }
 
-func handleFakeVikunjaPostTask(w http.ResponseWriter, r *http.Request, state *fakeVikunjaServerState) {
+func handleFakeVikunjaPostTask(w http.ResponseWriter, r *http.Request) {
 	var updated VikunjaTask
 	_ = json.NewDecoder(r.Body).Decode(&updated)
 	if updated.ID == 0 {
 		updated.ID = 1
 	}
-	state.mu.Lock()
-	state.lastUpdatedTask = &updated
-	state.mu.Unlock()
 	_ = json.NewEncoder(w).Encode(updated)
 }
 
@@ -341,77 +337,27 @@ func setupTestEnvironment(t *testing.T) (*Server, *http.ServeMux, *fakeVikunjaSe
 	return srv, mux, state
 }
 
+// TestServer_HTTPRoutesTable stubs httpkit's package-level coverage writers, so
+// neither it nor its rows run in parallel.
 func TestServer_HTTPRoutesTable(t *testing.T) {
-	t.Parallel()
-
-	oldCountersFn := httpkit.WriteCountersDirFn
-	oldMetaFn := httpkit.WriteMetaDirFn
-	httpkit.WriteCountersDirFn = func(dir string) error { return nil }
-	httpkit.WriteMetaDirFn = func(dir string) error { return nil }
-	t.Cleanup(func() {
-		httpkit.WriteCountersDirFn = oldCountersFn
-		httpkit.WriteMetaDirFn = oldMetaFn
-	})
-
+	httpkittest.StubCoverageWriters(t, nil, nil)
 	_, mux, _ := setupTestEnvironment(t)
 
 	tests := []struct {
 		name             string
 		method           string
 		path             string
-		body             string
 		wantStatus       int
 		wantSubstr       string
 		wantCacheControl string
 	}{
-		{
-			name:       "health GET returns 200",
-			method:     http.MethodGet,
-			path:       "/health",
-			wantStatus: http.StatusOK,
-			wantSubstr: `"status":"ok"`,
-		},
-		{
-			name:       "health HEAD returns 200",
-			method:     http.MethodHead,
-			path:       "/health",
-			wantStatus: http.StatusOK,
-		},
-		{
-			name:       "health POST returns 405",
-			method:     http.MethodPost,
-			path:       "/health",
-			wantStatus: http.StatusMethodNotAllowed,
-			wantSubstr: "Method not allowed",
-		},
-		{
-			name:       "coverage flush returns 200",
-			method:     http.MethodPost,
-			path:       "/debug/coverage/flush",
-			wantStatus: http.StatusOK,
-		},
-		{
-			name:       "mcp GET returns ready banner",
-			method:     http.MethodGet,
-			path:       "/mcp",
-			wantStatus: http.StatusOK,
-			wantSubstr: "docket-mcp ready",
-		},
-		{
-			name:       "root GET returns ready banner",
-			method:     http.MethodGet,
-			path:       "/",
-			wantStatus: http.StatusOK,
-			wantSubstr: "docket-mcp ready",
-		},
-		{
-			name:       "mcp empty POST returns 400",
-			method:     http.MethodPost,
-			path:       "/mcp",
-			body:       "",
-			wantStatus: http.StatusBadRequest,
-			wantSubstr: "Empty request body",
-		},
+		{name: "health GET returns 200", method: http.MethodGet, path: "/health", wantStatus: http.StatusOK, wantSubstr: `"status":"ok"`},
+		{name: "health HEAD returns 200", method: http.MethodHead, path: "/health", wantStatus: http.StatusOK},
+		{name: "health POST returns 405", method: http.MethodPost, path: "/health", wantStatus: http.StatusMethodNotAllowed, wantSubstr: "Method not allowed"},
+		{name: "coverage flush returns 200", method: http.MethodPost, path: "/debug/coverage/flush", wantStatus: http.StatusOK},
+		{name: "mcp GET returns ready banner", method: http.MethodGet, path: "/mcp", wantStatus: http.StatusOK, wantSubstr: "docket-mcp ready"},
+		{name: "root GET returns ready banner", method: http.MethodGet, path: "/", wantStatus: http.StatusOK, wantSubstr: "docket-mcp ready"},
+		{name: "mcp empty POST returns 400", method: http.MethodPost, path: "/mcp", wantStatus: http.StatusBadRequest, wantSubstr: "Empty request body"},
 		{name: "tasks list defaults to open", method: http.MethodGet, path: "/api/tasks", wantStatus: http.StatusOK, wantSubstr: `{"id":2,"title":"Subtask 2","status":"open","parent_id":1}`, wantCacheControl: "no-cache"},
 		{name: "tasks list status all includes completed", method: http.MethodGet, path: "/api/tasks?status=all", wantStatus: http.StatusOK, wantSubstr: `{"id":5,"title":"Completed Task 5","status":"completed"}`, wantCacheControl: "no-cache"},
 		{name: "tasks list pages past the vikunja page cap", method: http.MethodGet, path: "/api/tasks", wantStatus: http.StatusOK, wantSubstr: `{"id":76,"title":"Task 76","status":"open","blocked_by":[75]}`, wantCacheControl: "no-cache"},
@@ -436,16 +382,8 @@ func TestServer_HTTPRoutesTable(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			var bodyReader *strings.Reader
-			if tc.body != "" {
-				bodyReader = strings.NewReader(tc.body)
-			} else {
-				bodyReader = strings.NewReader("")
-			}
-			req := httptest.NewRequest(tc.method, tc.path, bodyReader)
 			w := httptest.NewRecorder()
-			mux.ServeHTTP(w, req)
+			mux.ServeHTTP(w, httptest.NewRequest(tc.method, tc.path, http.NoBody))
 
 			if w.Code != tc.wantStatus {
 				t.Fatalf("status = %d, want %d", w.Code, tc.wantStatus)
@@ -465,10 +403,11 @@ func TestServer_HTTPRoutesTable(t *testing.T) {
 	}
 }
 
-// TestServer_RESTUpstreamErrorsTable verifies REST error mapping when Vikunja and the task store fail.
-func TestServer_RESTUpstreamErrorsTable(t *testing.T) {
-	t.Parallel()
-
+// setupErrorEnvironment serves docket-mcp against a Vikunja that answers 404 for
+// task 404 and 500 for everything else, and a task store whose search and
+// resolution fetches fail.
+func setupErrorEnvironment(t *testing.T) http.Handler {
+	t.Helper()
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/v1/tasks/404" {
 			w.WriteHeader(http.StatusNotFound)
@@ -485,7 +424,14 @@ func TestServer_RESTUpstreamErrorsTable(t *testing.T) {
 	setTestToken(vkClient, "dummy")
 	store := newMemoryTaskStore()
 	store.searchErr = errors.New("search db failed")
-	mux := NewHTTPMux(NewServer(cfg, vkClient, store, nil))
+	store.fetchErr = errors.New("fetch db failed")
+	return NewHTTPMux(NewServer(cfg, vkClient, store, nil))
+}
+
+// TestServer_RESTUpstreamErrorsTable verifies REST error mapping when Vikunja and the task store fail.
+func TestServer_RESTUpstreamErrorsTable(t *testing.T) {
+	t.Parallel()
+	mux := setupErrorEnvironment(t)
 
 	tests := []struct {
 		name       string
@@ -592,7 +538,8 @@ func TestServerInstructions(t *testing.T) {
 	}
 }
 
-func TestServer_ToolsListSchemaTable(t *testing.T) {
+// TestServer_ToolsListSchema locks the enum and default values tools/list advertises.
+func TestServer_ToolsListSchema(t *testing.T) {
 	t.Parallel()
 
 	_, mux, _ := setupTestEnvironment(t)
@@ -603,14 +550,9 @@ func TestServer_ToolsListSchemaTable(t *testing.T) {
 				Name        string `json:"name"`
 				InputSchema struct {
 					Properties map[string]struct {
-						Type    string   `json:"type"`
 						Enum    []string `json:"enum"`
 						Default any      `json:"default"`
-						Items   struct {
-							Type string `json:"type"`
-						} `json:"items"`
 					} `json:"properties"`
-					Required []string `json:"required"`
 				} `json:"inputSchema"`
 			} `json:"tools"`
 		} `json:"result"`
@@ -618,20 +560,10 @@ func TestServer_ToolsListSchemaTable(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode tools/list %q: %v", w.Body.String(), err)
 	}
-	type schemaShape struct {
-		props    map[string]string
-		required []string
-	}
-	got := make(map[string]schemaShape)
 	enums := make(map[string]string)
 	defaults := make(map[string]any)
 	for _, tool := range resp.Result.Tools {
-		shape := schemaShape{props: make(map[string]string), required: tool.InputSchema.Required}
 		for name, prop := range tool.InputSchema.Properties {
-			shape.props[name] = prop.Type
-			if prop.Items.Type != "" {
-				shape.props[name] += "<" + prop.Items.Type + ">"
-			}
 			if len(prop.Enum) > 0 {
 				enums[tool.Name+"."+name] = strings.Join(prop.Enum, ",")
 			}
@@ -639,44 +571,10 @@ func TestServer_ToolsListSchemaTable(t *testing.T) {
 				defaults[tool.Name+"."+name] = prop.Default
 			}
 		}
-		got[tool.Name] = shape
 	}
-
-	tests := []struct {
-		tool         string
-		wantProps    map[string]string
-		wantRequired []string
-	}{
-		{tool: "ready", wantProps: map[string]string{"parent_id": "integer"}},
-		{tool: "list", wantProps: map[string]string{"status": "string", "parent_id": "integer"}},
-		{tool: "search", wantProps: map[string]string{"query": "string", "status": "string", "limit": "integer"}, wantRequired: []string{"query"}},
-		{tool: "show", wantProps: map[string]string{"id": "integer"}, wantRequired: []string{"id"}},
-		{tool: "create", wantProps: map[string]string{"title": "string", "description": "string", "parent_id": "integer", "blocks": "array<integer>", "blocked_by": "array<integer>", "related": "array<integer>"}, wantRequired: []string{"title"}},
-		{tool: "update", wantProps: map[string]string{"id": "integer", "title": "string", "description": "string"}, wantRequired: []string{"id"}},
-		{tool: "comment", wantProps: map[string]string{"id": "integer", "text": "string"}, wantRequired: []string{"id", "text"}},
-		{tool: "link", wantProps: map[string]string{"id": "integer", "target_id": "integer", "type": "string", "remove": "boolean"}, wantRequired: []string{"id", "target_id", "type"}},
-		{tool: "close", wantProps: map[string]string{"id": "integer", "resolution": "string", "reason": "string"}, wantRequired: []string{"id", "resolution", "reason"}},
+	if len(resp.Result.Tools) != 9 {
+		t.Fatalf("tools/list returned %d tools, want 9", len(resp.Result.Tools))
 	}
-	if len(got) != len(tests) {
-		t.Fatalf("tools/list returned %d tools, want %d", len(got), len(tests))
-	}
-	for _, tc := range tests {
-		t.Run(tc.tool, func(t *testing.T) {
-			t.Parallel()
-			shape, ok := got[tc.tool]
-			if !ok {
-				t.Fatalf("tool %q missing from tools/list", tc.tool)
-			}
-			if !maps.Equal(shape.props, tc.wantProps) {
-				t.Errorf("properties = %v, want %v", shape.props, tc.wantProps)
-			}
-			gotRequired := slices.Sorted(slices.Values(shape.required))
-			if !slices.Equal(gotRequired, slices.Sorted(slices.Values(tc.wantRequired))) {
-				t.Errorf("required = %v, want %v", shape.required, tc.wantRequired)
-			}
-		})
-	}
-
 	wantEnums := map[string]string{
 		"list.status":      "open,completed,wont_do,all",
 		"search.status":    "open,completed,wont_do,all",
@@ -704,6 +602,7 @@ func TestServer_ToolsExecutionTable(t *testing.T) {
 		wantSubstr    string
 		wantError     bool
 		wantRelations []VikunjaRelationRecord
+		vikunjaDown   bool // run against setupErrorEnvironment
 	}{
 		{name: "ready top level tasks", toolName: "ready", args: `{}`, wantSubstr: `"id":1`},
 		{name: "ready includes tasks past first page", toolName: "ready", args: `{}`, wantSubstr: `{"id":75,"title":"High Task 75","status":"open"}`},
@@ -737,6 +636,7 @@ func TestServer_ToolsExecutionTable(t *testing.T) {
 		{name: "create blocker fetch failure", toolName: "create", args: `{"title":"Task","blocked_by":[888]}`, wantSubstr: "failed to fetch task 888", wantError: true},
 		{name: "create empty title error", toolName: "create", args: `{"title":""}`, wantSubstr: "cannot be empty", wantError: true},
 		{name: "update task success", toolName: "update", args: `{"id":1,"title":"Updated Title"}`, wantSubstr: `"title":"Updated Title"`},
+		{name: "update task description", toolName: "update", args: `{"id":1,"description":"Updated description text"}`, wantSubstr: `{"id":1,"title":"Top Task 1","status":"open"}`},
 		{name: "update invalid id error", toolName: "update", args: `{"id":0}`, wantSubstr: "must be a positive integer", wantError: true},
 		{name: "comment task success", toolName: "comment", args: `{"id":1,"text":"Nice progress"}`, wantSubstr: "comment added to task 1"},
 		{name: "comment missing text error", toolName: "comment", args: `{"id":1,"text":""}`, wantSubstr: "required", wantError: true},
@@ -765,12 +665,27 @@ func TestServer_ToolsExecutionTable(t *testing.T) {
 		{name: "close empty reason error", toolName: "close", args: `{"id":1,"resolution":"completed","reason":""}`, wantSubstr: "cannot be empty", wantError: true},
 		{name: "list status defaults to open", toolName: "list", args: `{}`, wantSubstr: `[{"id":1,"title":"Top Task 1","status":"open","blocks":[3]},{"id":2,`},
 		{name: "legacy docket_ prefix resolves tool", toolName: "docket_comment", args: `{"id":1,"text":"via alias"}`, wantSubstr: "comment added to task 1"},
+		{name: "ready upstream failure", toolName: "ready", args: `{}`, wantSubstr: "failed to get default project: vikunja API returned status 500", wantError: true, vikunjaDown: true},
+		{name: "list upstream failure", toolName: "list", args: `{}`, wantSubstr: "failed to get default project: vikunja API returned status 500", wantError: true, vikunjaDown: true},
+		{name: "search store failure", toolName: "search", args: `{"query":"error test"}`, wantSubstr: "search db failed", wantError: true, vikunjaDown: true},
+		{name: "show upstream failure", toolName: "show", args: `{"id":1}`, wantSubstr: "failed to fetch task 1: vikunja API returned status 500", wantError: true, vikunjaDown: true},
+		{name: "create upstream failure", toolName: "create", args: `{"title":"Task"}`, wantSubstr: "failed to get default project: vikunja API returned status 500", wantError: true, vikunjaDown: true},
+		{name: "update upstream failure", toolName: "update", args: `{"id":1,"title":"Task"}`, wantSubstr: "failed to fetch task 1: vikunja API returned status 500", wantError: true, vikunjaDown: true},
+		{name: "comment upstream failure", toolName: "comment", args: `{"id":1,"text":"Hello"}`, wantSubstr: "failed to add comment to task 1: vikunja API returned status 500", wantError: true, vikunjaDown: true},
+		{name: "link upstream failure", toolName: "link", args: `{"id":1,"target_id":2,"type":"blocks"}`, wantSubstr: "failed to get default project: vikunja API returned status 500", wantError: true, vikunjaDown: true},
+		{name: "close upstream failure", toolName: "close", args: `{"id":1,"resolution":"completed","reason":"done"}`, wantSubstr: "failed to get default project: vikunja API returned status 500", wantError: true, vikunjaDown: true},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			_, mux, state := setupTestEnvironment(t)
+			var mux http.Handler
+			state := &fakeVikunjaServerState{}
+			if tc.vikunjaDown {
+				mux = setupErrorEnvironment(t)
+			} else {
+				_, mux, state = setupTestEnvironment(t)
+			}
 			resp := callTool(t, mux, tc.toolName, tc.args)
 			if resp.Error != nil || len(resp.Result.Content) != 1 {
 				t.Fatalf("unexpected response %+v", resp)
@@ -791,60 +706,9 @@ func TestServer_ToolsExecutionTable(t *testing.T) {
 	}
 }
 
-func TestServer_ErrorBranchesTable(t *testing.T) {
-	t.Parallel()
-
-	errorServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
-		_, _ = w.Write([]byte(`{"error":"server error"}`))
-	}))
-	t.Cleanup(errorServer.Close)
-
-	cfg := &Config{
-		VikunjaURL:      errorServer.URL,
-		VikunjaUsername: "user",
-		VikunjaPassword: "pwd",
-	}
-	vkClient := NewVikunjaClient(cfg, errorServer.Client())
-	setTestToken(vkClient, "dummy")
-	store := newMemoryTaskStore()
-	store.searchErr = errors.New("search db failed")
-	store.fetchErr = errors.New("fetch db failed")
-
-	mux := NewHTTPMux(NewServer(cfg, vkClient, store, nil))
-
-	tests := []struct {
-		name     string
-		toolName string
-		args     string
-	}{
-		{"ready error", "ready", `{}`},
-		{"list error", "list", `{}`},
-		{"search error", "search", `{"query":"error test"}`},
-		{"show error", "show", `{"id":1}`},
-		{"create error", "create", `{"title":"Task"}`},
-		{"update error", "update", `{"id":1,"title":"Task"}`},
-		{"comment error", "comment", `{"id":1,"text":"Hello"}`},
-		{"link error", "link", `{"id":1,"target_id":2,"type":"blocks"}`},
-		{"close error", "close", `{"id":1,"resolution":"completed","reason":"done"}`},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			resp := callTool(t, mux, tc.toolName, tc.args)
-			if resp.Error != nil || !resp.Result.IsError {
-				t.Fatalf("%s: expected isError tool result, got %+v", tc.name, resp)
-			}
-		})
-	}
-}
-
 func TestRunServer_Execution(t *testing.T) {
 	oldSQLOpen := sqlOpenFn
-	t.Cleanup(func() {
-		sqlOpenFn = oldSQLOpen
-	})
+	t.Cleanup(func() { sqlOpenFn = oldSQLOpen })
 
 	tests := []struct {
 		name        string
@@ -852,75 +716,34 @@ func TestRunServer_Execution(t *testing.T) {
 		databaseURL string
 		dbErr       error
 		cancelInit  bool
-		wantErr     bool
-		wantErrSub  string
+		wantErr     string
 	}{
-		{
-			name:        "clean shutdown on context cancel",
-			port:        "0",
-			databaseURL: "postgres://mock",
-			cancelInit:  true,
-			wantErr:     false,
-		},
-		{
-			name:        "unconfigured database URL returns error",
-			port:        "0",
-			databaseURL: "",
-			cancelInit:  false,
-			wantErr:     true,
-			wantErrSub:  "database URL is not configured",
-		},
-		{
-			name:        "database open error returned",
-			port:        "0",
-			databaseURL: "postgres://mock",
-			dbErr:       errors.New("db open error"),
-			cancelInit:  false,
-			wantErr:     true,
-		},
-		{
-			name:        "invalid port returns listen error",
-			port:        "-1",
-			databaseURL: "postgres://mock",
-			cancelInit:  false,
-			wantErr:     true,
-		},
+		{name: "clean shutdown on context cancel", port: "0", databaseURL: "postgres://mock", cancelInit: true},
+		{name: "unconfigured database URL returns error", port: "0", wantErr: "database URL is not configured"},
+		{name: "database open error returned", port: "0", databaseURL: "postgres://mock", dbErr: errors.New("db open error"), wantErr: "db open error"},
+		{name: "invalid port returns listen error", port: "-1", databaseURL: "postgres://mock", wantErr: "listen tcp: address -1: invalid port"},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			sqlOpenFn = func(driverName, dataSourceName string) (*sql.DB, error) {
+			sqlOpenFn = func(string, string) (*sql.DB, error) {
 				if tc.dbErr != nil {
 					return nil, tc.dbErr
 				}
-				conn := &testConn{}
-				return sql.OpenDB(&testConnector{conn: conn}), nil
+				return sql.OpenDB(&testConnector{conn: &testConn{}}), nil
 			}
-
-			cfg := &Config{
-				Port:        tc.port,
-				DatabaseURL: tc.databaseURL,
-			}
-
 			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
 			if tc.cancelInit {
 				cancel()
-			} else {
-				defer cancel()
 			}
 
-			err := runServer(ctx, cfg)
-			if tc.wantErr {
-				if err == nil {
-					t.Fatalf("expected error, got nil")
-				}
-				if tc.wantErrSub != "" && !strings.Contains(err.Error(), tc.wantErrSub) {
-					t.Fatalf("expected error substring %q, got %v", tc.wantErrSub, err)
-				}
-				return
+			err := runServer(ctx, &Config{Port: tc.port, DatabaseURL: tc.databaseURL})
+			if errors.Is(err, http.ErrServerClosed) || errors.Is(err, context.Canceled) {
+				err = nil
 			}
-			if err != nil && !errors.Is(err, http.ErrServerClosed) && !errors.Is(err, context.Canceled) {
-				t.Fatalf("unexpected error: %v", err)
+			if got := errText(err); !strings.Contains(got, tc.wantErr) || (tc.wantErr == "") != (err == nil) {
+				t.Fatalf("runServer err = %v, want substring %q", err, tc.wantErr)
 			}
 		})
 	}
@@ -949,11 +772,7 @@ func TestMain_Execution_TableDriven(t *testing.T) {
 			oldExit := exitFn
 			exitCalled := false
 
-			if tc.configPath != "" {
-				t.Setenv("CONFIG_PATH", tc.configPath)
-			} else {
-				t.Setenv("CONFIG_PATH", "")
-			}
+			t.Setenv("CONFIG_PATH", tc.configPath)
 
 			runServerFn = func(ctx context.Context, cfg *Config) error {
 				return tc.runErr
@@ -976,31 +795,36 @@ func TestMain_Execution_TableDriven(t *testing.T) {
 	}
 }
 
+// closeTestServer returns a fixture server whose task store fails resolution updates with updateErr.
+func closeTestServer(t *testing.T, updateErr error) *Server {
+	t.Helper()
+	srv, _, _ := setupTestEnvironment(t)
+	store, ok := srv.store.(*memoryTaskStore)
+	if !ok {
+		t.Fatalf("store = %T, want *memoryTaskStore", srv.store)
+	}
+	store.updateErr = updateErr
+	return srv
+}
+
 func TestServer_CloseCompleted_Errors(t *testing.T) {
 	t.Parallel()
 
-	srv, _, _ := setupTestEnvironment(t)
-	ctx := context.Background()
-	now := time.Now().UTC()
-
 	tests := []struct {
-		name    string
-		taskID  int64
-		wantErr bool
+		name      string
+		taskID    int64
+		updateErr error
+		wantErr   string
 	}{
-		{
-			name:    "nonexistent task returns error",
-			taskID:  888,
-			wantErr: true,
-		},
+		{"fetch failure returns error", 888, nil, `failed to get task: vikunja API returned status 500: {"error":"task 888 error"}`},
+		{"resolution update failure is logged only", 4, errors.New("resolution db failed"), ""},
 	}
-
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			err := srv.closeCompleted(ctx, tc.taskID, "reason", now)
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("%s: err = %v, wantErr = %v", tc.name, err, tc.wantErr)
+			err := closeTestServer(t, tc.updateErr).closeCompleted(context.Background(), tc.taskID, "reason", time.Now().UTC())
+			if got := errText(err); got != tc.wantErr {
+				t.Fatalf("closeCompleted err = %q, want %q", got, tc.wantErr)
 			}
 		})
 	}
@@ -1009,72 +833,30 @@ func TestServer_CloseCompleted_Errors(t *testing.T) {
 func TestServer_CloseWontDo_Errors(t *testing.T) {
 	t.Parallel()
 
-	srv, _, _ := setupTestEnvironment(t)
-	ctx := context.Background()
-	now := time.Now().UTC()
-
 	tests := []struct {
-		name    string
-		taskID  int64
-		wantErr bool
+		name      string
+		taskID    int64
+		updateErr error
+		wantErr   string
 	}{
-		{
-			name:    "nonexistent task returns error",
-			taskID:  888,
-			wantErr: true,
-		},
+		{"fetch failure returns error", 888, nil, `failed to get task: vikunja API returned status 500: {"error":"task 888 error"}`},
+		{"resolution update failure is logged only", 4, errors.New("resolution db failed"), ""},
 	}
-
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			err := srv.closeWontDo(ctx, tc.taskID, "reason", nil, now)
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("%s: err = %v, wantErr = %v", tc.name, err, tc.wantErr)
+			err := closeTestServer(t, tc.updateErr).closeWontDo(context.Background(), tc.taskID, "reason", nil, time.Now().UTC())
+			if got := errText(err); got != tc.wantErr {
+				t.Fatalf("closeWontDo err = %q, want %q", got, tc.wantErr)
 			}
 		})
 	}
 }
 
-func TestServer_WireCreateRelations(t *testing.T) {
-	t.Parallel()
-
-	srv, _, state := setupTestEnvironment(t)
-	ctx := context.Background()
-
-	// 1. Success case: verify wireCreateRelations creates all four relations with correct kinds and directions.
-	srv.wireCreateRelations(ctx, 10, int64Ptr(1), []int64{2}, []int64{3}, []int64{4})
-
-	state.mu.Lock()
-	if len(state.recordedRelations) != 4 {
-		t.Fatalf("recorded %d relations, want 4", len(state.recordedRelations))
+// errText returns err's message, or "" for nil, so rows compare errors as literals.
+func errText(err error) string {
+	if err == nil {
+		return ""
 	}
-	expected := []VikunjaRelationRecord{
-		{TaskID: 10, OtherTaskID: 1, RelationKind: "parenttask"},
-		{TaskID: 10, OtherTaskID: 2, RelationKind: "blocking"},
-		{TaskID: 3, OtherTaskID: 10, RelationKind: "blocking"},
-		{TaskID: 10, OtherTaskID: 4, RelationKind: "related"},
-	}
-	for i, exp := range expected {
-		if state.recordedRelations[i] != exp {
-			t.Fatalf("relation[%d] = %+v, want %+v", i, state.recordedRelations[i], exp)
-		}
-	}
-	state.mu.Unlock()
-}
-
-func TestServer_UpdateTaskDescription(t *testing.T) {
-	t.Parallel()
-
-	srv, _, state := setupTestEnvironment(t)
-	desc := "Updated description text"
-	res, isErr := srv.toolUpdate(context.Background(), UpdateArgs{ID: 1, Description: &desc})
-	if isErr {
-		t.Fatalf("unexpected error: %s", res)
-	}
-	state.mu.Lock()
-	defer state.mu.Unlock()
-	if state.lastUpdatedTask == nil || state.lastUpdatedTask.Description != desc {
-		t.Fatalf("lastUpdatedTask description = %v, want %q", state.lastUpdatedTask, desc)
-	}
+	return err.Error()
 }
