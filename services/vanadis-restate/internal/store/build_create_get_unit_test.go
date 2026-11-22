@@ -11,22 +11,23 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
-	"github.com/azylman/aerial/services/vanadis-restate/internal/sqltest"
 )
 
 func TestInsertBuildChunkCases(t *testing.T) {
 	t.Parallel()
 	now := time.Now().UTC()
-	pgErr := func(code, constraint string) error {
-		return fmt.Errorf("wrapped: %w", &pgconn.PgError{Code: code, ConstraintName: constraint})
-	}
 	tests := []struct {
-		name       string
-		chunk      model.VanadisChunk
-		execErr    error
-		wantErrIs  error
-		wantErr    bool
-		wantErrSub string
+		name  string
+		chunk model.VanadisChunk
+		// seedChunks are stored (in b0 or b1) before the insert runs.
+		seedChunks    []model.VanadisChunk
+		setup         string
+		wantErrIs     error
+		wantErr       bool
+		wantErrSub    string
+		wantStatus    string
+		wantStarted   bool
+		wantCompleted bool
 	}{
 		{name: "invalid mode", chunk: model.VanadisChunk{ID: "c1", Mode: "bogus"}, wantErr: true},
 		{name: "pr requires repo", chunk: model.VanadisChunk{ID: "c1", Mode: "pr"}, wantErr: true, wantErrSub: "repo is required for pr mode"},
@@ -34,28 +35,47 @@ func TestInsertBuildChunkCases(t *testing.T) {
 		{name: "action rejects target files", chunk: model.VanadisChunk{ID: "c1", Mode: "action", TargetFiles: []string{"f.go"}}, wantErr: true, wantErrSub: "action chunk must not specify target files or symbols"},
 		{name: "action rejects target symbols", chunk: model.VanadisChunk{ID: "c1", Mode: "action", TargetSymbols: []string{"S"}}, wantErr: true},
 		{name: "invalid effort", chunk: model.VanadisChunk{ID: "c1", Mode: "pr", Repo: "aerial", Effort: "ultra"}, wantErr: true, wantErrSub: "invalid chunk effort"},
-		{name: "pr success", chunk: model.VanadisChunk{ID: "c1", Mode: "pr", Repo: "aerial", Status: "pending", Effort: "medium"}},
-		{name: "action running success", chunk: model.VanadisChunk{ID: "c2", Mode: "action", Status: "running"}},
-		{name: "terminal status success", chunk: model.VanadisChunk{ID: "c3", Mode: "pr", Repo: "aerial", Status: "completed"}},
-		{name: "explicit times success", chunk: model.VanadisChunk{ID: "c4", Mode: "pr", Repo: "aerial", Status: "running", PRNumber: 7, StartedAt: now, CompletedAt: now}},
-		{name: "chunk id conflict", chunk: model.VanadisChunk{ID: "c1", Mode: "pr", Repo: "aerial"}, execErr: pgErr("23505", "vanadis_chunks_pkey"), wantErrIs: ErrBuildConflict},
-		{name: "chunk index conflict", chunk: model.VanadisChunk{ID: "c1", Mode: "pr", Repo: "aerial"}, execErr: pgErr("23505", "uq_vanadis_chunks_build_index"), wantErrIs: ErrBuildConflict},
-		{name: "unknown unique constraint", chunk: model.VanadisChunk{ID: "c1", Mode: "pr", Repo: "aerial"}, execErr: pgErr("23505", "other_constraint"), wantErr: true},
-		{name: "non-unique pg error", chunk: model.VanadisChunk{ID: "c1", Mode: "pr", Repo: "aerial"}, execErr: pgErr("40P01", "vanadis_chunks_pkey"), wantErr: true},
-		{name: "generic exec error", chunk: model.VanadisChunk{ID: "c1", Mode: "pr", Repo: "aerial"}, execErr: errors.New("exec failed"), wantErr: true},
+		{name: "pr success", chunk: model.VanadisChunk{ID: "c1", Mode: "pr", Repo: "aerial", Status: "pending", Effort: "medium"}, wantStatus: "pending"},
+		{name: "action running success", chunk: model.VanadisChunk{ID: "c2", Mode: "action", Status: "running"}, wantStatus: "running", wantStarted: true},
+		{name: "terminal status success", chunk: model.VanadisChunk{ID: "c3", Mode: "pr", Repo: "aerial", Status: "completed"}, wantStatus: "completed", wantCompleted: true},
+		{name: "explicit times success", chunk: model.VanadisChunk{ID: "c4", Mode: "pr", Repo: "aerial", Status: "running", PRNumber: 7, StartedAt: now, CompletedAt: now}, wantStatus: "running", wantStarted: true, wantCompleted: true},
+		{name: "chunk id conflict", chunk: model.VanadisChunk{ID: "c1", Mode: "pr", Repo: "aerial"}, seedChunks: []model.VanadisChunk{{ID: "c1", BuildID: "b0"}}, wantErrIs: ErrBuildConflict},
+		{name: "chunk index conflict", chunk: model.VanadisChunk{ID: "c1", Mode: "pr", Repo: "aerial"}, seedChunks: []model.VanadisChunk{{ID: "other", BuildID: "b1"}}, wantErrIs: ErrBuildConflict},
+		{name: "unknown unique constraint", chunk: model.VanadisChunk{ID: "c1", Mode: "pr", Repo: "aerial"}, seedChunks: []model.VanadisChunk{{ID: "c0", BuildID: "b0"}}, setup: cgUnknownUniqueSQL, wantErr: true},
+		{name: "non-unique pg error", chunk: model.VanadisChunk{ID: "c1", Mode: "pr", Repo: "aerial"}, setup: cgDeadlockSQL, wantErr: true},
+		{name: "generic exec error", chunk: model.VanadisChunk{ID: "c1", Mode: "pr", Repo: "aerial"}, setup: failStatement("vanadis_chunks", "INSERT"), wantErr: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			tx := &sqltest.Tx{}
-			if tc.execErr != nil {
-				tx.ExecFn = func(context.Context, string, ...any) (pgconn.CommandTag, error) {
-					return pgconn.CommandTag{}, tc.execErr
-				}
+			_, pool := openStore(t)
+			seed(t, pool, []model.VanadisBuild{cgOtherBuild, {ID: "b1", ThreadID: "th1"}}, tc.seedChunks)
+			mustExec(t, pool, tc.setup)
+			ctx := context.Background()
+			tx, err := pool.Begin(ctx)
+			if err != nil {
+				t.Fatalf("begin: %v", err)
 			}
-			err := InsertBuildChunk(context.Background(), tx, "b1", tc.chunk, InsertChunkSQL)
-			if assertStoreErr(t, err, tc.wantErrIs, tc.wantErr) && !strings.Contains(err.Error(), tc.wantErrSub) {
-				t.Fatalf("err = %v, want containing %q", err, tc.wantErrSub)
+			defer func() { _ = tx.Rollback(ctx) }()
+			err = InsertBuildChunk(ctx, tx, "b1", tc.chunk, InsertChunkSQL)
+			if assertStoreErr(t, err, tc.wantErrIs, tc.wantErr) {
+				if tc.wantErrIs == nil && errors.Is(err, ErrBuildConflict) {
+					t.Errorf("err = %v, want a non-conflict failure", err)
+				}
+				if !strings.Contains(err.Error(), tc.wantErrSub) {
+					t.Fatalf("err = %v, want containing %q", err, tc.wantErrSub)
+				}
+				return
+			}
+			if err := tx.Commit(ctx); err != nil {
+				t.Fatalf("commit: %v", err)
+			}
+			got := loadChunk(t, pool, tc.chunk.ID)
+			if got.BuildID != "b1" || got.Status != tc.wantStatus || got.PRNumber != tc.chunk.PRNumber {
+				t.Errorf("stored chunk = %+v, want build b1 status %q pr %d", got, tc.wantStatus, tc.chunk.PRNumber)
+			}
+			if !got.StartedAt.IsZero() != tc.wantStarted || !got.CompletedAt.IsZero() != tc.wantCompleted {
+				t.Errorf("stored started=%v completed=%v, want started %v completed %v", got.StartedAt, got.CompletedAt, tc.wantStarted, tc.wantCompleted)
 			}
 		})
 	}
