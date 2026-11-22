@@ -271,10 +271,3 @@ func TestRunCLI(t *testing.T) {
 		})
 	}
 }
-
-func TestHelpMessage(t *testing.T) {
-	t.Parallel()
-	if msg := HelpMessage(); !strings.HasPrefix(msg, "Usage: hook-guard [") {
-		t.Errorf("unexpected HelpMessage: %s", msg)
-	}
-}

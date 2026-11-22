@@ -315,7 +315,7 @@ func TestScanReceivePack(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := ScanReceivePack(bytes.NewReader(tc.body), tc.policy, tc.fetch)
+			got, err := ScanReceivePackContext(context.Background(), bytes.NewReader(tc.body), tc.policy, tc.fetch)
 			if tc.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 					t.Fatalf("err = %v, want %q", err, tc.wantErr)

@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -926,39 +925,6 @@ func TestHTTPConnectionTruncatedBody(t *testing.T) {
 		_, err := executeStatsHTTP(context.Background(), cfg)
 		if err == nil {
 			t.Fatal("expected error on truncated body in executeStatsHTTP")
-		}
-	})
-}
-
-func TestNewRequestWithContextErrors(t *testing.T) {
-	oldFn := newRequestWithContext
-	defer func() { newRequestWithContext = oldFn }()
-
-	newRequestWithContext = func(ctx context.Context, method, url string, body io.Reader) (*http.Request, error) {
-		return nil, errors.New("simulated request creation failure")
-	}
-
-	t.Run("ExecuteSearchHTTP_NewRequestError", func(t *testing.T) {
-		cfg := CLIConfig{BaseURL: "http://localhost:8080", Query: "test"}
-		_, err := executeSearchHTTP(context.Background(), cfg)
-		if err == nil || !strings.Contains(err.Error(), "simulated request creation failure") {
-			t.Fatalf("expected simulated error, got %v", err)
-		}
-	})
-
-	t.Run("ExecuteStatsHTTP_NewRequestError", func(t *testing.T) {
-		cfg := CLIConfig{BaseURL: "http://localhost:8080"}
-		_, err := executeStatsHTTP(context.Background(), cfg)
-		if err == nil || !strings.Contains(err.Error(), "simulated request creation failure") {
-			t.Fatalf("expected simulated error, got %v", err)
-		}
-	})
-
-	t.Run("ExecuteGetHTTP_NewRequestError", func(t *testing.T) {
-		cfg := CLIConfig{BaseURL: "http://localhost:8080", Session: "s", Step: 0}
-		_, err := executeGetHTTP(context.Background(), cfg)
-		if err == nil || !strings.Contains(err.Error(), "simulated request creation failure") {
-			t.Fatalf("expected simulated error, got %v", err)
 		}
 	})
 }

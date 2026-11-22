@@ -568,13 +568,8 @@ func scanObjectRaw(i int, obj packObject, rules []PatternRule) ([]pushHit, error
 	return hits, nil
 }
 
-// ScanReceivePack scans a git-receive-pack request body (gzip already removed)
-// and returns violations with file:line locations where resolvable.
-func ScanReceivePack(body io.Reader, policy PushScanPolicy, fetch ObjectFetcher) ([]Violation, error) {
-	return ScanReceivePackContext(context.Background(), body, policy, fetch)
-}
-
-// ScanReceivePackContext is ScanReceivePack with a caller context for object fetches.
+// ScanReceivePackContext scans a git-receive-pack request body (gzip already removed)
+// and returns violations with file:line locations where resolvable; ctx bounds object fetches.
 func ScanReceivePackContext(ctx context.Context, body io.Reader, policy PushScanPolicy, fetch ObjectFetcher) ([]Violation, error) {
 	raw, err := io.ReadAll(body)
 	if err != nil {

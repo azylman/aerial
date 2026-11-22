@@ -79,22 +79,6 @@ func LatestQuotaSnapshot() QuotaSnapshot {
 	return QuotaSnapshot{Groups: out, UpdatedAt: latestQuotaUpdatedAt}
 }
 
-func LatestQuotaGroups() []QuotaGroup {
-	latestQuotaMu.RLock()
-	defer latestQuotaMu.RUnlock()
-	out := make([]QuotaGroup, len(latestQuotaGroups))
-	for i, g := range latestQuotaGroups {
-		out[i] = QuotaGroup{Name: g.Name, Buckets: append([]QuotaBucket(nil), g.Buckets...)}
-	}
-	return out
-}
-
-func LatestQuotaUpdatedAt() time.Time {
-	latestQuotaMu.RLock()
-	defer latestQuotaMu.RUnlock()
-	return latestQuotaUpdatedAt
-}
-
 func RecordUsageJSON(raw []byte) error {
 	var resp usageCLIResponse
 	if err := json.Unmarshal(raw, &resp); err != nil {
