@@ -1,63 +1,25 @@
-package twilio
+package twilio_test
 
 import (
 	"bytes"
 	"context"
-	"crypto/hmac"
-	"crypto/sha1"
-	"encoding/base64"
 	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
-	"sort"
 	"strings"
 	"testing"
 	"time"
 
-	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/propagation"
-	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"github.com/azylman/aerial/services/prospera/internal/fakes"
+	"github.com/azylman/aerial/services/prospera/internal/twilio"
 )
 
 func TestMain(m *testing.M) {
-	otel.SetTracerProvider(sdktrace.NewTracerProvider())
-	otel.SetTextMapPropagator(propagation.TraceContext{})
+	fakes.InstallTestTracing()
 	os.Exit(m.Run())
-}
-
-// traceCaller returns a context carrying a sampled caller span (or a bare context) and the
-// caller's trace id ("" without a span).
-func traceCaller(withParent bool) (context.Context, string) {
-	if !withParent {
-		return context.Background(), ""
-	}
-	ctx, span := otel.Tracer("test").Start(context.Background(), "caller")
-	span.End()
-	return ctx, span.SpanContext().TraceID().String()
-}
-
-func computeExpectedTwilioSignature(authToken, fullURL string, form url.Values) string {
-	keys := make([]string, 0, len(form))
-	for k := range form {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-
-	var sb strings.Builder
-	sb.WriteString(fullURL)
-	for _, k := range keys {
-		for _, v := range form[k] {
-			sb.WriteString(k)
-			sb.WriteString(v)
-		}
-	}
-
-	mac := hmac.New(sha1.New, []byte(authToken))
-	mac.Write([]byte(sb.String()))
-	return base64.StdEncoding.EncodeToString(mac.Sum(nil))
 }
 
 func TestValidateTwilioSignature(t *testing.T) {
@@ -72,7 +34,7 @@ func TestValidateTwilioSignature(t *testing.T) {
 		"Digits":  {"4"},
 	}
 
-	validSig := computeExpectedTwilioSignature(token, targetURL, form)
+	validSig := fakes.TwilioSignature(token, targetURL, form)
 
 	tests := []struct {
 		name      string
@@ -95,7 +57,7 @@ func TestValidateTwilioSignature(t *testing.T) {
 			token:     token,
 			fullURL:   targetURL,
 			form:      nil,
-			sig:       computeExpectedTwilioSignature(token, targetURL, nil),
+			sig:       fakes.TwilioSignature(token, targetURL, nil),
 			wantValid: true,
 		},
 		{
@@ -143,7 +105,7 @@ func TestValidateTwilioSignature(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := ValidateTwilioSignature(tc.token, tc.fullURL, tc.form, tc.sig)
+			got := twilio.ValidateTwilioSignature(tc.token, tc.fullURL, tc.form, tc.sig)
 			if got != tc.wantValid {
 				t.Fatalf("ValidateTwilioSignature() = %v, want %v", got, tc.wantValid)
 			}
@@ -155,7 +117,7 @@ func TestStreamTokenManager(t *testing.T) {
 	t.Parallel()
 
 	now := time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC)
-	mgr := NewStreamTokenManager(func() time.Time {
+	mgr := twilio.NewStreamTokenManager(func() time.Time {
 		return now
 	}, nil)
 
@@ -197,7 +159,7 @@ func TestStreamTokenManager(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			currentTime := now
-			mgrInstance := NewStreamTokenManager(func() time.Time {
+			mgrInstance := twilio.NewStreamTokenManager(func() time.Time {
 				return currentTime
 			}, nil)
 
@@ -257,7 +219,7 @@ func TestGenerateConnectStreamTwiML(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := GenerateConnectStreamTwiML(tc.streamURL)
+			got := twilio.GenerateConnectStreamTwiML(tc.streamURL)
 			for _, exp := range tc.mustContain {
 				if !strings.Contains(got, exp) {
 					t.Fatalf("generated TwiML %q does not contain %q", got, exp)
@@ -293,7 +255,7 @@ func TestGenerateVoicemailTwiML(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := GenerateVoicemailTwiML(tc.greeting, tc.actionURL)
+			got := twilio.GenerateVoicemailTwiML(tc.greeting, tc.actionURL)
 			for _, exp := range tc.mustContain {
 				if !strings.Contains(got, exp) {
 					t.Fatalf("generated TwiML %q does not contain %q", got, exp)
@@ -450,7 +412,7 @@ func runDownloadRecordingCase(t *testing.T, tc downloadRecordingTestCase) {
 		}, nil
 	})
 
-	client := NewHTTPTwilioClient("AC123", "token123", WithTwilioHTTPClient(&http.Client{
+	client := twilio.NewHTTPTwilioClient("AC123", "token123", twilio.WithTwilioHTTPClient(&http.Client{
 		Transport: tripper,
 	}))
 
@@ -474,7 +436,7 @@ func runDownloadRecordingCase(t *testing.T, tc downloadRecordingTestCase) {
 
 type createCallTestCase struct {
 	name       string
-	req        CreateCallRequest
+	req        twilio.CreateCallRequest
 	statusCode int
 	respBody   string
 	wantSID    string
@@ -488,7 +450,7 @@ func TestHTTPTwilioClient_CreateCall(t *testing.T) {
 	tests := []createCallTestCase{
 		{
 			name: "successful call creation with AMD and SendDigits",
-			req: CreateCallRequest{
+			req: twilio.CreateCallRequest{
 				To:                     "+15105550199",
 				From:                   "+15105550100",
 				TwiMLURL:               "https://prospera.aerial/twilio/voice",
@@ -501,7 +463,7 @@ func TestHTTPTwilioClient_CreateCall(t *testing.T) {
 		},
 		{
 			name: "validation failure missing To",
-			req: CreateCallRequest{
+			req: twilio.CreateCallRequest{
 				From:     "+15105550100",
 				TwiMLURL: "https://prospera.aerial/twilio/voice",
 			},
@@ -509,7 +471,7 @@ func TestHTTPTwilioClient_CreateCall(t *testing.T) {
 		},
 		{
 			name: "server returns 500 error",
-			req: CreateCallRequest{
+			req: twilio.CreateCallRequest{
 				To:       "+15105550199",
 				From:     "+15105550100",
 				TwiMLURL: "https://prospera.aerial/twilio/voice",
@@ -520,7 +482,7 @@ func TestHTTPTwilioClient_CreateCall(t *testing.T) {
 		},
 		{
 			name: "missing SID in response body",
-			req: CreateCallRequest{
+			req: twilio.CreateCallRequest{
 				To:       "+15105550199",
 				From:     "+15105550100",
 				TwiMLURL: "https://prospera.aerial/twilio/voice",
@@ -531,7 +493,7 @@ func TestHTTPTwilioClient_CreateCall(t *testing.T) {
 		},
 		{
 			name: "successful call creation with status callback",
-			req: CreateCallRequest{
+			req: twilio.CreateCallRequest{
 				To:             "+15105550199",
 				From:           "+15105550100",
 				TwiMLURL:       "https://prospera.aerial/twilio/voice",
@@ -543,7 +505,7 @@ func TestHTTPTwilioClient_CreateCall(t *testing.T) {
 		},
 		{
 			name: "malformed JSON response body",
-			req: CreateCallRequest{
+			req: twilio.CreateCallRequest{
 				To:       "+15105550199",
 				From:     "+15105550100",
 				TwiMLURL: "https://prospera.aerial/twilio/voice",
@@ -594,7 +556,7 @@ func runCreateCallCase(t *testing.T, tc createCallTestCase) {
 	}))
 	t.Cleanup(server.Close)
 
-	client := NewHTTPTwilioClient("AC123", "token123", WithTwilioBaseURL(server.URL), WithTwilioHTTPClient(server.Client()))
+	client := twilio.NewHTTPTwilioClient("AC123", "token123", twilio.WithTwilioBaseURL(server.URL), twilio.WithTwilioHTTPClient(server.Client()))
 	sid, err := client.CreateCall(context.Background(), tc.req)
 	if tc.wantErr {
 		if err == nil {
@@ -657,7 +619,7 @@ func TestHTTPTwilioClient_HangupCall(t *testing.T) {
 			}))
 			t.Cleanup(server.Close)
 
-			client := NewHTTPTwilioClient("AC123", "token123", WithTwilioBaseURL(server.URL), WithTwilioHTTPClient(server.Client()))
+			client := twilio.NewHTTPTwilioClient("AC123", "token123", twilio.WithTwilioBaseURL(server.URL), twilio.WithTwilioHTTPClient(server.Client()))
 			err := client.HangupCall(context.Background(), tc.callSID)
 			if tc.wantErr {
 				if err == nil {
@@ -744,7 +706,7 @@ func TestHTTPTwilioClient_IsCallActive(t *testing.T) {
 			}))
 			t.Cleanup(server.Close)
 
-			client := NewHTTPTwilioClient("AC123", "token123", WithTwilioBaseURL(server.URL), WithTwilioHTTPClient(server.Client()))
+			client := twilio.NewHTTPTwilioClient("AC123", "token123", twilio.WithTwilioBaseURL(server.URL), twilio.WithTwilioHTTPClient(server.Client()))
 			active, err := client.IsCallActive(context.Background(), tc.callSID)
 			if tc.wantErr {
 				if err == nil {
@@ -831,7 +793,7 @@ func TestHTTPTwilioClient_SendSMS(t *testing.T) {
 			}))
 			t.Cleanup(server.Close)
 
-			client := NewHTTPTwilioClient("AC123", "token123", WithTwilioBaseURL(server.URL), WithTwilioHTTPClient(server.Client()))
+			client := twilio.NewHTTPTwilioClient("AC123", "token123", twilio.WithTwilioBaseURL(server.URL), twilio.WithTwilioHTTPClient(server.Client()))
 			sid, err := client.SendSMS(context.Background(), tc.to, tc.from, tc.body)
 			if tc.wantErr {
 				if err == nil {
@@ -1067,7 +1029,7 @@ func runEnsurePhoneNumberCase(t *testing.T, tc ensurePhoneNumberTestCase) {
 	if tc.emptyAreaCode {
 		area = ""
 	}
-	client := NewHTTPTwilioClient("AC123", "token123", WithTwilioBaseURL(server.URL), WithTwilioHTTPClient(httpClient))
+	client := twilio.NewHTTPTwilioClient("AC123", "token123", twilio.WithTwilioBaseURL(server.URL), twilio.WithTwilioHTTPClient(httpClient))
 	phone, err := client.EnsurePhoneNumber(context.Background(), area, "https://prospera.aerial")
 	if tc.wantErr {
 		if err == nil {
@@ -1089,12 +1051,12 @@ func runEnsurePhoneNumberCase(t *testing.T, tc ensurePhoneNumberTestCase) {
 func TestHTTPTwilioClient_NetworkErrors(t *testing.T) {
 	t.Parallel()
 
-	clientBad := NewHTTPTwilioClient("AC123", "token123", WithTwilioBaseURL("http://127.0.0.1:1"))
+	clientBad := twilio.NewHTTPTwilioClient("AC123", "token123", twilio.WithTwilioBaseURL("http://127.0.0.1:1"))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 
-	if _, err := clientBad.CreateCall(ctx, CreateCallRequest{To: "+15105550199", From: "+15105550100", TwiMLURL: "https://test"}); err == nil {
+	if _, err := clientBad.CreateCall(ctx, twilio.CreateCallRequest{To: "+15105550199", From: "+15105550100", TwiMLURL: "https://test"}); err == nil {
 		t.Error("expected create call network error")
 	}
 	if err := clientBad.HangupCall(ctx, "CA123"); err == nil {
@@ -1114,10 +1076,10 @@ func TestHTTPTwilioClient_NetworkErrors(t *testing.T) {
 func TestReadBodySnippet(t *testing.T) {
 	t.Parallel()
 
-	if got := readBodySnippet(strings.NewReader("sample error body")); got != "sample error body" {
+	if got := twilio.ReadBodySnippet(strings.NewReader("sample error body")); got != "sample error body" {
 		t.Errorf("readBodySnippet = %q, want sample error body", got)
 	}
-	if got := readBodySnippet(&errSnippetReader{}); got != "" {
+	if got := twilio.ReadBodySnippet(&errSnippetReader{}); got != "" {
 		t.Errorf("readBodySnippet on error = %q, want empty", got)
 	}
 }
@@ -1138,7 +1100,7 @@ func TestEscapeXML(t *testing.T) {
 		{"<tag>&'\"", "&lt;tag&gt;&amp;&#39;&#34;"},
 	}
 	for _, tc := range tests {
-		if got := EscapeXML(tc.in); got != tc.want {
+		if got := twilio.EscapeXML(tc.in); got != tc.want {
 			t.Fatalf("EscapeXML(%q) = %q, want %q", tc.in, got, tc.want)
 		}
 	}
@@ -1146,7 +1108,7 @@ func TestEscapeXML(t *testing.T) {
 
 func TestStreamTokenManager_EntropyError(t *testing.T) {
 	t.Parallel()
-	mgr := NewStreamTokenManager(nil, func([]byte) (int, error) {
+	mgr := twilio.NewStreamTokenManager(nil, func([]byte) (int, error) {
 		return 0, errors.New("entropy error")
 	})
 	if _, err := mgr.Issue("c1", time.Minute); err == nil {
@@ -1172,8 +1134,8 @@ func TestNewHTTPTwilioClient_TraceHeaders(t *testing.T) {
 				w.WriteHeader(http.StatusOK)
 			}))
 			t.Cleanup(srv.Close)
-			ctx, _ := traceCaller(tc.withParent)
-			if err := NewHTTPTwilioClient("AC1", "tok", WithTwilioBaseURL(srv.URL)).HangupCall(ctx, "CA1"); err != nil {
+			ctx, _ := fakes.TraceCaller(tc.withParent)
+			if err := twilio.NewHTTPTwilioClient("AC1", "tok", twilio.WithTwilioBaseURL(srv.URL)).HangupCall(ctx, "CA1"); err != nil {
 				t.Fatalf("HangupCall: %v", err)
 			}
 			if got != "" {
