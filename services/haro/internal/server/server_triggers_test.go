@@ -159,11 +159,7 @@ func TestServer_Metrics_Table(t *testing.T) {
 }
 
 func TestHandleOneShotJob_Scenarios(t *testing.T) {
-	db, err := testutil.OpenSQLiteTestDB(":memory:")
-	if err != nil {
-		t.Fatalf("OpenSQLiteTestDB failed: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
+	db := testutil.NewDB(t)
 	ctx := context.Background()
 	now := time.Date(2026, 11, 14, 12, 0, 0, 0, time.UTC)
 
@@ -208,11 +204,7 @@ func TestHandleOneShotJob_Scenarios(t *testing.T) {
 
 func TestHandleOneShotJob_ClosedDB(t *testing.T) {
 	ctx := context.Background()
-	closedDB, err := testutil.OpenSQLiteTestDB(":memory:")
-	if err != nil {
-		t.Fatalf("OpenSQLiteTestDB failed: %v", err)
-	}
-	_ = closedDB.Close()
+	closedDB := testutil.NewClosedDB(t)
 
 	tests := []struct {
 		name    string
@@ -320,20 +312,12 @@ func verifyDispatchedPrompt(t *testing.T, disp *stubScenarioDispatcher, wantChan
 }
 
 func TestHandleExternalEvent_Scenarios(t *testing.T) {
-	db, err := testutil.OpenSQLiteTestDB(":memory:")
-	if err != nil {
-		t.Fatalf("OpenSQLiteTestDB failed: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
+	db := testutil.NewDB(t)
 	ctx := context.Background()
 
 	seedExternalEventTriggers(ctx, db)
 
-	closedDB, err := testutil.OpenSQLiteTestDB(":memory:")
-	if err != nil {
-		t.Fatalf("OpenSQLiteTestDB failed: %v", err)
-	}
-	_ = closedDB.Close()
+	closedDB := testutil.NewClosedDB(t)
 	serverClosed := NewServer(tools.NewToolHandler(&config.Config{DatabaseURL: ":memory:"}, closedDB))
 
 	mockDispFail := &stubScenarioDispatcher{err: errors.New("eri unavailable")}

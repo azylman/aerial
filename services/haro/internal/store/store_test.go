@@ -3,20 +3,27 @@ package store
 import (
 	"context"
 	"database/sql"
+	"os"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/azylman/aerial/pkg/pgtest"
 	"github.com/azylman/aerial/services/haro/internal/config"
 	"github.com/azylman/aerial/services/haro/internal/model"
-	"github.com/azylman/aerial/services/haro/internal/testutil"
 )
 
+func TestMain(m *testing.M) {
+	os.Exit(pgtest.Main(m))
+}
+
+// openStoreTestDB opens a private clone of the production schema through the
+// production constructor OpenDB.
 func openStoreTestDB(t *testing.T) *sql.DB {
 	t.Helper()
-	db, err := testutil.OpenSQLiteTestDB(":memory:")
+	db, err := OpenDB(context.Background(), &config.Config{DatabaseURL: pgtest.NewDSN(t)})
 	if err != nil {
-		t.Fatalf("OpenSQLiteTestDB failed: %v", err)
+		t.Fatalf("OpenDB failed: %v", err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
 	return db
@@ -130,8 +137,8 @@ func TestFindEarliestNextRun(t *testing.T) {
 }
 
 func TestOpenDBValidation(t *testing.T) {
-	addr := testutil.StartMockPostgres(t)
-	pgCfg := &config.Config{DatabaseURL: "postgres://mock_user:mock_pass@" + addr + "/mock_db?sslmode=disable"}
+	t.Parallel()
+	pgCfg := &config.Config{DatabaseURL: pgtest.NewDSN(t)}
 	tests := []struct {
 		name    string
 		cfg     *config.Config
@@ -141,52 +148,26 @@ func TestOpenDBValidation(t *testing.T) {
 		{"nil config", nil, "config cannot be nil", false},
 		{"empty dsn", &config.Config{DatabaseURL: ""}, "connection string cannot be empty", false},
 		{"unsupported scheme", &config.Config{DatabaseURL: "mysql://localhost/db"}, "unsupported database scheme", false},
-		{"sqlite without hook unsupported", &config.Config{DatabaseURL: ":memory:"}, "unsupported database scheme", false},
-		{"mock postgres success", pgCfg, "", true},
+		{"bare sqlite path unsupported", &config.Config{DatabaseURL: ":memory:"}, "unsupported database scheme", false},
+		{"postgres success", pgCfg, "", true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			db, err := OpenDB(context.Background(), tc.cfg)
 			if tc.wantOK {
 				if err != nil {
 					t.Fatalf("OpenDB err = %v", err)
 				}
-				_ = db.Close()
+				defer func() { _ = db.Close() }()
+				var one int
+				if qErr := db.QueryRowContext(context.Background(), "SELECT 1").Scan(&one); qErr != nil || one != 1 {
+					t.Fatalf("SELECT 1 = (%d, %v), want (1, nil)", one, qErr)
+				}
 				return
 			}
 			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 				t.Errorf("OpenDB err = %v, want containing %q", err, tc.wantErr)
-			}
-		})
-	}
-}
-
-func TestIsSQLiteDB(t *testing.T) {
-	t.Parallel()
-	sqliteDB, err := testutil.OpenSQLiteTestDB(":memory:")
-	if err != nil {
-		t.Fatalf("OpenSQLiteTestDB failed: %v", err)
-	}
-	t.Cleanup(func() { _ = sqliteDB.Close() })
-	pgDB, err := sql.Open("pgx", "postgres://invalid:invalid@127.0.0.1:59997/db?sslmode=disable")
-	if err != nil {
-		t.Fatalf("sql.Open pgx failed: %v", err)
-	}
-	t.Cleanup(func() { _ = pgDB.Close() })
-	tests := []struct {
-		name string
-		db   *sql.DB
-		want bool
-	}{
-		{"nil db", nil, false},
-		{"sqlite db", sqliteDB, true},
-		{"postgres db", pgDB, false},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			if got := isSQLiteDB(tc.db); got != tc.want {
-				t.Errorf("isSQLiteDB = %v, want %v", got, tc.want)
 			}
 		})
 	}
@@ -799,7 +780,7 @@ func TestGetDueCronSchedulesErrors(t *testing.T) {
 		{name: "closed db", closedDB: true, wantErr: "database is closed"},
 		{
 			name:    "bad row fails scan",
-			badSQL:  `INSERT INTO cron_schedules (id, target_id, title_prefix, cron_expr, prompt, timezone, next_run_at, enabled, created_at, effort) VALUES ('c-bad', 't1', '', '0 0 * * *', 'p', 'UTC', 0, TRUE, CURRENT_TIMESTAMP, 'medium')`,
+			badSQL:  `ALTER TABLE cron_schedules ALTER COLUMN created_at TYPE TEXT; INSERT INTO cron_schedules (id, target_id, title_prefix, cron_expr, prompt, timezone, next_run_at, enabled, created_at, effort) VALUES ('c-bad', 't1', '', '0 0 * * *', 'p', 'UTC', '2026-01-01T00:00:00Z', TRUE, 'not-a-date', 'medium')`,
 			wantErr: "Scan error",
 		},
 	}
@@ -829,7 +810,7 @@ func TestGetDueHeartbeatSchedulesErrors(t *testing.T) {
 		{name: "nil db", nilDB: true, wantErr: "database is nil"},
 		{
 			name:    "bad row fails scan",
-			badSQL:  `INSERT INTO heartbeat_schedules (id, target_id, title_prefix, cron_expr, prompt, timezone, effort, next_run_at, enabled, created_at) VALUES ('h-bad', 't1', '', '0 0 * * *', 'p', 'UTC', 'low', 0, TRUE, CURRENT_TIMESTAMP)`,
+			badSQL:  `ALTER TABLE heartbeat_schedules ALTER COLUMN created_at TYPE TEXT; INSERT INTO heartbeat_schedules (id, target_id, title_prefix, cron_expr, prompt, timezone, effort, next_run_at, enabled, created_at) VALUES ('h-bad', 't1', '', '0 0 * * *', 'p', 'UTC', 'low', '2026-01-01T00:00:00Z', TRUE, 'not-a-date')`,
 			wantErr: "Scan error",
 		},
 	}
@@ -1016,7 +997,7 @@ func seedSharedSchedules(ctx context.Context, t *testing.T, db *sql.DB, id strin
 	mustInsertCron(ctx, t, db, model.CronSchedule{ID: id, TargetID: "t", CronExpr: "0 0 * * *", Prompt: "p", NextRunAt: now, Enabled: true})
 	mustInsertOneShot(ctx, t, db, model.OneShotSchedule{ID: id, ThreadID: "th", Prompt: "p", RunAt: now})
 	mustInsertHeartbeat(ctx, t, db, model.HeartbeatSchedule{ID: id, TargetID: "t", CronExpr: "0 * * * *", Prompt: "p", NextRunAt: now, Enabled: true})
-	if _, err := db.ExecContext(ctx, `INSERT INTO event_triggers (id, channel_id, source, target, event_type, prompt, effort, created_at, persistent) VALUES (?, 'ch', 'vanadis_build', 't', 'ev', 'p', 'medium', ?, FALSE)`, id, now); err != nil {
+	if _, err := db.ExecContext(ctx, `INSERT INTO event_triggers (id, channel_id, source, target, event_type, prompt, effort, created_at, persistent) VALUES ($1, 'ch', 'vanadis_build', 't', 'ev', 'p', 'medium', $2, FALSE)`, id, now); err != nil {
 		t.Fatalf("seed event trigger err = %v", err)
 	}
 }
