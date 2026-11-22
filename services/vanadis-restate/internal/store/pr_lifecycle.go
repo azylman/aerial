@@ -98,8 +98,8 @@ func (s *Store) MarkActionRepairDeployed(ctx context.Context, chunkID string, ro
 // SweptChunk identifies one cross-build swept chunk and the foreign build
 // that owns it.
 type SweptChunk struct {
-	ChunkID string
-	BuildID string
+	ChunkID string `json:"chunk_id"`
+	BuildID string `json:"build_id"`
 }
 
 // buildPushJobRegex mirrors the widget Build-and-Push check-name parser so
@@ -219,15 +219,6 @@ func supersededAcrossBuilds(owner string, candidate, deploying model.VanadisChun
 	return crossBuildSweepEligible(owner, candidate, deploying) && sweepPreDeployStatus(candidate.Status)
 }
 
-// recoveredAcrossBuilds reports whether an already-completed chunk in
-// another build matches the cross-build sweep eligibility. A retry that
-// lands after a prior attempt completed the writes but failed before the
-// side effects re-derives these so events, widget sync, and build
-// completion still happen.
-func recoveredAcrossBuilds(owner string, candidate, deploying model.VanadisChunk) bool {
-	return crossBuildSweepEligible(owner, candidate, deploying) && strings.EqualFold(strings.TrimSpace(candidate.Status), statusCompleted)
-}
-
 // CrossBuildDeploymentSweepIDs returns the earlier chunks in OTHER builds a
 // deploy_success also completes: same-repo PR chunks still pre-deploy whose
 // merge stamp is at or before the deploying chunk's merge stamp and that
@@ -247,68 +238,36 @@ func CrossBuildDeploymentSweepIDs(owner string, deploying model.VanadisChunk, ca
 	return swept
 }
 
-// SweepEarlierDeploymentsAcrossBuilds completes eligible earlier chunks in
-// other builds superseded by the deploying chunk's landed commit and
-// returns every affected chunk and build ID, plus already-completed chunks
-// matching the same eligibility so a retry that lands after the writes but
-// before the side effects can still publish events, re-sync widgets, and
-// complete foreign builds. Skipped transitions (a concurrent completion,
-// failure, or cancellation) are harmless; other errors return the chunks
-// completed so far alongside the error so the caller processes partial
-// progress before the journaled step retries the remainder.
-func (s *Store) SweepEarlierDeploymentsAcrossBuilds(ctx context.Context, deploying model.VanadisChunk) (swept, recovered []SweptChunk, err error) {
+// SweepEarlierDeploymentsAcrossBuilds returns eligible earlier chunks in
+// other builds superseded by the deploying chunk's landed commit.
+func (s *Store) SweepEarlierDeploymentsAcrossBuilds(ctx context.Context, deploying model.VanadisChunk) ([]SweptChunk, error) {
 	if s == nil || s.db == nil {
-		return nil, nil, errors.New("database connection is nil")
+		return nil, errors.New("database connection is nil")
 	}
 	if strings.TrimSpace(deploying.BuildID) == "" || strings.TrimSpace(deploying.ID) == "" {
-		return nil, nil, nil
+		return nil, nil
 	}
 	repos := RepoMatchCandidates(s.gitHubOwner, deploying.Repo)
 	if len(repos) == 0 {
-		return nil, nil, nil
+		return nil, nil
 	}
-	rows, err := s.db.Query(ctx, `SELECT c.id, c.build_id, c.chunk_index, c.mode, c.repo, c.title, c.instructions, c.target_files, c.target_symbols, COALESCE(c.effort, 'medium'), c.acceptance_criteria, c.status, COALESCE(c.pr_number, 0), COALESCE(c.stall_nudges, 0), c.depends_on, c.ci_fail_count, c.ci_checks, c.rollout_state, c.banner, c.merge_awakeable_id, c.deploy_awakeable_id, c.started_at, c.completed_at, c.created_at, c.updated_at FROM vanadis_chunks AS c JOIN vanadis_builds AS b ON b.id = c.build_id WHERE c.build_id != $1 AND c.mode = 'pr' AND COALESCE(c.pr_number, 0) > 0 AND c.status IN ('merged', 'synced', 'deploying', 'deploy_failed', 'completed') AND c.repo = ANY($2) AND b.status NOT IN ('cancelled', 'completed') ORDER BY c.build_id ASC, c.chunk_index ASC;`, deploying.BuildID, repos)
+	rows, err := s.db.Query(ctx, `SELECT c.id, c.build_id, c.chunk_index, c.mode, c.repo, c.title, c.instructions, c.target_files, c.target_symbols, COALESCE(c.effort, 'medium'), c.acceptance_criteria, c.status, COALESCE(c.pr_number, 0), COALESCE(c.stall_nudges, 0), c.depends_on, c.ci_fail_count, c.ci_checks, c.rollout_state, c.banner, c.merge_awakeable_id, c.deploy_awakeable_id, c.started_at, c.completed_at, c.created_at, c.updated_at FROM vanadis_chunks AS c JOIN vanadis_builds AS b ON b.id = c.build_id WHERE c.build_id != $1 AND c.mode = 'pr' AND COALESCE(c.pr_number, 0) > 0 AND c.status IN ('merged', 'synced', 'deploying', 'deploy_failed') AND c.repo = ANY($2) AND b.status NOT IN ('cancelled', 'completed') ORDER BY c.build_id ASC, c.chunk_index ASC;`, deploying.BuildID, repos)
 	if err != nil {
-		return nil, nil, fmt.Errorf("query cross-build sweep candidates: %w", err)
+		return nil, fmt.Errorf("query cross-build sweep candidates: %w", err)
 	}
 	defer rows.Close()
 	var candidates []model.VanadisChunk
 	for rows.Next() {
 		c, err := scanChunkRow(rows)
 		if err != nil {
-			return nil, nil, fmt.Errorf("scan cross-build sweep candidates: %w", err)
+			return nil, fmt.Errorf("scan cross-build sweep candidates: %w", err)
 		}
 		candidates = append(candidates, c)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, nil, fmt.Errorf("iterate cross-build sweep candidates: %w", err)
+		return nil, fmt.Errorf("iterate cross-build sweep candidates: %w", err)
 	}
-	for _, sw := range CrossBuildDeploymentSweepIDs(s.gitHubOwner, deploying, candidates) {
-		if err := s.CompletePRDeployment(ctx, sw.ChunkID, nil); err != nil {
-			if errors.Is(err, ErrPRTransitionSkipped) {
-				continue
-			}
-			return swept, recoveredCrossBuildChunks(s.gitHubOwner, deploying, candidates), err
-		}
-		swept = append(swept, sw)
-	}
-	return swept, recoveredCrossBuildChunks(s.gitHubOwner, deploying, candidates), nil
-}
-
-// recoveredCrossBuildChunks re-derives already-completed chunks matching
-// the cross-build sweep eligibility so a retry can finish their side
-// effects idempotently.
-func recoveredCrossBuildChunks(owner string, deploying model.VanadisChunk, candidates []model.VanadisChunk) []SweptChunk {
-	if strings.TrimSpace(deploying.BuildID) == "" {
-		return nil
-	}
-	var recovered []SweptChunk
-	for _, candidate := range candidates {
-		if recoveredAcrossBuilds(owner, candidate, deploying) {
-			recovered = append(recovered, SweptChunk{ChunkID: candidate.ID, BuildID: candidate.BuildID})
-		}
-	}
-	return recovered
+	return CrossBuildDeploymentSweepIDs(s.gitHubOwner, deploying, candidates), nil
 }
 
 // EarlierDeploymentSweepIDs returns the IDs of chunks a deploy_success also

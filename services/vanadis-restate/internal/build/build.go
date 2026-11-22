@@ -205,7 +205,7 @@ type reconcileStepOutput struct {
 	State          *model.BuildObjectState       `json:"state,omitempty"`
 	// ReconcileTargets are other builds this step changed; each is reconciled
 	// by its own runner after the step commits.
-	ReconcileTargets []store.BuildRoute `json:"reconcile_targets,omitempty"`
+	ReconcileTargets []store.SweptChunk `json:"reconcile_targets,omitempty"`
 }
 
 type objectRuntime interface {
@@ -218,7 +218,7 @@ type objectRuntime interface {
 	ScheduleReconcile()
 	ScheduleDeferredReconcile(delay time.Duration, seq int)
 	InvocationID() string
-	SendReconcile(service, buildID, reason string)
+	SendCrossBuildDeploySuccess(service, buildID, chunkID string)
 	RunReconcileStep(name string, fn func(ctx context.Context) (reconcileStepOutput, error)) (reconcileStepOutput, error)
 }
 
@@ -287,9 +287,9 @@ func (r restateObjectRuntime) InvocationID() string {
 	return r.ctx.Request().ID
 }
 
-// SendReconcile sends a one-way Reconcile to another build's Build object.
-func (r restateObjectRuntime) SendReconcile(service, buildID, reason string) {
-	_ = restate.ObjectSend(r.ctx, service, buildID, "Reconcile").Send(ReconcileBuildRequest{Reason: reason})
+// SendCrossBuildDeploySuccess sends a one-way Mutate(chunk_deploy_success) to another build's Build object.
+func (r restateObjectRuntime) SendCrossBuildDeploySuccess(service, buildID, chunkID string) {
+	_ = restate.ObjectSend(r.ctx, service, buildID, "Mutate").Send(BuildMutationRequest{Action: mutationChunkDeploySuccess, ChunkID: chunkID})
 }
 
 // BuildObject implements the Restate-authoritative Virtual Object for multi-chunk builds.

@@ -305,10 +305,7 @@ func appendCallJSONSlice[T any](ctx context.Context, s *PGStore, callID, column,
 	}
 	defer rollbackTx(tx)
 
-	query := fmt.Sprintf("SELECT %s FROM voice_calls WHERE call_id = $1", column)
-	if !s.isSQLite {
-		query += " FOR UPDATE"
-	}
+	query := fmt.Sprintf("SELECT %s FROM voice_calls WHERE call_id = $1 FOR UPDATE", column)
 
 	var raw string
 	err = tx.QueryRowContext(ctx, query, callID).Scan(&raw)

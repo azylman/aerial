@@ -5,6 +5,8 @@ import (
 	"log/slog"
 	"maps"
 	"reflect"
+	"slices"
+	"strconv"
 	"testing"
 	"time"
 
@@ -18,7 +20,6 @@ import (
 	"github.com/azylman/aerial/services/vanadis-restate/internal/deploygate"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/executor"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
-	"github.com/azylman/aerial/services/vanadis-restate/internal/sqltest"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
 )
 
@@ -32,7 +33,7 @@ type fakeObjectRuntime struct {
 	stepsRun           []string
 	cleared            bool
 	reconcileScheduled bool
-	reconcilesSent     []sentReconcile
+	reconcilesSent     []sentCrossBuildDeploySuccess
 	invocationID       string
 	deferredSends      []deferredSend
 }
@@ -43,11 +44,11 @@ type deferredSend struct {
 	Seq   int
 }
 
-// sentReconcile records one cross-build Reconcile send.
-type sentReconcile struct {
+// sentCrossBuildDeploySuccess records one cross-build Mutate(chunk_deploy_success) send.
+type sentCrossBuildDeploySuccess struct {
 	Service string
 	BuildID string
-	Reason  string
+	ChunkID string
 }
 
 func newFakeObjectRuntime(key string) *fakeObjectRuntime {
@@ -182,26 +183,7 @@ func TestBuildObject_AuthoritativeHandlers(t *testing.T) {
 	eri := &mockEriClient{}
 	bus := pubsub.NewMemoryBus()
 	exec := executor.NewExecutor("", eri, bus, "test-token", "example-owner", nil)
-	b1 := model.VanadisBuild{ID: "b1", Title: "Build 1", Objective: "Obj 1", Status: "running", ThreadID: "th-1"}
-	c1 := model.VanadisChunk{ID: "c1", BuildID: "b1", Title: "Chunk 1", Instructions: "Inst 1", Status: "pending", Mode: "pr", Repo: "aerial", TargetFiles: []string{"pkg/a.go"}}
-	c2 := model.VanadisChunk{ID: "c2", BuildID: "b1", Title: "Chunk 2", Instructions: "Inst 2", Status: "pending", Mode: "pr", Repo: "aerial", DependsOn: []string{"c1"}, TargetFiles: []string{"pkg/b.go"}}
-	st, _ := open(dbScript{
-		Routes: []sqlRoute{
-			{Match: "SELECT status FROM vanadis_builds", Row: sqltest.ValuesRow("running")},
-			{Match: "SELECT mode FROM vanadis_chunks", Row: sqltest.ValuesRow("pr")},
-			{Match: "SELECT build_id FROM vanadis_chunks", Row: sqltest.ValuesRow("b1")},
-			{Match: "RETURNING b.id, c.id, b.thread_id", Row: sqltest.ValuesRow("b1", "c1", "th-1")},
-			{Match: "RETURNING ci_fail_count", Row: sqltest.ValuesRow(1)},
-			{Match: "WHERE c.id = $1", Row: sqltest.FailRow("running", "running")},
-			{Match: "c.repo = ANY($1) AND c.pr_number = $2", Row: sqltest.ValuesRow("c1", "b1", 0, "medium", true)},
-			{Match: "MAX(chunk_index)", Row: sqltest.ValuesRow(1)},
-		},
-		Row:      sqltest.ValuesRow("running"),
-		BuildRow: &sqltest.Row{Build: &b1},
-		Chunks:   []model.VanadisChunk{c1, c2},
-		CountRow: sqltest.ValuesRow(1),
-		ExecTag:  "UPDATE 1",
-	})
+	st, _ := openStore(t)
 
 	bo := NewBuildObject("", nil).WithAuthority(st, exec)
 
@@ -216,7 +198,8 @@ func TestBuildObject_AuthoritativeHandlers(t *testing.T) {
 		ThreadID:  "th-1",
 		Objective: "Test build",
 		Chunks: []store.CreateChunkInput{
-			{ID: "c1", Title: "Chunk 1", Repo: "aerial", Instructions: "Do 1", DependsOn: []string{}},
+			{ID: "c1", Title: "Chunk 1", Repo: "aerial", Instructions: "Do 1", DependsOn: []string{}, TargetFiles: []string{"pkg/a.go"}},
+			{ID: "c2", Title: "Chunk 2", Repo: "aerial", Instructions: "Do 2", DependsOn: []string{"c1"}, TargetFiles: []string{"pkg/b.go"}},
 		},
 	}
 	bld, err := bo.Create(ctx, createReq)
@@ -229,16 +212,18 @@ func TestBuildObject_AuthoritativeHandlers(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, "b1", bldUp.ID)
 
-	// 4. UpdateChunk
-	cUp, err := bo.UpdateChunk(ctx, store.UpdateChunkRequest{ChunkRef: "c1", Title: "Updated Title"})
+	// 4. UpdateChunk: Create launched c1, so edit the still-pending dependent.
+	cUp, err := bo.UpdateChunk(ctx, store.UpdateChunkRequest{ChunkRef: "c2", Title: "Updated Title"})
 	assert.NoError(t, err)
-	assert.Equal(t, "c1", cUp.ID)
+	assert.Equal(t, "c2", cUp.ID)
 
 	// 5. AppendChunks
 	appReq := AppendChunksRequest{Chunks: []store.CreateChunkInput{{Title: "Chunk 3", Repo: "aerial", Instructions: "Do 3", DependsOn: []string{"c2"}, TargetFiles: []string{"pkg/c.go"}}}}
 	appended, err := bo.AppendChunks(ctx, appReq)
-	assert.NoError(t, err)
-	assert.NotEmpty(t, appended)
+	require.NoError(t, err)
+	require.Len(t, appended, 1)
+	assert.Equal(t, "b1-chunk-3", appended[0].ID)
+	assert.Equal(t, []string{"b1-chunk-3", "c1", "c2"}, slices.Sorted(maps.Keys(chunkStatuses(t, st, "b1"))))
 
 	// 6. AttachPR
 	attReq := store.AttachChunkPRRequest{ChunkID: "c1", PRNumber: 101, Repo: "aerial"}
@@ -252,9 +237,15 @@ func TestBuildObject_AuthoritativeHandlers(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, "c1", failResp.ChunkID)
 
-	// 8. RemoveChunk
-	remErr := bo.RemoveChunk(ctx, RemoveChunkRequest{ChunkRef: "c1"})
+	// 8. RemoveChunk: only pending chunks are removable, so drop the appended one.
+	remErr := bo.RemoveChunk(ctx, RemoveChunkRequest{ChunkRef: appended[0].ID})
 	assert.NoError(t, remErr)
+	assert.Equal(t, map[string]string{"c1": "failed", "c2": "pending"}, chunkStatuses(t, st, "b1"))
+	stored, chunks := loadBuild(t, st, "b1")
+	assert.Equal(t, "New Title", stored.Title)
+	assert.Equal(t, "New Obj", stored.Objective)
+	assert.Equal(t, "Updated Title", chunks[1].Title)
+	assert.Equal(t, 101, chunks[0].PRNumber)
 
 	// 9. OnPREvent
 	assert.NoError(t, bo.OnPREvent(ctx, pubsub.PRLifecycleEvent{Repo: "aerial", PRNumber: 101, Event: "check_failed", CheckName: "lint", CheckURL: "https://github.com/...", Details: "failure", RolloutState: &pubsub.PRRolloutState{ExpectedJobs: []string{"eri"}}}))
@@ -275,13 +266,14 @@ func TestBuildObject_AuthoritativeHandlers(t *testing.T) {
 	canBld, err := bo.Cancel(ctx, CancelBuildRequest{Reason: "user cancelled"})
 	assert.NoError(t, err)
 	assert.Equal(t, "b1", canBld.ID)
+	stored, _ = loadBuild(t, st, "b1")
+	assert.Equal(t, statusCancelled, stored.Status)
 }
 
 func TestBuildObject_HandlerErrors(t *testing.T) {
 	t.Parallel()
 	ctx := makeObjectMockContext(t, "b1")
-	st, _ := open(dbScript{Row: sqltest.ErrRow(ErrChunkNotFound)})
-	bo := NewBuildObject("", nil).WithAuthority(st, nil)
+	bo := NewBuildObject("", nil).WithAuthority(closedStore(t), nil)
 
 	// UpdateBuild empty
 	_, err := bo.UpdateBuild(ctx, store.UpdateBuildRequest{})
@@ -335,9 +327,7 @@ func TestBuildObject_CreateAndCancelErrors(t *testing.T) {
 
 	// Create with chunk with empty ID (generates auto ID)
 	ctxAuto := makeObjectMockContext(t, "b-auto")
-	storeCreate, _ := open(dbScript{Routes: []sqlRoute{
-		{Match: "FROM vanadis_builds WHERE id = $1", Row: &sqltest.Row{Build: &model.VanadisBuild{ID: "b-auto", Status: "running"}}},
-	}})
+	storeCreate, _ := openStore(t)
 	boCreate := NewBuildObject("", nil).WithAuthority(storeCreate, nil)
 	validNoChunkIDReq := CreateBuildRequest{
 		ID:        "b-auto",
@@ -350,6 +340,7 @@ func TestBuildObject_CreateAndCancelErrors(t *testing.T) {
 	bAuto, err := boCreate.Create(ctxAuto, validNoChunkIDReq)
 	assert.NoError(t, err)
 	assert.Equal(t, "b-auto", bAuto.ID)
+	assert.Equal(t, map[string]string{"b-auto-chunk-1": "pending"}, chunkStatuses(t, storeCreate, "b-auto"))
 
 	// Create with empty objective
 	_, err = bo.Create(ctx, CreateBuildRequest{ID: "b1", ThreadID: "th1", Objective: ""})
@@ -367,92 +358,89 @@ func TestBuildObject_CreateAndCancelErrors(t *testing.T) {
 	}
 	_, err = bo.Create(ctx, cycleReq)
 	assert.Error(t, err)
+}
 
-	// Cancel terminal builds
-	bComp := model.VanadisBuild{ID: "b1", Status: "completed"}
-	storeCompleted, _ := open(dbScript{BuildRow: &sqltest.Row{Build: &bComp}})
-	rtCompleted := newFakeObjectRuntime("b1")
-	boCompleted := NewBuildObject("", nil, func(restate.ObjectContext) objectRuntime { return rtCompleted }).WithAuthority(storeCompleted, nil)
-	_, err = boCompleted.Cancel(ctx, CancelBuildRequest{})
-	assert.Error(t, err)
-	assert.False(t, rtCompleted.cleared)
-
-	bFail := model.VanadisBuild{ID: "b1", Status: "failed"}
-	storeFailed, _ := open(dbScript{BuildRow: &sqltest.Row{Build: &bFail}, ExecTag: "UPDATE 1"})
-	rtFailed := newFakeObjectRuntime("b1")
-	boFailed := NewBuildObject("", nil, func(restate.ObjectContext) objectRuntime { return rtFailed }).WithAuthority(storeFailed, nil)
-	canFailed, err := boFailed.Cancel(ctx, CancelBuildRequest{})
-	assert.NoError(t, err)
-	assert.Equal(t, statusCancelled, canFailed.Status)
-	assert.True(t, rtFailed.cleared)
-
-	bCancelled := model.VanadisBuild{ID: "b1", Status: statusCancelled}
-	storeCancelled, _ := open(dbScript{BuildRow: &sqltest.Row{Build: &bCancelled}})
-	rtCancelled := newFakeObjectRuntime("b1")
-	boCancelled := NewBuildObject("", nil, func(restate.ObjectContext) objectRuntime { return rtCancelled }).WithAuthority(storeCancelled, nil)
-	_, err = boCancelled.Cancel(ctx, CancelBuildRequest{})
-	assert.Error(t, err)
-	assert.ErrorContains(t, err, store.ErrBuildConflict.Error())
-	assert.False(t, rtCancelled.cleared)
+func TestBuildObject_CancelTerminalBuilds(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		status      string
+		wantErr     string
+		wantCleared bool
+		wantStored  string
+	}{
+		{name: "completed", status: "completed", wantErr: "vanadis build state conflict", wantStored: "completed"},
+		{name: "failed", status: "failed", wantCleared: true, wantStored: "cancelled"},
+		{name: "cancelled", status: "cancelled", wantErr: store.ErrBuildConflict.Error(), wantStored: "cancelled"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			st, _ := seededStore(t, []model.VanadisBuild{{ID: "b1", ThreadID: "th-1", Status: tc.status}}, nil)
+			rt := newFakeObjectRuntime("b1")
+			bo := NewBuildObject("", nil, func(restate.ObjectContext) objectRuntime { return rt }).WithAuthority(st, nil)
+			got, err := bo.Cancel(makeObjectMockContext(t, "b1"), CancelBuildRequest{})
+			if tc.wantErr != "" {
+				assert.ErrorContains(t, err, tc.wantErr)
+			} else {
+				require.NoError(t, err)
+				assert.Equal(t, statusCancelled, got.Status)
+			}
+			assert.Equal(t, tc.wantCleared, rt.cleared)
+			stored, _ := loadBuild(t, st, "b1")
+			assert.Equal(t, tc.wantStored, stored.Status)
+		})
+	}
 }
 
 func TestBuildObject_HandlersWithAuthorityAndMockContext(t *testing.T) {
 	t.Parallel()
 	b1 := model.VanadisBuild{ID: "b-auth", Status: "running", ThreadID: "th-1"}
-	c1 := model.VanadisChunk{ID: "c1", BuildID: "b-auth", ChunkIndex: 0, Title: "C1", Status: "pending", Mode: "action"}
-	st, _ := open(dbScript{
-		BuildRow: &sqltest.Row{Build: &b1},
-		Chunks:   []model.VanadisChunk{c1},
-		Routes: []sqlRoute{
-			{Match: "SELECT mode FROM vanadis_chunks", Row: sqltest.ValuesRow("action")},
-			{Match: "UPDATE vanadis_chunks", Row: sqltest.ValuesRow("b-auth", "c1", "th-1")},
-			{Match: "WHERE c.repo = ANY($1) AND c.pr_number = $2", Row: sqltest.ValuesRow("c1", "b-auth", 0, "medium", false)},
-			{Match: "SELECT id, build_id, chunk_index, mode, title, status", Row: sqltest.ValuesRow("c1", "b-auth", 0, "action", "C1", "running", 0)},
-			{Match: "SELECT id, thread_id, tier", Row: sqltest.ValuesRow("b-auth", "th-1", 1, "Build Title", "Build Obj", "running", "")},
-			{Match: "SELECT COUNT(*)", Row: sqltest.ValuesRow(1)},
-		},
-		ExecTag: "UPDATE 1",
-	})
+	c1 := model.VanadisChunk{ID: "c1", BuildID: "b-auth", ChunkIndex: 0, Title: "C1", Status: "pending", Mode: "action", Repo: "aerial", PRNumber: 101}
+	st, _ := seededStore(t, []model.VanadisBuild{b1}, []model.VanadisChunk{c1})
 	eri := &mockEriClient{}
 	exec := executor.NewExecutor(t.TempDir(), eri, nil, "token", "example-owner", nil)
 	bo := NewBuildObject("", nil).WithAuthority(st, exec)
 
 	ctx := makeObjectMockContext(t, "b-auth")
 
-	// AppendChunks
-	appReq := AppendChunksRequest{Chunks: []store.CreateChunkInput{{Mode: "action", Title: "C2", Instructions: "Inst"}}}
-	_, _ = bo.AppendChunks(ctx, appReq)
+	// AppendChunks: the transition also launches the ready c1.
+	appReq := AppendChunksRequest{Chunks: []store.CreateChunkInput{{Mode: "action", Title: "C2", Instructions: "Inst", DependsOn: []string{"c1"}}}}
+	_, err := bo.AppendChunks(ctx, appReq)
+	require.NoError(t, err)
+	assert.Equal(t, map[string]string{"c1": "running", "b-auth-chunk-2": "pending"}, chunkStatuses(t, st, "b-auth"))
 
-	// UpdateChunk
-	updChunkReq := store.UpdateChunkRequest{ChunkRef: "c1", Title: "Updated Action"}
-	_, _ = bo.UpdateChunk(ctx, updChunkReq)
+	// UpdateChunk on the still-pending appended chunk.
+	updChunkReq := store.UpdateChunkRequest{ChunkRef: "b-auth-chunk-2", Title: "Updated Action"}
+	_, err = bo.UpdateChunk(ctx, updChunkReq)
+	require.NoError(t, err)
 
 	// UpdateBuild
 	rt := newFakeObjectRuntime("b-auth")
 	rt.SetState(model.BuildObjectState{Build: b1, Chunks: []model.VanadisChunk{c1}})
 	bo.runtimeFactory = func(restate.ObjectContext) objectRuntime { return rt }
 	updBldReq := store.UpdateBuildRequest{Title: "Updated Build"}
-	_, _ = bo.UpdateBuild(ctx, updBldReq)
+	_, err = bo.UpdateBuild(ctx, updBldReq)
+	require.NoError(t, err)
 
-	// OnPREvent with check_failed
-	prEv := pubsub.PRLifecycleEvent{Repo: "aerial", PRNumber: 101, Event: "check_failed", CheckName: "lint"}
-	_ = bo.OnPREvent(ctx, prEv)
+	// PR lifecycle on the action chunk's attached PR, then its dispatch outcome.
+	events := []pubsub.PRLifecycleEvent{
+		{Repo: "aerial", PRNumber: 101, Event: "check_failed", CheckName: "lint"},
+		{Repo: "aerial", PRNumber: 101, Event: "conflict"},
+		{Repo: "aerial", PRNumber: 101, Event: "merged"},
+		{Repo: "aerial", PRNumber: 101, Event: "closed", Status: "merged"},
+	}
+	for _, ev := range events {
+		require.NoError(t, bo.OnPREvent(ctx, ev), ev.Event)
+	}
+	require.NoError(t, bo.OnDispatchOutcome(ctx, pubsub.DispatchOutcomeEvent{VanadisChunkID: "c1", Status: "completed"}))
 
-	// OnPREvent with conflict
-	prEvConflict := pubsub.PRLifecycleEvent{Repo: "aerial", PRNumber: 101, Event: "conflict"}
-	_ = bo.OnPREvent(ctx, prEvConflict)
-
-	// OnPREvent with merged
-	prEvMerged := pubsub.PRLifecycleEvent{Repo: "aerial", PRNumber: 101, Event: "merged"}
-	_ = bo.OnPREvent(ctx, prEvMerged)
-
-	// OnPREvent with closed (status merged -> no fail)
-	prEvClosed := pubsub.PRLifecycleEvent{Repo: "aerial", PRNumber: 101, Event: "closed", Status: "merged"}
-	_ = bo.OnPREvent(ctx, prEvClosed)
-
-	// OnDispatchOutcome completed
-	outEv := pubsub.DispatchOutcomeEvent{VanadisChunkID: "c1", Status: "completed"}
-	_ = bo.OnDispatchOutcome(ctx, outEv)
+	stored, chunks := loadBuild(t, st, "b-auth")
+	assert.Equal(t, "running", stored.Status)
+	assert.Equal(t, "Updated Build", stored.Title)
+	require.Len(t, chunks, 2)
+	assert.Equal(t, []string{"c1", "merged", "101", "Merge conflict detected"}, []string{chunks[0].ID, chunks[0].Status, strconv.Itoa(chunks[0].PRNumber), chunks[0].Banner})
+	assert.Equal(t, []string{"b-auth-chunk-2", "pending", "Updated Action"}, []string{chunks[1].ID, chunks[1].Status, chunks[1].Title})
 }
 
 func (f *fakeObjectRuntime) ScheduleReconcile() { f.reconcileScheduled = true }
@@ -464,8 +452,8 @@ func (f *fakeObjectRuntime) ScheduleDeferredReconcile(delay time.Duration, seq i
 
 func (f *fakeObjectRuntime) InvocationID() string { return f.invocationID }
 
-func (f *fakeObjectRuntime) SendReconcile(service, buildID, reason string) {
-	f.reconcilesSent = append(f.reconcilesSent, sentReconcile{Service: service, BuildID: buildID, Reason: reason})
+func (f *fakeObjectRuntime) SendCrossBuildDeploySuccess(service, buildID, chunkID string) {
+	f.reconcilesSent = append(f.reconcilesSent, sentCrossBuildDeploySuccess{Service: service, BuildID: buildID, ChunkID: chunkID})
 }
 
 func TestBuildObject_NilStoreBranches(t *testing.T) {

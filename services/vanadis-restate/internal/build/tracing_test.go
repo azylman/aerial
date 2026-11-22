@@ -19,17 +19,21 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/azylman/aerial/pkg/pgtest"
 	"github.com/azylman/aerial/pkg/tracing"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/executor"
 )
 
+// TestMain installs tracing and runs the package against one throwaway
+// Postgres 18 server loaded from the production schema; every store test
+// clones its own database.
 func TestMain(m *testing.M) {
 	// Disabled config installs the W3C propagator with a noop provider, like production
 	// without an exporter: traceparent still flows end to end.
 	if _, err := tracing.Setup(context.Background(), "vanadis-restate-test", tracing.Config{}); err != nil {
 		panic(err)
 	}
-	os.Exit(m.Run())
+	os.Exit(pgtest.Main(m))
 }
 
 const (
