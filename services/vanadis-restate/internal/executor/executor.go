@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -188,6 +189,31 @@ func CIRemediationDispatchID(chunkID, headSHA string, failCount int) string {
 		return fmt.Sprintf("vanadis-%s-cifail-%s-%d", cleanChunk, cleanSHA, failCount)
 	}
 	return fmt.Sprintf("vanadis-%s-cifail-%d", cleanChunk, failCount)
+}
+
+// ParseCIRemediationDispatchID inverts CIRemediationDispatchID for chunkID. It
+// reports ok=false for any other chunk or dispatch shape; the SHA-less form
+// yields an empty headSHA.
+func ParseCIRemediationDispatchID(chunkID, dispatchID string) (string, int, bool) {
+	cleanChunk := strings.TrimSpace(chunkID)
+	if cleanChunk == "" {
+		return "", 0, false
+	}
+	rest, ok := strings.CutPrefix(strings.TrimSpace(dispatchID), "vanadis-"+cleanChunk+"-cifail-")
+	if !ok {
+		return "", 0, false
+	}
+	headSHA, countText, hasSHA := strings.CutLast(rest, "-")
+	if !hasSHA {
+		headSHA, countText = "", rest
+	} else if headSHA == "" || strings.Contains(headSHA, "-") {
+		return "", 0, false
+	}
+	attempt, err := strconv.Atoi(countText)
+	if err != nil || attempt <= 0 || strconv.Itoa(attempt) != countText {
+		return "", 0, false
+	}
+	return headSHA, attempt, true
 }
 
 func ConflictRemediationDispatchID(chunkID, headSHA string) string {

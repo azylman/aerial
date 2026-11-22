@@ -180,6 +180,42 @@ func TestValidatePRHead(t *testing.T) {
 	}
 }
 
+func TestLivePRState(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		status   int
+		body     string
+		wantHead string
+		wantOpen bool
+		wantErr  bool
+	}{
+		{"open pr", 200, `{"state":"open","merged":false,"head":{"sha":" abc123 "}}`, "abc123", true, false},
+		{"open pr without merged field", 200, `{"state":"open","head":{"sha":"abc123"}}`, "abc123", true, false},
+		{"closed pr", 200, `{"state":"closed","merged":false,"head":{"sha":"abc123"}}`, "abc123", false, false},
+		{"merged pr", 200, `{"state":"closed","merged":true,"head":{"sha":"abc123"}}`, "abc123", false, false},
+		{"missing pr reads closed", 404, `{"message":"Not Found"}`, "", false, false},
+		{"server error returned", 500, `{}`, "", false, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				assert.Equal(t, "/repos/example-owner/aerial/pulls/42", r.URL.Path)
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer srv.Close()
+			exec := NewExecutor("", nil, nil, "", "example-owner", srv.Client())
+			exec.GitHubAPIURL = srv.URL
+			head, open, err := exec.LivePRState(context.Background(), "aerial", 42)
+			assert.Equal(t, tc.wantErr, err != nil)
+			assert.Equal(t, tc.wantHead, head)
+			assert.Equal(t, tc.wantOpen, open)
+		})
+	}
+}
+
 func TestIsTrustedPRAuthor(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

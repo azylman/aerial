@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -716,4 +717,68 @@ func (b *recordingChunkBus) Publish(_ context.Context, subject, _ string, data a
 		b.events = append(b.events, ev)
 	}
 	return nil
+}
+
+// TestBuildObject_OnDispatchOutcome_CIFixupTurnEnded covers the OnDispatchOutcome
+// routing for verdictless CI fix-up turns; the pause rules themselves live in
+// prflow TestFlow_HandleCIRemediationTurnEnded.
+func TestBuildObject_OnDispatchOutcome_CIFixupTurnEnded(t *testing.T) {
+	t.Parallel()
+	const (
+		head      = "abcdef1234567"
+		openPR    = `{"state":"open","merged":false,"head":{"sha":"abcdef1234567"}}`
+		movedPR   = `{"state":"open","merged":false,"head":{"sha":"fedcba7654321"}}`
+		pauseMsg  = "🛑 [aerial#42] CI fix-up turn ended without pushing a fix, recording an override, or calling fail_chunk. Chunk paused for a decision."
+		buildWake = "[VANADIS BUILD FAILED]\nBuild ID: b1\nObjective: \n\nBuild encountered failures.\nChunk 1 failed [c1]"
+	)
+	ciFailed := model.VanadisChunk{ID: "c1", BuildID: "b1", Mode: "pr", Status: "ci_failed", PRNumber: 42, CIFailCount: 2, Repo: "aerial", Title: "Chunk 1"}
+	tests := []struct {
+		name, dispatchID, status, prBody string
+		prStatus                         int
+		wantTerminal                     bool
+		wantFailReason, wantMsg          string
+		wantPrompts                      []string
+		wantGitHubCalls                  int32
+	}{
+		{"completed fix-up on unchanged head pauses and wakes", executor.CIRemediationDispatchID("c1", head, 2), "completed", openPR, 200, false, "ci_remediation_no_outcome", pauseMsg, []string{buildWake}, 1},
+		{"fix-up that pushed is a no-op", executor.CIRemediationDispatchID("c1", head, 2), "completed", movedPR, 200, false, "", "", nil, 1},
+		{"stale attempt is a no-op", executor.CIRemediationDispatchID("c1", head, 1), "completed", openPR, 200, false, "", "", nil, 0},
+		{"non-cifail dispatch keeps no-pr path", "vanadis-c1-turn-0", "completed", openPR, 200, false, "", "", nil, 0},
+		{"conflict dispatch keeps no-pr path", executor.ConflictRemediationDispatchID("c1", head), "completed", openPR, 200, false, "", "", nil, 0},
+		{"github client error is terminal", executor.CIRemediationDispatchID("c1", head, 2), "completed", `{"message":"Forbidden"}`, 403, true, "", "", nil, 1},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var calls atomic.Int32
+			api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls.Add(1)
+				assert.Equal(t, "/repos/example-owner/aerial/pulls/42", r.URL.Path)
+				w.WriteHeader(tc.prStatus)
+				_, _ = w.Write([]byte(tc.prBody))
+			}))
+			t.Cleanup(api.Close)
+			build := model.VanadisBuild{ID: "b1", Status: statusRunning, ThreadID: "thread"}
+			scripted, _ := open(dbScript{Row: &sqltest.Row{Build: &build}, Chunks: []model.VanadisChunk{ciFailed}})
+			st := &noPRFailStore{VanadisStore: scripted}
+			var prompts []string
+			eri := &mockEriClient{promptFn: func(_ context.Context, _, prompt string) error {
+				prompts = append(prompts, prompt)
+				return nil
+			}}
+			exec := executor.NewExecutor("", eri, &deploymentEventRecorder{}, "token", "example-owner", api.Client())
+			exec.GitHubAPIURL = api.URL
+			bo := NewBuildObject("", nil).WithAuthority(st, exec)
+			bo.runtimeFactory = func(restate.ObjectContext) objectRuntime { return newFakeObjectRuntime("b1") }
+			err := bo.OnDispatchOutcome(makeObjectMockContext(t, "b1"), pubsub.DispatchOutcomeEvent{VanadisChunkID: "c1", DispatchID: tc.dispatchID, Status: tc.status})
+			assert.Equal(t, tc.wantTerminal, restate.IsTerminalError(err), err)
+			if !tc.wantTerminal {
+				require.NoError(t, err)
+			}
+			assert.Equal(t, tc.wantFailReason, st.failReason)
+			assert.Equal(t, tc.wantMsg, eri.LastMsgCont)
+			assert.Equal(t, tc.wantPrompts, prompts)
+			assert.Equal(t, tc.wantGitHubCalls, calls.Load())
+		})
+	}
 }
