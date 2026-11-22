@@ -16,7 +16,6 @@ import (
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/executor"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
-	"github.com/azylman/aerial/services/vanadis-restate/internal/sqltest"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
 )
 
@@ -26,40 +25,28 @@ func TestExecutePRAttachment(t *testing.T) {
 	tests := []struct {
 		name        string
 		req         store.AttachChunkPRRequest
-		db          dbScript
+		mode, repo  string
+		closed      bool
 		wantCode    restate.Code
 		wantMessage string
 		wantErr     bool
 	}{
-		{"missing action repo", attachRequest("c1", ""), dbScript{Routes: sqltest.AttachRoutes("action", true, false)}, 400, "repo is required", true},
-		{"blank action repo", attachRequest("c1", "  "), dbScript{Routes: sqltest.AttachRoutes("action", true, false)}, 400, "repo is required", true},
-		{"standalone repo", attachRequest("", ""), dbScript{}, 400, "repo is required", true},
-		{"invalid number", store.AttachChunkPRRequest{PRNumber: -1}, dbScript{}, 400, "valid pr number", true},
-		{"transient database error", attachRequest("c1", "aerial"), dbScript{Row: sqltest.ErrRow(errors.New("connection interrupted"))}, 0, "connection interrupted", true},
-		{
-			name: "successful attach skips sync widget during attach step",
-			req:  attachRequest("c1", "aerial"),
-			db: dbScript{
-				Routes: []sqlRoute{
-					{Match: "SELECT status FROM vanadis_builds", Row: sqltest.ValuesRow("running")},
-					{Match: "SELECT mode FROM vanadis_chunks", Row: sqltest.ValuesRow("pr")},
-					{Match: "SELECT build_id FROM vanadis_chunks", Row: sqltest.ValuesRow("b1")},
-					{Match: "RETURNING b.id, c.id, b.thread_id", Row: sqltest.ValuesRow("b1", "c1", "th-1")},
-					{Match: "WHERE c.id = $1", Row: sqltest.FailRow("running", "running")},
-				},
-				Row:      sqltest.ValuesRow("running"),
-				BuildRow: &sqltest.Row{Build: &model.VanadisBuild{ID: "b1", ThreadID: "th-1", Status: "running", Title: "Build", StatusMessageID: "msg-123"}},
-				Chunks:   []model.VanadisChunk{{ID: "c1", BuildID: "b1", Status: "running", Repo: "aerial", Mode: "pr"}},
-				CountRow: sqltest.ValuesRow(1),
-				ExecTag:  "UPDATE 1",
-			},
-			wantErr: false,
-		},
+		{"missing action repo", attachRequest("c1", ""), "action", "", false, 400, "repo is required", true},
+		{"blank action repo", attachRequest("c1", "  "), "action", "", false, 400, "repo is required", true},
+		{"standalone repo", attachRequest("", ""), "pr", "aerial", false, 400, "repo is required", true},
+		{"invalid number", store.AttachChunkPRRequest{PRNumber: -1}, "pr", "aerial", false, 400, "valid pr number", true},
+		{"transient database error", attachRequest("c1", "aerial"), "pr", "aerial", true, 0, "closed pool", true},
+		{"successful attach skips sync widget during attach step", attachRequest("c1", "aerial"), "pr", "aerial", false, 0, "", false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			st, _ := open(tc.db)
+			st, _ := seededStore(t,
+				[]model.VanadisBuild{{ID: "b1", ThreadID: "th-1", Status: statusRunning, Title: "Build", StatusMessageID: "msg-123"}},
+				[]model.VanadisChunk{{ID: "c1", BuildID: "b1", Status: statusRunning, Repo: tc.repo, Mode: tc.mode}})
+			if tc.closed {
+				st = closedStore(t)
+			}
 			var attachStepWidgetCalls atomic.Int32
 			eri := &mockEriClient{
 				widgetFn: func(ctx context.Context, req executor.StatusWidgetRequest) (string, error) {
@@ -105,6 +92,11 @@ func TestExecutePRAttachment(t *testing.T) {
 			require.NoError(t, err)
 			assert.Equal(t, "attached", resp.Status)
 			assert.Equal(t, "b1", resp.BuildID)
+			_, chunks := loadBuild(t, st, "b1")
+			require.Len(t, chunks, 1)
+			assert.Equal(t, 101, chunks[0].PRNumber)
+			assert.Equal(t, "aerial", chunks[0].Repo)
+			assert.Equal(t, statusPROpened, chunks[0].Status)
 		})
 	}
 }
@@ -114,13 +106,13 @@ func TestBuildObject_RefreshFailedPRWidget(t *testing.T) {
 	tests := []struct {
 		name      string
 		build     *model.VanadisBuild
-		getErr    error
+		closed    bool
 		syncErr   error
 		noExec    bool
 		wantCalls int
 	}{
 		{name: "nil executor no-op", noExec: true, wantCalls: 0},
-		{name: "store read error skips widget sync", getErr: errors.New("db error"), wantCalls: 0},
+		{name: "store read error skips widget sync", closed: true, wantCalls: 0},
 		{name: "non-failed build skips widget sync", build: &model.VanadisBuild{ID: "b1", Status: "running"}, wantCalls: 0},
 		{name: "failed build sync widget error logged", build: &model.VanadisBuild{ID: "b1", Status: "failed"}, syncErr: errors.New("sync error"), wantCalls: 1},
 		{name: "failed build sync widget success", build: &model.VanadisBuild{ID: "b1", Status: "failed"}, wantCalls: 1},
@@ -128,7 +120,13 @@ func TestBuildObject_RefreshFailedPRWidget(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			st, _ := open(dbScript{BuildRow: &sqltest.Row{Build: tc.build}, QueryErr: tc.getErr})
+			st, pool := openStore(t)
+			if tc.build != nil {
+				seedBuild(t, pool, *tc.build)
+			}
+			if tc.closed {
+				pool.Close()
+			}
 			var widgetCalls int
 			var exec *executor.Executor
 			if !tc.noExec {
