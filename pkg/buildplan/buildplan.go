@@ -46,6 +46,7 @@ type VanadisChunk struct {
 	Effort             string                 `json:"effort"`
 	AcceptanceCriteria []string               `json:"acceptance_criteria"`
 	Status             string                 `json:"status"`
+	ActiveStep         string                 `json:"active_step,omitempty"`
 	PRNumber           int                    `json:"pr_number,omitempty"`
 	StallNudges        int                    `json:"stall_nudges,omitempty"`
 	DependsOn          []string               `json:"depends_on"`
