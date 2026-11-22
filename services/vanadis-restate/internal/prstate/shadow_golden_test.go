@@ -16,6 +16,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/azylman/aerial/pkg/prwire"
 )
 
 // shadowWantState is the hand-derived lifecycle state a case ends on.
@@ -64,7 +66,7 @@ func TestShadowRolloutReadyJobsGolden(t *testing.T) {
 				sim.send(inv)
 			}
 			key := tc.Shadow[0]
-			raw, ok := sim.kv[PRObjectServiceName+"/"+objectKey(t, key)+"/"+prObjectStateKey]
+			raw, ok := sim.kv[prwire.PRObjectServiceName+"/"+objectKey(t, key)+"/"+prObjectStateKey]
 			require.True(t, ok, "PRObject state committed")
 			st, err := decodeInput[PRState](raw)
 			require.NoError(t, err)
@@ -140,18 +142,18 @@ func TestShadowUntrackedUpstreamGolden(t *testing.T) {
 			}
 			first := tc.Stream[0]
 			got := untrackedWant{Effects: sim.effects}
-			if raw, ok := sim.kv[PRObjectServiceName+"/"+objectKey(t, first)+"/"+prObjectStateKey]; ok {
+			if raw, ok := sim.kv[prwire.PRObjectServiceName+"/"+objectKey(t, first)+"/"+prObjectStateKey]; ok {
 				st, err := decodeInput[PRState](raw)
 				require.NoError(t, err)
 				got.Persisted, got.Status = true, st.Status
 			}
-			if raw, ok := sim.kv[RepoObjectServiceName+"/"+RolloutIndexKey+"/"+rolloutIndexStateKey]; ok {
+			if raw, ok := sim.kv[prwire.RepoObjectServiceName+"/"+RolloutIndexKey+"/"+rolloutIndexStateKey]; ok {
 				idx, err := decodeInput[RolloutIndexState](raw)
 				require.NoError(t, err)
 				got.Rollouts = idx.Active()
 			}
-			addr := parityInvocation{Object: RepoObjectServiceName, Event: first.Event}
-			_, got.RepoIndexed = sim.kv[RepoObjectServiceName+"/"+objectKey(t, addr)+"/"+repoObjectStateKey]
+			addr := parityInvocation{Object: prwire.RepoObjectServiceName, Event: first.Event}
+			_, got.RepoIndexed = sim.kv[prwire.RepoObjectServiceName+"/"+objectKey(t, addr)+"/"+repoObjectStateKey]
 			require.Equal(t, tc.Want, got)
 		})
 	}
@@ -234,15 +236,15 @@ func newStaleHeadSim(t *testing.T) *paritySim {
 	sim := newParitySim(t)
 	repo := NewRepoObjectService()
 	sim.handlers["RepoObject/HandleCheckRunBySHA"] = bindErr(repo.HandleCheckRunBySHA)
-	sim.handlers["RepoObject/"+RepoHandlerHeldReplay] = bindErr(repo.HandleHeldReplay)
-	sim.handlers["RepoObject/"+RepoHandlerHeldExpiry] = bindErr(repo.HandleHeldExpiry)
+	sim.handlers["RepoObject/"+prwire.RepoHandlerHeldReplay] = bindErr(repo.HandleHeldReplay)
+	sim.handlers["RepoObject/"+prwire.RepoHandlerHeldExpiry] = bindErr(repo.HandleHeldExpiry)
 	return sim
 }
 
 // simPRState decodes the committed PRObject state for inv's key.
 func simPRState(t *testing.T, sim *paritySim, inv parityInvocation) PRState {
 	t.Helper()
-	raw, ok := sim.kv[PRObjectServiceName+"/"+objectKey(t, inv)+"/"+prObjectStateKey]
+	raw, ok := sim.kv[prwire.PRObjectServiceName+"/"+objectKey(t, inv)+"/"+prObjectStateKey]
 	require.True(t, ok, "PRObject state committed")
 	st, err := decodeInput[PRState](raw)
 	require.NoError(t, err)
@@ -273,7 +275,7 @@ func TestShadowStaleHeadSynchronizeGolden(t *testing.T) {
 			}
 			st := simPRState(t, sim, tc.Setup[0])
 			got := staleHeadWant{Owner: st.OwnerAgent(), HeadSHA: st.HeadSHA, PriorHeads: st.PriorHeads, Status: st.RegistryStatus()}
-			repoRaw, ok := sim.kv[RepoObjectServiceName+"/"+RepoObjectKey(st.Repo)+"/"+repoObjectStateKey]
+			repoRaw, ok := sim.kv[prwire.RepoObjectServiceName+"/"+RepoObjectKey(st.Repo)+"/"+repoObjectStateKey]
 			require.True(t, ok, "RepoObject index committed")
 			repoSt, err := decodeInput[RepoState](repoRaw)
 			require.NoError(t, err)
@@ -329,7 +331,7 @@ type mergedStaleHeadCase struct {
 // simActiveRollouts reads the active rollout index, nil when never written.
 func simActiveRollouts(t *testing.T, sim *paritySim) []RolloutRef {
 	t.Helper()
-	raw, ok := sim.kv[RepoObjectServiceName+"/"+RolloutIndexKey+"/"+rolloutIndexStateKey]
+	raw, ok := sim.kv[prwire.RepoObjectServiceName+"/"+RolloutIndexKey+"/"+rolloutIndexStateKey]
 	if !ok {
 		return nil
 	}
@@ -372,7 +374,7 @@ func TestShadowMergedStaleHeadDeployGolden(t *testing.T) {
 				DeployedJobs: st.DeployedJobs, DeployedKustomizations: st.DeployedKustomizations,
 				Rollouts: simActiveRollouts(t, sim), Effects: sim.effects,
 			}
-			repoRaw, ok := sim.kv[RepoObjectServiceName+"/"+RepoObjectKey(st.Repo)+"/"+repoObjectStateKey]
+			repoRaw, ok := sim.kv[prwire.RepoObjectServiceName+"/"+RepoObjectKey(st.Repo)+"/"+repoObjectStateKey]
 			require.True(t, ok, "RepoObject index committed")
 			repoSt, err := decodeInput[RepoState](repoRaw)
 			require.NoError(t, err)
@@ -457,7 +459,7 @@ func TestShadowLostMergeWebhooksGolden(t *testing.T) {
 				PriorHeads: st.PriorHeads, DeployedJobs: st.DeployedJobs, DeployedKustomizations: st.DeployedKustomizations,
 				Rollouts: simActiveRollouts(t, sim), Effects: sim.effects,
 			}
-			repoRaw, ok := sim.kv[RepoObjectServiceName+"/"+RepoObjectKey(st.Repo)+"/"+repoObjectStateKey]
+			repoRaw, ok := sim.kv[prwire.RepoObjectServiceName+"/"+RepoObjectKey(st.Repo)+"/"+repoObjectStateKey]
 			require.True(t, ok, "RepoObject index committed")
 			repoSt, err := decodeInput[RepoState](repoRaw)
 			require.NoError(t, err)
@@ -523,7 +525,7 @@ type selfRegisteredCase struct {
 // when no send ever committed one (a PR synapse journaled nothing for).
 func simSelfRegisteredState(t *testing.T, sim *paritySim, pr PREvent) PRState {
 	t.Helper()
-	raw, ok := sim.kv[PRObjectServiceName+"/"+PRObjectKey(pr.Repo, pr.PRNumber)+"/"+prObjectStateKey]
+	raw, ok := sim.kv[prwire.PRObjectServiceName+"/"+PRObjectKey(pr.Repo, pr.PRNumber)+"/"+prObjectStateKey]
 	if !ok {
 		return *NewPRState(pr.Repo, pr.PRNumber)
 	}

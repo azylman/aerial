@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
+	"github.com/azylman/aerial/pkg/prwire"
 	"github.com/azylman/aerial/pkg/pubsub"
 )
 
@@ -132,42 +133,42 @@ func TestRepoObjectServiceGitHubEffects(t *testing.T) {
 		wantSends []sentCall
 	}{
 		{
-			name: "repo state load failure surfaces for the invocation retry", handler: RepoHandlerAutoUpdate, gh: &fakeGitHub{}, failGet: true,
+			name: "repo state load failure surfaces for the invocation retry", handler: prwire.RepoHandlerAutoUpdate, gh: &fakeGitHub{}, failGet: true,
 			ev: RepoEvent{Repo: "aerial", MainSHA: "m1", AutoUpdate: policy}, wantErr: true,
 		},
 		{
-			name: "unstamped cascade executes", handler: RepoHandlerAutoUpdate, gh: &fakeGitHub{},
+			name: "unstamped cascade executes", handler: prwire.RepoHandlerAutoUpdate, gh: &fakeGitHub{},
 			ev: RepoEvent{Repo: "aerial", MainSHA: "m1", AutoUpdate: policy}, wantSet: true, wantRun: true,
 		},
 		{
-			name: "restate cascade executes and forwards conflicts", handler: RepoHandlerAutoUpdate, gh: conflictGH(),
+			name: "restate cascade executes and forwards conflicts", handler: prwire.RepoHandlerAutoUpdate, gh: conflictGH(),
 			ev: RepoEvent{Repo: "aerial", MainSHA: "m1", AutoUpdate: policy}, wantSet: true, wantRun: true,
 			wantSends: []sentCall{{
-				service: "PRObject", key: "azylman/aerial#4", method: PRHandlerBranchConflict,
+				service: "PRObject", key: "azylman/aerial#4", method: prwire.PRHandlerBranchConflict,
 				input: PREvent{Event: "branch_conflict", Repo: "azylman/aerial", PRNumber: 4, HeadSHA: "h4", Branch: "b4", Title: "PR 4"},
 			}},
 		},
 		{
-			name: "retryable failure schedules a delayed retry", handler: RepoHandlerAutoUpdate, gh: &fakeGitHub{listErr: errGHServer},
+			name: "retryable failure schedules a delayed retry", handler: prwire.RepoHandlerAutoUpdate, gh: &fakeGitHub{listErr: errGHServer},
 			ev: RepoEvent{Repo: "aerial", MainSHA: "m1", AutoUpdate: policy, Attempt: 2}, wantRun: true,
-			wantSends: retrySend(RepoHandlerAutoUpdate, RepoEvent{Repo: "aerial", MainSHA: "m1", AutoUpdate: policy, Attempt: 3}),
+			wantSends: retrySend(prwire.RepoHandlerAutoUpdate, RepoEvent{Repo: "aerial", MainSHA: "m1", AutoUpdate: policy, Attempt: 3}),
 		},
 		{
-			name: "spent retry budget drops", handler: RepoHandlerAutoUpdate, gh: &fakeGitHub{listErr: errGHServer},
+			name: "spent retry budget drops", handler: prwire.RepoHandlerAutoUpdate, gh: &fakeGitHub{listErr: errGHServer},
 			ev: RepoEvent{Repo: "aerial", MainSHA: "m1", AutoUpdate: policy, Attempt: maxRepoEffectRetries}, wantRun: true,
 		},
 		{
-			name: "deduped trigger reports nothing", handler: RepoHandlerAutoUpdate, gh: &fakeGitHub{},
+			name: "deduped trigger reports nothing", handler: prwire.RepoHandlerAutoUpdate, gh: &fakeGitHub{},
 			seed: &RepoState{Repo: "azylman/aerial", RepoEffects: []string{autoUpdateKeyMain}},
 			ev:   RepoEvent{Repo: "aerial", MainSHA: "m1", AutoUpdate: policy},
 		},
-		{name: "invalid trigger fails terminally", handler: RepoHandlerAutoUpdate, gh: &fakeGitHub{}, ev: RepoEvent{Repo: "aerial"}, wantErr: true},
+		{name: "invalid trigger fails terminally", handler: prwire.RepoHandlerAutoUpdate, gh: &fakeGitHub{}, ev: RepoEvent{Repo: "aerial"}, wantErr: true},
 		{
-			name: "skipped cascade reports unconfigured", handler: RepoHandlerAutoUpdate, gh: &fakeGitHub{},
+			name: "skipped cascade reports unconfigured", handler: prwire.RepoHandlerAutoUpdate, gh: &fakeGitHub{},
 			ev: RepoEvent{Repo: "aerial", MainSHA: "m1"}, wantSet: true, wantRun: true,
 		},
 		{
-			name: "terminal rerun failure reports an error", handler: RepoHandlerWorkflowRerun, gh: &fakeGitHub{rerunErr: errGHNotFound},
+			name: "terminal rerun failure reports an error", handler: prwire.RepoHandlerWorkflowRerun, gh: &fakeGitHub{rerunErr: errGHNotFound},
 			ev: RepoEvent{Repo: "aerial", HeadSHA: "s1", RunID: 55}, wantSet: true, wantRun: true,
 		},
 	}
@@ -184,7 +185,7 @@ func TestRepoObjectServiceGitHubEffects(t *testing.T) {
 			run := stubRunKeepTerminal(mc)
 			svc := NewRepoObjectService().WithGitHub(tc.gh)
 			var err error
-			if tc.handler == RepoHandlerWorkflowRerun {
+			if tc.handler == prwire.RepoHandlerWorkflowRerun {
 				err = svc.HandleWorkflowRerun(restate.WithMockContext(mc), tc.ev)
 			} else {
 				err = svc.HandleAutoUpdate(restate.WithMockContext(mc), tc.ev)
@@ -217,7 +218,7 @@ func TestPRObjectServiceHandleConflictCheck(t *testing.T) {
 	ev := func(head string) PREvent {
 		return PREvent{Repo: "aerial", PRNumber: 101, HeadSHA: head, Branch: "feat", EriEffects: []EriEffect{dmEffect()}}
 	}
-	recheck := sentCall{service: "PRObject", key: "azylman/aerial#101", method: PRHandlerConflictCheck, input: ev("h1"), delayed: true}
+	recheck := sentCall{service: "PRObject", key: "azylman/aerial#101", method: prwire.PRHandlerConflictCheck, input: ev("h1"), delayed: true}
 	tests := []struct {
 		name          string
 		state         *PRState
@@ -403,7 +404,7 @@ func TestPRObjectServiceHandleHeadRefMissing(t *testing.T) {
 			require.Equal(t, tc.wantTerminal, tc.state.Terminal)
 			indexed := false
 			for _, s := range rec.sends.snapshot() {
-				indexed = indexed || s.method == RepoHandlerPRIndex
+				indexed = indexed || s.method == prwire.RepoHandlerPRIndex
 			}
 			require.Equal(t, tc.wantIndex, indexed)
 		})

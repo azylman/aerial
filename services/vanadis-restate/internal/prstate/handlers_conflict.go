@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/azylman/aerial/pkg/prwire"
 )
 
 // Dark per-PR conflict check as a journaled GitHub effect.
@@ -105,10 +107,10 @@ func (h *ConflictHandlers) HandleConflictCheck(ctx context.Context, prKey string
 		// Proceed to the journaled effect below.
 	}
 	headSHA := strings.TrimSpace(ev.HeadSHA)
-	if headSHA == "" || IsZeroSHA(headSHA) {
+	if headSHA == "" || prwire.IsZeroSHA(headSHA) {
 		return ConflictOutcome{Disposition: DispositionDropStale}, nil
 	}
-	key := pr.EffectKeyFor(EffectGitHubConflictCheck, headSHA, "", "")
+	key := pr.EffectKeyFor(prwire.EffectGitHubConflictCheck, headSHA, "", "")
 	if pr.WasEffectDispatched(key) {
 		return ConflictOutcome{Disposition: DispositionApply, AlreadyDispatched: true}, nil
 	}

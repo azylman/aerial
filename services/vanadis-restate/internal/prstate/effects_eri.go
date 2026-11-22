@@ -35,6 +35,7 @@ import (
 	restate "github.com/restatedev/sdk-go"
 
 	"github.com/azylman/aerial/pkg/eriwire"
+	"github.com/azylman/aerial/pkg/prwire"
 )
 
 // PRHandlerRetryEriEffect is the delayed self-send that retries one
@@ -93,7 +94,7 @@ type PlannedEriEffect struct {
 // isEriEffectKind reports whether kind is an eri-bound effect kind.
 func isEriEffectKind(kind string) bool {
 	switch kind {
-	case EffectEriPrompt, EffectEriBackground, EffectEriDirectMessage:
+	case prwire.EffectEriPrompt, prwire.EffectEriBackground, prwire.EffectEriDirectMessage:
 		return true
 	default:
 		return false
@@ -117,7 +118,7 @@ func normalizeEriEffect(st *PRState, eff EriEffect) (EriEffect, bool) {
 	if out.ChannelID == "" && st != nil {
 		out.ChannelID = strings.TrimSpace(st.TargetID)
 	}
-	if out.ChannelID == "" && out.Kind != EffectEriBackground {
+	if out.ChannelID == "" && out.Kind != prwire.EffectEriBackground {
 		return EriEffect{}, false
 	}
 	return out, true
@@ -230,7 +231,7 @@ func (s *PRObjectService) scheduleEriRetry(ctx restate.ObjectContext, req EriEff
 	}, restate.WithName("retry-eri-effect-"+kind))
 	next := req
 	next.Attempt++
-	restate.ObjectSend(ctx, PRObjectServiceName, pr, PRHandlerRetryEriEffect).Send(next, restate.WithDelay(s.eriRetryDelay))
+	restate.ObjectSend(ctx, prwire.PRObjectServiceName, pr, PRHandlerRetryEriEffect).Send(next, restate.WithDelay(s.eriRetryDelay))
 }
 
 // RetryEriEffect re-delivers one restate-owned eri effect to the current
@@ -274,9 +275,9 @@ func (e *SessionEriEffector) DeliverEri(ctx context.Context, agent string, key E
 		return errEriEffectorUnconfigured
 	}
 	switch eff.Kind {
-	case EffectEriPrompt:
+	case prwire.EffectEriPrompt:
 		return e.client.PromptAgent(ctx, agent, eff.ChannelID, eff.Content, EffectIdempotencyKey(key))
-	case EffectEriBackground:
+	case prwire.EffectEriBackground:
 		err := e.client.DispatchRestate(ctx, eriwire.BrainDispatchRequest{
 			ID:           EffectIdempotencyKey(key),
 			Agent:        agent,
@@ -290,7 +291,7 @@ func (e *SessionEriEffector) DeliverEri(ctx context.Context, agent string, key E
 			return nil
 		}
 		return err
-	case EffectEriDirectMessage:
+	case prwire.EffectEriDirectMessage:
 		return e.client.MessageAgent(ctx, agent, eff.ChannelID, eff.Content)
 	default:
 		return restate.ToTerminalError(fmt.Errorf("prstate: unknown eri effect kind %q", eff.Kind))

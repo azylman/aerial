@@ -30,6 +30,7 @@ import (
 
 	restate "github.com/restatedev/sdk-go"
 
+	"github.com/azylman/aerial/pkg/prwire"
 	"github.com/azylman/aerial/pkg/pubsub"
 )
 
@@ -143,13 +144,13 @@ func (s *RepoObjectService) WithGitHub(gh GitHubEffector) *RepoObjectService {
 // HandleAutoUpdate runs one open-PR auto-update cascade trigger.
 func (s *RepoObjectService) HandleAutoUpdate(ctx restate.ObjectContext, ev RepoEvent) error {
 	out, err := s.handlers(ctx).HandleAutoUpdate(ctx, ev)
-	return s.reportRepoEffect(ctx, RepoHandlerAutoUpdate, ev, out, err)
+	return s.reportRepoEffect(ctx, prwire.RepoHandlerAutoUpdate, ev, out, err)
 }
 
 // HandleWorkflowRerun reruns the failed jobs of one workflow run.
 func (s *RepoObjectService) HandleWorkflowRerun(ctx restate.ObjectContext, ev RepoEvent) error {
 	out, err := s.handlers(ctx).HandleWorkflowRerun(ctx, ev)
-	return s.reportRepoEffect(ctx, RepoHandlerWorkflowRerun, ev, out, err)
+	return s.reportRepoEffect(ctx, prwire.RepoHandlerWorkflowRerun, ev, out, err)
 }
 
 // reportRepoEffect journals the metrics and logs for one repo effect and
@@ -202,9 +203,9 @@ func logRepoEffect(ctx restate.ObjectContext, out RepoEffectOutcome) {
 		}
 		slog.InfoContext(rc, "[prstate] repo effect executed", attrs...)
 		for _, u := range out.Updates {
-			key := EffectKey{Repo: out.Key.Repo, PRNumber: u.PRNumber, HeadSHA: u.HeadSHA, Kind: EffectGitHubUpdateBranch}
-			effectsTotal.WithLabelValues(EffectGitHubUpdateBranch, effectResultOK).Inc()
-			slog.InfoContext(rc, "[prstate] effect executed", "pr", PRObjectKey(out.Key.Repo, u.PRNumber), "kind", EffectGitHubUpdateBranch,
+			key := EffectKey{Repo: out.Key.Repo, PRNumber: u.PRNumber, HeadSHA: u.HeadSHA, Kind: prwire.EffectGitHubUpdateBranch}
+			effectsTotal.WithLabelValues(prwire.EffectGitHubUpdateBranch, effectResultOK).Inc()
+			slog.InfoContext(rc, "[prstate] effect executed", "pr", PRObjectKey(out.Key.Repo, u.PRNumber), "kind", prwire.EffectGitHubUpdateBranch,
 				"effect_key", key.String(), "match_key", key.MatchKey(), "outcome", string(u.Outcome))
 		}
 		return restate.Void{}, nil
@@ -231,7 +232,7 @@ func (s *RepoObjectService) scheduleRepoEffectRetry(ctx restate.ObjectContext, h
 	}, restate.WithName("retry-"+kind))
 	next := ev
 	next.Attempt++
-	restate.ObjectSend(ctx, RepoObjectServiceName, RepoObjectKey(ev.Repo), handler).Send(next, restate.WithDelay(s.retryDelay))
+	restate.ObjectSend(ctx, prwire.RepoObjectServiceName, RepoObjectKey(ev.Repo), handler).Send(next, restate.WithDelay(s.retryDelay))
 }
 
 // WithGitHub injects the GitHub boundary and returns s. Without it
@@ -417,6 +418,6 @@ type restateConflictRescheduler struct {
 }
 
 func (r restateConflictRescheduler) ScheduleConflictRecheck(_ context.Context, delay time.Duration, ev PREvent) error {
-	restate.ObjectSend(r.ctx, PRObjectServiceName, PRObjectKey(ev.Repo, ev.PRNumber), PRHandlerConflictCheck).Send(ev, restate.WithDelay(delay))
+	restate.ObjectSend(r.ctx, prwire.PRObjectServiceName, PRObjectKey(ev.Repo, ev.PRNumber), prwire.PRHandlerConflictCheck).Send(ev, restate.WithDelay(delay))
 	return nil
 }

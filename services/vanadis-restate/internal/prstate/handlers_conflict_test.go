@@ -5,6 +5,8 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	"github.com/azylman/aerial/pkg/prwire"
 )
 
 // Hermetic fakes for the dark per-PR conflict check: no I/O, clocks, or
@@ -70,7 +72,7 @@ func seedConflictPR(store *MemPRStore, head string, gen, epoch uint64, terminal 
 		ps.MarkCollaboratorConflict(conflictMark)
 	}
 	if dispatched {
-		ps.MarkEffectDispatched(ps.EffectKeyFor(EffectGitHubConflictCheck, head, "", ""))
+		ps.MarkEffectDispatched(ps.EffectKeyFor(prwire.EffectGitHubConflictCheck, head, "", ""))
 	}
 	store.SavePR(ps)
 	return key

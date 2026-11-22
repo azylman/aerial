@@ -27,6 +27,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/azylman/aerial/pkg/prwire"
 )
 
 // In-cluster service-account paths and the Flux objects the effects write.
@@ -295,7 +297,7 @@ func (c *KubeClient) PromoteImageTag(ctx context.Context, req ImagePromotionRequ
 	}
 	var kubeOK, fluxOK bool
 	var kubeErr, fluxErr *KubeError
-	if commit := strings.TrimSpace(req.CommitSHA); c.apiServer != "" && commit != "" && !IsZeroSHA(commit) {
+	if commit := strings.TrimSpace(req.CommitSHA); c.apiServer != "" && commit != "" && !prwire.IsZeroSHA(commit) {
 		if kubeErr = c.upsertImageTag(ctx, tagKey, commit); kubeErr == nil {
 			kubeOK = true
 		}

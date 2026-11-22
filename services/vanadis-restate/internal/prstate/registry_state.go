@@ -15,6 +15,8 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+
+	"github.com/azylman/aerial/pkg/prwire"
 )
 
 // Registry status values. They match the pr_registry status column exactly.
@@ -37,10 +39,6 @@ const (
 	CheckStatePending = "pending"
 )
 
-// BuildMetadataFinal is the terminal build-metadata snapshot kind; every
-// other recordable kind (manifest, progress) is phase 1.
-const BuildMetadataFinal = "final"
-
 // Register metadata keys PRObject records as typed row fields.
 const (
 	MetaVanadisChunkID = "vanadis_chunk_id"
@@ -51,91 +49,13 @@ const (
 // drops ci_fail_count only once it exceeded three.
 const ciFailCountResetThreshold = 3
 
-// KustomizationRequest is the reconcile request recorded for one Flux
-// Kustomization of a PR rollout (metadata.kustomization_requests values).
-type KustomizationRequest struct {
-	Namespace   string `json:"namespace"`
-	RequestedAt string `json:"requested_at"`
-}
-
-// BuildSelection is one selected image in a build-metadata snapshot.
-type BuildSelection struct {
-	Service   string `json:"service"`
-	ImageName string `json:"image_name"`
-}
-
-// BuildResult is one per-image result in a build-metadata snapshot.
-type BuildResult struct {
-	Service       string   `json:"service"`
-	ImageName     string   `json:"image_name"`
-	State         string   `json:"state"`
-	Pushed        bool     `json:"pushed"`
-	SourceAttempt int      `json:"source_attempt"`
-	ImageRefs     []string `json:"image_refs,omitempty"`
-	Digest        string   `json:"digest,omitempty"`
-}
-
-// BuildMetadata mirrors the synapse model.BuildMetadata snapshot stored in
-// metadata.build_metadata. JSON tags match the synapse wire format exactly.
-type BuildMetadata struct {
-	Version       int              `json:"version"`
-	Kind          string           `json:"kind"`
-	Repository    string           `json:"repository"`
-	WorkflowPath  string           `json:"workflow_path"`
-	RunID         int64            `json:"run_id"`
-	RunNumber     int64            `json:"run_number"`
-	RunAttempt    int              `json:"run_attempt"`
-	Event         string           `json:"event"`
-	SourceSHA     string           `json:"source_sha"`
-	ExecutionSHA  string           `json:"execution_sha"`
-	PRNumber      *int             `json:"pr_number"`
-	Selected      []BuildSelection `json:"selected"`
-	Results       []BuildResult    `json:"results,omitempty"`
-	Service       string           `json:"service,omitempty"`
-	ImageName     string           `json:"image_name,omitempty"`
-	State         string           `json:"state,omitempty"`
-	Pushed        bool             `json:"pushed,omitempty"`
-	SourceAttempt int              `json:"source_attempt,omitempty"`
-	ImageRefs     []string         `json:"image_refs,omitempty"`
-	Digest        string           `json:"digest,omitempty"`
-}
-
-func (m *BuildMetadata) phase() int {
-	if m != nil && m.Kind == BuildMetadataFinal {
+// buildMetadataPhase orders snapshot kinds: final is phase 2, every other
+// recordable kind (manifest, progress) is phase 1.
+func buildMetadataPhase(m *BuildMetadata) int {
+	if m != nil && m.Kind == prwire.BuildMetadataFinal {
 		return 2
 	}
 	return 1
-}
-
-// RegisterRequest is the PRObject.Register input: the normalized synapse
-// register payload plus the owner fence and the headless target fallback.
-type RegisterRequest struct {
-	Repo     string `json:"repo"`
-	PRNumber int    `json:"pr_number"`
-	Branch   string `json:"branch"`
-	HeadSHA  string `json:"head_sha"`
-	TargetID string `json:"target_id"`
-	Title    string `json:"title,omitempty"`
-	Agent    string `json:"agent,omitempty"`
-	BotID    string `json:"bot_id,omitempty"`
-	// Metadata is the string-valued register metadata synapse forwards
-	// opaquely; ApplyRegister records the typed keys it knows.
-	Metadata map[string]string `json:"metadata,omitempty"`
-	// FallbackTargetID is the system channel used when neither the request
-	// nor the stored row carries a valid Discord snowflake.
-	FallbackTargetID string `json:"fallback_target_id,omitempty"`
-	// EnforceOwner turns on the existing-owner fence: synapse authorized the
-	// caller to update ExpectedOwner (empty means no existing owner), and a
-	// PR already owned by someone else is rejected.
-	EnforceOwner  bool   `json:"enforce_owner,omitempty"`
-	ExpectedOwner string `json:"expected_owner,omitempty"`
-}
-
-// RegisterResponse is the PRObject.Register result.
-type RegisterResponse struct {
-	TargetID string `json:"target_id"`
-	Agent    string `json:"agent"`
-	Status   string `json:"status"`
 }
 
 // RegisterVerdict classifies a register request before it mutates state.
@@ -148,22 +68,6 @@ const (
 	RegisterOwnerMismatch RegisterVerdict = "owner_mismatch"
 	RegisterBadTarget     RegisterVerdict = "bad_target"
 )
-
-// BuildLifecycle is the PRObject.GetBuildLifecycle result: the registry
-// lifecycle fence (LoadPRBuildLifecycle) plus the fenced build metadata
-// snapshot (LoadPRBuildMetadata).
-type BuildLifecycle struct {
-	Found            bool           `json:"found"`
-	Status           string         `json:"status"`
-	HeadSHA          string         `json:"head_sha"`
-	MergeSHA         string         `json:"merge_sha"`
-	Started          bool           `json:"started"`
-	HasBuildMetadata bool           `json:"has_build_metadata"`
-	BuildMetadata    *BuildMetadata `json:"build_metadata,omitempty"`
-	// Agent is the stored owner, empty when no authoritative source has
-	// claimed the PR yet, so synapse shadow lookups can compare owners.
-	Agent string `json:"agent,omitempty"`
-}
 
 var discordSnowflake = regexp.MustCompile(`^\d{17,20}$`)
 
@@ -309,7 +213,7 @@ func (s *PRState) ApplySelfRegistration(branch, head, targetID, title, agent str
 		s.Branch = b
 		changed = true
 	}
-	if h := strings.TrimSpace(head); h != "" && !IsZeroSHA(h) && strings.TrimSpace(s.HeadSHA) == "" {
+	if h := strings.TrimSpace(head); h != "" && !prwire.IsZeroSHA(h) && strings.TrimSpace(s.HeadSHA) == "" {
 		s.SetHead(h)
 		changed = true
 	}
@@ -335,7 +239,7 @@ func (s *PRState) ApplySelfRegistration(branch, head, targetID, title, agent str
 // otherwise only the banner clears. Returns true when the row changed.
 func (s *PRState) ApplyRegistrySync(prevHead, head string) bool {
 	head = strings.TrimSpace(head)
-	if s == nil || head == "" || IsZeroSHA(head) || s.MergeSHA != "" || isLockedStatus(s.Status) {
+	if s == nil || head == "" || prwire.IsZeroSHA(head) || s.MergeSHA != "" || isLockedStatus(s.Status) {
 		return false
 	}
 	headChanged := prevHead != head
@@ -366,7 +270,7 @@ func (s *PRState) SynchronizeDisposition(ev PREvent) EventDisposition {
 		return DispositionAbsorbTerminal
 	}
 	head := strings.TrimSpace(ev.HeadSHA)
-	if head == "" || IsZeroSHA(head) {
+	if head == "" || prwire.IsZeroSHA(head) {
 		return DispositionDropStale
 	}
 	stored := strings.TrimSpace(s.HeadSHA)
@@ -386,7 +290,7 @@ func (s *PRState) ApplyRegistryMerged(mergeSHA string) {
 	if s == nil {
 		return
 	}
-	if clean := strings.TrimSpace(mergeSHA); clean != "" && !IsZeroSHA(clean) {
+	if clean := strings.TrimSpace(mergeSHA); clean != "" && !prwire.IsZeroSHA(clean) {
 		s.MergeSHA = clean
 	}
 	if s.Status == RegistryStatusDeployFailed {
@@ -444,7 +348,7 @@ func (s *PRState) RecordCheckState(sha, checkName, state string) bool {
 	sha = strings.TrimSpace(sha)
 	checkName = strings.TrimSpace(checkName)
 	state = strings.TrimSpace(state)
-	if s == nil || sha == "" || IsZeroSHA(sha) || checkName == "" || state == "" {
+	if s == nil || sha == "" || prwire.IsZeroSHA(sha) || checkName == "" || state == "" {
 		return false
 	}
 	status := s.RegistryStatus()
@@ -747,7 +651,7 @@ func buildMetadataReplaces(cur, m *BuildMetadata) bool {
 func sameBuildAttempt(cur, m *BuildMetadata) bool {
 	return cur.RunID == m.RunID && cur.RunAttempt == m.RunAttempt && cur.WorkflowPath == m.WorkflowPath &&
 		cur.ExecutionSHA == m.ExecutionSHA && sameSelection(cur.Selected, m.Selected) &&
-		cur.Version <= m.Version && cur.phase() <= m.phase()
+		cur.Version <= m.Version && buildMetadataPhase(cur) <= buildMetadataPhase(m)
 }
 
 func sameBuildIdentity(cur, m *BuildMetadata) bool {

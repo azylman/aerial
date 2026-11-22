@@ -7,6 +7,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/azylman/aerial/pkg/prwire"
 	"github.com/azylman/aerial/pkg/pubsub"
 )
 
@@ -58,7 +59,7 @@ var (
 
 func TestRepoHandlersHandleGitPush(t *testing.T) {
 	t.Parallel()
-	pushKey := EffectKey{Repo: "azylman/aerial", PRNumber: 7, HeadSHA: "m1", Kind: EffectFluxGitPush}
+	pushKey := EffectKey{Repo: "azylman/aerial", PRNumber: 7, HeadSHA: "m1", Kind: prwire.EffectFluxGitPush}
 	pushKeyStr := "azylman/aerial#7@m1:gen0:flux_git_push"
 	push := func() RepoEvent {
 		return RepoEvent{Repo: "aerial", MainSHA: "m1", PRNumber: 7, Ref: "refs/heads/main", TargetID: "t1"}
@@ -82,7 +83,7 @@ func TestRepoHandlersHandleGitPush(t *testing.T) {
 		},
 		{
 			name: "direct commit with no pr still dispatches", ev: RepoEvent{Repo: "aerial", MainSHA: "m2", Ref: "refs/heads/main"}, kube: &fakeKube{},
-			wantOutcome: RepoEffectOutcome{Key: EffectKey{Repo: "azylman/aerial", HeadSHA: "m2", Kind: EffectFluxGitPush}, Executed: true},
+			wantOutcome: RepoEffectOutcome{Key: EffectKey{Repo: "azylman/aerial", HeadSHA: "m2", Kind: prwire.EffectFluxGitPush}, Executed: true},
 			wantCalls:   []string{"push azylman/aerial refs/heads/main m2 "},
 			wantEffects: []string{"azylman/aerial#0@m2:gen0:flux_git_push"},
 		},
@@ -163,7 +164,7 @@ func mainPromotion() RepoEvent {
 func promotionFailureForward(kerr *KubeError) sentPR {
 	fact := promotionFailed
 	fact.Details = kerr.Error()
-	return sentPR{handler: PRHandlerDeployAttemptFailed, ev: PREvent{
+	return sentPR{handler: prwire.PRHandlerDeployAttemptFailed, ev: PREvent{
 		Event: "deploy_attempt_failed", Repo: "azylman/aerial", PRNumber: 7, HeadSHA: "s1", MergeSHA: "s1", Branch: "feat",
 		Banner: kerr.Error(), Facts: []pubsub.PRLifecycleEvent{fact},
 	}}
@@ -172,12 +173,12 @@ func promotionFailureForward(kerr *KubeError) sentPR {
 func TestRepoHandlersHandleImagePromotion(t *testing.T) {
 	t.Parallel()
 	requests := promotionRequests
-	prKey := EffectKey{Repo: "azylman/aerial", PRNumber: 7, HeadSHA: "s1", Kind: EffectImagePromote}
+	prKey := EffectKey{Repo: "azylman/aerial", PRNumber: 7, HeadSHA: "s1", Kind: prwire.EffectImagePromote}
 	prKeyStr := "azylman/aerial#7@s1:gen0:image_promote"
-	mainKey := EffectKey{Repo: "azylman/aerial", HeadSHA: "s2", Kind: EffectImagePromote}
+	mainKey := EffectKey{Repo: "azylman/aerial", HeadSHA: "s2", Kind: prwire.EffectImagePromote}
 	mainKeyStr := "azylman/aerial#0@s2:gen0:image_promote"
 	mainReconcileStr := "azylman/aerial#0@s2:gen0:flux_reconcile"
-	rolloutForward := sentPR{handler: PRHandlerKustomizationRequested, ev: PREvent{
+	rolloutForward := sentPR{handler: prwire.PRHandlerKustomizationRequested, ev: PREvent{
 		Event: "kustomization_requested", Repo: "azylman/aerial", PRNumber: 7, HeadSHA: "s1", Branch: "feat", TargetID: "t9", Jobs: []string{"eri"},
 		KustomizationRequests: requests, Facts: []pubsub.PRLifecycleEvent{promotionStarted},
 	}}

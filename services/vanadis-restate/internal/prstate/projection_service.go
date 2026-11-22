@@ -16,6 +16,8 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	restate "github.com/restatedev/sdk-go"
+
+	"github.com/azylman/aerial/pkg/prwire"
 )
 
 // PRObject handler names for projection self-sends.
@@ -65,7 +67,7 @@ func (s *PRObjectService) afterCommit(ctx restate.ObjectContext, st *PRState) {
 	}
 	s.syncRolloutIndex(ctx, st)
 	if s.projection != nil {
-		restate.ObjectSend(ctx, PRObjectServiceName, PRObjectKey(st.Repo, st.PRNumber), PRHandlerProject).Send(ProjectRequest{})
+		restate.ObjectSend(ctx, prwire.PRObjectServiceName, PRObjectKey(st.Repo, st.PRNumber), PRHandlerProject).Send(ProjectRequest{})
 	}
 }
 
@@ -103,7 +105,7 @@ func (s *PRObjectService) Project(ctx restate.ObjectContext, _ ProjectRequest) e
 	}, restate.WithName("project-registry"), restate.WithMaxRetryAttempts(projectionRunAttempts))
 	if runErr != nil {
 		slog.ErrorContext(ctx, "[prstate] PRObject registry projection failed; retrying later", "pr", restate.Key(ctx), "error", runErr)
-		restate.ObjectSend(ctx, PRObjectServiceName, restate.Key(ctx), PRHandlerProject).Send(ProjectRequest{}, restate.WithDelay(s.retryDelay))
+		restate.ObjectSend(ctx, prwire.PRObjectServiceName, restate.Key(ctx), PRHandlerProject).Send(ProjectRequest{}, restate.WithDelay(s.retryDelay))
 		return nil
 	}
 	st.ProjectedKey = key

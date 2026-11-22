@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/azylman/aerial/pkg/prwire"
 	"github.com/azylman/aerial/pkg/pubsub"
 )
 
@@ -126,12 +127,12 @@ func collaboratorConflictDM(policy *AutoUpdatePolicy, repo string, pr GitHubPR) 
 	if state := strings.TrimSpace(pr.State); state != "" && !strings.EqualFold(state, "open") {
 		return EriEffect{}, false
 	}
-	rule, ok := policy.collaborator(pr.User.Login)
+	rule, ok := collaborator(policy, pr.User.Login)
 	if !ok {
 		return EriEffect{}, false
 	}
 	return EriEffect{
-		Kind:      EffectEriDirectMessage,
+		Kind:      prwire.EffectEriDirectMessage,
 		ChannelID: rule.ChannelID,
 		Content:   CollaboratorConflictMessage(rule.Mention, repo, pr.Number, pr.Title, pr.Head.Ref, pr.Head.SHA),
 	}, true

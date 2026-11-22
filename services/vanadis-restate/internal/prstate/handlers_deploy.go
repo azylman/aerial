@@ -20,6 +20,7 @@ import (
 
 	restate "github.com/restatedev/sdk-go"
 
+	"github.com/azylman/aerial/pkg/prwire"
 	"github.com/azylman/aerial/pkg/pubsub"
 )
 
@@ -60,7 +61,7 @@ func ResolveDeployDispatchDecision(s *PRState, ev PREvent) (DeployDispatchDecisi
 	if disp := s.ApplyDeployEvent(ev); disp != DispositionApply {
 		return DeployDispatchDecision{Disposition: disp}, nil
 	}
-	key := s.EffectKeyFor(EffectDeployDispatch, ev.HeadSHA, ev.JobName, "")
+	key := s.EffectKeyFor(prwire.EffectDeployDispatch, ev.HeadSHA, ev.JobName, "")
 	out := DeployDispatchDecision{Disposition: DispositionApply, EffectKey: key.String()}
 	if !s.DeploySuccessDue(ev.JobName) {
 		return out, nil
@@ -106,12 +107,12 @@ func RecordDeployPublished(s *PRState, ev PREvent) (DeployPublishedOutcome, erro
 	if disp := s.ApplyDeployEvent(ev); disp != DispositionApply {
 		return DeployPublishedOutcome{Disposition: disp}, nil
 	}
-	key := s.EffectKeyFor(EffectDeployDispatch, ev.HeadSHA, ev.JobName, "")
+	key := s.EffectKeyFor(prwire.EffectDeployDispatch, ev.HeadSHA, ev.JobName, "")
 	out := DeployPublishedOutcome{Disposition: DispositionApply, EffectKey: key.String()}
 	out.Deduped = s.WasEffectDispatched(key)
 	s.MarkEffectDispatched(key)
 	s.RecordDeployedPR()
-	if cleanJob, cleanHead := strings.TrimSpace(ev.JobName), strings.TrimSpace(ev.HeadSHA); cleanJob != "" && cleanHead != "" && !IsZeroSHA(cleanHead) {
+	if cleanJob, cleanHead := strings.TrimSpace(ev.JobName), strings.TrimSpace(ev.HeadSHA); cleanJob != "" && cleanHead != "" && !prwire.IsZeroSHA(cleanHead) {
 		s.RecordDeployedSHAJob(cleanJob, cleanHead)
 	}
 	syncHeadSHA(s, ev)
@@ -139,7 +140,7 @@ func WasDispatched(s *PRState, repo, jobName, sha string, prNumber int) bool {
 	}
 	cleanJob := strings.TrimSpace(jobName)
 	cleanSHA := strings.TrimSpace(sha)
-	if cleanJob == "" || cleanSHA == "" || IsZeroSHA(cleanSHA) {
+	if cleanJob == "" || cleanSHA == "" || prwire.IsZeroSHA(cleanSHA) {
 		return false
 	}
 	if s.DeploySHAJob == nil {
@@ -157,7 +158,7 @@ func syncHeadSHA(s *PRState, ev PREvent) {
 		s.RecoverMergedHead(ev)
 		return
 	}
-	if clean := strings.TrimSpace(ev.HeadSHA); clean != "" && !IsZeroSHA(clean) {
+	if clean := strings.TrimSpace(ev.HeadSHA); clean != "" && !prwire.IsZeroSHA(clean) {
 		s.SetHead(clean)
 	}
 }
@@ -246,13 +247,13 @@ func (s *PRObjectService) HandleDeployAttemptFailed(ctx restate.ObjectContext, e
 	if err != nil {
 		return err
 	}
-	if s.dropUntrackedRollout(ctx, st, stored, PRHandlerDeployAttemptFailed) || st.ApplyDeployEvent(ev) != DispositionApply {
+	if s.dropUntrackedRollout(ctx, st, stored, prwire.PRHandlerDeployAttemptFailed) || st.ApplyDeployEvent(ev) != DispositionApply {
 		return nil
 	}
 	seq, armed := st.ArmDeployFailure(ev)
 	restate.Set(ctx, s.stateKey, st)
 	if armed {
-		restate.ObjectSend(ctx, PRObjectServiceName, PRObjectKey(st.Repo, st.PRNumber), PRHandlerDeployFailureDeadline).
+		restate.ObjectSend(ctx, prwire.PRObjectServiceName, PRObjectKey(st.Repo, st.PRNumber), prwire.PRHandlerDeployFailureDeadline).
 			Send(DeployFailureDeadlineRequest{Seq: seq}, restate.WithDelay(s.deployFailureDeadline))
 	}
 	return nil
@@ -310,10 +311,6 @@ func (s *PRState) RetryReadinessGate(mergeSHA string) (map[string]KustomizationR
 	return out, true
 }
 
-// ReadinessJobName scopes the readiness reconcile effect in match keys;
-// the journaled key appends the retry ordinal.
-const ReadinessJobName = "readiness"
-
 // ReadinessReconcileKey keys the reconcile one accepted readiness retry
 // requests: the merge SHA plus the retry ordinal, in the current
 // generation. The returned match key drops the ordinal, matching the
@@ -322,8 +319,8 @@ func ReadinessReconcileKey(s *PRState, mergeSHA string) (EffectKey, string) {
 	if s == nil {
 		return EffectKey{}, ""
 	}
-	key := s.EffectKeyFor(EffectFluxReconcile, mergeSHA, fmt.Sprintf("%s-%d", ReadinessJobName, s.ReadinessRetries), "")
-	match := s.EffectKeyFor(EffectFluxReconcile, mergeSHA, ReadinessJobName, "").MatchKey()
+	key := s.EffectKeyFor(prwire.EffectFluxReconcile, mergeSHA, fmt.Sprintf("%s-%d", prwire.ReadinessJobName, s.ReadinessRetries), "")
+	match := s.EffectKeyFor(prwire.EffectFluxReconcile, mergeSHA, prwire.ReadinessJobName, "").MatchKey()
 	return key, match
 }
 
@@ -331,5 +328,5 @@ func ReadinessReconcileKey(s *PRState, mergeSHA string) (EffectKey, string) {
 // the head SHA the request event carried, in the generation the record
 // minted.
 func RolloutReconcileKey(s *PRState, headSHA string) EffectKey {
-	return s.EffectKeyFor(EffectFluxReconcile, usableHeadSHA(headSHA), "", "")
+	return s.EffectKeyFor(prwire.EffectFluxReconcile, usableHeadSHA(headSHA), "", "")
 }

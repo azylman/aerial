@@ -8,6 +8,7 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
+	"github.com/azylman/aerial/pkg/prwire"
 	"github.com/azylman/aerial/pkg/pubsub"
 )
 
@@ -446,8 +447,8 @@ func untrackedCleaned() *PRState {
 
 // untrackedCleanupSends are the index closes the cleanup sends.
 var untrackedCleanupSends = []sentCall{
-	{service: RepoObjectServiceName, key: RolloutIndexKey, method: RepoHandlerRolloutIndex, input: RolloutIndexEvent{Repo: "kubernetes-sigs/gateway-api", PRNumber: 5433, Seq: 2}},
-	{service: RepoObjectServiceName, key: "kubernetes-sigs/gateway-api", method: RepoHandlerPRIndex, input: PRIndexEvent{Repo: "kubernetes-sigs/gateway-api", PRNumber: 5433, Generation: 1, Lifecycle: IndexDeployed}},
+	{service: prwire.RepoObjectServiceName, key: RolloutIndexKey, method: prwire.RepoHandlerRolloutIndex, input: RolloutIndexEvent{Repo: "kubernetes-sigs/gateway-api", PRNumber: 5433, Seq: 2}},
+	{service: prwire.RepoObjectServiceName, key: "kubernetes-sigs/gateway-api", method: prwire.RepoHandlerPRIndex, input: PRIndexEvent{Repo: "kubernetes-sigs/gateway-api", PRNumber: 5433, Generation: 1, Lifecycle: IndexDeployed}},
 }
 
 func TestPRObjectServiceDropUntracked(t *testing.T) {

@@ -23,6 +23,7 @@ import (
 	"strings"
 
 	"github.com/azylman/aerial/pkg/githubauth"
+	"github.com/azylman/aerial/pkg/prwire"
 )
 
 // DefaultGitHubAPIURL is the public GitHub REST endpoint.
@@ -285,7 +286,7 @@ type gitHubCheckRun struct {
 func (c *GitHubClient) HeadChecksBlocked(ctx context.Context, repo, sha string) bool {
 	repo = NormalizeRepo(repo)
 	sha = strings.TrimSpace(sha)
-	if repo == "" || sha == "" || IsZeroSHA(sha) {
+	if repo == "" || sha == "" || prwire.IsZeroSHA(sha) {
 		return false
 	}
 	var resp struct {
