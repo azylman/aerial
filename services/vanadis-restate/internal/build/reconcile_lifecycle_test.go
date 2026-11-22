@@ -874,9 +874,9 @@ func TestBuildObject_GenerationRecoveryOrdering(t *testing.T) {
 		withPendingSibling bool
 		wantDispatched     []string
 	}{
-		{"resume at capacity", "action", "running", 2, 3, "completed", true, []string{"vanadis-retry-turn-2"}},
-		{"unlaunched running reserves slot", "pr", "running", 0, 3, "completed", true, []string{"vanadis-retry-turn-0"}},
-		{"pending at capacity", "action", "pending", 2, 4, "completed", false, nil},
+		{"resume at capacity", "action", "running", 2, 5, "completed", true, []string{"vanadis-retry-turn-2"}},
+		{"unlaunched running reserves slot", "pr", "running", 0, 5, "completed", true, []string{"vanadis-retry-turn-0"}},
+		{"pending at capacity", "action", "pending", 2, 6, "completed", false, nil},
 		{"dependency unfinished", "action", "running", 2, 0, "running", false, nil},
 		{"dependency ready", "action", "pending", 2, 0, "completed", false, []string{"vanadis-retry-turn-2"}},
 	}
@@ -908,7 +908,7 @@ func TestBuildObject_GenerationRecoveryOrdering(t *testing.T) {
 			assert.Equal(t, tc.wantDispatched, dispatched)
 			if len(tc.wantDispatched) > 0 {
 				// Repeated reconciliation after acceptance must leave the generation acknowledged
-				// and keep the 4-chunk cap intact against pending siblings.
+				// and keep the 6-chunk cap intact against pending siblings.
 				dispatched = nil
 				_, _, err = bo.launchEligibleChunks(context.Background(), model.VanadisBuild{ID: "b"}, chunks, launched)
 				assert.NoError(t, err)

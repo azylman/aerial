@@ -257,6 +257,9 @@ func isLaunchCandidate(chunk model.VanadisChunk, chunks []model.VanadisChunk, la
 // launchEligibleChunks dispatches ready chunks. It returns the launched chunk
 // IDs and the launch keys eri deferred with skipped_active; a deferred chunk
 // keeps its pre-launch status.
+// maxActiveChunks caps how many chunks of one build run at once.
+const maxActiveChunks = 6
+
 func (b *BuildObject) launchEligibleChunks(ctx context.Context, build model.VanadisBuild, chunks []model.VanadisChunk, launchedMap map[string]bool) ([]string, []string, error) {
 	var launchedChunks, deferredKeys []string
 	var launchErrors []error
@@ -268,7 +271,7 @@ func (b *BuildObject) launchEligibleChunks(ctx context.Context, build model.Vana
 			continue
 		}
 		key := actionLaunchKey(chunk)
-		if activeCount > 4 || (!resuming && activeCount >= 4) || launchedMap[key] || b.executor == nil {
+		if activeCount > maxActiveChunks || (!resuming && activeCount >= maxActiveChunks) || launchedMap[key] || b.executor == nil {
 			continue
 		}
 		if !resuming {
