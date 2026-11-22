@@ -26,7 +26,8 @@ func TestWriteError(t *testing.T) {
 		{name: "unauthorized error is 401", err: &UnauthorizedError{Message: "no token"}, wantStatus: http.StatusUnauthorized, wantBody: "{\"error\":\"no token\"}\n"},
 		{name: "forbidden error is 403", err: &ForbiddenError{Message: "denied"}, wantStatus: http.StatusForbidden, wantBody: "{\"error\":\"denied\"}\n"},
 		{name: "wrapped forbidden error is 403", err: fmt.Errorf("authorize: %w", &ForbiddenError{Message: "denied"}), wantStatus: http.StatusForbidden, wantBody: "{\"error\":\"authorize: denied\"}\n"},
-		{name: "plain error is 500", err: errors.New("boom"), wantStatus: http.StatusInternalServerError, wantBody: "{\"error\":\"boom\"}\n"},
+		{name: "plain error is 500 with generic body", err: errors.New("token review: connection refused"), wantStatus: http.StatusInternalServerError, wantBody: "{\"error\":\"internal error\"}\n"},
+		{name: "wrapped plain error is 500 with generic body", err: fmt.Errorf("authorize: %w", errors.New("boom")), wantStatus: http.StatusInternalServerError, wantBody: "{\"error\":\"internal error\"}\n"},
 	}
 
 	for _, tc := range tests {

@@ -9,10 +9,11 @@ import (
 	"strings"
 
 	"github.com/azylman/aerial/pkg/httpkit"
+	"github.com/azylman/aerial/pkg/k8sauth"
 	"github.com/azylman/aerial/pkg/prwire"
+	"github.com/azylman/aerial/pkg/restateingress"
 	"github.com/azylman/aerial/services/synapse/internal/metrics"
 	"github.com/azylman/aerial/services/synapse/internal/model"
-	"github.com/azylman/aerial/services/synapse/internal/restateclient"
 )
 
 // handlePRRegisterRestate serves /internal/pr/register: the caller is
@@ -33,7 +34,7 @@ func (s *RouterServer) handlePRRegisterRestate(w http.ResponseWriter, r *http.Re
 			httpkit.WriteJSON(w, http.StatusConflict, map[string]string{fieldError: errBotMismatch.Error()})
 			return
 		}
-		writeK8sAuthError(w, err)
+		k8sauth.WriteError(w, err)
 		return
 	}
 	if valErr := validateOwnedPRRegisterRequest(&req, rawTargetID); valErr != "" {
@@ -114,8 +115,8 @@ func validateOwnedPRRegisterRequest(req *PRRegisterRequest, rawTargetID string) 
 // status for its cause: owner mismatch
 // 409, a bad or unresolvable target 400, anything else 500.
 func registerFailureResponse(err error) (int, string) {
-	if serr, ok := errors.AsType[*restateclient.StatusError](err); ok {
-		switch serr.Code {
+	if serr, ok := errors.AsType[*restateingress.HTTPError](err); ok {
+		switch serr.Status {
 		case http.StatusConflict:
 			return http.StatusConflict, "pr is owned by another agent"
 		case http.StatusBadRequest:

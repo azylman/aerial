@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"maps"
 	"net"
 	"net/http"
@@ -547,17 +548,20 @@ func writeJSONError(w http.ResponseWriter, statusCode int, msg string) {
 // serves without bearer authentication.
 var DefaultExemptPaths = []string{"/health", "/healthz", "/readyz", "/metrics", "/debug/coverage/flush"}
 
-// WriteError writes err as a JSON error body. The status comes from the error's
-// StatusCode method (ValidationError, UnauthorizedError, ForbiddenError), else 500.
+// WriteError writes err as a JSON error body. A coded error (ValidationError,
+// UnauthorizedError, ForbiddenError) writes its StatusCode and message. Any
+// other error is logged and answered with 500 and a generic "internal error"
+// body so internal detail never reaches the caller.
 func WriteError(w http.ResponseWriter, err error) {
-	status := http.StatusInternalServerError
 	if coded, ok := errors.AsType[interface {
 		error
 		StatusCode() int
 	}](err); ok {
-		status = coded.StatusCode()
+		writeJSONError(w, coded.StatusCode(), err.Error())
+		return
 	}
-	writeJSONError(w, status, err.Error())
+	slog.Error("k8sauth internal error", "error", err)
+	writeJSONError(w, http.StatusInternalServerError, "internal error")
 }
 
 // ApplyEnvOverride applies K8S_AUTH_ENABLED from getenv to cfg. An empty value

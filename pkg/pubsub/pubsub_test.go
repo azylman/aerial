@@ -672,7 +672,7 @@ func TestEnsureCoreStreams(t *testing.T) {
 		subject string
 	}{
 		{StreamAerialEvents, SubjectAerialPRPrefix + "merged"},
-		{StreamAerialEvents, SubjectTranscriptsIndexed},
+		{StreamAerialEvents, "aerial.turn.transcripts_indexed"},
 		{StreamAerialJobs, SubjectProsperaReportJob},
 		{StreamAerialCoalesced, SubjectCovenExtractCoalesced("thread-test")},
 		{StreamAerialTranscripts, SubjectTranscriptsSteps("sess-1")},

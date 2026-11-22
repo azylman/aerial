@@ -13,9 +13,8 @@ import (
 )
 
 const (
-	DefaultBaseURL = "http://ollama:11434"
-	DefaultModel   = "all-minilm"
-	DefaultNumCtx  = 512
+	DefaultModel  = "all-minilm"
+	DefaultNumCtx = 512
 )
 
 type Config struct {

@@ -16,14 +16,12 @@
 package restateclient
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -31,6 +29,7 @@ import (
 
 	"github.com/azylman/aerial/pkg/prwire"
 	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/pkg/restateingress"
 	"github.com/azylman/aerial/pkg/tracing"
 	"github.com/azylman/aerial/services/synapse/internal/model"
 )
@@ -90,19 +89,6 @@ var repoSHAHandlers = map[string]map[string]bool{
 // handlers and missing keys. No retry can fix it, so IsTerminal reports it.
 var ErrInvalidEvent = errors.New("invalid restate event")
 
-// StatusError is a non-2xx Restate ingress response.
-type StatusError struct {
-	Code int
-	Body string
-}
-
-func (e *StatusError) Error() string {
-	if e.Body == "" {
-		return fmt.Sprintf("restate ingress returned status %d", e.Code)
-	}
-	return fmt.Sprintf("restate ingress returned status %d: %s", e.Code, e.Body)
-}
-
 // IsTerminal reports whether err can never succeed on retry: an invalid
 // payload or a 4xx ingress rejection other than 408 Request Timeout and 429
 // Too Many Requests. Transport failures, 5xx, and an unconfigured client are
@@ -111,14 +97,16 @@ func IsTerminal(err error) bool {
 	if errors.Is(err, ErrInvalidEvent) {
 		return true
 	}
-	var se *StatusError
-	if !errors.As(err, &se) {
+	httpErr, ok := errors.AsType[*restateingress.HTTPError](err)
+	if !ok {
 		return false
 	}
-	if se.Code == http.StatusRequestTimeout || se.Code == http.StatusTooManyRequests {
+	switch httpErr.Status {
+	case http.StatusRequestTimeout, http.StatusTooManyRequests:
 		return false
+	default:
+		return httpErr.Status >= 400 && httpErr.Status < 500
 	}
-	return se.Code >= 400 && se.Code < 500
 }
 
 // PRObjectKey returns the Restate key for a PR object: repo#prNumber.
@@ -328,7 +316,7 @@ func (c *Client) ListRollouts(ctx context.Context) ([]prwire.RolloutRef, error) 
 
 // Register invokes PRObject.Register (request-response, exclusive) and
 // returns the resolved target ID. Owner mismatches (409) and invalid
-// requests (400) come back as terminal StatusErrors.
+// requests (400) come back as terminal *restateingress.HTTPError values.
 func (c *Client) Register(ctx context.Context, req prwire.RegisterRequest) (prwire.RegisterResponse, error) {
 	if strings.TrimSpace(c.baseURL) == "" {
 		return prwire.RegisterResponse{}, errors.New("restate is not configured")
@@ -352,7 +340,7 @@ func (c *Client) GetBuildLifecycle(ctx context.Context, repo string, prNumber in
 
 // RetryReadiness invokes PRObject.RetryReadiness (request-response,
 // exclusive) and returns the 409/202 readiness decision. A missing merge
-// SHA comes back as a terminal 400 StatusError, a fenced caller not
+// SHA comes back as a terminal 400 *restateingress.HTTPError, a fenced caller not
 // authorized for the stored owner as a terminal 409.
 func (c *Client) RetryReadiness(ctx context.Context, repo string, prNumber int, req prwire.RetryReadinessRequest) (prwire.RetryReadinessResponse, error) {
 	if strings.TrimSpace(c.baseURL) == "" {
@@ -378,11 +366,7 @@ func (c *Client) call(ctx context.Context, key, handler string, payload, out any
 // callService is one request-response invocation on service without an
 // Idempotency-Key.
 func (c *Client) callService(ctx context.Context, service, key, handler string, payload, out any) error {
-	bodyBytes, err := json.Marshal(payload)
-	if err != nil {
-		return fmt.Errorf("marshal restate payload: %w", err)
-	}
-	body, err := c.post(ctx, c.ingressURL(service, key, handler), bodyBytes, "")
+	body, err := c.post(ctx, c.ingressURL(service, key, handler), "", payload)
 	if err != nil {
 		return err
 	}
@@ -393,16 +377,12 @@ func (c *Client) callService(ctx context.Context, service, key, handler string, 
 }
 
 func (c *Client) send(ctx context.Context, service, key, handler string, payload any) error {
-	bodyBytes, err := json.Marshal(payload)
-	if err != nil {
-		return fmt.Errorf("marshal restate payload: %w", err)
-	}
 	keyBytes, err := json.Marshal(digestShape(idempotencyPayload(payload)))
 	if err != nil {
 		return fmt.Errorf("marshal restate idempotency payload: %w", err)
 	}
 	idKey := SendIdempotencyKey(EventIdentityFromContext(ctx), handler, keyBytes)
-	_, err = c.post(ctx, c.ingressURL(service, key, handler)+"/send", bodyBytes, idKey)
+	_, err = c.post(ctx, c.ingressURL(service, key, handler)+"/send", idKey, payload)
 	return err
 }
 
@@ -515,29 +495,16 @@ func (c *Client) ingressURL(service, key, handler string) string {
 	return c.baseURL + "/" + url.PathEscape(service) + "/" + url.PathEscape(key) + "/" + handler
 }
 
-func (c *Client) post(ctx context.Context, endpoint string, bodyBytes []byte, idKey string) ([]byte, error) {
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(bodyBytes))
-	if err != nil {
-		return nil, fmt.Errorf("create restate request: %w", err)
+// post sends payload to the ingress endpoint. Non-2xx responses come back
+// as *restateingress.HTTPError; every other failure is wrapped as a failed
+// ingress request.
+func (c *Client) post(ctx context.Context, endpoint, idKey string, payload any) ([]byte, error) {
+	body, err := restateingress.Post(ctx, c.httpClient, endpoint, idKey, payload, 64<<10)
+	if err == nil {
+		return body, nil
 	}
-	httpReq.Header.Set("Content-Type", "application/json")
-	if idKey != "" {
-		httpReq.Header.Set("Idempotency-Key", idKey)
+	if _, ok := errors.AsType[*restateingress.HTTPError](err); ok {
+		return nil, err
 	}
-	resp, err := c.httpClient.Do(httpReq)
-	if err != nil {
-		return nil, fmt.Errorf("restate ingress request failed: %w", err)
-	}
-	defer resp.Body.Close()
-	respBody, readErr := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
-	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		if readErr != nil {
-			return nil, fmt.Errorf("drain restate response: %w", readErr)
-		}
-		return respBody, nil
-	}
-	if readErr != nil {
-		return nil, &StatusError{Code: resp.StatusCode}
-	}
-	return nil, &StatusError{Code: resp.StatusCode, Body: string(respBody)}
+	return nil, fmt.Errorf("restate ingress request failed: %w", err)
 }

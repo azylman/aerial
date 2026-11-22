@@ -145,29 +145,6 @@ func TestFormatAndClassifyVMAlert(t *testing.T) {
 	})
 }
 
-func TestSanitizeSubjectToken(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		in   string
-		want string
-	}{
-		{"", "unknown"},
-		{"   ", "unknown"},
-		{"aerial", "aerial"},
-		{"Aerial-App_v1", "Aerial-App_v1"},
-		{"my.topic#name", "my_topic_name"},
-		{"!!!", "___"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.in, func(t *testing.T) {
-			t.Parallel()
-			if got := SanitizeSubjectToken(tc.in); got != tc.want {
-				t.Fatalf("SanitizeSubjectToken(%q) = %q, want %q", tc.in, got, tc.want)
-			}
-		})
-	}
-}
-
 func TestFireEventTriggers(t *testing.T) {
 	t.Parallel()
 

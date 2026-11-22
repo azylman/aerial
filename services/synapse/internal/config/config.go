@@ -461,17 +461,19 @@ func parseBotsConfig(fileCfg RouterYAMLConfig, botID, eriURL, sysChan string, de
 	return bots
 }
 
+// resolveK8sAuthConfig merges the YAML k8s auth block with the
+// K8S_AUTH_ENABLED override; an unparsable override keeps the YAML value and
+// logs the error.
 func resolveK8sAuthConfig(fileCfg RouterYAMLConfig, kubeServer string) (bool, k8sauth.Config) {
-	k8sAuthEnabled := fileCfg.K8sAuthEnabled
-	if envVal := os.Getenv("K8S_AUTH_ENABLED"); envVal != "" {
-		k8sAuthEnabled = strings.EqualFold(envVal, "true") || envVal == "1"
-	}
 	k8sCfg := fileCfg.K8sAuthConfig
-	k8sCfg.Enabled = k8sAuthEnabled
+	k8sCfg.Enabled = fileCfg.K8sAuthEnabled
+	if err := k8sauth.ApplyEnvOverride(&k8sCfg, os.Getenv); err != nil {
+		log.Printf("[Synapse] config error: %v; keeping k8s_auth_enabled=%v", err, k8sCfg.Enabled)
+	}
 	if k8sCfg.APIServerURL == "" && kubeServer != "" {
 		k8sCfg.APIServerURL = strings.TrimRight(kubeServer, "/")
 	}
-	return k8sAuthEnabled, k8sCfg
+	return k8sCfg.Enabled, k8sCfg
 }
 
 func buildConfig(fileCfg RouterYAMLConfig) Config {

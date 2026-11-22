@@ -31,30 +31,6 @@ func (m *policyJobMsg) Term() error              { m.termed = true; return nil }
 func (*policyJobMsg) Snooze(time.Duration) error { return nil }
 func (*policyJobMsg) InProgress() error          { return nil }
 
-func TestRestateBackoffDelay(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name         string
-		numDelivered uint64
-		want         time.Duration
-	}{
-		{name: "first delivery", numDelivered: 1, want: time.Second},
-		{name: "zero delivery", numDelivered: 0, want: time.Second},
-		{name: "fourth delivery doubles", numDelivered: 4, want: 8 * time.Second},
-		{name: "sixth delivery", numDelivered: 6, want: 32 * time.Second},
-		{name: "seventh delivery caps", numDelivered: 7, want: time.Minute},
-		{name: "late delivery stays capped", numDelivered: 44, want: time.Minute},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			if got := restateBackoffDelay(tc.numDelivered); got != tc.want {
-				t.Errorf("restateBackoffDelay(%d) = %v, want %v", tc.numDelivered, got, tc.want)
-			}
-		})
-	}
-}
-
 func TestHandleJetStreamJobRestatePolicy(t *testing.T) {
 	t.Parallel()
 	retryable := &restateSendError{handler: "HandleMerged", err: errors.New("status 503")}
