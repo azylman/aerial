@@ -53,59 +53,39 @@ func outcomeOf(res *VanadisAdvancementResult) advanceOutcome {
 	return advanceOutcome{Matched: res.Matched, Advanced: res.Advanced, BuildCompleted: res.BuildCompleted, NextChunkIndex: res.NextChunkIndex, BuildStatus: res.BuildStatus, Chunks: len(res.Chunks)}
 }
 
-func TestPostgresVanadisStore_StatusUpdates(t *testing.T) {
+// buildStatusUpdateRows is shared by UpdateBuildStatus and
+// UpdateBuildStatusMessageID: same guards, same data contract.
+var buildStatusUpdateRows = []struct {
+	name      string
+	id        string
+	db        dbScript
+	wantErrIs error
+	wantErr   bool
+}{
+	{name: "nil db", id: "b1", db: dbScript{bare: nilDB}, wantErr: true},
+	{name: "empty id", id: "", wantErr: true},
+	{name: "not found", id: "b1", db: dbScript{execTag: "UPDATE 0"}, wantErrIs: ErrBuildNotFound},
+	{name: "success", id: "b1", db: dbScript{execTag: "UPDATE 1"}},
+}
+
+func TestPostgresVanadisStore_UpdateBuildStatus(t *testing.T) {
 	t.Parallel()
-	tests := []struct {
-		name      string
-		action    string
-		id        string
-		val       string
-		db        dbScript
-		wantErr   bool
-		wantErrIs error
-	}{
-		{name: "build status nil db", action: "build", id: "b1", val: "running", db: dbScript{bare: nilDB}, wantErr: true},
-		{name: "build status empty id", action: "build", id: "", val: "running", wantErr: true},
-		{name: "build status not found", action: "build", id: "b1", val: "running", db: dbScript{execTag: "UPDATE 0"}, wantErrIs: ErrBuildNotFound},
-		{name: "build status success", action: "build", id: "b1", val: "running", db: dbScript{execTag: "UPDATE 1"}},
-
-		{name: "msg id nil db", action: "msg", id: "b1", val: "m1", db: dbScript{bare: nilDB}, wantErr: true},
-		{name: "msg id empty id", action: "msg", id: "", val: "m1", wantErr: true},
-		{name: "msg id not found", action: "msg", id: "b1", val: "m1", db: dbScript{execTag: "UPDATE 0"}, wantErrIs: ErrBuildNotFound},
-		{name: "msg id success", action: "msg", id: "b1", val: "m1", db: dbScript{execTag: "UPDATE 1"}},
-
-		{name: "reserve nil db", action: "reserve", id: "c1", db: dbScript{bare: nilDB}, wantErr: true},
-		{name: "reserve empty id", action: "reserve", id: "", wantErr: true},
-		{name: "reserve db error", action: "reserve", id: "c1", db: dbScript{failExec: "UPDATE vanadis_chunks", execErr: errors.New("db error")}, wantErr: true},
-		{name: "reserve not found", action: "reserve", id: "c1", db: dbScript{execTag: "UPDATE 0"}, wantErrIs: ErrChunkNotFound},
-		{name: "reserve success", action: "reserve", id: "c1", db: dbScript{execTag: "UPDATE 1"}},
-	}
-	for _, tc := range tests {
+	for _, tc := range buildStatusUpdateRows {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			st, _ := tc.db.open()
-			var err error
-			ctx := context.Background()
-			switch tc.action {
-			case "build":
-				err = st.UpdateBuildStatus(ctx, tc.id, tc.val)
-			case "msg":
-				err = st.UpdateBuildStatusMessageID(ctx, tc.id, tc.val)
-			case "reserve":
-				err = st.ReserveChunkForLaunch(ctx, tc.id)
-			}
-			if tc.wantErrIs != nil {
-				if !errors.Is(err, tc.wantErrIs) {
-					t.Fatalf("err = %v, wantErrIs %v", err, tc.wantErrIs)
-				}
-				return
-			}
-			if tc.wantErr && err == nil {
-				t.Fatal("expected error, got nil")
-			}
-			if !tc.wantErr && err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
+			assertStoreErr(t, st.UpdateBuildStatus(context.Background(), tc.id, "running"), tc.wantErrIs, tc.wantErr)
+		})
+	}
+}
+
+func TestPostgresVanadisStore_UpdateBuildStatusMessageID(t *testing.T) {
+	t.Parallel()
+	for _, tc := range buildStatusUpdateRows {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			st, _ := tc.db.open()
+			assertStoreErr(t, st.UpdateBuildStatusMessageID(context.Background(), tc.id, "m1"), tc.wantErrIs, tc.wantErr)
 		})
 	}
 }

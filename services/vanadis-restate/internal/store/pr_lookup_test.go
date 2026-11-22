@@ -13,35 +13,47 @@ import (
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 )
 
-func TestPostgresVanadisStore_LookupsAndAppend(t *testing.T) {
+func TestPostgresVanadisStore_LookupPRChunk(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name      string
 		db        dbScript
-		wantErr   bool
 		wantErrIs error
 		wantRoute BuildRoute
 	}{
-		{name: "lookup pr chunk not found", db: dbScript{row: errRow(pgx.ErrNoRows)}, wantErrIs: ErrChunkNotFound},
-		{name: "lookup pr chunk success", db: dbScript{row: valuesRow("c1", "b1", 0, "medium", false)}, wantRoute: BuildRoute{BuildID: "b1"}},
-		{name: "lookup chunk build id not found", db: dbScript{row: errRow(pgx.ErrNoRows)}, wantErrIs: ErrChunkNotFound},
-		{name: "lookup chunk build id success", db: dbScript{row: valuesRow("b1")}, wantRoute: BuildRoute{BuildID: "b1"}},
+		{name: "not found", db: dbScript{row: errRow(pgx.ErrNoRows)}, wantErrIs: ErrChunkNotFound},
+		{name: "success", db: dbScript{row: valuesRow("c1", "b1", 0, "medium", false)}, wantRoute: BuildRoute{BuildID: "b1"}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			st, _ := tc.db.open()
-			switch tc.name {
-			case "lookup pr chunk not found", "lookup pr chunk success":
-				route, _, err := st.LookupPRChunk(context.Background(), "aerial", 123)
-				if !assertStoreErr(t, err, tc.wantErrIs, tc.wantErr) && route != tc.wantRoute {
-					t.Errorf("LookupPRChunk = %+v, want %+v", route, tc.wantRoute)
-				}
-			case "lookup chunk build id not found", "lookup chunk build id success":
-				route, err := st.LookupChunkBuildID(context.Background(), "c1")
-				if !assertStoreErr(t, err, tc.wantErrIs, tc.wantErr) && route != tc.wantRoute {
-					t.Errorf("LookupChunkBuildID = %+v, want %+v", route, tc.wantRoute)
-				}
+			route, _, err := st.LookupPRChunk(context.Background(), "aerial", 123)
+			if !assertStoreErr(t, err, tc.wantErrIs, false) && route != tc.wantRoute {
+				t.Errorf("LookupPRChunk = %+v, want %+v", route, tc.wantRoute)
+			}
+		})
+	}
+}
+
+func TestPostgresVanadisStore_LookupChunkBuildID(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		db        dbScript
+		wantErrIs error
+		wantRoute BuildRoute
+	}{
+		{name: "not found", db: dbScript{row: errRow(pgx.ErrNoRows)}, wantErrIs: ErrChunkNotFound},
+		{name: "success", db: dbScript{row: valuesRow("b1")}, wantRoute: BuildRoute{BuildID: "b1"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			st, _ := tc.db.open()
+			route, err := st.LookupChunkBuildID(context.Background(), "c1")
+			if !assertStoreErr(t, err, tc.wantErrIs, false) && route != tc.wantRoute {
+				t.Errorf("LookupChunkBuildID = %+v, want %+v", route, tc.wantRoute)
 			}
 		})
 	}
