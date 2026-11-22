@@ -234,7 +234,7 @@ func runSessionDBRotationCase(t *testing.T, tc sessionDBRotationCase) {
 	var attempts []string
 	appCfg := config.NewFromData(&config.ConfigData{Channels: map[string]config.ChannelPolicy{"default": {Mode: tc.channelMode}}})
 	pool := New(appCfg, WorkerPoolConfig{
-		SessionManager: sessMgr, Store: store, TimeoutMinutes: 1, BackoffBase: 5 * time.Millisecond, MaxAttempts: tc.maxAttempts,
+		SessionManager: sessMgr, Store: store, BackoffBase: 5 * time.Millisecond, MaxAttempts: tc.maxAttempts,
 		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error { return nil },
 		TypingFunc:   func(s *discordgo.Session, channelID string) func() { return func() {} },
 		OnMessageCompleted: func(msg db.Message, finalStatus string) {
@@ -320,7 +320,7 @@ func runSessionRotationInjectCase(t *testing.T, tt sessionRotationInjectCase) {
 	doneCh := make(chan struct{})
 
 	pool := New(cfg, WorkerPoolConfig{
-		SessionManager: session.New(tmpHome, tempData), Store: store, TimeoutMinutes: 1, MaxAttempts: tt.maxAttempts,
+		SessionManager: session.New(tmpHome, tempData), Store: store, MaxAttempts: tt.maxAttempts,
 		RetryDelayOverride: 10 * time.Millisecond, BackoffBase: 5 * time.Millisecond,
 		RunnerWithOptionsFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
 			mu.Lock()
@@ -610,7 +610,7 @@ func TestWorker_RotatedSession_TreatsTurnOneAsColdStart(t *testing.T) {
 	appCfg := config.NewFromData(&config.ConfigData{Channels: map[string]config.ChannelPolicy{"default": {Mode: "threads"}}})
 
 	pool := New(appCfg, WorkerPoolConfig{
-		SessionManager: sessMgr, Store: store, TimeoutMinutes: 1, BackoffBase: 10 * time.Millisecond, MaxAttempts: 1,
+		SessionManager: sessMgr, Store: store, BackoffBase: 10 * time.Millisecond, MaxAttempts: 1,
 		HistoryFetcher: func(ctx context.Context, tid, beforeID string, limit int) ([]HistoryMessage, error) {
 			return []HistoryMessage{{ID: "msg-hist-1", AuthorName: "test-user", Content: "pre-rotation message", CreatedAt: time.Now().Add(-10 * time.Minute)}}, nil
 		},

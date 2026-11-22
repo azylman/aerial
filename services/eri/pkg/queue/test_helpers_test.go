@@ -284,20 +284,20 @@ func assertExcludesAll(t *testing.T, target string, subs []string, label string)
 }
 
 type workerTestCase struct {
-	name, initialSessionID, policyMode, notifierReply, wantStatus, wantSavedSession, wantErrorContains, wantDBContent, wantResponseText       string
-	useSessionMgr, enqueueAsBurst, sequentialTurns, checkRunnerCalls, checkTurnCount, checkDeliveryCalls                                      bool
-	seedTurnCount, maxAttempts, concurrentEnqueueCount, wantDefaultTimeout, wantRunnerCalls, wantRetryCount, wantTurnCount, wantDeliveryCalls int
-	seedIdleAge, idleTimeout                                                                                                                  time.Duration
-	seedTranscriptFiles                                                                                                                       map[string]string
-	seedPNGImage                                                                                                                              image.Image
-	seedPNGLevel                                                                                                                              png.CompressionLevel
-	seedPNGFilename                                                                                                                           string
-	messages                                                                                                                                  []db.Message
-	runnerSteps                                                                                                                               []mockRunnerStep
-	wantPassedSessions, wantDeliveredTexts, wantDeliveredSubstrings, wantDeliveredExcludes, wantDeliveredChannels                             []string
-	wantAttachments                                                                                                                           []*delivery.Attachment
-	wantPromptContains, wantPromptExcludes                                                                                                    []string
-	wantAttemptPromptContains, wantAttemptPromptExcludes                                                                                      map[int][]string
+	name, initialSessionID, policyMode, notifierReply, wantStatus, wantSavedSession, wantErrorContains, wantDBContent, wantResponseText string
+	useSessionMgr, enqueueAsBurst, sequentialTurns, checkRunnerCalls, checkTurnCount, checkDeliveryCalls                                bool
+	seedTurnCount, maxAttempts, concurrentEnqueueCount, wantRunnerCalls, wantRetryCount, wantTurnCount, wantDeliveryCalls               int
+	seedIdleAge, idleTimeout                                                                                                            time.Duration
+	seedTranscriptFiles                                                                                                                 map[string]string
+	seedPNGImage                                                                                                                        image.Image
+	seedPNGLevel                                                                                                                        png.CompressionLevel
+	seedPNGFilename                                                                                                                     string
+	messages                                                                                                                            []db.Message
+	runnerSteps                                                                                                                         []mockRunnerStep
+	wantPassedSessions, wantDeliveredTexts, wantDeliveredSubstrings, wantDeliveredExcludes, wantDeliveredChannels                       []string
+	wantAttachments                                                                                                                     []*delivery.Attachment
+	wantPromptContains, wantPromptExcludes                                                                                              []string
+	wantAttemptPromptContains, wantAttemptPromptExcludes                                                                                map[int][]string
 }
 
 func initWorkerTestSession(t *testing.T, tc workerTestCase, store *dbtest.FakeStore) (string, *session.Manager, string) {
@@ -490,7 +490,7 @@ func assertWorkerPromptsAndState(t *testing.T, tc workerTestCase, store db.Store
 
 func makeWorkerTestConfig(tc workerTestCase, store db.Store, sessMgr *session.Manager, tmpHome string, steps []mockRunnerStep, maxAttempts, expectedCompletions int, mu *sync.Mutex, runnerCalls *int, passedSessions, promptsSeen *[]string, capturedPrompt *string, deliveredChannels, deliveredTexts *[]string, deliveredAttachments *[]*delivery.Attachment, completedCount *atomic.Int32, doneCh chan struct{}, turnDoneCh chan struct{}) WorkerPoolConfig {
 	cfg := WorkerPoolConfig{
-		Store: store, SessionManager: sessMgr, TimeoutMinutes: 1, IdleTimeout: tc.idleTimeout,
+		Store: store, SessionManager: sessMgr, IdleTimeout: tc.idleTimeout,
 		BackoffBase: 5 * time.Millisecond, MaxAttempts: maxAttempts,
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
 			mu.Lock()
@@ -549,13 +549,6 @@ func makeWorkerTestConfig(tc workerTestCase, store db.Store, sessMgr *session.Ma
 
 func runWorkerTestCase(t *testing.T, tc workerTestCase) {
 	t.Helper()
-	if tc.wantDefaultTimeout > 0 && len(tc.messages) == 0 && tc.concurrentEnqueueCount == 0 {
-		if DefaultTimeoutMinutes != tc.wantDefaultTimeout {
-			t.Errorf("DefaultTimeoutMinutes = %d, want %d", DefaultTimeoutMinutes, tc.wantDefaultTimeout)
-		}
-		return
-	}
-
 	store := setupTestStore(t)
 	tmpHome, sessMgr, threadID := initWorkerTestSession(t, tc, store)
 	steps, wantDeliveredExcludes := setupWorkerTestPNG(t, tc, append([]mockRunnerStep(nil), tc.runnerSteps...), append([]string(nil), tc.wantDeliveredExcludes...))
@@ -786,7 +779,7 @@ func assertBurstState(t *testing.T, tc burstTestCase, store db.Store, tmpDir str
 
 func makeBurstTestConfig(tc burstTestCase, store db.Store, sessMgr *session.Manager, dg *discordgo.Session, cls *classifier.Classifier, tmpDir, initialSessionID string, mu *sync.Mutex, runnerCalls, deliveryCalls, typingCalls *int, receivedPrompt, deliveredText, passedSessID *string, capturedPrompts, passedSessions *[]string, alertChannel, alertTitle, alertBody *string, alertReceived chan struct{}) WorkerPoolConfig {
 	cfg := WorkerPoolConfig{
-		Store: store, SessionManager: sessMgr, DiscordSession: dg, TimeoutMinutes: 1, BackoffBase: 5 * time.Millisecond,
+		Store: store, SessionManager: sessMgr, DiscordSession: dg, BackoffBase: 5 * time.Millisecond,
 		MaxAttempts: tc.maxAttempts, Classifier: cls,
 		SystemAlertFunc: func(s *discordgo.Session, channelNameOrID, title, body string) error {
 			mu.Lock()
