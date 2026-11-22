@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/azylman/aerial/pkg/eriwire"
@@ -70,6 +71,9 @@ type Executor struct {
 	HTTPClient   *http.Client
 	deployUIURL  string
 	gitHubOwner  string
+
+	buildLocks      sync.Map
+	buildMessageIDs sync.Map
 }
 
 // NewExecutor creates a new Executor instance. gitHubOwner qualifies bare
@@ -285,6 +289,45 @@ func (e *Executor) DispatchDirectMessage(ctx context.Context, channelID, content
 	return e.EriClient.Message(ctx, channelID, content)
 }
 
+func (e *Executor) recordMessageIDAdvance(buildID, prevID, latestID string) {
+	if e == nil || buildID == "" || latestID == "" || prevID == latestID {
+		return
+	}
+	val, _ := e.buildMessageIDs.LoadOrStore(buildID, &sync.Map{})
+	if m, ok := val.(*sync.Map); ok {
+		m.Store(prevID, latestID)
+	}
+}
+
+func (e *Executor) resolveLatestMessageID(buildID, msgID string) string {
+	if e == nil || buildID == "" {
+		return msgID
+	}
+	val, ok := e.buildMessageIDs.Load(buildID)
+	if !ok || val == nil {
+		return msgID
+	}
+	m, ok := val.(*sync.Map)
+	if !ok {
+		return msgID
+	}
+	curr := msgID
+	visited := make(map[string]bool)
+	for {
+		nextVal, exists := m.Load(curr)
+		if !exists {
+			break
+		}
+		next, ok := nextVal.(string)
+		if !ok || next == "" || next == curr || visited[next] {
+			break
+		}
+		visited[curr] = true
+		curr = next
+	}
+	return curr
+}
+
 // SyncBuildWidget formats the Discord tracker widget and dispatches it directly to Eri via POST /discord/widget.
 // It explicitly DOES NOT publish to aerial.coalesced.widget_sync.>. A newly
 // posted message is stored only by compare-and-swap against
@@ -293,6 +336,17 @@ func (e *Executor) DispatchDirectMessage(ctx context.Context, channelID, content
 func (e *Executor) SyncBuildWidget(ctx context.Context, st store.VanadisStore, build model.VanadisBuild, chunks []model.VanadisChunk, notice string) (string, error) {
 	if e == nil || e.EriClient == nil {
 		return "", nil
+	}
+	if build.ID != "" {
+		lockVal, _ := e.buildLocks.LoadOrStore(build.ID, &sync.Mutex{})
+		if mu, ok := lockVal.(*sync.Mutex); ok && mu != nil {
+			mu.Lock()
+			defer mu.Unlock()
+		}
+
+		if latest := e.resolveLatestMessageID(build.ID, build.StatusMessageID); latest != "" && latest != build.StatusMessageID {
+			build.StatusMessageID = latest
+		}
 	}
 	widgetReq := widget.BuildSyncWidgetRequest(build, chunks, e.deployUIURL)
 	if notice != "" {
@@ -313,6 +367,7 @@ func (e *Executor) SyncBuildWidget(ctx context.Context, st store.VanadisStore, b
 		return msgID, nil
 	}
 	if swapped {
+		e.recordMessageIDAdvance(build.ID, build.StatusMessageID, msgID)
 		return msgID, nil
 	}
 	slog.InfoContext(ctx, "[vanadis-restate] status widget lost the message id race; deleting duplicate card", "build_id", build.ID, "message_id", msgID)
