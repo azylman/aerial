@@ -33,7 +33,6 @@ func pushFixtures(t *testing.T) map[string][]byte {
 func TestHandler(t *testing.T) {
 	t.Parallel()
 	fixtures := pushFixtures(t)
-	sampleRows := []CoverageRow{{File: "github.com/x/svc/a.go", Function: "Run", Percent: 75}, {File: "github.com/x/svc/a.go", Function: "Stop", Percent: 0}}
 	tests := []struct {
 		name         string
 		method       string
@@ -145,7 +144,6 @@ func waitHits(t *testing.T, hits <-chan string, path string, n int) {
 
 func TestPullLoop(t *testing.T) {
 	t.Parallel()
-	sampleRows := []CoverageRow{{File: "github.com/x/svc/a.go", Function: "Run", Percent: 75}, {File: "github.com/x/svc/a.go", Function: "Stop", Percent: 0}}
 	tests := []struct {
 		name         string
 		reload       string   // config written after the first pull; "{srv}" becomes the flush server URL

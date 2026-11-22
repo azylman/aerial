@@ -38,6 +38,29 @@ func TestMain(m *testing.M) {
 	goleak.VerifyTestMain(m)
 }
 
+// withDefaults fills the zero fields of c with the values ParseConfig applies by default.
+func withDefaults(c Config) Config {
+	if c.FlushTimeout == 0 {
+		c.FlushTimeout = 60 * time.Second
+	}
+	if c.ConnectRetryWindow == 0 {
+		c.ConnectRetryWindow = 30 * time.Second
+	}
+	if c.ConnectRetryInterval == 0 {
+		c.ConnectRetryInterval = time.Second
+	}
+	if c.PullInterval == 0 {
+		c.PullInterval = 15 * time.Minute
+	}
+	if c.Listen == "" {
+		c.Listen = ":8080"
+	}
+	if c.MaxPushBytes == 0 {
+		c.MaxPushBytes = 64 << 20
+	}
+	return c
+}
+
 func TestParseConfig(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -49,35 +72,35 @@ func TestParseConfig(t *testing.T) {
 		{
 			name: "explicit timeout and shared service",
 			yaml: "targets:\n  - service: eri\n    url: http://eri.aerial/debug/coverage/flush\n  - service: eri\n    url: http://eri-agent-alpha.aerial/debug/coverage/flush\nflush_timeout: 90s\n",
-			want: Config{Targets: []Target{
+			want: withDefaults(Config{Targets: []Target{
 				{Service: "eri", URL: "http://eri.aerial/debug/coverage/flush"},
 				{Service: "eri", URL: "http://eri-agent-alpha.aerial/debug/coverage/flush"},
-			}, FlushTimeout: 90 * time.Second, ConnectRetryWindow: 30 * time.Second, ConnectRetryInterval: time.Second, PullInterval: 15 * time.Minute, Listen: ":8080", MaxPushBytes: 64 << 20},
+			}, FlushTimeout: 90 * time.Second}),
 		},
 		{
 			name: "explicit connect retry",
 			yaml: "targets:\n  - service: eri\n    url: http://x\nconnect_retry_window: 10s\nconnect_retry_interval: 250ms\n",
-			want: Config{Targets: []Target{{Service: "eri", URL: "http://x"}}, FlushTimeout: 60 * time.Second, ConnectRetryWindow: 10 * time.Second, ConnectRetryInterval: 250 * time.Millisecond, PullInterval: 15 * time.Minute, Listen: ":8080", MaxPushBytes: 64 << 20},
+			want: withDefaults(Config{Targets: []Target{{Service: "eri", URL: "http://x"}}, ConnectRetryWindow: 10 * time.Second, ConnectRetryInterval: 250 * time.Millisecond}),
 		},
 		{
 			name: "default timeout",
 			yaml: "targets:\n  - service: haro\n    url: http://haro.aerial/debug/coverage/flush\n",
-			want: Config{Targets: []Target{{Service: "haro", URL: "http://haro.aerial/debug/coverage/flush"}}, FlushTimeout: 60 * time.Second, ConnectRetryWindow: 30 * time.Second, ConnectRetryInterval: time.Second, PullInterval: 15 * time.Minute, Listen: ":8080", MaxPushBytes: 64 << 20},
+			want: withDefaults(Config{Targets: []Target{{Service: "haro", URL: "http://haro.aerial/debug/coverage/flush"}}}),
 		},
 		{
 			name: "explicit zero retry durations take the defaults",
 			yaml: "targets:\n  - service: eri\n    url: http://x\nconnect_retry_window: 0s\nconnect_retry_interval: 0s\n",
-			want: Config{Targets: []Target{{Service: "eri", URL: "http://x"}}, FlushTimeout: 60 * time.Second, ConnectRetryWindow: 30 * time.Second, ConnectRetryInterval: time.Second, PullInterval: 15 * time.Minute, Listen: ":8080", MaxPushBytes: 64 << 20},
+			want: withDefaults(Config{Targets: []Target{{Service: "eri", URL: "http://x"}}}),
 		},
 		{
 			name: "push only with explicit server settings",
 			yaml: "push_services: [photos-sync]\npull_interval: 1m\nlisten: ':9090'\nmax_push_bytes: 1024\n",
-			want: Config{PushServices: []string{"photos-sync"}, FlushTimeout: 60 * time.Second, ConnectRetryWindow: 30 * time.Second, ConnectRetryInterval: time.Second, PullInterval: time.Minute, Listen: ":9090", MaxPushBytes: 1024},
+			want: withDefaults(Config{PushServices: []string{"photos-sync"}, PullInterval: time.Minute, Listen: ":9090", MaxPushBytes: 1024}),
 		},
 		{
 			name: "pull targets and distinct push services",
 			yaml: "targets:\n  - service: eri\n    url: http://x\npush_services: [photos-sync, backup]\n",
-			want: Config{Targets: []Target{{Service: "eri", URL: "http://x"}}, PushServices: []string{"photos-sync", "backup"}, FlushTimeout: 60 * time.Second, ConnectRetryWindow: 30 * time.Second, ConnectRetryInterval: time.Second, PullInterval: 15 * time.Minute, Listen: ":8080", MaxPushBytes: 64 << 20},
+			want: withDefaults(Config{Targets: []Target{{Service: "eri", URL: "http://x"}}, PushServices: []string{"photos-sync", "backup"}}),
 		},
 		{name: "no targets", yaml: "flush_timeout: 10s\n", wantErr: "no targets or push_services"},
 		{name: "blank push service", yaml: "push_services: ['']\n", wantErr: "push_services 0 is empty"},
@@ -623,6 +646,8 @@ func newFlushServer(t *testing.T, responses map[string]flushResponse) *httptest.
 	return srv
 }
 
+var sampleRows = []CoverageRow{{File: "github.com/x/svc/a.go", Function: "Run", Percent: 75}, {File: "github.com/x/svc/a.go", Function: "Stop", Percent: 0}}
+
 const sampleReport = "github.com/x/svc/a.go:3:\t\tRun\t\t75.0%\ngithub.com/x/svc/a.go:9:\t\t(*S).Stop\t\t0.0%\ntotal\t(statements)\t50.0%\n"
 
 func TestIngest(t *testing.T) {
@@ -630,7 +655,6 @@ func TestIngest(t *testing.T) {
 	good := func(id string) flushResponse {
 		return flushResponse{status: http.StatusOK, body: buildTar(t, reg("covmeta."+id, "m"), reg("covcounters."+id+".1.1", "c"))}
 	}
-	sampleRows := []CoverageRow{{File: "github.com/x/svc/a.go", Function: "Run", Percent: 75}, {File: "github.com/x/svc/a.go", Function: "Stop", Percent: 0}}
 	tests := []struct {
 		name          string
 		paths         []Target // URL holds only the server path
@@ -760,15 +784,7 @@ const refusedPath = "<refused>"
 // with ECONNREFUSED.
 func closedURL(t *testing.T) string {
 	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	addr := ln.Addr().String()
-	if err := ln.Close(); err != nil {
-		t.Fatalf("close listener: %v", err)
-	}
-	return "http://" + addr + "/debug/coverage/flush"
+	return "http://" + freeAddr(t) + "/debug/coverage/flush"
 }
 
 // errRefused mirrors the error chain a dial rejected by the peer produces.
