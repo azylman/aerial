@@ -425,9 +425,6 @@ func AdvanceHeartbeatLastCompletedAt(ctx context.Context, database *sql.DB, id s
 		return fmt.Errorf("schedule_id cannot be empty")
 	}
 	query := `UPDATE heartbeat_schedules SET last_completed_at = GREATEST(COALESCE(last_completed_at, $1), $1) WHERE id = $2`
-	if isSQLiteDBFn(database) {
-		query = `UPDATE heartbeat_schedules SET last_completed_at = MAX(COALESCE(last_completed_at, $1), $1) WHERE id = $2`
-	}
 	return execScheduleUpdate(ctx, database, model.ScheduleTypeHeartbeat, id, query, completedAt, id)
 }
 
@@ -602,15 +599,6 @@ func PruneScheduleRuns(ctx context.Context, database *sql.DB, maxCount int, maxA
 		return 0, err
 	}
 	return res.RowsAffected()
-}
-
-var isSQLiteDBFn = isSQLiteDB
-
-func isSQLiteDB(db *sql.DB) bool {
-	if db == nil {
-		return false
-	}
-	return strings.Contains(strings.ToLower(fmt.Sprintf("%T", db.Driver())), "sqlite")
 }
 
 func findEarliestNextRun(crons []model.CronSchedule, heartbeats []model.HeartbeatSchedule, oneshots []model.OneShotSchedule) *time.Time {
