@@ -235,15 +235,9 @@ func TestProjectionJournalKey(t *testing.T) {
 	}
 }
 
-var ownedKeysLiteral = []string{
-	"agent", "banner", "bot_id", "build_metadata", "ci_checks", "ci_fail_count",
-	"deploy_failed_published", "deploy_success_pending", "deployed_jobs",
-	"deployed_kustomizations", "job_states", "jobs", "kustomization_requests",
-	"started_jobs", "vanadis_chunk_id", "widget_state",
-}
-
 // TestProjectionUpsertQuery pins the full-row upsert argument binding:
-// column args, the owned-key replacement list, and the metadata blob.
+// row column args and typed scalar args, and that the statement never
+// names the legacy metadata JSON column.
 func TestProjectionUpsertQuery(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -255,14 +249,14 @@ func TestProjectionUpsertQuery(t *testing.T) {
 			name: "full snapshot",
 			snap: ProjectionSnapshot{Repo: "aerial", PRNumber: 101, Agent: "agent-beta", Branch: " feat ", HeadSHA: "h1", MergeSHA: "m1", TargetID: snowA, Title: "T", Status: "merged", Metadata: ProjectionMetadata{Jobs: []string{"eri", "coven"}, DeploySuccessPending: true}},
 			wantArgs: append([]any{
-				"azylman/aerial", 101, "agent-beta", "feat", "h1", "m1", snowA, "T", "merged", `{"deploy_success_pending":true,"jobs":["coven","eri"]}`, ownedKeysLiteral,
+				"azylman/aerial", 101, "agent-beta", "feat", "h1", "m1", snowA, "T", "merged",
 				"", "", 0, false, true, "", "",
 			}, make([]any, 18)...),
 		},
 		{
 			name:     "blank agent and empty metadata",
 			snap:     ProjectionSnapshot{Repo: "azylman/aerial", PRNumber: 5, Status: "open"},
-			wantArgs: append([]any{"azylman/aerial", 5, "aerial", "", "", "", "", "", "open", `{}`, ownedKeysLiteral, "", "", 0, false, false, "", ""}, make([]any, 18)...),
+			wantArgs: append([]any{"azylman/aerial", 5, "aerial", "", "", "", "", "", "open", "", "", 0, false, false, "", ""}, make([]any, 18)...),
 		},
 		{
 			name: "typed scalars and a pre-final build snapshot",
@@ -272,8 +266,7 @@ func TestProjectionUpsertQuery(t *testing.T) {
 			}},
 			wantArgs: []any{
 				"azylman/aerial", 6, "miorine", "", "", "", "", "", "ci_failed",
-				`{"bot_id":"miorine","banner":"b","build_metadata":{"version":1,"kind":"pre","repository":"azylman/aerial","workflow_path":"ci.yml","run_id":9,"run_number":8,"run_attempt":2,"event":"pull_request","source_sha":"s1","execution_sha":"e1","pr_number":null,"selected":null},"ci_fail_count":3,"deploy_failed_published":true,"vanadis_chunk_id":"c1","widget_state":"w"}`,
-				ownedKeysLiteral, "c1", "miorine", 3, true, false, "b", "w",
+				"c1", "miorine", 3, true, false, "b", "w",
 				1, "pre", "azylman/aerial", "ci.yml", int64(9), int64(8), 2, "pull_request", "s1", "e1", (*int)(nil),
 				(*string)(nil), (*string)(nil), (*string)(nil), (*bool)(nil), (*int)(nil), []string(nil), (*string)(nil),
 			},
@@ -285,8 +278,7 @@ func TestProjectionUpsertQuery(t *testing.T) {
 			}},
 			wantArgs: []any{
 				"azylman/aerial", 7, "aerial", "", "", "", "", "", "open",
-				`{"build_metadata":{"version":1,"kind":"final","repository":"","workflow_path":"","run_id":0,"run_number":0,"run_attempt":0,"event":"","source_sha":"","execution_sha":"","pr_number":7,"selected":null,"service":"eri","image_name":"aerial-eri","state":"pushed","pushed":true,"source_attempt":1,"image_refs":["ghcr.io/x:1"],"digest":"sha256:d"}}`,
-				ownedKeysLiteral, "", "", 0, false, false, "", "",
+				"", "", 0, false, false, "", "",
 				1, "final", "", "", int64(0), int64(0), 0, "", "", "", new(7),
 				new("eri"), new("aerial-eri"), new("pushed"), new(true), new(1),
 				[]string{"ghcr.io/x:1"},
@@ -298,8 +290,8 @@ func TestProjectionUpsertQuery(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			query, args := ProjectionUpsertQuery(tc.snap)
-			if query == "" {
-				t.Fatal("expected non-empty query")
+			if query == "" || strings.Contains(query, "metadata") {
+				t.Fatalf("query must be non-empty and never touch metadata: %s", query)
 			}
 			if !reflect.DeepEqual(args, tc.wantArgs) {
 				t.Fatalf("args =\n%#v\nwant\n%#v", args, tc.wantArgs)

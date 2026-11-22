@@ -114,7 +114,7 @@ type untrackedGolden struct {
 }
 
 // TestShadowUntrackedUpstreamGolden pins that rollout events for a PR
-// PRObject never saw register, Hydrate, opened or merge persist nothing,
+// PRObject never saw register, opened or merge persist nothing,
 // index nothing and run no fact or reconcile, while a tracked merged PR
 // still records, reconciles once per generation and is tracked as a
 // rollout. Captured legacy streams replay as captured.
