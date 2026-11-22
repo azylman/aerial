@@ -11,7 +11,11 @@ import (
 
 // DefaultTerminalStepQuiescence is the minimum time since a terminal PLANNER_RESPONSE step's
 // created_at timestamp and task log modifications before considering the turn quiescent and eligible for rescue.
-const DefaultTerminalStepQuiescence = 15 * time.Second
+const (
+	DefaultTerminalStepQuiescence = 15 * time.Second
+	backgroundTaskRunningMarker   = "Tool is running as a background task with task id:"
+	backgroundTasksStoppedMarker  = "All your subagents and background tasks have been stopped due to server restart"
+)
 
 func hasRecentTaskLogActivity(sessDir string, minQuiescence time.Duration) bool {
 	tasksDir := filepath.Join(sessDir, ".system_generated", "tasks")
@@ -84,7 +88,13 @@ func countPendingAsyncAndFinalStep(ctx context.Context, lines []string, startIdx
 			}
 		}
 
-		if (step.Type == "SYSTEM_MESSAGE" || step.Type == stepTypeUserInput) && pendingAsyncCalls > 0 {
+		if step.Type != stepTypePlannerResponse && step.Type != stepTypeSystemMessage && step.Type != stepTypeUserInput && strings.Contains(step.Content, backgroundTaskRunningMarker) {
+			pendingAsyncCalls++
+		}
+
+		if step.Type == stepTypeSystemMessage && strings.Contains(step.Content, backgroundTasksStoppedMarker) {
+			pendingAsyncCalls = 0
+		} else if (step.Type == stepTypeSystemMessage || step.Type == stepTypeUserInput) && pendingAsyncCalls > 0 {
 			pendingAsyncCalls--
 		}
 
@@ -99,7 +109,7 @@ func countPendingAsyncAndFinalStep(ctx context.Context, lines []string, startIdx
 }
 
 func validateTerminalResponse(finalStep transcriptStepRecord, since time.Time, minQuiescence time.Duration) string {
-	if finalStep.Type != "PLANNER_RESPONSE" || finalStep.Status != "DONE" || len(finalStep.ToolCalls) != 0 || finalStep.CreatedAt == "" {
+	if finalStep.Type != stepTypePlannerResponse || finalStep.Status != "DONE" || len(finalStep.ToolCalls) != 0 || finalStep.CreatedAt == "" {
 		return ""
 	}
 
