@@ -2,7 +2,10 @@ package server
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -443,6 +446,13 @@ func routesFailingStore(getErr, listErr error) *memoryVanadisStore {
 	return s
 }
 
+// routesPreRecordFailingStore is routesStore with injected PreRecordChunkPR error.
+func routesPreRecordFailingStore(err error) *memoryVanadisStore {
+	s := routesStore()
+	s.PreRecordErr = err
+	return s
+}
+
 // routesListStore holds one running, one completed and one queued build, newest first.
 func routesListStore() *memoryVanadisStore {
 	s := newMemoryVanadisStore()
@@ -484,6 +494,7 @@ var (
 	routesSeeded, routesListed, routesMetrics = routesStore(), routesListStore(), routesMetricsStore()
 	routesGetFails                            = routesFailingStore(errors.New("simulated get err"), nil)
 	routesListFails                           = routesFailingStore(nil, errors.New("simulated list failure"))
+	routesPreRecordFails                      = routesPreRecordFailingStore(errors.New("simulated prerecord failure"))
 	routesAllow, routesDeny, routesUnauth     = authFake(true, true), authFake(true, false), authFake(false, false)
 )
 
@@ -556,6 +567,14 @@ var routeCases = []routeCase{
 	{
 		name: "attach pins agent caller to its own agent", method: http.MethodPost, path: "/chunks/attach-pr", body: `{"repo":"aerial","pr_number":7,"agent":"agent-alpha"}`, store: routesSeeded, auth: routesAllow, token: routesToken,
 		wantStatus: http.StatusOK, wantSubstr: `"thread_id":"thread-aerial"`,
+	},
+	{
+		name: "attach chunk with chunk_id pre-records pr", method: http.MethodPost, path: "/chunks/attach-pr", body: `{"chunk_id":"c1","repo":"aerial","pr_number":123,"agent":"agent-alpha"}`, store: routesSeeded, auth: routesAllow, token: routesToken,
+		wantStatus: http.StatusOK, wantSubstr: `"status":"attached"`,
+	},
+	{
+		name: "attach chunk pre-record error logs and continues", method: http.MethodPost, path: "/chunks/attach-pr", body: `{"chunk_id":"c1","repo":"aerial","pr_number":123,"agent":"agent-alpha"}`, store: routesPreRecordFails, auth: routesAllow, token: routesToken,
+		wantStatus: http.StatusOK, wantSubstr: `"status":"attached"`,
 	},
 	{name: "chunk by id allowed", method: http.MethodGet, path: "/chunks/c1", store: routesSeeded, auth: routesAllow, token: routesToken, wantStatus: http.StatusOK, wantSubstr: `"id":"c1"`},
 	{name: "chunk by id forbidden", method: http.MethodGet, path: "/chunks/c1", store: routesSeeded, auth: routesDeny, token: routesToken, wantStatus: http.StatusForbidden},
@@ -698,6 +717,67 @@ func TestRoutes(t *testing.T) {
 			}
 			if !strings.Contains(rec.Body.String(), tc.wantSubstr) {
 				t.Fatalf("body %q missing %q", rec.Body.String(), tc.wantSubstr)
+			}
+		})
+	}
+}
+
+func TestServerIngressIdempotencyKeys(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		method  string
+		path    string
+		body    string
+		wantKey string
+	}{
+		{
+			name:    "attach chunk pr sets deterministic key",
+			method:  http.MethodPost,
+			path:    "/chunks/attach-pr",
+			body:    `{"chunk_id":"c1","repo":"aerial","pr_number":42}`,
+			wantKey: "attach-pr:c1:aerial:42",
+		},
+		{
+			name:    "active step sets content-addressed key",
+			method:  http.MethodPost,
+			path:    "/chunks/active-step",
+			body:    `{"chunk_id":"c1","active_step":"running tests"}`,
+			wantKey: fmt.Sprintf("active-step:b1:c1:%x", sha256.Sum256([]byte("running tests"))),
+		},
+		{
+			name:    "active step with step fallback sets key",
+			method:  http.MethodPost,
+			path:    "/chunks/active-step",
+			body:    `{"chunk_id":"c1","step":"compiling code"}`,
+			wantKey: fmt.Sprintf("active-step:b1:c1:%x", sha256.Sum256([]byte("compiling code"))),
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var capturedKey string
+			restateSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				capturedKey = r.Header.Get("Idempotency-Key")
+				w.Header().Set("Content-Type", "application/json")
+				if strings.Contains(r.URL.Path, "RouteAttachPR") {
+					_ = json.NewEncoder(w).Encode(AttachChunkPRResponse{Status: "attached", BuildID: "b1", ChunkID: "c1", ThreadID: "123"})
+					return
+				}
+				w.WriteHeader(http.StatusOK)
+			}))
+			defer restateSrv.Close()
+
+			srv := NewVanadisServer(Config{}, RestateConfig{RestateIngressURL: restateSrv.URL}, routesStore(), restateSrv.Client())
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(tc.method, tc.path, strings.NewReader(tc.body))
+			req.Header.Set("Content-Type", "application/json")
+			srv.Routes().ServeHTTP(rec, req)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, want %d: %s", rec.Code, http.StatusOK, rec.Body.String())
+			}
+			if capturedKey != tc.wantKey {
+				t.Fatalf("Idempotency-Key = %q, want %q", capturedKey, tc.wantKey)
 			}
 		})
 	}
