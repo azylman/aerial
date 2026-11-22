@@ -2,8 +2,10 @@ package flux
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"path"
@@ -13,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/azylman/aerial/pkg/githubapi"
 	"github.com/azylman/aerial/pkg/prwire"
 	"github.com/azylman/aerial/services/synapse/internal/kube"
 	"github.com/azylman/aerial/services/synapse/internal/model"
@@ -572,6 +575,79 @@ func TestRunRolloutRechecks(t *testing.T) {
 
 	if len(sink.events) == 0 {
 		t.Errorf("expected recheck events to be recorded")
+	}
+}
+
+func TestRunRolloutRechecksRateLimit(t *testing.T) {
+	t.Parallel()
+	client := kube.NewClient(nil)
+	sink := &recordingSink{
+		pending:    true,
+		pendingErr: &githubapi.StatusError{StatusCode: 429, RateLimited: true, RetryAfter: time.Hour},
+	}
+	ticks := make(chan time.Time, 3)
+	ticks <- time.Now()
+	ticks <- time.Now()
+	ticks <- time.Now()
+	close(ticks)
+
+	RunRolloutRechecks(context.Background(), client, sink, ticks)
+
+	// Since tick 1 encountered a 1-hour rate limit, ticks 2 and 3 must be skipped.
+	// Only 1 pending check should have been attempted.
+	if len(sink.events) != 1 {
+		t.Fatalf("expected exactly 1 event (the initial check), got %d: %v", len(sink.events), sink.events)
+	}
+}
+
+type rateLimitSource struct {
+	mu     sync.Mutex
+	times  []time.Time
+	cancel context.CancelFunc
+	err    error
+}
+
+func (*rateLimitSource) String() string { return "rateLimitSource" }
+
+func (s *rateLimitSource) List(context.Context, KubeClient, RolloutSink) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.times = append(s.times, time.Now())
+	if len(s.times) >= 2 {
+		s.cancel()
+	}
+	return "", s.err
+}
+
+func (*rateLimitSource) Watch(context.Context, KubeClient, string) (io.ReadCloser, error) {
+	return nil, nil
+}
+
+func (*rateLimitSource) Apply(context.Context, KubeClient, RolloutSink, string, json.RawMessage) error {
+	return nil
+}
+
+func TestKubeWatcherRunRateLimit(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	const rlDelay = 50 * time.Millisecond
+	src := &rateLimitSource{
+		cancel: cancel,
+		err:    &githubapi.StatusError{StatusCode: 429, RateLimited: true, RetryAfter: rlDelay},
+	}
+	watcher := NewKubeWatcher(nil, nil, src, time.Millisecond)
+	watcher.Run(ctx)
+
+	src.mu.Lock()
+	defer src.mu.Unlock()
+	if len(src.times) < 2 {
+		t.Fatalf("expected at least 2 list calls, got %d", len(src.times))
+	}
+	gap := src.times[1].Sub(src.times[0])
+	if gap < 35*time.Millisecond {
+		t.Fatalf("gap between calls = %v, want at least %v", gap, 35*time.Millisecond)
 	}
 }
 

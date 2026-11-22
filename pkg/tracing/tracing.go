@@ -435,6 +435,11 @@ func (t *transport) CloseIdleConnections() {
 	}
 }
 
+// Unwrap returns the underlying RoundTripper so callers can inspect or unwrap it.
+func (t *transport) Unwrap() http.RoundTripper {
+	return t.base
+}
+
 func originOnly(u *url.URL) string {
 	if u == nil {
 		return ""

@@ -108,7 +108,9 @@ type ownedHarness struct {
 func newOwnedHarness(t *testing.T, cfg Config, ingress *ownedIngress, ghBody string) *ownedHarness {
 	t.Helper()
 	cfg.RestateURL = ingress.serve(t)
-	cfg.GitHubAPIURL = ownedGitHub(t, ghBody)
+	if cfg.GitHubAPIURL == "" {
+		cfg.GitHubAPIURL = ownedGitHub(t, ghBody)
+	}
 	h := &ownedHarness{srv: NewRouterServer(fixedConfig(cfg), nil), ingress: ingress, bus: &recordingBus{}, disp: &mockOutboundDispatcher{}}
 	h.srv.SetEventBus(h.bus)
 	h.srv.SetDispatcher(h.disp)

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/azylman/aerial/pkg/githubapi"
 	"github.com/azylman/aerial/pkg/prwire"
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/pkg/strutil"
@@ -507,7 +508,7 @@ func (s *RouterServer) dispatchOwnedWorkflowRunImages(ctx context.Context, run w
 	}
 	if err != nil {
 		slog.ErrorContext(ctx, "[synapse] [dispatcher] error resolving images for workflow run", "run_id", run.ID, "attempt", run.Attempt, "repo", repo, "error", err)
-		if prNum > 0 {
+		if _, rateLimited := githubapi.RateLimitDelay(err); !rateLimited && prNum > 0 {
 			fact := ownedImageDeployFailedFact(repo, prNum, prBranch, headSHA, err.Error())
 			if rErr := s.sendOwnedPR(ctx, prwire.PRHandlerDeployAttemptFailed, prwire.PREvent{
 				Repo: repo, PRNumber: prNum, HeadSHA: headSHA, MergeSHA: headSHA, Banner: fact.Details, Facts: facts(fact),

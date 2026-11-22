@@ -10,6 +10,9 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
+
+	"github.com/azylman/aerial/pkg/tracing"
 )
 
 type fakeSource struct {
@@ -224,5 +227,140 @@ func TestIsRateLimited(t *testing.T) {
 				t.Fatalf("IsRateLimited() = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestRateLimitDelay(t *testing.T) {
+	t.Parallel()
+	baseNow := time.Unix(1700000000, 0)
+	tests := []struct {
+		name    string
+		status  int
+		headers map[string]string
+		nilResp bool
+		want    time.Duration
+	}{
+		{name: "nil response", nilResp: true, want: 0},
+		{name: "not rate limited 200", status: 200, want: 0},
+		{name: "not rate limited 403", status: 403, headers: map[string]string{"X-Ratelimit-Remaining": "100"}, want: 0},
+		{name: "retry-after takes precedence", status: 429, headers: map[string]string{"Retry-After": "45", "X-Ratelimit-Reset": "1700000200"}, want: 45 * time.Second},
+		{name: "retry-after invalid falls back to reset", status: 429, headers: map[string]string{"Retry-After": "abc", "X-Ratelimit-Reset": "1700000120"}, want: 120 * time.Second},
+		{name: "reset in future", status: 403, headers: map[string]string{"X-Ratelimit-Remaining": "0", "X-Ratelimit-Reset": "1700000090"}, want: 90 * time.Second},
+		{name: "reset in past defaults to 1 minute", status: 403, headers: map[string]string{"X-Ratelimit-Remaining": "0", "X-Ratelimit-Reset": "1699999900"}, want: time.Minute},
+		{name: "no headers on 429 defaults to 1 minute", status: 429, want: time.Minute},
+		{name: "delay capped at 1 hour", status: 429, headers: map[string]string{"Retry-After": "7200"}, want: time.Hour},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var resp *http.Response
+			if !tc.nilResp {
+				resp = &http.Response{StatusCode: tc.status, Header: http.Header{}}
+				for k, v := range tc.headers {
+					resp.Header.Set(k, v)
+				}
+			}
+			if got := RateLimitDelay(resp, baseNow); got != tc.want {
+				t.Fatalf("RateLimitDelay() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+type wrapperTransport struct {
+	inner http.RoundTripper
+}
+
+func (w *wrapperTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	return w.inner.RoundTrip(r)
+}
+
+func (w *wrapperTransport) Unwrap() http.RoundTripper {
+	return w.inner
+}
+
+func TestRateLimitResetAt(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		setReset   int64
+		wrapDepth  int
+		nilTrip    bool
+		wantActive bool
+	}{
+		{name: "nil roundtripper", nilTrip: true, wantActive: false},
+		{name: "unconfigured transport", setReset: 0, wrapDepth: 0, wantActive: false},
+		{name: "direct transport", setReset: 1700000500, wrapDepth: 0, wantActive: true},
+		{name: "wrapped 1 layer", setReset: 1700000500, wrapDepth: 1, wantActive: true},
+		{name: "wrapped 2 layers", setReset: 1700000500, wrapDepth: 2, wantActive: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if tc.nilTrip {
+				if got := RateLimitResetAt(nil); !got.IsZero() {
+					t.Fatalf("RateLimitResetAt(nil) = %v, want zero", got)
+				}
+				return
+			}
+			tr := &Transport{}
+			if tc.setReset > 0 {
+				tr.rateLimitResetUnix.Store(tc.setReset)
+			}
+			var rt http.RoundTripper = tr
+			for range tc.wrapDepth {
+				rt = &wrapperTransport{inner: rt}
+			}
+			got := RateLimitResetAt(rt)
+			if tc.wantActive {
+				if got.Unix() != tc.setReset {
+					t.Fatalf("RateLimitResetAt() = %v, want %v", got.Unix(), tc.setReset)
+				}
+			} else {
+				if !got.IsZero() {
+					t.Fatalf("RateLimitResetAt() = %v, want zero", got)
+				}
+			}
+		})
+	}
+}
+
+func TestTransportRateLimitState(t *testing.T) {
+	t.Parallel()
+	api, _, _ := newTransportServers(t, 200, "5000")
+	apiURL, _ := url.Parse(api.URL)
+	tr := NewTransport(nil, &fakeSource{value: "tok", source: "app"}, apiURL.Host)
+	tr.rateLimitResetUnix.Store(time.Now().Add(time.Minute).Unix())
+	if tr.RateLimitResetAt().IsZero() {
+		t.Fatal("expected active rate limit")
+	}
+	client := &http.Client{Transport: tr}
+	req, _ := http.NewRequest(http.MethodGet, api.URL+"/repos/o/r", http.NoBody)
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	resp.Body.Close()
+	if !tr.RateLimitResetAt().IsZero() {
+		t.Fatalf("RateLimitResetAt() = %v, want cleared to zero", tr.RateLimitResetAt())
+	}
+}
+
+func TestRateLimitResetAtWithTracing(t *testing.T) {
+	t.Parallel()
+	api, _, _ := newTransportServers(t, http.StatusTooManyRequests, "")
+	apiURL, _ := url.Parse(api.URL)
+	tr := NewTransport(nil, &fakeSource{value: "tok", source: "app"}, apiURL.Host)
+	client := tracing.Client(&http.Client{Transport: tr})
+
+	req, _ := http.NewRequest(http.MethodGet, api.URL+"/repos/o/r", http.NoBody)
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	resp.Body.Close()
+
+	if resetAt := RateLimitResetAt(client.Transport); resetAt.IsZero() {
+		t.Fatal("expected non-zero rate-limit reset time through tracing-wrapped transport")
 	}
 }

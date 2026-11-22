@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/azylman/aerial/pkg/githubapi"
 	"github.com/azylman/aerial/pkg/prwire"
 	"github.com/azylman/aerial/services/synapse/internal/ericlient"
 	"github.com/azylman/aerial/services/synapse/internal/kube"
@@ -251,6 +252,7 @@ func RecheckPendingRollouts(ctx context.Context, client KubeClient, sink Rollout
 
 // RunRolloutRechecks re-evaluates pending rollouts on every tick until ctx ends or ticks closes.
 func RunRolloutRechecks(ctx context.Context, client KubeClient, sink RolloutSink, ticks <-chan time.Time) {
+	var rateLimitUntil time.Time
 	for {
 		select {
 		case <-ctx.Done():
@@ -259,7 +261,13 @@ func RunRolloutRechecks(ctx context.Context, client KubeClient, sink RolloutSink
 			if !ok {
 				return
 			}
+			if time.Now().Before(rateLimitUntil) {
+				continue
+			}
 			if err := RecheckPendingRollouts(ctx, client, sink); err != nil && ctx.Err() == nil {
+				if rlDelay, ok := githubapi.RateLimitDelay(err); ok {
+					rateLimitUntil = time.Now().Add(rlDelay)
+				}
 				log.Printf("[synapse] [flux-watch] error re-checking pending rollouts: %v", err)
 			}
 		}
@@ -291,9 +299,13 @@ func (w *KubeWatcher) Run(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		log.Printf("[synapse] [flux-watch] error watching %s (retrying in %s): %v", w.source, delay, err)
+		wait := delay
+		if rlDelay, ok := githubapi.RateLimitDelay(err); ok && rlDelay > wait {
+			wait = rlDelay
+		}
+		log.Printf("[synapse] [flux-watch] error watching %s (retrying in %s): %v", w.source, wait, err)
 		select {
-		case <-time.After(delay):
+		case <-time.After(wait):
 			delay = ericlient.AdvanceBackoffDelay(delay, true)
 		case <-ctx.Done():
 			return
