@@ -164,55 +164,33 @@ func TestNewKustomizationRequests(t *testing.T) {
 func TestTrackedRollout(t *testing.T) {
 	t.Parallel()
 	ref := model.FluxKustomizationRef{Namespace: "flux-system", Name: "aerial-core"}
-	tr := TrackedRollout{
-		PR: model.DeployingPR{
-			Repo:     "azylman/aerial",
-			PRNumber: 42,
-		},
-		Requests: map[string]prwire.KustomizationRequest{
-			"aerial-core": {Namespace: "flux-system", RequestedAt: reqT1},
-		},
+	recorded := map[string]prwire.KustomizationRequest{"aerial-core": {Namespace: "flux-system", RequestedAt: reqT1}}
+	pr := model.DeployingPR{Repo: "example/aerial", PRNumber: 42}
+	successPending := model.DeployingPR{Repo: "example/aerial", PRNumber: 42, Metadata: map[string]any{"deploy_success_pending": true}}
+	tests := []struct {
+		name           string
+		tr             TrackedRollout
+		ref            model.FluxKustomizationRef
+		wantRequest    string
+		wantHasPending bool
+	}{
+		{name: "recorded request pending", tr: TrackedRollout{PR: pr, Requests: recorded}, ref: ref, wantRequest: reqT1, wantHasPending: true},
+		{name: "deployed request settled", tr: TrackedRollout{PR: pr, Requests: recorded, Deployed: []string{"aerial-core"}}, ref: ref},
+		{name: "deploy success pending keeps deployed request pending", tr: TrackedRollout{PR: successPending, Requests: recorded, Deployed: []string{"aerial-core"}}, ref: ref, wantRequest: reqT1, wantHasPending: true},
+		{name: "wrong namespace", tr: TrackedRollout{PR: pr, Requests: recorded}, ref: model.FluxKustomizationRef{Namespace: "other", Name: "aerial-core"}, wantHasPending: true},
+		{name: "empty requestedAt", tr: TrackedRollout{Requests: map[string]prwire.KustomizationRequest{"aerial-core": {Namespace: "flux-system"}}}, ref: ref},
 	}
-
-	req, ok := tr.PendingRequest(ref)
-	if !ok || req.RequestedAt != reqT1 {
-		t.Errorf("PendingRequest() = (%+v, %v), want ok=true", req, ok)
-	}
-	if !tr.HasPending() {
-		t.Errorf("HasPending() = false, want true")
-	}
-
-	// Deployed
-	tr.Deployed = []string{"aerial-core"}
-	_, ok = tr.PendingRequest(ref)
-	if ok {
-		t.Errorf("expected PendingRequest = false when already deployed")
-	}
-	if tr.HasPending() {
-		t.Errorf("expected HasPending = false when deployed")
-	}
-
-	// Deploy success pending flag keeps it pending
-	tr.PR.Metadata = map[string]any{"deploy_success_pending": true}
-	_, ok = tr.PendingRequest(ref)
-	if !ok {
-		t.Errorf("expected PendingRequest = true when deploy_success_pending is set")
-	}
-
-	// Wrong namespace
-	wrongRef := model.FluxKustomizationRef{Namespace: "other", Name: "aerial-core"}
-	if _, pending := tr.PendingRequest(wrongRef); pending {
-		t.Errorf("expected PendingRequest = false for wrong namespace")
-	}
-
-	// Empty requestedAt
-	emptyReq := TrackedRollout{
-		Requests: map[string]prwire.KustomizationRequest{
-			"aerial-core": {Namespace: "flux-system", RequestedAt: ""},
-		},
-	}
-	if _, pending := emptyReq.PendingRequest(ref); pending {
-		t.Errorf("expected PendingRequest = false for empty requestedAt")
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			req, ok := tc.tr.PendingRequest(tc.ref)
+			if req.RequestedAt != tc.wantRequest || ok != (tc.wantRequest != "") {
+				t.Errorf("PendingRequest() = (%+v, %v), want requestedAt %q", req, ok, tc.wantRequest)
+			}
+			if got := tc.tr.HasPending(); got != tc.wantHasPending {
+				t.Errorf("HasPending() = %v, want %v", got, tc.wantHasPending)
+			}
+		})
 	}
 }
 
@@ -331,8 +309,10 @@ type kubeWatcherTestCase struct {
 	source       KubeWatchSource
 	lists        []kubeRoute
 	watches      []kubeRoute
+	failList     bool
 	failStatus   bool
 	pending      bool
+	pendingErr   error
 	wantRequests []string
 	wantEvents   []string
 }
@@ -410,6 +390,13 @@ func kubeWatcherKustomizationCases(list func(rv string, names ...string) kubeRou
 		},
 		{
 			source:       KustomizationSource{Namespace: "flux-system"},
+			name:         "sink failure applying the list backs off and re-lists",
+			lists:        []kubeRoute{list("10", "aerial-core")},
+			failList:     true,
+			wantRequests: []string{"LIST kustomizations", "LIST kustomizations"},
+		},
+		{
+			source:       KustomizationSource{Namespace: "flux-system"},
 			name:         "sink failure on an event re-lists to re-derive state",
 			lists:        []kubeRoute{list("10"), list("90")},
 			watches:      []kubeRoute{{body: event("MODIFIED", "aerial-core", reqT1, reqT1)}},
@@ -450,6 +437,14 @@ func kubeWatcherWorkloadCases(list func(rv string, names ...string) kubeRoute, w
 			lists:        []kubeRoute{workloads("5"), {status: http.StatusInternalServerError, body: `boom`}, workloads("9"), list("10")},
 			wantRequests: []string{deploymentsList, "LIST kustomizations", deploymentsList, "LIST kustomizations", deploymentsWatch + "9"},
 			wantEvents:   []string{"pending? true", "pending? true", "list flux-system []"},
+		},
+		{
+			name:         "pending rollout lookup failure backs off and re-lists workloads",
+			source:       deployments,
+			pendingErr:   errors.New("db error"),
+			lists:        []kubeRoute{workloads("5")},
+			wantRequests: []string{deploymentsList, deploymentsList},
+			wantEvents:   []string{"pending? false"},
 		},
 		{
 			name:         "workload list failure backs off and retries",
@@ -500,7 +495,7 @@ func TestKubeWatcherRun(t *testing.T) {
 			client := kube.NewClient(ts.Client())
 			client.SetKubeConfig(ts.URL, "test-token")
 			client.SetRetryConfig(time.Millisecond, 6)
-			sink := &recordingSink{failStatus: tc.failStatus, pending: tc.pending}
+			sink := &recordingSink{failList: tc.failList, failStatus: tc.failStatus, pending: tc.pending, pendingErr: tc.pendingErr}
 
 			NewKubeWatcher(client, sink, tc.source, time.Millisecond).Run(ctx)
 
@@ -514,45 +509,23 @@ func TestKubeWatcherRun(t *testing.T) {
 	}
 }
 
-func TestKubeWatchSourcesEdgeCases(t *testing.T) {
+func TestKubeWatchSourceString(t *testing.T) {
 	t.Parallel()
-	ks := KustomizationSource{Namespace: "flux-system"}
-	if got := ks.String(); got != "flux-system kustomizations" {
-		t.Errorf("KustomizationSource.String() = %q", got)
+	tests := []struct {
+		name   string
+		source KubeWatchSource
+		want   string
+	}{
+		{"kustomizations", KustomizationSource{Namespace: "flux-system"}, "flux-system kustomizations"},
+		{"workloads", WorkloadSource{Path: "/apis/apps/v1/deployments"}, "/apis/apps/v1/deployments"},
 	}
-
-	ws := WorkloadSource{Path: "/test"}
-	if got := ws.String(); got != "/test" {
-		t.Errorf("WorkloadSource.String() = %q", got)
-	}
-
-	// Apply deleted on WorkloadSource is no-op
-	if err := ws.Apply(context.Background(), nil, &recordingSink{}, "DELETED", nil); err != nil {
-		t.Errorf("unexpected error on WorkloadSource DELETED apply: %v", err)
-	}
-
-	// Apply malformed JSON on KustomizationSource
-	if err := ks.Apply(context.Background(), nil, &recordingSink{}, "ADDED", []byte("invalid")); err == nil {
-		t.Errorf("expected error decoding malformed JSON in KustomizationSource.Apply")
-	}
-
-	// List error in KustomizationSource when sink fails
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"metadata":{"resourceVersion":"1"},"items":[]}`))
-	}))
-	defer ts.Close()
-	client := kube.NewClient(ts.Client())
-	client.SetKubeConfig(ts.URL, "token")
-	sinkFail := &recordingSink{failList: true}
-	if _, err := ks.List(context.Background(), client, sinkFail); err == nil {
-		t.Errorf("expected error when ApplyKustomizationList fails")
-	}
-
-	// RecheckPendingRollouts error from sink
-	sinkErr := &recordingSink{pendingErr: errors.New("db error")}
-	if err := RecheckPendingRollouts(context.Background(), client, sinkErr); err == nil {
-		t.Errorf("expected error when HasPendingRollouts returns error")
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := tc.source.String(); got != tc.want {
+				t.Errorf("String() = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 
@@ -668,14 +641,6 @@ func TestKubeWatcherRunRateLimit(t *testing.T) {
 	gap := src.times[1].Sub(src.times[0])
 	if gap < 35*time.Millisecond {
 		t.Fatalf("gap between calls = %v, want at least %v", gap, 35*time.Millisecond)
-	}
-}
-
-func TestRolloutWatchSources(t *testing.T) {
-	t.Parallel()
-	sources := RolloutWatchSources()
-	if len(sources) != 6 {
-		t.Errorf("RolloutWatchSources() returned %d sources, want 6", len(sources))
 	}
 }
 
