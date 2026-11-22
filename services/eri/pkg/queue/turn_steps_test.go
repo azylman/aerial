@@ -936,3 +936,73 @@ func TestRefreshBurstThreadSummary(t *testing.T) {
 		})
 	}
 }
+
+// liveTurn is what driving one turn through the TurnRunner step functions returned.
+type liveTurn struct {
+	started StartedTurn
+	prep    TurnPrep
+	kinds   []string
+	last    AttemptResult
+	outcome TurnOutcome
+	err     error
+}
+
+// runLiveTurn drives one turn through the TurnRunner step functions in the order executeTurn
+// journals them: record-started, prep, run-1..n chained by nextAttempt, record-outcome and the
+// post-turn steps. It runs without Restate and skips the backoff sleeps; a step error stops it.
+func runLiveTurn(ctx context.Context, subj runnerSubject, maxAttempts int, turnID string) liveTurn {
+	var lt liveTurn
+	if lt.started, lt.err = subj.recordStarted(ctx); lt.err != nil || len(lt.started.IDs) == 0 {
+		lt.outcome = OutcomeEmpty
+		return lt
+	}
+	tp := turnProgress{ids: lt.started.IDs}
+	if lt.prep, lt.err = subj.prep(ctx, turnID, lt.started.IDs); lt.err != nil {
+		return lt
+	}
+	tp.hookMetadata = lt.prep.HookMetadata
+	if decided, err := applyPrepDecision(lt.prep, &tp); err != nil || decided {
+		lt.outcome, lt.err = tp.outcome, err
+		return lt
+	}
+	in := subj.attemptInput(turnID, lt.started.IDs, lt.prep, lt.started.BaseRetry+1)
+	for {
+		res, err := subj.attempt(ctx, in)
+		lt.kinds, lt.last = append(lt.kinds, res.Kind), res
+		if err != nil {
+			lt.err = err
+			return lt
+		}
+		tp.attempted, tp.last = true, res
+		action, next, outcome, err := nextAttempt(in, res, maxAttempts)
+		if err != nil {
+			lt.err = err
+			return lt
+		}
+		if action == actionDone {
+			tp.outcome = outcome
+			break
+		}
+		in = next
+	}
+	lt.outcome = tp.outcome
+	if lt.err = subj.recordOutcome(ctx, tp.ids, outcomeSummary(tp)); lt.err != nil {
+		return lt
+	}
+	for _, step := range subj.afterSteps(tp) {
+		if lt.err = step.fn(ctx); lt.err != nil {
+			return lt
+		}
+	}
+	return lt
+}
+
+// runLiveBurst drives one burst turn of threadID over ids through the TurnRunner steps.
+func runLiveBurst(ctx context.Context, pool *WorkerPool, threadID, turnID string, ids ...string) liveTurn {
+	return runLiveTurn(ctx, burstRunner{steps: pool, threadID: threadID, ids: normalizeStepIDs(ids)}, pool.maxAttempts(), turnID)
+}
+
+// runLiveDispatch drives one dispatch turn through the TurnRunner steps.
+func runLiveDispatch(ctx context.Context, pool *WorkerPool, sessionKey, turnID, dispatchID string) liveTurn {
+	return runLiveTurn(ctx, dispatchRunner{steps: pool, sessionKey: sessionKey, dispatchID: dispatchID, ids: []string{dispatchID}}, pool.maxAttempts(), turnID)
+}
