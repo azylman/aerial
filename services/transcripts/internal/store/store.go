@@ -3,11 +3,9 @@ package store
 import (
 	"context"
 	"database/sql"
-	"database/sql/driver"
 	"errors"
 	"fmt"
 	"log"
-	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -127,25 +125,6 @@ func (s *Store) checkWriter() error {
 	return nil
 }
 
-// forUpdateClause keeps row locking on PostgreSQL while staying runnable on
-// SQLite hermetic fixtures, which reject FOR UPDATE.
-func forUpdateClause(db *sql.DB) string {
-	if isPostgresDriver(db.Driver()) {
-		return " FOR UPDATE"
-	}
-	return ""
-}
-
-// isPostgresDriver reports whether the database/sql driver is the pgx stdlib
-// bridge, mirroring the eri store check so hermetic SQLite fixtures take the
-// no-lock path while production PostgreSQL takes row and advisory locks.
-func isPostgresDriver(d driver.Driver) bool {
-	if d == nil {
-		return false
-	}
-	return strings.Contains(reflect.TypeOf(d).String(), "stdlib.Driver")
-}
-
 // ApplyBatch ingests one transcript step batch in a single transaction: it
 // locks the session summary row, applies decideBatch, and reports the outcome.
 // Stale batches commit nothing. Callers publish TranscriptsIndexedEvent after
@@ -169,7 +148,7 @@ func (s *Store) ApplyBatch(ctx context.Context, batch transcriptwire.TranscriptS
 		}
 	}()
 
-	cur, lockErr := lockSessionCursor(queryCtx, tx, s.db, agent, sessionID)
+	cur, lockErr := lockSessionCursor(queryCtx, tx, agent, sessionID)
 	if lockErr != nil {
 		return BatchOutcome{}, lockErr
 	}
@@ -209,19 +188,17 @@ func (s *Store) validatedBatchSession(batch transcriptwire.TranscriptStepBatch) 
 }
 
 // lockSessionCursor reads the indexed cursor for a session under a row lock.
-func lockSessionCursor(ctx context.Context, tx *sql.Tx, db *sql.DB, stack, sessionID string) (sessionCursor, error) {
+func lockSessionCursor(ctx context.Context, tx *sql.Tx, stack, sessionID string) (sessionCursor, error) {
 	var cur sessionCursor
-	var rawMtime any
+	var lastMtime sql.NullTime
 	var lastStep sql.NullInt64
 	var isSettled sql.NullBool
-	row := tx.QueryRowContext(ctx, `SELECT last_mtime, last_indexed_step, is_settled FROM session_summaries WHERE agent = $1 AND session_id = $2`+forUpdateClause(db), stack, sessionID)
-	switch scanErr := row.Scan(&rawMtime, &lastStep, &isSettled); {
+	row := tx.QueryRowContext(ctx, `SELECT last_mtime, last_indexed_step, is_settled FROM session_summaries WHERE agent = $1 AND session_id = $2 FOR UPDATE`, stack, sessionID)
+	switch scanErr := row.Scan(&lastMtime, &lastStep, &isSettled); {
 	case scanErr == nil:
 		cur.found = true
-		// any-typed scan plus ParseDBTime keeps NULL and driver-specific
-		// time encodings portable across PostgreSQL and SQLite fixtures.
-		if t, ok := ParseDBTime(rawMtime); ok {
-			cur.lastMtime = t
+		if lastMtime.Valid {
+			cur.lastMtime = lastMtime.Time
 		}
 		if lastStep.Valid {
 			cur.lastStep = int(lastStep.Int64)
@@ -362,7 +339,6 @@ func summaryLockKey(threadID string) string {
 // The release unlocks on a detached context with a short timeout so shutdown
 // cancellation cannot strand the lock; when the unlock itself fails the
 // connection is destroyed instead of returning a lock-holding session to the pool.
-// Non-PostgreSQL drivers (SQLite hermetic fixtures) yield a no-op release.
 func (s *Store) AcquireThreadSummaryLock(ctx context.Context, threadID string) (func(), error) {
 	if err := s.checkDB(); err != nil {
 		return nil, err
@@ -373,9 +349,6 @@ func (s *Store) AcquireThreadSummaryLock(ctx context.Context, threadID string) (
 	conn, err := s.db.Conn(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("acquire summary lock conn: %w", err)
-	}
-	if !isPostgresDriver(s.db.Driver()) {
-		return func() { httpkit.CloseWarn(conn, "summary lock fixture conn") }, nil
 	}
 	if _, err := conn.ExecContext(ctx, `SELECT pg_advisory_lock(hashtext($1))`, summaryLockKey(threadID)); err != nil {
 		httpkit.CloseWarn(conn, "summary lock conn after failed lock")
@@ -452,9 +425,9 @@ func (s *Store) ListDueSessions(ctx context.Context, idleThreshold time.Duration
 	var out []SummaryCandidate
 	for rows.Next() {
 		var cand SummaryCandidate
-		var rawMtime any
+		var lastMtime sql.NullTime
 		var isSettled sql.NullBool
-		if err := rows.Scan(&cand.Agent, &cand.SessionID, &cand.ThreadID, &cand.Summary, &cand.LastIndexed, &cand.Watermark, &rawMtime, &isSettled); err != nil {
+		if err := rows.Scan(&cand.Agent, &cand.SessionID, &cand.ThreadID, &cand.Summary, &cand.LastIndexed, &cand.Watermark, &lastMtime, &isSettled); err != nil {
 			return nil, fmt.Errorf("scan summary candidate: %w", err)
 		}
 		cand.Agent = strings.TrimSpace(cand.Agent)
@@ -464,12 +437,8 @@ func (s *Store) ListDueSessions(ctx context.Context, idleThreshold time.Duration
 		if cand.SessionID == "" {
 			continue
 		}
-		var lastMtime time.Time
-		if t, ok := ParseDBTime(rawMtime); ok {
-			lastMtime = t
-		}
 		settled := isSettled.Valid && isSettled.Bool
-		if !settled && !lastMtime.IsZero() && lastMtime.After(cutoff) {
+		if !settled && lastMtime.Valid && !lastMtime.Time.IsZero() && lastMtime.Time.After(cutoff) {
 			continue
 		}
 		out = append(out, cand)
