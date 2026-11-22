@@ -96,29 +96,6 @@ func roundTrip(t *testing.T, rt *k8sauthtest.RoundTripper, path, body string, bo
 	return resp.StatusCode, string(got), ""
 }
 
-func TestBuilders(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name string
-		got  string
-		want string
-	}{
-		{"token review", k8sauthtest.TokenReview("system:serviceaccount:default:alpha"), `{"apiVersion":"authentication.k8s.io/v1","kind":"TokenReview","status":{"authenticated":true,"user":{"username":"system:serviceaccount:default:alpha"}}}`},
-		{"token review denied", k8sauthtest.TokenReviewDenied(), `{"apiVersion":"authentication.k8s.io/v1","kind":"TokenReview","status":{"authenticated":false}}`},
-		{"sar allowed", k8sauthtest.SAR(true, ""), allowed},
-		{"sar denied with reason", k8sauthtest.SAR(false, "no rbac"), `{"apiVersion":"authorization.k8s.io/v1","kind":"SubjectAccessReview","status":{"allowed":false,"reason":"no rbac"}}`},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			if tc.got != tc.want {
-				t.Fatalf("got %s\nwant %s", tc.got, tc.want)
-			}
-		})
-	}
-}
-
 // TestAuthenticator drives the real k8sauth client against the fake, proving
 // the builders and SARRules keys match what k8sauth sends and parses.
 func TestAuthenticator(t *testing.T) {

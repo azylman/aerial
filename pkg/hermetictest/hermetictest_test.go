@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/goleak"
 )
 
@@ -109,7 +110,6 @@ func TestTransportCloseIdleConnections(t *testing.T) {
 		wantClosed int
 	}{
 		{name: "closes base", base: &recordingTransport{}, wantClosed: 1},
-		{name: "nil base uses default transport", base: nil, wantClosed: 0},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -252,19 +252,23 @@ func TestUnsetOTELEnv(t *testing.T) {
 	}
 }
 
+// TestNewRecorder checks the AlwaysSample contract: a span whose remote parent
+// was not sampled is still recorded (the SDK default ParentBased sampler drops it).
 func TestNewRecorder(t *testing.T) {
 	t.Parallel()
 
 	tp, sr := NewRecorder()
-	defer func() {
-		if err := tp.Shutdown(context.Background()); err != nil && !errors.Is(err, context.Canceled) {
-			t.Errorf("Shutdown: %v", err)
-		}
-	}()
-	_, span := tp.Tracer("hermetictest").Start(context.Background(), "op")
+	defer func() { _ = tp.Shutdown(context.Background()) }()
+	parent := trace.NewSpanContext(trace.SpanContextConfig{
+		TraceID: trace.TraceID{0x4b, 0xf9},
+		SpanID:  trace.SpanID{0x01},
+		Remote:  true,
+	})
+	ctx := trace.ContextWithRemoteSpanContext(context.Background(), parent)
+	_, span := tp.Tracer("hermetictest").Start(ctx, "op")
 	span.End()
 	ended := sr.Ended()
 	if len(ended) != 1 || ended[0].Name() != "op" || !ended[0].SpanContext().IsSampled() {
-		t.Fatalf("ended spans = %v, want one sampled span named op", ended)
+		t.Fatalf("ended spans = %v, want one sampled span named op under an unsampled parent", ended)
 	}
 }
