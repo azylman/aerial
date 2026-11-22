@@ -57,7 +57,7 @@ func (s *Store) RetryActionChunk(ctx context.Context, req RetryActionChunkReques
 		if c.StallNudges >= 2147483647 {
 			return nil, fmt.Errorf("%w: generation exhausted", ErrBuildConflict)
 		}
-		const reset = `UPDATE vanadis_chunks SET instructions = COALESCE($2, instructions), status = 'pending', stall_nudges = stall_nudges + 1, started_at = NULL, completed_at = NULL, ci_fail_count = 0, ci_checks = '{}'::jsonb, rollout_state = '{}'::jsonb, banner = '', merge_awakeable_id = '', deploy_awakeable_id = '', updated_at = CURRENT_TIMESTAMP WHERE id = $1;`
+		const reset = `UPDATE vanadis_chunks SET instructions = COALESCE($2, instructions), status = 'pending', stall_nudges = stall_nudges + 1, repo = '', pr_number = NULL, started_at = NULL, completed_at = NULL, ci_fail_count = 0, ci_checks = '{}'::jsonb, rollout_state = '{}'::jsonb, banner = '', merge_awakeable_id = '', deploy_awakeable_id = '', updated_at = CURRENT_TIMESTAMP WHERE id = $1;`
 		if _, err := tx.Exec(ctx, reset, c.ID, req.ReplacementInstructions); err != nil {
 			return nil, err
 		}
@@ -121,7 +121,7 @@ func retryActionCandidate(b model.VanadisBuild, chunks []model.VanadisChunk, req
 	conflict := func() (model.VanadisChunk, bool, error) {
 		return model.VanadisChunk{}, false, fmt.Errorf("%w: action retry preconditions changed", ErrBuildConflict)
 	}
-	if c.BuildID != req.BuildID || c.Mode != chunkModeAction || c.PRNumber != 0 || c.StallNudges < 0 {
+	if c.BuildID != req.BuildID || c.Mode != chunkModeAction || c.StallNudges < 0 {
 		return conflict()
 	}
 	previous := c
