@@ -37,6 +37,10 @@ type repo struct {
 	byDir   map[string]*module
 	pkgs    map[string]*goPackage
 	prefix  string // longest import-path prefix shared by every repo module
+	// testdataEmbeds lists non-test files outside testutil packages whose
+	// //go:embed directives mention testdata, which would let a test-only
+	// change reach a binary.
+	testdataEmbeds []string
 }
 
 func loadRepo(root string) (*repo, error) {
@@ -186,6 +190,9 @@ func (r *repo) addFile(fset *token.FileSet, m *module, file, rel string) error {
 		return fmt.Errorf("parse %s: %w", rel, err)
 	}
 	dir := path.Dir(rel)
+	if !strings.HasSuffix(rel, "_test.go") && path.Base(dir) != "testutil" && !strings.HasPrefix(rel, toolDir) && embedsTestdata(src) {
+		r.testdataEmbeds = append(r.testdataEmbeds, rel)
+	}
 	pkg := r.pkgs[dir]
 	if pkg == nil {
 		pkg = &goPackage{dir: dir, mod: m}
@@ -203,6 +210,16 @@ func (r *repo) addFile(fset *token.FileSet, m *module, file, rel string) error {
 		}
 	}
 	return nil
+}
+
+// embedsTestdata reports whether any //go:embed directive in src names a testdata path.
+func embedsTestdata(src []byte) bool {
+	for line := range strings.SplitSeq(string(src), "\n") {
+		if rest, ok := strings.CutPrefix(strings.TrimSpace(line), "//go:embed"); ok && strings.Contains(rest, "testdata") {
+			return true
+		}
+	}
+	return false
 }
 
 // resolve maps an import seen while building main to a repo package dir.
