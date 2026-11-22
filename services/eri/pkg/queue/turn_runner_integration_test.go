@@ -720,13 +720,21 @@ func (e *itEnv) row(id string) (itRow, bool) {
 	return itRow{status: m.Status, errSub: m.ErrorMessage, reply: m.ResponseText, retry: m.RetryCount, restart: m.RestartCount}, true
 }
 
-// idle: every expected row reached its final status and the key is quiescent.
+// idle: every expected row reached its final status, every expected OnTurnDone arrived and the
+// key is quiescent. A runner completes a few ms before Restate creates the OnTurnDone it sent
+// (cross-partition send), so quiescence alone can pass in that window.
 func (e *itEnv) idle() bool {
 	for id, want := range e.tc.wantRows {
 		got, _ := e.row(id)
 		if got.status != want.status {
 			return false
 		}
+	}
+	e.mu.Lock()
+	done := len(e.doneOrder)
+	e.mu.Unlock()
+	if done < len(e.tc.wantDone) {
+		return false
 	}
 	return e.quiescent()
 }
