@@ -89,6 +89,7 @@ type generateEmbeddingTestCase struct {
 	retryDelay    time.Duration
 	emptyBaseURL  bool
 	nilHTTPClient bool
+	rt            http.RoundTripper
 	cancelInDelay bool
 	handlerStatus int
 	handlerBody   string
@@ -149,10 +150,13 @@ func runGenerateEmbeddingCase(t *testing.T, tc generateEmbeddingTestCase) {
 			QueryPrefix: tc.queryPrefix,
 		}
 	})
-	if !tc.nilHTTPClient {
-		client.SetHTTPClient(server.Client())
-	} else {
+	switch {
+	case tc.rt != nil:
+		client.SetHTTPClient(&http.Client{Transport: tc.rt})
+	case tc.nilHTTPClient:
 		client.SetHTTPClient(nil)
+	default:
+		client.SetHTTPClient(server.Client())
 	}
 	client.SetRetryDelay(tc.retryDelay)
 
@@ -300,6 +304,13 @@ func TestGenerateEmbedding_TableDriven(t *testing.T) {
 			wantAttempts:  1,
 		},
 		{
+			name:          "transport error surfaces as request error",
+			text:          "test prompt",
+			maxRetries:    1,
+			rt:            errRoundTripper{},
+			wantErrSubstr: "request error",
+		},
+		{
 			name:          "unconfigured base URL fails fast with zero network IO",
 			text:          "test prompt",
 			emptyBaseURL:  true,
@@ -312,43 +323,6 @@ func TestGenerateEmbedding_TableDriven(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			runGenerateEmbeddingCase(t, tc)
-		})
-	}
-}
-
-func TestGenerateEmbedding_NetworkError_TableDriven(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name          string
-		baseURL       string
-		maxRetries    int
-		wantErrSubstr string
-	}{
-		{
-			name:          "unreachable connection refused",
-			baseURL:       "http://127.0.0.1:59999",
-			maxRetries:    1,
-			wantErrSubstr: "request error",
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-
-			client := NewDynamicClient(func() Config {
-				return Config{
-					BaseURL: tc.baseURL,
-				}
-			})
-			client.SetHTTPClient(&http.Client{Transport: errRoundTripper{}})
-			client.SetRetryDelay(0)
-
-			_, err := client.GenerateEmbedding(context.Background(), "test prompt", false, tc.maxRetries)
-			if err == nil || !strings.Contains(err.Error(), tc.wantErrSubstr) {
-				t.Fatalf("GenerateEmbedding() error = %v, want substring %q", err, tc.wantErrSubstr)
-			}
 		})
 	}
 }
