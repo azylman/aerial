@@ -1,6 +1,7 @@
 package pubsub
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -8,7 +9,9 @@ import (
 	"maps"
 	"net"
 	"os"
+	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -174,35 +177,182 @@ func spanAttrs(span sdktrace.ReadOnlySpan) map[string]string {
 	return attrs
 }
 
-type publishStep struct {
-	subject string
-	msgID   string
-	payload string
+// pubSpan is the expected producer span for one publish of subject; an empty msgID omits the
+// message id attribute.
+func pubSpan(key, parent, subject, msgID string) spanShape {
+	attrs := map[string]string{
+		"messaging.system": "nats", "messaging.operation.type": "send", "messaging.operation.name": "publish", "messaging.destination.name": subject,
+	}
+	if msgID != "" {
+		attrs["messaging.message.id"] = msgID
+	}
+	return spanShape{key: key, name: subject + " publish", kind: trace.SpanKindProducer, parent: parent, attrs: attrs}
+}
+
+// procSpan is the expected consumer span for one delivery of subject; an empty group or msgID
+// omits that attribute.
+func procSpan(key, parent, subject, group, msgID string, delivered int) spanShape {
+	attrs := map[string]string{
+		"messaging.system": "nats", "messaging.operation.type": "process", "messaging.destination.name": subject,
+		"messaging.nats.message.delivery_count": strconv.Itoa(delivered),
+	}
+	if group != "" {
+		attrs["messaging.consumer.group.name"] = group
+	}
+	if msgID != "" {
+		attrs["messaging.message.id"] = msgID
+	}
+	return spanShape{key: key, name: subject + " process", kind: trace.SpanKindConsumer, parent: parent, attrs: attrs}
+}
+
+// failed marks the expected span as ended with an error status.
+func (s spanShape) failed() spanShape {
+	s.status = codes.Error
+	return s
+}
+
+// memBusStep publishes msgID (with an optional initial snooze sequence header) to the row's
+// subject, or, with unsub set, unsubscribes the consumer at index consumer.
+type memBusStep struct {
+	msgID    string
+	seq      string
+	unsub    bool
+	consumer int
+}
+
+// memDelivery is what consumer (its index in subscription order) saw on one delivery. Generated
+// "msg-<UnixNano>" ids are recorded as "msg-N".
+type memDelivery struct {
+	consumer  int
+	msgID     string
+	seq       string
+	delivered uint64
+}
+
+// memSettlement scripts how handlers settle the bus-wide n-th delivery: the first fail
+// deliveries return an error, the next nak call NakWithDelay(0), the next snooze call
+// Snooze(snoozeDelay); later deliveries Term when term is set and otherwise return nil so the
+// bus auto-acks. Rows with a script publish one message.
+type memSettlement struct {
+	fail, nak, snooze int
+	snoozeDelay       time.Duration
+	term              bool
+}
+
+var memGeneratedMsgID = regexp.MustCompile(`^msg-\d{10,}`)
+
+// memDeliveryRecorder hands out per-consumer handlers that record every delivery and settle
+// it per script.
+type memDeliveryRecorder struct {
+	script memSettlement
+	calls  atomic.Int64
+	ch     chan memDelivery
+}
+
+func newMemDeliveryRecorder(script memSettlement) *memDeliveryRecorder {
+	return &memDeliveryRecorder{script: script, ch: make(chan memDelivery, 64)}
+}
+
+func (r *memDeliveryRecorder) handler(consumer int) Handler {
+	return func(_ context.Context, msg Message) error {
+		n := int(r.calls.Add(1))
+		msgID := memGeneratedMsgID.ReplaceAllString(msg.Header().Get(HeaderMsgID), "msg-N")
+		r.ch <- memDelivery{consumer: consumer, msgID: msgID, seq: msg.Header().Get(HeaderSnoozeSeq), delivered: msg.NumDelivered()}
+		s := r.script
+		switch {
+		case n <= s.fail:
+			return errors.New("transient failure")
+		case n <= s.fail+s.nak:
+			return msg.NakWithDelay(0)
+		case n <= s.fail+s.nak+s.snooze:
+			return msg.Snooze(s.snoozeDelay)
+		case s.term:
+			return msg.Term()
+		}
+		return nil
+	}
+}
+
+// run applies steps to bus, waits for len(want) deliveries and compares them, sorted by
+// consumer, msg id and delivery count, with want. A delivery already waiting beyond want fails.
+func (r *memDeliveryRecorder) run(t *testing.T, bus *MemoryBus, subject string, subs []Subscription, steps []memBusStep, want []memDelivery) {
+	t.Helper()
+	for _, step := range steps {
+		if step.unsub {
+			if err := subs[step.consumer].Unsubscribe(); err != nil {
+				t.Fatalf("Unsubscribe(%d): %v", step.consumer, err)
+			}
+			continue
+		}
+		header := nats.Header{}
+		if step.seq != "" {
+			header.Set(HeaderSnoozeSeq, step.seq)
+		}
+		if err := bus.PublishWithHeader(context.Background(), subject, step.msgID, []byte("payload"), header); err != nil {
+			t.Fatalf("PublishWithHeader(%q): %v", step.msgID, err)
+		}
+	}
+	deadline := time.NewTimer(10 * time.Second)
+	defer deadline.Stop()
+	got := []memDelivery{}
+	for len(got) < len(want) {
+		select {
+		case d := <-r.ch:
+			got = append(got, d)
+		case <-deadline.C:
+			t.Fatalf("received %+v, want %+v", got, want)
+		}
+	}
+	select {
+	case d := <-r.ch:
+		t.Errorf("unexpected extra delivery %+v", d)
+	default:
+	}
+	slices.SortFunc(got, func(a, b memDelivery) int {
+		return cmp.Or(cmp.Compare(a.consumer, b.consumer), cmp.Compare(a.msgID, b.msgID), cmp.Compare(a.delivered, b.delivered))
+	})
+	if !slices.Equal(got, want) {
+		t.Errorf("deliveries = %+v, want %+v", got, want)
+	}
 }
 
 func TestMemoryBus_Subscribe(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name        string
-		pattern     string
-		durables    []string
-		steps       []publishStep
-		wantHandled int
+		name     string
+		pattern  string
+		subject  string
+		durables []string
+		steps    []memBusStep
+		want     []memDelivery
 	}{
 		{
-			name:        "fan-out delivers to all distinct durable subscribers",
-			pattern:     "aerial.events.>",
-			durables:    []string{"haro-events", "coven-events"},
-			steps:       []publishStep{{subject: "aerial.events.device.created", msgID: "evt-1", payload: "data1"}},
-			wantHandled: 2,
+			name: "fan-out delivers once to each distinct durable", pattern: "aerial.events.>", subject: "aerial.events.device.created",
+			durables: []string{"haro-events", "coven-events"}, steps: []memBusStep{{msgID: "evt-1"}},
+			want: []memDelivery{{0, "evt-1", "", 1}, {1, "evt-1", "", 1}},
 		},
 		{
-			name:        "filters out non-matching subjects",
-			pattern:     "aerial.turn.>",
-			durables:    []string{"coven-turns"},
-			steps:       []publishStep{{subject: "aerial.dispatch.completed", msgID: "evt-2", payload: "data2"}},
-			wantHandled: 0,
+			name: "non-matching subject is filtered out", pattern: "aerial.turn.>", subject: "aerial.dispatch.completed",
+			durables: []string{"coven-turns"}, steps: []memBusStep{{msgID: "evt-2"}}, want: []memDelivery{},
+		},
+		{
+			name: "empty durable subscribes directly", pattern: "aerial.events.nodur", subject: "aerial.events.nodur",
+			durables: []string{""}, steps: []memBusStep{{msgID: "m-nodur"}}, want: []memDelivery{{0, "m-nodur", "", 1}},
+		},
+		{
+			name: "duplicate msg id inside the window is dropped", pattern: "aerial.events.dedup", subject: "aerial.events.dedup",
+			durables: []string{"dedup-sub"}, steps: []memBusStep{{msgID: "dup-1"}, {msgID: "dup-1"}}, want: []memDelivery{{0, "dup-1", "", 1}},
+		},
+		{
+			name: "unsubscribed durable gets nothing more", pattern: "aerial.events.unsub", subject: "aerial.events.unsub",
+			durables: []string{"unsub-durable"}, steps: []memBusStep{{msgID: "msg-1"}, {unsub: true}, {msgID: "msg-2"}},
+			want: []memDelivery{{0, "msg-1", "", 1}},
+		},
+		{
+			name: "subscribers sharing a durable take turns", pattern: "aerial.events.shared", subject: "aerial.events.shared",
+			durables: []string{"shared-durable", "shared-durable"}, steps: []memBusStep{{msgID: "m1"}, {msgID: "m2"}},
+			want: []memDelivery{{0, "m1", "", 1}, {1, "m2", "", 1}},
 		},
 	}
 
@@ -212,14 +362,16 @@ func TestMemoryBus_Subscribe(t *testing.T) {
 			bus := NewMemoryBus()
 			defer bus.Close()
 
-			counter := newHandledCounter(tc.wantHandled)
-			for _, d := range tc.durables {
-				if _, err := bus.Subscribe(context.Background(), tc.pattern, d, counter.handle); err != nil {
+			rec := newMemDeliveryRecorder(memSettlement{})
+			subs := make([]Subscription, len(tc.durables))
+			for i, d := range tc.durables {
+				sub, err := bus.Subscribe(context.Background(), tc.pattern, d, rec.handler(i))
+				if err != nil {
 					t.Fatalf("Subscribe failed: %v", err)
 				}
+				subs[i] = sub
 			}
-			publishSteps(t, bus, tc.steps)
-			counter.assertHandled(t, tc.wantHandled)
+			rec.run(t, bus, tc.subject, subs, tc.steps, tc.want)
 		})
 	}
 }
@@ -228,27 +380,49 @@ func TestMemoryBus_ConsumeQueue(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name         string
-		pattern      string
-		queueName    string
-		numConsumers int
-		steps        []publishStep
-		wantHandled  int
+		name      string
+		consumers int
+		script    memSettlement
+		steps     []memBusStep
+		want      []memDelivery
 	}{
 		{
-			name:         "competing consumers balance messages across workers without duplicates",
-			pattern:      "aerial.jobs.>",
-			queueName:    "control-workers",
-			numConsumers: 3,
-			steps: []publishStep{
-				{subject: "aerial.jobs.sync", msgID: "job-1", payload: "p1"},
-				{subject: "aerial.jobs.sync", msgID: "job-2", payload: "p2"},
-				{subject: "aerial.jobs.sync", msgID: "job-3", payload: "p3"},
-				{subject: "aerial.jobs.sync", msgID: "job-4", payload: "p4"},
-				{subject: "aerial.jobs.sync", msgID: "job-5", payload: "p5"},
-				{subject: "aerial.jobs.sync", msgID: "job-6", payload: "p6"},
-			},
-			wantHandled: 6,
+			name: "competing consumers take turns without duplicates", consumers: 3,
+			steps: []memBusStep{{msgID: "job-1"}, {msgID: "job-2"}, {msgID: "job-3"}, {msgID: "job-4"}, {msgID: "job-5"}, {msgID: "job-6"}},
+			want:  []memDelivery{{0, "job-1", "", 1}, {0, "job-4", "", 1}, {1, "job-2", "", 1}, {1, "job-5", "", 1}, {2, "job-3", "", 1}, {2, "job-6", "", 1}},
+		},
+		{
+			name: "unsubscribing one consumer leaves the others serving", consumers: 2,
+			steps: []memBusStep{{msgID: "m1"}, {msgID: "m2"}, {unsub: true, consumer: 0}, {msgID: "m3"}},
+			want:  []memDelivery{{0, "m1", "", 1}, {1, "m2", "", 1}, {1, "m3", "", 1}},
+		},
+		{
+			name: "handler error redelivers with a higher delivery count", consumers: 1, script: memSettlement{fail: 1},
+			steps: []memBusStep{{msgID: "fail-1"}}, want: []memDelivery{{0, "fail-1", "", 1}, {0, "fail-1", "", 2}},
+		},
+		{
+			name: "nak redelivers and term ends the message", consumers: 1, script: memSettlement{nak: 1, term: true},
+			steps: []memBusStep{{msgID: "job-term-1"}}, want: []memDelivery{{0, "job-term-1", "", 1}, {0, "job-term-1", "", 2}},
+		},
+		{
+			name: "snooze rotates the msg id and resets the delivery count", consumers: 1, script: memSettlement{snooze: 1},
+			steps: []memBusStep{{msgID: "job-42"}}, want: []memDelivery{{0, "job-42", "", 1}, {0, "job-42:snooze:1", "1", 1}},
+		},
+		{
+			name: "consecutive snoozes advance the suffix", consumers: 1, script: memSettlement{snooze: 3}, steps: []memBusStep{{msgID: "job-99"}},
+			want: []memDelivery{{0, "job-99", "", 1}, {0, "job-99:snooze:1", "1", 1}, {0, "job-99:snooze:2", "2", 1}, {0, "job-99:snooze:3", "3", 1}},
+		},
+		{
+			name: "re-snooze increments an existing snooze suffix", consumers: 1, script: memSettlement{snooze: 1},
+			steps: []memBusStep{{msgID: "job-abc:snooze:5", seq: "5"}}, want: []memDelivery{{0, "job-abc:snooze:5", "5", 1}, {0, "job-abc:snooze:6", "6", 1}},
+		},
+		{
+			name: "delayed snooze republishes after the delay", consumers: 1, script: memSettlement{snooze: 1, snoozeDelay: time.Millisecond},
+			steps: []memBusStep{{msgID: "job-delay-1"}}, want: []memDelivery{{0, "job-delay-1", "", 1}, {0, "job-delay-1:snooze:1", "1", 1}},
+		},
+		{
+			name: "snooze without a msg id generates one", consumers: 1, script: memSettlement{snooze: 1},
+			steps: []memBusStep{{}}, want: []memDelivery{{0, "", "", 1}, {0, "msg-N:snooze:1", "1", 1}},
 		},
 	}
 
@@ -258,169 +432,55 @@ func TestMemoryBus_ConsumeQueue(t *testing.T) {
 			bus := NewMemoryBus()
 			defer bus.Close()
 
-			counter := newHandledCounter(tc.wantHandled)
-			for range tc.numConsumers {
-				if _, err := bus.ConsumeQueue(context.Background(), tc.pattern, tc.queueName, counter.handle); err != nil {
+			rec := newMemDeliveryRecorder(tc.script)
+			subs := make([]Subscription, tc.consumers)
+			for i := range subs {
+				sub, err := bus.ConsumeQueue(context.Background(), "aerial.jobs.>", "workers", rec.handler(i))
+				if err != nil {
 					t.Fatalf("ConsumeQueue failed: %v", err)
 				}
+				subs[i] = sub
 			}
-			publishSteps(t, bus, tc.steps)
-			counter.assertHandled(t, tc.wantHandled)
+			rec.run(t, bus, "aerial.jobs.work", subs, tc.steps, tc.want)
 		})
 	}
 }
 
-// handledCounter is a Handler that counts deliveries and lets the test block
-// until the expected number of deliveries has arrived.
-type handledCounter struct {
-	total atomic.Int64
-	wg    sync.WaitGroup
-}
-
-func newHandledCounter(want int) *handledCounter {
-	c := &handledCounter{}
-	c.wg.Add(want)
-	return c
-}
-
-func (c *handledCounter) handle(context.Context, Message) error {
-	c.total.Add(1)
-	c.wg.Done()
-	return nil
-}
-
-func (c *handledCounter) assertHandled(t *testing.T, want int) {
-	t.Helper()
-	c.wg.Wait()
-	if got := int(c.total.Load()); got != want {
-		t.Errorf("handled %d messages, want %d", got, want)
-	}
-}
-
-func publishSteps(t *testing.T, bus Bus, steps []publishStep) {
-	t.Helper()
-	for _, step := range steps {
-		if err := bus.Publish(context.Background(), step.subject, step.msgID, step.payload); err != nil {
-			t.Fatalf("Publish failed: %v", err)
-		}
-	}
-}
-
-func TestSnooze_RotatesMsgIDAndResetsAttempts(t *testing.T) {
+func TestMessage_SettledSettlementIsNoop(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name           string
-		initialMsgID   string
-		initialSeq     string
-		snoozeRounds   int
-		wantFinalMsgID string
-		wantFinalSeq   string
-		wantDelivered  uint64
-		wantAcks       int
+		name string
+		msg  Message
 	}{
-		{
-			name:           "single snooze from clean base id rotates suffix and keeps delivered 1",
-			initialMsgID:   "job-42",
-			initialSeq:     "",
-			snoozeRounds:   1,
-			wantFinalMsgID: "job-42:snooze:1",
-			wantFinalSeq:   "1",
-			wantDelivered:  1,
-			wantAcks:       1,
-		},
-		{
-			name:           "multiple consecutive snoozes monotonically rotate generation suffix",
-			initialMsgID:   "job-99",
-			initialSeq:     "",
-			snoozeRounds:   3,
-			wantFinalMsgID: "job-99:snooze:3",
-			wantFinalSeq:   "3",
-			wantDelivered:  1,
-			wantAcks:       3,
-		},
-		{
-			name:           "re-snooze of message that already had snooze sequence increments it",
-			initialMsgID:   "job-abc:snooze:5",
-			initialSeq:     "5",
-			snoozeRounds:   1,
-			wantFinalMsgID: "job-abc:snooze:6",
-			wantFinalSeq:   "6",
-			wantDelivered:  1,
-			wantAcks:       1,
-		},
+		{name: "memory message", msg: &memMessage{bus: NewMemoryBus(), subject: "aerial.jobs.settled", data: []byte("d"), settled: true}},
+		{name: "jetstream message", msg: &jsMessage{
+			raw:     &fakeMsg{subject: "aerial.jobs.jsmsg", data: []byte("raw"), header: nats.Header{}},
+			bus:     newJetStreamBusWithContext(nil, &mockJetStream{}),
+			settled: true,
+		}},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-
-			bus := NewMemoryBus()
-			defer bus.Close()
-
-			var wg sync.WaitGroup
-			wg.Add(tc.snoozeRounds + 1)
-
-			var mu sync.Mutex
-			currentRound := 0
-			ackCount := 0
-			var finalMsgID string
-			var finalSeq string
-			var finalDelivered uint64
-
-			_, err := bus.ConsumeQueue(context.Background(), "aerial.jobs.snooze", "snooze-workers", func(ctx context.Context, msg Message) error {
-				mu.Lock()
-				currentRound++
-				round := currentRound
-				mu.Unlock()
-
-				wg.Done()
-
-				if round <= tc.snoozeRounds {
-					mu.Lock()
-					ackCount++
-					mu.Unlock()
-					return msg.Snooze(0)
-				}
-
-				mu.Lock()
-				finalMsgID = msg.Header().Get(HeaderMsgID)
-				finalSeq = msg.Header().Get(HeaderSnoozeSeq)
-				finalDelivered = msg.NumDelivered()
-				ackCount++
-				mu.Unlock()
-				return msg.Ack()
-			})
-			if err != nil {
-				t.Fatalf("ConsumeQueue failed: %v", err)
+			if err := tc.msg.Ack(); err != nil {
+				t.Errorf("Ack = %v, want nil", err)
 			}
-
-			initialHeader := nats.Header{}
-			if tc.initialSeq != "" {
-				initialHeader.Set(HeaderSnoozeSeq, tc.initialSeq)
+			if err := tc.msg.NakWithDelay(0); err != nil {
+				t.Errorf("NakWithDelay = %v, want nil", err)
 			}
-
-			err = bus.PublishWithHeader(context.Background(), "aerial.jobs.snooze", tc.initialMsgID, []byte("payload"), initialHeader)
-			if err != nil {
-				t.Fatalf("PublishWithHeader failed: %v", err)
+			if err := tc.msg.Term(); err != nil {
+				t.Errorf("Term = %v, want nil", err)
 			}
-
-			wg.Wait()
-
-			mu.Lock()
-			defer mu.Unlock()
-
-			if finalMsgID != tc.wantFinalMsgID {
-				t.Errorf("final msg ID = %q, want %q", finalMsgID, tc.wantFinalMsgID)
+			if err := tc.msg.Snooze(0); err != nil {
+				t.Errorf("Snooze = %v, want nil", err)
 			}
-			if finalSeq != tc.wantFinalSeq {
-				t.Errorf("final snooze seq = %q, want %q", finalSeq, tc.wantFinalSeq)
+			if err := tc.msg.InProgress(); err != nil {
+				t.Errorf("InProgress = %v, want nil", err)
 			}
-			if finalDelivered != tc.wantDelivered {
-				t.Errorf("final delivered = %d, want %d", finalDelivered, tc.wantDelivered)
-			}
-			if ackCount != tc.wantAcks+1 {
-				t.Errorf("ack count = %d, want %d", ackCount, tc.wantAcks+1)
+			if tc.msg.Header() == nil {
+				t.Error("Header() = nil, want a non-nil header")
 			}
 		})
 	}
@@ -445,14 +505,8 @@ func TestTracePropagation_InjectAndExtract(t *testing.T) {
 			subject: "aerial.events.tracing.durable", durable: "tracer", msgID: "trace-msg-1",
 			traceparent: testTraceparent,
 			want: []spanShape{
-				{key: "pub", name: "aerial.events.tracing.durable publish", kind: trace.SpanKindProducer, parent: parentRemote, attrs: map[string]string{
-					"messaging.system": "nats", "messaging.operation.type": "send", "messaging.operation.name": "publish",
-					"messaging.destination.name": "aerial.events.tracing.durable", "messaging.message.id": "trace-msg-1",
-				}},
-				{key: "proc", name: "aerial.events.tracing.durable process", kind: trace.SpanKindConsumer, parent: "pub", attrs: map[string]string{
-					"messaging.system": "nats", "messaging.operation.type": "process", "messaging.destination.name": "aerial.events.tracing.durable",
-					"messaging.consumer.group.name": "tracer", "messaging.nats.message.delivery_count": "1", "messaging.message.id": "trace-msg-1",
-				}},
+				pubSpan("pub", parentRemote, "aerial.events.tracing.durable", "trace-msg-1"),
+				procSpan("proc", "pub", "aerial.events.tracing.durable", "tracer", "trace-msg-1", 1),
 			},
 		},
 		{
@@ -460,18 +514,9 @@ func TestTracePropagation_InjectAndExtract(t *testing.T) {
 			subject: "aerial.jobs.tracing.retry", queue: "retry-workers", msgID: "trace-msg-2",
 			traceparent: testTraceparent, failDeliveries: 1,
 			want: []spanShape{
-				{key: "pub", name: "aerial.jobs.tracing.retry publish", kind: trace.SpanKindProducer, parent: parentRemote, attrs: map[string]string{
-					"messaging.system": "nats", "messaging.operation.type": "send", "messaging.operation.name": "publish",
-					"messaging.destination.name": "aerial.jobs.tracing.retry", "messaging.message.id": "trace-msg-2",
-				}},
-				{key: "proc1", name: "aerial.jobs.tracing.retry process", kind: trace.SpanKindConsumer, parent: "pub", status: codes.Error, attrs: map[string]string{
-					"messaging.system": "nats", "messaging.operation.type": "process", "messaging.destination.name": "aerial.jobs.tracing.retry",
-					"messaging.consumer.group.name": "retry-workers", "messaging.nats.message.delivery_count": "1", "messaging.message.id": "trace-msg-2",
-				}},
-				{key: "proc2", name: "aerial.jobs.tracing.retry process", kind: trace.SpanKindConsumer, parent: "pub", attrs: map[string]string{
-					"messaging.system": "nats", "messaging.operation.type": "process", "messaging.destination.name": "aerial.jobs.tracing.retry",
-					"messaging.consumer.group.name": "retry-workers", "messaging.nats.message.delivery_count": "2", "messaging.message.id": "trace-msg-2",
-				}},
+				pubSpan("pub", parentRemote, "aerial.jobs.tracing.retry", "trace-msg-2"),
+				procSpan("proc1", "pub", "aerial.jobs.tracing.retry", "retry-workers", "trace-msg-2", 1).failed(),
+				procSpan("proc2", "pub", "aerial.jobs.tracing.retry", "retry-workers", "trace-msg-2", 2),
 			},
 		},
 		{
@@ -479,36 +524,18 @@ func TestTracePropagation_InjectAndExtract(t *testing.T) {
 			subject: "aerial.jobs.tracing.snooze", queue: "snooze-workers", msgID: "trace-msg-3",
 			traceparent: testTraceparent, snoozeDeliveries: 1,
 			want: []spanShape{
-				{key: "pub", name: "aerial.jobs.tracing.snooze publish", kind: trace.SpanKindProducer, parent: parentRemote, attrs: map[string]string{
-					"messaging.system": "nats", "messaging.operation.type": "send", "messaging.operation.name": "publish",
-					"messaging.destination.name": "aerial.jobs.tracing.snooze", "messaging.message.id": "trace-msg-3",
-				}},
-				{key: "proc1", name: "aerial.jobs.tracing.snooze process", kind: trace.SpanKindConsumer, parent: "pub", attrs: map[string]string{
-					"messaging.system": "nats", "messaging.operation.type": "process", "messaging.destination.name": "aerial.jobs.tracing.snooze",
-					"messaging.consumer.group.name": "snooze-workers", "messaging.nats.message.delivery_count": "1", "messaging.message.id": "trace-msg-3",
-				}},
-				{key: "pub2", name: "aerial.jobs.tracing.snooze publish", kind: trace.SpanKindProducer, parent: "proc1", attrs: map[string]string{
-					"messaging.system": "nats", "messaging.operation.type": "send", "messaging.operation.name": "publish",
-					"messaging.destination.name": "aerial.jobs.tracing.snooze", "messaging.message.id": "trace-msg-3:snooze:1",
-				}},
-				{key: "proc2", name: "aerial.jobs.tracing.snooze process", kind: trace.SpanKindConsumer, parent: "pub2", attrs: map[string]string{
-					"messaging.system": "nats", "messaging.operation.type": "process", "messaging.destination.name": "aerial.jobs.tracing.snooze",
-					"messaging.consumer.group.name": "snooze-workers", "messaging.nats.message.delivery_count": "1", "messaging.message.id": "trace-msg-3:snooze:1",
-				}},
+				pubSpan("pub", parentRemote, "aerial.jobs.tracing.snooze", "trace-msg-3"),
+				procSpan("proc1", "pub", "aerial.jobs.tracing.snooze", "snooze-workers", "trace-msg-3", 1),
+				pubSpan("pub2", "proc1", "aerial.jobs.tracing.snooze", "trace-msg-3:snooze:1"),
+				procSpan("proc2", "pub2", "aerial.jobs.tracing.snooze", "snooze-workers", "trace-msg-3:snooze:1", 1),
 			},
 		},
 		{
 			name:    "untraced publish without msg id to an ephemeral subscriber starts a root",
 			subject: "aerial.events.tracing.root",
 			want: []spanShape{
-				{key: "pub", name: "aerial.events.tracing.root publish", kind: trace.SpanKindProducer, attrs: map[string]string{
-					"messaging.system": "nats", "messaging.operation.type": "send", "messaging.operation.name": "publish",
-					"messaging.destination.name": "aerial.events.tracing.root",
-				}},
-				{key: "proc", name: "aerial.events.tracing.root process", kind: trace.SpanKindConsumer, parent: "pub", attrs: map[string]string{
-					"messaging.system": "nats", "messaging.operation.type": "process", "messaging.destination.name": "aerial.events.tracing.root",
-					"messaging.nats.message.delivery_count": "1",
-				}},
+				pubSpan("pub", "", "aerial.events.tracing.root", ""),
+				procSpan("proc", "pub", "aerial.events.tracing.root", "", "", 1),
 			},
 		},
 	}
@@ -632,78 +659,6 @@ func TestCoalescedStream_SupersededSequence(t *testing.T) {
 	<-doneMsg1
 }
 
-func TestMemoryBus_DeduplicationWindow(t *testing.T) {
-	t.Parallel()
-
-	bus := NewMemoryBus()
-	defer bus.Close()
-
-	var deliveredCount atomic.Int64
-	var wg sync.WaitGroup
-	wg.Add(1)
-
-	_, err := bus.Subscribe(context.Background(), "aerial.events.dedup", "dedup-sub", func(ctx context.Context, msg Message) error {
-		deliveredCount.Add(1)
-		wg.Done()
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("Subscribe failed: %v", err)
-	}
-
-	// First publish
-	if err := bus.Publish(context.Background(), "aerial.events.dedup", "dup-msg-id-1", []byte("payload")); err != nil {
-		t.Fatalf("Publish 1 failed: %v", err)
-	}
-	wg.Wait()
-
-	// Second publish with same MsgID within 30m window
-	if err := bus.Publish(context.Background(), "aerial.events.dedup", "dup-msg-id-1", []byte("payload")); err != nil {
-		t.Fatalf("Publish 2 failed: %v", err)
-	}
-
-	if count := int(deliveredCount.Load()); count != 1 {
-		t.Errorf("delivered count = %d, want 1 (should be deduplicated)", count)
-	}
-}
-
-func TestEnsureCoreStreams(t *testing.T) {
-	t.Parallel()
-
-	mjs := &mockJetStream{existingStreams: make(map[string]*nats.StreamInfo)}
-	jsBus := newJetStreamBusWithContext(nil, mjs)
-	if err := jsBus.EnsureCoreStreams(context.Background()); err != nil {
-		t.Fatalf("jsBus.EnsureCoreStreams failed: %v", err)
-	}
-	checks := []struct {
-		stream  string
-		subject string
-	}{
-		{StreamAerialEvents, SubjectAerialPRPrefix + "merged"},
-		{StreamAerialEvents, "aerial.turn.transcripts_indexed"},
-		{StreamAerialJobs, SubjectProsperaReportJob},
-		{StreamAerialCoalesced, SubjectCovenExtractCoalesced("thread-test")},
-		{StreamAerialTranscripts, SubjectTranscriptsSteps("sess-1")},
-		{StreamAerialTranscripts, SubjectTranscriptsStepsPrefix + "test"},
-	}
-	for _, chk := range checks {
-		st, ok := mjs.existingStreams[chk.stream]
-		if !ok {
-			t.Fatalf("stream %s not found in mockJetStream", chk.stream)
-		}
-		matched := false
-		for _, p := range st.Config.Subjects {
-			if matchSubject(p, chk.subject) {
-				matched = true
-				break
-			}
-		}
-		if !matched {
-			t.Errorf("%s subjects %v do not match %s", chk.stream, st.Config.Subjects, chk.subject)
-		}
-	}
-}
-
 func TestMatchSubject(t *testing.T) {
 	t.Parallel()
 
@@ -812,321 +767,6 @@ func TestContracts_JSONWireFormat(t *testing.T) {
 	}
 }
 
-func TestMemoryBus_SubscribeEmptyDurable(t *testing.T) {
-	t.Parallel()
-
-	bus := NewMemoryBus()
-	defer bus.Close()
-
-	var wg sync.WaitGroup
-	wg.Add(1)
-
-	_, err := bus.Subscribe(context.Background(), "aerial.events.nodur", "", func(ctx context.Context, msg Message) error {
-		wg.Done()
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("Subscribe failed: %v", err)
-	}
-
-	if err := bus.Publish(context.Background(), "aerial.events.nodur", "m-nodur", []byte("ok")); err != nil {
-		t.Fatalf("Publish failed: %v", err)
-	}
-	wg.Wait()
-}
-
-func TestSubscription_Unsubscribe(t *testing.T) {
-	t.Parallel()
-
-	bus := NewMemoryBus()
-	defer bus.Close()
-
-	var deliveredCount atomic.Int64
-	var wg sync.WaitGroup
-	wg.Add(1)
-
-	sub, err := bus.Subscribe(context.Background(), "aerial.events.unsub", "unsub-durable", func(ctx context.Context, msg Message) error {
-		deliveredCount.Add(1)
-		wg.Done()
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("Subscribe failed: %v", err)
-	}
-
-	if err := bus.Publish(context.Background(), "aerial.events.unsub", "msg-1", []byte("a")); err != nil {
-		t.Fatalf("Publish 1 failed: %v", err)
-	}
-	wg.Wait()
-
-	if err := sub.Unsubscribe(); err != nil {
-		t.Fatalf("Unsubscribe failed: %v", err)
-	}
-
-	if err := bus.Publish(context.Background(), "aerial.events.unsub", "msg-2", []byte("b")); err != nil {
-		t.Fatalf("Publish 2 failed: %v", err)
-	}
-
-	if count := int(deliveredCount.Load()); count != 1 {
-		t.Errorf("delivered count = %d, want 1 (second publish after unsub should be skipped)", count)
-	}
-}
-
-func TestMessage_TermAndNak(t *testing.T) {
-	t.Parallel()
-
-	bus := NewMemoryBus()
-	defer bus.Close()
-
-	var deliveredCount atomic.Int64
-	var wg sync.WaitGroup
-	wg.Add(2)
-
-	_, err := bus.ConsumeQueue(context.Background(), "aerial.jobs.term", "term-queue", func(ctx context.Context, msg Message) error {
-		count := deliveredCount.Add(1)
-		wg.Done()
-		if count == 1 {
-			return msg.NakWithDelay(0)
-		}
-		return msg.Term()
-	})
-	if err != nil {
-		t.Fatalf("ConsumeQueue failed: %v", err)
-	}
-
-	if err := bus.Publish(context.Background(), "aerial.jobs.term", "job-term-1", []byte("payload")); err != nil {
-		t.Fatalf("Publish failed: %v", err)
-	}
-
-	wg.Wait()
-
-	if count := int(deliveredCount.Load()); count != 2 {
-		t.Errorf("delivered count = %d, want 2", count)
-	}
-}
-
-func TestMemoryMessage_SnoozeWithDelay(t *testing.T) {
-	t.Parallel()
-
-	bus := NewMemoryBus()
-	defer bus.Close()
-
-	var wg sync.WaitGroup
-	wg.Add(2)
-
-	var secondMsgMsgID, secondMsgSnoozeSeq string
-	var mu sync.Mutex
-
-	_, err := bus.ConsumeQueue(context.Background(), "aerial.jobs.delay", "delay-workers", func(ctx context.Context, msg Message) error {
-		defer wg.Done()
-		if msg.Header().Get(HeaderSnoozeSeq) == "" {
-			return msg.Snooze(10 * time.Millisecond)
-		}
-		mu.Lock()
-		secondMsgMsgID = msg.Header().Get(HeaderMsgID)
-		secondMsgSnoozeSeq = msg.Header().Get(HeaderSnoozeSeq)
-		mu.Unlock()
-		return msg.Ack()
-	})
-	if err != nil {
-		t.Fatalf("ConsumeQueue failed: %v", err)
-	}
-
-	if err := bus.Publish(context.Background(), "aerial.jobs.delay", "job-delay-1", []byte("data")); err != nil {
-		t.Fatalf("Publish failed: %v", err)
-	}
-	wg.Wait()
-
-	mu.Lock()
-	defer mu.Unlock()
-	if secondMsgMsgID != "job-delay-1:snooze:1" {
-		t.Errorf("second message msgID = %q, want %q", secondMsgMsgID, "job-delay-1:snooze:1")
-	}
-	if secondMsgSnoozeSeq != "1" {
-		t.Errorf("second message snoozeSeq = %q, want %q", secondMsgSnoozeSeq, "1")
-	}
-}
-
-func TestMemoryBus_HandlerReturnsError(t *testing.T) {
-	t.Parallel()
-
-	bus := NewMemoryBus()
-	defer bus.Close()
-
-	var attempts atomic.Int64
-	var wg sync.WaitGroup
-	wg.Add(2)
-
-	_, err := bus.ConsumeQueue(context.Background(), "aerial.jobs.fail", "fail-queue", func(ctx context.Context, msg Message) error {
-		wg.Done()
-		if attempts.Add(1) == 1 {
-			return errors.New("transient failure")
-		}
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("ConsumeQueue failed: %v", err)
-	}
-
-	if err := bus.Publish(context.Background(), "aerial.jobs.fail", "fail-1", []byte("data")); err != nil {
-		t.Fatalf("Publish failed: %v", err)
-	}
-	wg.Wait()
-}
-
-func TestJetStreamBus_SnoozeWithDelay(t *testing.T) {
-	t.Parallel()
-
-	published := make(chan *nats.Msg, 1)
-	mjs := &mockJetStream{
-		onPublish: func(msg *nats.Msg) {
-			select {
-			case published <- msg:
-			default:
-			}
-		},
-	}
-	bus := newJetStreamBusWithContext(nil, mjs)
-	msg := &jsMessage{
-		raw: &fakeMsg{
-			subject: "aerial.jobs.delaytest",
-			header:  nats.Header{HeaderMsgID: []string{"msg-1"}, HeaderSnoozeSeq: []string{"4"}},
-		},
-		bus: bus,
-	}
-	if err := msg.Snooze(10 * time.Millisecond); err != nil {
-		t.Fatalf("Snooze with delay failed: %v", err)
-	}
-
-	select {
-	case continuation := <-published:
-		if got := continuation.Header.Get(HeaderMsgID); got != "msg-1:snooze:5" {
-			t.Errorf("expected rotated MsgID msg-1:snooze:5, got: %s", got)
-		}
-		if got := continuation.Header.Get(HeaderSnoozeSeq); got != "5" {
-			t.Errorf("expected SnoozeSeq 5, got: %s", got)
-		}
-	case <-time.After(500 * time.Millisecond):
-		t.Fatal("timed out waiting for background snooze continuation publish")
-	}
-}
-
-func TestMemoryBus_UnsubscribeRetainsOthersAndQueueRoundRobin(t *testing.T) {
-	t.Parallel()
-
-	bus := NewMemoryBus()
-	defer bus.Close()
-
-	var count1, count2 int64
-	var wg sync.WaitGroup
-	wg.Add(2)
-	var wgRemaining sync.WaitGroup
-
-	sub1, err := bus.ConsumeQueue(context.Background(), "aerial.jobs.rr", "rr-queue", func(ctx context.Context, msg Message) error {
-		atomic.AddInt64(&count1, 1)
-		wg.Done()
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("ConsumeQueue 1 failed: %v", err)
-	}
-
-	_, err = bus.ConsumeQueue(context.Background(), "aerial.jobs.rr", "rr-queue", func(ctx context.Context, msg Message) error {
-		atomic.AddInt64(&count2, 1)
-		if atomic.LoadInt64(&count2) <= 1 {
-			wg.Done()
-		} else {
-			wgRemaining.Done()
-		}
-		return nil
-	})
-	if err != nil {
-		t.Fatalf("ConsumeQueue 2 failed: %v", err)
-	}
-
-	// Publish two messages to trigger round robin on queue
-	if err := bus.Publish(context.Background(), "aerial.jobs.rr", "m1", []byte("1")); err != nil {
-		t.Fatalf("Publish 1 failed: %v", err)
-	}
-	if err := bus.Publish(context.Background(), "aerial.jobs.rr", "m2", []byte("2")); err != nil {
-		t.Fatalf("Publish 2 failed: %v", err)
-	}
-	wg.Wait()
-
-	if c1 := atomic.LoadInt64(&count1); c1 != 1 {
-		t.Errorf("count1 = %d, want 1", c1)
-	}
-	if c2 := atomic.LoadInt64(&count2); c2 != 1 {
-		t.Errorf("count2 = %d, want 1", c2)
-	}
-
-	// Unsubscribe one to exercise removeSubscription with retained subscribers
-	if err := sub1.Unsubscribe(); err != nil {
-		t.Fatalf("Unsubscribe failed: %v", err)
-	}
-
-	wgRemaining.Add(1)
-	if err := bus.Publish(context.Background(), "aerial.jobs.rr", "m3", []byte("3")); err != nil {
-		t.Fatalf("Publish 3 failed: %v", err)
-	}
-	wgRemaining.Wait()
-
-	if c2 := atomic.LoadInt64(&count2); c2 != 2 {
-		t.Errorf("count2 after sub1 unsub = %d, want 2", c2)
-	}
-
-	// MemMessage snooze with empty initial msgID to cover msgID == "" branch
-	memMsgNoID := &memMessage{
-		bus:     bus,
-		subject: "aerial.jobs.noid",
-		data:    []byte("noid"),
-	}
-	var wgSnooze sync.WaitGroup
-	wgSnooze.Add(1)
-	_, _ = bus.Subscribe(context.Background(), "aerial.jobs.noid", "snooze-durable", func(ctx context.Context, msg Message) error {
-		wgSnooze.Done()
-		return nil
-	})
-	if err := memMsgNoID.Snooze(0); err != nil {
-		t.Errorf("Snooze with empty msgID failed: %v", err)
-	}
-	wgSnooze.Wait()
-}
-
-func TestMemoryBus_SameDurableRoundRobin(t *testing.T) {
-	t.Parallel()
-
-	bus := NewMemoryBus()
-	defer bus.Close()
-
-	var handled1, handled2 int64
-	var wg sync.WaitGroup
-	wg.Add(2)
-
-	_, _ = bus.Subscribe(context.Background(), "aerial.events.shared", "shared-durable", func(ctx context.Context, msg Message) error {
-		atomic.AddInt64(&handled1, 1)
-		wg.Done()
-		return nil
-	})
-	_, _ = bus.Subscribe(context.Background(), "aerial.events.shared", "shared-durable", func(ctx context.Context, msg Message) error {
-		atomic.AddInt64(&handled2, 1)
-		wg.Done()
-		return nil
-	})
-
-	if err := bus.Publish(context.Background(), "aerial.events.shared", "m1", []byte("1")); err != nil {
-		t.Fatalf("Publish 1 failed: %v", err)
-	}
-	if err := bus.Publish(context.Background(), "aerial.events.shared", "m2", []byte("2")); err != nil {
-		t.Fatalf("Publish 2 failed: %v", err)
-	}
-	wg.Wait()
-
-	if total := atomic.LoadInt64(&handled1) + atomic.LoadInt64(&handled2); total != 2 {
-		t.Errorf("total handled = %d, want 2", total)
-	}
-}
-
 func TestMemoryBus_ClosedAndErrorPaths(t *testing.T) {
 	t.Parallel()
 
@@ -1168,39 +808,6 @@ func TestMemoryBus_ClosedAndErrorPaths(t *testing.T) {
 	unmarshalable := make(chan int)
 	if err := openBus.Publish(context.Background(), "sub", "id", unmarshalable); err == nil {
 		t.Error("expected error serializing chan, got nil")
-	}
-}
-
-func TestMessage_AlreadySettled(t *testing.T) {
-	t.Parallel()
-
-	bus := NewMemoryBus()
-	defer bus.Close()
-
-	msg := &memMessage{
-		bus:     bus,
-		subject: "aerial.jobs.settled",
-		data:    []byte("d"),
-		settled: true,
-	}
-
-	if err := msg.Ack(); err != nil {
-		t.Errorf("Ack on settled should return nil, got: %v", err)
-	}
-	if err := msg.NakWithDelay(0); err != nil {
-		t.Errorf("NakWithDelay on settled should return nil, got: %v", err)
-	}
-	if err := msg.Term(); err != nil {
-		t.Errorf("Term on settled should return nil, got: %v", err)
-	}
-	if err := msg.Snooze(0); err != nil {
-		t.Errorf("Snooze on settled should return nil, got: %v", err)
-	}
-	if err := msg.InProgress(); err != nil {
-		t.Errorf("InProgress on settled should return nil, got: %v", err)
-	}
-	if h := msg.Header(); h == nil {
-		t.Error("Header() should return non-nil even if uninitialized")
 	}
 }
 
@@ -1297,106 +904,10 @@ func (*mockNatsDialer) Dial(network, address string) (net.Conn, error) {
 	return c1, nil
 }
 
-func (m *mockJetStream) setPublishErr(err error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.publishErr = err
-}
-
-func (m *mockJetStream) setAddStreamErr(err error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.addStreamErr = err
-}
-
-func (m *mockJetStream) setStreamInfoErr(err error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.streamInfoErr = err
-}
-
 func (m *mockJetStream) publishedCount() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return len(m.publishedMsgs)
-}
-
-func (m *mockJetStream) streamCount() int {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return len(m.existingStreams)
-}
-
-func (m *mockJetStream) resetStreams() {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.existingStreams = make(map[string]*nats.StreamInfo)
-}
-
-func TestJetStreamBus_StreamsAndPublishSubscribe(t *testing.T) {
-	t.Parallel()
-
-	mjs := &mockJetStream{
-		existingStreams: make(map[string]*nats.StreamInfo),
-	}
-	bus := newJetStreamBusWithContext(nil, mjs)
-
-	// 1. EnsureCoreStreams - AddStream path
-	if err := bus.EnsureCoreStreams(context.Background()); err != nil {
-		t.Fatalf("EnsureCoreStreams (add) failed: %v", err)
-	}
-	if mjs.streamCount() != 4 {
-		t.Errorf("expected 4 streams created, got %d", mjs.streamCount())
-	}
-
-	// 2. EnsureCoreStreams - UpdateStream path
-	if err := bus.EnsureCoreStreams(context.Background()); err != nil {
-		t.Fatalf("EnsureCoreStreams (update) failed: %v", err)
-	}
-
-	// 3. Publish and PublishWithHeader
-	if err := bus.Publish(context.Background(), "aerial.jobs.test", "job-1", "string-payload"); err != nil {
-		t.Fatalf("Publish string failed: %v", err)
-	}
-	if err := bus.Publish(context.Background(), "aerial.jobs.test", "job-2", []byte("byte-payload")); err != nil {
-		t.Fatalf("Publish bytes failed: %v", err)
-	}
-	h := nats.Header{}
-	h.Set("Custom-Key", "Custom-Val")
-	if err := bus.PublishWithHeader(context.Background(), "aerial.jobs.test", "job-3", map[string]string{"foo": "bar"}, h); err != nil {
-		t.Fatalf("PublishWithHeader failed: %v", err)
-	}
-	if mjs.publishedCount() != 3 {
-		t.Errorf("expected 3 published msgs, got %d", mjs.publishedCount())
-	}
-
-	nilSub := &jsSubscription{}
-	if err := nilSub.Unsubscribe(); err != nil {
-		t.Errorf("Unsubscribe on nil sub should return nil, got: %v", err)
-	}
-
-	// 5. Error paths on JetStreamBus
-	mjs.setPublishErr(errors.New("pub failed"))
-	if err := bus.Publish(context.Background(), "aerial.jobs.err", "id", "data"); err == nil {
-		t.Error("expected publish error, got nil")
-	}
-	if err := bus.Publish(context.Background(), "aerial.jobs.err", "id", make(chan int)); err == nil {
-		t.Error("expected payload marshal error, got nil")
-	}
-	mjs.setPublishErr(nil)
-
-	mjs.setAddStreamErr(errors.New("add stream failed"))
-	mjs.resetStreams() // force AddStream path
-	if err := bus.EnsureCoreStreams(context.Background()); err == nil {
-		t.Error("expected add stream error, got nil")
-	}
-	mjs.setAddStreamErr(nil)
-
-	mjs.setStreamInfoErr(errors.New("stream info failed"))
-	if err := bus.EnsureCoreStreams(context.Background()); err == nil {
-		t.Error("expected stream info error, got nil")
-	}
-	mjs.setStreamInfoErr(nil)
 }
 
 func TestJetStreamBus_ConsumerStats(t *testing.T) {

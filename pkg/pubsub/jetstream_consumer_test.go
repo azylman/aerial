@@ -276,9 +276,30 @@ func equalHandled(got, want []handledMsg) bool {
 	return maps.Equal(count(got), count(want))
 }
 
-type busSubscribeFunc func(b *JetStreamBus, ctx context.Context, subject, name string, handler Handler) (Subscription, error)
+// assertPullConsumer checks that durable on stream is a pull consumer filtering subject with
+// explicit 30s acks delivering all.
+func assertPullConsumer(t *testing.T, bus *JetStreamBus, stream, durable, subject string) {
+	t.Helper()
+	info, err := bus.js.ConsumerInfo(stream, durable)
+	if err != nil {
+		t.Fatalf("ConsumerInfo: %v", err)
+	}
+	cfg := info.Config
+	if cfg.DeliverSubject != "" || cfg.DeliverGroup != "" || cfg.FilterSubject != subject ||
+		cfg.AckPolicy != nats.AckExplicitPolicy || cfg.AckWait != 30*time.Second || cfg.DeliverPolicy != nats.DeliverAllPolicy {
+		t.Errorf("consumer config = %+v, want pull filtering %q with explicit 30s acks delivering all", cfg, subject)
+	}
+}
 
-func TestJetStreamBus_SubscribeAndConsumeQueueBindDurables(t *testing.T) {
+// bindErrString returns err's text, or "" for nil.
+func bindErrString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
+}
+
+func TestJetStreamBus_SubscribeBindsDurable(t *testing.T) {
 	t.Parallel()
 
 	serverBus := newServerBus(t)
@@ -286,44 +307,96 @@ func TestJetStreamBus_SubscribeAndConsumeQueueBindDurables(t *testing.T) {
 	tests := []struct {
 		name       string
 		bus        *JetStreamBus
-		subscribe  busSubscribeFunc
 		subject    string
 		durable    string
 		wantErr    string
 		wantStream string
 	}{
-		{"durable subscribe creates pull consumer", serverBus, (*JetStreamBus).Subscribe, "aerial.events.haro", "haro-events", "", StreamAerialEvents},
-		{"consume queue creates pull consumer", serverBus, (*JetStreamBus).ConsumeQueue, "aerial.jobs.vanadis.chunk", "vanadis-chunk", "", StreamAerialJobs},
-		{"empty durable rejected", serverBus, (*JetStreamBus).Subscribe, "aerial.events.>", "", "durable name required", ""},
-		{"empty queue rejected", serverBus, (*JetStreamBus).ConsumeQueue, "aerial.jobs.>", "", "queue name is required", ""},
-		{"unresolvable stream fails", serverBus, (*JetStreamBus).Subscribe, "unknown.subject", "dur", "resolve stream for unknown.subject", ""},
-		{"bus without a connection fails", bareBus, (*JetStreamBus).Subscribe, "aerial.events.haro", "dur", "jetstream handle is nil", ""},
+		{"durable subscribe creates pull consumer", serverBus, "aerial.events.haro", "haro-events", "", "AERIAL_EVENTS"},
+		{"empty durable rejected", serverBus, "aerial.events.>", "", "pubsub: durable name required", ""},
+		{"unresolvable stream fails", serverBus, "unknown.subject", "dur", "resolve stream for unknown.subject", ""},
+		{"bus without a connection fails", bareBus, "aerial.events.haro", "dur", "jetstream handle is nil", ""},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			sub, err := tc.subscribe(tc.bus, t.Context(), tc.subject, tc.durable, func(context.Context, Message) error { return nil })
+			sub, err := tc.bus.Subscribe(t.Context(), tc.subject, tc.durable, func(context.Context, Message) error { return nil })
 			if sub != nil {
 				t.Cleanup(func() { _ = sub.Unsubscribe() })
 			}
-			if tc.wantErr != "" {
-				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
-					t.Fatalf("err = %v, want containing %q", err, tc.wantErr)
+			if got := bindErrString(err); !strings.Contains(got, tc.wantErr) || (got == "") != (tc.wantErr == "") {
+				t.Fatalf("err = %q, want containing %q", got, tc.wantErr)
+			}
+			if tc.wantErr == "" {
+				assertPullConsumer(t, tc.bus, tc.wantStream, tc.durable, tc.subject)
+			}
+		})
+	}
+}
+
+func TestJetStreamBus_ConsumeQueueBindsDurable(t *testing.T) {
+	t.Parallel()
+
+	bus := newServerBus(t)
+	tests := []struct {
+		name       string
+		subject    string
+		queue      string
+		wantErr    string
+		wantStream string
+	}{
+		{"consume queue creates pull consumer", "aerial.jobs.vanadis.chunk", "vanadis-chunk", "", "AERIAL_JOBS"},
+		{"empty queue rejected", "aerial.jobs.>", "", "queue name is required", ""},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			sub, err := bus.ConsumeQueue(t.Context(), tc.subject, tc.queue, func(context.Context, Message) error { return nil })
+			if sub != nil {
+				t.Cleanup(func() { _ = sub.Unsubscribe() })
+			}
+			if got := bindErrString(err); !strings.Contains(got, tc.wantErr) || (got == "") != (tc.wantErr == "") {
+				t.Fatalf("err = %q, want containing %q", got, tc.wantErr)
+			}
+			if tc.wantErr == "" {
+				assertPullConsumer(t, bus, tc.wantStream, tc.queue, tc.subject)
+			}
+		})
+	}
+}
+
+func TestJSSubscription_Unsubscribe(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		sub        *jsSubscription
+		wantClosed bool
+	}{
+		{name: "never-started subscription is a no-op", sub: &jsSubscription{}},
+		{name: "repeated unsubscribe closes stop once", sub: &jsSubscription{stop: make(chan struct{})}, wantClosed: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			for range 2 {
+				if err := tc.sub.Unsubscribe(); err != nil {
+					t.Fatalf("Unsubscribe = %v, want nil", err)
 				}
-				return
 			}
-			if err != nil {
-				t.Fatalf("unexpected err: %v", err)
+			closed := false
+			if tc.sub.stop != nil {
+				select {
+				case <-tc.sub.stop:
+					closed = true
+				default:
+				}
 			}
-			info, err := tc.bus.js.ConsumerInfo(tc.wantStream, tc.durable)
-			if err != nil {
-				t.Fatalf("ConsumerInfo: %v", err)
-			}
-			cfg := info.Config
-			if cfg.DeliverSubject != "" || cfg.DeliverGroup != "" || cfg.FilterSubject != tc.subject ||
-				cfg.AckPolicy != nats.AckExplicitPolicy || cfg.AckWait != 30*time.Second || cfg.DeliverPolicy != nats.DeliverAllPolicy {
-				t.Errorf("consumer config = %+v, want pull filtering %q with explicit 30s acks delivering all", cfg, tc.subject)
+			if closed != tc.wantClosed {
+				t.Errorf("stop closed = %v, want %v", closed, tc.wantClosed)
 			}
 		})
 	}

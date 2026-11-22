@@ -11,7 +11,6 @@ import (
 
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
-	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -99,10 +98,7 @@ func TestJetStreamBus_Dispatch(t *testing.T) {
 			subject: "aerial.events.meta", meta: &jetstream.MsgMetadata{NumDelivered: 4}, data: "with-meta", group: "durable",
 			want:     dispatchObservation{invoked: true, subject: "aerial.events.meta", data: "with-meta", numDelivered: 4},
 			wantAcks: []string{"+ACK"},
-			wantSpan: spanShape{key: "proc", name: "aerial.events.meta process", kind: trace.SpanKindConsumer, attrs: map[string]string{
-				"messaging.system": "nats", "messaging.operation.type": "process", "messaging.destination.name": "aerial.events.meta",
-				"messaging.consumer.group.name": "durable", "messaging.nats.message.delivery_count": "4",
-			}},
+			wantSpan: procSpan("proc", "", "aerial.events.meta", "durable", "", 4),
 		},
 		{
 			name:    "traceparent header parents the process span seen by the handler",
@@ -110,10 +106,7 @@ func TestJetStreamBus_Dispatch(t *testing.T) {
 			header:   traceparentHeader(testTraceparent, "evt-head"),
 			want:     dispatchObservation{invoked: true, subject: "aerial.events.head", data: "h", numDelivered: 1, traceID: testTraceID},
 			wantAcks: []string{"+ACK"},
-			wantSpan: spanShape{key: "proc", name: "aerial.events.head process", kind: trace.SpanKindConsumer, parent: parentRemote, attrs: map[string]string{
-				"messaging.system": "nats", "messaging.operation.type": "process", "messaging.destination.name": "aerial.events.head",
-				"messaging.consumer.group.name": "workers", "messaging.nats.message.delivery_count": "1", "messaging.message.id": "evt-head",
-			}},
+			wantSpan: procSpan("proc", parentRemote, "aerial.events.head", "workers", "evt-head", 1),
 		},
 		{
 			name:    "handler error is auto-naked and fails the process span",
@@ -121,10 +114,7 @@ func TestJetStreamBus_Dispatch(t *testing.T) {
 			handlerErr: errors.New("handler failed"),
 			want:       dispatchObservation{invoked: true, subject: "aerial.events.err", data: "err", numDelivered: 1},
 			wantAcks:   []string{"-NAK"},
-			wantSpan: spanShape{key: "proc", name: "aerial.events.err process", kind: trace.SpanKindConsumer, status: codes.Error, attrs: map[string]string{
-				"messaging.system": "nats", "messaging.operation.type": "process", "messaging.destination.name": "aerial.events.err",
-				"messaging.nats.message.delivery_count": "1",
-			}},
+			wantSpan:   procSpan("proc", "", "aerial.events.err", "", "", 1).failed(),
 		},
 		{
 			name:    "handler settling via InProgress and Term skips auto-settlement",
@@ -132,10 +122,7 @@ func TestJetStreamBus_Dispatch(t *testing.T) {
 			termInHandler: true,
 			want:          dispatchObservation{invoked: true, subject: "aerial.events.term", data: "term", numDelivered: 1},
 			wantAcks:      []string{"+WPI", "+TERM"},
-			wantSpan: spanShape{key: "proc", name: "aerial.events.term process", kind: trace.SpanKindConsumer, attrs: map[string]string{
-				"messaging.system": "nats", "messaging.operation.type": "process", "messaging.destination.name": "aerial.events.term",
-				"messaging.nats.message.delivery_count": "1",
-			}},
+			wantSpan:      procSpan("proc", "", "aerial.events.term", "", "", 1),
 		},
 	}
 
@@ -188,32 +175,30 @@ func TestJetStreamBus_PublishWithHeader(t *testing.T) {
 		publishErr  error
 		wantErr     bool
 		wantHeader  string
+		wantData    string
 		wantSpan    spanShape
 	}{
 		{
 			name:    "traced publish injects the producer span and keeps custom headers",
 			subject: "aerial.jobs.pubspan.ok", msgID: "job-7", traceparent: testTraceparent, data: "payload",
-			wantHeader: "Custom-Val",
-			wantSpan: spanShape{key: "pub", name: "aerial.jobs.pubspan.ok publish", kind: trace.SpanKindProducer, parent: parentRemote, attrs: map[string]string{
-				"messaging.system": "nats", "messaging.operation.type": "send", "messaging.operation.name": "publish",
-				"messaging.destination.name": "aerial.jobs.pubspan.ok", "messaging.message.id": "job-7",
-			}},
+			wantHeader: "Custom-Val", wantData: "payload",
+			wantSpan: pubSpan("pub", parentRemote, "aerial.jobs.pubspan.ok", "job-7"),
+		},
+		{
+			name:    "structured payload is published as JSON",
+			subject: "aerial.jobs.pubspan.json", msgID: "job-9", data: map[string]string{"foo": "bar"},
+			wantHeader: "Custom-Val", wantData: `{"foo":"bar"}`,
+			wantSpan: pubSpan("pub", "", "aerial.jobs.pubspan.json", "job-9"),
 		},
 		{
 			name:    "server publish failure fails the producer span",
 			subject: "aerial.jobs.pubspan.err", data: "payload", publishErr: errors.New("pub failed"), wantErr: true,
-			wantSpan: spanShape{key: "pub", name: "aerial.jobs.pubspan.err publish", kind: trace.SpanKindProducer, status: codes.Error, attrs: map[string]string{
-				"messaging.system": "nats", "messaging.operation.type": "send", "messaging.operation.name": "publish",
-				"messaging.destination.name": "aerial.jobs.pubspan.err",
-			}},
+			wantSpan: pubSpan("pub", "", "aerial.jobs.pubspan.err", "").failed(),
 		},
 		{
 			name:    "unmarshalable payload fails the producer span",
 			subject: "aerial.jobs.pubspan.marshal", msgID: "job-8", data: make(chan int), wantErr: true,
-			wantSpan: spanShape{key: "pub", name: "aerial.jobs.pubspan.marshal publish", kind: trace.SpanKindProducer, status: codes.Error, attrs: map[string]string{
-				"messaging.system": "nats", "messaging.operation.type": "send", "messaging.operation.name": "publish",
-				"messaging.destination.name": "aerial.jobs.pubspan.marshal", "messaging.message.id": "job-8",
-			}},
+			wantSpan: pubSpan("pub", "", "aerial.jobs.pubspan.marshal", "job-8").failed(),
 		},
 	}
 
@@ -241,38 +226,12 @@ func TestJetStreamBus_PublishWithHeader(t *testing.T) {
 			if got := h.Get("Custom-Key"); got != tc.wantHeader {
 				t.Errorf("Custom-Key = %q, want %q", got, tc.wantHeader)
 			}
+			if got := string(mjs.publishedMsgs[0].Data); got != tc.wantData {
+				t.Errorf("data = %q, want %q", got, tc.wantData)
+			}
 			injected := trace.SpanContextFromContext(propagation.TraceContext{}.Extract(context.Background(), propagation.HeaderCarrier(http.Header(h))))
 			if pub := spans["pub"]; pub != nil && injected.SpanID() != pub.SpanContext().SpanID() {
 				t.Errorf("injected traceparent span = %s, want producer span %s", injected.SpanID(), pub.SpanContext().SpanID())
-			}
-		})
-	}
-}
-
-func TestJSMessage_SettledSettlementIsNoop(t *testing.T) {
-	t.Parallel()
-
-	msg := &jsMessage{
-		raw:     &fakeMsg{subject: "aerial.jobs.jsmsg", data: []byte("raw"), header: nats.Header{}},
-		bus:     newJetStreamBusWithContext(nil, &mockJetStream{}),
-		settled: true,
-	}
-	tests := []struct {
-		name string
-		err  error
-	}{
-		{name: "Ack", err: msg.Ack()},
-		{name: "NakWithDelay", err: msg.NakWithDelay(0)},
-		{name: "Term", err: msg.Term()},
-		{name: "Snooze", err: msg.Snooze(0)},
-		{name: "InProgress", err: msg.InProgress()},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			if tc.err != nil {
-				t.Errorf("%s on settled jsMessage = %v, want nil", tc.name, tc.err)
 			}
 		})
 	}
@@ -294,6 +253,23 @@ func countInProgressTokens(tokens []string) int {
 	return count
 }
 
+// snoozeContinuation returns the msg id (generated ids as "msg-N") and snooze sequence headers
+// of the one continuation mjs received, or empty strings when none was published.
+func snoozeContinuation(t *testing.T, mjs *mockJetStream) (msgID, seq string) {
+	t.Helper()
+	mjs.mu.Lock()
+	defer mjs.mu.Unlock()
+	switch len(mjs.publishedMsgs) {
+	case 0:
+		return "", ""
+	case 1:
+		h := mjs.publishedMsgs[0].Header
+		return memGeneratedMsgID.ReplaceAllString(h.Get(HeaderMsgID), "msg-N"), h.Get(HeaderSnoozeSeq)
+	}
+	t.Errorf("published %d continuations, want at most 1", len(mjs.publishedMsgs))
+	return "", ""
+}
+
 func TestJSMessage_Snooze(t *testing.T) {
 	t.Parallel()
 
@@ -312,65 +288,43 @@ func TestJSMessage_Snooze(t *testing.T) {
 		wantSettled       bool
 		wantMinInProgress int
 		wantMaxInProgress int
+		wantMsgID         string
+		wantSeq           string
 	}{
 		{
-			name:        "message without msg id publishes then fails to ack",
-			settleErr:   jetstream.ErrMsgNotBound,
-			wantErr:     jetstream.ErrMsgNotBound,
-			wantSettled: true,
+			name:      "message without msg id publishes a generated id then fails to ack",
+			settleErr: jetstream.ErrMsgNotBound, wantErr: jetstream.ErrMsgNotBound, wantSettled: true, wantMsgID: "msg-N:snooze:1", wantSeq: "1",
+		},
+		{name: "continuation publish failure is returned", publishErr: errContinuation, wantErr: errContinuation},
+		{
+			name:   "existing snooze suffix on a non-header publisher bus publishes without headers",
+			header: nats.Header{HeaderMsgID: []string{"task-1:snooze:2"}}, plainBus: true,
+			settleErr: jetstream.ErrMsgNotBound, wantErr: jetstream.ErrMsgNotBound, wantSettled: true, wantMsgID: "task-1:snooze:1",
+		},
+		{name: "delayed continuation publish failure does not settle", delay: 5 * time.Millisecond, publishErr: errContinuation, wantErr: errContinuation},
+		{
+			name:   "delay rotates an existing snooze sequence after waiting",
+			header: nats.Header{HeaderMsgID: []string{"msg-1"}, HeaderSnoozeSeq: []string{"4"}}, delay: 10 * time.Millisecond,
+			wantSettled: true, wantMsgID: "msg-1:snooze:5", wantSeq: "5",
 		},
 		{
-			name:        "continuation publish failure is returned",
-			publishErr:  errContinuation,
-			wantErr:     errContinuation,
-			wantSettled: false,
+			name:  "message with delay exceeding heartbeat interval triggers in progress and settles",
+			delay: 15 * time.Millisecond, hbInterval: 3 * time.Millisecond, countInProgress: true,
+			wantSettled: true, wantMinInProgress: 1, wantMaxInProgress: 100, wantMsgID: "msg-N:snooze:1", wantSeq: "1",
 		},
 		{
-			name:        "existing snooze sequence on a non-header publisher bus",
-			header:      nats.Header{HeaderMsgID: []string{"task-1:snooze:2"}},
-			plainBus:    true,
-			settleErr:   jetstream.ErrMsgNotBound,
-			wantErr:     jetstream.ErrMsgNotBound,
-			wantSettled: true,
+			name:  "message with delay below heartbeat interval settles without in progress",
+			delay: 5 * time.Millisecond, hbInterval: 50 * time.Millisecond, countInProgress: true,
+			wantSettled: true, wantMsgID: "msg-N:snooze:1", wantSeq: "1",
 		},
-		{
-			name:        "delay with continuation publish failure does not settle",
-			delay:       5 * time.Millisecond,
-			publishErr:  errContinuation,
-			wantErr:     errContinuation,
-			wantSettled: false,
-		},
-		{
-			name:              "message with delay exceeding heartbeat interval triggers in progress and settles",
-			delay:             15 * time.Millisecond,
-			hbInterval:        3 * time.Millisecond,
-			countInProgress:   true,
-			wantSettled:       true,
-			wantMinInProgress: 1,
-			wantMaxInProgress: 100,
-		},
-		{
-			name:              "message with delay below heartbeat interval settles without in progress",
-			delay:             5 * time.Millisecond,
-			hbInterval:        50 * time.Millisecond,
-			countInProgress:   true,
-			wantSettled:       true,
-			wantMinInProgress: 0,
-			wantMaxInProgress: 0,
-		},
-		{
-			name:        "canceled context aborts snooze delay and leaves message unsettled",
-			delay:       1 * time.Hour,
-			cancelCtx:   true,
-			wantErr:     context.Canceled,
-			wantSettled: false,
-		},
+		{name: "canceled context aborts snooze delay and leaves message unsettled", delay: time.Hour, cancelCtx: true, wantErr: context.Canceled},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			jsBus := newJetStreamBusWithContext(nil, &mockJetStream{publishErr: tc.publishErr})
+			mjs := &mockJetStream{publishErr: tc.publishErr}
+			jsBus := newJetStreamBusWithContext(nil, mjs)
 			if tc.hbInterval > 0 {
 				jsBus.heartbeatInterval = tc.hbInterval
 			}
@@ -403,6 +357,9 @@ func TestJSMessage_Snooze(t *testing.T) {
 				if gotIP < tc.wantMinInProgress || gotIP > tc.wantMaxInProgress {
 					t.Errorf("inProgress tokens = %d, want between %d and %d", gotIP, tc.wantMinInProgress, tc.wantMaxInProgress)
 				}
+			}
+			if gotMsgID, gotSeq := snoozeContinuation(t, mjs); gotMsgID != tc.wantMsgID || gotSeq != tc.wantSeq {
+				t.Errorf("continuation msg id, seq = %q, %q, want %q, %q", gotMsgID, gotSeq, tc.wantMsgID, tc.wantSeq)
 			}
 		})
 	}

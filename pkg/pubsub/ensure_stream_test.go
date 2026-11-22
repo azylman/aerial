@@ -1,7 +1,10 @@
 package pubsub
 
 import (
+	"context"
 	"errors"
+	"maps"
+	"reflect"
 	"testing"
 	"time"
 
@@ -91,6 +94,100 @@ func TestJetStreamBus_EnsureStream(t *testing.T) {
 			got := mjs.existingStreams[tc.desired.Name].Config
 			if got.MaxAge != tc.wantMaxAge || got.MaxBytes != tc.wantMaxBytes {
 				t.Errorf("stream limits = (%v, %d), want (%v, %d)", got.MaxAge, got.MaxBytes, tc.wantMaxAge, tc.wantMaxBytes)
+			}
+		})
+	}
+}
+
+// coreStream is the part of a stream config TestJetStreamBus_EnsureCoreStreams checks.
+type coreStream struct {
+	subjects []string
+	maxAge   time.Duration
+	maxBytes int64
+}
+
+// coreStreamsWith returns the four default core streams with overrides replacing entries.
+func coreStreamsWith(overrides map[string]coreStream) map[string]coreStream {
+	streams := map[string]coreStream{
+		"AERIAL_EVENTS":      {[]string{"aerial.dispatch.>", "aerial.events.>", "aerial.turn.>", "aerial.pr.>"}, 72 * time.Hour, 256 << 20},
+		"AERIAL_JOBS":        {[]string{"aerial.jobs.>"}, 72 * time.Hour, 256 << 20},
+		"AERIAL_COALESCED":   {[]string{"aerial.coalesced.>"}, 72 * time.Hour, 64 << 20},
+		"AERIAL_TRANSCRIPTS": {[]string{"aerial.transcripts.>"}, 72 * time.Hour, 128 << 20},
+	}
+	maps.Copy(streams, overrides)
+	return streams
+}
+
+func TestJetStreamBus_EnsureCoreStreams(t *testing.T) {
+	t.Parallel()
+
+	coalesced, transcripts := []string{"aerial.coalesced.>"}, []string{"aerial.transcripts.>"}
+	tests := []struct {
+		name          string
+		seed          map[string]coreStream
+		streamInfoErr error
+		addStreamErr  error
+		want          map[string]coreStream
+		wantErr       string
+	}{
+		{name: "empty broker gets the four core streams", want: coreStreamsWith(nil)},
+		{name: "existing core streams are updated in place", seed: coreStreamsWith(nil), want: coreStreamsWith(nil)},
+		{
+			name: "coalesced below the floor is raised", seed: map[string]coreStream{"AERIAL_COALESCED": {coalesced, time.Hour, 64 << 20}},
+			want: coreStreamsWith(map[string]coreStream{"AERIAL_COALESCED": {coalesced, 72 * time.Hour, 64 << 20}}),
+		},
+		{
+			name: "coalesced larger age is kept", seed: map[string]coreStream{"AERIAL_COALESCED": {coalesced, 200 * time.Hour, 64 << 20}},
+			want: coreStreamsWith(map[string]coreStream{"AERIAL_COALESCED": {coalesced, 200 * time.Hour, 64 << 20}}),
+		},
+		{
+			name: "coalesced larger bytes are kept", seed: map[string]coreStream{"AERIAL_COALESCED": {coalesced, 72 * time.Hour, 256 << 20}},
+			want: coreStreamsWith(map[string]coreStream{"AERIAL_COALESCED": {coalesced, 72 * time.Hour, 256 << 20}}),
+		},
+		{
+			name: "transcripts below the floor are raised", seed: map[string]coreStream{"AERIAL_TRANSCRIPTS": {transcripts, time.Hour, 1 << 20}},
+			want: coreStreamsWith(nil),
+		},
+		{
+			name: "transcripts unlimited age is kept", seed: map[string]coreStream{"AERIAL_TRANSCRIPTS": {transcripts, 0, 128 << 20}},
+			want: coreStreamsWith(map[string]coreStream{"AERIAL_TRANSCRIPTS": {transcripts, 0, 128 << 20}}),
+		},
+		{
+			name: "transcripts unlimited bytes are kept", seed: map[string]coreStream{"AERIAL_TRANSCRIPTS": {transcripts, 72 * time.Hour, -1}},
+			want: coreStreamsWith(map[string]coreStream{"AERIAL_TRANSCRIPTS": {transcripts, 72 * time.Hour, -1}}),
+		},
+		{
+			name: "stream info error names the stream", streamInfoErr: errors.New("stream info failed"),
+			want: map[string]coreStream{}, wantErr: "ensure stream AERIAL_EVENTS: stream info failed",
+		},
+		{
+			name: "add stream error names the stream", addStreamErr: errors.New("add stream failed"),
+			want: map[string]coreStream{}, wantErr: "ensure stream AERIAL_EVENTS: add stream failed",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			mjs := &mockJetStream{existingStreams: map[string]*nats.StreamInfo{}, streamInfoErr: tc.streamInfoErr, addStreamErr: tc.addStreamErr}
+			for name, s := range tc.seed {
+				cfg := nats.StreamConfig{Name: name, Subjects: s.subjects, Storage: nats.FileStorage, MaxAge: s.maxAge, MaxBytes: s.maxBytes}
+				mjs.existingStreams[name] = &nats.StreamInfo{Config: cfg}
+			}
+			err := newJetStreamBusWithContext(nil, mjs).EnsureCoreStreams(context.Background())
+			gotErr := ""
+			if err != nil {
+				gotErr = err.Error()
+			}
+			if gotErr != tc.wantErr {
+				t.Errorf("EnsureCoreStreams() err = %q, want %q", gotErr, tc.wantErr)
+			}
+			got := map[string]coreStream{}
+			for name, info := range mjs.existingStreams {
+				got[name] = coreStream{info.Config.Subjects, info.Config.MaxAge, info.Config.MaxBytes}
+			}
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("streams = %+v, want %+v", got, tc.want)
 			}
 		})
 	}
