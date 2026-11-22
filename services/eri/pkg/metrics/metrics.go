@@ -159,11 +159,13 @@ var (
 		},
 	)
 
-	TaskTimeoutsTotal = prometheus.NewCounter(
+	// TurnTimeoutsTotal counts turn attempts stopped by a timeout, split by reason.
+	TurnTimeoutsTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
-			Name: "aerial_brain_task_timeouts_total",
-			Help: "Total background tasks terminated by safety timeout.",
+			Name: "aerial_brain_turn_timeouts_total",
+			Help: "Turn attempts stopped by a timeout, by reason.",
 		},
+		[]string{"reason"},
 	)
 
 	// VoiceTTFRDurationSeconds tracks voice time-to-first-response telemetry.
@@ -515,12 +517,16 @@ func init() {
 		DaemonSpawnsTotal,
 		DaemonPrunesTotal,
 		DaemonMemoryBytes,
-		TaskTimeoutsTotal,
+		TurnTimeoutsTotal,
 		VoiceTTFRDurationSeconds,
 		BuildInfo,
 	)
 
 	BuildInfo.WithLabelValues("1.0.0", runtime.Version()).Set(1)
+
+	for _, reason := range []string{TurnTimeoutReasonCap, TurnTimeoutReasonWatchdog} {
+		TurnTimeoutsTotal.WithLabelValues(reason)
+	}
 
 	// Pre-initialize voice TTFR series so metrics exist immediately on startup before first voice turn
 	for _, mode := range []string{"sse", "json"} {
@@ -544,6 +550,22 @@ func Handler() http.Handler {
 	return promhttp.HandlerFor(Registry, promhttp.HandlerOpts{
 		EnableOpenMetrics: true,
 	})
+}
+
+// Turn timeout reasons for TurnTimeoutsTotal.
+const (
+	// TurnTimeoutReasonCap: the attempt hit its turn_timeout_minutes deadline.
+	TurnTimeoutReasonCap = "turn_cap"
+	// TurnTimeoutReasonWatchdog: the inactivity watchdog stopped the attempt.
+	TurnTimeoutReasonWatchdog = "watchdog"
+)
+
+// RecordTurnTimeout counts one turn attempt stopped by a timeout with the given reason.
+func RecordTurnTimeout(reason string) {
+	if reason == "" {
+		reason = unknownLabelValue
+	}
+	TurnTimeoutsTotal.WithLabelValues(reason).Inc()
 }
 
 // RecordTurnCompleted records a finished turn with its duration, status, trigger type, and model.

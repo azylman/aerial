@@ -1618,8 +1618,8 @@
             "uid": "VictoriaMetrics"
           },
           "editorMode": "code",
-          "expr": "aerial_brain_task_timeouts_total",
-          "legendFormat": "{{job}}: Task Timeouts",
+          "expr": "sum by (job, reason) (increase(aerial_brain_turn_timeouts_total[$__rate_interval]))",
+          "legendFormat": "{{job}}: {{reason}}",
           "range": true,
           "refId": "D"
         }

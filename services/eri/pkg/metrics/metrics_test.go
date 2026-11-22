@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	dto "github.com/prometheus/client_model/go"
 	_ "modernc.org/sqlite"
 )
@@ -192,6 +193,28 @@ func TestSanitizeChannelLabel(t *testing.T) {
 		if got := SanitizeChannelLabel(c.input); got != c.expected {
 			t.Errorf("case %d: SanitizeChannelLabel(%q) = %q, expected %q", idx, c.input, got, c.expected)
 		}
+	}
+}
+
+func TestRecordTurnTimeout(t *testing.T) {
+	// Not parallel: rows read before/after deltas on shared global counter series.
+	tests := []struct {
+		name       string
+		reason     string
+		wantSeries string
+	}{
+		{name: "turn cap", reason: TurnTimeoutReasonCap, wantSeries: "turn_cap"},
+		{name: "watchdog", reason: TurnTimeoutReasonWatchdog, wantSeries: "watchdog"},
+		{name: "empty reason falls back to unknown", reason: "", wantSeries: "unknown"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			before := testutil.ToFloat64(TurnTimeoutsTotal.WithLabelValues(tc.wantSeries))
+			RecordTurnTimeout(tc.reason)
+			if got := testutil.ToFloat64(TurnTimeoutsTotal.WithLabelValues(tc.wantSeries)) - before; got != 1 {
+				t.Errorf("aerial_brain_turn_timeouts_total{reason=%q} delta = %v, want 1", tc.wantSeries, got)
+			}
+		})
 	}
 }
 

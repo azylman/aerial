@@ -194,6 +194,15 @@ func classifyAttempt(in attemptClassInput) attemptClass {
 	}
 }
 
+// timeoutReason names which timeout stopped an attempt classified classTimeout: the attempt's own
+// run deadline (turn cap) wins, otherwise the inactivity watchdog. It is pure.
+func timeoutReason(in attemptClassInput) string {
+	if in.RunDeadline {
+		return metrics.TurnTimeoutReasonCap
+	}
+	return metrics.TurnTimeoutReasonWatchdog
+}
+
 // attemptInterruptedError is the terminal (412) error of an attempt interrupted by
 // TurnRegistry.Stop or refused by its tombstone: the handler is already past the await, so a
 // retryable error would abort the invocation attempt instead of just being recorded.
@@ -393,7 +402,11 @@ func (p *WorkerPool) executeAttempt(ctx context.Context, s db.Store, te *turnExe
 	case classResume:
 		return te.resumeAttempt(st, base, model), nil
 	default:
-		return p.failAttempt(ctx, s, te, subj, attemptFailure{class: class, ordinal: in.Ordinal, maxAttempts: maxAttempts, errDetail: st.errDetail, stderr: st.stderr, model: model, cfg: cfg}, ids, base)
+		f := attemptFailure{class: class, ordinal: in.Ordinal, maxAttempts: maxAttempts, errDetail: st.errDetail, stderr: st.stderr, model: model, cfg: cfg}
+		if class == classTimeout {
+			f.timeoutReason = timeoutReason(classIn)
+		}
+		return p.failAttempt(ctx, s, te, subj, f, ids, base)
 	}
 }
 
@@ -498,6 +511,8 @@ type attemptFailure struct {
 	errDetail, stderr    string
 	model                string
 	cfg                  attemptConfig
+	// timeoutReason is the metrics.TurnTimeoutReason* that stopped a classTimeout attempt.
+	timeoutReason string
 }
 
 // failAttempt applies a failure class: retries return a backoff; timeouts and terminal failures
@@ -538,6 +553,9 @@ func (p *WorkerPool) failAttempt(ctx context.Context, s db.Store, te *turnExecut
 		te.rotateSessionID(te.threadID, "")
 	}
 	metrics.RecordTurnCompleted(postTurnStatus(summary.Outcome), te.triggerType, f.model, time.Since(te.execStart))
+	if f.class == classTimeout {
+		metrics.RecordTurnTimeout(f.timeoutReason)
+	}
 	summary.DurationMs, summary.Usage = base.Telemetry.DurationMs, base.Telemetry.Usage
 	if err := subj.recordFailure(ctx, s, te, ids, summary); err != nil {
 		return AttemptResult{}, err
