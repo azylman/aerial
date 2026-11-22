@@ -77,7 +77,7 @@ func (c *CDPClient) getActivePageTarget(ctx context.Context) (string, string, er
 	if c.cfg == nil || strings.TrimSpace(c.cfg.CDPHost) == "" {
 		return "", "", errors.New("cdp host is not configured")
 	}
-	resolvedHost := ResolveCDPHost(ctx, c.cfg.CDPHost)
+	resolvedHost := ResolveCDPHost(ctx, c.cfg.CDPHost, net.DefaultResolver.LookupHost)
 	listURL := fmt.Sprintf("http://%s/json/list", net.JoinHostPort(resolvedHost, c.cfg.CDPPort))
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, listURL, http.NoBody)

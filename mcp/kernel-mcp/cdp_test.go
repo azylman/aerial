@@ -3,10 +3,10 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -366,246 +366,257 @@ func TestCDPClient_EnsureConnectionTable(t *testing.T) {
 	}
 }
 
-func runCDPCommand(ctx context.Context, client *CDPClient, action string) error {
-	switch action {
-	case "click":
-		return client.DispatchTrustedClick(ctx, 100, 200)
-	case "type":
-		return client.InsertText(ctx, "hello baddie")
-	case "navigate":
-		return client.Navigate(ctx, "https://www.example.com")
-	case "screenshot":
-		return verifyScreenshot(ctx, client, "png")
-	case "screenshot-empty":
-		return verifyScreenshot(ctx, client, "")
-	case "screenshot-bad-json":
-		_, err := client.CaptureScreenshot(ctx, "fail-unmarshal")
-		return err
-	case "eval":
-		return verifyEval(ctx, client)
-	case "wait-settle-zero":
-		oldDelay := client.cfg.SettleDelay
-		client.cfg.SettleDelay = 0
-		defer func() { client.cfg.SettleDelay = oldDelay }()
-		return client.WaitSettle(ctx)
-	default:
-		return fmt.Errorf("unknown action: %s", action)
-	}
-}
-
-func verifyScreenshot(ctx context.Context, client *CDPClient, format string) error {
-	data, err := client.CaptureScreenshot(ctx, format)
-	if err != nil {
-		return err
-	}
-	if data != "dGVzdC1zY3JlZW5zaG90" {
-		return fmt.Errorf("CaptureScreenshot data = %q, want %q", data, "dGVzdC1zY3JlZW5zaG90")
-	}
-	return nil
-}
-
-func verifyEval(ctx context.Context, client *CDPClient) error {
-	raw, err := client.EvaluateJS(ctx, "window.location.href", true, true)
-	if err != nil {
-		return err
-	}
-	if string(raw) != `"eval-success"` {
-		return fmt.Errorf("EvaluateJS result = %s, want %q", string(raw), `"eval-success"`)
-	}
-	return nil
-}
-
-func TestCDPClient_CommandsTable(t *testing.T) {
-	_, cfg := startFakeCDPServer(t, fakeCDPOptions{})
+// startCDPClient starts a fake CDP server with opts and returns it with a
+// client and a bounded context, all torn down via t.Cleanup.
+func startCDPClient(t *testing.T, opts fakeCDPOptions) (*fakeCDPServer, *CDPClient, context.Context) {
+	t.Helper()
+	server, cfg := startFakeCDPServer(t, opts)
 	client := NewCDPClient(cfg)
-	defer client.Close()
-
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-
-	if err := client.EnsureConnection(ctx); err != nil {
-		t.Fatalf("EnsureConnection failed: %v", err)
-	}
-
-	tests := []struct {
-		name      string
-		action    string
-		expectErr bool
-	}{
-		{name: "trusted click", action: "click"},
-		{name: "insert text", action: "type"},
-		{name: "navigate", action: "navigate"},
-		{name: "navigate same host paced", action: "navigate"},
-		{name: "screenshot png", action: "screenshot"},
-		{name: "screenshot empty format defaults png", action: "screenshot-empty"},
-		{name: "screenshot unmarshal failure", action: "screenshot-bad-json", expectErr: true},
-		{name: "evaluate js", action: "eval"},
-		{name: "wait settle zero delay", action: "wait-settle-zero"},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			err := runCDPCommand(ctx, client, tc.action)
-			if tc.expectErr && err == nil {
-				t.Fatalf("%s expected error, got nil", tc.action)
-			}
-			if !tc.expectErr && err != nil {
-				t.Fatalf("%s unexpected error: %v", tc.action, err)
-			}
-		})
-	}
+	t.Cleanup(func() {
+		cancel()
+		_ = client.Close()
+	})
+	return server, client, ctx
 }
 
-func executeCDPErrorAction(ctx context.Context, client *CDPClient, action string, server *fakeCDPServer) error {
-	switch action {
-	case "eval":
-		_, err := client.EvaluateJS(ctx, "bad()", true, true)
-		return err
-	case "detach":
-		_ = client.EnsureConnection(ctx)
-		return client.InsertText(ctx, "trigger detach")
-	case "settle-cancel":
-		cancelCtx, cancelFn := context.WithCancel(ctx)
-		cancelFn()
-		client.cfg.SettleDelay = 500 * time.Millisecond
-		client.waitSettleBestEffort(cancelCtx)
-		return client.WaitSettle(cancelCtx)
-	case "send-cdp-fail":
-		server.Close()
-		_, err := client.SendCDP(ctx, "Page.enable", nil)
-		return err
-	case "click-fail-moved", "click-fail-press", "click-fail-release":
-		_ = client.EnsureConnection(ctx)
-		return client.DispatchTrustedClick(ctx, 50, 50)
-	case "cdp-error-resp":
-		_ = client.EnsureConnection(ctx)
-		return client.InsertText(ctx, "should error")
-	case "send-cdp-canceled-ctx":
-		_ = client.EnsureConnection(ctx)
-		cancelCtx, cancelFn := context.WithCancel(ctx)
-		cancelFn()
-		_, err := client.sendCDPDirect(cancelCtx, client.activeConn, "Test.withheld", nil, "")
-		return err
-	case "send-cdp-write-err":
-		_ = client.EnsureConnection(ctx)
-		client.stateMu.Lock()
-		conn := client.activeConn
-		client.stateMu.Unlock()
-		if conn != nil {
-			_ = conn.UnderlyingConn().Close()
+// checkCDPErr fails the test unless err matches wantErr ("" means no error).
+func checkCDPErr(t *testing.T, call string, err error, wantErr string) {
+	t.Helper()
+	if wantErr == "" {
+		if err != nil {
+			t.Fatalf("%s unexpected error: %v", call, err)
 		}
-		_, err := client.sendCDPDirect(ctx, conn, "Page.enable", nil, "")
-		return err
-	case "send-cdp-late-cancel":
-		_ = client.EnsureConnection(ctx)
-		lateCtx, lateCancel := context.WithCancel(ctx)
-		defer lateCancel()
-		time.AfterFunc(20*time.Millisecond, lateCancel)
-		_, err := client.sendCDPDirect(lateCtx, client.activeConn, "Test.withheld", nil, "")
-		return err
-	default:
-		return nil
+		return
+	}
+	if err == nil || !strings.Contains(err.Error(), wantErr) {
+		t.Fatalf("%s error = %v, want substring %q", call, err, wantErr)
 	}
 }
 
-func TestCDPClient_ErrorAndDisconnectTable(t *testing.T) {
+func TestCDPClient_DispatchTrustedClick(t *testing.T) {
 	tests := []struct {
-		name      string
-		opts      fakeCDPOptions
-		action    string
-		wantErr   bool
-		errSubstr string
+		name    string
+		opts    fakeCDPOptions
+		wantErr string
 	}{
-		{
-			name:      "eval exception details returns error",
-			opts:      fakeCDPOptions{evalException: "SyntaxError: Unexpected token"},
-			action:    "eval",
-			wantErr:   true,
-			errSubstr: "javascript evaluation error: SyntaxError: Unexpected token",
-		},
-		{
-			name:      "detachment disconnects connection",
-			opts:      fakeCDPOptions{detachOnMethod: "Input.insertText"},
-			action:    "detach",
-			wantErr:   true,
-			errSubstr: "connection closed",
-		},
-		{
-			name:      "cancelled context aborts wait settle",
-			action:    "settle-cancel",
-			wantErr:   true,
-			errSubstr: "context canceled",
-		},
-		{
-			name:      "send cdp with dead server returns error",
-			action:    "send-cdp-fail",
-			wantErr:   true,
-			errSubstr: "cdp target query failed",
-		},
-		{
-			name:      "trusted click mouseMoved error",
-			opts:      fakeCDPOptions{failMouseMoved: true},
-			action:    "click-fail-moved",
-			wantErr:   true,
-			errSubstr: "mouseMoved",
-		},
-		{
-			name:      "trusted click mousePressed error",
-			opts:      fakeCDPOptions{failMousePress: true},
-			action:    "click-fail-press",
-			wantErr:   true,
-			errSubstr: "mousePressed",
-		},
-		{
-			name:      "trusted click mouseReleased error",
-			opts:      fakeCDPOptions{failMouseRelease: true},
-			action:    "click-fail-release",
-			wantErr:   true,
-			errSubstr: "mouseReleased",
-		},
-		{
-			name:      "send cdp command returns cdp error code",
-			opts:      fakeCDPOptions{returnCDPError: true},
-			action:    "cdp-error-resp",
-			wantErr:   true,
-			errSubstr: "cdp error -32603",
-		},
-		{
-			name:      "send cdp with pre-canceled context",
-			opts:      fakeCDPOptions{withholdMethod: "Test.withheld"},
-			action:    "send-cdp-canceled-ctx",
-			wantErr:   true,
-			errSubstr: "context canceled",
-		},
-		{
-			name:      "send cdp with closed connection write error",
-			action:    "send-cdp-write-err",
-			wantErr:   true,
-			errSubstr: "write cdp payload",
-		},
-		{
-			name:      "send cdp with late context cancellation",
-			opts:      fakeCDPOptions{withholdMethod: "Test.withheld"},
-			action:    "send-cdp-late-cancel",
-			wantErr:   true,
-			errSubstr: "context canceled",
-		},
+		{"three step click succeeds", fakeCDPOptions{}, ""},
+		{"mouseMoved error", fakeCDPOptions{failMouseMoved: true}, "mouseMoved: cdp error -32000"},
+		{"mousePressed error", fakeCDPOptions{failMousePress: true}, "mousePressed: cdp error -32000"},
+		{"mouseReleased error", fakeCDPOptions{failMouseRelease: true}, "mouseReleased: cdp error -32000"},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			server, cfg := startFakeCDPServer(t, tc.opts)
+			_, client, ctx := startCDPClient(t, tc.opts)
+			checkCDPErr(t, "DispatchTrustedClick", client.DispatchTrustedClick(ctx, 100, 200), tc.wantErr)
+		})
+	}
+}
 
-			client := NewCDPClient(cfg)
-			defer client.Close()
+func TestCDPClient_InsertText(t *testing.T) {
+	tests := []struct {
+		name    string
+		opts    fakeCDPOptions
+		wantErr string
+	}{
+		{"insert text succeeds", fakeCDPOptions{}, ""},
+		{"target detach closes connection", fakeCDPOptions{detachOnMethod: "Input.insertText"}, "cdp connection closed"},
+		{"cdp error response", fakeCDPOptions{returnCDPError: true}, "cdp error -32603: Internal error executing command"},
+	}
 
-			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-			defer cancel()
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, client, ctx := startCDPClient(t, tc.opts)
+			checkCDPErr(t, "InsertText", client.InsertText(ctx, "hello there"), tc.wantErr)
+		})
+	}
+}
 
-			err := executeCDPErrorAction(ctx, client, tc.action, server)
-			if tc.wantErr && (err == nil || !strings.Contains(err.Error(), tc.errSubstr)) {
-				t.Fatalf("action %s error = %v, want substring %q", tc.action, err, tc.errSubstr)
+func TestCDPClient_Navigate(t *testing.T) {
+	tests := []struct {
+		name        string
+		lastNavHost string
+		url         string
+	}{
+		{"first navigation", "", "https://www.example.com"},
+		{"navigate same host paced", "www.example.com", "https://www.example.com/next"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, client, ctx := startCDPClient(t, fakeCDPOptions{})
+			client.lastNavHost = tc.lastNavHost
+			checkCDPErr(t, "Navigate", client.Navigate(ctx, tc.url), "")
+			client.stateMu.Lock()
+			got := client.lastNavHost
+			client.stateMu.Unlock()
+			if got != "www.example.com" {
+				t.Fatalf("lastNavHost = %q, want %q", got, "www.example.com")
 			}
 		})
 	}
+}
+
+func TestCDPClient_CaptureScreenshot(t *testing.T) {
+	tests := []struct {
+		name    string
+		format  string
+		want    string
+		wantErr string
+	}{
+		{"png", "png", "dGVzdC1zY3JlZW5zaG90", ""},
+		{"empty format defaults png", "", "dGVzdC1zY3JlZW5zaG90", ""},
+		{"unmarshal failure", "fail-unmarshal", "", "unmarshal screenshot result"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, client, ctx := startCDPClient(t, fakeCDPOptions{})
+			got, err := client.CaptureScreenshot(ctx, tc.format)
+			checkCDPErr(t, "CaptureScreenshot", err, tc.wantErr)
+			if got != tc.want {
+				t.Fatalf("CaptureScreenshot(%q) = %q, want %q", tc.format, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestCDPClient_EvaluateJS(t *testing.T) {
+	tests := []struct {
+		name    string
+		opts    fakeCDPOptions
+		want    string
+		wantErr string
+	}{
+		{"returns value", fakeCDPOptions{}, `"eval-success"`, ""},
+		{"exception details", fakeCDPOptions{evalException: "SyntaxError: bad token"}, "", "javascript evaluation error: SyntaxError: bad token"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, client, ctx := startCDPClient(t, tc.opts)
+			got, err := client.EvaluateJS(ctx, "window.location.href", true, true)
+			checkCDPErr(t, "EvaluateJS", err, tc.wantErr)
+			if string(got) != tc.want {
+				t.Fatalf("EvaluateJS = %s, want %s", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestCDPClient_WaitSettle(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		delay    time.Duration
+		canceled bool
+		wantErr  string
+	}{
+		{"zero delay returns immediately", 0, false, ""},
+		{"positive delay elapses", time.Millisecond, false, ""},
+		{"canceled context aborts", 500 * time.Millisecond, true, "context canceled"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			client := NewCDPClient(&Config{SettleDelay: tc.delay})
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if tc.canceled {
+				cancel()
+			}
+			client.waitSettleBestEffort(ctx)
+			checkCDPErr(t, "WaitSettle", client.WaitSettle(ctx), tc.wantErr)
+		})
+	}
+}
+
+func TestCDPClient_SendCDP(t *testing.T) {
+	tests := []struct {
+		name         string
+		closedServer bool
+		want         string
+		wantErr      string
+	}{
+		{"returns result", false, "{}", ""},
+		{"dead cdp host", true, "", "cdp target query failed"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			server, client, ctx := startCDPClient(t, fakeCDPOptions{})
+			if tc.closedServer {
+				server.Close()
+			}
+			got, err := client.SendCDP(ctx, "Page.enable", nil)
+			checkCDPErr(t, "SendCDP", err, tc.wantErr)
+			if string(got) != tc.want {
+				t.Fatalf("SendCDP = %s, want %s", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestCDPClient_SendCDPDirectCancel covers both cancellation points of a
+// withheld command: before the request is registered and while awaiting the
+// reply.
+func TestCDPClient_SendCDPDirectCancel(t *testing.T) {
+	tests := []struct {
+		name      string
+		preCancel bool
+	}{
+		{"pre-canceled context", true},
+		{"cancel while awaiting reply", false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, client, ctx := startCDPClient(t, fakeCDPOptions{withholdMethod: "Test.withheld"})
+			checkCDPErr(t, "EnsureConnection", client.EnsureConnection(ctx), "")
+			client.stateMu.Lock()
+			conn := client.activeConn
+			client.stateMu.Unlock()
+			sendCtx, cancel := context.WithCancel(ctx)
+			defer cancel()
+			if tc.preCancel {
+				cancel()
+			}
+			errCh := make(chan error, 1)
+			go func() {
+				_, err := client.sendCDPDirect(sendCtx, conn, "Test.withheld", nil, "")
+				errCh <- err
+			}()
+			if !tc.preCancel {
+				waitCDPPending(client)
+				cancel()
+			}
+			checkCDPErr(t, "sendCDPDirect", <-errCh, "context canceled")
+		})
+	}
+}
+
+// waitCDPPending yields until client has a registered in-flight request.
+func waitCDPPending(client *CDPClient) {
+	for {
+		client.stateMu.Lock()
+		n := len(client.pending)
+		client.stateMu.Unlock()
+		if n > 0 {
+			return
+		}
+		runtime.Gosched()
+	}
+}
+
+func TestCDPClient_SendCDPDirectWriteError(t *testing.T) {
+	_, client, ctx := startCDPClient(t, fakeCDPOptions{})
+	checkCDPErr(t, "EnsureConnection", client.EnsureConnection(ctx), "")
+	client.stateMu.Lock()
+	conn := client.activeConn
+	client.stateMu.Unlock()
+	_ = conn.UnderlyingConn().Close()
+	_, err := client.sendCDPDirect(ctx, conn, "Page.enable", nil, "")
+	checkCDPErr(t, "sendCDPDirect", err, "write cdp payload")
 }
