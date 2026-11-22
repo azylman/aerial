@@ -16,28 +16,18 @@ func TestInitSynapseJetStream(t *testing.T) {
 		name          string
 		natsURL       string
 		busErr        error
-		customBus     func() pubsub.Bus
+		customBus     pubsub.Bus
 		wantErr       bool
 		wantBusCalled bool
 		wantBusSet    bool
 	}{
 		{name: "empty nats url returns noop without connecting", natsURL: "", wantBusCalled: false},
 		{name: "connect error returns error", natsURL: "nats://127.0.0.1:4222", busErr: errors.New("connection refused"), wantBusCalled: true, wantErr: true},
-		{name: "ensure core streams error returns error", natsURL: "nats://127.0.0.1:4222", wantBusCalled: true, wantErr: true, customBus: func() pubsub.Bus {
-			return &errCoreStreamsBus{Bus: pubsub.NewMemoryBus(), err: errors.New("stream err")}
-		}},
-		{name: "start job consumers error returns error", natsURL: "nats://127.0.0.1:4222", wantBusCalled: true, wantErr: true, customBus: func() pubsub.Bus {
-			return &errSubscribeBus{Bus: pubsub.NewMemoryBus(), err: errors.New("sub err")}
-		}},
-		{name: "ensure core streams error with close error", natsURL: "nats://127.0.0.1:4222", wantBusCalled: true, wantErr: true, customBus: func() pubsub.Bus {
-			return &errCoreStreamsAndCloseBus{Bus: pubsub.NewMemoryBus(), streamErr: errors.New("stream err"), closeErr: errors.New("close err")}
-		}},
-		{name: "start job consumers error with close error", natsURL: "nats://127.0.0.1:4222", wantBusCalled: true, wantErr: true, customBus: func() pubsub.Bus {
-			return &errSubscribeAndCloseBus{Bus: pubsub.NewMemoryBus(), subErr: errors.New("sub err"), closeErr: errors.New("close err")}
-		}},
-		{name: "successful connection with close error on teardown", natsURL: "nats://127.0.0.1:4222", wantBusCalled: true, wantBusSet: true, customBus: func() pubsub.Bus {
-			return &errCloseBus{Bus: pubsub.NewMemoryBus(), closeErr: errors.New("close err")}
-		}},
+		{name: "ensure core streams error returns error", natsURL: "nats://127.0.0.1:4222", wantBusCalled: true, wantErr: true, customBus: &errCoreStreamsBus{Bus: pubsub.NewMemoryBus(), err: errors.New("stream err")}},
+		{name: "start job consumers error returns error", natsURL: "nats://127.0.0.1:4222", wantBusCalled: true, wantErr: true, customBus: &errSubscribeBus{Bus: pubsub.NewMemoryBus(), err: errors.New("sub err")}},
+		{name: "ensure core streams error with close error", natsURL: "nats://127.0.0.1:4222", wantBusCalled: true, wantErr: true, customBus: &errCoreStreamsAndCloseBus{Bus: pubsub.NewMemoryBus(), streamErr: errors.New("stream err"), closeErr: errors.New("close err")}},
+		{name: "start job consumers error with close error", natsURL: "nats://127.0.0.1:4222", wantBusCalled: true, wantErr: true, customBus: &errSubscribeAndCloseBus{Bus: pubsub.NewMemoryBus(), subErr: errors.New("sub err"), closeErr: errors.New("close err")}},
+		{name: "successful connection with close error on teardown", natsURL: "nats://127.0.0.1:4222", wantBusCalled: true, wantBusSet: true, customBus: &errCloseBus{Bus: pubsub.NewMemoryBus(), closeErr: errors.New("close err")}},
 		{name: "successful connection configures bus and starts consumers", natsURL: "nats://127.0.0.1:4222", wantBusCalled: true, wantBusSet: true},
 	}
 
@@ -47,7 +37,7 @@ func TestInitSynapseJetStream(t *testing.T) {
 			newBusFn = func(ctx context.Context, url string) (pubsub.Bus, error) {
 				called = true
 				if tc.customBus != nil {
-					return tc.customBus(), nil
+					return tc.customBus, nil
 				}
 				if tc.wantBusSet {
 					return pubsub.NewMemoryBus(), nil

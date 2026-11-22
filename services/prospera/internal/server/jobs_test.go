@@ -144,8 +144,7 @@ func TestServer_StartJobConsumers(t *testing.T) {
 	tests := []struct {
 		name           string
 		nilServer      bool
-		setupBus       func() (pubsub.Bus, error)
-		failSubject    string
+		busKind        string
 		assertHandlers bool
 		wantErr        bool
 	}{
@@ -155,46 +154,34 @@ func TestServer_StartJobConsumers(t *testing.T) {
 			wantErr:   false,
 		},
 		{
-			name: "nil bus returns nil",
-			setupBus: func() (pubsub.Bus, error) {
-				return nil, nil
-			},
+			name:    "nil bus returns nil",
+			busKind: "nil",
 			wantErr: false,
 		},
 		{
-			name: "memory bus subscribes all consumers",
-			setupBus: func() (pubsub.Bus, error) {
-				return pubsub.NewMemoryBus(), nil
-			},
+			name:    "memory bus subscribes all consumers",
+			busKind: "memory",
 			wantErr: false,
 		},
 		{
-			name: "bus wires consumers and handlers invoke server methods",
-			setupBus: func() (pubsub.Bus, error) {
-				return &captureConsumerBus{handlers: make(map[string]pubsub.Handler)}, nil
-			},
+			name:           "bus wires consumers and handlers invoke server methods",
+			busKind:        "capture",
 			assertHandlers: true,
 			wantErr:        false,
 		},
 		{
-			name: "report consumer error fails",
-			setupBus: func() (pubsub.Bus, error) {
-				return &failConsumeQueueBus{Bus: pubsub.NewMemoryBus(), failSubject: pubsub.SubjectProsperaReportJob}, nil
-			},
+			name:    "report consumer error fails",
+			busKind: "fail_report",
 			wantErr: true,
 		},
 		{
-			name: "voicemail consumer error fails",
-			setupBus: func() (pubsub.Bus, error) {
-				return &failConsumeQueueBus{Bus: pubsub.NewMemoryBus(), failSubject: pubsub.SubjectProsperaVoicemailJob}, nil
-			},
+			name:    "voicemail consumer error fails",
+			busKind: "fail_voicemail",
 			wantErr: true,
 		},
 		{
-			name: "sms consumer error fails",
-			setupBus: func() (pubsub.Bus, error) {
-				return &failConsumeQueueBus{Bus: pubsub.NewMemoryBus(), failSubject: pubsub.SubjectProsperaSMSJob}, nil
-			},
+			name:    "sms consumer error fails",
+			busKind: "fail_sms",
 			wantErr: true,
 		},
 	}
@@ -207,8 +194,21 @@ func TestServer_StartJobConsumers(t *testing.T) {
 				server, _, _ = setupTestServer()
 			}
 			var bus pubsub.Bus
-			if tc.setupBus != nil {
-				bus, _ = tc.setupBus()
+			switch tc.busKind {
+			case "", "nil":
+				bus = nil
+			case "memory":
+				bus = pubsub.NewMemoryBus()
+			case "capture":
+				bus = &captureConsumerBus{handlers: make(map[string]pubsub.Handler)}
+			case "fail_report":
+				bus = &failConsumeQueueBus{Bus: pubsub.NewMemoryBus(), failSubject: pubsub.SubjectProsperaReportJob}
+			case "fail_voicemail":
+				bus = &failConsumeQueueBus{Bus: pubsub.NewMemoryBus(), failSubject: pubsub.SubjectProsperaVoicemailJob}
+			case "fail_sms":
+				bus = &failConsumeQueueBus{Bus: pubsub.NewMemoryBus(), failSubject: pubsub.SubjectProsperaSMSJob}
+			default:
+				t.Fatalf("unknown busKind %q", tc.busKind)
 			}
 			server.SetEventBus(bus)
 			if tc.nilServer && server.EventBus() != nil {
