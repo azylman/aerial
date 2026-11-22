@@ -4,14 +4,37 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/azylman/aerial/pkg/eriwire"
 	"github.com/azylman/aerial/pkg/restateingresstest"
 )
+
+// eriClosedURL returns the URL of an httptest server that is already closed,
+// so dialing it fails with connection refused on loopback.
+func eriClosedURL(t *testing.T) string {
+	t.Helper()
+	srv := httptest.NewServer(http.NotFoundHandler())
+	srv.Close()
+	return srv.URL
+}
+
+// requireErrText asserts err is nil when want is empty, else that its text
+// contains want.
+func requireErrText(t *testing.T, err error, want string) {
+	t.Helper()
+	if want == "" {
+		require.NoError(t, err)
+		return
+	}
+	require.ErrorContains(t, err, want)
+}
 
 func TestServiceNaming(t *testing.T) {
 	t.Parallel()
@@ -170,8 +193,7 @@ func TestRestateEriClient_Dispatch(t *testing.T) {
 		},
 		{name: "bad restate url fails building the request", restateURL: "http://127.0.0.1:0\nbad", req: d1, wantErr: "dispatch failed: "},
 		{name: "unreachable restate fails", restateURL: closedURL, req: d1, wantErr: "dispatch failed: "},
-		{name: "no restate url falls back to eri", noRestate: true, req: d1, path: "/dispatch", body: accepted, wantCalls: []string{"eri /dispatch"}},
-		{name: "neither url configured", noRestate: true, noEri: true, req: d1, wantErr: "neither restate url nor eri url configured"},
+		{name: "no restate url errors", noRestate: true, req: d1, wantErr: "restate url not configured"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -210,7 +232,7 @@ func TestRestateEriClient_DispatchAccepted(t *testing.T) {
 			wantErr: `restate did not accept dispatch "d1" (status "accepted", identity "other")`, wantCalls: []string{"restate " + path + " key=d1"},
 		},
 		{name: "empty reply errors", req: d1, path: path, wantErr: `restate did not accept dispatch "d1" (status "", identity "")`, wantCalls: []string{"restate " + path + " key=d1"}},
-		{name: "no restate url falls back to eri", noRestate: true, req: d1, path: "/dispatch", body: accepted, wantCalls: []string{"eri /dispatch"}},
+		{name: "no restate url errors", noRestate: true, req: d1, wantErr: "restate url not configured"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -237,8 +259,7 @@ func TestRestateEriClient_CancelDispatch(t *testing.T) {
 	}{
 		{name: "restate cancels the chunk session", chunkID: "c1", path: "/DispatchSession/vanadis-c1/Cancel", wantCalls: []string{"restate /DispatchSession/vanadis-c1/Cancel key="}},
 		{name: "blank chunk is a noop", chunkID: " "},
-		{name: "no restate url falls back to eri", noRestate: true, chunkID: "c1", path: "/dispatch/cancel", wantCalls: []string{"eri /dispatch/cancel"}},
-		{name: "neither url configured", noRestate: true, noEri: true, chunkID: "c1", wantErr: "neither restate url nor eri url configured"},
+		{name: "no restate url errors", noRestate: true, chunkID: "c1", wantErr: "restate url not configured"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -268,8 +289,7 @@ func TestRestateEriClient_Prompt(t *testing.T) {
 			wantCalls: []string{"restate /ThreadSession/th-1/Enqueue key=prompt:th-1:vanadis-prompt-83e7044d26ed4a0c7faf9d30d9d2089e"},
 		},
 		{name: "blank thread and prompt is a noop", thread: " ", prompt: " "},
-		{name: "no restate url falls back to eri", noRestate: true, thread: "th-1", prompt: "hello", path: "/prompt", wantCalls: []string{"eri /prompt"}},
-		{name: "neither url configured", noRestate: true, noEri: true, thread: "th-1", prompt: "hello", wantErr: "neither restate url nor eri url configured"},
+		{name: "no restate url errors", noRestate: true, thread: "th-1", prompt: "hello", wantErr: "restate url not configured"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -298,9 +318,9 @@ func TestRestateEriClient_Widget(t *testing.T) {
 		wantCalls []string
 	}{
 		{name: "direct deliverer with auth and restate", auth: true, deliverer: &mockDeliverer{msgID: "msg-direct-1"}, wantID: "msg-direct-1"},
-		{name: "missing auth falls back to eri", deliverer: &mockDeliverer{msgID: "unused"}, wantID: "msg-eri", wantCalls: []string{"eri /discord/widget"}},
-		{name: "missing restate url falls back to eri", auth: true, noRestate: true, deliverer: &mockDeliverer{msgID: "unused"}, wantID: "msg-eri", wantCalls: []string{"eri /discord/widget"}},
-		{name: "unconfigured errors", noRestate: true, noEri: true, wantErr: "neither widget deliverer nor eri url configured for widget delivery"},
+		{name: "missing auth errors", deliverer: &mockDeliverer{msgID: "unused"}, wantErr: "direct widget delivery is unconfigured"},
+		{name: "missing restate url errors", auth: true, noRestate: true, deliverer: &mockDeliverer{msgID: "unused"}, wantErr: "restate url not configured"},
+		{name: "unconfigured errors", auth: true, wantErr: "direct widget delivery is unconfigured"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -385,14 +405,10 @@ func TestRestateEriClient_Message(t *testing.T) {
 		{name: "plain deliverer with auth and restate", auth: true, deliverer: &mockDeliverer{}, channel: "ch-1", wantDelivered: "ch-1 test content"},
 		{name: "agent deliverer routes through the client agent", auth: true, deliverer: &agentDeliverer{}, channel: "ch-1", wantDelivered: "aerial ch-1 test content"},
 		{name: "deliverer error propagates", auth: true, deliverer: &mockDeliverer{err: errBoom}, channel: "ch-1", wantErr: "boom", wantDelivered: "ch-1 test content"},
-		{name: "missing auth falls back to eri", deliverer: &mockDeliverer{}, channel: "ch-1", wantCalls: []string{"eri /discord/message"}},
-		{name: "missing restate url falls back to eri", auth: true, noRestate: true, deliverer: &mockDeliverer{}, channel: "ch-1", wantCalls: []string{"eri /discord/message"}},
-		{name: "no deliverer falls back to eri", auth: true, channel: "ch-1", wantCalls: []string{"eri /discord/message"}},
-		{name: "blank channel is a noop", auth: true, noRestate: true, noEri: true, channel: " "},
-		{
-			name: "unconfigured errors", noRestate: true, noEri: true, channel: "ch-1",
-			wantErr: "neither direct message deliverer nor http fallback configured for message delivery",
-		},
+		{name: "missing auth errors", deliverer: &mockDeliverer{}, channel: "ch-1", wantErr: "direct message delivery is unconfigured"},
+		{name: "missing restate url errors", auth: true, noRestate: true, deliverer: &mockDeliverer{}, channel: "ch-1", wantErr: "restate url not configured"},
+		{name: "no deliverer errors", auth: true, channel: "ch-1", wantErr: "direct message delivery is unconfigured"},
+		{name: "blank channel is a noop", auth: true, channel: " "},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

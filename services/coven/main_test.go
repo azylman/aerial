@@ -2,73 +2,13 @@ package main
 
 import (
 	"context"
-	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/azylman/aerial/services/coven/internal/config"
 )
-
-func TestMain_Execution(t *testing.T) {
-	oldRun, oldExit, oldPath := runAppFn, exitFn, configPath
-	defer func() {
-		runAppFn, exitFn, configPath = oldRun, oldExit, oldPath
-	}()
-
-	tmpDir := t.TempDir()
-	testCfg := filepath.Join(tmpDir, "config.yaml")
-	testCfgContent := `port: "4008"
-database_url: "postgres://u:p@localhost/db"
-eri_url: "http://eri.aerial"
-eri_llm_url: "http://eri.aerial/internal/llm"
-pr_register_url: "http://synapse.aerial/internal/pr/register"
-custom_skills_dir: "/config/custom-skills"
-rules_dir: "/config/rules"
-config_repo_owner: "example"
-config_repo_name: "example-config"
-ollama:
-  base_url: "http://ollama:11434"
-  model: "all-minilm"
-  num_ctx: 512
-`
-	_ = os.WriteFile(testCfg, []byte(testCfgContent), 0o644)
-	configPath = testCfg
-	t.Setenv("CONFIG_PATH", testCfg)
-	t.Setenv("DATABASE_URL", "postgres://user:pass@localhost:5432/db")
-
-	runCalled := false
-	runAppFn = func(ctx context.Context, cfg *config.Config) error {
-		runCalled = true
-		return nil
-	}
-	main()
-	if !runCalled {
-		t.Error("expected runAppFn called")
-	}
-
-	exitCalled := false
-	exitFn = func(string, ...any) { exitCalled = true }
-	runAppFn = func(ctx context.Context, cfg *config.Config) error { return http.ErrServerClosed }
-	main()
-	if exitCalled {
-		t.Error("did not expect exitFn on http.ErrServerClosed")
-	}
-
-	runAppFn = func(ctx context.Context, cfg *config.Config) error { return context.DeadlineExceeded }
-	main()
-	if !exitCalled {
-		t.Error("expected exitFn on server error")
-	}
-
-	exitCalled = false
-	configPath = filepath.Join(tmpDir, "nonexistent.yaml")
-	t.Setenv("CONFIG_PATH", configPath)
-	main()
-	if !exitCalled {
-		t.Error("expected exitFn on config load error")
-	}
-}
 
 func mapEnv(m map[string]string) func(string) string {
 	return func(k string) string {
@@ -76,6 +16,8 @@ func mapEnv(m map[string]string) func(string) string {
 	}
 }
 
+// TestRunMain covers coven-specific wiring (getenv bound into LoadConfig);
+// the generic bootstrap branches are covered by httpkit.TestRunService.
 func TestRunMain(t *testing.T) {
 	oldRun, oldExit, oldPath := runAppFn, exitFn, configPath
 	defer func() {
@@ -113,9 +55,6 @@ ollama:
 		wantExitCall bool
 	}{
 		{name: "CleanExit", cfgPath: testCfg, env: map[string]string{"DATABASE_URL": dbURL}, wantRunCall: true},
-		{name: "ErrServerClosedIgnored", cfgPath: testCfg, env: map[string]string{"DATABASE_URL": dbURL}, runErr: http.ErrServerClosed, wantRunCall: true},
-		{name: "RuntimeFailureCallsExit", cfgPath: testCfg, env: map[string]string{"DATABASE_URL": dbURL}, runErr: context.DeadlineExceeded, wantRunCall: true, wantExitCall: true},
-		{name: "ConfigLoadFailureCallsExit", cfgPath: filepath.Join(tmpDir, "nonexistent.yaml"), wantExitCall: true},
 		{name: "InvalidEnvCallsExit", cfgPath: testCfg, env: map[string]string{"DATABASE_URL": dbURL, "K8S_AUTH_ENABLED": "maybe"}, wantExitCall: true},
 	}
 
@@ -142,5 +81,34 @@ ollama:
 				t.Errorf("exitCalled = %v, want %v", exitCalled, tc.wantExitCall)
 			}
 		})
+	}
+}
+
+// TestMainFunc checks main binds os.Getenv into runMain.
+func TestMainFunc(t *testing.T) {
+	oldRun, oldExit, oldPath := runAppFn, exitFn, configPath
+	t.Cleanup(func() { runAppFn, exitFn, configPath = oldRun, oldExit, oldPath })
+
+	testCfg := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(testCfg, []byte("port: \"4008\"\neri_url: \"http://eri.aerial\"\neri_llm_url: \"http://eri.aerial/internal/llm\"\npr_register_url: \"http://synapse.aerial/internal/pr/register\"\ncustom_skills_dir: \"/config/custom-skills\"\nrules_dir: \"/config/rules\"\nconfig_repo_owner: \"example\"\nconfig_repo_name: \"example-config\"\nollama:\n  base_url: \"http://ollama:11434\"\n  model: \"all-minilm\"\n  num_ctx: 512\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	configPath = testCfg
+	t.Setenv("CONFIG_PATH", testCfg)
+	t.Setenv("DATABASE_URL", "postgres://env-user:pass@localhost:5432/db")
+
+	gotDB := ""
+	exitCalled := false
+	exitFn = func(string, ...any) { exitCalled = true }
+	runAppFn = func(_ context.Context, cfg *config.Config) error {
+		gotDB = cfg.DatabaseURL
+		return nil
+	}
+	main()
+	if !strings.Contains(gotDB, "env-user") {
+		t.Errorf("runAppFn cfg.DatabaseURL = %q, want env value", gotDB)
+	}
+	if exitCalled {
+		t.Error("exitFn called on clean run")
 	}
 }
