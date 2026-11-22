@@ -24,6 +24,8 @@ const (
 )
 
 const (
+	maxRootMainFiles         = 3
+	minCrossPkgCloneGrams    = 6
 	maxFileLines             = 1500
 	maxDepth                 = 5
 	minCloneFuncLines        = 20
@@ -35,7 +37,10 @@ const (
 	maxStructCloneSimilarity = 0.85
 )
 
-var splitTestRegex = regexp.MustCompile(`^Test.*_(Extra|More.*|Additional.*|Uncovered.*|EdgeCases|CornerCases|Branches|AllBranches|Chunk\d+.*|Coverage.*)$`)
+var (
+	splitTestRegex = regexp.MustCompile(`^Test.*_(Extra|More.*|Additional.*|Uncovered.*|EdgeCases|CornerCases|Branches|AllBranches|Chunk\d+.*|Coverage.*)$`)
+	partTestRegex  = regexp.MustCompile(`^.*_part\d+_test\.go$`)
+)
 
 // FileMetrics records ratcheted file-level watermarks.
 type FileMetrics struct {
@@ -51,6 +56,7 @@ type FuncMetrics struct {
 type Baseline struct {
 	Files     map[string]FileMetrics `json:"files,omitempty"`
 	Functions map[string]FuncMetrics `json:"functions,omitempty"`
+	RootFiles map[string]int         `json:"root_files,omitempty"`
 }
 
 type funcCloneSig struct {
@@ -258,10 +264,38 @@ func isCandidateTestGoFile(rel string) bool {
 	return true
 }
 
+func countRootPackageFiles(targets []string) map[string]int {
+	counts := make(map[string]int)
+	for _, target := range targets {
+		normalized := filepath.ToSlash(filepath.Clean(target))
+		parts := strings.Split(normalized, "/")
+		if len(parts) == 3 && (parts[0] == "services" || parts[0] == "mcp") && isCandidateGoFile(normalized) {
+			dir := parts[0] + "/" + parts[1]
+			counts[dir]++
+		}
+	}
+	return counts
+}
+
+func isBannedGrabBagFilename(rel string) bool {
+	base := filepath.Base(rel)
+	switch base {
+	case "pure.go", "pure_test.go",
+		"helpers.go", "helpers_test.go",
+		"utils.go", "utils_test.go",
+		"common.go", "common_test.go",
+		"types.go", "types_test.go",
+		"frozen.go", "frozen_test.go":
+		return true
+	}
+	return partTestRegex.MatchString(base)
+}
+
 func loadBaseline(path string) (Baseline, error) {
 	b := Baseline{
 		Files:     make(map[string]FileMetrics),
 		Functions: make(map[string]FuncMetrics),
+		RootFiles: make(map[string]int),
 	}
 	data, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
@@ -271,6 +305,15 @@ func loadBaseline(path string) (Baseline, error) {
 		return b, err
 	}
 	err = json.Unmarshal(data, &b)
+	if b.Files == nil {
+		b.Files = make(map[string]FileMetrics)
+	}
+	if b.Functions == nil {
+		b.Functions = make(map[string]FuncMetrics)
+	}
+	if b.RootFiles == nil {
+		b.RootFiles = make(map[string]int)
+	}
 	return b, err
 }
 
@@ -278,6 +321,7 @@ func buildBaseline(absRoot string, targets []string, r rules) (Baseline, error) 
 	b := Baseline{
 		Files:     make(map[string]FileMetrics),
 		Functions: make(map[string]FuncMetrics),
+		RootFiles: make(map[string]int),
 	}
 	for _, rel := range targets {
 		fa, err := analyzeFile(filepath.Join(absRoot, rel), rel)
@@ -296,6 +340,11 @@ func buildBaseline(absRoot string, targets []string, r rules) (Baseline, error) 
 			}
 		}
 	}
+	for dir, count := range countRootPackageFiles(targets) {
+		if count > maxRootMainFiles {
+			b.RootFiles[dir] = count
+		}
+	}
 	return b, nil
 }
 
@@ -311,7 +360,25 @@ func checkTargets(absRoot string, targets, testTargets []string, base Baseline, 
 	var violations []string
 	var allFuncSigs []funcCloneSig
 	var allStructSigs []structCloneSig
+
+	rootCounts := countRootPackageFiles(targets)
+	dirs := make([]string, 0, len(rootCounts))
+	for dir := range rootCounts {
+		dirs = append(dirs, dir)
+	}
+	sort.Strings(dirs)
+	for _, dir := range dirs {
+		count := rootCounts[dir]
+		limit := max(maxRootMainFiles, base.RootFiles[dir])
+		if count > limit {
+			violations = append(violations, fmt.Sprintf("%s: root package has %d Go files, exceeds limit %d (ceiling %d: main.go, main_test.go, goleak_test.go); move domain logic and tests into internal/* subpackages", dir, count, limit, maxRootMainFiles))
+		}
+	}
+
 	for _, rel := range targets {
+		if isBannedGrabBagFilename(rel) {
+			violations = append(violations, rel+": filename uses banned horizontal split or grab-bag name; name files after their domain concern or move into an internal/* subpackage")
+		}
 		fullPath := filepath.Join(absRoot, rel)
 		if r.checkOrdering {
 			orderViolations, err := checkOrFixFileOrdering(fullPath, rel, fix)
@@ -388,18 +455,35 @@ func forEachPackagePair[T any](sigs []T, pkgOf, relOf, nameOf func(T) string, fn
 	}
 }
 
+func checkPairCloneViolation(a, b funcCloneSig) string {
+	if a.pkgKey == b.pkgKey {
+		if sim := jaccardSimilarity(a.grams, b.grams); sim >= maxCloneSimilarity {
+			return fmt.Sprintf("%s (%s) <-> %s (%s): near-miss AST clone similarity %.2f exceeds %.2f ceiling", a.rel, a.name, b.rel, b.name, sim, maxCloneSimilarity)
+		}
+		if editSim := editSimilarity(a.scopedTokens, b.scopedTokens); editSim >= maxCloneEditSimilarity {
+			return fmt.Sprintf("%s (%s) <-> %s (%s): near-miss AST edit similarity %.2f exceeds %.2f ceiling", a.rel, a.name, b.rel, b.name, editSim, maxCloneEditSimilarity)
+		}
+		return ""
+	}
+	if a.name == "main" || b.name == "main" || len(a.grams) < minCrossPkgCloneGrams || len(b.grams) < minCrossPkgCloneGrams {
+		return ""
+	}
+	if sim := jaccardSimilarity(a.grams, b.grams); sim >= maxCloneSimilarity {
+		return fmt.Sprintf("%s (%s) <-> %s (%s): near-miss AST clone similarity %.2f exceeds %.2f ceiling", a.rel, a.name, b.rel, b.name, sim, maxCloneSimilarity)
+	}
+	return ""
+}
+
 func checkCloneViolations(sigs []funcCloneSig) []string {
 	var violations []string
 	forEachPackagePair(
 		sigs,
-		func(s funcCloneSig) string { return s.pkgKey },
+		func(s funcCloneSig) string { return "all" },
 		func(s funcCloneSig) string { return s.rel },
 		func(s funcCloneSig) string { return s.name },
 		func(a, b funcCloneSig) {
-			if sim := jaccardSimilarity(a.grams, b.grams); sim >= maxCloneSimilarity {
-				violations = append(violations, fmt.Sprintf("%s (%s) <-> %s (%s): near-miss AST clone similarity %.2f exceeds %.2f ceiling", a.rel, a.name, b.rel, b.name, sim, maxCloneSimilarity))
-			} else if editSim := editSimilarity(a.scopedTokens, b.scopedTokens); editSim >= maxCloneEditSimilarity {
-				violations = append(violations, fmt.Sprintf("%s (%s) <-> %s (%s): near-miss AST edit similarity %.2f exceeds %.2f ceiling", a.rel, a.name, b.rel, b.name, editSim, maxCloneEditSimilarity))
+			if v := checkPairCloneViolation(a, b); v != "" {
+				violations = append(violations, v)
 			}
 		},
 	)
@@ -847,10 +931,31 @@ func inspectTestNode(n ast.Node, fset *token.FileSet, rel string, r rules, viola
 			*violations = append(*violations, fmt.Sprintf("%s:%d: %s", rel, line, reason))
 		}
 	}
+	if arr, ok := n.(*ast.ArrayType); ok && arr.Len == nil {
+		if st, ok := arr.Elt.(*ast.StructType); ok {
+			checkTestTableStructFields(st, fset, rel, violations)
+			return false
+		}
+	}
 	if st, ok := n.(*ast.StructType); ok && st.Fields != nil {
 		checkTestStructFields(st, fset, rel, r, violations)
 	}
 	return true
+}
+
+func checkTestTableStructFields(st *ast.StructType, fset *token.FileSet, rel string, violations *[]string) {
+	if st == nil || st.Fields == nil {
+		return
+	}
+	for _, field := range st.Fields.List {
+		if _, isFunc := field.Type.(*ast.FuncType); !isFunc {
+			continue
+		}
+		for _, ident := range field.Names {
+			line := fset.Position(ident.Pos()).Line
+			*violations = append(*violations, fmt.Sprintf("%s:%d: test struct field %q uses a banned closure func type; use declarative expectation fields instead", rel, line, ident.Name))
+		}
+	}
 }
 
 func checkTestStructFields(st *ast.StructType, fset *token.FileSet, rel string, r rules, violations *[]string) {
