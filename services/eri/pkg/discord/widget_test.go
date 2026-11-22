@@ -14,16 +14,8 @@ type extractComponentsTestCase struct {
 
 func extractSimpleComponentsCases() []extractComponentsTestCase {
 	return []extractComponentsTestCase{
-		{
-			name:       "NilSlice",
-			components: nil,
-			want:       "",
-		},
-		{
-			name:       "EmptySlice",
-			components: []discordgo.MessageComponent{},
-			want:       "",
-		},
+		{name: "NilSlice", components: nil, want: ""},
+		{name: "EmptySlice", components: []discordgo.MessageComponent{}, want: ""},
 		{
 			name: "NilElementsAndTypedNils",
 			components: []discordgo.MessageComponent{
@@ -36,20 +28,8 @@ func extractSimpleComponentsCases() []extractComponentsTestCase {
 			},
 			want: "",
 		},
-		{
-			name: "PointerTextDisplay",
-			components: []discordgo.MessageComponent{
-				&discordgo.TextDisplay{Content: "Hello world"},
-			},
-			want: "Hello world",
-		},
-		{
-			name: "ValueTextDisplay",
-			components: []discordgo.MessageComponent{
-				discordgo.TextDisplay{Content: "Value world"},
-			},
-			want: "Value world",
-		},
+		{name: "PointerTextDisplay", components: []discordgo.MessageComponent{&discordgo.TextDisplay{Content: "Hello world"}}, want: "Hello world"},
+		{name: "ValueTextDisplay", components: []discordgo.MessageComponent{discordgo.TextDisplay{Content: "Value world"}}, want: "Value world"},
 		{
 			name: "TextDisplay_WhitespaceTrimming",
 			components: []discordgo.MessageComponent{
@@ -71,13 +51,7 @@ func extractSimpleComponentsCases() []extractComponentsTestCase {
 			},
 			want: "[Value Button](https://example.com/val)",
 		},
-		{
-			name: "Button_LabelOnly",
-			components: []discordgo.MessageComponent{
-				&discordgo.Button{Label: "Only Label"},
-			},
-			want: "[Only Label]",
-		},
+		{name: "Button_LabelOnly", components: []discordgo.MessageComponent{&discordgo.Button{Label: "Only Label"}}, want: "[Only Label]"},
 		{
 			name: "Button_URLOnly",
 			components: []discordgo.MessageComponent{
@@ -85,13 +59,7 @@ func extractSimpleComponentsCases() []extractComponentsTestCase {
 			},
 			want: "https://example.com/only",
 		},
-		{
-			name: "Button_EmptyBoth",
-			components: []discordgo.MessageComponent{
-				&discordgo.Button{Label: "   ", URL: ""},
-			},
-			want: "",
-		},
+		{name: "Button_EmptyBoth", components: []discordgo.MessageComponent{&discordgo.Button{Label: "   ", URL: ""}}, want: ""},
 	}
 }
 
