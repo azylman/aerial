@@ -27,6 +27,7 @@ type module struct {
 type goPackage struct {
 	dir         string
 	mod         *module
+	isMain      bool     // a non-test file declares package main
 	imports     []string // imports of non-test files
 	testImports []string // imports of _test.go files, internal and external test packages
 }
@@ -197,6 +198,9 @@ func (r *repo) addFile(fset *token.FileSet, m *module, file, rel string) error {
 	if pkg == nil {
 		pkg = &goPackage{dir: dir, mod: m}
 		r.pkgs[dir] = pkg
+	}
+	if f.Name.Name == "main" && !strings.HasSuffix(rel, "_test.go") {
+		pkg.isMain = true
 	}
 	for _, spec := range f.Imports {
 		imp, err := strconv.Unquote(spec.Path.Value)

@@ -161,6 +161,11 @@ var selectAffectedCases = []selectAffectedCase{
 		want: result{Images: sel(false, "tool"), Test: sel(false, "tool"), Lint: sel(false, "tool"), Reasons: []string{}},
 	},
 	{
+		name: "unimported helper package in a go root module", fixture: "repo", catalog: repoCatalog, changed: []string{"app/internal/spare/spare.go"},
+		overlay: map[string]string{"app/internal/spare/spare.go": "package spare\n"},
+		want:    result{Images: noImages, Test: sel(false, "app"), Lint: sel(false, "app"), Reasons: []string{}},
+	},
+	{
 		name: "nested module is not its parent", fixture: "repo", catalog: repoCatalog, changed: []string{"tool/nested/nested.go"},
 		want: result{Images: sel(false, "tool"), Test: sel(false, "tool", "tool/nested"), Lint: sel(false, "tool", "tool/nested"), Reasons: []string{}},
 	},
