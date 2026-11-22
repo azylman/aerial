@@ -19,17 +19,27 @@ func cfChunk(status string) model.VanadisChunk {
 	return model.VanadisChunk{ID: "c1", BuildID: "b1", Mode: "pr", Repo: "aerial", PRNumber: 12, Status: status}
 }
 
-// cfOpen seeds running build b1 plus chunk into a private database and then
+// cfOpenWithBuild seeds build b1 with given status plus chunks into a private database and then
 // applies sabotage. nilDB returns a Store without a database instead.
-func cfOpen(t *testing.T, nilDB bool, chunk model.VanadisChunk, sabotage string) (*Store, *pgxpool.Pool) {
+func cfOpenWithBuild(t *testing.T, nilDB bool, buildStatus string, chunks []model.VanadisChunk, sabotage string) (*Store, *pgxpool.Pool) {
 	t.Helper()
 	if nilDB {
 		return &Store{}, nil
 	}
+	if buildStatus == "" {
+		buildStatus = "running"
+	}
 	st, pool := openStore(t)
-	seed(t, pool, []model.VanadisBuild{{ID: "b1", ThreadID: "thread-1"}}, []model.VanadisChunk{chunk})
+	seed(t, pool, []model.VanadisBuild{{ID: "b1", ThreadID: "thread-1", Status: buildStatus}}, chunks)
 	mustExec(t, pool, sabotage)
 	return st, pool
+}
+
+// cfOpen seeds running build b1 plus chunk into a private database and then
+// applies sabotage. nilDB returns a Store without a database instead.
+func cfOpen(t *testing.T, nilDB bool, chunk model.VanadisChunk, sabotage string) (*Store, *pgxpool.Pool) {
+	t.Helper()
+	return cfOpenWithBuild(t, nilDB, "running", []model.VanadisChunk{chunk}, sabotage)
 }
 
 // cfFailChunkWrite makes every vanadis_chunks UPDATE fail.
@@ -239,8 +249,20 @@ func TestPostgresVanadisStore_RecordPRCheckStatus(t *testing.T) {
 		chunkID, headSHA      string
 		checkName, checkState string
 		chunkStatus, sabotage string
+		buildStatus           string
+		isActionChunk         bool
+		hasSibling            bool
+		siblingChunk          model.VanadisChunk
+		initialChecks         map[string]string
+		initialBanner         string
+		initialFailCount      int
 		nilDB                 bool
 		wantErr, wantSkipped  bool
+		wantStatus            string
+		wantBuildStatus       string
+		wantChecks            map[string]string
+		wantBanner            string
+		wantFailCount         int
 	}{
 		{name: "nil database", chunkID: "c1", headSHA: "sha-1", checkName: "test", checkState: "passed", nilDB: true, wantErr: true},
 		{name: "empty chunk id", chunkID: "", headSHA: "sha-1", checkName: "test", checkState: "passed", chunkStatus: "pr_opened", wantErr: true},
@@ -248,11 +270,56 @@ func TestPostgresVanadisStore_RecordPRCheckStatus(t *testing.T) {
 		{name: "record passed status", chunkID: "c1", headSHA: "sha-1", checkName: "test", checkState: "passed", chunkStatus: "pr_opened"},
 		{name: "skipped transition rejected", chunkID: "c1", headSHA: "sha-1", checkName: "test", checkState: "passed", chunkStatus: "deploying", wantErr: true, wantSkipped: true},
 		{name: "persistence failure", chunkID: "c1", headSHA: "sha-1", checkName: "test", checkState: "passed", chunkStatus: "pr_opened", sabotage: cfFailChunkWrite, wantErr: true},
+		{
+			name:    "failed pr chunk recovered to pr_opened and reopens build",
+			chunkID: "c1", headSHA: "sha-1", checkName: "test", checkState: "passed",
+			chunkStatus: "failed", buildStatus: "failed", initialBanner: "ci failed", initialFailCount: 3,
+			wantStatus: "pr_opened", wantBuildStatus: "running", wantFailCount: 0, wantChecks: map[string]string{"test": "passed"},
+		},
+		{
+			name:    "failed pr check failure recorded while staying failed",
+			chunkID: "c1", headSHA: "sha-1", checkName: "test", checkState: "failed",
+			chunkStatus: "failed", buildStatus: "failed", initialBanner: "ci failed", initialFailCount: 3,
+			wantStatus: "failed", wantBuildStatus: "failed", wantBanner: "ci failed", wantFailCount: 3, wantChecks: map[string]string{"test": "failed"},
+		},
+		{
+			name:    "failed pr chunk stays failed when another check remains failed",
+			chunkID: "c1", headSHA: "sha-1", checkName: "test", checkState: "passed",
+			chunkStatus: "failed", buildStatus: "failed", initialChecks: map[string]string{"lint": "failed"}, initialBanner: "ci failed", initialFailCount: 3,
+			wantStatus: "failed", wantBuildStatus: "failed", wantBanner: "ci failed", wantFailCount: 3, wantChecks: map[string]string{"lint": "failed", "test": "passed"},
+		},
+		{
+			name:    "failed pr chunk with failed sibling does not reopen build",
+			chunkID: "c1", headSHA: "sha-1", checkName: "test", checkState: "passed",
+			chunkStatus: "failed", buildStatus: "failed", initialBanner: "ci failed", initialFailCount: 2,
+			hasSibling: true, siblingChunk: model.VanadisChunk{ID: "c2", BuildID: "b1", ChunkIndex: 1, Mode: "pr", Repo: "aerial", Status: "failed"},
+			wantStatus: "pr_opened", wantBuildStatus: "failed", wantFailCount: 0, wantChecks: map[string]string{"test": "passed"},
+		},
+		{
+			name:    "failed action chunk rejected",
+			chunkID: "c1", headSHA: "sha-1", checkName: "test", checkState: "passed",
+			chunkStatus: "failed", isActionChunk: true,
+			wantErr: true, wantSkipped: true,
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			st, pool := cfOpen(t, tc.nilDB, cfChunk(tc.chunkStatus), tc.sabotage)
+			chunk := cfChunk(tc.chunkStatus)
+			if tc.isActionChunk {
+				chunk.Mode = "action"
+				chunk.Repo = ""
+				chunk.PRNumber = 0
+			}
+			chunk.HeadSHA = tc.headSHA
+			chunk.Banner = tc.initialBanner
+			chunk.CIFailCount = tc.initialFailCount
+			chunk.CIChecks = tc.initialChecks
+			chunks := []model.VanadisChunk{chunk}
+			if tc.hasSibling {
+				chunks = append(chunks, tc.siblingChunk)
+			}
+			st, pool := cfOpenWithBuild(t, tc.nilDB, tc.buildStatus, chunks, tc.sabotage)
 			err := st.RecordPRCheckStatus(context.Background(), tc.chunkID, tc.headSHA, tc.checkName, tc.checkState)
 			assert.Equal(t, tc.wantErr, err != nil, "err = %v", err)
 			assert.Equal(t, tc.wantSkipped, errors.Is(err, ErrPRTransitionSkipped))
@@ -260,8 +327,26 @@ func TestPostgresVanadisStore_RecordPRCheckStatus(t *testing.T) {
 				return
 			}
 			got := loadChunk(t, pool, "c1")
-			assert.Equal(t, map[string]string{tc.checkName: tc.checkState}, got.CIChecks)
+			if tc.wantChecks != nil {
+				assert.Equal(t, tc.wantChecks, got.CIChecks)
+			} else {
+				assert.Equal(t, map[string]string{tc.checkName: tc.checkState}, got.CIChecks)
+			}
 			assert.Equal(t, tc.headSHA, got.HeadSHA)
+			if tc.wantStatus != "" {
+				assert.Equal(t, tc.wantStatus, got.Status)
+			}
+			if tc.wantBanner != "" {
+				assert.Equal(t, tc.wantBanner, got.Banner)
+			} else if tc.wantStatus == "pr_opened" {
+				assert.Empty(t, got.Banner)
+				assert.True(t, got.CompletedAt.IsZero())
+			}
+			assert.Equal(t, tc.wantFailCount, got.CIFailCount)
+			if tc.wantBuildStatus != "" {
+				b := loadBuild(t, pool, "b1")
+				assert.Equal(t, tc.wantBuildStatus, b.Status)
+			}
 		})
 	}
 }
@@ -289,6 +374,18 @@ func TestPostgresVanadisStore_ResetPRCheckState(t *testing.T) {
 		{name: "rejected merge check state", chunkID: "c1", headSHA: "sha-2", mergeSHA: "merge-sha-1", chunk: cfChunk("completed"), wantErr: true, wantSkipped: true},
 		{name: "sync check state failure", chunkID: "c1", headSHA: "sha-2", chunk: failedCI, sabotage: cfFailChunkWrite, wantErr: true},
 		{name: "merge check state failure", chunkID: "c1", headSHA: "sha-2", mergeSHA: "merge-sha-1", chunk: merged, sabotage: cfFailChunkWrite, wantErr: true},
+		{
+			name:    "reset merge check state on failed pr chunk",
+			chunkID: "c1", headSHA: "sha-2", mergeSHA: "merge-sha-1",
+			chunk:      model.VanadisChunk{ID: "c1", BuildID: "b1", Mode: "pr", Repo: "aerial", PRNumber: 12, Status: "failed", Banner: "deploy failed", HeadSHA: "sha-1", MergeSHA: "merge-sha-1", CIChecks: map[string]string{"build": "passed"}},
+			wantStatus: "failed", wantHead: "sha-2", wantMerge: "merge-sha-1", wantChecks: map[string]string{"build": "passed"},
+		},
+		{
+			name:    "rejected merge check state on failed action chunk",
+			chunkID: "c1", headSHA: "sha-2", mergeSHA: "merge-sha-1",
+			chunk:   model.VanadisChunk{ID: "c1", BuildID: "b1", Mode: "action", Repo: "", PRNumber: 0, Status: "failed", Banner: "failed", HeadSHA: "sha-1", MergeSHA: "merge-sha-1"},
+			wantErr: true, wantSkipped: true,
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
