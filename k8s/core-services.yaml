@@ -2868,11 +2868,11 @@ spec:
             periodSeconds: 5
           resources:
             limits:
-              cpu: 500m
-              memory: 256Mi
+              cpu: 1000m
+              memory: 1Gi
             requests:
-              cpu: 25m
-              memory: 64Mi
+              cpu: 100m
+              memory: 256Mi
           volumeMounts:
             - mountPath: /var/run/secrets/kubernetes.io/serviceaccount
               name: kube-api-access
