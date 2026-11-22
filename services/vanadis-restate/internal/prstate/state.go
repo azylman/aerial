@@ -906,7 +906,8 @@ type RepoState struct {
 	// RepoEffects are the keys of repo-level GitHub effects (auto-update
 	// cascades, workflow reruns) already executed, oldest
 	// first, bounded by MaxRepoEffects.
-	RepoEffects []string
+	RepoEffects    []string
+	UpdatedForMain map[int]bool `json:"updated_for_main,omitempty"`
 }
 
 // MaxRepoEffects bounds the RepoObject repo-effect key history.
@@ -938,6 +939,33 @@ func NewRepoState(repo string) *RepoState {
 	}
 }
 
+// MarkPRUpdatedForMain records that prNumber was updated for the current main commit.
+func (s *RepoState) MarkPRUpdatedForMain(prNumber int) {
+	if s == nil || prNumber <= 0 {
+		return
+	}
+	if s.UpdatedForMain == nil {
+		s.UpdatedForMain = make(map[int]bool)
+	}
+	s.UpdatedForMain[prNumber] = true
+}
+
+// WasPRUpdatedForMain reports whether prNumber was updated for the current main commit.
+func (s *RepoState) WasPRUpdatedForMain(prNumber int) bool {
+	return s != nil && prNumber > 0 && s.UpdatedForMain[prNumber]
+}
+
+// ClearPRUpdatedForMain removes prNumber from the updated-for-main set.
+func (s *RepoState) ClearPRUpdatedForMain(prNumber int) {
+	if s == nil || prNumber <= 0 || len(s.UpdatedForMain) == 0 {
+		return
+	}
+	delete(s.UpdatedForMain, prNumber)
+	if len(s.UpdatedForMain) == 0 {
+		s.UpdatedForMain = nil
+	}
+}
+
 // RecordMainPushSHA records a main push SHA into the bounded index.
 // Returns true when newly recorded. The index keeps at most the latest
 // MaxMainPushIndex entries; LatestMainSHA tracks the newest push.
@@ -954,6 +982,7 @@ func (s *RepoState) RecordMainPushSHA(sha string) bool {
 		s.MainPushIndex = s.MainPushIndex[len(s.MainPushIndex)-MaxMainPushIndex:]
 	}
 	s.LatestMainSHA = cleanSHA
+	s.UpdatedForMain = nil
 	return true
 }
 
@@ -1109,6 +1138,9 @@ func (s *RepoState) ApplyPRIndex(ev PRIndexEvent) (bool, []string) {
 	if branch := strings.TrimSpace(ev.Branch); branch != "" && branch != status.Branch {
 		status.Branch = branch
 		changed = true
+	}
+	if ev.Lifecycle == IndexMerged || ev.Lifecycle == IndexClosed {
+		s.ClearPRUpdatedForMain(ev.PRNumber)
 	}
 	if s.applyIndexLifecycle(status, ev) {
 		changed = true

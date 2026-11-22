@@ -115,11 +115,12 @@ func (h *RepoHandlers) HandleMainPush(ctx context.Context, ev RepoEvent) error {
 	}
 	recorded := st.RecordMainPushSHA(mainSHA)
 	touched := ev.PRNumber > 0 && st.TouchPRKey(prwire.PRObjectKey(repo, ev.PRNumber))
-	if !recorded && !touched {
+	needsFanout := st.LatestMainSHA != "" && st.FannedOutMainSHA != st.LatestMainSHA
+	if !recorded && !touched && !needsFanout {
 		return nil
 	}
 	var errs []error
-	if recorded {
+	if recorded || needsFanout {
 		errs = append(errs, h.sendMainAdvanced(ctx, st))
 		st.FannedOutMainSHA = st.LatestMainSHA
 	}
@@ -251,6 +252,10 @@ func (h *RepoHandlers) RouteBySHA(ctx context.Context, kind string, ev SHAEvent)
 		return SHARouteOutcome{}, err
 	}
 	if entry, ok := st.ResolveSHA(sha); ok {
+		if ev.Handler == prwire.PRHandlerCheckFailed {
+			st.ClearPRUpdatedForMain(entry.PRNumber)
+			h.store.SaveRepo(st)
+		}
 		if err := h.prs.SendPR(ctx, ev.Handler, forwardSHAEvent(kind, repo, entry, ev)); err != nil {
 			return SHARouteOutcome{}, err
 		}
@@ -305,6 +310,9 @@ func (h *RepoHandlers) ReplayHeld(ctx context.Context, repo, sha string) error {
 		return nil
 	}
 	for _, ev := range held {
+		if ev.Event.Handler == prwire.PRHandlerCheckFailed {
+			st.ClearPRUpdatedForMain(entry.PRNumber)
+		}
 		if err := h.prs.SendPR(ctx, ev.Event.Handler, forwardSHAEvent(ev.Kind, repo, entry, ev.Event)); err != nil {
 			return fmt.Errorf("replay held %s@%s: %w", repo, ev.Event.SHA, err)
 		}
@@ -471,6 +479,18 @@ func (h *RepoHandlers) HandleAutoUpdate(ctx context.Context, ev RepoEvent) (Repo
 		out.Retry, out.Err = true, errGitHubUnconfigured
 		return out, nil
 	}
+	if strings.TrimSpace(ev.MainSHA) != "" {
+		st.RecordMainPushSHA(ev.MainSHA)
+	}
+	if strings.TrimSpace(ev.CheckName) == "" {
+		if ev.PRNumber > 0 {
+			st.ClearPRUpdatedForMain(ev.PRNumber)
+		} else if strings.TrimSpace(ev.HeadSHA) != "" {
+			if entry, ok := st.ResolveSHA(ev.HeadSHA); ok {
+				st.ClearPRUpdatedForMain(entry.PRNumber)
+			}
+		}
+	}
 	sendErr := h.runAutoUpdate(ctx, st, ev.AutoUpdate, &out)
 	if !out.Retry {
 		out.Executed = true
@@ -487,6 +507,18 @@ func (h *RepoHandlers) runAutoUpdate(ctx context.Context, st *RepoState, policy 
 	if gerr != nil {
 		out.Err, out.Retry = gerr, gerr.Retryable()
 		return nil
+	}
+	for _, pr := range prs {
+		if !autoUpdateEligible(st, policy, pr) {
+			continue
+		}
+		if st.WasPRUpdatedForMain(pr.Number) {
+			if strings.EqualFold(pr.MergeableState, "dirty") || strings.EqualFold(pr.MergeableState, "conflicting") {
+				st.ClearPRUpdatedForMain(pr.Number)
+				continue
+			}
+			return nil
+		}
 	}
 	var errs []error
 	for _, pr := range prs {
@@ -505,14 +537,17 @@ func (h *RepoHandlers) runAutoUpdate(ctx context.Context, st *RepoState, policy 
 		out.Updates = append(out.Updates, BranchUpdate{PRNumber: pr.Number, HeadSHA: strings.TrimSpace(pr.Head.SHA), Outcome: outcome})
 		switch outcome {
 		case UpdateBranchConflict:
+			st.ClearPRUpdatedForMain(pr.Number)
 			errs = append(errs, h.forward(ctx, prwire.PRHandlerBranchConflict, branchConflictEvent(policy, repo, pr), out))
 			continue
 		case UpdateBranchHeadMissing:
+			st.ClearPRUpdatedForMain(pr.Number)
 			if ev, ok := h.staleCloseEvent(ctx, repo, pr.Number); ok {
 				errs = append(errs, h.forward(ctx, prwire.PRHandlerHeadRefMissing, ev, out))
 			}
 			continue
 		case UpdateBranchUpdated, UpdateBranchUpToDate:
+			st.MarkPRUpdatedForMain(pr.Number)
 		}
 		break
 	}
