@@ -54,35 +54,6 @@ func TestEffectKeyMatchKey(t *testing.T) {
 	}
 }
 
-// TestPREventEriEffectsDecode pins that the golden synapse payload decodes
-// into PREvent with its rendered effect and owner stamp intact.
-func TestPREventEriEffectsDecode(t *testing.T) {
-	t.Parallel()
-	var fx struct {
-		Event json.RawMessage `json:"event"`
-	}
-	readPRLifecycleFixture(t, "eri_effect_wire.json", &fx)
-	tests := []struct {
-		name        string
-		raw         []byte
-		wantEffects []EriEffect
-	}{
-		{
-			name: "golden collaborator DM event", raw: fx.Event,
-			wantEffects: []EriEffect{{Kind: prwire.EffectEriDirectMessage, ChannelID: "111111111111111111", Content: "<@42> CI check lint failed on mirrormere#1010"}},
-		},
-		{name: "event without effects", raw: []byte(`{"repo":"azylman/aerial","pr_number":1,"head_sha":"h1"}`)},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			var ev PREvent
-			require.NoError(t, json.Unmarshal(tc.raw, &ev))
-			require.Equal(t, tc.wantEffects, ev.EriEffects)
-		})
-	}
-}
-
 const (
 	testChannel = "111111111111111111"
 	testTarget  = "222222222222222222"

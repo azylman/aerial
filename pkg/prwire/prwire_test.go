@@ -3,6 +3,8 @@ package prwire
 import (
 	"bytes"
 	"encoding/json"
+	"os"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -106,6 +108,82 @@ func TestIsZeroSHA(t *testing.T) {
 			t.Parallel()
 			if got := IsZeroSHA(tc.sha); got != tc.want {
 				t.Errorf("IsZeroSHA(%q) = %v, want %v", tc.sha, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestWireGoldenRoundTrip(t *testing.T) {
+	t.Parallel()
+	dm := PREvent{
+		Repo: "azylman/mirrormere", PRNumber: 1010, HeadSHA: "def5678", CheckName: "lint",
+		Branch: "feature/x", Title: "Fix lint", Unmanaged: true, Agent: "aerial",
+		EriEffects: []EriEffect{{Kind: EffectEriDirectMessage, ChannelID: "111111111111111111", Content: "<@42> CI check lint failed on mirrormere#1010"}},
+	}
+	dmBare := dm
+	dmBare.EriEffects = nil
+	au := RepoEvent{
+		Repo: "azylman/mirrormere", PRNumber: 1010, HeadSHA: "def5678", CheckName: "CI Gate",
+		AutoUpdate: &AutoUpdatePolicy{
+			Authors: []string{"aerial-bot", "dependabot[bot]"}, DefaultOwner: true,
+			Collaborators: []CollaboratorAlert{{Author: "octo", ChannelID: "111111111111111111", Mention: "<@42>"}},
+		},
+	}
+	tests := []struct {
+		name    string
+		fixture string
+		want    any
+		bare    any
+	}{
+		{name: "collaborator DM pr event", fixture: "eri_effect_wire.json", want: dm, bare: dmBare},
+		{name: "auto-update repo event", fixture: "github_effect_wire.json", want: au, bare: au},
+	}
+	toMap := func(t *testing.T, raw []byte) map[string]any {
+		t.Helper()
+		var m map[string]any
+		if err := json.Unmarshal(raw, &m); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		return m
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			raw, err := os.ReadFile("../../testdata/prlifecycle/" + tc.fixture)
+			if err != nil {
+				t.Fatalf("read fixture: %v", err)
+			}
+			var fx struct {
+				Event json.RawMessage `json:"event"`
+			}
+			if err = json.Unmarshal(raw, &fx); err != nil {
+				t.Fatalf("decode fixture: %v", err)
+			}
+			wantMap := toMap(t, fx.Event)
+
+			got, err := json.Marshal(tc.want)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			if gm := toMap(t, got); !reflect.DeepEqual(gm, wantMap) {
+				t.Errorf("marshal = %v, want %v", gm, wantMap)
+			}
+
+			decoded := reflect.New(reflect.TypeOf(tc.want))
+			if err = json.Unmarshal(fx.Event, decoded.Interface()); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			if !reflect.DeepEqual(decoded.Elem().Interface(), tc.want) {
+				t.Errorf("unmarshal = %+v, want %+v", decoded.Elem().Interface(), tc.want)
+			}
+
+			delete(wantMap, "eri_effects")
+			bare, err := json.Marshal(tc.bare)
+			if err != nil {
+				t.Fatalf("marshal bare: %v", err)
+			}
+			if bm := toMap(t, bare); !reflect.DeepEqual(bm, wantMap) {
+				t.Errorf("effect-free marshal = %v, want %v", bm, wantMap)
 			}
 		})
 	}
