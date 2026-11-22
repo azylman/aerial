@@ -1,26 +1,37 @@
-package main
+package server
 
 import (
 	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"log"
 	"maps"
+	"net"
 	"net/http"
 	"os"
 	"slices"
 	"sync/atomic"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/azylman/aerial/services/coverage-ingest/internal/config"
+	"github.com/azylman/aerial/services/coverage-ingest/internal/store"
 )
+
+// shutdownTimeout bounds how long in-flight pushes may finish after SIGTERM; after it,
+// their contexts are cancelled and their connections closed.
+const shutdownTimeout = 30 * time.Second
 
 // Server is the always-on collector: it pulls every configured target on an interval
 // and accepts coverage archives pushed by short-lived jobs.
 type Server struct {
-	cfg    atomic.Pointer[Config]
+	cfg    atomic.Pointer[config.Config]
 	client *http.Client
-	runner CovdataRunner
-	store  CoverageStore
+	runner store.CovdataRunner
+	store  store.CoverageStore
 
 	// sem is a one-slot semaphore serializing every ingestService call across pull
 	// rounds and pushes; waiting on it honors ctx so shutdown never hangs behind it.
@@ -28,14 +39,14 @@ type Server struct {
 }
 
 // NewServer returns a Server serving cfg until a reload replaces it.
-func NewServer(cfg Config, client *http.Client, runner CovdataRunner, store CoverageStore) *Server {
-	s := &Server{client: client, runner: runner, store: store, sem: make(chan struct{}, 1)}
+func NewServer(cfg config.Config, client *http.Client, runner store.CovdataRunner, st store.CoverageStore) *Server {
+	s := &Server{client: client, runner: runner, store: st, sem: make(chan struct{}, 1)}
 	s.cfg.Store(&cfg)
 	return s
 }
 
 // Config returns the current configuration snapshot.
-func (s *Server) Config() Config {
+func (s *Server) Config() config.Config {
 	return *s.cfg.Load()
 }
 
@@ -74,7 +85,7 @@ func (s *Server) handlePush(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 	body := http.MaxBytesReader(w, r.Body, cfg.MaxPushBytes)
-	n, err := ExtractFlushArchive(body, dir)
+	n, err := config.ExtractFlushArchive(body, dir)
 	if err == nil {
 		// The tar reader stops at the end marker; drain so trailing bytes still count
 		// against the cap before anything is ingested.
@@ -151,7 +162,7 @@ func (s *Server) pullRound(ctx context.Context) {
 // pruneRetired deletes rows of services the current snapshot no longer collects. It
 // refuses when the keep set is empty; failures are logged, never fatal.
 func (s *Server) pruneRetired(ctx context.Context) {
-	keep, err := PruneKeepSet(s.Config())
+	keep, err := config.PruneKeepSet(s.Config())
 	if err != nil {
 		log.Printf("[coverage-ingest] skipping prune: %v", err)
 		return
@@ -171,12 +182,93 @@ func (s *Server) pruneRetired(ctx context.Context) {
 func (s *Server) reload(configPath string) bool {
 	data, err := os.ReadFile(configPath)
 	if err == nil {
-		var cfg Config
-		if cfg, err = ParseConfig(data); err == nil {
+		var cfg config.Config
+		if cfg, err = config.ParseConfig(data); err == nil {
 			s.cfg.Store(&cfg)
 			return true
 		}
 	}
 	log.Printf("[coverage-ingest] keeping last good config: %v", err)
 	return false
+}
+
+// Run parses flags and loads config, then serves pushes and runs the pull loop until
+// ctx ends. Database settings come from the standard libpq PG* environment (PGHOST,
+// PGUSER, PGPASSWORD, PGDATABASE, ...).
+func Run(ctx context.Context, args []string, stderr io.Writer) int {
+	fs := flag.NewFlagSet("coverage-ingest", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	configPath := fs.String("config", "", "path to the coverage-ingest YAML config")
+	goBin := fs.String("go", "go", "go binary used for `go tool covdata`")
+	errLog := log.New(stderr, "coverage-ingest: ", 0)
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if *configPath == "" {
+		errLog.Print("-config is required")
+		return 2
+	}
+	data, err := os.ReadFile(*configPath)
+	if err != nil {
+		errLog.Printf("read config: %v", err)
+		return 1
+	}
+	cfg, err := config.ParseConfig(data)
+	if err != nil {
+		errLog.Print(err)
+		return 1
+	}
+	pool, err := pgxpool.New(ctx, "")
+	if err != nil {
+		errLog.Printf("postgres config: %v", err)
+		return 1
+	}
+	defer pool.Close()
+	ln, err := (&net.ListenConfig{}).Listen(ctx, "tcp", cfg.Listen)
+	if err != nil {
+		errLog.Printf("listen: %v", err)
+		return 1
+	}
+
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	srv := NewServer(cfg, &http.Client{}, store.ExecCovdata{GoBin: *goBin}, store.PostgresStore{DB: pool})
+	// Request contexts outlive ctx so in-flight pushes may finish during the grace period,
+	// and are cancelled explicitly once it expires.
+	reqCtx, cancelReqs := context.WithCancel(context.WithoutCancel(ctx))
+	defer cancelReqs()
+	httpSrv := &http.Server{
+		Handler:           srv.Handler(),
+		ReadHeaderTimeout: 10 * time.Second,
+		BaseContext:       func(net.Listener) context.Context { return reqCtx },
+	}
+	pullDone := make(chan struct{})
+	go func() {
+		defer close(pullDone)
+		srv.PullLoop(ctx, *configPath)
+	}()
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- httpSrv.Serve(ln) }()
+	log.Printf("[coverage-ingest] serving pushes on %s, pulling %d targets every %s", ln.Addr(), len(cfg.Targets), cfg.PullInterval)
+
+	code := 0
+	select {
+	case <-ctx.Done():
+	case err := <-serveErr:
+		errLog.Printf("serve: %v", err)
+		code = 1
+	}
+	cancel()
+	shutdownCtx, cancelShutdown := context.WithTimeout(context.WithoutCancel(ctx), shutdownTimeout)
+	defer cancelShutdown()
+	if err := httpSrv.Shutdown(shutdownCtx); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		errLog.Printf("shutdown: %v", err)
+		code = 1
+		cancelReqs()
+		if cErr := httpSrv.Close(); cErr != nil {
+			errLog.Printf("close: %v", cErr)
+		}
+	}
+	<-pullDone
+	return code
 }
