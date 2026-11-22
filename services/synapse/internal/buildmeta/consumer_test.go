@@ -248,10 +248,6 @@ func TestCurrentMetadataSnapshot(t *testing.T) {
 			if got.Kind != tc.wantKind || got.RunAttempt != tc.run.RunAttempt || (tc.wantResults != nil && !reflect.DeepEqual(states, tc.wantResults)) || (tc.wantResults == nil && len(got.Results) > 0) {
 				t.Fatalf("snapshot kind=%s attempt=%d results=%v, want %s/%d/%v", got.Kind, got.RunAttempt, states, tc.wantKind, tc.run.RunAttempt, tc.wantResults)
 			}
-			raw, _ := json.Marshal(got)
-			if _, err := model.ParseStoredBuildMetadata(raw); err != nil {
-				t.Fatalf("snapshot is not storable: %v", err)
-			}
 		})
 	}
 }

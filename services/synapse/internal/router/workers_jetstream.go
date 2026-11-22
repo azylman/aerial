@@ -11,12 +11,9 @@ import (
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/pkg/tracing"
 	"github.com/azylman/aerial/services/synapse/internal/metrics"
+	"github.com/azylman/aerial/services/synapse/internal/model"
 	"github.com/azylman/aerial/services/synapse/internal/restateclient"
 )
-
-func resolveJetStreamJobCoords(args any, routing metrics.DiscordRouting) (string, string) {
-	return metrics.ResolveJetStreamJobCoords(args, routing)
-}
 
 // discordRoutingFor derives per-agent Discord subject routing from cfg's
 // configured bots and default owner agent. A nil cfg routes everything to the
@@ -97,7 +94,7 @@ func handleJetStreamJob[T any](ctx context.Context, msg pubsub.Message, maxDeliv
 	var args T
 	if err := json.Unmarshal(msg.Data(), &args); err != nil {
 		slog.ErrorContext(ctx, "[synapse] [jetstream] error unmarshaling job", "job", jobName, "error", err)
-		RecordJobDropped(queueDefault, jobName+"_webhook", "malformed")
+		metrics.RecordJobDropped(metrics.QueueDefault, jobName+"_webhook", "malformed")
 		if termErr := msg.Term(); termErr != nil {
 			slog.WarnContext(ctx, "[synapse] [jetstream] error terming job", "job", jobName, "error", termErr)
 		}
@@ -108,7 +105,7 @@ func handleJetStreamJob[T any](ctx context.Context, msg pubsub.Message, maxDeliv
 		delay := pubsub.NakBackoff(msg.NumDelivered(), maxNakBackoff)
 		switch restateFailed, terminal := restateSendFailure(err); {
 		case terminal:
-			RecordJobDropped(queueDefault, jobName+"_webhook", restateTerminalDropReason)
+			metrics.RecordJobDropped(metrics.QueueDefault, jobName+"_webhook", restateTerminalDropReason)
 			slog.ErrorContext(ctx, "[synapse] [jetstream] dropping job after terminal restate rejection", "job", jobName, "error", err)
 			if termErr := msg.Term(); termErr != nil {
 				slog.WarnContext(ctx, "[synapse] [jetstream] error terming job", "job", jobName, "error", termErr)
@@ -119,7 +116,7 @@ func handleJetStreamJob[T any](ctx context.Context, msg pubsub.Message, maxDeliv
 			delay = pubsub.NakBackoff(msg.NumDelivered(), maxRestateBackoff)
 		}
 		if termJobIfExhausted(ctx, msg, maxDeliver, jobName) {
-			RecordJobDropped(queueDefault, jobName+"_webhook", "max_retries_exhausted")
+			metrics.RecordJobDropped(metrics.QueueDefault, jobName+"_webhook", "max_retries_exhausted")
 			return nil
 		}
 		if nakErr := msg.NakWithDelay(delay); nakErr != nil {
@@ -177,7 +174,7 @@ func (s *RouterServer) HandleDiscordIngressJob(ctx context.Context, msg pubsub.M
 	defer func() { markDiscordJobSpan(span, err) }()
 
 	if termJobIfExhausted(ctx, msg, maxDeliverDiscordIngress, "discord ingress") {
-		RecordJobDropped(QueueDiscordIngress, "discord_ingress", "max_retries_exhausted")
+		metrics.RecordJobDropped(QueueDiscordIngress, "discord_ingress", "max_retries_exhausted")
 		return nil
 	}
 
@@ -202,7 +199,7 @@ func (s *RouterServer) HandleDiscordIngressJob(ctx context.Context, msg pubsub.M
 			isStale = true
 		}
 		if isStale {
-			RecordJobDropped(QueueDiscordIngress, "discord_ingress", "ttl_expired")
+			metrics.RecordJobDropped(QueueDiscordIngress, "discord_ingress", "ttl_expired")
 			if termErr := msg.Term(); termErr != nil {
 				slog.WarnContext(ctx, "[synapse] [jetstream] error terming expired discord ingress job", "error", termErr)
 			}
@@ -212,14 +209,14 @@ func (s *RouterServer) HandleDiscordIngressJob(ctx context.Context, msg pubsub.M
 		if pErr == nil {
 			return nil
 		}
-		if is4xxClientError(pErr) {
-			RecordJobDropped(QueueDiscordIngress, "discord_ingress", "client_4xx")
+		if model.Is4xxClientError(pErr) {
+			metrics.RecordJobDropped(QueueDiscordIngress, "discord_ingress", "client_4xx")
 			if termErr := msg.Term(); termErr != nil {
 				slog.WarnContext(ctx, "[synapse] [jetstream] error terming client 4xx discord ingress job", "error", termErr)
 			}
 			return nil
 		}
-		RecordJobRetry(QueueDiscordIngress, "discord_ingress", "discord_ingress_backoff")
+		metrics.RecordJobRetry(QueueDiscordIngress, "discord_ingress", "discord_ingress_backoff")
 		select {
 		case <-time.After(delay):
 		case <-ctx.Done():

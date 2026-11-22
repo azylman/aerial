@@ -13,6 +13,7 @@ import (
 
 	"github.com/azylman/aerial/pkg/discordutil"
 	"github.com/azylman/aerial/pkg/k8sauth"
+	"github.com/azylman/aerial/pkg/strutil"
 	"github.com/azylman/aerial/services/synapse/internal/model"
 )
 
@@ -378,7 +379,7 @@ func loadAerialConfigFallback(path, sysChan, botID string, autoUpdateAuthors []s
 		return sysChan, botID, autoUpdateAuthors, collaboratorAlerts
 	}
 	if sysChan == "" {
-		sysChan = model.FirstNonEmpty(aerialCfg.SystemChannelID, aerialCfg.SystemChannel)
+		sysChan = strutil.FirstNonEmpty(aerialCfg.SystemChannelID, aerialCfg.SystemChannel)
 	}
 	if botID == "" {
 		botID = strings.TrimSpace(aerialCfg.BotID)
@@ -476,16 +477,16 @@ func buildConfig(fileCfg RouterYAMLConfig) Config {
 		log.Printf("[Synapse] invalid legacy workflows: %v", err)
 	}
 	autoUpdateAuthors := model.DedupeTrimmedStrings(fileCfg.AutoUpdatePRAuthors)
-	sysChan := model.FirstNonEmpty(fileCfg.SystemChannelID, fileCfg.SystemChannel)
+	sysChan := strutil.FirstNonEmpty(fileCfg.SystemChannelID, fileCfg.SystemChannel)
 	collaboratorAlerts := NormalizeCollaboratorCIAlerts(fileCfg.CollaboratorCIAlerts)
 	var aerialBotID string
 	if (sysChan == "" || len(autoUpdateAuthors) == 0 || aerialBotID == "" || len(collaboratorAlerts) == 0) && SynapseAerialConfigPath != "" {
 		sysChan, aerialBotID, autoUpdateAuthors, collaboratorAlerts = loadAerialConfigFallback(SynapseAerialConfigPath, sysChan, aerialBotID, autoUpdateAuthors, collaboratorAlerts)
 	}
 
-	botID := strings.TrimSpace(model.FirstNonEmpty(os.Getenv("AERIAL_BOT_ID"), fileCfg.BotID, aerialBotID, defaultAgentName))
+	botID := strings.TrimSpace(strutil.FirstNonEmpty(os.Getenv("AERIAL_BOT_ID"), fileCfg.BotID, aerialBotID, defaultAgentName))
 	defaultOwner := fileCfg.DefaultOwner
-	if envVal := strings.TrimSpace(model.FirstNonEmpty(os.Getenv("AERIAL_DEFAULT_OWNER"), os.Getenv("DEFAULT_OWNER"))); envVal != "" {
+	if envVal := strings.TrimSpace(strutil.FirstNonEmpty(os.Getenv("AERIAL_DEFAULT_OWNER"), os.Getenv("DEFAULT_OWNER"))); envVal != "" {
 		defaultOwner = strings.EqualFold(envVal, "true") || envVal == "1"
 	}
 
@@ -497,7 +498,7 @@ func buildConfig(fileCfg RouterYAMLConfig) Config {
 		}
 	}
 	kubeToken := os.Getenv("KUBE_TOKEN")
-	eriURL := strings.TrimRight(model.FirstNonEmpty(os.Getenv("ERI_URL"), fileCfg.EriURL, "http://127.0.0.1:8088"), "/")
+	eriURL := strings.TrimRight(strutil.FirstNonEmpty(os.Getenv("ERI_URL"), fileCfg.EriURL, "http://127.0.0.1:8088"), "/")
 
 	bots := parseBotsConfig(fileCfg, botID, eriURL, sysChan, defaultOwner)
 
@@ -518,21 +519,21 @@ func buildConfig(fileCfg RouterYAMLConfig) Config {
 
 	return Config{
 		LegacyBuildWorkflows: legacy,
-		Port:                 model.FirstNonEmpty(os.Getenv("PORT"), fileCfg.Port, "4020"),
+		Port:                 strutil.FirstNonEmpty(os.Getenv("PORT"), fileCfg.Port, "4020"),
 		KubeAPIServer:        strings.TrimRight(kubeServer, "/"),
 		KubeToken:            kubeToken,
 		GitHubToken:          os.Getenv("GITHUB_PAT"),
-		GitHubAPIURL:         strings.TrimRight(model.FirstNonEmpty(os.Getenv("GITHUB_API_URL"), "https://api.github.com"), "/"),
+		GitHubAPIURL:         strings.TrimRight(strutil.FirstNonEmpty(os.Getenv("GITHUB_API_URL"), "https://api.github.com"), "/"),
 		GitHubCredential:     ghCredential,
 		GitHubWebhookSecret:  strings.TrimSpace(os.Getenv("GITHUB_WEBHOOK_SECRET")),
-		FluxReceiverURL:      strings.TrimRight(model.FirstNonEmpty(os.Getenv("FLUX_RECEIVER_URL"), fileCfg.FluxReceiverURL), "/"),
+		FluxReceiverURL:      strings.TrimRight(strutil.FirstNonEmpty(os.Getenv("FLUX_RECEIVER_URL"), fileCfg.FluxReceiverURL), "/"),
 		BrainURL:             eriURL,
 		EriURL:               eriURL,
-		NATSURL:              model.FirstNonEmpty(os.Getenv("NATS_URL"), fileCfg.NATSURL, "nats://nats.aerial:4222"),
+		NATSURL:              strutil.FirstNonEmpty(os.Getenv("NATS_URL"), fileCfg.NATSURL, "nats://nats.aerial:4222"),
 		RestateURL:           strings.TrimRight(strings.TrimSpace(fileCfg.RestateURL), "/"),
-		RestatePRService:     model.FirstNonEmpty(strings.TrimSpace(fileCfg.RestatePRService), defaultRestatePRService),
-		RestateRepoService:   model.FirstNonEmpty(strings.TrimSpace(fileCfg.RestateRepoService), defaultRestateRepoService),
-		SystemChannelID:      strings.TrimSpace(model.FirstNonEmpty(os.Getenv("SYSTEM_CHANNEL_ID"), sysChan)),
+		RestatePRService:     strutil.FirstNonEmpty(strings.TrimSpace(fileCfg.RestatePRService), defaultRestatePRService),
+		RestateRepoService:   strutil.FirstNonEmpty(strings.TrimSpace(fileCfg.RestateRepoService), defaultRestateRepoService),
+		SystemChannelID:      strings.TrimSpace(strutil.FirstNonEmpty(os.Getenv("SYSTEM_CHANNEL_ID"), sysChan)),
 		DiscordToken:         discordToken,
 		AutoUpdatePRAuthors:  autoUpdateAuthors,
 		BotID:                botID,

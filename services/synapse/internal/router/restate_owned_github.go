@@ -10,6 +10,7 @@ import (
 
 	"github.com/azylman/aerial/pkg/prwire"
 	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/pkg/strutil"
 	"github.com/azylman/aerial/services/synapse/internal/buildmeta"
 	"github.com/azylman/aerial/services/synapse/internal/github"
 	"github.com/azylman/aerial/services/synapse/internal/model"
@@ -204,7 +205,7 @@ func (s *RouterServer) resolveOwnedCommitPR(ctx context.Context, res *ResolvedGi
 		return
 	}
 	res.PRNumber = prNum
-	res.Branch = firstNonEmpty(branch, res.Branch)
+	res.Branch = strutil.FirstNonEmpty(branch, res.Branch)
 	res.ResolutionSource = "commit_sha_lookup"
 }
 
@@ -220,17 +221,17 @@ func (s *RouterServer) processOwnedCheckRun(ctx context.Context, delivery string
 	res.HeadSHA = p.CheckRun.HeadSHA
 	res.Status = p.CheckRun.Status
 	res.Conclusion = p.CheckRun.Conclusion
-	if isBuildMetadataCheck(res.CheckName) {
+	if model.IsBuildMetadataCheck(res.CheckName) {
 		return res, s.processOwnedBuildMetadataCheck(ctx, p, res)
 	}
 	resolveOwnedPayloadPR(res, p.CheckRun.PullRequests, "check_run_payload")
 	slog.InfoContext(ctx, "[synapse] [restate] check_run", "repo", res.Repo, "check", res.CheckName, "head_sha", res.HeadSHA, "pr", res.PRNumber, "status", res.Status, "conclusion", res.Conclusion, "delivery", delivery)
-	details := firstNonEmpty(strings.TrimSpace(p.CheckRun.Output.Text), strings.TrimSpace(p.CheckRun.Output.Summary), strings.TrimSpace(p.CheckRun.Output.Title))
+	details := strutil.FirstNonEmpty(strings.TrimSpace(p.CheckRun.Output.Text), strings.TrimSpace(p.CheckRun.Output.Summary), strings.TrimSpace(p.CheckRun.Output.Title))
 	if lines := github.ExtractLogErrorLines(details, 10); len(lines) > 0 {
 		details = strings.Join(lines, "\n")
 	}
 	details = github.SanitizeDetailsForPrompt(details, 2000)
-	checkURL := firstNonEmpty(strings.TrimSpace(p.CheckRun.HTMLURL), strings.TrimSpace(p.CheckRun.DetailsURL))
+	checkURL := strutil.FirstNonEmpty(strings.TrimSpace(p.CheckRun.HTMLURL), strings.TrimSpace(p.CheckRun.DetailsURL))
 	if err := s.sendOwnedCheckOutcome(ctx, res, p.Action, details, checkURL, prwire.RepoHandlerCheckRunBySHA); err != nil {
 		return nil, err
 	}
@@ -336,7 +337,7 @@ func (s *RouterServer) sendOwnedCheckPassed(ctx context.Context, res *ResolvedGi
 		recovered := base
 		recovered.Facts = facts(ownedFact(res, ghActionSynchronize, prOpen))
 		if res.Event == ghEventCheckRun && !gateTrigger {
-			recovered.AutoUpdate = s.autoUpdatePolicy(normalizeRepo(res.Repo))
+			recovered.AutoUpdate = s.autoUpdatePolicy(model.NormalizeRepo(res.Repo))
 		}
 		if err := s.sendOwnedPR(ctx, prwire.PRHandlerCIRecovered, recovered); err != nil {
 			return err
@@ -363,7 +364,7 @@ func ownedGateSuccessTrigger(res *ResolvedGitHubEvent, action string) bool {
 // push, a CI failure or a gate success) to RepoObject with the rendered
 // policy; RepoObject runs the cascade and its update-branch calls.
 func (s *RouterServer) sendOwnedAutoUpdate(ctx context.Context, repo string, prNumber int, headSHA, mainSHA, checkName string) error {
-	normRepo := normalizeRepo(repo)
+	normRepo := model.NormalizeRepo(repo)
 	return s.sendOwnedRepo(ctx, prwire.RepoHandlerAutoUpdate, prwire.RepoEvent{
 		Repo: normRepo, PRNumber: prNumber, HeadSHA: headSHA, MainSHA: mainSHA, CheckName: checkName, AutoUpdate: s.autoUpdatePolicy(normRepo),
 	})
@@ -372,7 +373,7 @@ func (s *RouterServer) sendOwnedAutoUpdate(ctx context.Context, repo string, prN
 // sendOwnedCheckStatus records one pending or passed non-gate check_run on
 // a known, non-dependabot PR (workflow runs record no ci_checks).
 func (s *RouterServer) sendOwnedCheckStatus(ctx context.Context, res *ResolvedGitHubEvent) error {
-	if res.Event != ghEventCheckRun || res.PRNumber <= 0 || isGateAggregatorCheck(res.CheckName) || isBuildMetadataCheck(res.CheckName) || isDependabotBranch(res.Branch) {
+	if res.Event != ghEventCheckRun || res.PRNumber <= 0 || isGateAggregatorCheck(res.CheckName) || model.IsBuildMetadataCheck(res.CheckName) || isDependabotBranch(res.Branch) {
 		return nil
 	}
 	checkState := classifyCheckState(res.Status, res.Conclusion)
@@ -529,7 +530,7 @@ func (s *RouterServer) ownedBuildConsumer(fact *pubsub.PRLifecycleEvent) *buildm
 // from the payload or the commits API, the snapshot from GitHub, and the
 // check_updated fact rides the HandleBuildMetadata event.
 func (s *RouterServer) processOwnedBuildMetadataCheck(ctx context.Context, p GitHubCheckRunPayload, res *ResolvedGitHubEvent) error {
-	if metadataWorkflowPath(normalizeRepo(res.Repo)) == "" {
+	if buildmeta.MetadataWorkflowPath(model.NormalizeRepo(res.Repo)) == "" {
 		return nil
 	}
 	resolveOwnedPayloadPR(res, p.CheckRun.PullRequests, "build_metadata")
@@ -547,8 +548,8 @@ func (s *RouterServer) processOwnedBuildMetadataCheck(ctx context.Context, p Git
 // refreshOwnedWorkflowRunBuildMetadata supersedes a stale attempt and
 // refreshes the snapshot for one producer workflow run of a known PR.
 func (s *RouterServer) refreshOwnedWorkflowRunBuildMetadata(ctx context.Context, p GitHubWorkflowRunPayload, res *ResolvedGitHubEvent) error {
-	repo := normalizeRepo(res.Repo)
-	if res.PRNumber <= 0 || metadataWorkflowPath(repo) == "" || (p.WorkflowRun.Path != "" && p.WorkflowRun.Path != metadataWorkflowPath(repo)) {
+	repo := model.NormalizeRepo(res.Repo)
+	if res.PRNumber <= 0 || buildmeta.MetadataWorkflowPath(repo) == "" || (p.WorkflowRun.Path != "" && p.WorkflowRun.Path != buildmeta.MetadataWorkflowPath(repo)) {
 		return nil
 	}
 	consumer := s.ownedBuildConsumer(nil)

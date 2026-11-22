@@ -7,6 +7,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/azylman/aerial/pkg/strutil"
 )
 
 const (
@@ -19,15 +21,6 @@ var (
 	channelNameRegex = regexp.MustCompile(`^#?[a-z0-9_-]{1,100}$`)
 	re4xx            = regexp.MustCompile(`\bstatus 4\d{2}\b`)
 )
-
-func FirstNonEmpty(vals ...string) string {
-	for _, v := range vals {
-		if v != "" {
-			return v
-		}
-	}
-	return ""
-}
 
 func RandomNonce() string {
 	b := make([]byte, 16)
@@ -173,13 +166,5 @@ func FormatErrorDetailsBlock(header, details, extraLine, footer string) string {
 }
 
 func TruncatePromptDetails(s string) string {
-	return TruncatePromptRunes(strings.ReplaceAll(s, "```", "'''"), MaxPromptRunes)
-}
-
-func TruncatePromptRunes(s string, maxRunes int) string {
-	runes := []rune(s)
-	if len(runes) <= maxRunes {
-		return s
-	}
-	return string(runes[:maxRunes]) + "... (truncated)"
+	return strutil.TruncateRunes(strings.ReplaceAll(s, "```", "'''"), MaxPromptRunes)
 }

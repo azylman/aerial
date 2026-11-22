@@ -2,10 +2,8 @@ package router
 
 import (
 	"github.com/azylman/aerial/services/synapse/internal/alerts"
-	"github.com/azylman/aerial/services/synapse/internal/buildmeta"
 	"github.com/azylman/aerial/services/synapse/internal/config"
 	"github.com/azylman/aerial/services/synapse/internal/flux"
-	"github.com/azylman/aerial/services/synapse/internal/kube"
 	"github.com/azylman/aerial/services/synapse/internal/metrics"
 	"github.com/azylman/aerial/services/synapse/internal/model"
 )
@@ -83,41 +81,6 @@ const (
 	maxRoboRevCommentRunes       = model.MaxRoboRevCommentRunes
 )
 
-var (
-	prRolloutStatus                 = flux.PRRolloutStatus
-	LoadConfig                      = config.LoadConfig
-	LoadConfigStrict                = config.LoadConfigStrict
-	LoadConfigFromEnv               = config.LoadConfigFromEnv
-	RestartRequired                 = config.RestartRequired
-	dedupeTrimmedStrings            = model.DedupeTrimmedStrings
-	firstNonEmpty                   = model.FirstNonEmpty
-	randomNonce                     = model.RandomNonce
-	formatDirectMessagePrefix       = model.FormatDirectMessagePrefix
-	isValidDiscordSnowflake         = model.IsValidDiscordSnowflake
-	isValidDiscordChannel           = model.IsValidDiscordChannel
-	isHeadlessSessionKey            = model.IsHeadlessSessionKey
-	IsHeadlessSessionKey            = model.IsHeadlessSessionKey
-	formatErrorDetailsBlock         = model.FormatErrorDetailsBlock
-	metadataWorkflowPath            = buildmeta.MetadataWorkflowPath
-	vmAlertFingerprint              = alerts.VMAlertFingerprint
-	isVMAlertResolved               = alerts.IsVMAlertResolved
-	formatVMAlertMessage            = alerts.FormatVMAlertMessage
-	translateFluxAlertToDeployEvent = flux.TranslateFluxAlertToDeployEvent
-	collectJetStreamQueueMetrics    = metrics.CollectJetStreamQueueMetrics
-	setDiscordGatewayLatency        = metrics.SetDiscordGatewayLatency
-	recordJobEnqueued               = metrics.RecordJobEnqueued
-	queueDefault                    = metrics.QueueDefault
-	normalizeRepo                   = model.NormalizeRepo
-	cleanRevisionSHA                = flux.CleanRevisionSHA
-	isBuildMetadataCheck            = model.IsBuildMetadataCheck
-	ParseBuildMetadata              = model.ParseBuildMetadata
-	ParseStoredBuildMetadata        = model.ParseStoredBuildMetadata
-	ResolveImageTag                 = kube.ResolveImageTag
-	ExtractImageWorkloadName        = model.ExtractImageWorkloadName
-	truncatePromptRunes             = model.TruncatePromptRunes
-	resolveImageTag                 = kube.ResolveImageTag
-)
-
 func (s *RouterServer) hasCollaboratorCIAlertsForRepo(repo string) bool {
 	if s == nil || s.cfgSrc == nil {
 		return false
@@ -139,22 +102,6 @@ const (
 )
 
 var (
-	alertPayloadRepo         = flux.AlertPayloadRepo
-	NormalizeDiscordTargetID = model.NormalizeDiscordTargetID
-	IsValidDiscordSnowflake  = model.IsValidDiscordSnowflake
-	IsValidDiscordChannel    = model.IsValidDiscordChannel
-	RecordJobDropped         = metrics.RecordJobDropped
-	RecordJobEnqueued        = metrics.RecordJobEnqueued
-	RecordJobRetry           = metrics.RecordJobRetry
-	JobRetriesTotal          = metrics.JobRetriesTotal
-	QueueDepth               = metrics.QueueDepth
-	SetDiscordGatewayLatency = metrics.SetDiscordGatewayLatency
-)
-
-var (
-	is4xxClientError        = model.Is4xxClientError
-	loadConfigFromEnvStrict = config.LoadConfigFromEnvStrict
-	synapseRestartRequired  = config.RestartRequired
-	runServer               = RunServer
-	runApp                  = RunApp
+	runServer = RunServer
+	runApp    = RunApp
 )

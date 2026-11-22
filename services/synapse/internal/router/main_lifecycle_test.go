@@ -13,6 +13,8 @@ import (
 
 	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/services/synapse/internal/config"
+	"github.com/azylman/aerial/services/synapse/internal/metrics"
 )
 
 func TestServerEndpoints_HealthMetricsAndCoverage(t *testing.T) {
@@ -23,10 +25,10 @@ func TestServerEndpoints_HealthMetricsAndCoverage(t *testing.T) {
 		httpkit.WriteMetaDirFn = oldMetaFn
 	})
 
-	RecordJobEnqueued("", "", "")
-	RecordJobRetry("", "", "")
-	RecordJobDropped("", "", "")
-	SetDiscordGatewayLatency(0.042)
+	metrics.RecordJobEnqueued("", "", "")
+	metrics.RecordJobRetry("", "", "")
+	metrics.RecordJobDropped("", "", "")
+	metrics.SetDiscordGatewayLatency(0.042)
 
 	tests := []struct {
 		name          string
@@ -153,7 +155,7 @@ func newTestReloadable(initial, next Config) *httpkit.Reloadable[Config] {
 	return httpkit.NewReloadable(&initial, func() (*Config, error) {
 		reloaded := next
 		return &reloaded, nil
-	}, synapseRestartRequired)
+	}, config.RestartRequired)
 }
 
 // testRestateURL is a never-dialed Restate ingress for lifecycle tests: the

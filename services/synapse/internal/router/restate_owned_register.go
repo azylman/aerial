@@ -101,11 +101,11 @@ func validateOwnedPRRegisterRequest(req *PRRegisterRequest, rawTargetID string) 
 	case req.HeadSHA == "":
 		return "head_sha cannot be empty"
 	}
-	if rawTargetID == "" || (!isValidDiscordSnowflake(req.TargetID) && isHeadlessSessionKey(rawTargetID)) {
+	if rawTargetID == "" || (!model.IsValidDiscordSnowflake(req.TargetID) && model.IsHeadlessSessionKey(rawTargetID)) {
 		req.TargetID = ""
 		return ""
 	}
-	if !isValidDiscordSnowflake(req.TargetID) {
+	if !model.IsValidDiscordSnowflake(req.TargetID) {
 		return errMsgInvalidTargetID
 	}
 	return ""

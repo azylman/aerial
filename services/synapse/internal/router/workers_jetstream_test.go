@@ -13,6 +13,7 @@ import (
 	"github.com/nats-io/nats.go"
 
 	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/services/synapse/internal/metrics"
 )
 
 type synapseMemoryMsg struct {
@@ -37,7 +38,7 @@ func (m *synapseMemoryMsg) Term() error                      { m.termed = true; 
 func (*synapseMemoryMsg) Snooze(_ time.Duration) error       { return nil }
 func (*synapseMemoryMsg) InProgress() error                  { return nil }
 
-func TestResolveJetStreamJobCoords(t *testing.T) {
+func TestDiscordRoutingForJetStreamJobCoords(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
@@ -111,7 +112,7 @@ func TestResolveJetStreamJobCoords(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			subj, msgID := resolveJetStreamJobCoords(tc.args, routing)
+			subj, msgID := metrics.ResolveJetStreamJobCoords(tc.args, routing)
 			if subj != tc.wantSubject {
 				t.Errorf("subject = %q, want %q", subj, tc.wantSubject)
 			}

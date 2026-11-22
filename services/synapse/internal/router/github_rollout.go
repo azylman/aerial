@@ -8,7 +8,9 @@ import (
 	"strings"
 
 	"github.com/azylman/aerial/pkg/prwire"
+	"github.com/azylman/aerial/pkg/strutil"
 	"github.com/azylman/aerial/services/synapse/internal/github"
+	"github.com/azylman/aerial/services/synapse/internal/model"
 )
 
 const (
@@ -38,7 +40,7 @@ func classifyCheckState(status, conclusion string) string {
 // infers services from historical job and step names and must never be reached
 // for metadata-capable producer runs.
 func (s *RouterServer) resolveLegacyWorkflowRunImages(ctx context.Context, repo string, runID int64) ([]string, error) {
-	repo = normalizeRepo(repo)
+	repo = model.NormalizeRepo(repo)
 	if repo == "" || runID <= 0 {
 		return nil, fmt.Errorf("invalid repo or runID for workflow run images resolution")
 	}
@@ -65,11 +67,11 @@ func (s *RouterServer) resolveLegacyWorkflowRunImages(ctx context.Context, repo 
 			rawImages = append(rawImages, fmt.Sprintf("ghcr.io/%s/%s:latest", owner, service))
 		}
 	}
-	return dedupeTrimmedStrings(rawImages), nil
+	return model.DedupeTrimmedStrings(rawImages), nil
 }
 
 func (s *RouterServer) fetchLatestRoboRevComment(ctx context.Context, repo string, prNumber int, headSHA string) string {
-	repo = normalizeRepo(repo)
+	repo = model.NormalizeRepo(repo)
 	if s == nil || repo == "" || prNumber <= 0 {
 		return ""
 	}
@@ -91,7 +93,7 @@ func (s *RouterServer) fetchLatestRoboRevComment(ctx context.Context, repo strin
 		if shortSHA != "" && !strings.Contains(body, "`"+shortSHA) && !strings.Contains(body, headSHA) {
 			continue
 		}
-		return truncatePromptRunes(body, maxRoboRevCommentRunes)
+		return strutil.TruncateRunes(body, maxRoboRevCommentRunes)
 	}
 	return ""
 }
@@ -110,7 +112,7 @@ func (s *RouterServer) resolveCollaboratorAlertTarget(ctx context.Context, repo 
 	}
 	if strings.TrimSpace(pr.User.Login) == "" {
 		var fetched GitHubPullRequest
-		path := fmt.Sprintf("/repos/%s/pulls/%d", normalizeRepo(repo), prNumber)
+		path := fmt.Sprintf("/repos/%s/pulls/%d", model.NormalizeRepo(repo), prNumber)
 		if err := s.getGitHubJSON(ctx, path, 2<<20, &fetched); err != nil {
 			return pr, "", "", false, err
 		}
@@ -183,8 +185,8 @@ func (s *RouterServer) notifyCollaboratorCIFailure(ctx context.Context, res *Res
 	if err != nil || !ok {
 		return err
 	}
-	branch := firstNonEmpty(resolvedPR.Head.Ref, res.Branch)
-	sha := firstNonEmpty(resolvedPR.Head.SHA, res.HeadSHA)
+	branch := strutil.FirstNonEmpty(resolvedPR.Head.Ref, res.Branch)
+	sha := strutil.FirstNonEmpty(resolvedPR.Head.SHA, res.HeadSHA)
 	msg := formatCollaboratorCIFailureMessage(mention, res.Repo, resolvedPR.Number, resolvedPR.Title, branch, sha, res.CheckName, checkURL)
 	return s.sendOwnedPR(ctx, prwire.PRHandlerCollaboratorAlert, prwire.PREvent{
 		Repo: res.Repo, PRNumber: resolvedPR.Number, HeadSHA: sha, MergeSHA: res.MergeSHA,
@@ -210,7 +212,7 @@ func syncPRFallbackFields(res *ResolvedGitHubEvent, pr GitHubPullRequest) GitHub
 }
 
 func (s *RouterServer) resolveAutoMergeDisabledPR(ctx context.Context, res *ResolvedGitHubEvent, pr GitHubPullRequest) (GitHubPullRequest, bool, error) {
-	if !isPRMergeabilityUnknown(pr) || res.PRNumber <= 0 || normalizeRepo(res.Repo) == "" {
+	if !isPRMergeabilityUnknown(pr) || res.PRNumber <= 0 || model.NormalizeRepo(res.Repo) == "" {
 		return pr, true, nil
 	}
 	fetchedModel, err := github.FetchSinglePRWithMergeabilityRetry(ctx, s.ghClient(), res.Repo, res.PRNumber, 3)

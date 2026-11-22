@@ -8,6 +8,7 @@ import (
 	"github.com/azylman/aerial/pkg/prwire"
 	"github.com/azylman/aerial/services/synapse/internal/github"
 	"github.com/azylman/aerial/services/synapse/internal/metrics"
+	"github.com/azylman/aerial/services/synapse/internal/model"
 	"github.com/azylman/aerial/services/synapse/internal/restateclient"
 )
 
@@ -56,7 +57,7 @@ func (s *RouterServer) recoverLostMerge(ctx context.Context, path, repo, sha str
 	if err != nil {
 		return
 	}
-	repo = normalizeRepo(repo)
+	repo = model.NormalizeRepo(repo)
 	view, err := c.GetDeployView(ctx, repo, pr.Number)
 	if err != nil {
 		slog.WarnContext(ctx, "[synapse] restate merge recovery skipped: deploy view read failed",

@@ -1,5 +1,10 @@
 package router
 
+import (
+	"github.com/azylman/aerial/services/synapse/internal/buildmeta"
+	"github.com/azylman/aerial/services/synapse/internal/model"
+)
+
 // legacyFixtureBlob stands in for an inventoried pre-producer workflow blob.
 const legacyFixtureBlob = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 
@@ -7,8 +12,8 @@ const legacyFixtureBlob = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 // deployment-plumbing fixtures, which serve historical job names, exercise the
 // bounded legacy adapter; structured transport has its own fixtures.
 func legacyFixtureConfig(cfg Config) Config {
-	for _, repo := range []string{normalizeRepo("aerial"), normalizeRepo("aerial-sidecars"), normalizeRepo("mirrormere")} {
-		cfg.LegacyBuildWorkflows = append(cfg.LegacyBuildWorkflows, LegacyBuildWorkflow{Repository: repo, WorkflowPath: metadataWorkflowPath(repo), BlobSHA: legacyFixtureBlob})
+	for _, repo := range []string{model.NormalizeRepo("aerial"), model.NormalizeRepo("aerial-sidecars"), model.NormalizeRepo("mirrormere")} {
+		cfg.LegacyBuildWorkflows = append(cfg.LegacyBuildWorkflows, LegacyBuildWorkflow{Repository: repo, WorkflowPath: buildmeta.MetadataWorkflowPath(repo), BlobSHA: legacyFixtureBlob})
 	}
 	return cfg
 }
