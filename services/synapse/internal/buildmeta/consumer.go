@@ -219,7 +219,7 @@ func ValidateMetadataProvenance(c model.GitHubMetadataCheck, m prwire.BuildMetad
 		return err
 	}
 	for _, sel := range m.Selected {
-		_, image, workload := model.ResolveImageTag(repo, sel.Service)
+		_, image, workload := prwire.ResolveImageTag(repo, sel.Service)
 		if workload != sel.Service || image != sel.ImageName {
 			return fmt.Errorf("service %q does not map to image %q", sel.Service, sel.ImageName)
 		}

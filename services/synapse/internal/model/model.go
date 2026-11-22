@@ -267,23 +267,6 @@ type DiscordInteractionArgs struct {
 	Interaction   *discordgo.Interaction `json:"interaction"`
 }
 
-type GitPushEventRequest struct {
-	Repo     string `json:"repo"`
-	Ref      string `json:"ref"`
-	Commit   string `json:"commit"`
-	TargetID string `json:"target_id,omitempty"`
-	PRNumber int    `json:"pr_number,omitempty"`
-}
-
-type ImageReadyEventRequest struct {
-	Image     string `json:"image"`
-	Digest    string `json:"digest,omitempty"`
-	Repo      string `json:"repo,omitempty"`
-	CommitSHA string `json:"commit_sha,omitempty"`
-	PRNumber  int    `json:"pr_number,omitempty"`
-	TargetID  string `json:"target_id,omitempty"`
-}
-
 type PromptRequest struct {
 	ChannelID string `json:"channel_id"`
 	Prompt    string `json:"prompt"`
@@ -307,9 +290,7 @@ type DirectMessageRequest struct {
 
 // OutboundDispatcher delivers outbound events, prompts, and cluster updates.
 type OutboundDispatcher interface {
-	DispatchGitPush(ctx context.Context, req GitPushEventRequest) error
 	DiscoverImageKustomizations(ctx context.Context, imageNames []string) ([]FluxKustomizationRef, error)
-	PromoteImageTag(ctx context.Context, req ImageReadyEventRequest) (workloadName string, err error)
 	ReconcileKustomization(ctx context.Context, ref FluxKustomizationRef, requestedAt string) error
 	ListKustomizationWorkloads(ctx context.Context, ref FluxKustomizationRef) ([]WorkloadRollout, error)
 	ListKustomizationConfigMaps(ctx context.Context, ref FluxKustomizationRef) ([]ConfigMapChange, error)

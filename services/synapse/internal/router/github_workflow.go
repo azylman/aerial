@@ -6,8 +6,8 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/azylman/aerial/pkg/prwire"
 	"github.com/azylman/aerial/services/synapse/internal/buildmeta"
-	"github.com/azylman/aerial/services/synapse/internal/kube"
 	"github.com/azylman/aerial/services/synapse/internal/model"
 )
 
@@ -19,7 +19,7 @@ func isMainBranch(branch string) bool {
 func resolveImagesWorkloadsAndNames(repo string, images []string) ([]string, []string) {
 	var imageNames, workloads []string
 	for _, img := range images {
-		if _, imageName, workload := kube.ResolveImageTag(repo, img); workload != "" {
+		if _, imageName, workload := prwire.ResolveImageTag(repo, img); workload != "" {
 			imageNames = append(imageNames, imageName)
 			workloads = append(workloads, workload)
 		}

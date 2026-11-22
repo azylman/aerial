@@ -7,12 +7,13 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/azylman/aerial/pkg/k8sauth"
 	"github.com/azylman/aerial/services/synapse/internal/model"
 )
 
@@ -30,287 +31,76 @@ func TestClientConfig(t *testing.T) {
 	if c1.APIServer() != "http://localhost:8080" {
 		t.Errorf("APIServer() = %q, want http://localhost:8080", c1.APIServer())
 	}
-
-	c1.SetFluxReceiverURL("http://notification-controller.flux-system.svc.cluster.local/")
-	if c1.fluxReceiverURL != "" {
-		t.Errorf("expected notification controller root URL to be rejected, got %q", c1.fluxReceiverURL)
-	}
-	c1.SetFluxReceiverURL("http://flux.lan/receiver")
-	if c1.fluxReceiverURL != "http://flux.lan/receiver" {
-		t.Errorf("fluxReceiverURL = %q, want http://flux.lan/receiver", c1.fluxReceiverURL)
-	}
 }
 
-func TestIsFluxEventServerRootURL(t *testing.T) {
+func TestClient_getKubeToken(t *testing.T) {
 	t.Parallel()
-	tests := []struct {
-		url  string
-		want bool
-	}{
-		{url: "invalid-url", want: false},
-		{url: "http://notification-controller/", want: true},
-		{url: "http://notification-controller.flux-system.svc.cluster.local/", want: true},
-		{url: "http://notification-controller:8080/", want: true},
-		{url: "http://notification-controller/path", want: false},
-		{url: "http://other-service/", want: false},
+	dir := t.TempDir()
+	tokenFile := filepath.Join(dir, "token")
+	if err := os.WriteFile(tokenFile, []byte("  mounted-token\n"), 0o600); err != nil {
+		t.Fatalf("write token: %v", err)
 	}
-	for _, tc := range tests {
-		if got := isFluxEventServerRootURL(tc.url); got != tc.want {
-			t.Errorf("isFluxEventServerRootURL(%q) = %v, want %v", tc.url, got, tc.want)
-		}
-	}
-}
-
-func TestClient_DispatchGitPush(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
 
 	tests := []struct {
-		name       string
-		setURL     bool
-		statusCode int
-		wantErr    bool
+		name          string
+		explicitToken string
+		tokenPath     string
+		want          string
 	}{
-		{name: "no receiver url does nothing", setURL: false, wantErr: false},
-		{name: "receiver url 200 ok", setURL: true, statusCode: http.StatusOK, wantErr: false},
-		{name: "receiver url 500 error", setURL: true, statusCode: http.StatusInternalServerError, wantErr: true},
+		{name: "explicit token wins over mounted token", explicitToken: " explicit-token ", tokenPath: tokenFile, want: "explicit-token"},
+		{name: "empty explicit token reads mounted token", tokenPath: tokenFile, want: "mounted-token"},
+		{name: "missing mounted token yields empty", tokenPath: filepath.Join(dir, "missing"), want: ""},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				w.WriteHeader(tc.statusCode)
-				_, _ = w.Write([]byte(`{"status":"ok"}`))
-			}))
-			defer ts.Close()
-
-			c := NewClient(ts.Client())
-			if tc.setURL {
-				c.SetFluxReceiverURL(ts.URL)
-			}
-			err := c.DispatchGitPush(ctx, model.GitPushEventRequest{Ref: "main", Commit: "c1"})
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("DispatchGitPush err = %v, wantErr = %v", err, tc.wantErr)
+			c := NewClient(nil)
+			c.tokenSource = k8sauth.NewTokenSource(tc.tokenPath, nil)
+			c.SetKubeConfig("http://kube.test", tc.explicitToken)
+			if got := c.getKubeToken(); got != tc.want {
+				t.Errorf("getKubeToken() = %q, want %q", got, tc.want)
 			}
 		})
 	}
 }
 
-func TestClient_ForwardFluxReceiver_MarshalError(t *testing.T) {
+func TestClient_SetKubeConfigAPIClient(t *testing.T) {
 	t.Parallel()
-	c := NewClient(nil)
-	c.SetFluxReceiverURL("http://localhost:8080")
-	if err := c.forwardFluxReceiver(context.Background(), make(chan int)); err == nil {
-		t.Errorf("expected marshal error")
-	}
-}
-
-func TestClient_PromoteImageTag(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
 
 	tests := []struct {
-		name         string
-		req          model.ImageReadyEventRequest
-		hasKube      bool
-		hasFlux      bool
-		kubeStatus   int
-		fluxStatus   int
-		wantWorkload string
-		wantErr      bool
+		name            string
+		apiServer       string
+		wantBaseClient  bool
+		wantAPIServer   string
+		wantDedicatedTr bool
 	}{
-		{
-			name: "workload none skipped",
-			req: model.ImageReadyEventRequest{
-				Repo:      "azylman/aerial",
-				Image:     "ghcr.io/azylman/none:latest",
-				CommitSHA: "abc",
-			},
-			hasKube:      true,
-			wantWorkload: "",
-		},
-		{
-			name: "promote via kube and flux success",
-			req: model.ImageReadyEventRequest{
-				Repo:      "azylman/aerial",
-				Image:     "ghcr.io/azylman/aerial-synapse:latest",
-				CommitSHA: "abcdef1234567890abcdef1234567890abcdef12",
-			},
-			hasKube:      true,
-			hasFlux:      true,
-			kubeStatus:   http.StatusOK,
-			fluxStatus:   http.StatusOK,
-			wantWorkload: "aerial-synapse",
-		},
-		{
-			name: "zero sha skips kube and promotes via flux",
-			req: model.ImageReadyEventRequest{
-				Repo:      "azylman/aerial",
-				Image:     "ghcr.io/azylman/aerial-synapse:latest",
-				CommitSHA: "0000000000000000000000000000000000000000",
-			},
-			hasKube:      true,
-			hasFlux:      true,
-			fluxStatus:   http.StatusOK,
-			wantWorkload: "aerial-synapse",
-		},
-		{
-			name: "kube error only",
-			req: model.ImageReadyEventRequest{
-				Repo:      "azylman/aerial",
-				Image:     "ghcr.io/azylman/aerial-synapse:latest",
-				CommitSHA: "abcdef1234567890abcdef1234567890abcdef12",
-			},
-			hasKube:    true,
-			kubeStatus: http.StatusInternalServerError,
-			wantErr:    true,
-		},
-		{
-			name: "flux error only",
-			req: model.ImageReadyEventRequest{
-				Repo:      "azylman/aerial",
-				Image:     "ghcr.io/azylman/aerial-synapse:latest",
-				CommitSHA: "abcdef1234567890abcdef1234567890abcdef12",
-			},
-			hasFlux:    true,
-			fluxStatus: http.StatusInternalServerError,
-			wantErr:    true,
-		},
-		{
-			name: "both kube and flux error",
-			req: model.ImageReadyEventRequest{
-				Repo:      "azylman/aerial",
-				Image:     "ghcr.io/azylman/aerial-synapse:latest",
-				CommitSHA: "abcdef1234567890abcdef1234567890abcdef12",
-			},
-			hasKube:    true,
-			hasFlux:    true,
-			kubeStatus: http.StatusInternalServerError,
-			fluxStatus: http.StatusInternalServerError,
-			wantErr:    true,
-		},
+		{name: "http server reuses traced base client", apiServer: "http://kube.test/", wantBaseClient: true, wantAPIServer: "http://kube.test"},
+		{name: "https server gets dedicated TLS client", apiServer: "https://kube.test:6443", wantAPIServer: "https://kube.test:6443", wantDedicatedTr: true},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.Method == http.MethodPatch {
-					w.WriteHeader(tc.kubeStatus)
-				} else {
-					w.WriteHeader(tc.fluxStatus)
-				}
-				_, _ = w.Write([]byte(`{}`))
-			}))
+			ts := httptest.NewServer(http.NotFoundHandler())
 			defer ts.Close()
-
-			c := NewClient(ts.Client())
-			if tc.hasKube {
-				c.SetKubeConfig(ts.URL, "token")
+			base := ts.Client()
+			base.Timeout = 9 * time.Second
+			c := NewClient(base)
+			c.SetKubeConfig(tc.apiServer, "tok")
+			if c.APIServer() != tc.wantAPIServer {
+				t.Errorf("APIServer() = %q, want %q", c.APIServer(), tc.wantAPIServer)
 			}
-			if tc.hasFlux {
-				c.SetFluxReceiverURL(ts.URL)
+			if (c.apiClient == c.httpClient) != tc.wantBaseClient {
+				t.Errorf("apiClient is base = %v, want %v", c.apiClient == c.httpClient, tc.wantBaseClient)
 			}
-
-			workload, err := c.PromoteImageTag(ctx, tc.req)
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("PromoteImageTag err = %v, wantErr = %v", err, tc.wantErr)
+			if c.apiClient.Timeout != 9*time.Second {
+				t.Errorf("apiClient.Timeout = %v, want 9s", c.apiClient.Timeout)
 			}
-			if workload != tc.wantWorkload {
-				t.Errorf("workload = %q, want %q", workload, tc.wantWorkload)
+			if _, ok := c.apiClient.Transport.(*http.Transport); ok != tc.wantDedicatedTr {
+				t.Errorf("dedicated transport = %v, want %v", ok, tc.wantDedicatedTr)
 			}
 		})
-	}
-}
-
-func TestClient_PromoteImageTag_ConfigMap404Retry(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-
-	var attempts atomic.Int32
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		att := attempts.Add(1)
-		if r.Method == http.MethodPatch && att == 1 {
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
-		if r.Method == http.MethodPost {
-			w.WriteHeader(http.StatusConflict)
-			return
-		}
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{}`))
-	}))
-	defer ts.Close()
-
-	c := NewClient(ts.Client())
-	c.SetKubeConfig(ts.URL, "tok")
-	workload, err := c.PromoteImageTag(ctx, model.ImageReadyEventRequest{
-		Repo:      "azylman/aerial",
-		Image:     "ghcr.io/azylman/aerial-synapse:latest",
-		CommitSHA: "abcdef1234567890abcdef1234567890abcdef12",
-	})
-	if err != nil {
-		t.Fatalf("unexpected err: %v", err)
-	}
-	if workload != "aerial-synapse" {
-		t.Errorf("workload = %q, want aerial-synapse", workload)
-	}
-}
-
-func TestClient_PromoteImageTag_ConfigMap404Errors(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-
-	// 404 patch, POST fails with 400
-	tsPostErr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodPatch {
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
-		w.WriteHeader(http.StatusBadRequest)
-		_, _ = w.Write([]byte(`bad post`))
-	}))
-	defer tsPostErr.Close()
-
-	c := NewClient(tsPostErr.Client())
-	c.SetKubeConfig(tsPostErr.URL, "tok")
-	_, err := c.PromoteImageTag(ctx, model.ImageReadyEventRequest{
-		Repo:      "azylman/aerial",
-		Image:     "ghcr.io/azylman/aerial-synapse:latest",
-		CommitSHA: "abcdef1234567890abcdef1234567890abcdef12",
-	})
-	if err == nil {
-		t.Fatalf("expected error from failed post")
-	}
-
-	// 404 patch, POST 409 conflict, retry patch fails with 400
-	var att atomic.Int32
-	tsConflictErr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		a := att.Add(1)
-		if r.Method == http.MethodPatch && a == 1 {
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
-		if r.Method == http.MethodPost {
-			w.WriteHeader(http.StatusConflict)
-			return
-		}
-		w.WriteHeader(http.StatusBadRequest)
-		_, _ = w.Write([]byte(`bad retry patch`))
-	}))
-	defer tsConflictErr.Close()
-
-	cConflict := NewClient(tsConflictErr.Client())
-	cConflict.SetKubeConfig(tsConflictErr.URL, "tok")
-	_, err = cConflict.PromoteImageTag(ctx, model.ImageReadyEventRequest{
-		Repo:      "azylman/aerial",
-		Image:     "ghcr.io/azylman/aerial-synapse:latest",
-		CommitSHA: "abcdef1234567890abcdef1234567890abcdef12",
-	})
-	if err == nil {
-		t.Fatalf("expected error from failed retry patch")
 	}
 }
 
@@ -633,86 +423,6 @@ func TestClient_DiscoverRepoKustomizations(t *testing.T) {
 	}
 }
 
-func TestResolveImageTag(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name          string
-		repo          string
-		imageRef      string
-		wantTagKey    string
-		wantImageName string
-		wantWorkload  string
-	}{
-		{
-			name:          "empty image",
-			repo:          "azylman/aerial",
-			imageRef:      "",
-			wantTagKey:    "",
-			wantImageName: "",
-			wantWorkload:  "",
-		},
-		{
-			name:          "none image",
-			repo:          "azylman/aerial",
-			imageRef:      "ghcr.io/azylman/none:latest",
-			wantTagKey:    "",
-			wantImageName: "",
-			wantWorkload:  "",
-		},
-		{
-			name:          "aerial repo with aerial- prefix",
-			repo:          "azylman/aerial",
-			imageRef:      "ghcr.io/azylman/aerial-synapse:sha123",
-			wantTagKey:    "TAG_AERIAL_SYNAPSE",
-			wantImageName: "aerial-synapse",
-			wantWorkload:  "aerial-synapse",
-		},
-		{
-			name:          "aerial-sidecars repo with aerial-sidecar- prefix",
-			repo:          "azylman/aerial-sidecars",
-			imageRef:      "ghcr.io/azylman/aerial-sidecar-prospera:sha123",
-			wantTagKey:    "TAG_AERIAL_SIDECAR_PROSPERA",
-			wantImageName: "aerial-sidecar-prospera",
-			wantWorkload:  "aerial-sidecar-prospera",
-		},
-		{
-			name:          "mirrormere repo with mirrormere- prefix",
-			repo:          "azylman/mirrormere",
-			imageRef:      "ghcr.io/azylman/mirrormere-kiosk:sha123",
-			wantTagKey:    "TAG_MIRRORMERE_KIOSK",
-			wantImageName: "mirrormere-kiosk",
-			wantWorkload:  "mirrormere-kiosk",
-		},
-		{
-			name:          "mirrormere repo without prefix",
-			repo:          "mirrormere",
-			imageRef:      "ghcr.io/azylman/kiosk:sha123",
-			wantTagKey:    "TAG_MIRRORMERE_KIOSK",
-			wantImageName: "mirrormere-kiosk",
-			wantWorkload:  "kiosk",
-		},
-		{
-			name:          "other repo with aerial- prefix",
-			repo:          "other-org/other-repo",
-			imageRef:      "ghcr.io/other/aerial-extra:sha123",
-			wantTagKey:    "TAG_AERIAL_EXTRA",
-			wantImageName: "aerial-extra",
-			wantWorkload:  "aerial-extra",
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			tagKey, imageName, workload := ResolveImageTag(tc.repo, tc.imageRef)
-			if tagKey != tc.wantTagKey || imageName != tc.wantImageName || workload != tc.wantWorkload {
-				t.Errorf("ResolveImageTag(%q, %q) = (%q, %q, %q), want (%q, %q, %q)", tc.repo, tc.imageRef, tagKey, imageName, workload, tc.wantTagKey, tc.wantImageName, tc.wantWorkload)
-			}
-		})
-	}
-}
-
 func TestPureDecoders(t *testing.T) {
 	t.Parallel()
 
@@ -896,7 +606,6 @@ func TestKubeClient_ErrorBranches(t *testing.T) {
 
 	c500 := NewClient(ts500.Client())
 	c500.SetKubeConfig(ts500.URL, "tok")
-	c500.SetFluxReceiverURL(ts500.URL)
 
 	if _, err := c500.ListKustomizationConfigMaps(ctx, model.FluxKustomizationRef{Name: "c"}); err == nil {
 		t.Errorf("expected error from 500 ListKustomizationConfigMaps")
@@ -912,12 +621,6 @@ func TestKubeClient_ErrorBranches(t *testing.T) {
 	}
 	if _, err := c500.listWorkloadImages(ctx); err == nil {
 		t.Errorf("expected error from 500 listWorkloadImages")
-	}
-	if err := c500.upsertImageTagConfigMap(ctx, "TAG_A", "sha123"); err == nil {
-		t.Errorf("expected error from 500 upsertImageTagConfigMap")
-	}
-	if err := c500.forwardFluxReceiver(ctx, map[string]string{"foo": "bar"}); err == nil {
-		t.Errorf("expected error from 500 forwardFluxReceiver")
 	}
 
 	// 3. Server returning malformed JSON
@@ -994,20 +697,6 @@ func TestKubeClient_UnhealthyEndpointErrors(t *testing.T) {
 	if _, resErr := cBadKust.ResolveFluxSourceRepo(ctx, model.FluxInvolvedObject{Kind: "GitRepository", Name: "g"}); resErr == nil {
 		t.Errorf("expected get error from ResolveFluxSourceRepo")
 	}
-
-	// 5. createOrRetryImageTagConfigMap directly returns 201
-	tsCreated := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusCreated)
-		_, _ = w.Write([]byte(`{}`))
-	}))
-	defer tsCreated.Close()
-
-	cCreated := NewClient(tsCreated.Client())
-	cCreated.SetKubeConfig(tsCreated.URL, "tok")
-	err = cCreated.createOrRetryImageTagConfigMap(ctx, tsCreated.Client(), "tok", "TAG_X", "sha", nil)
-	if err != nil {
-		t.Errorf("expected nil error on 201 Created")
-	}
 }
 
 func TestKubeClient_TransportFailures(t *testing.T) {
@@ -1019,11 +708,6 @@ func TestKubeClient_TransportFailures(t *testing.T) {
 
 	c := NewClient(ts.Client())
 	c.SetKubeConfig(ts.URL, "tok")
-	c.SetFluxReceiverURL(ts.URL)
-
-	if err := c.forwardFluxReceiver(ctx, map[string]string{"k": "v"}); err == nil {
-		t.Errorf("expected transport error from forwardFluxReceiver")
-	}
 	if _, err := c.KubeJSON(ctx, http.MethodGet, "/test", "", nil); err == nil {
 		t.Errorf("expected transport error from KubeJSON")
 	}
@@ -1064,31 +748,6 @@ func TestKubeClient_FinalPushes(t *testing.T) {
 	if _, err := cBadFallback.DiscoverImageKustomizations(ctx, []string{"unmatched-image"}); err == nil {
 		t.Errorf("expected decode error from fallback DiscoverImageKustomizations")
 	}
-
-	// 3. createOrRetryImageTagConfigMap conflict retry returns error
-	tsConflictErr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusConflict)
-	}))
-	defer tsConflictErr.Close()
-
-	cConflict := NewClient(tsConflictErr.Client())
-	cConflict.SetKubeConfig(tsConflictErr.URL, "tok")
-	err := cConflict.createOrRetryImageTagConfigMap(ctx, tsConflictErr.Client(), "tok", "TAG_Y", "sha", func() (int, []byte, error) {
-		return 0, nil, errors.New("retry patch error")
-	})
-	if err == nil || !strings.Contains(err.Error(), "retry patch error") {
-		t.Errorf("expected retry patch error, got %v", err)
-	}
-
-	// 4. upsertImageTagConfigMap network failure
-	tsClosed := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
-	tsClosed.Close()
-
-	cClosed := NewClient(tsClosed.Client())
-	cClosed.SetKubeConfig(tsClosed.URL, "tok")
-	if err := cClosed.upsertImageTagConfigMap(ctx, "TAG_Z", "sha"); err == nil {
-		t.Errorf("expected network failure from upsertImageTagConfigMap")
-	}
 }
 
 func TestKubeClient_Over95Percent(t *testing.T) {
@@ -1101,26 +760,10 @@ func TestKubeClient_Over95Percent(t *testing.T) {
 	if s := GitRepoSlug("git@github.com:"); s != "" {
 		t.Errorf("expected empty slug for git@github.com:, got %q", s)
 	}
-
-	// 2. createOrRetryImageTagConfigMap conflict patch success
-	tsConflict := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusConflict)
-	}))
-	defer tsConflict.Close()
-
-	c := NewClient(tsConflict.Client())
-	c.SetKubeConfig(tsConflict.URL, "tok")
-	err := c.createOrRetryImageTagConfigMap(context.Background(), tsConflict.Client(), "tok", "TAG_OK", "sha", func() (int, []byte, error) {
-		return http.StatusOK, []byte(`{}`), nil
-	})
-	if err != nil {
-		t.Errorf("expected nil error on conflict retry patch 200, got %v", err)
-	}
 }
 
 func TestKubeClient_PushOver95_DecodingAndEdgeCases(t *testing.T) {
 	t.Parallel()
-	ctx := context.Background()
 
 	// isKubeNotFound nil
 	if isKubeNotFound(nil) {
@@ -1135,16 +778,6 @@ func TestKubeClient_PushOver95_DecodingAndEdgeCases(t *testing.T) {
 	truncated := truncateKubeBody(longBody)
 	if !strings.HasSuffix(truncated, "...") || len(truncated) != 515 {
 		t.Errorf("expected truncated string with length 515, got %d", len(truncated))
-	}
-
-	// PromoteImageTag with neither kube nor flux configured
-	cEmpty := NewClient(nil)
-	wName, err := cEmpty.PromoteImageTag(ctx, model.ImageReadyEventRequest{
-		Repo:  "azylman/aerial",
-		Image: "ghcr.io/azylman/aerial-synapse:v1",
-	})
-	if err != nil || wName != "" {
-		t.Errorf("expected empty workload and nil err for unconfigured client, got (%q, %v)", wName, err)
 	}
 
 	// DecodeWorkloadImageRefs with JobTemplate initContainers
@@ -1167,17 +800,6 @@ func TestKubeClient_PushOver95_DecodingAndEdgeCases(t *testing.T) {
 	compRollouts, err := DecodeWorkloadRollouts("RestateDeployment", computeRepJSON)
 	if err != nil || len(compRollouts) != 1 || compRollouts[0].Replicas != 3 {
 		t.Errorf("expected compute replicas 3, got %+v (err: %v)", compRollouts, err)
-	}
-
-	// LoadK8sCertPool with non-PEM content
-	tmpCert, err := os.CreateTemp(t.TempDir(), "bad-pem-*.crt")
-	if err == nil {
-		defer os.Remove(tmpCert.Name())
-		_, _ = tmpCert.WriteString("this is not valid pem data")
-		_ = tmpCert.Close()
-		if pool := LoadK8sCertPool(tmpCert.Name()); pool != nil {
-			t.Errorf("expected nil cert pool for invalid PEM")
-		}
 	}
 }
 

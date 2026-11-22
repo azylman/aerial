@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/azylman/aerial/pkg/prwire"
 	"github.com/azylman/aerial/services/synapse/internal/kube"
 	"github.com/azylman/aerial/services/synapse/internal/model"
 )
@@ -69,7 +70,7 @@ func LinkManagedWorkloads(workloads []model.WorkloadRollout) {
 
 // ImageServiceCandidates extracts candidate service names from an image reference.
 func ImageServiceCandidates(image string) []string {
-	base := model.ExtractImageWorkloadName(image)
+	base := prwire.ExtractImageWorkloadName(image)
 	if base == "" {
 		return nil
 	}

@@ -26,8 +26,6 @@ type (
 	DiscordIngressArgs           = model.DiscordIngressArgs
 	DiscordInteractionArgs       = model.DiscordInteractionArgs
 	DiscordMessageIngressRequest = model.DiscordMessageIngressRequest
-	GitPushEventRequest          = model.GitPushEventRequest
-	ImageReadyEventRequest       = model.ImageReadyEventRequest
 	PromptRequest                = model.PromptRequest
 	DispatchRequest              = model.DispatchRequest
 	DirectMessageRequest         = model.DirectMessageRequest

@@ -12,7 +12,7 @@ var synapseConfigKeysToClear = []string{
 	"KUBE_TOKEN", "KUBERNETES_SERVICE_HOST", "KUBERNETES_SERVICE_PORT",
 	"GITHUB_PAT", "GITHUB_API_URL", "GITHUB_WEBHOOK_SECRET",
 	"DISCORD_TOKEN", "BOT_ID", "AERIAL_BOT_ID", "BRAIN_URL", "ERI_URL",
-	"FLUX_RECEIVER_URL", "HARO_URL", "HANGAR_URL", "NATS_URL",
+	"HARO_URL", "HANGAR_URL", "NATS_URL",
 	"SYSTEM_CHANNEL_ID", "AUTO_UPDATE_PR_AUTHORS",
 	"WEBHOOK_FORWARD_URLS", "SYNAPSE_DEFAULT_OWNER", "DEFAULT_OWNER", "AERIAL_DEFAULT_OWNER",
 }
@@ -27,7 +27,6 @@ func TestLoadConfig_EnvAndFallbacks(t *testing.T) {
 		wantGHTok           string
 		wantGHURL           string
 		wantGHWebhookSecret string
-		wantFluxURL         string
 		wantBrainURL        string
 		wantEriURL          string
 		wantSysChan         string
@@ -87,11 +86,6 @@ func TestLoadConfig_EnvAndFallbacks(t *testing.T) {
 			wantEriURL:   "http://eri-primary.aerial:8088",
 		},
 		{
-			name:        "flux receiver url primary env",
-			env:         map[string]string{"FLUX_RECEIVER_URL": "http://flux-receiver.aerial/webhook/"},
-			wantFluxURL: "http://flux-receiver.aerial/webhook",
-		},
-		{
 			name:        "nats url primary env",
 			env:         map[string]string{"NATS_URL": "nats://custom-nats:4222"},
 			wantNATSURL: "nats://custom-nats:4222",
@@ -102,7 +96,7 @@ func TestLoadConfig_EnvAndFallbacks(t *testing.T) {
 		"PORT", "KUBE_API_SERVER",
 		"KUBE_TOKEN", "KUBERNETES_SERVICE_HOST", "KUBERNETES_SERVICE_PORT",
 		"GITHUB_PAT", "GITHUB_API_URL", "GITHUB_WEBHOOK_SECRET",
-		"HANGAR_URL", "FLUX_RECEIVER_URL", "ERI_URL", "HARO_URL", "NATS_URL",
+		"HANGAR_URL", "ERI_URL", "HARO_URL", "NATS_URL",
 		"SYSTEM_CHANNEL_ID", "CONFIG_PATH", "DISCORD_TOKEN",
 	}
 
@@ -122,7 +116,6 @@ func TestLoadConfig_EnvAndFallbacks(t *testing.T) {
 				{cfg.GitHubToken, tc.wantGHTok, "GitHubToken"},
 				{cfg.GitHubAPIURL, tc.wantGHURL, "GitHubAPIURL"},
 				{cfg.GitHubWebhookSecret, tc.wantGHWebhookSecret, "GitHubWebhookSecret"},
-				{cfg.FluxReceiverURL, tc.wantFluxURL, "FluxReceiverURL"},
 				{cfg.BrainURL, tc.wantBrainURL, "BrainURL"},
 				{cfg.EriURL, tc.wantEriURL, "EriURL"},
 				{cfg.SystemChannelID, tc.wantSysChan, "SystemChannelID"},
@@ -146,7 +139,6 @@ type loadConfigCase struct {
 	missingFallback        bool
 	env                    map[string]string
 	wantPort               string
-	wantFluxURL            string
 	wantBrainURL           string
 	wantSysChan            string
 	wantAuthors            []string
@@ -220,7 +212,6 @@ func assertLoadedConfigFields(t *testing.T, tc loadConfigCase, cfg Config) {
 	t.Helper()
 	for _, check := range []struct{ got, want, field string }{
 		{cfg.Port, tc.wantPort, "Port"},
-		{cfg.FluxReceiverURL, tc.wantFluxURL, "FluxReceiverURL"},
 		{cfg.BrainURL, tc.wantBrainURL, "BrainURL"},
 		{cfg.EriURL, tc.wantBrainURL, "EriURL"},
 		{cfg.SystemChannelID, tc.wantSysChan, "SystemChannelID"},
@@ -302,12 +293,11 @@ eri_url: "http://brain.custom:8088"
 			wantBrainURL: "http://brain.custom:8088",
 		},
 		{
-			name: "yaml config with flux_receiver_url",
+			name: "stale flux_receiver_url key is ignored",
 			localYAML: `port: "4099"
 flux_receiver_url: "http://flux-receiver.custom:8080/hook/"
 `,
-			wantPort:    "4099",
-			wantFluxURL: "http://flux-receiver.custom:8080/hook",
+			wantPort: "4099",
 		},
 		{
 			name: "yaml config with eri_url",
@@ -494,7 +484,6 @@ func TestRestartRequired(t *testing.T) {
 		BotID:               "aerial",
 		BrainURL:            "http://eri:8080",
 		EriURL:              "http://eri:8080",
-		FluxReceiverURL:     "http://flux/hook",
 		KubeAPIServer:       "https://192.0.2.1:443",
 		KubeToken:           "kube",
 		SystemChannelID:     "111",
@@ -517,7 +506,6 @@ func TestRestartRequired(t *testing.T) {
 		{name: "discord token requires restart", next: withField(base, Config{DiscordToken: "tok2"}), want: true},
 		{name: "bot id requires restart", next: withField(base, Config{BotID: "agent-gamma"}), want: true},
 		{name: "eri url requires restart", next: withField(base, Config{BrainURL: "http://eri2:8080", EriURL: "http://eri2:8080"}), want: true},
-		{name: "flux receiver url requires restart", next: withField(base, Config{FluxReceiverURL: "http://flux2/hook"}), want: true},
 		{name: "kube api server requires restart", next: withField(base, Config{KubeAPIServer: "https://192.0.2.2:443"}), want: true},
 		{name: "kube token requires restart", next: withField(base, Config{KubeToken: "kube2"}), want: true},
 		{name: "nats url requires restart", next: withField(base, Config{NATSURL: "nats://nats2:4222"}), want: true},
