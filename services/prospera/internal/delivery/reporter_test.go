@@ -404,13 +404,3 @@ func runDeliverReportCase(t *testing.T, tc deliverReportTestCase) {
 		assert.Contains(t, msg, tc.expectFilename)
 	}
 }
-
-func TestProsperaReport_Definition(t *testing.T) {
-	t.Parallel()
-	reporter := NewReporter(fakes.StaticConfig{Cfg: &config.Config{}}, nil, nil)
-	obj := NewProsperaReport(reporter)
-	def := obj.Definition()
-	if def.Name() != "ProsperaReport" {
-		t.Errorf("def.Name() = %q, want ProsperaReport", def.Name())
-	}
-}

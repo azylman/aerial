@@ -52,6 +52,8 @@ func fakesScript(s *FakeStore, tw *FakeTwilio, failTo []string) []string {
 	add("by-sid %s | %s", fakesCallText(s.GetCallByProviderSID(ctx, "CA1")), fakesCallText(s.GetCallByProviderSID(ctx, "CA9")))
 	calls, err := s.ListCalls(ctx, 10)
 	add("list-calls %d %s", len(calls), fakesErrText(err))
+	unfin, err := s.ListUnfinishedReportCalls(ctx, 10)
+	add("list-unfin %d %s", len(unfin), fakesErrText(err))
 	add("recent %s | %s", fakesCallText(s.FindRecentOutboundCall(ctx, "+15105550123", time.Hour)), fakesCallText(s.FindRecentOutboundCall(ctx, "+15105550199", time.Hour)))
 	add("state %s %s %s", fakesErrText(s.UpdateCallState(ctx, "c1", "ended", "hangup", "human")),
 		fakesErrText(s.UpdateCallState(ctx, "c1", "done", "", "")), fakesErrText(s.UpdateCallState(ctx, "missing", "done", "", "")))
@@ -127,6 +129,7 @@ func TestFakes(t *testing.T) {
 				"get c1/CA1/// turns=0 cursor=0 instr=0 vm= report=pending/ <nil> | nil <nil>",
 				"by-sid c1/CA1/// turns=0 cursor=0 instr=0 vm= report=pending/ <nil> | nil <nil>",
 				"list-calls 2 <nil>",
+				"list-unfin 0 <nil>",
 				"recent c1/CA1/// turns=0 cursor=0 instr=0 vm= report=pending/ <nil> | nil <nil>",
 				"state <nil> <nil> <nil>",
 				"turn <nil> <nil>",
@@ -164,6 +167,7 @@ func TestFakes(t *testing.T) {
 				"get nil op | nil op",
 				"by-sid nil op | nil op",
 				"list-calls 0 op",
+				"list-unfin 0 op",
 				"recent nil <nil> | nil <nil>",
 				"state state state state",
 				"turn <nil> <nil>",
@@ -199,6 +203,7 @@ func TestFakes(t *testing.T) {
 				"get c1/CA1/// turns=0 cursor=0 instr=0 vm= report=pending/ <nil> | nil <nil>",
 				"by-sid c1/CA1/// turns=0 cursor=0 instr=0 vm= report=pending/ <nil> | nil <nil>",
 				"list-calls 2 <nil>",
+				"list-unfin 0 <nil>",
 				"recent c1/CA1/// turns=0 cursor=0 instr=0 vm= report=pending/ <nil> | nil <nil>",
 				"state <nil> <nil> <nil>",
 				"turn <nil> <nil>",
@@ -251,67 +256,6 @@ func TestTwilioSignature(t *testing.T) {
 			t.Parallel()
 			if got := TwilioSignature("token-a", hook, tc.form); got != tc.want {
 				t.Errorf("TwilioSignature() = %q, want %q", got, tc.want)
-			}
-		})
-	}
-}
-
-func TestFakeStore_ListUnfinishedReportCalls(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name      string
-		calls     []model.VoiceCall
-		storeErr  error
-		limit     int
-		wantCount int
-		wantErr   bool
-	}{
-		{
-			name:      "empty store returns empty slice",
-			limit:     10,
-			wantCount: 0,
-		},
-		{
-			name:     "store error returns error",
-			storeErr: errors.New("query error"),
-			limit:    10,
-			wantErr:  true,
-		},
-		{
-			name: "filters pending and processing calls up to limit",
-			calls: []model.VoiceCall{
-				{CallID: "c1", ReportStatus: "pending", StartedAt: time.Now().Add(-2 * time.Minute)},
-				{CallID: "c2", ReportStatus: "delivered", StartedAt: time.Now().Add(-1 * time.Minute)},
-				{CallID: "c3", ReportStatus: "processing", StartedAt: time.Now()},
-			},
-			limit:     1,
-			wantCount: 1,
-		},
-		{
-			name: "returns all matching when limit exceeds count",
-			calls: []model.VoiceCall{
-				{CallID: "c1", ReportStatus: "pending", StartedAt: time.Now().Add(-2 * time.Minute)},
-				{CallID: "c2", ReportStatus: "processing", StartedAt: time.Now()},
-			},
-			limit:     10,
-			wantCount: 2,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			st := NewFakeStore()
-			st.OpErr = tc.storeErr
-			for _, c := range tc.calls {
-				_ = st.CreateOutboundCall(context.Background(), c, 5)
-			}
-			got, err := st.ListUnfinishedReportCalls(context.Background(), tc.limit)
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("ListUnfinishedReportCalls() err = %v, wantErr = %v", err, tc.wantErr)
-			}
-			if len(got) != tc.wantCount {
-				t.Fatalf("len(got) = %d, want %d", len(got), tc.wantCount)
 			}
 		})
 	}

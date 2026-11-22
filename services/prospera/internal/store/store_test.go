@@ -409,6 +409,7 @@ func TestPGStore_ListUnfinishedReportCalls(t *testing.T) {
 		t.Fatalf("expected 0 calls, got %d", len(calls))
 	}
 
+	ended := now
 	cPending := model.VoiceCall{
 		CallID:       "call-pending",
 		Direction:    "outbound",
@@ -417,6 +418,7 @@ func TestPGStore_ListUnfinishedReportCalls(t *testing.T) {
 		ToNumber:     "+15105550101",
 		ReportStatus: "pending",
 		StartedAt:    now.Add(-2 * time.Minute),
+		EndedAt:      &ended,
 		UpdatedAt:    now.Add(-2 * time.Minute),
 	}
 	cProcessing := model.VoiceCall{
@@ -427,6 +429,7 @@ func TestPGStore_ListUnfinishedReportCalls(t *testing.T) {
 		ToNumber:     "+15105550102",
 		ReportStatus: "processing",
 		StartedAt:    now.Add(-1 * time.Minute),
+		EndedAt:      &ended,
 		UpdatedAt:    now.Add(-1 * time.Minute),
 	}
 	cDelivered := model.VoiceCall{
@@ -437,12 +440,24 @@ func TestPGStore_ListUnfinishedReportCalls(t *testing.T) {
 		ToNumber:     "+15105550103",
 		ReportStatus: "delivered",
 		StartedAt:    now,
+		EndedAt:      &ended,
+		UpdatedAt:    now,
+	}
+	cActive := model.VoiceCall{
+		CallID:       "call-active",
+		Direction:    "outbound",
+		State:        "in-progress",
+		FromNumber:   "+15105550100",
+		ToNumber:     "+15105550104",
+		ReportStatus: "pending",
+		StartedAt:    now,
 		UpdatedAt:    now,
 	}
 
 	_ = st.CreateInboundCall(ctx, cPending)
 	_ = st.CreateInboundCall(ctx, cProcessing)
 	_ = st.CreateInboundCall(ctx, cDelivered)
+	_ = st.CreateInboundCall(ctx, cActive)
 
 	calls, err = st.ListUnfinishedReportCalls(ctx, 10)
 	if err != nil {

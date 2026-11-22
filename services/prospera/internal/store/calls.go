@@ -427,12 +427,12 @@ func (s *PGStore) TransitionReportStatus(ctx context.Context, callID string, all
 	return rows > 0, nil
 }
 
-// ListUnfinishedReportCalls lists calls with report_status in ('pending', 'processing') up to limit.
+// ListUnfinishedReportCalls lists calls with report_status in ('pending', 'processing') and ended_at IS NOT NULL up to limit.
 func (s *PGStore) ListUnfinishedReportCalls(ctx context.Context, limit int) ([]model.VoiceCall, error) {
 	if limit <= 0 {
 		limit = 100
 	}
-	query := fmt.Sprintf("SELECT %s FROM voice_calls WHERE report_status IN ('pending', 'processing') ORDER BY started_at ASC LIMIT $1", selectCallFields)
+	query := fmt.Sprintf("SELECT %s FROM voice_calls WHERE report_status IN ('pending', 'processing') AND ended_at IS NOT NULL ORDER BY started_at ASC LIMIT $1", selectCallFields)
 	return s.queryCalls(ctx, "unfinished report calls", query, limit)
 }
 

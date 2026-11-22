@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/pkg/pubsubtest"
@@ -96,19 +97,67 @@ func TestSetupProsperaBus(t *testing.T) {
 	}
 }
 
+type registerTestCase struct {
+	name         string
+	adminURL     string
+	advertiseURL string
+	statusCode   int
+	expectBody   string
+	closeServer  bool
+	nilClient    bool
+	wantErr      bool
+}
+
+func runRegisterRestateDeploymentCase(t *testing.T, tc registerTestCase) {
+	t.Helper()
+	var receivedBody string
+	var receivedPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedPath = r.URL.Path
+		b, _ := io.ReadAll(r.Body)
+		receivedBody = string(b)
+		w.WriteHeader(tc.statusCode)
+		if tc.statusCode >= 300 {
+			_, _ = w.Write([]byte("deployment conflict"))
+		}
+	}))
+	defer srv.Close()
+
+	adminURL := tc.adminURL
+	if adminURL == "" && tc.name != "empty admin url is skipped" {
+		adminURL = srv.URL
+	}
+	advURL := tc.advertiseURL
+	if advURL == "" && tc.name != "empty advertise url is skipped" {
+		advURL = "http://prospera.default.svc.cluster.local:9080"
+	}
+
+	var client *http.Client
+	if !tc.nilClient {
+		client = srv.Client()
+	}
+	if tc.closeServer {
+		srv.Close()
+	}
+
+	err := RegisterRestateDeployment(context.Background(), client, adminURL, advURL)
+	if (err != nil) != tc.wantErr {
+		t.Fatalf("RegisterRestateDeployment() err = %v, wantErr = %v", err, tc.wantErr)
+	}
+	if tc.expectBody != "" {
+		if receivedPath != "/deployments" {
+			t.Errorf("path = %q, want /deployments", receivedPath)
+		}
+		if !strings.Contains(receivedBody, `"force":true`) {
+			t.Errorf("body missing force=true: %q", receivedBody)
+		}
+	}
+}
+
 func TestRegisterRestateDeployment(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
-		name         string
-		adminURL     string
-		advertiseURL string
-		statusCode   int
-		expectBody   string
-		closeServer  bool
-		nilClient    bool
-		wantErr      bool
-	}{
+	tests := []registerTestCase{
 		{
 			name:         "empty admin url is skipped",
 			adminURL:     "",
@@ -149,45 +198,7 @@ func TestRegisterRestateDeployment(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			var receivedBody string
-			var receivedPath string
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				receivedPath = r.URL.Path
-				b, _ := io.ReadAll(r.Body)
-				receivedBody = string(b)
-				w.WriteHeader(tc.statusCode)
-			}))
-			defer srv.Close()
-
-			adminURL := tc.adminURL
-			if adminURL == "" && tc.name != "empty admin url is skipped" {
-				adminURL = srv.URL
-			}
-			advURL := tc.advertiseURL
-			if advURL == "" && tc.name != "empty advertise url is skipped" {
-				advURL = "http://prospera.default.svc.cluster.local:9080"
-			}
-
-			var client *http.Client
-			if !tc.nilClient {
-				client = srv.Client()
-			}
-			if tc.closeServer {
-				srv.Close()
-			}
-
-			err := RegisterRestateDeployment(context.Background(), client, adminURL, advURL)
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("RegisterRestateDeployment() err = %v, wantErr = %v", err, tc.wantErr)
-			}
-			if tc.expectBody != "" {
-				if receivedPath != "/deployments" {
-					t.Errorf("path = %q, want /deployments", receivedPath)
-				}
-				if !strings.Contains(receivedBody, `"force":true`) {
-					t.Errorf("body missing force=true: %q", receivedBody)
-				}
-			}
+			runRegisterRestateDeploymentCase(t, tc)
 		})
 	}
 }
@@ -271,6 +282,8 @@ func runSweepUnfinishedReportsTest(t *testing.T, tc sweepTestCase) {
 func TestSweepUnfinishedReports(t *testing.T) {
 	t.Parallel()
 
+	now := time.Now().UTC()
+
 	tests := []sweepTestCase{
 		{
 			name:       "empty ingress url is skipped",
@@ -290,21 +303,30 @@ func TestSweepUnfinishedReports(t *testing.T) {
 			wantErr:    true,
 		},
 		{
-			name:       "successful sweep enqueues pending calls",
+			name:       "successful sweep enqueues ended pending calls",
 			ingressURL: "test-server",
 			calls: []model.VoiceCall{
-				{CallID: "call-sweep-1", ReportStatus: "pending"},
-				{CallID: "call-sweep-2", ReportStatus: "processing"},
+				{CallID: "call-sweep-1", ReportStatus: "pending", EndedAt: &now},
+				{CallID: "call-sweep-2", ReportStatus: "processing", EndedAt: &now},
 			},
 			postStatus: http.StatusOK,
 			wantCount:  2,
+		},
+		{
+			name:       "in-progress unended calls are skipped",
+			ingressURL: "test-server",
+			calls: []model.VoiceCall{
+				{CallID: "call-sweep-active", ReportStatus: "pending"},
+			},
+			postStatus: http.StatusOK,
+			wantCount:  0,
 		},
 		{
 			name:       "nil client defaults to http.DefaultClient",
 			ingressURL: "test-server",
 			nilClient:  true,
 			calls: []model.VoiceCall{
-				{CallID: "call-sweep-nilclient", ReportStatus: "pending"},
+				{CallID: "call-sweep-nilclient", ReportStatus: "pending", EndedAt: &now},
 			},
 			postStatus: http.StatusOK,
 			wantCount:  1,
@@ -313,7 +335,7 @@ func TestSweepUnfinishedReports(t *testing.T) {
 			name:       "post failure logs and returns joined error",
 			ingressURL: "test-server",
 			calls: []model.VoiceCall{
-				{CallID: "call-sweep-fail", ReportStatus: "pending"},
+				{CallID: "call-sweep-fail", ReportStatus: "pending", EndedAt: &now},
 			},
 			postStatus: http.StatusInternalServerError,
 			wantErr:    true,

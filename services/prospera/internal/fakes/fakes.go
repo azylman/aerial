@@ -311,12 +311,9 @@ func (m *FakeStore) ListUnfinishedReportCalls(ctx context.Context, limit int) ([
 	}
 	var list []model.VoiceCall
 	for _, c := range m.calls {
-		if c.ReportStatus == "pending" || c.ReportStatus == "processing" {
+		if (c.ReportStatus == "pending" || c.ReportStatus == "processing") && c.EndedAt != nil {
 			list = append(list, *c)
 		}
-	}
-	if limit > 0 && len(list) > limit {
-		list = list[:limit]
 	}
 	return list, nil
 }

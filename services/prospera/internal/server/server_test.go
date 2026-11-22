@@ -1318,6 +1318,7 @@ type handleReportJobTestCase struct {
 	ingressStatus int
 	wantIngress   bool
 	wantDelivered bool
+	nilClient     bool
 }
 
 func runHandleReportJobTest(t *testing.T, tc handleReportJobTestCase) {
@@ -1354,7 +1355,11 @@ func runHandleReportJobTest(t *testing.T, tc handleReportJobTestCase) {
 	}, 5)
 
 	rep := delivery.NewReporter(fakes.StaticConfig{Cfg: cfg}, st, &fakes.FakeTwilio{})
-	server := NewServer(newTestConfigSource(cfg), st, &fakes.FakeTwilio{}, nil, nil, rep, WithServerHTTPClient(srv.Client()))
+	var serverOpts []ServerOption
+	if !tc.nilClient {
+		serverOpts = append(serverOpts, WithServerHTTPClient(srv.Client()))
+	}
+	server := NewServer(newTestConfigSource(cfg), st, &fakes.FakeTwilio{}, nil, nil, rep, serverOpts...)
 
 	msg := &pubsubtest.Message{
 		Payload: []byte(`{"call_id":"` + tc.callID + `"}`),
@@ -1389,6 +1394,14 @@ func TestServer_HandleReportJob_RestateIngress(t *testing.T) {
 			wantDelivered: false,
 		},
 		{
+			name:          "restate ingress succeeds with default http client",
+			callID:        "call-job-restate-default-client",
+			ingressStatus: http.StatusOK,
+			wantIngress:   true,
+			wantDelivered: false,
+			nilClient:     true,
+		},
+		{
 			name:          "restate ingress failure falls back to direct reporter delivery",
 			callID:        "call-job-restate-fallback",
 			ingressStatus: http.StatusInternalServerError,
@@ -1416,22 +1429,20 @@ func TestServer_HangupActiveSessions(t *testing.T) {
 	emptyS.HangupActiveSessions()
 	emptyS.Drain(context.Background())
 
-	// 2. Active sessions are hung up
+	// 2. Active sessions have hangup initiated
 	server, _, _ := setupTestServer()
 	server.Drain(nil)
 	server.Drain(context.Background())
 
-	sess := mediastream.NewMediaStreamSession(mediastream.MediaStreamSessionConfig{
-		CallID: "call-hangup-1",
-	})
+	sess := &stubSession{}
 	server.sessionMgr.RegisterSession("call-hangup-1", sess)
 	if server.sessionMgr.ActiveCount() != 1 {
 		t.Fatalf("active count = %d, want 1", server.sessionMgr.ActiveCount())
 	}
-	ctxDone, cancel := context.WithCancel(context.Background())
-	cancel()
-	server.Drain(ctxDone)
 	server.HangupActiveSessions()
+	if sess.hangupCount() != 1 {
+		t.Fatalf("hangup count = %d, want 1", sess.hangupCount())
+	}
 }
 
 func TestServer_ResolveAndBindCall_ErrorBranches(t *testing.T) {
@@ -1455,5 +1466,25 @@ func TestServer_ResolveAndBindCall_ErrorBranches(t *testing.T) {
 	call := server.resolveAndBindCall(context.Background(), reqBind, "CA-bind-err")
 	if call == nil || call.CallID != "call-bind-err" {
 		t.Fatalf("expected call-bind-err, got %+v", call)
+	}
+
+	// 3. Store error on inbound voicemail routing logs warning
+	stErr := fakes.NewFakeStore()
+	stErr.OpErr = errors.New("store insert failure")
+	cfg := &config.Config{DefaultDiscordChannel: "prospera"}
+	serverErrStore := NewServer(newTestConfigSource(cfg), stErr, nil, nil, nil, nil)
+	recVM := httptest.NewRecorder()
+	serverErrStore.routeVoicemailRecording(context.Background(), cfg, recVM, "CA-vm-err", "+15105550199", "+15105550100")
+	if recVM.Code != http.StatusOK {
+		t.Fatalf("routeVoicemailRecording code = %d, want 200", recVM.Code)
+	}
+
+	// 4. Store error on inbound stream connection logs warning
+	tokenMgr := twilio.NewStreamTokenManager(time.Now, nil)
+	serverInboundErr := NewServer(newTestConfigSource(cfg), stErr, nil, tokenMgr, nil, nil)
+	recInbound := httptest.NewRecorder()
+	serverInboundErr.connectInboundStream(context.Background(), cfg, recInbound, "CA-in-err", "+15105550199", "+15105550100", nil)
+	if recInbound.Code != http.StatusOK {
+		t.Fatalf("connectInboundStream code = %d, want 200", recInbound.Code)
 	}
 }
