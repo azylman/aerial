@@ -404,21 +404,25 @@ func resolveCandidateJobs(rs *pubsub.PRRolloutState, checkJobs []string) []strin
 	return checkJobs
 }
 
-func formatRecoverableFailureStep(cleanStatus, banner string) (string, bool) {
+func formatRecoverableFailureStep(cleanStatus, banner, activeStep string) (string, bool) {
 	if cleanStatus != statusCIFailed && cleanStatus != statusConflict {
 		return "", false
 	}
+	base := "Remediation in progress"
 	if trimmed := strings.TrimSpace(banner); trimmed != "" {
-		return trimmed + " — remediation in progress", true
+		base = trimmed + " — remediation in progress"
 	}
-	return "Remediation in progress", true
+	if trimmedStep := strings.TrimSpace(activeStep); trimmedStep != "" {
+		return base + "\n" + trimmedStep, true
+	}
+	return base, true
 }
 
 // FormatChunkActiveStep formats the step string for a chunk in a widget.
 func FormatChunkActiveStep(chunk model.VanadisChunk, deployUIURL ...string) string {
 	baseURL := strutil.FirstNonEmpty(deployUIURL...)
 	cleanStatus := strings.ToLower(strings.TrimSpace(chunk.Status))
-	if step, ok := formatRecoverableFailureStep(cleanStatus, chunk.Banner); ok {
+	if step, ok := formatRecoverableFailureStep(cleanStatus, chunk.Banner, chunk.ActiveStep); ok {
 		return step
 	}
 	if cleanStatus == statusOpen || cleanStatus == statusPROpened {
