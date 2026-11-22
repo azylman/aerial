@@ -108,7 +108,7 @@ func TestExecutor_PromptAndDispatch(t *testing.T) {
 	t.Parallel()
 	eri := &mockEriClient{}
 	bus := pubsub.NewMemoryBus()
-	exec := NewExecutor(t.TempDir(), eri, bus, "test-token", nil)
+	exec := NewExecutor(t.TempDir(), eri, bus, "test-token", "azylman", nil)
 
 	b := model.VanadisBuild{ID: "b1", Title: "Build 1", Objective: "Make everything awesome", ThreadID: "th-1"}
 	chunks := []model.VanadisChunk{
@@ -157,7 +157,7 @@ func TestExecutor_SyncBuildWidget(t *testing.T) {
 			return "widget-msg-456", nil
 		},
 	}
-	exec := NewExecutor("", eri, nil, "", nil)
+	exec := NewExecutor("", eri, nil, "", "azylman", nil)
 	st := &mockWidgetStore{}
 
 	b := model.VanadisBuild{ID: "b1", Title: "Build 1", Status: "running", ThreadID: "th-1"}
@@ -182,7 +182,7 @@ func TestExecutor_SyncBuildWidget(t *testing.T) {
 			return "", errors.New("eri widget failure")
 		},
 	}
-	execErr := NewExecutor("", eriErr, nil, "", nil)
+	execErr := NewExecutor("", eriErr, nil, "", "azylman", nil)
 	if _, err := execErr.SyncBuildWidget(context.Background(), st, b, chunks, ""); err == nil {
 		t.Error("expected error on eri failure")
 	}
@@ -195,7 +195,7 @@ func TestExecutor_SyncBuildWidget(t *testing.T) {
 func TestExecutor_PublishExternalEvent(t *testing.T) {
 	t.Parallel()
 	bus := pubsub.NewMemoryBus()
-	exec := NewExecutor("", nil, bus, "", nil)
+	exec := NewExecutor("", nil, bus, "", "azylman", nil)
 
 	ctx := context.Background()
 	if err := exec.PublishExternalEvent(ctx, "vanadis_build", "completed", []string{"b1"}, "all green"); err != nil {
@@ -205,7 +205,7 @@ func TestExecutor_PublishExternalEvent(t *testing.T) {
 
 func TestExecutor_NilEriAndDirectHelpers(t *testing.T) {
 	t.Parallel()
-	execNil := NewExecutor("", nil, nil, "", nil)
+	execNil := NewExecutor("", nil, nil, "", "azylman", nil)
 	ctx := context.Background()
 	if err := execNil.CancelChunkDispatch(ctx, "c1"); err != nil {
 		t.Fatal(err)
@@ -224,7 +224,7 @@ func TestExecutor_NilEriAndDirectHelpers(t *testing.T) {
 	}
 
 	eri := &mockEriClient{}
-	exec := NewExecutor("", eri, nil, "", nil)
+	exec := NewExecutor("", eri, nil, "", "azylman", nil)
 	if err := exec.CancelChunkDispatch(ctx, "c1"); err != nil {
 		t.Fatal(err)
 	}
@@ -254,7 +254,7 @@ func TestExecutor_NilEriAndDirectHelpers(t *testing.T) {
 func TestDispatchSilentWakePrompt_OccurrenceDistinguishesFailures(t *testing.T) {
 	t.Parallel()
 	eri := &mockEriClient{}
-	exec := NewExecutor(t.TempDir(), eri, nil, "test-token", nil)
+	exec := NewExecutor(t.TempDir(), eri, nil, "test-token", "azylman", nil)
 	ctx := context.Background()
 	dispatch := func(occurrence string) string {
 		t.Helper()
@@ -281,7 +281,7 @@ func TestExecuteLaunchChunk_Errors(t *testing.T) {
 		t.Error("expected error for nil executor")
 	}
 
-	exec := NewExecutor("", &mockEriClient{}, nil, "", nil)
+	exec := NewExecutor("", &mockEriClient{}, nil, "", "azylman", nil)
 
 	// out of bounds
 	if err := exec.ExecuteLaunchChunk(ctx, nil, model.VanadisBuild{}, nil, 0, ""); err == nil {
@@ -299,7 +299,7 @@ func TestExecuteLaunchChunk_Errors(t *testing.T) {
 
 	// store reserve error branch
 	mockStore := &mockStoreForLaunch{reserveErr: errors.New("database locked")}
-	execWithStore := NewExecutor("", &mockEriClient{}, nil, "", nil)
+	execWithStore := NewExecutor("", &mockEriClient{}, nil, "", "azylman", nil)
 	chunksForLaunch := []model.VanadisChunk{{ID: "c1", Title: "Chunk 1", Mode: "pr", Repo: "aerial"}}
 	if err := execWithStore.ExecuteLaunchChunk(ctx, mockStore, model.VanadisBuild{ID: "b1"}, chunksForLaunch, 0, ""); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -310,7 +310,7 @@ func TestExecuteLaunchChunk_Errors(t *testing.T) {
 	aerialDir := filepath.Join(tmpShare, "aerial")
 	_ = os.MkdirAll(aerialDir, 0o755)
 	_ = os.WriteFile(filepath.Join(aerialDir, "main.go"), []byte("package main\n\nfunc MySpecialSym() {\n}\n"), 0o644)
-	execShare := NewExecutor(tmpShare, &mockEriClient{}, nil, "", nil)
+	execShare := NewExecutor(tmpShare, &mockEriClient{}, nil, "", "azylman", nil)
 	promptWithSpans, err := execShare.FormatChunkPrompt(model.VanadisBuild{ID: "b1"}, []model.VanadisChunk{{
 		ID:            "c1",
 		Title:         "Chunk 1",
@@ -328,7 +328,7 @@ func TestExecuteLaunchChunk_Errors(t *testing.T) {
 
 	// PublishExternalEvent
 	mockB := &mockBusExecutor{}
-	execBus := NewExecutor("", nil, mockB, "", nil)
+	execBus := NewExecutor("", nil, mockB, "", "azylman", nil)
 	if err := execBus.PublishExternalEvent(ctx, "source", "type", []string{"t1"}, "ctx"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -358,7 +358,7 @@ func TestExecutorCoordinatorBranches(t *testing.T) {
 
 	// Coordinator with deploy UI URL and explicit share root.
 	eri := &mockEriClient{}
-	exec := NewExecutor("/custom-share", eri, nil, "tok", nil, "https://flux.example.com")
+	exec := NewExecutor("/custom-share", eri, nil, "tok", "azylman", nil, "https://flux.example.com")
 	if exec.shareRoot != "/custom-share" || exec.deployUIURL != "https://flux.example.com" {
 		t.Errorf("unexpected executor config: %+v", exec)
 	}
@@ -379,7 +379,7 @@ func TestExecutorCoordinatorBranches(t *testing.T) {
 	}
 
 	// Nil bus publishes nothing and reports no error.
-	execNoBus := NewExecutor("", nil, nil, "", nil)
+	execNoBus := NewExecutor("", nil, nil, "", "azylman", nil)
 	if err := execNoBus.PublishExternalEvent(ctx, "source", "type", []string{"t1"}, "ctx"); err != nil {
 		t.Fatalf("PublishExternalEvent with nil bus failed: %v", err)
 	}
@@ -410,7 +410,7 @@ func TestExecutorCILogDelegation(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	exec := NewExecutor("", nil, nil, "token", srv.Client())
+	exec := NewExecutor("", nil, nil, "token", "azylman", srv.Client())
 	exec.GitHubAPIURL = srv.URL
 
 	// Log fetch success delegates through the coordinator.
@@ -419,7 +419,7 @@ func TestExecutorCILogDelegation(t *testing.T) {
 		t.Errorf("delegated checked = (%q, %v), want FAIL log", got, err)
 	}
 	// RoboRev errors propagate through the checked path.
-	if _, err := exec.ResolveCIFailureDetailsChecked(ctx, "aerial", 10, "roborev-check", "abc123", "", "failure"); err == nil {
+	if _, err := exec.ResolveCIFailureDetailsChecked(ctx, "aerial", 10, "roborev", "abc123", "", "failure"); err == nil {
 		t.Error("expected delegated error for 500 comments, got nil")
 	}
 }
@@ -448,7 +448,7 @@ func TestExecuteLaunchChunk_RetryReservation(t *testing.T) {
 			dispatchErr := tc.dispatchErr
 			eri := &mockEriClient{dispatchFn: func(context.Context, eriwire.BrainDispatchRequest) error { return dispatchErr }}
 			st := &mockStoreForLaunch{reserveErr: tc.reserveErr}
-			executor := NewExecutor(t.TempDir(), eri, nil, "", nil)
+			executor := NewExecutor(t.TempDir(), eri, nil, "", "azylman", nil)
 			err := executor.ExecuteLaunchChunk(context.Background(), st, model.VanadisBuild{ID: "b"}, []model.VanadisChunk{{ID: "c", Mode: "action", Status: "pending", StallNudges: tc.nudges}}, 0, "")
 			if tc.wantErr != nil {
 				assert.ErrorIs(t, err, tc.wantErr)

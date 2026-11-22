@@ -46,7 +46,7 @@ func TestRecoveredChunkRemediationWake(t *testing.T) {
 		w.Write([]byte(`{}`))
 	}))
 	defer server.Close()
-	bo := NewBuildObject("", nil).WithAuthority(st, executor.NewExecutor(t.TempDir(), executor.NewHTTPEriClient(server.URL, server.Client()), nil, "", nil))
+	bo := NewBuildObject("", nil).WithAuthority(st, executor.NewExecutor(t.TempDir(), executor.NewHTTPEriClient(server.URL, server.Client()), nil, "", "azylman", nil))
 	ctx := makeObjectMockContext(t, "b1")
 	_, err := restate.Run(ctx, func(rc restate.RunContext) (bool, error) {
 		return true, bo.handlePREventType(rc, "b1", "c1", "ci_failed", pubsub.PRLifecycleEvent{Repo: "aerial", PRNumber: 101, CheckName: "unit", Details: "unit test failed"})
@@ -111,7 +111,7 @@ func TestExecutePRAttachment(t *testing.T) {
 					return "msg-123", nil
 				},
 			}
-			exec := executor.NewExecutor(t.TempDir(), eri, pubsub.NewMemoryBus(), "token", nil)
+			exec := executor.NewExecutor(t.TempDir(), eri, pubsub.NewMemoryBus(), "token", "azylman", nil)
 			fakeRT := newFakeObjectRuntime("b1")
 			bo := NewBuildObject("", nil, func(restate.ObjectContext) objectRuntime { return fakeRT }).WithAuthority(st, exec)
 			mc := mocks.NewMockContext(t)

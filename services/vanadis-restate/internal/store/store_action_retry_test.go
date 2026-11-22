@@ -201,7 +201,7 @@ func retryFixtureStore(mu *sync.Mutex, current *model.VanadisChunk, buildStatus 
 			}
 			return nil
 		}}, nil
-	}})
+	}}, "azylman")
 }
 
 func validRetryResult(result *RetryActionChunkResult) bool {

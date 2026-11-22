@@ -107,7 +107,7 @@ channels:
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			mockSender := &mockWidgetSender{sendMsg: &discordgo.Message{ID: "msg-123"}}
-			d, err := NewDiscordWidgetDeliverer("", "", nil, tc.cfgPath)
+			d, err := NewDiscordWidgetDeliverer("", "", "azylman", nil, tc.cfgPath)
 			require.NoError(t, err)
 			d.agentSenders = map[string]DiscordWidgetSender{"aerial": mockSender}
 			if tc.resolverSysID != "" || tc.resolverErr != nil {
@@ -159,7 +159,7 @@ func TestDelivererChannelRedirectionCustomPolicy(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			mockSender := &mockWidgetSender{sendMsg: &discordgo.Message{ID: "m-1"}}
-			d, err := NewDiscordWidgetDeliverer("", "", nil, filepath.Join(t.TempDir(), "config.yaml"))
+			d, err := NewDiscordWidgetDeliverer("", "", "azylman", nil, filepath.Join(t.TempDir(), "config.yaml"))
 			require.NoError(t, err)
 			d.agentSenders = map[string]DiscordWidgetSender{"aerial": mockSender}
 			d.channelPolicyResolver = func(_ string) (bool, string) {
@@ -187,7 +187,7 @@ channels:
 	require.NoError(t, os.WriteFile(cfgPath, []byte(initialYAML), 0o644))
 
 	resolveCount := 0
-	d, err := NewDiscordWidgetDeliverer("", "", nil, cfgPath)
+	d, err := NewDiscordWidgetDeliverer("", "", "azylman", nil, cfgPath)
 	require.NoError(t, err)
 	d.channelResolver = func(target string) (string, error) {
 		resolveCount++

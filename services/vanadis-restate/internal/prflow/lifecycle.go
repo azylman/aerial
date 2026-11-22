@@ -487,7 +487,7 @@ func (f *Flow) LocateOrAttachPRChunk(ctx context.Context, buildID string, ev pub
 }
 
 // IsEligibleUnattachedChunk reports whether a chunk may adopt an unattached PR.
-func IsEligibleUnattachedChunk(build *model.VanadisBuild, c *model.VanadisChunk, ev pubsub.PRLifecycleEvent) bool {
+func IsEligibleUnattachedChunk(owner string, build *model.VanadisBuild, c *model.VanadisChunk, ev pubsub.PRLifecycleEvent) bool {
 	if build == nil || c == nil {
 		return false
 	}
@@ -500,7 +500,7 @@ func IsEligibleUnattachedChunk(build *model.VanadisBuild, c *model.VanadisChunk,
 	if buildThread := model.NormalizeDiscordThreadID(build.ThreadID); buildThread != "" && strings.TrimSpace(ev.TargetID) != "" && model.NormalizeDiscordThreadID(ev.TargetID) != buildThread {
 		return false
 	}
-	return store.AttachmentMatches(*c, *build, store.AttachChunkPRRequest{Repo: strings.TrimSpace(ev.Repo), PRNumber: ev.PRNumber})
+	return store.AttachmentMatches(owner, *c, *build, store.AttachChunkPRRequest{Repo: strings.TrimSpace(ev.Repo), PRNumber: ev.PRNumber})
 }
 
 // SyncAttachedPRWidget refreshes the build widget after a PR attachment.
@@ -518,14 +518,14 @@ func (f *Flow) SyncAttachedPRWidget(ctx context.Context, buildID string) {
 
 // SelectUnattachedTargetChunk picks the single unattached chunk an event may
 // attach to: by branch-encoded chunk ID, else by unambiguous thread match.
-func SelectUnattachedTargetChunk(build *model.VanadisBuild, chunks []model.VanadisChunk, ev pubsub.PRLifecycleEvent) *model.VanadisChunk {
+func SelectUnattachedTargetChunk(owner string, build *model.VanadisBuild, chunks []model.VanadisChunk, ev pubsub.PRLifecycleEvent) *model.VanadisChunk {
 	if build == nil {
 		return nil
 	}
 	if chunkID := model.ExtractChunkIDFromBranch(ev.Repo, ev.Branch); chunkID != "" {
 		for i := range chunks {
 			if chunks[i].ID == chunkID && chunks[i].BuildID == build.ID {
-				if IsEligibleUnattachedChunk(build, &chunks[i], ev) {
+				if IsEligibleUnattachedChunk(owner, build, &chunks[i], ev) {
 					return &chunks[i]
 				}
 				return nil
@@ -540,7 +540,7 @@ func SelectUnattachedTargetChunk(build *model.VanadisBuild, chunks []model.Vanad
 	}
 	var matched *model.VanadisChunk
 	for i := range chunks {
-		if chunks[i].BuildID == build.ID && IsEligibleUnattachedChunk(build, &chunks[i], ev) {
+		if chunks[i].BuildID == build.ID && IsEligibleUnattachedChunk(owner, build, &chunks[i], ev) {
 			if matched != nil {
 				return nil
 			}
@@ -564,7 +564,7 @@ func (f *Flow) ResolveOrAttachPRChunk(ctx context.Context, buildID string, ev pu
 		return "", gErr
 	}
 
-	targetChunk := SelectUnattachedTargetChunk(build, chunks, ev)
+	targetChunk := SelectUnattachedTargetChunk(f.Exec.GitHubOwner(), build, chunks, ev)
 	if targetChunk == nil {
 		return "", nil
 	}

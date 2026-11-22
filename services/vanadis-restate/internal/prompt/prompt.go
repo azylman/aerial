@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
+	"github.com/azylman/aerial/pkg/prwire"
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/pkg/strutil"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
@@ -43,7 +45,7 @@ func FormatCIFailurePrompt(ev pubsub.PRLifecycleEvent, details string) string {
 		"Investigate the failing logs, diagnose the root cause, verify locally, and remediate this turn. This turn must end in exactly one machine-visible outcome: (1) a fix pushed to the existing PR branch, or (2) a final line in the form REMEDIATION BLOCKED: <reason and the decision needed> when genuinely blocked. " + checkoutAndSubmit + "\n" +
 		"Ending this turn with neither a commit nor that blocked final line is a failed remediation, not a completed one. A recommendation, waiver request, or \"no legitimate fix\" conclusion written only in your final response is invisible to the thread and counts as no outcome.\n" +
 		"If the correct fix conflicts with the chunk's stated boundaries, do not silently stop: apply the smallest boundary-crossing fix that makes the gate pass, note the scope change in the commit and PR description, and let the next chunk absorb it."
-	if isRoboRevCheckName(ev.CheckName) {
+	if prwire.IsRoboRevCheck(ev.CheckName) {
 		directive = "[VANADIS CI REMEDIATION — MANDATORY]\n" +
 			fmt.Sprintf("Please critically evaluate each RoboRev finding against codebase reality and architectural intent. This turn must end in exactly one machine-visible outcome: (1) a verified fix pushed to the existing PR branch, (2) a technical rebuttal recorded via '/share/aerial/scripts/aerial-pr.sh --repo %s override-roborev %d '<technical_rebuttal>'', or (3) a final line in the form REMEDIATION BLOCKED: <reason and the decision needed> when genuinely blocked. %s\n", shortRepo, ev.PRNumber, checkoutAndSubmit) +
 			"Ending this turn with no commit, no override, and no blocked final line is a failed remediation, not a completed one. A recommendation, waiver request, or \"no legitimate fix\" conclusion written only in your final response is invisible to the thread and counts as no outcome.\n" +
@@ -164,23 +166,9 @@ func formatErrorDetailsBlock(header, details, extraLine, footer string) string {
 	return strings.Join(lines, "\n")
 }
 
-func isRoboRevCheckName(name string) bool {
-	lower := strings.ToLower(strings.TrimSpace(name))
-	return strings.Contains(lower, "roborev")
-}
-
-// TruncatePromptRunes caps s at maxRunes runes with a truncation marker.
-func TruncatePromptRunes(s string, maxRunes int) string {
-	runes := []rune(s)
-	if len(runes) <= maxRunes {
-		return s
-	}
-	return string(runes[:maxRunes]) + "... (truncated)"
-}
-
 // TruncatePromptDetails sanitizes details for prompt embedding.
 func TruncatePromptDetails(s string) string {
-	return TruncatePromptRunes(strings.ReplaceAll(s, "```", "'''"), maxPromptRunes)
+	return strutil.TruncateRunes(strings.ReplaceAll(s, "```", "'''"), maxPromptRunes)
 }
 
 // AST Symbol Spans resolution
@@ -202,15 +190,6 @@ func normalizeSymbolName(symbol string) string {
 		sym = sym[idx+1:]
 	}
 	return strings.TrimSpace(sym)
-}
-
-func hasAnyPrefix(s string, prefixes []string) bool {
-	for _, p := range prefixes {
-		if strings.HasPrefix(s, p) {
-			return true
-		}
-	}
-	return false
 }
 
 func isIdentByte(b byte) bool {
@@ -262,7 +241,7 @@ func FindSymbolSpan(content, symbol string) (int, int, bool) {
 	lines := strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n")
 	for idx, line := range lines {
 		clean := strings.TrimSpace(stripLineComment(line))
-		if hasAnyPrefix(clean, declKeywordPrefixes) && containsIdent(clean, sym) {
+		if slices.ContainsFunc(declKeywordPrefixes, func(p string) bool { return strings.HasPrefix(clean, p) }) && containsIdent(clean, sym) {
 			end := idx + 1
 			for j := idx + 1; j < len(lines); j++ {
 				if strings.HasPrefix(lines[j], "}") {

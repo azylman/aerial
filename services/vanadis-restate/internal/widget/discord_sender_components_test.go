@@ -187,7 +187,7 @@ func TestBuildStatusWidgetComponentsTable(t *testing.T) {
 	for _, tc := range buildStatusWidgetCases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			comps, err := BuildStatusWidgetComponents(tc.req, now)
+			comps, err := BuildStatusWidgetComponents("azylman", tc.req, now)
 			require.NoError(t, err)
 			require.Len(t, comps, 1)
 

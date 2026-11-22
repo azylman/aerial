@@ -187,7 +187,7 @@ func TestStoreNilGuards(t *testing.T) {
 	if _, _, err := nilStore.GetBuild(context.Background(), "b1"); err == nil {
 		t.Error("expected GetBuild nil error, got nil")
 	}
-	empty := New(&mockDB{})
+	empty := New(&mockDB{}, "azylman")
 	empty.db = nil
 	if err := empty.CreateBuild(context.Background(), model.VanadisBuild{ID: "b1"}, nil); err == nil {
 		t.Error("expected CreateBuild nil-db error, got nil")

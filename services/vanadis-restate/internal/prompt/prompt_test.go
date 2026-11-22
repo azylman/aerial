@@ -299,18 +299,6 @@ func TestNormalizeSymbolName(t *testing.T) {
 	}
 }
 
-func TestTruncatePromptRunes(t *testing.T) {
-	t.Parallel()
-	shortStr := "hello"
-	if got := TruncatePromptRunes(shortStr, 10); got != shortStr {
-		t.Errorf("expected %q, got %q", shortStr, got)
-	}
-	longStr := "hello world from vanadis"
-	if got := TruncatePromptRunes(longStr, 5); !strings.HasSuffix(got, "... (truncated)") {
-		t.Errorf("expected truncation, got %q", got)
-	}
-}
-
 func TestFailurePromptDirectives(t *testing.T) {
 	t.Parallel()
 	ev := pubsub.PRLifecycleEvent{

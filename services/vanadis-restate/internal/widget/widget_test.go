@@ -411,3 +411,28 @@ func TestBuildStatusWidgetChunk(t *testing.T) {
 		})
 	}
 }
+
+func TestNormalizeRepo(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		owner     string
+		repo      string
+		wantFull  string
+		wantShort string
+	}{
+		{name: "bare repo gets owner", owner: "acme", repo: "aerial", wantFull: "acme/aerial", wantShort: "aerial"},
+		{name: "bare repo trimmed", owner: "acme", repo: " aerial/ ", wantFull: "acme/aerial", wantShort: "aerial"},
+		{name: "qualified repo kept", owner: "acme", repo: "other/x", wantFull: "other/x", wantShort: "x"},
+		{name: "empty repo", owner: "acme", repo: "  ", wantFull: "", wantShort: ""},
+		{name: "empty owner keeps bare repo", owner: "", repo: "aerial", wantFull: "aerial", wantShort: "aerial"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			full, short := NormalizeRepo(tc.owner, tc.repo)
+			assert.Equal(t, tc.wantFull, full)
+			assert.Equal(t, tc.wantShort, short)
+		})
+	}
+}

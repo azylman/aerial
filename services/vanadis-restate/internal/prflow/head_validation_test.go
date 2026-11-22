@@ -55,7 +55,7 @@ func TestFlow_RecordPRHeadRevision(t *testing.T) {
 				fmt.Fprint(w, tc.body)
 			}))
 			defer api.Close()
-			exec := executor.NewExecutor("", nil, nil, "", api.Client())
+			exec := executor.NewExecutor("", nil, nil, "", "azylman", api.Client())
 			exec.GitHubAPIURL = api.URL
 			spy := &checkStatusSpyStore{}
 			if tc.cold {
@@ -107,7 +107,7 @@ func TestFlow_SynchronizeValidatesHeadAgainstGitHub(t *testing.T) {
 		fmt.Fprint(w, `{"state":"open","merged":false,"head":{"sha":"sha-2"}}`)
 	}))
 	defer api.Close()
-	exec := executor.NewExecutor("", nil, nil, "", api.Client())
+	exec := executor.NewExecutor("", nil, nil, "", "azylman", api.Client())
 	exec.GitHubAPIURL = api.URL
 	spy := &checkStatusSpyStore{}
 	f := NewFlow(spy, exec)

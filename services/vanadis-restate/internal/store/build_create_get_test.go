@@ -112,7 +112,7 @@ func (s dbScript) open() (*Store, *[]string) {
 			}
 			return tx, nil
 		},
-	}), candidates
+	}, "azylman"), candidates
 }
 
 func isActionRow(row pgx.Row) bool { _, ok := row.(*genericMockRow); return ok }

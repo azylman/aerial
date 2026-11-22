@@ -160,7 +160,7 @@ func applyChunkUpdates(chunk *model.VanadisChunk, req UpdateChunkRequest, normEf
 	}
 	effectiveRepo := chunk.Repo
 	if strings.TrimSpace(req.Repo) != "" {
-		effectiveRepo = buildplan.NormalizeRepo(req.Repo)
+		effectiveRepo = buildplan.TrimRepo(req.Repo)
 	}
 	normMode, modeErr := buildplan.NormalizeChunkMode(effectiveMode)
 	if modeErr != nil {
@@ -304,7 +304,7 @@ func buildAppendedChunks(buildID string, existingIDs map[string]bool, startIndex
 		if err != nil {
 			return nil, err
 		}
-		cRepo := buildplan.NormalizeRepo(inp.Repo)
+		cRepo := buildplan.TrimRepo(inp.Repo)
 		if cMode == chunkModeAction {
 			cRepo = ""
 		}

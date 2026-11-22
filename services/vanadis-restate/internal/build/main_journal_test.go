@@ -561,7 +561,7 @@ func TestOnDispatchOutcome_VerdictCutoverJournalCommandSequence(t *testing.T) {
 				labelReconcileAfterNoPRFail:        transition,
 			}
 			ctx := makeOutcomeJournalContext(t, journal, &commands)
-			bo := NewBuildObject("", nil).WithAuthority(&metadataMutationStore{}, executor.NewExecutor("", &mockEriClient{}, nil, "token", nil))
+			bo := NewBuildObject("", nil).WithAuthority(&metadataMutationStore{}, executor.NewExecutor("", &mockEriClient{}, nil, "token", "azylman", nil))
 			err := bo.OnDispatchOutcome(ctx, pubsub.DispatchOutcomeEvent{VanadisChunkID: "c1", DispatchID: "vanadis-c1-turn-0", Status: tc.status})
 			require.NoError(t, err)
 			assert.Equal(t, append(append([]string{}, prefix...), tc.want...), commands)
@@ -596,7 +596,7 @@ func TestOnPREvent_DeploySuccessJournalCommandSequence(t *testing.T) {
 				labelReconcileAfterPREvent: transition,
 			}
 			ctx := makeOutcomeJournalContext(t, journal, &commands)
-			bo := NewBuildObject("", nil).WithAuthority(&metadataMutationStore{}, executor.NewExecutor("", &mockEriClient{}, nil, "token", nil))
+			bo := NewBuildObject("", nil).WithAuthority(&metadataMutationStore{}, executor.NewExecutor("", &mockEriClient{}, nil, "token", "azylman", nil))
 			err := bo.OnPREvent(ctx, pubsub.PRLifecycleEvent{Repo: "aerial", PRNumber: 9, Event: "deploy_success"})
 			require.NoError(t, err)
 			assert.Equal(t, tc.want, commands)

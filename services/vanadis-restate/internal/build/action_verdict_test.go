@@ -137,7 +137,7 @@ func TestBuildObject_CompleteChunk(t *testing.T) {
 			if tc.noStore {
 				authority = nil
 			}
-			bo := NewBuildObject("", nil, func(restate.ObjectContext) objectRuntime { return newFakeObjectRuntime("b1") }).WithAuthority(authority, executor.NewExecutor(t.TempDir(), eri, bus, "", nil))
+			bo := NewBuildObject("", nil, func(restate.ObjectContext) objectRuntime { return newFakeObjectRuntime("b1") }).WithAuthority(authority, executor.NewExecutor(t.TempDir(), eri, bus, "", "azylman", nil))
 			var got CompleteChunkResponse
 			var err error
 			for range tc.calls {

@@ -43,7 +43,7 @@ func (s *Store) GetChunkByPR(ctx context.Context, repo string, prNumber int) (*V
 	if s == nil || s.db == nil {
 		return nil, errors.New("database connection is nil")
 	}
-	candidates := RepoMatchCandidates(repo)
+	candidates := RepoMatchCandidates(s.gitHubOwner, repo)
 	if len(candidates) == 0 || prNumber <= 0 {
 		return &VanadisChunkPRLookup{Matched: false}, nil
 	}
@@ -64,7 +64,7 @@ func (s *Store) LookupPRChunk(ctx context.Context, repo string, prNumber int) (B
 	if s == nil || s.db == nil {
 		return BuildRoute{}, "", errors.New("database connection is nil")
 	}
-	candidates := RepoMatchCandidates(repo)
+	candidates := RepoMatchCandidates(s.gitHubOwner, repo)
 	if len(candidates) == 0 || prNumber <= 0 {
 		return BuildRoute{}, "", ErrChunkNotFound
 	}
@@ -106,7 +106,7 @@ func (s *Store) LookupUnattachedChunkByThreadAndRepo(ctx context.Context, thread
 		return BuildRoute{}, "", errors.New("database connection is nil")
 	}
 	threadID = model.NormalizeDiscordThreadID(threadID)
-	candidates := RepoMatchCandidates(repo)
+	candidates := RepoMatchCandidates(s.gitHubOwner, repo)
 	if threadID == "" || len(candidates) == 0 {
 		return BuildRoute{}, "", ErrChunkNotFound
 	}

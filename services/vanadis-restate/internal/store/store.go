@@ -19,17 +19,17 @@ import (
 
 	"github.com/azylman/aerial/pkg/agent"
 	"github.com/azylman/aerial/pkg/buildplan"
+	"github.com/azylman/aerial/pkg/githubapi"
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 )
 
 const (
-	chunkModeAction  = "action"
-	defaultAgent     = "aerial"
-	defaultRepoOwner = "azylman"
-	effortLow        = "low"
-	effortMedium     = "medium"
-	jsonNull         = "null"
+	chunkModeAction = "action"
+	defaultAgent    = "aerial"
+	effortLow       = "low"
+	effortMedium    = "medium"
+	jsonNull        = "null"
 )
 
 // BuildColumns is the canonical build-row select list.
@@ -50,12 +50,14 @@ type rowScanner interface {
 // Store is the shared pgx-backed persistence handle embedded by the root
 // PostgresVanadisStore.
 type Store struct {
-	db PgxQueryExecer
+	db          PgxQueryExecer
+	gitHubOwner string
 }
 
-// New returns a Store backed by db.
-func New(db PgxQueryExecer) *Store {
-	return &Store{db: db}
+// New returns a Store backed by db. gitHubOwner is the configured GitHub
+// owner whose bare and qualified repo spellings chunk lookups treat as one.
+func New(db PgxQueryExecer, gitHubOwner string) *Store {
+	return &Store{db: db, gitHubOwner: gitHubOwner}
 }
 
 // DB returns the underlying query surface so sibling packages (the prstate
@@ -209,16 +211,22 @@ func CapChunkEffort(effort string) string {
 	return eff
 }
 
-// RepoMatchCandidates returns the repo spellings a chunk lookup should match.
-func RepoMatchCandidates(repo string) []string {
-	repo = buildplan.NormalizeRepo(repo)
+// RepoMatchCandidates returns the repo spellings a chunk lookup should
+// match: a bare repo also matches its owner-qualified form, and a repo
+// under owner also matches its bare name. Other owners match only as given.
+func RepoMatchCandidates(owner, repo string) []string {
+	repo = buildplan.TrimRepo(repo)
 	if repo == "" {
 		return nil
 	}
-	if !strings.Contains(repo, "/") {
-		return []string{repo, defaultRepoOwner + "/" + repo}
+	owner = strings.Trim(strings.TrimSpace(owner), "/")
+	if owner == "" {
+		return []string{repo}
 	}
-	if bare, ok := strings.CutPrefix(repo, defaultRepoOwner+"/"); ok && bare != "" && !strings.Contains(bare, "/") {
+	if !strings.Contains(repo, "/") {
+		return []string{repo, githubapi.QualifyRepo(owner, repo)}
+	}
+	if bare, ok := strings.CutPrefix(repo, owner+"/"); ok && bare != "" && !strings.Contains(bare, "/") {
 		return []string{repo, bare}
 	}
 	return []string{repo}

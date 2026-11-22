@@ -74,6 +74,7 @@ func TestRunApp_Shutdown(t *testing.T) {
 		RestatePort:  restatePort,
 		VanadisURL:   "http://127.0.0.1:4025",
 		PostgresURL:  "postgres://mock:mock@localhost:5432/mock",
+		GitHubOwner:  "acme",
 		NATSURL:      "nats://mock:4222",
 		DiscordToken: "test-token",
 	}
@@ -129,6 +130,7 @@ func TestRunApp_ErrorCases(t *testing.T) {
 		RestatePort: "9080",
 		VanadisURL:  "http://vanadis.aerial:4025",
 		PostgresURL: "postgres://mock:mock@localhost:5432/mock",
+		GitHubOwner: "acme",
 		NATSURL:     "nats://mock:4222",
 	})
 	assert.Error(t, errHealth)
@@ -144,6 +146,7 @@ func TestRunApp_ErrorCases(t *testing.T) {
 		RestatePort: "invalid-port",
 		VanadisURL:  "http://vanadis.aerial:4025",
 		PostgresURL: "postgres://mock:mock@localhost:5432/mock",
+		GitHubOwner: "acme",
 		NATSURL:     "nats://mock:4222",
 	})
 	assert.Error(t, errRestate)
@@ -151,7 +154,7 @@ func TestRunApp_ErrorCases(t *testing.T) {
 	// 3. Widget deliverer constructor error logs warning without failing RunApp
 	origDeliverer := newDiscordWidgetDelivererFn
 	defer func() { newDiscordWidgetDelivererFn = origDeliverer }()
-	newDiscordWidgetDelivererFn = func(string, string, []string, string) (*widget.DiscordWidgetDeliverer, error) {
+	newDiscordWidgetDelivererFn = func(string, string, string, []string, string) (*widget.DiscordWidgetDeliverer, error) {
 		return nil, errors.New("mock deliverer fail")
 	}
 
@@ -173,6 +176,7 @@ func TestRunApp_ErrorCases(t *testing.T) {
 			RestatePort: restatePort2,
 			VanadisURL:  "http://127.0.0.1:4025",
 			PostgresURL: "postgres://mock:mock@localhost:5432/mock",
+			GitHubOwner: "acme",
 			NATSURL:     "nats://mock:4222",
 		})
 	}()
@@ -456,8 +460,12 @@ func TestRunApp_FailFast(t *testing.T) {
 	err := RunApp(context.Background(), Config{PostgresURL: "", NATSURL: "nats://localhost:4222"})
 	assert.ErrorContains(t, err, "postgres_url is required")
 
+	// Missing GitHub owner fails before connecting anything
+	err = RunApp(context.Background(), Config{PostgresURL: "invalid://url", GitHubOwner: "  ", NATSURL: "nats://localhost:4222"})
+	assert.ErrorContains(t, err, "github_owner is required")
+
 	// Invalid Postgres URL
-	err = RunApp(context.Background(), Config{PostgresURL: "invalid://url", NATSURL: "nats://localhost:4222"})
+	err = RunApp(context.Background(), Config{PostgresURL: "invalid://url", GitHubOwner: "acme", NATSURL: "nats://localhost:4222"})
 	assert.ErrorContains(t, err, "connect to postgres")
 
 	// Unreachable NATS via default newBusFn fails fast (RetryOnFailedConnect(false))
@@ -466,12 +474,12 @@ func TestRunApp_FailFast(t *testing.T) {
 
 	// Missing NATS URL
 	oldInitPg := initPostgres
-	initPostgres = func(context.Context, string) (*store.Store, func(context.Context), error) {
+	initPostgres = func(context.Context, string, string) (*store.Store, func(context.Context), error) {
 		return &store.Store{}, func(context.Context) {}, nil
 	}
 	defer func() { initPostgres = oldInitPg }()
 
-	err = RunApp(context.Background(), Config{PostgresURL: "postgres://mock", NATSURL: ""})
+	err = RunApp(context.Background(), Config{PostgresURL: "postgres://mock", GitHubOwner: "acme", NATSURL: ""})
 	assert.ErrorContains(t, err, "nats_url is required")
 
 	// NATS connect failure
@@ -481,7 +489,7 @@ func TestRunApp_FailFast(t *testing.T) {
 	}
 	defer func() { newBusFn = oldNewBus }()
 
-	err = RunApp(context.Background(), Config{PostgresURL: "postgres://mock", NATSURL: "nats://mock"})
+	err = RunApp(context.Background(), Config{PostgresURL: "postgres://mock", GitHubOwner: "acme", NATSURL: "nats://mock"})
 	assert.ErrorContains(t, err, "connect to nats")
 
 	// NATS JetStream verification failure closes bus and fails fast
@@ -489,7 +497,7 @@ func TestRunApp_FailFast(t *testing.T) {
 	newBusFn = func(context.Context, string) (pubsub.Bus, error) {
 		return startupBus, nil
 	}
-	err = RunApp(context.Background(), Config{PostgresURL: "postgres://mock", NATSURL: "nats://mock"})
+	err = RunApp(context.Background(), Config{PostgresURL: "postgres://mock", GitHubOwner: "acme", NATSURL: "nats://mock"})
 	assert.ErrorContains(t, err, "verify nats jetstream")
 	assert.True(t, startupBus.closed)
 }
@@ -507,7 +515,7 @@ func TestInitPostgres(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			_, _, err := initPostgres(ctx, tc.url)
+			_, _, err := initPostgres(ctx, tc.url, "azylman")
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("initPostgres() err = %v, wantErr %v", err, tc.wantErr)
 			}

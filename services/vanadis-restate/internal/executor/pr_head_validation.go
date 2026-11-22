@@ -42,10 +42,7 @@ func (e *Executor) fetchGitHubPullRequest(ctx context.Context, repo string, numb
 	if e == nil || e.HTTPClient == nil {
 		return nil, "", "", fmt.Errorf("PR head verification unavailable")
 	}
-	repo = strings.TrimSpace(repo)
-	if repo != "" && !strings.Contains(repo, "/") {
-		repo = defaultRepoOwner + "/" + repo
-	}
+	repo = githubapi.QualifyRepo(e.gitHubOwner, repo)
 	parts := strings.Split(repo, "/")
 	if len(parts) != 2 || parts[0] == "" || parts[1] == "" || number <= 0 {
 		return nil, "", "", fmt.Errorf("PR head verification requires repository and PR number")

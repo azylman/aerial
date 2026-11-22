@@ -76,7 +76,7 @@ func TestResolveCIFailureDetailsChecked(t *testing.T) {
 	}))
 	t.Cleanup(ghServer.Close)
 
-	client := NewClient("gh-token", ghServer.Client())
+	client := NewClient("gh-token", "azylman", ghServer.Client())
 	client.GitHubAPIURL = ghServer.URL
 
 	tests := []struct {
@@ -162,7 +162,7 @@ func TestResolveCIFailureDetailsRoboRevAndLogs(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	client := NewClient("token", srv.Client())
+	client := NewClient("token", "azylman", srv.Client())
 	client.GitHubAPIURL = srv.URL
 
 	// 1. RoboRev match
@@ -199,7 +199,7 @@ func TestFetchCheckJobFailureLogsAndRoboRevCases(t *testing.T) {
 	}))
 	defer ghServer.Close()
 
-	client := NewClient("gh-token", ghServer.Client())
+	client := NewClient("gh-token", "azylman", ghServer.Client())
 	client.GitHubAPIURL = ghServer.URL
 
 	ctx := context.Background()
@@ -245,7 +245,7 @@ func TestFetchCheckJobFailureLogsAndRoboRevCases(t *testing.T) {
 		_, _ = w.Write([]byte(prefix + "\n--- FAIL: TestHuge (0.01s)\n"))
 	}))
 	defer ghServerHuge.Close()
-	hugeClient := NewClient("token", ghServerHuge.Client())
+	hugeClient := NewClient("token", "azylman", ghServerHuge.Client())
 	hugeClient.GitHubAPIURL = ghServerHuge.URL
 	if res, _ := hugeClient.fetchCheckJobFailureLogsChecked(ctx, "aerial", 111); !strings.Contains(res, "FAIL: TestHuge") {
 		t.Errorf("expected FAIL: TestHuge, got %q", res)
@@ -261,32 +261,10 @@ func TestFetchCheckJobFailureLogsAndRoboRevCases(t *testing.T) {
 		_, _ = w.Write(data)
 	}))
 	defer ghServerRoboMismatch.Close()
-	mismatchClient := NewClient("token", ghServerRoboMismatch.Client())
+	mismatchClient := NewClient("token", "azylman", ghServerRoboMismatch.Client())
 	mismatchClient.GitHubAPIURL = ghServerRoboMismatch.URL
 	if res, _ := mismatchClient.fetchLatestRoboRevCommentChecked(ctx, "aerial", 10, "abcdef1"); res != "" {
 		t.Errorf("expected empty string for non-matching SHA, got %q", res)
-	}
-}
-
-func TestResolveGitHubRepoPath(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name     string
-		repo     string
-		wantPath string
-	}{
-		{name: "empty string", repo: "", wantPath: ""},
-		{name: "whitespace only", repo: "   ", wantPath: ""},
-		{name: "bare repo with slashes prepends default owner", repo: "/aerial/", wantPath: "azylman/aerial"},
-		{name: "qualified repo with leading slash retains owner", repo: "/azylman/mirrormere", wantPath: "azylman/mirrormere"},
-		{name: "external owner retains owner", repo: "other-org/other-repo", wantPath: "other-org/other-repo"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			got := ResolveGitHubRepoPath(tc.repo)
-			assert.Equal(t, tc.wantPath, got)
-		})
 	}
 }
 
@@ -294,12 +272,14 @@ func TestFetchCheckJobFailureLogsRepoPath(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name        string
+		owner       string
 		repo        string
 		wantSubpath string
 	}{
-		{name: "bare repo prepends azylman", repo: "aerial", wantSubpath: "/repos/azylman/aerial/actions/jobs/123/logs"},
-		{name: "qualified repo retains owner", repo: "azylman/aerial", wantSubpath: "/repos/azylman/aerial/actions/jobs/123/logs"},
-		{name: "external repo retains owner", repo: "external/repo", wantSubpath: "/repos/external/repo/actions/jobs/123/logs"},
+		{name: "bare repo gets configured owner", owner: "azylman", repo: "aerial", wantSubpath: "/repos/azylman/aerial/actions/jobs/123/logs"},
+		{name: "bare repo gets other configured owner", owner: "acme", repo: " /aerial/ ", wantSubpath: "/repos/acme/aerial/actions/jobs/123/logs"},
+		{name: "qualified repo retains owner", owner: "azylman", repo: "azylman/aerial", wantSubpath: "/repos/azylman/aerial/actions/jobs/123/logs"},
+		{name: "external repo retains owner", owner: "azylman", repo: "external/repo", wantSubpath: "/repos/external/repo/actions/jobs/123/logs"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -312,7 +292,7 @@ func TestFetchCheckJobFailureLogsRepoPath(t *testing.T) {
 			}))
 			defer server.Close()
 
-			client := NewClient("token", server.Client())
+			client := NewClient("token", tc.owner, server.Client())
 			client.GitHubAPIURL = server.URL
 			res, _ := client.fetchCheckJobFailureLogsChecked(context.Background(), tc.repo, 123)
 			assert.NotEmpty(t, res)
@@ -323,7 +303,7 @@ func TestFetchCheckJobFailureLogsRepoPath(t *testing.T) {
 
 func TestNewClientDefaults(t *testing.T) {
 	t.Parallel()
-	c := NewClient("tok", nil)
+	c := NewClient("tok", "azylman", nil)
 	assert.Equal(t, "tok", c.GitHubToken)
 	assert.Equal(t, "https://api.github.com", c.GitHubAPIURL)
 	if c.HTTPClient == nil {
@@ -353,9 +333,9 @@ func TestResolveCIFailureDetailsCheckedErrors(t *testing.T) {
 	defer srv.Close()
 
 	// RoboRev path surfaces transport-level GitHub errors.
-	errClient := NewClient("token", srv.Client())
+	errClient := NewClient("token", "azylman", srv.Client())
 	errClient.GitHubAPIURL = srv.URL
-	if _, err := errClient.ResolveCIFailureDetailsChecked(ctx, "aerial", 10, "roborev-check", "abc123", "", "failure"); err == nil {
+	if _, err := errClient.ResolveCIFailureDetailsChecked(ctx, "aerial", 10, "roborev", "abc123", "", "failure"); err == nil {
 		t.Error("expected error for 500 comments response, got nil")
 	}
 	// Log fetch success through the checked path.
@@ -382,7 +362,7 @@ func TestCILogClientEdgeCases(t *testing.T) {
 	defer srv.Close()
 
 	// Unreachable API URL surfaces a transport error.
-	badClient := NewClient("token", srv.Client())
+	badClient := NewClient("token", "azylman", srv.Client())
 	badClient.GitHubAPIURL = "http://[::1]:namedport"
 	if _, err := badClient.fetchCheckJobFailureLogsChecked(ctx, "aerial", 42); err == nil {
 		t.Error("expected transport error, got nil")
@@ -392,7 +372,7 @@ func TestCILogClientEdgeCases(t *testing.T) {
 	}
 
 	// Malformed API URL surfaces a request-build error.
-	malformedClient := NewClient("token", srv.Client())
+	malformedClient := NewClient("token", "azylman", srv.Client())
 	malformedClient.GitHubAPIURL = "://bad-url"
 	if _, err := malformedClient.fetchCheckJobFailureLogsChecked(ctx, "aerial", 42); err == nil {
 		t.Error("expected request build error, got nil")
@@ -404,7 +384,7 @@ func TestCILogClientEdgeCases(t *testing.T) {
 		_, _ = w.Write([]byte(`{not-json`))
 	}))
 	defer invalidJSONSrv.Close()
-	invalidClient := NewClient("token", invalidJSONSrv.Client())
+	invalidClient := NewClient("token", "azylman", invalidJSONSrv.Client())
 	invalidClient.GitHubAPIURL = invalidJSONSrv.URL
 	if got, _ := invalidClient.fetchLatestRoboRevCommentChecked(ctx, "aerial", 10, "sha"); got != "" {
 		t.Errorf("expected empty for invalid JSON, got %q", got)
@@ -415,7 +395,7 @@ func TestCILogClientEdgeCases(t *testing.T) {
 		w.WriteHeader(http.StatusNotFound)
 	}))
 	defer missingSrv.Close()
-	missingClient := NewClient("token", missingSrv.Client())
+	missingClient := NewClient("token", "azylman", missingSrv.Client())
 	missingClient.GitHubAPIURL = missingSrv.URL
 	if got, _ := missingClient.fetchCheckJobFailureLogsChecked(ctx, "aerial", 42); got != "" {
 		t.Errorf("expected empty for 404 logs, got %q", got)
@@ -428,14 +408,14 @@ func TestCILogClientEdgeCases(t *testing.T) {
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
 	defer failingLogSrv.Close()
-	failingClient := NewClient("token", failingLogSrv.Client())
+	failingClient := NewClient("token", "azylman", failingLogSrv.Client())
 	failingClient.GitHubAPIURL = failingLogSrv.URL
 	if _, err := failingClient.ResolveCIFailureDetailsChecked(ctx, "aerial", 0, "unit", "abc", "https://github.com/o/r/actions/runs/1/job/42", "failure"); err == nil {
 		t.Error("expected error for 500 logs response, got nil")
 	}
 
 	// Empty token sends requests without an authorization header.
-	noTokenClient := NewClient("", srv.Client())
+	noTokenClient := NewClient("", "azylman", srv.Client())
 	noTokenClient.GitHubAPIURL = srv.URL
 	if got, err := noTokenClient.ResolveCIFailureDetailsChecked(ctx, "aerial", 0, "unit", "abc", "https://github.com/o/r/actions/runs/1/job/42", "failure"); err != nil || !strings.Contains(got, "FAIL: TestErr") {
 		t.Errorf("expected FAIL log without token, got (%q, %v)", got, err)
@@ -481,7 +461,7 @@ func TestFetchLatestRoboRevCommentRepoPath(t *testing.T) {
 			}))
 			defer server.Close()
 
-			client := NewClient("token", server.Client())
+			client := NewClient("token", "azylman", server.Client())
 			client.GitHubAPIURL = server.URL
 			res, _ := client.fetchLatestRoboRevCommentChecked(context.Background(), tc.repo, 42, "sha1234")
 			assert.NotEmpty(t, res)

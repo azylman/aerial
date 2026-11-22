@@ -100,7 +100,7 @@ func TestCompleteCrossBuildSweep_RecoveryAndOverlay(t *testing.T) {
 				crossErr:       tc.crossErr,
 			}
 			bus := &recordingChunkBus{}
-			exec := executor.NewExecutor("", &mockEriClient{}, bus, "token", nil)
+			exec := executor.NewExecutor("", &mockEriClient{}, bus, "token", "azylman", nil)
 			bo := NewBuildObject("", nil).WithAuthority(spy, exec)
 			mutation := &BuildMutationRequest{Action: mutationChunkDeploySuccess, ChunkID: "deploying", RolloutState: mutated}
 			ctx, crossBuild := withCrossBuildReconciles(context.Background())

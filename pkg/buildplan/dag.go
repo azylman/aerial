@@ -175,7 +175,7 @@ func ValidateConcurrentDisjointPRChunks(out []VanadisChunk, reach [][]bool) erro
 		if err != nil || modeI != "pr" {
 			continue
 		}
-		repoI := NormalizeRepo(chunkI.Repo)
+		repoI := TrimRepo(chunkI.Repo)
 		for j := i + 1; j < len(out); j++ {
 			chunkJ := out[j]
 			if IsTerminalChunkStatus(chunkJ.Status) {
@@ -185,7 +185,7 @@ func ValidateConcurrentDisjointPRChunks(out []VanadisChunk, reach [][]bool) erro
 			if err != nil || modeJ != "pr" {
 				continue
 			}
-			repoJ := NormalizeRepo(chunkJ.Repo)
+			repoJ := TrimRepo(chunkJ.Repo)
 			if !strings.EqualFold(repoI, repoJ) {
 				continue
 			}

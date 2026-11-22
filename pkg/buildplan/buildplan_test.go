@@ -182,8 +182,8 @@ func TestNormalizeRepo(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if got := NormalizeRepo(tc.repo); got != tc.want {
-				t.Errorf("NormalizeRepo(%q) = %q, want %q", tc.repo, got, tc.want)
+			if got := TrimRepo(tc.repo); got != tc.want {
+				t.Errorf("TrimRepo(%q) = %q, want %q", tc.repo, got, tc.want)
 			}
 		})
 	}
