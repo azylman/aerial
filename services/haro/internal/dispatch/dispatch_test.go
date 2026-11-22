@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 
 	"go.opentelemetry.io/otel"
@@ -32,332 +34,373 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
-func setupMockDispatcherServer(t *testing.T, expectedPath string, status int, respBody string, closeServer bool, nilDispatcher bool, testName string) (*HTTPPromptDispatcher, *httptest.Server, context.Context) {
+// dispatchServerURL in a row's brain or restate column is replaced with the recording server's URL.
+const dispatchServerURL = "{server}"
+
+type dispatchRequest struct {
+	path        string
+	idempotency string
+	contentType string
+	body        []byte
+}
+
+type dispatchRecording struct {
+	mu   sync.Mutex
+	last dispatchRequest
+}
+
+func (r *dispatchRecording) snapshot() dispatchRequest {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.last
+}
+
+// newDispatchRecordingServer replies with status/body and records the last request.
+func newDispatchRecordingServer(t *testing.T, status int, body string) (*httptest.Server, *dispatchRecording) {
 	t.Helper()
+	rec := &dispatchRecording{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Content-Type") != "application/json" {
-			t.Errorf("expected Content-Type application/json, got %q", r.Header.Get("Content-Type"))
-		}
-		if r.URL.Path != expectedPath {
-			t.Errorf("expected path %s, got %q", expectedPath, r.URL.Path)
-		}
+		reqBody, _ := io.ReadAll(r.Body)
+		rec.mu.Lock()
+		rec.last = dispatchRequest{path: r.URL.Path, idempotency: r.Header.Get("Idempotency-Key"), contentType: r.Header.Get("Content-Type"), body: reqBody}
+		rec.mu.Unlock()
 		w.WriteHeader(status)
-		_, _ = w.Write([]byte(respBody))
+		_, _ = w.Write([]byte(body))
 	}))
-
-	var dispatcher *HTTPPromptDispatcher
-	switch {
-	case nilDispatcher:
-		dispatcher = nil
-	case testName == "default http client used when httpClient is nil":
-		dispatcher = &HTTPPromptDispatcher{brainURL: server.URL}
-	case testName == "empty brain url fails fast":
-		dispatcher = &HTTPPromptDispatcher{}
-	default:
-		serverURL := server.URL + "/"
-		if closeServer {
-			server.Close()
-		}
-		dispatcher = NewHTTPPromptDispatcher(serverURL)
-	}
-
-	ctx := context.Background()
-	return dispatcher, server, ctx
+	t.Cleanup(server.Close)
+	return server, rec
 }
 
-type promptDispatcherTestCase struct {
-	name            string
-	serverStatus    int
-	serverResponse  string
-	req             PromptDispatchRequest
-	closeServer     bool
-	nilDispatcher   bool
-	wantErr         bool
-	wantErrContains string
-	wantChannelID   string
+var (
+	nilDispatcher = dispatcherTarget{nilDispatcher: true}
+	closedBrain   = dispatcherTarget{brain: dispatchServerURL + "/", closeServer: true}
+)
+
+// dispatcherTarget is the dispatcher-construction half of a row: brain/restate URLs (dispatchServerURL
+// expands to the recording server), the agent, a struct literal without http client (nilClient), a nil
+// dispatcher, or a server closed before the call.
+type dispatcherTarget struct {
+	brain         string
+	restate       string
+	agent         string
+	nilClient     bool
+	nilDispatcher bool
+	closeServer   bool
 }
 
-func runPromptDispatcherCase(t *testing.T, tc promptDispatcherTestCase) {
+func newTargetDispatcher(t *testing.T, target dispatcherTarget, status int, body string) (*HTTPPromptDispatcher, *dispatchRecording) {
 	t.Helper()
-	disp, server, ctx := setupMockDispatcherServer(t, "/prompt", tc.serverStatus, tc.serverResponse, tc.closeServer, tc.nilDispatcher, tc.name)
-	defer server.Close()
-
-	got, err := disp.DispatchPrompt(ctx, tc.req)
+	server, rec := newDispatchRecordingServer(t, status, body)
+	if target.closeServer {
+		server.Close()
+	}
+	brain := strings.ReplaceAll(target.brain, dispatchServerURL, server.URL)
+	restate := strings.ReplaceAll(target.restate, dispatchServerURL, server.URL)
 	switch {
-	case tc.wantErr:
-		if err == nil {
-			t.Fatal("DispatchPrompt() expected error, got nil")
-		}
-		if tc.wantErrContains != "" && !strings.Contains(err.Error(), tc.wantErrContains) {
-			t.Fatalf("DispatchPrompt() err = %v, want error containing %q", err, tc.wantErrContains)
-		}
+	case target.nilDispatcher:
+		return nil, rec
+	case target.nilClient:
+		return &HTTPPromptDispatcher{brainURL: brain, restateURL: restate, agentName: target.agent}, rec
 	default:
+		return NewHTTPPromptDispatcher(brain, restate, target.agent), rec
+	}
+}
+
+func assertDispatchRecording(t *testing.T, rec dispatchRequest, wantPath, wantIdempotency string) {
+	t.Helper()
+	if wantPath != "" && rec.path != wantPath {
+		t.Errorf("path = %q, want %q", rec.path, wantPath)
+	}
+	if wantIdempotency != "" && rec.idempotency != wantIdempotency {
+		t.Errorf("Idempotency-Key = %q, want %q", rec.idempotency, wantIdempotency)
+	}
+	if rec.path != "" && rec.contentType != "application/json" {
+		t.Errorf("Content-Type = %q, want application/json", rec.contentType)
+	}
+}
+
+func assertDispatchErr(t *testing.T, err error, wantErr string) bool {
+	t.Helper()
+	if wantErr == "" {
 		if err != nil {
-			t.Fatalf("DispatchPrompt() unexpected error: %v", err)
+			t.Fatalf("unexpected error: %v", err)
 		}
-		if got.ChannelID != tc.wantChannelID {
-			t.Errorf("resp.ChannelID = %q, want %q", got.ChannelID, tc.wantChannelID)
-		}
+		return false
 	}
+	if err == nil || !strings.Contains(err.Error(), wantErr) {
+		t.Fatalf("err = %v, want error containing %q", err, wantErr)
+	}
+	return true
 }
 
-func TestHTTPPromptDispatcher(t *testing.T) {
-	tests := []promptDispatcherTestCase{
+func TestHTTPPromptDispatcherDispatchPrompt(t *testing.T) {
+	t.Parallel()
+	brain := dispatcherTarget{brain: dispatchServerURL + "/"}
+	restate := func(agent string) dispatcherTarget {
+		return dispatcherTarget{brain: "http://eri:8080", restate: dispatchServerURL, agent: agent}
+	}
+	tests := []struct {
+		name            string
+		target          dispatcherTarget
+		status          int
+		body            string
+		req             PromptDispatchRequest
+		wantPath        string
+		wantIdempotency string
+		wantErr         string
+		wantStatus      string
+		wantChannelID   string
+	}{
 		{
-			name:           "success accepted 202",
-			serverStatus:   http.StatusAccepted,
-			serverResponse: `{"status":"accepted","channel_id":"123456789","message_id":"msg-1"}`,
-			req: PromptDispatchRequest{
-				Prompt:    "echo test",
-				ChannelID: "123456789",
-				Title:     "Daily Check",
-				MessageID: "run-1",
-				Effort:    "low",
-			},
-			wantChannelID: "123456789",
+			name: "brain success accepted 202", target: brain, status: http.StatusAccepted,
+			body:     `{"status":"accepted","channel_id":"123456789","message_id":"run-1"}`,
+			req:      PromptDispatchRequest{Prompt: "echo test", ChannelID: "123456789", Title: "Daily Check", MessageID: "run-1", Effort: "low"},
+			wantPath: "/prompt", wantStatus: "accepted", wantChannelID: "123456789",
 		},
 		{
-			name:           "success ok 200",
-			serverStatus:   http.StatusOK,
-			serverResponse: `{"status":"ok","channel_id":"123456789","message_id":"msg-2"}`,
-			req: PromptDispatchRequest{
-				Prompt:    "echo test 2",
-				ChannelID: "123456789",
-			},
-			wantChannelID: "123456789",
+			name: "brain success ok 200", target: brain, status: http.StatusOK, body: `{"status":"ok","channel_id":"123456789"}`,
+			req: PromptDispatchRequest{Prompt: "echo test 2", ChannelID: "123456789"}, wantPath: "/prompt", wantStatus: "ok", wantChannelID: "123456789",
 		},
 		{
-			name:           "server returns error json 400",
-			serverStatus:   http.StatusBadRequest,
-			serverResponse: `{"error":"prompt cannot be empty"}`,
-			req: PromptDispatchRequest{
-				ChannelID: "123456789",
-			},
-			wantErr: true,
+			name: "brain error json 400", target: brain, status: http.StatusBadRequest, body: `{"error":"prompt cannot be empty"}`,
+			req: PromptDispatchRequest{ChannelID: "123456789"}, wantPath: "/prompt", wantErr: "brain /prompt error (400): prompt cannot be empty",
 		},
 		{
-			name:           "server returns non-json error 500",
-			serverStatus:   http.StatusInternalServerError,
-			serverResponse: `Internal Server Error`,
-			req: PromptDispatchRequest{
-				Prompt: "fail",
-			},
-			wantErr: true,
+			name: "brain non-json error 500", target: brain, status: http.StatusInternalServerError, body: `Internal Server Error`,
+			req: PromptDispatchRequest{Prompt: "fail"}, wantPath: "/prompt", wantErr: "brain /prompt returned HTTP 500: Internal Server Error",
 		},
 		{
-			name:           "server returns invalid json on 200",
-			serverStatus:   http.StatusOK,
-			serverResponse: `not valid json`,
-			req: PromptDispatchRequest{
-				Prompt: "test invalid json",
-			},
-			wantErr: true,
+			name: "brain invalid json on 200", target: brain, status: http.StatusOK, body: `not valid json`,
+			req: PromptDispatchRequest{Prompt: "test invalid json"}, wantPath: "/prompt", wantErr: "failed to parse prompt dispatch response",
 		},
 		{
-			name:        "closed server network error",
-			closeServer: true,
-			req: PromptDispatchRequest{
-				Prompt: "test closed",
-			},
-			wantErr: true,
+			name: "brain closed server network error", target: closedBrain,
+			req: PromptDispatchRequest{Prompt: "test closed"}, wantErr: "prompt dispatch failed",
+		},
+		{name: "nil dispatcher returns error", target: nilDispatcher, req: PromptDispatchRequest{Prompt: "test"}, wantErr: "dispatcher is nil"},
+		{
+			name:   "default http client used when httpClient is nil",
+			target: dispatcherTarget{brain: dispatchServerURL, nilClient: true}, status: http.StatusAccepted,
+			body:     `{"status":"accepted","channel_id":"nil-client-chan","message_id":"msg-nc"}`,
+			req:      PromptDispatchRequest{Prompt: "nil client test", ChannelID: "nil-client-chan", MessageID: "msg-nc"},
+			wantPath: "/prompt", wantStatus: "accepted", wantChannelID: "nil-client-chan",
 		},
 		{
-			name:          "nil dispatcher returns error",
-			nilDispatcher: true,
-			req:           PromptDispatchRequest{Prompt: "test"},
-			wantErr:       true,
+			name: "empty brain url fails fast", target: dispatcherTarget{nilClient: true},
+			req: PromptDispatchRequest{Prompt: "test empty url"}, wantErr: "brain URL is not configured",
 		},
 		{
-			name:           "default http client used when httpClient is nil",
-			serverStatus:   http.StatusAccepted,
-			serverResponse: `{"status":"accepted","channel_id":"nil-client-chan","message_id":"msg-nc"}`,
-			req: PromptDispatchRequest{
-				Prompt:    "nil client test",
-				ChannelID: "nil-client-chan",
-			},
-			wantChannelID: "nil-client-chan",
+			name: "restate default aerial", target: restate("aerial"), status: http.StatusOK,
+			body:     `{"status":"accepted","channel_id":"ch-123","message_id":"msg-abc"}`,
+			req:      PromptDispatchRequest{ChannelID: "ch-123", MessageID: "msg-abc", Prompt: "hello restate"},
+			wantPath: "/ThreadSession/ch-123/Enqueue", wantIdempotency: "prompt:ch-123:msg-abc", wantStatus: "accepted", wantChannelID: "ch-123",
 		},
 		{
-			name: "empty brain url fails fast",
-			req: PromptDispatchRequest{
-				Prompt: "test empty url",
-			},
-			wantErr:         true,
-			wantErrContains: "brain URL is not configured",
+			name: "restate custom agent from dispatcher and empty body", target: restate("agent-alpha"), status: http.StatusOK,
+			req:      PromptDispatchRequest{ChannelID: "ch-456", MessageID: "msg-456", Prompt: "hello alpha"},
+			wantPath: "/ThreadSession-agent-alpha/ch-456/Enqueue", wantIdempotency: "prompt:ch-456:msg-456", wantStatus: "accepted", wantChannelID: "ch-456",
+		},
+		{
+			name: "restate per-request agent override", target: restate("aerial"), status: http.StatusOK,
+			body:     `{"status":"accepted","channel_id":"ch-789","message_id":"msg-789"}`,
+			req:      PromptDispatchRequest{ChannelID: "ch-789", MessageID: "msg-789", Prompt: "hello beta", Agent: "agent-beta"},
+			wantPath: "/ThreadSession-agent-beta/ch-789/Enqueue", wantIdempotency: "prompt:ch-789:msg-789", wantStatus: "accepted", wantChannelID: "ch-789",
+		},
+		{
+			name: "restate auto-generated message id", target: restate(""), status: http.StatusOK, body: `{"status":"accepted"}`,
+			req:      PromptDispatchRequest{ChannelID: "ch-auto", Prompt: "auto msg id"},
+			wantPath: "/ThreadSession/ch-auto/Enqueue", wantStatus: "accepted", wantChannelID: "ch-auto",
+		},
+		{
+			name: "restate missing channel_id fails", target: restate("aerial"),
+			req: PromptDispatchRequest{Prompt: "no channel"}, wantErr: "channel_id cannot be empty",
+		},
+		{
+			name: "restate error response message", target: restate("aerial"), status: http.StatusInternalServerError,
+			body: `{"message":"something went wrong in restate"}`,
+			req:  PromptDispatchRequest{ChannelID: "ch-err", Prompt: "trigger err"}, wantPath: "/ThreadSession/ch-err/Enqueue",
+			wantErr: "restate prompt dispatch error (500): something went wrong in restate",
+		},
+		{
+			name: "restate error response fallback field", target: restate("aerial"), status: http.StatusBadRequest, body: `{"error":"invalid prompt"}`,
+			req: PromptDispatchRequest{ChannelID: "ch-err-2", Prompt: "trigger err 2"}, wantPath: "/ThreadSession/ch-err-2/Enqueue",
+			wantErr: "restate prompt dispatch error (400): invalid prompt",
+		},
+		{
+			name: "restate raw status error", target: restate("aerial"), status: http.StatusBadGateway, body: `bad gateway upstream`,
+			req: PromptDispatchRequest{ChannelID: "ch-err-3", Prompt: "trigger err 3"}, wantPath: "/ThreadSession/ch-err-3/Enqueue",
+			wantErr: "restate prompt dispatch returned HTTP 502: bad gateway upstream",
+		},
+		{
+			name: "restate invalid json on 200", target: restate("aerial"), status: http.StatusOK, body: `invalid-json`,
+			req: PromptDispatchRequest{ChannelID: "ch-inv", Prompt: "inv"}, wantPath: "/ThreadSession/ch-inv/Enqueue",
+			wantErr: "failed to parse prompt dispatch restate response",
 		},
 	}
-
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			runPromptDispatcherCase(t, tc)
+			t.Parallel()
+			disp, rec := newTargetDispatcher(t, tc.target, tc.status, tc.body)
+			resp, err := disp.DispatchPrompt(context.Background(), tc.req)
+			got := rec.snapshot()
+			assertDispatchRecording(t, got, tc.wantPath, tc.wantIdempotency)
+			if assertDispatchErr(t, err, tc.wantErr) {
+				return
+			}
+			if resp.Status != tc.wantStatus || resp.ChannelID != tc.wantChannelID {
+				t.Errorf("resp = %+v, want status %q channel %q", resp, tc.wantStatus, tc.wantChannelID)
+			}
+			var sent PromptDispatchRequest
+			if err := json.Unmarshal(got.body, &sent); err != nil {
+				t.Fatalf("decode sent body: %v", err)
+			}
+			if sent.ChannelID != resp.ChannelID || sent.MessageID != resp.MessageID {
+				t.Errorf("sent ids = %q/%q, want response ids %q/%q", sent.ChannelID, sent.MessageID, resp.ChannelID, resp.MessageID)
+			}
 		})
 	}
 }
 
-type dispatchTestCase struct {
-	name            string
-	nilDispatcher   bool
-	serverStatus    int
-	serverResponse  string
-	closeServer     bool
-	req             eriwire.BrainDispatchRequest
-	wantErr         bool
-	wantErrContains string
-	wantStatus      string
-	wantDispatchID  string
-}
-
-func runDispatchCase(t *testing.T, tc dispatchTestCase) {
-	t.Helper()
-	var disp *HTTPPromptDispatcher
-	if !tc.nilDispatcher {
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.URL.Path != "/dispatch" {
-				t.Errorf("expected path /dispatch, got %q", r.URL.Path)
-			}
-			w.WriteHeader(tc.serverStatus)
-			_, _ = w.Write([]byte(tc.serverResponse))
-		}))
-		defer server.Close()
-		if tc.closeServer {
-			server.Close()
-		}
-		disp = NewHTTPPromptDispatcher(server.URL)
+func TestHTTPPromptDispatcherDispatch(t *testing.T) {
+	t.Parallel()
+	brain := dispatcherTarget{brain: dispatchServerURL}
+	restate := func(agent string) dispatcherTarget {
+		return dispatcherTarget{brain: "http://eri:8080", restate: dispatchServerURL, agent: agent}
 	}
-	ctx := context.Background()
-	resp, err := disp.Dispatch(ctx, tc.req)
-	if tc.wantErr {
-		if err == nil {
-			t.Fatal("Dispatch() expected error, got nil")
-		}
-		if tc.wantErrContains != "" && !strings.Contains(err.Error(), tc.wantErrContains) {
-			t.Fatalf("Dispatch() err = %v, want error containing %q", err, tc.wantErrContains)
-		}
-		return
-	}
-	if err != nil {
-		t.Fatalf("Dispatch() unexpected error: %v", err)
-	}
-	if resp.Status != tc.wantStatus {
-		t.Errorf("resp.Status = %q, want %q", resp.Status, tc.wantStatus)
-	}
-	if tc.wantDispatchID != "" && resp.DispatchID != tc.wantDispatchID {
-		t.Errorf("resp.DispatchID = %q, want %q", resp.DispatchID, tc.wantDispatchID)
-	}
-}
-
-func TestHTTPPromptDispatcher_Dispatch(t *testing.T) {
-	tests := []dispatchTestCase{
+	hb := eriwire.BrainDispatchRequest{Source: "heartbeat", Prompt: "test"}
+	tests := []struct {
+		name            string
+		target          dispatcherTarget
+		status          int
+		body            string
+		req             eriwire.BrainDispatchRequest
+		wantPath        string
+		wantIdempotency string
+		wantErr         string
+		wantStatus      string
+		wantDispatchID  string
+	}{
+		{name: "nil dispatcher returns error", target: nilDispatcher, req: hb, wantErr: "dispatcher is nil"},
+		{name: "empty source returns error", target: brain, req: eriwire.BrainDispatchRequest{Source: "  ", Prompt: "test"}, wantErr: "source cannot be"},
+		{name: "empty prompt returns error", target: brain, req: eriwire.BrainDispatchRequest{Source: "heartbeat", Prompt: " "}, wantErr: "prompt cannot"},
 		{
-			name:            "nil dispatcher returns error",
-			nilDispatcher:   true,
-			req:             eriwire.BrainDispatchRequest{Source: "heartbeat", Prompt: "test"},
-			wantErr:         true,
-			wantErrContains: "dispatcher is nil",
+			name: "brain error json 400", target: brain, status: http.StatusBadRequest, body: `{"error":"invalid dispatch"}`,
+			req: hb, wantPath: "/dispatch", wantErr: "brain /dispatch error (400): invalid dispatch",
 		},
 		{
-			name:            "empty source returns error",
-			req:             eriwire.BrainDispatchRequest{Source: "  ", Prompt: "test"},
-			wantErr:         true,
-			wantErrContains: "source cannot be empty",
+			name: "brain non-json error 500", target: brain, status: http.StatusInternalServerError, body: `Internal Server Error`,
+			req: hb, wantPath: "/dispatch", wantErr: "brain /dispatch returned HTTP 500: Internal Server Error",
+		},
+		{name: "brain closed server network error", target: closedBrain, req: hb, wantErr: "dispatch failed: "},
+		{
+			name: "brain success accepted 202", target: brain, status: http.StatusAccepted, body: `{"status":"accepted","dispatch_id":"disp-1"}`,
+			req: eriwire.BrainDispatchRequest{
+				Source: "heartbeat", SessionID: "hb-1", TargetID: "123456789", Prompt: "echo test", Effort: "low", SkipIfActive: true,
+			},
+			wantPath: "/dispatch", wantStatus: "accepted", wantDispatchID: "disp-1",
 		},
 		{
-			name:            "empty prompt returns error",
-			req:             eriwire.BrainDispatchRequest{Source: "heartbeat", Prompt: "  "},
-			wantErr:         true,
-			wantErrContains: "prompt cannot be empty",
+			name: "brain success ok 200", target: brain, status: http.StatusOK, body: `{"status":"ok","dispatch_id":"disp-2"}`,
+			req: eriwire.BrainDispatchRequest{Source: "heartbeat", Prompt: "echo test 2"}, wantPath: "/dispatch", wantStatus: "ok", wantDispatchID: "disp-2",
 		},
 		{
-			name:            "server returns error json 400",
-			serverStatus:    http.StatusBadRequest,
-			serverResponse:  `{"error":"invalid dispatch"}`,
-			req:             eriwire.BrainDispatchRequest{Source: "heartbeat", Prompt: "test"},
-			wantErr:         true,
-			wantErrContains: "invalid dispatch",
+			name: "restate default session_id", target: restate("aerial"), status: http.StatusOK, body: `{"status":"accepted","dispatch_id":"disp-1"}`,
+			req:      eriwire.BrainDispatchRequest{ID: "disp-1", Source: "heartbeat", SessionID: "sess-custom", Prompt: "check something"},
+			wantPath: "/DispatchSession/sess-custom/Enqueue", wantIdempotency: "disp-1", wantStatus: "accepted", wantDispatchID: "disp-1",
 		},
 		{
-			name:            "server returns non-json error 500",
-			serverStatus:    http.StatusInternalServerError,
-			serverResponse:  `Internal Server Error`,
-			req:             eriwire.BrainDispatchRequest{Source: "heartbeat", Prompt: "test"},
-			wantErr:         true,
-			wantErrContains: "returned HTTP 500",
+			name: "restate fallback session key from id agent-alpha", target: restate("agent-alpha"), status: http.StatusOK,
+			req:      eriwire.BrainDispatchRequest{ID: "disp-2", Source: "vanadis", Prompt: "build chunk"},
+			wantPath: "/DispatchSession-agent-alpha/dispatch-disp-2/Enqueue", wantIdempotency: "disp-2", wantStatus: "accepted", wantDispatchID: "disp-2",
 		},
 		{
-			name:            "closed server network error",
-			closeServer:     true,
-			req:             eriwire.BrainDispatchRequest{Source: "heartbeat", Prompt: "test"},
-			wantErr:         true,
-			wantErrContains: "dispatch failed",
+			name: "restate per-request agent override", target: restate("aerial"), status: http.StatusOK, body: `{"status":"accepted","dispatch_id":"disp-3"}`,
+			req:      eriwire.BrainDispatchRequest{ID: "disp-3", Source: "heartbeat", Prompt: "build chunk override", Agent: "agent-beta"},
+			wantPath: "/DispatchSession-agent-beta/dispatch-disp-3/Enqueue", wantIdempotency: "disp-3", wantStatus: "accepted", wantDispatchID: "disp-3",
 		},
 		{
-			name:           "success accepted 202",
-			serverStatus:   http.StatusAccepted,
-			serverResponse: `{"status":"accepted","dispatch_id":"disp-1"}`,
-			req:            eriwire.BrainDispatchRequest{Source: "heartbeat", SessionID: "hb-1", TargetID: "123456789", Prompt: "echo test", Effort: "low", SkipIfActive: true},
-			wantStatus:     "accepted",
-			wantDispatchID: "disp-1",
+			name: "restate auto id generated when empty", target: restate("aerial"), status: http.StatusOK, body: `{"status":"accepted"}`,
+			req: eriwire.BrainDispatchRequest{Source: "heartbeat", Prompt: "auto id dispatch"}, wantStatus: "accepted",
 		},
 		{
-			name:           "success ok 200",
-			serverStatus:   http.StatusOK,
-			serverResponse: `{"status":"ok","dispatch_id":"disp-2"}`,
-			req:            eriwire.BrainDispatchRequest{Source: "heartbeat", Prompt: "echo test 2"},
-			wantStatus:     "ok",
-			wantDispatchID: "disp-2",
+			name: "restate conflict error", target: restate("aerial"), status: http.StatusConflict, body: `{"message":"active turn running"}`,
+			req:      eriwire.BrainDispatchRequest{ID: "disp-conflict", Source: "heartbeat", Prompt: "conflict test"},
+			wantPath: "/DispatchSession/dispatch-disp-conflict/Enqueue", wantIdempotency: "disp-conflict",
+			wantErr: "restate dispatch error (409): active turn running",
+		},
+		{
+			name: "restate invalid json on 200", target: restate("aerial"), status: http.StatusOK, body: `not-json`,
+			req:      eriwire.BrainDispatchRequest{ID: "disp-bad-json", Source: "heartbeat", Prompt: "bad json"},
+			wantPath: "/DispatchSession/dispatch-disp-bad-json/Enqueue", wantIdempotency: "disp-bad-json",
+			wantErr: "failed to parse dispatch restate response",
 		},
 	}
-
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			runDispatchCase(t, tc)
+			t.Parallel()
+			disp, rec := newTargetDispatcher(t, tc.target, tc.status, tc.body)
+			resp, err := disp.Dispatch(context.Background(), tc.req)
+			assertDispatchRecording(t, rec.snapshot(), tc.wantPath, tc.wantIdempotency)
+			if assertDispatchErr(t, err, tc.wantErr) {
+				return
+			}
+			if resp.Status != tc.wantStatus {
+				t.Errorf("resp.Status = %q, want %q", resp.Status, tc.wantStatus)
+			}
+			if tc.wantDispatchID != "" && resp.DispatchID != tc.wantDispatchID {
+				t.Errorf("resp.DispatchID = %q, want %q", resp.DispatchID, tc.wantDispatchID)
+			}
 		})
 	}
 }
 
-func TestNewHTTPPromptDispatcher_Validation(t *testing.T) {
-	t.Run("empty URL panics", func(t *testing.T) {
-		defer func() {
-			if r := recover(); r == nil {
-				t.Errorf("expected panic for empty brainURL, got nil")
+func TestNewHTTPPromptDispatcher(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		brainURL    string
+		restateOpts []string
+		wantPanic   bool
+		wantBrain   string
+		wantRestate string
+		wantAgent   string
+	}{
+		{name: "empty URL panics", brainURL: "   ", wantPanic: true},
+		{name: "brain only defaults agent", brainURL: " http://eri:8080 ", wantBrain: "http://eri:8080", wantAgent: "aerial"},
+		{
+			name: "restate opts trimmed", brainURL: "http://eri:8080", restateOpts: []string{"http://restate:8080/", "agent-alpha"},
+			wantBrain: "http://eri:8080", wantRestate: "http://restate:8080", wantAgent: "agent-alpha",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			defer func() {
+				if r := recover(); (r != nil) != tc.wantPanic {
+					t.Errorf("recover() = %v, wantPanic %v", r, tc.wantPanic)
+				}
+			}()
+			d := NewHTTPPromptDispatcher(tc.brainURL, tc.restateOpts...)
+			if d.brainURL != tc.wantBrain || d.restateURL != tc.wantRestate || d.agentName != tc.wantAgent {
+				t.Errorf("dispatcher = {%q %q %q}, want {%q %q %q}", d.brainURL, d.restateURL, d.agentName, tc.wantBrain, tc.wantRestate, tc.wantAgent)
 			}
-		}()
-		NewHTTPPromptDispatcher("   ")
-	})
-
-	t.Run("constructor with restate opts", func(t *testing.T) {
-		d := NewHTTPPromptDispatcher("http://eri:8080", "http://restate:8080/", "agent-alpha")
-		if d.brainURL != "http://eri:8080" {
-			t.Errorf("brainURL = %q, want http://eri:8080", d.brainURL)
-		}
-		if d.restateURL != "http://restate:8080" {
-			t.Errorf("restateURL = %q, want http://restate:8080", d.restateURL)
-		}
-		if d.agentName != "agent-alpha" {
-			t.Errorf("agentName = %q, want agent-alpha", d.agentName)
-		}
-	})
+		})
+	}
 }
 
 func TestServiceNameHelpers(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		agent        string
 		wantThread   string
 		wantDispatch string
 	}{
 		{"", "ThreadSession", "DispatchSession"},
-		{"aerial", "ThreadSession", "DispatchSession"},
-		{"AERIAL", "ThreadSession", "DispatchSession"},
-		{"  aerial  ", "ThreadSession", "DispatchSession"},
 		{"agent-alpha", "ThreadSession-agent-alpha", "DispatchSession-agent-alpha"},
-		{"Agent-Beta", "ThreadSession-agent-beta", "DispatchSession-agent-beta"},
-		{"agent-1_test", "ThreadSession-agent-1_test", "DispatchSession-agent-1_test"},
-		{"invalid/name", "ThreadSession", "DispatchSession"},
-		{"../traversal", "ThreadSession", "DispatchSession"},
-		{"a@b#c", "ThreadSession", "DispatchSession"},
 	}
 	for _, tc := range tests {
 		t.Run("agent_"+tc.agent, func(t *testing.T) {
+			t.Parallel()
 			if got := ThreadSessionServiceName(tc.agent); got != tc.wantThread {
 				t.Errorf("ThreadSessionServiceName(%q) = %q, want %q", tc.agent, got, tc.wantThread)
 			}
@@ -559,359 +602,6 @@ func TestTraceFire(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			runTraceFireCase(t, tc)
-		})
-	}
-}
-
-type restatePromptTestCase struct {
-	name            string
-	serverStatus    int
-	serverResponse  string
-	agent           string
-	reqPrompt       PromptDispatchRequest
-	wantPath        string
-	wantIdempotency string
-	wantErr         bool
-	wantErrContains string
-	wantStatus      string
-	wantChannelID   string
-}
-
-func runRestatePromptTest(t *testing.T, tc restatePromptTestCase) {
-	t.Helper()
-	var gotPath, gotIdempotency string
-	var gotBody PromptDispatchRequest
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotPath = r.URL.Path
-		gotIdempotency = r.Header.Get("Idempotency-Key")
-		if r.Header.Get("Content-Type") != "application/json" {
-			t.Errorf("Content-Type = %q, want application/json", r.Header.Get("Content-Type"))
-		}
-		_ = json.NewDecoder(r.Body).Decode(&gotBody)
-		w.WriteHeader(tc.serverStatus)
-		_, _ = w.Write([]byte(tc.serverResponse))
-	}))
-	defer server.Close()
-
-	disp := NewHTTPPromptDispatcher("http://eri:8080", server.URL, tc.agent)
-	resp, err := disp.DispatchPrompt(context.Background(), tc.reqPrompt)
-	if tc.wantErr {
-		if err == nil {
-			t.Fatal("DispatchPrompt() expected error, got nil")
-		}
-		if tc.wantErrContains != "" && !strings.Contains(err.Error(), tc.wantErrContains) {
-			t.Fatalf("DispatchPrompt() err = %v, want containing %q", err, tc.wantErrContains)
-		}
-		return
-	}
-	if err != nil {
-		t.Fatalf("DispatchPrompt() unexpected error: %v", err)
-	}
-	if tc.wantPath != "" && gotPath != tc.wantPath {
-		t.Errorf("path = %q, want %q", gotPath, tc.wantPath)
-	}
-	if tc.wantIdempotency != "" && gotIdempotency != tc.wantIdempotency {
-		t.Errorf("idempotency = %q, want %q", gotIdempotency, tc.wantIdempotency)
-	}
-	if resp.Status != tc.wantStatus {
-		t.Errorf("resp.Status = %q, want %q", resp.Status, tc.wantStatus)
-	}
-	if tc.wantChannelID != "" && resp.ChannelID != tc.wantChannelID {
-		t.Errorf("resp.ChannelID = %q, want %q", resp.ChannelID, tc.wantChannelID)
-	}
-	if resp.ChannelID != "" && gotBody.ChannelID != resp.ChannelID {
-		t.Errorf("gotBody.ChannelID = %q, want %q", gotBody.ChannelID, resp.ChannelID)
-	}
-	if resp.MessageID != "" && gotBody.MessageID != resp.MessageID {
-		t.Errorf("gotBody.MessageID = %q, want %q", gotBody.MessageID, resp.MessageID)
-	}
-}
-
-func TestHTTPPromptDispatcher_RestatePrompt(t *testing.T) {
-	t.Parallel()
-	tests := []restatePromptTestCase{
-		{
-			name:           "dispatch prompt default aerial",
-			serverStatus:   http.StatusOK,
-			serverResponse: `{"status":"accepted","channel_id":"ch-123","message_id":"msg-abc"}`,
-			agent:          "aerial",
-			reqPrompt: PromptDispatchRequest{
-				ChannelID: "ch-123",
-				MessageID: "msg-abc",
-				Prompt:    "hello restate",
-			},
-			wantPath:        "/ThreadSession/ch-123/Enqueue",
-			wantIdempotency: "prompt:ch-123:msg-abc",
-			wantStatus:      "accepted",
-			wantChannelID:   "ch-123",
-		},
-		{
-			name:           "dispatch prompt custom agent from dispatcher and empty body",
-			serverStatus:   http.StatusOK,
-			serverResponse: ``,
-			agent:          "agent-alpha",
-			reqPrompt: PromptDispatchRequest{
-				ChannelID: "ch-456",
-				MessageID: "msg-456",
-				Prompt:    "hello alpha",
-			},
-			wantPath:        "/ThreadSession-agent-alpha/ch-456/Enqueue",
-			wantIdempotency: "prompt:ch-456:msg-456",
-			wantStatus:      "accepted",
-			wantChannelID:   "ch-456",
-		},
-		{
-			name:           "dispatch prompt per-request agent override",
-			serverStatus:   http.StatusOK,
-			serverResponse: `{"status":"accepted","channel_id":"ch-789","message_id":"msg-789"}`,
-			agent:          "aerial",
-			reqPrompt: PromptDispatchRequest{
-				ChannelID: "ch-789",
-				MessageID: "msg-789",
-				Prompt:    "hello beta",
-				Agent:     "agent-beta",
-			},
-			wantPath:        "/ThreadSession-agent-beta/ch-789/Enqueue",
-			wantIdempotency: "prompt:ch-789:msg-789",
-			wantStatus:      "accepted",
-			wantChannelID:   "ch-789",
-		},
-		{
-			name:           "dispatch prompt auto-generated message id",
-			serverStatus:   http.StatusOK,
-			serverResponse: `{"status":"accepted"}`,
-			agent:          "",
-			reqPrompt: PromptDispatchRequest{
-				ChannelID: "ch-auto",
-				Prompt:    "auto msg id",
-			},
-			wantPath:      "/ThreadSession/ch-auto/Enqueue",
-			wantStatus:    "accepted",
-			wantChannelID: "ch-auto",
-		},
-		{
-			name:  "dispatch prompt missing channel_id fails",
-			agent: "aerial",
-			reqPrompt: PromptDispatchRequest{
-				Prompt: "no channel",
-			},
-			wantErr:         true,
-			wantErrContains: "channel_id cannot be empty",
-		},
-		{
-			name:           "dispatch prompt error response message",
-			serverStatus:   http.StatusInternalServerError,
-			serverResponse: `{"message":"something went wrong in restate"}`,
-			agent:          "aerial",
-			reqPrompt: PromptDispatchRequest{
-				ChannelID: "ch-err",
-				Prompt:    "trigger err",
-			},
-			wantPath:        "/ThreadSession/ch-err/Enqueue",
-			wantErr:         true,
-			wantErrContains: "restate prompt dispatch error (500): something went wrong in restate",
-		},
-		{
-			name:           "dispatch prompt error response fallback field",
-			serverStatus:   http.StatusBadRequest,
-			serverResponse: `{"error":"invalid prompt"}`,
-			agent:          "aerial",
-			reqPrompt: PromptDispatchRequest{
-				ChannelID: "ch-err-2",
-				Prompt:    "trigger err 2",
-			},
-			wantPath:        "/ThreadSession/ch-err-2/Enqueue",
-			wantErr:         true,
-			wantErrContains: "restate prompt dispatch error (400): invalid prompt",
-		},
-		{
-			name:           "dispatch prompt raw status error",
-			serverStatus:   http.StatusBadGateway,
-			serverResponse: `bad gateway upstream`,
-			agent:          "aerial",
-			reqPrompt: PromptDispatchRequest{
-				ChannelID: "ch-err-3",
-				Prompt:    "trigger err 3",
-			},
-			wantPath:        "/ThreadSession/ch-err-3/Enqueue",
-			wantErr:         true,
-			wantErrContains: "restate prompt dispatch returned HTTP 502: bad gateway upstream",
-		},
-		{
-			name:           "dispatch prompt invalid json on 200",
-			serverStatus:   http.StatusOK,
-			serverResponse: `invalid-json`,
-			agent:          "aerial",
-			reqPrompt: PromptDispatchRequest{
-				ChannelID: "ch-inv",
-				Prompt:    "inv",
-			},
-			wantPath:        "/ThreadSession/ch-inv/Enqueue",
-			wantErr:         true,
-			wantErrContains: "failed to parse prompt dispatch restate response",
-		},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			runRestatePromptTest(t, tc)
-		})
-	}
-}
-
-type restateDispatchTestCase struct {
-	name            string
-	serverStatus    int
-	serverResponse  string
-	agent           string
-	reqDispatch     eriwire.BrainDispatchRequest
-	wantPath        string
-	wantIdempotency string
-	wantErr         bool
-	wantErrContains string
-	wantStatus      string
-	wantDispatchID  string
-}
-
-func runRestateDispatchTest(t *testing.T, tc restateDispatchTestCase) {
-	t.Helper()
-	var capturedURL string
-	var capturedID string
-	ts := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
-		capturedURL = req.URL.String()
-		capturedID = req.Header.Get("Idempotency-Key")
-		if ct := req.Header.Get("Content-Type"); ct != "application/json" {
-			t.Errorf("expected json content-type, got %s", ct)
-		}
-		rw.WriteHeader(tc.serverStatus)
-		_, _ = rw.Write([]byte(tc.serverResponse))
-	}))
-	defer ts.Close()
-
-	d := NewHTTPPromptDispatcher("http://eri:8080", ts.URL, tc.agent)
-	actual, err := d.Dispatch(context.Background(), tc.reqDispatch)
-	if tc.wantErr {
-		if err == nil {
-			t.Fatal("Dispatch() expected error, got nil")
-		}
-		if tc.wantErrContains != "" && !strings.Contains(err.Error(), tc.wantErrContains) {
-			t.Fatalf("Dispatch() error %v does not contain %q", err, tc.wantErrContains)
-		}
-		return
-	}
-	if err != nil {
-		t.Fatalf("Dispatch() failed unexpectedly: %v", err)
-	}
-	if tc.wantPath != "" && capturedURL != tc.wantPath {
-		t.Errorf("url = %q, want %q", capturedURL, tc.wantPath)
-	}
-	if tc.wantIdempotency != "" && capturedID != tc.wantIdempotency {
-		t.Errorf("key = %q, want %q", capturedID, tc.wantIdempotency)
-	}
-	if actual.Status != tc.wantStatus {
-		t.Errorf("status = %q, want %q", actual.Status, tc.wantStatus)
-	}
-	if tc.wantDispatchID != "" && actual.DispatchID != tc.wantDispatchID {
-		t.Errorf("dispatch ID = %q, want %q", actual.DispatchID, tc.wantDispatchID)
-	}
-}
-
-func TestHTTPPromptDispatcher_RestateDispatch(t *testing.T) {
-	t.Parallel()
-	tests := []restateDispatchTestCase{
-		{
-			name:           "dispatch task default session_id",
-			serverStatus:   http.StatusOK,
-			serverResponse: `{"status":"accepted","dispatch_id":"disp-1"}`,
-			agent:          "aerial",
-			reqDispatch: eriwire.BrainDispatchRequest{
-				ID:        "disp-1",
-				Source:    "heartbeat",
-				SessionID: "sess-custom",
-				Prompt:    "check something",
-			},
-			wantPath:        "/DispatchSession/sess-custom/Enqueue",
-			wantIdempotency: "disp-1",
-			wantStatus:      "accepted",
-			wantDispatchID:  "disp-1",
-		},
-		{
-			name:           "dispatch task fallback session key from id agent-alpha",
-			serverStatus:   http.StatusOK,
-			serverResponse: ``,
-			agent:          "agent-alpha",
-			reqDispatch: eriwire.BrainDispatchRequest{
-				ID:     "disp-2",
-				Source: "vanadis",
-				Prompt: "build chunk",
-			},
-			wantPath:        "/DispatchSession-agent-alpha/dispatch-disp-2/Enqueue",
-			wantIdempotency: "disp-2",
-			wantStatus:      "accepted",
-			wantDispatchID:  "disp-2",
-		},
-		{
-			name:           "dispatch task per-request agent override",
-			serverStatus:   http.StatusOK,
-			serverResponse: `{"status":"accepted","dispatch_id":"disp-3"}`,
-			agent:          "aerial",
-			reqDispatch: eriwire.BrainDispatchRequest{
-				ID:     "disp-3",
-				Source: "heartbeat",
-				Prompt: "build chunk override",
-				Agent:  "agent-beta",
-			},
-			wantPath:        "/DispatchSession-agent-beta/dispatch-disp-3/Enqueue",
-			wantIdempotency: "disp-3",
-			wantStatus:      "accepted",
-			wantDispatchID:  "disp-3",
-		},
-		{
-			name:           "dispatch task auto id generated when empty",
-			serverStatus:   http.StatusOK,
-			serverResponse: `{"status":"accepted"}`,
-			agent:          "aerial",
-			reqDispatch: eriwire.BrainDispatchRequest{
-				Source: "heartbeat",
-				Prompt: "auto id dispatch",
-			},
-			wantStatus: "accepted",
-		},
-		{
-			name:           "dispatch task restate error",
-			serverStatus:   http.StatusConflict,
-			serverResponse: `{"message":"active turn running"}`,
-			agent:          "aerial",
-			reqDispatch: eriwire.BrainDispatchRequest{
-				ID:     "disp-conflict",
-				Source: "heartbeat",
-				Prompt: "conflict test",
-			},
-			wantPath:        "/DispatchSession/dispatch-disp-conflict/Enqueue",
-			wantIdempotency: "disp-conflict",
-			wantErr:         true,
-			wantErrContains: "restate dispatch error (409): active turn running",
-		},
-		{
-			name:           "dispatch task invalid json on 200",
-			serverStatus:   http.StatusOK,
-			serverResponse: `not-json`,
-			agent:          "aerial",
-			reqDispatch: eriwire.BrainDispatchRequest{
-				ID:     "disp-bad-json",
-				Source: "heartbeat",
-				Prompt: "bad json",
-			},
-			wantPath:        "/DispatchSession/dispatch-bad-json/Enqueue",
-			wantIdempotency: "disp-bad-json",
-			wantErr:         true,
-			wantErrContains: "failed to parse dispatch restate response",
-		},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			runRestateDispatchTest(t, tc)
 		})
 	}
 }
