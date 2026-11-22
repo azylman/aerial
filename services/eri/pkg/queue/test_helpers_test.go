@@ -22,7 +22,6 @@ import (
 
 	"github.com/bwmarrin/discordgo"
 	"github.com/google/uuid"
-	"github.com/restatedev/sdk-go/x/mocks"
 
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/eri/pkg/classifier"
@@ -1132,24 +1131,4 @@ func (m *mockSpawner) LastSpawnCfg() runner.DaemonConfig {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.lastSpawnCfg
-}
-
-// actorJournalCommands lists the journaled Restate commands a handler issued against
-// the mock, in order, so tests can pin the command sequence that replay depends on.
-func actorJournalCommands(mc *mocks.MockContext) []string {
-	var cmds []string
-	stateCmds := []string{"Get", "Set", "Clear"}
-	for _, c := range mc.Calls {
-		switch {
-		case slices.Contains(stateCmds, c.Method):
-			cmds = append(cmds, c.Method+" "+c.Arguments.String(0))
-		case c.Method == "ClearAll":
-			cmds = append(cmds, c.Method)
-		case c.Method == "Run":
-			cmds = append(cmds, fmt.Sprintf("Run %v", c.Arguments[2:]))
-		case c.Method == "Object":
-			cmds = append(cmds, "Send "+c.Arguments.String(2))
-		}
-	}
-	return cmds
 }

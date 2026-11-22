@@ -34,15 +34,10 @@ func TestServiceNaming(t *testing.T) {
 			assert.Equal(t, tc.wantDispSvc, DispatchSessionServiceName(tc.agent))
 			assert.Equal(t, tc.wantVoiceSvc, VoiceSessionServiceName(tc.agent))
 			assert.Equal(t, tc.wantMgrSvc, SessionManagerServiceName(tc.agent))
-
-			assert.Equal(t, tc.wantThreadSvc, NewThreadSessionObject(nil, tc.agent).ServiceName())
-			assert.Equal(t, tc.wantDispSvc, NewDispatchSessionObject(nil, tc.agent).ServiceName())
 			assert.Equal(t, tc.wantVoiceSvc, NewVoiceSessionObject(nil, tc.agent).ServiceName())
 		})
 	}
 
-	assert.Equal(t, "ThreadSession", (*ThreadSessionObject)(nil).ServiceName())
-	assert.Equal(t, "DispatchSession", (*DispatchSessionObject)(nil).ServiceName())
 	assert.Equal(t, "VoiceSession", (*VoiceSessionObject)(nil).ServiceName())
 }
 
