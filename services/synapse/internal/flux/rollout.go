@@ -210,10 +210,174 @@ func WorkloadRolloutComplete(w model.WorkloadRollout) (done, failed bool, reason
 // PRRolloutInput is everything one Kustomization contributes to a PR's deployed decision. Since is the
 // merge commit time: anything written at or after it (less rolloutChangeSkew) may carry the PR's change.
 type PRRolloutInput struct {
-	Workloads  []model.WorkloadRollout
-	ConfigMaps []model.ConfigMapChange
-	CommitSHA  string
-	Since, Now time.Time
+	Workloads       []model.WorkloadRollout
+	ConfigMaps      []model.ConfigMapChange
+	CommitSHA       string
+	IncludedCommits []string
+	ExpectedJobs    []string
+	Since, Now      time.Time
+}
+
+func init() {
+	_ = ServiceJobs(nil, nil)
+	_ = CandidateDescendantTags(nil, "", nil)
+}
+
+// ServiceJobs trims, drops empty, and deduplicates entries in jobs (preserving first-occurrence
+// order) that are not keys in requests (matched after strings.TrimSpace). It returns nil when no
+// non-Kustomization service jobs remain (e.g., manifest-only rollouts where jobs equals the
+// Kustomization names).
+func ServiceJobs(jobs []string, requests map[string]prwire.KustomizationRequest) []string {
+	reqKeys := make(map[string]bool, len(requests))
+	for k := range requests {
+		if trimmed := strings.TrimSpace(k); trimmed != "" {
+			reqKeys[trimmed] = true
+		}
+	}
+	var (
+		res  []string
+		seen = make(map[string]bool)
+	)
+	for _, j := range jobs {
+		trimmed := strings.TrimSpace(j)
+		if trimmed == "" || reqKeys[trimmed] || seen[trimmed] {
+			continue
+		}
+		seen[trimmed] = true
+		res = append(res, trimmed)
+	}
+	return res
+}
+
+// WorkloadMatchesJobs reports whether w corresponds to any job in expectedJobs.
+// It returns true when len(expectedJobs) == 0; otherwise returns true if w.Name matches
+// any entry in expectedJobs (case-insensitively, trimmed), or any image in w.Images has a
+// candidate in ImageServiceCandidates matching any entry in expectedJobs, or any managed
+// child in w.ManagedWorkloads satisfies WorkloadMatchesJobs.
+func WorkloadMatchesJobs(w model.WorkloadRollout, expectedJobs []string) bool {
+	if len(expectedJobs) == 0 {
+		return true
+	}
+	wName := strings.TrimSpace(w.Name)
+	for _, j := range expectedJobs {
+		tj := strings.TrimSpace(j)
+		if tj != "" && strings.EqualFold(wName, tj) {
+			return true
+		}
+	}
+	for _, img := range w.Images {
+		for _, cand := range ImageServiceCandidates(img) {
+			candTrimmed := strings.TrimSpace(cand)
+			for _, j := range expectedJobs {
+				tj := strings.TrimSpace(j)
+				if tj != "" && strings.EqualFold(candTrimmed, tj) {
+					return true
+				}
+			}
+		}
+	}
+	for _, m := range w.ManagedWorkloads {
+		if WorkloadMatchesJobs(m, expectedJobs) {
+			return true
+		}
+	}
+	return false
+}
+
+func imageMatchesExpectedJobs(img string, wName string, expectedJobs []string) bool {
+	cands := ImageServiceCandidates(img)
+	for _, cand := range cands {
+		candTrimmed := strings.TrimSpace(cand)
+		for _, j := range expectedJobs {
+			tj := strings.TrimSpace(j)
+			if tj != "" && strings.EqualFold(candTrimmed, tj) {
+				return true
+			}
+		}
+	}
+	if len(cands) == 0 {
+		tName := strings.TrimSpace(wName)
+		for _, j := range expectedJobs {
+			tj := strings.TrimSpace(j)
+			if tj != "" && strings.EqualFold(tName, tj) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func appendCandidateTags(tags []string, seen map[string]bool, images []string, names []string, commitSHA string, expectedJobs []string) []string {
+	for _, img := range images {
+		if !imageMatchesAnyName(img, names, expectedJobs) {
+			continue
+		}
+		tag := ImageTag(img)
+		if tag == "" || tag == commitSHA || strings.EqualFold(tag, "latest") || seen[tag] {
+			continue
+		}
+		seen[tag] = true
+		tags = append(tags, tag)
+	}
+	return tags
+}
+
+func imageMatchesAnyName(img string, names []string, expectedJobs []string) bool {
+	for _, name := range names {
+		if imageMatchesExpectedJobs(img, name, expectedJobs) {
+			return true
+		}
+	}
+	return false
+}
+
+// CandidateDescendantTags returns candidate descendant image tags found on workloads matching expectedJobs.
+// It returns nil when commitSHA == "" or len(expectedJobs) == 0. Otherwise it calls LinkManagedWorkloads
+// and scans non-deleting workloads where WorkloadMatchesJobs is true; for each image in w.Images (and managed
+// child images) whose ImageServiceCandidates matches at least one entry in expectedJobs (or when w.Name
+// matches expectedJobs and len(ImageServiceCandidates) == 0), extracts ImageTag and collects unique tags
+// where tag != "", tag != commitSHA, and tag != "latest" (case-insensitive) in first-seen order.
+func CandidateDescendantTags(workloads []model.WorkloadRollout, commitSHA string, expectedJobs []string) []string {
+	if commitSHA == "" || len(expectedJobs) == 0 {
+		return nil
+	}
+	LinkManagedWorkloads(workloads)
+
+	var (
+		tags []string
+		seen = make(map[string]bool)
+	)
+	for _, w := range workloads {
+		if strings.TrimSpace(w.DeletionTimestamp) != "" || !WorkloadMatchesJobs(w, expectedJobs) {
+			continue
+		}
+		tags = appendCandidateTags(tags, seen, w.Images, []string{w.Name}, commitSHA, expectedJobs)
+		for _, m := range w.ManagedWorkloads {
+			if strings.TrimSpace(m.DeletionTimestamp) != "" {
+				continue
+			}
+			tags = appendCandidateTags(tags, seen, m.Images, []string{m.Name, w.Name}, commitSHA, expectedJobs)
+		}
+	}
+	return tags
+}
+
+func checkReloaderRestart(w model.WorkloadRollout, configMaps []model.ConfigMapChange, changed func(time.Time) bool, now time.Time) (gated bool, awaiting []string, failReason string) {
+	wStr := WorkloadString(w)
+	for _, cm := range configMaps {
+		if cm.Namespace != w.Namespace || !changed(cm.ChangedAt) || !ReloadsOn(w, cm.Name) {
+			continue
+		}
+		gated = true
+		if !w.ChangedAt.Before(cm.ChangedAt) {
+			continue
+		}
+		if now.Sub(cm.ChangedAt) > reloaderRestartTimeout {
+			return true, nil, fmt.Sprintf("%s: not restarted by Reloader within %s of ConfigMap %s/%s changing", wStr, reloaderRestartTimeout, cm.Namespace, cm.Name)
+		}
+		awaiting = append(awaiting, cm.Namespace+"/"+cm.Name)
+	}
+	return gated, awaiting, ""
 }
 
 // PRRolloutStatus gates a PR deploy on every workload its change reached: workloads running the
@@ -228,23 +392,20 @@ func PRRolloutStatus(in PRRolloutInput) (done, failed bool, reason string) {
 	changed := func(at time.Time) bool { return !at.IsZero() && !at.Before(cutoff) }
 	var pending []string
 	for _, w := range in.Workloads {
-		wStr := WorkloadString(w)
-		gated := changed(w.ChangedAt) || (in.CommitSHA != "" && slices.ContainsFunc(w.Images, func(image string) bool { return ImageTag(image) == in.CommitSHA }))
-		var awaitingRestart []string
-		for _, cm := range in.ConfigMaps {
-			if cm.Namespace != w.Namespace || !changed(cm.ChangedAt) || !ReloadsOn(w, cm.Name) {
-				continue
-			}
-			gated = true
-			if !w.ChangedAt.Before(cm.ChangedAt) {
-				continue
-			}
-			if in.Now.Sub(cm.ChangedAt) > reloaderRestartTimeout {
-				return false, true, fmt.Sprintf("%s: not restarted by Reloader within %s of ConfigMap %s/%s changing", wStr, reloaderRestartTimeout, cm.Namespace, cm.Name)
-			}
-			awaitingRestart = append(awaitingRestart, cm.Namespace+"/"+cm.Name)
+		if len(in.ExpectedJobs) > 0 && !WorkloadMatchesJobs(w, in.ExpectedJobs) {
+			continue
 		}
+		wStr := WorkloadString(w)
+		imageMatched := in.CommitSHA != "" && len(commitMatchingImages(w.Images, in.CommitSHA, in.IncludedCommits)) > 0
+		cmGated, awaitingRestart, failMsg := checkReloaderRestart(w, in.ConfigMaps, changed, in.Now)
+		if failMsg != "" {
+			return false, true, failMsg
+		}
+		gated := changed(w.ChangedAt) || imageMatched || cmGated
 		if !gated {
+			if len(in.ExpectedJobs) > 0 && strings.TrimSpace(w.DeletionTimestamp) == "" && in.CommitSHA != "" {
+				pending = append(pending, wStr+" (awaiting image tag "+in.CommitSHA+")")
+			}
 			continue
 		}
 		if len(awaitingRestart) > 0 {
@@ -274,10 +435,11 @@ func workloadAwaitingConfigMapRestart(w model.WorkloadRollout, configMaps []mode
 	return false
 }
 
-func commitMatchingImages(images []string, commitSHA string) []string {
+func commitMatchingImages(images []string, commitSHA string, includedCommits []string) []string {
 	var matching []string
 	for _, img := range images {
-		if ImageTag(img) == commitSHA {
+		tag := ImageTag(img)
+		if tag != "" && (tag == commitSHA || slices.Contains(includedCommits, tag)) {
 			matching = append(matching, img)
 		}
 	}
@@ -303,7 +465,10 @@ func ReadyForCommitServices(in PRRolloutInput) []string {
 		if strings.TrimSpace(w.DeletionTimestamp) != "" {
 			continue
 		}
-		commitImages := commitMatchingImages(w.Images, in.CommitSHA)
+		if len(in.ExpectedJobs) > 0 && !WorkloadMatchesJobs(w, in.ExpectedJobs) {
+			continue
+		}
+		commitImages := commitMatchingImages(w.Images, in.CommitSHA, in.IncludedCommits)
 		if len(commitImages) == 0 {
 			continue
 		}
