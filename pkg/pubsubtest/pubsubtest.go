@@ -176,11 +176,12 @@ func (f *FaultBus) wrap(handler pubsub.Handler) pubsub.Handler {
 }
 
 // ConsumerStats is a pubsub.ConsumerStatsProvider keyed by consumer name:
-// it returns Err when set, otherwise Pending[consumer] and Inflight[consumer]
-// (0 when absent).
+// it returns Err when set, then Errs[consumer] when set, otherwise
+// Pending[consumer] and Inflight[consumer] (0 when absent).
 type ConsumerStats struct {
 	Pending, Inflight map[string]int64
 	Err               error
+	Errs              map[string]error
 }
 
 var _ pubsub.ConsumerStatsProvider = ConsumerStats{}
@@ -189,6 +190,9 @@ var _ pubsub.ConsumerStatsProvider = ConsumerStats{}
 func (s ConsumerStats) ConsumerStats(_ context.Context, _, consumer string) (int64, int64, error) {
 	if s.Err != nil {
 		return 0, 0, s.Err
+	}
+	if err := s.Errs[consumer]; err != nil {
+		return 0, 0, err
 	}
 	return s.Pending[consumer], s.Inflight[consumer], nil
 }

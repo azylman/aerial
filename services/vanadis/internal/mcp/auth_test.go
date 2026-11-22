@@ -3,86 +3,24 @@ package mcp
 import (
 	"context"
 	"errors"
-	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/azylman/aerial/pkg/k8sauth"
+	"github.com/azylman/aerial/pkg/k8sauthtest"
 	"github.com/azylman/aerial/services/vanadis/internal/config"
 	"github.com/azylman/aerial/services/vanadis/internal/model"
 	"github.com/azylman/aerial/services/vanadis/internal/restate"
 	"github.com/azylman/aerial/services/vanadis/internal/store"
+	"github.com/azylman/aerial/services/vanadis/internal/storetest"
 )
 
-type staticAuthRoundTripper struct {
-	authStatus int
-	authBody   string
-	sarStatus  int
-	sarBody    string
-	err        error
-}
-
-func (s *staticAuthRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
-	if s.err != nil {
-		return nil, s.err
-	}
-	if strings.Contains(req.URL.Path, "tokenreviews") {
-		return &http.Response{
-			StatusCode: s.authStatus,
-			Body:       io.NopCloser(strings.NewReader(s.authBody)),
-			Header:     make(http.Header),
-			Request:    req,
-		}, nil
-	}
-	if strings.Contains(req.URL.Path, "subjectaccessreviews") {
-		return &http.Response{
-			StatusCode: s.sarStatus,
-			Body:       io.NopCloser(strings.NewReader(s.sarBody)),
-			Header:     make(http.Header),
-			Request:    req,
-		}, nil
-	}
-	return &http.Response{
-		StatusCode: http.StatusOK,
-		Body:       io.NopCloser(strings.NewReader(`{}`)),
-		Header:     make(http.Header),
-		Request:    req,
-	}, nil
-}
-
-func newTestAuthenticator(t *testing.T, tr *staticAuthRoundTripper) *k8sauth.Authenticator {
-	t.Helper()
-	tokenFile := filepath.Join(t.TempDir(), "token")
-	if err := os.WriteFile(tokenFile, []byte("host-token"), 0o600); err != nil {
-		t.Fatalf("failed to write host token: %v", err)
-	}
-	return k8sauth.NewAuthenticator(k8sauth.Config{
-		Enabled:      true,
-		TokenPath:    tokenFile,
-		APIServerURL: "https://k8s.local",
-		HTTPClient:   &http.Client{Transport: tr},
-	})
-}
-
-func authRoundTripper(authOk, sarOk bool) *staticAuthRoundTripper {
-	authBody := `{"apiVersion":"authentication.k8s.io/v1","kind":"TokenReview","status":{"authenticated":false}}`
-	if authOk {
-		authBody = `{"apiVersion":"authentication.k8s.io/v1","kind":"TokenReview","status":{"authenticated":true,"user":{"username":"system:serviceaccount:default:eri-aerial"}}}`
-	}
-	sarBody := `{"apiVersion":"authorization.k8s.io/v1","kind":"SubjectAccessReview","status":{"allowed":false}}`
-	if sarOk {
-		sarBody = `{"apiVersion":"authorization.k8s.io/v1","kind":"SubjectAccessReview","status":{"allowed":true}}`
-	}
-	return &staticAuthRoundTripper{
-		authStatus: http.StatusOK,
-		authBody:   authBody,
-		sarStatus:  http.StatusOK,
-		sarBody:    sarBody,
-	}
+// authFake authenticates every token as the eri service account and answers
+// SubjectAccessReview with sarOK.
+func authFake(sarOK bool) *k8sauthtest.RoundTripper {
+	return &k8sauthtest.RoundTripper{AuthBody: k8sauthtest.TokenReview("system:serviceaccount:default:eri-aerial"), SARBody: k8sauthtest.SAR(sarOK, "")}
 }
 
 func TestMCP_StoreErrorStatus(t *testing.T) {
@@ -113,9 +51,9 @@ func TestMCP_StoreErrorStatus(t *testing.T) {
 
 func TestMCP_AuthRBAC_GetBuild(t *testing.T) {
 	t.Parallel()
-	b1 := mkBuild("b1", "1234567890", "Build 1", "Obj 1", statusRunning)
+	b1 := storetest.Build("b1", "1234567890", "Build 1", "Obj 1", statusRunning)
 	b1.Agent = "aerial"
-	c1 := mkChunk("c1", "b1", 0, "Chunk 1", "Inst 1", "medium", statusRunning)
+	c1 := storetest.Chunk("c1", "b1", 0, "Chunk 1", "Inst 1", "medium", statusRunning)
 
 	caller := k8sauth.CallerIdentity{Username: "system:serviceaccount:default:eri-aerial", CallerAgent: "aerial", IsService: true}
 
@@ -133,10 +71,10 @@ func TestMCP_AuthRBAC_GetBuild(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			auth := newTestAuthenticator(t, authRoundTripper(true, tc.sarOk))
-			memStore := newMemoryStore()
-			memStore.builds["b1"] = b1
-			memStore.chunks["b1"] = []model.VanadisChunk{c1}
+			auth := k8sauthtest.Authenticator(t, authFake(tc.sarOk))
+			memStore := storetest.New()
+			memStore.Builds["b1"] = b1
+			memStore.Chunks["b1"] = []model.VanadisChunk{c1}
 
 			handler := NewHandler(memStore, nil, false, auth)
 			ctx := context.Background()
@@ -165,9 +103,9 @@ func TestMCP_AuthRBAC_GetBuild(t *testing.T) {
 
 func TestMCP_AuthRBAC_GetChunk(t *testing.T) {
 	t.Parallel()
-	b1 := mkBuild("b1", "1234567890", "Build 1", "Obj 1", statusRunning)
+	b1 := storetest.Build("b1", "1234567890", "Build 1", "Obj 1", statusRunning)
 	b1.Agent = "aerial"
-	c1 := mkChunk("c1", "b1", 0, "Chunk 1", "Inst 1", "medium", statusRunning)
+	c1 := storetest.Chunk("c1", "b1", 0, "Chunk 1", "Inst 1", "medium", statusRunning)
 
 	caller := k8sauth.CallerIdentity{Username: "system:serviceaccount:default:eri-aerial", CallerAgent: "aerial", IsService: true}
 
@@ -185,10 +123,10 @@ func TestMCP_AuthRBAC_GetChunk(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			auth := newTestAuthenticator(t, authRoundTripper(true, tc.sarOk))
-			memStore := newMemoryStore()
-			memStore.builds["b1"] = b1
-			memStore.chunks["b1"] = []model.VanadisChunk{c1}
+			auth := k8sauthtest.Authenticator(t, authFake(tc.sarOk))
+			memStore := storetest.New()
+			memStore.Builds["b1"] = b1
+			memStore.Chunks["b1"] = []model.VanadisChunk{c1}
 
 			handler := NewHandler(memStore, nil, false, auth)
 			ctx := context.Background()
@@ -235,9 +173,9 @@ func TestMCP_AuthRBAC_Mutations(t *testing.T) {
 	}))
 	defer restateSrv.Close()
 
-	b1 := mkBuild("b1", "1234567890", "Build 1", "Obj 1", statusRunning)
+	b1 := storetest.Build("b1", "1234567890", "Build 1", "Obj 1", statusRunning)
 	b1.Agent = "aerial"
-	c1 := mkChunk("c1", "b1", 0, "Chunk 1", "Inst 1", "medium", statusRunning)
+	c1 := storetest.Chunk("c1", "b1", 0, "Chunk 1", "Inst 1", "medium", statusRunning)
 
 	caller := k8sauth.CallerIdentity{Username: "system:serviceaccount:default:eri-aerial", CallerAgent: "aerial", IsService: true}
 
@@ -278,10 +216,10 @@ func TestMCP_AuthRBAC_Mutations(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			auth := newTestAuthenticator(t, authRoundTripper(true, tc.sarOk))
-			memStore := newMemoryStore()
-			memStore.builds["b1"] = b1
-			memStore.chunks["b1"] = []model.VanadisChunk{c1}
+			auth := k8sauthtest.Authenticator(t, authFake(tc.sarOk))
+			memStore := storetest.New()
+			memStore.Builds["b1"] = b1
+			memStore.Chunks["b1"] = []model.VanadisChunk{c1}
 
 			rc := restate.NewClient(config.RestateConfig{RestateIngressURL: restateSrv.URL}, nil)
 			handler := NewHandler(memStore, rc, true, auth)
@@ -321,9 +259,9 @@ func TestMCP_AuthRBAC_Mutations(t *testing.T) {
 }
 
 func TestMCP_RetryActionChunk_Auth(t *testing.T) {
-	b1 := mkBuild("b1", "1234567890", "Build 1", "Obj 1", statusFailed)
+	b1 := storetest.Build("b1", "1234567890", "Build 1", "Obj 1", statusFailed)
 	b1.Agent = "aerial"
-	c1 := mkChunk("c1", "b1", 0, "Chunk 1", "Inst 1", "medium", statusFailed)
+	c1 := storetest.Chunk("c1", "b1", 0, "Chunk 1", "Inst 1", "medium", statusFailed)
 	c1.Mode = chunkModeAction
 
 	caller := k8sauth.CallerIdentity{Username: "system:serviceaccount:default:eri-aerial", CallerAgent: "aerial", IsService: true}
@@ -344,12 +282,12 @@ func TestMCP_RetryActionChunk_Auth(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			auth := newTestAuthenticator(t, authRoundTripper(true, tc.sarOk))
+			auth := k8sauthtest.Authenticator(t, authFake(tc.sarOk))
 			var st store.VanadisStore
 			if tc.withStore {
-				mem := newMemoryStore()
-				mem.builds["b1"] = b1
-				mem.chunks["b1"] = []model.VanadisChunk{c1}
+				mem := storetest.New()
+				mem.Builds["b1"] = b1
+				mem.Chunks["b1"] = []model.VanadisChunk{c1}
 				st = mem
 			}
 
