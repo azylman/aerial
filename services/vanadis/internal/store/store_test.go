@@ -124,10 +124,14 @@ func (r *mockRows) Scan(dest ...any) error {
 type mockDB struct {
 	queryRowFn func(ctx context.Context, query string, args ...any) pgx.Row
 	queryFn    func(ctx context.Context, query string, args ...any) (pgx.Rows, error)
+	execFn     func(ctx context.Context, query string, args ...any) (pgconn.CommandTag, error)
 	beginFn    func(ctx context.Context) (pgx.Tx, error)
 }
 
-func (*mockDB) Exec(context.Context, string, ...any) (pgconn.CommandTag, error) {
+func (db *mockDB) Exec(ctx context.Context, s string, a ...any) (pgconn.CommandTag, error) {
+	if db.execFn != nil {
+		return db.execFn(ctx, s, a...)
+	}
 	return pgconn.NewCommandTag("UPDATE 1"), nil
 }
 
@@ -290,6 +294,11 @@ var (
 	nilDB       = &bareStore{store: &PostgresVanadisStore{}}
 )
 
+type execCall struct {
+	query string
+	args  []any
+}
+
 type dbScript struct {
 	bare         *bareStore
 	buildVals    []any
@@ -302,6 +311,8 @@ type dbScript struct {
 	chunksErr    error
 	chunkScanErr error
 	chunkRowsErr error
+	execErr      error
+	recordedExec *[]execCall
 }
 
 func (s dbScript) open() *PostgresVanadisStore {
@@ -326,7 +337,16 @@ func (s dbScript) open() *PostgresVanadisStore {
 		}
 		return &mockRows{items: s.chunks, scanErr: s.chunkScanErr, rowsErr: s.chunkRowsErr}, nil
 	}
-	return &PostgresVanadisStore{db: &mockDB{queryRowFn: queryRow, queryFn: query}}
+	exec := func(_ context.Context, query string, args ...any) (pgconn.CommandTag, error) {
+		if s.recordedExec != nil {
+			*s.recordedExec = append(*s.recordedExec, execCall{query: query, args: args})
+		}
+		if s.execErr != nil {
+			return pgconn.CommandTag{}, s.execErr
+		}
+		return pgconn.NewCommandTag("UPDATE 1"), nil
+	}
+	return &PostgresVanadisStore{db: &mockDB{queryRowFn: queryRow, queryFn: query, execFn: exec}}
 }
 
 func buildVals(b model.VanadisBuild) []any {
@@ -593,5 +613,73 @@ func TestScanChunks(t *testing.T) {
 				t.Errorf("ScanChunks decoded fields mismatch: %+v", got[0])
 			}
 		})
+	}
+}
+
+type preRecordChunkPRCase struct {
+	name       string
+	bare       *bareStore
+	chunkID    string
+	repo       string
+	prNumber   int
+	execErr    error
+	wantErr    bool
+	wantSubstr string
+	wantExecs  int
+}
+
+func assertPreRecordExec(t *testing.T, call execCall, prNumber int, chunkID, repo string) {
+	t.Helper()
+	if !strings.Contains(call.query, "UPDATE vanadis_chunks") {
+		t.Errorf("exec query %q missing UPDATE vanadis_chunks", call.query)
+	}
+	if len(call.args) != 3 || call.args[0] != prNumber || call.args[1] != strings.TrimSpace(chunkID) || call.args[2] != strings.TrimSpace(repo) {
+		t.Errorf("exec args = %v, want [%v %v %v]", call.args, prNumber, strings.TrimSpace(chunkID), strings.TrimSpace(repo))
+	}
+}
+
+func TestPreRecordChunkPR(t *testing.T) {
+	t.Parallel()
+	tests := []preRecordChunkPRCase{
+		{name: "nil receiver errors", bare: nilReceiver, chunkID: "c1", repo: "aerial", prNumber: 42, wantErr: true, wantSubstr: "database connection is nil"},
+		{name: "nil db errors", bare: nilDB, chunkID: "c1", repo: "aerial", prNumber: 42, wantErr: true, wantSubstr: "database connection is nil"},
+		{name: "empty chunk id no-op", chunkID: "   ", repo: "aerial", prNumber: 42},
+		{name: "nonpositive pr number no-op", chunkID: "c1", repo: "aerial", prNumber: 0},
+		{name: "negative pr number no-op", chunkID: "c1", repo: "aerial", prNumber: -5},
+		{name: "exec error propagates", chunkID: "c1", repo: "aerial", prNumber: 42, execErr: errors.New("exec down"), wantErr: true, wantSubstr: "prerecord chunk pr c1 (#42)", wantExecs: 1},
+		{name: "success executes update", chunkID: "c1", repo: "aerial", prNumber: 42, wantExecs: 1},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var calls []execCall
+			s := dbScript{bare: tc.bare, execErr: tc.execErr, recordedExec: &calls}.open()
+			err := s.PreRecordChunkPR(context.Background(), tc.chunkID, tc.repo, tc.prNumber)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+				if tc.wantSubstr != "" && !strings.Contains(err.Error(), tc.wantSubstr) {
+					t.Fatalf("err %q does not contain %q", err.Error(), tc.wantSubstr)
+				}
+			} else if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if len(calls) != tc.wantExecs {
+				t.Fatalf("exec calls = %d, want %d", len(calls), tc.wantExecs)
+			}
+			if tc.wantExecs > 0 {
+				assertPreRecordExec(t, calls[0], tc.prNumber, tc.chunkID, tc.repo)
+			}
+		})
+	}
+}
+
+func TestNewPostgresVanadisStore(t *testing.T) {
+	t.Parallel()
+	db := &mockDB{}
+	s := NewPostgresVanadisStore(db)
+	if s == nil || s.db != db {
+		t.Fatalf("NewPostgresVanadisStore() = %+v, want db set", s)
 	}
 }
