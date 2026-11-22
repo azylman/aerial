@@ -14,37 +14,31 @@ import (
 	"github.com/azylman/aerial/services/synapse/internal/kube"
 )
 
+// DefaultOutboundDispatcher routes outbound work to the Kubernetes/Flux
+// client and to the one ericlient.Client that owns eri dispatch, its HTTP
+// clients and its retry bounds.
 type DefaultOutboundDispatcher struct {
-	fluxReceiverURL          string
-	brainURL                 string
-	kubeAPIServer            string
-	kubeToken                string
-	httpClient               *http.Client
-	discordMsgClient         *http.Client
-	discordInteractionClient *http.Client
-	retryDelay               time.Duration
-	maxAttempts              int
-	cfgSrc                   ConfigSource
+	fluxReceiverURL string
+	kubeAPIServer   string
+	kubeToken       string
+	httpClient      *http.Client
+	cfgSrc          ConfigSource
 
 	kubeClient *kube.Client
 	eriClient  *ericlient.Client
 }
 
+// NewDefaultOutboundDispatcher builds a dispatcher whose eri client comes
+// from ericlient.NewClient(brainURL, client); a nil client gets ericlient's
+// per-endpoint default timeouts and a 15s client for Kubernetes calls.
 func NewDefaultOutboundDispatcher(brainURL string, client *http.Client) *DefaultOutboundDispatcher {
-	discordMsgClient := client
-	discordInteractionClient := client
-	if client == nil {
-		client = &http.Client{Timeout: 15 * time.Second}
-		discordMsgClient = &http.Client{Timeout: 20 * time.Second}
-		discordInteractionClient = &http.Client{Timeout: 2500 * time.Millisecond}
+	kubeHTTP := client
+	if kubeHTTP == nil {
+		kubeHTTP = &http.Client{Timeout: 15 * time.Second}
 	}
 	d := &DefaultOutboundDispatcher{
-		brainURL:                 strings.TrimRight(brainURL, "/"),
-		httpClient:               tracing.Client(client),
-		discordMsgClient:         tracing.Client(discordMsgClient),
-		discordInteractionClient: tracing.Client(discordInteractionClient),
-		retryDelay:               1500 * time.Millisecond,
-		maxAttempts:              6,
+		httpClient: tracing.Client(kubeHTTP),
+		eriClient:  ericlient.NewClient(brainURL, client),
 	}
 	d.ensureClients()
 	return d
@@ -78,13 +72,9 @@ func (d *DefaultOutboundDispatcher) ensureClients() {
 		d.kubeClient = kube.NewClient(d.httpClient)
 		d.kubeClient.SetFluxReceiverURL(d.fluxReceiverURL)
 		d.kubeClient.SetKubeConfig(d.kubeAPIServer, d.kubeToken)
-		d.kubeClient.SetRetryConfig(d.retryDelay, d.maxAttempts)
 	}
 	if d.eriClient == nil {
-		d.eriClient = ericlient.NewClient(d.brainURL, d.httpClient)
-		d.eriClient.SetDiscordMsgClient(d.discordMsgClient)
-		d.eriClient.SetDiscordInteractionClient(d.discordInteractionClient)
-		d.eriClient.SetRetryConfig(d.retryDelay, d.maxAttempts)
+		d.eriClient = ericlient.NewClient("", d.httpClient)
 	}
 }
 
@@ -118,15 +108,12 @@ func (d *DefaultOutboundDispatcher) SetKubeConfig(apiServer, token string) {
 	}
 }
 
+// SetRetryConfig applies one retry delay and attempt bound to both the
+// Kubernetes client and the eri client.
 func (d *DefaultOutboundDispatcher) SetRetryConfig(delay time.Duration, maxAttempts int) {
-	d.retryDelay = delay
-	d.maxAttempts = maxAttempts
-	if d.kubeClient != nil {
-		d.kubeClient.SetRetryConfig(delay, maxAttempts)
-	}
-	if d.eriClient != nil {
-		d.eriClient.SetRetryConfig(delay, maxAttempts)
-	}
+	d.ensureClients()
+	d.kubeClient.SetRetryConfig(delay, maxAttempts)
+	d.eriClient.SetRetryConfig(delay, maxAttempts)
 }
 
 func (d *DefaultOutboundDispatcher) APIServer() string {
@@ -134,7 +121,8 @@ func (d *DefaultOutboundDispatcher) APIServer() string {
 }
 
 func (d *DefaultOutboundDispatcher) RetryDelay() time.Duration {
-	return d.retryDelay
+	d.ensureClients()
+	return d.kubeClient.RetryDelay()
 }
 
 func (d *DefaultOutboundDispatcher) DispatchGitPush(ctx context.Context, req GitPushEventRequest) error {

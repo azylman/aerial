@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/azylman/aerial/pkg/githubapi"
 	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/synapse/internal/github"
@@ -70,7 +71,7 @@ func (s *RouterServer) ghClient() *github.Client {
 // snapshot's API URL. s.githubClient's githubauth.Transport attaches the
 // credential, so requests must be sent through it.
 func (s *RouterServer) newGitHubRequest(ctx context.Context, method, path string, body io.Reader) (*http.Request, error) {
-	return github.NewRequest(ctx, s.cfgSrc.Current().GitHubAPIURL, "", method, path, body)
+	return githubapi.NewRequest(ctx, s.cfgSrc.Current().GitHubAPIURL, "", method, path, body)
 }
 
 func (s *RouterServer) getGitHubJSON(ctx context.Context, path string, maxBytes int64, out any) error {
@@ -78,7 +79,7 @@ func (s *RouterServer) getGitHubJSON(ctx context.Context, path string, maxBytes 
 	if err != nil {
 		return fmt.Errorf("create github api request: %w", err)
 	}
-	return github.GetJSON(ctx, s.githubClient, req, maxBytes, out)
+	return githubapi.GetJSON(ctx, s.githubClient, req, maxBytes, out)
 }
 
 // GitHub Webhook Payloads and Resolution Types

@@ -122,7 +122,6 @@ func NewRouterServer(cfgSrc ConfigSource, client *http.Client, opts ...RouterOpt
 func (s *RouterServer) SetEventBus(b pubsub.Bus)                    { s.bus = b }
 func (s *RouterServer) EventBus() pubsub.Bus                        { return s.bus }
 func (s *RouterServer) SetDispatcher(d OutboundDispatcher)          { s.dispatcher = d }
-func (s *RouterServer) SetQueueStats(q ConsumerStatsQuerier)        { s.queueStats = q }
 func (s *RouterServer) SetGatewayLatencyFn(fn func() time.Duration) { s.gatewayLatencyFn = fn }
 
 func (s *RouterServer) k8sAuthEnabled() bool {

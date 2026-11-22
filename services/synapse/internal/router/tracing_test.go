@@ -108,17 +108,18 @@ func runTraceparentDispatchCase(t *testing.T, target string, withParent bool, fa
 	if withParent {
 		ctx = parentCtx
 	}
-	d := NewDefaultOutboundDispatcher(srv.URL, srv.Client())
-	d.retryDelay = time.Millisecond
+	client := srv.Client()
+	if nilClient {
+		client = nil
+	}
+	d := NewDefaultOutboundDispatcher(srv.URL, client)
+	d.SetRetryConfig(time.Millisecond, 6)
 	switch target {
 	case "brain":
 		if err := d.DispatchBackground(ctx, DispatchRequest{Source: "webhook"}); err != nil {
 			t.Fatalf("DispatchBackground: %v", err)
 		}
 	case "discord":
-		if nilClient {
-			d.discordMsgClient = nil
-		}
 		if err := d.DispatchDiscordMessage(ctx, DiscordMessageIngressRequest{}); err != nil {
 			t.Fatalf("DispatchDiscordMessage: %v", err)
 		}
