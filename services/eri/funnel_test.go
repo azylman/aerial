@@ -21,6 +21,7 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
 	"github.com/azylman/aerial/services/eri/pkg/db/dbtest"
+	"github.com/azylman/aerial/services/eri/pkg/interactions"
 	"github.com/azylman/aerial/services/eri/pkg/queue"
 )
 
@@ -1301,6 +1302,31 @@ func TestProcessFunnelMessageIngress_Restate(t *testing.T) {
 				if res != tc.wantResult {
 					t.Fatalf("result = %q, want %q", res, tc.wantResult)
 				}
+			}
+		})
+	}
+}
+
+func TestActiveTurnCanceller(t *testing.T) {
+	tests := []struct {
+		name    string
+		client  *RestateIngressClient
+		wantNil bool
+	}{
+		{name: "no restate client yields untyped nil", client: nil, wantNil: true},
+		{name: "restate client is the canceller", client: NewRestateIngressClient("http://restate.invalid", "aerial"), wantNil: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			orig := activeRestateIngressClient.Swap(tc.client)
+			defer activeRestateIngressClient.Store(orig)
+
+			got := activeTurnCanceller()
+			if (got == nil) != tc.wantNil {
+				t.Fatalf("activeTurnCanceller() nil = %v, want %v", got == nil, tc.wantNil)
+			}
+			if !tc.wantNil && got != interactions.TurnCanceller(tc.client) {
+				t.Errorf("activeTurnCanceller() = %v, want the active client", got)
 			}
 		})
 	}

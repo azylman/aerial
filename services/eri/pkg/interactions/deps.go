@@ -25,18 +25,27 @@ type ConfigProvider func() *config.Config
 // PoolProvider supplies dynamic worker pool snapshots JIT.
 type PoolProvider func() *queue.WorkerPool
 
+// TurnCanceller cancels the active turn and queued messages of a thread.
+type TurnCanceller interface {
+	CancelThreadTurn(ctx context.Context, threadID string, req queue.CancelTurnRequest) (queue.CancelTurnResponse, error)
+}
+
+// TurnCancellerProvider supplies the turn canceller JIT; it returns nil when none is available.
+type TurnCancellerProvider func() TurnCanceller
+
 // InteractionDeps holds the dependencies required to execute slash commands.
 type InteractionDeps struct {
-	Store                db.Store
-	Pool                 *queue.WorkerPool
-	PoolProvider         PoolProvider
-	Config               *config.Config
-	ConfigProvider       ConfigProvider
-	AppID                string
-	DeployStatusProvider DeployStatusProvider
-	QuotaProvider        QuotaProvider
-	GitOpsChannelUpdater GitOpsChannelUpdater
-	MemoryURL            string
-	MemoryClient         *http.Client
-	HaroURL              string
+	Store                 db.Store
+	Pool                  *queue.WorkerPool
+	PoolProvider          PoolProvider
+	TurnCancellerProvider TurnCancellerProvider
+	Config                *config.Config
+	ConfigProvider        ConfigProvider
+	AppID                 string
+	DeployStatusProvider  DeployStatusProvider
+	QuotaProvider         QuotaProvider
+	GitOpsChannelUpdater  GitOpsChannelUpdater
+	MemoryURL             string
+	MemoryClient          *http.Client
+	HaroURL               string
 }
