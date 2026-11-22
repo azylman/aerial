@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/azylman/aerial/pkg/buildplan"
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/pkg/restateingress"
 	"github.com/azylman/aerial/pkg/tracing"
@@ -41,7 +42,7 @@ func NewNATSBridge(cfg config.Config, bus pubsub.Bus, httpClient *http.Client) *
 }
 
 func (b *NATSBridge) restateRouterSendPath(handler string) string {
-	return "/" + config.BuildRouterServiceName(b.cfg.AgentName) + "/" + handler + "/send"
+	return "/" + buildplan.BuildRouterServiceName(b.cfg.AgentName) + "/" + handler + "/send"
 }
 
 // StartConsumers verifies JetStream streams and binds durable queue consumers for dispatch and PR events.

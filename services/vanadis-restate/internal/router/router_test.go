@@ -24,6 +24,7 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
+	"github.com/azylman/aerial/pkg/buildplan"
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/pkg/strutil"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/build"
@@ -983,7 +984,7 @@ func TestBuildRouterServiceName_Derivation(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			assert.Equal(t, tc.wantRouter, model.BuildRouterServiceName(tc.agent))
+			assert.Equal(t, tc.wantRouter, buildplan.BuildRouterServiceName(tc.agent))
 			assert.Equal(t, tc.wantRouter, NewBuildRouterServiceWithAgent(nil, tc.agent).ServiceName())
 		})
 	}

@@ -8,7 +8,6 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/azylman/aerial/pkg/agent"
 	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/pkg/k8sauth"
 	"github.com/azylman/aerial/pkg/strutil"
@@ -88,18 +87,6 @@ func LoadConfig(configPath string) Config {
 
 // LoadConfigFromEnv initializes configuration from environment variables with optional CONFIG_PATH fallback.
 func LoadConfigFromEnv() Config { return LoadConfig(os.Getenv("CONFIG_PATH")) }
-
-// BuildServiceName derives the Restate Build Virtual Object name for an agent.
-// Empty, default and unsafe agent names resolve to the unsuffixed Build name.
-func BuildServiceName(name string) string {
-	return agent.ScopedServiceName("Build", name)
-}
-
-// BuildRouterServiceName derives the Restate BuildRouter service name for an agent.
-// Empty, default and unsafe agent names resolve to the unsuffixed BuildRouter name.
-func BuildRouterServiceName(name string) string {
-	return agent.ScopedServiceName("BuildRouter", name)
-}
 
 // LoadRestateConfig loads Restate configuration from an optional YAML file with environment variable overrides.
 func LoadRestateConfig(configPath string) RestateConfig {

@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/azylman/aerial/pkg/buildplan"
 	"github.com/azylman/aerial/pkg/k8sauth"
 )
 
@@ -182,7 +183,7 @@ func TestServer_RBAC_Endpoints(t *testing.T) {
 			Agent string `json:"agent"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&routed)
-		if strings.HasSuffix(r.URL.Path, "/Create") && !strings.HasPrefix(r.URL.Path, "/"+BuildServiceName(routed.Agent)+"/") {
+		if strings.HasSuffix(r.URL.Path, "/Create") && !strings.HasPrefix(r.URL.Path, "/"+buildplan.BuildServiceName(routed.Agent)+"/") {
 			w.WriteHeader(http.StatusTeapot)
 			_, _ = w.Write([]byte(`{"message":"misrouted build object"}`))
 			return

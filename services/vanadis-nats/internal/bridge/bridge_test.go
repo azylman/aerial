@@ -16,6 +16,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/azylman/aerial/pkg/buildplan"
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/vanadis-nats/internal/config"
 )
@@ -1069,7 +1070,7 @@ func TestBuildServiceName_Derivation(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			assert.Equal(t, tc.wantRouter, config.BuildRouterServiceName(tc.agent))
+			assert.Equal(t, tc.wantRouter, buildplan.BuildRouterServiceName(tc.agent))
 			bridge := NewNATSBridge(config.Config{AgentName: tc.agent}, nil, nil)
 			assert.Equal(t, tc.wantRouterPath, bridge.restateRouterSendPath("RoutePREvent"))
 		})

@@ -7,7 +7,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/azylman/aerial/pkg/agent"
 	"github.com/azylman/aerial/pkg/buildplan"
 )
 
@@ -64,24 +63,6 @@ type AttachChunkPRResponse struct {
 	BuildID  string `json:"build_id"`
 	ChunkID  string `json:"chunk_id"`
 	ThreadID string `json:"thread_id"`
-}
-
-// Legacy Restate service names preserved for the dark-launch default agent.
-const (
-	legacyBuildServiceName       = "Build"
-	legacyBuildRouterServiceName = "BuildRouter"
-)
-
-// BuildServiceName derives the Restate Build Virtual Object name for an agent.
-// Empty and aerial resolve to the legacy Build name so Phase 1 stays dark.
-func BuildServiceName(name string) string {
-	return agent.ScopedServiceName(legacyBuildServiceName, name)
-}
-
-// BuildRouterServiceName derives the Restate BuildRouter service name for an agent.
-// Empty and aerial resolve to the legacy BuildRouter name so Phase 1 stays dark.
-func BuildRouterServiceName(name string) string {
-	return agent.ScopedServiceName(legacyBuildRouterServiceName, name)
 }
 
 // ErrInvalidBuildInput reports malformed build or chunk input; see pkg/buildplan.

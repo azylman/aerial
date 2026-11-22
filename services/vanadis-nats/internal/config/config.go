@@ -7,7 +7,6 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/azylman/aerial/pkg/agent"
 	"github.com/azylman/aerial/pkg/strutil"
 )
 
@@ -32,12 +31,6 @@ type NATSBridgeYAMLConfig struct {
 var FallbackConfigPaths = []string{
 	"/share/aerial-config/services/vanadis-nats/vanadis-nats.yaml",
 	"/config/vanadis-nats.yaml",
-}
-
-// BuildRouterServiceName derives the Restate BuildRouter service name for an agent.
-// Empty and aerial resolve to the legacy BuildRouter name so Phase 1 stays dark.
-func BuildRouterServiceName(agentName string) string {
-	return agent.ScopedServiceName("BuildRouter", agentName)
 }
 
 // LoadConfig loads configuration from an optional YAML file with environment variable overrides.

@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/azylman/aerial/pkg/buildplan"
 	"github.com/azylman/aerial/services/vanadis/internal/config"
 	"github.com/azylman/aerial/services/vanadis/internal/model"
 )
@@ -344,7 +345,7 @@ func TestClientScopedNames(t *testing.T) {
 			if got := c.BuildRouterServiceName(); got != tc.wantRouter {
 				t.Errorf("BuildRouterServiceName() = %q, want %q", got, tc.wantRouter)
 			}
-			if got := c.ObjectPath(config.BuildServiceName(tc.runnerAgent), tc.buildID, "Create"); got != tc.wantObjectPath {
+			if got := c.ObjectPath(buildplan.BuildServiceName(tc.runnerAgent), tc.buildID, "Create"); got != tc.wantObjectPath {
 				t.Errorf("ObjectPath() = %q, want %q", got, tc.wantObjectPath)
 			}
 			if got := c.RouterPath("RouteFailChunk"); got != tc.wantRouterPath {

@@ -6,30 +6,6 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func TestServiceNameDerivation(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name, agent, wantBuild, wantRouter string
-	}{
-		{"empty defaults to legacy", "", "Build", "BuildRouter"},
-		{"aerial defaults to legacy", "aerial", "Build", "BuildRouter"},
-		{"aerial case insensitive", "Aerial", "Build", "BuildRouter"},
-		{"agent-beta scoped", "agent-beta", "Build-agent-beta", "BuildRouter-agent-beta"},
-		{"agent-alpha scoped", "agent-alpha", "Build-agent-alpha", "BuildRouter-agent-alpha"},
-		{"whitespace trimmed", "  agent-beta  ", "Build-agent-beta", "BuildRouter-agent-beta"},
-		{"mixed case scoped normalized", "Agent-Beta", "Build-agent-beta", "BuildRouter-agent-beta"},
-		{"unsafe chars route to default", "Foo Bar", "Build", "BuildRouter"},
-		{"underscore allowed", "agent_beta", "Build-agent_beta", "BuildRouter-agent_beta"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			assert.Equal(t, tc.wantBuild, BuildServiceName(tc.agent))
-			assert.Equal(t, tc.wantRouter, BuildRouterServiceName(tc.agent))
-		})
-	}
-}
-
 func TestActionDispatchID(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

@@ -9,6 +9,7 @@ import (
 
 	restate "github.com/restatedev/sdk-go"
 
+	"github.com/azylman/aerial/pkg/buildplan"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/ericlient"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
@@ -36,7 +37,7 @@ func (b *BuildObject) runnerAgent() string {
 // RunsBuild reports whether a Build object of ownAgent executes builds
 // recorded with runnerAgent. Empty and the default agent compare equal.
 func RunsBuild(ownAgent, runnerAgent string) bool {
-	return model.BuildServiceName(store.NormalizeRunnerAgent(ownAgent)) == model.BuildServiceName(store.NormalizeRunnerAgent(runnerAgent))
+	return buildplan.BuildServiceName(store.NormalizeRunnerAgent(ownAgent)) == buildplan.BuildServiceName(store.NormalizeRunnerAgent(runnerAgent))
 }
 
 // runnerGuardResult is the journaled runner lookup for the keyed build.
@@ -88,7 +89,7 @@ func (b *BuildObject) checkRunner(handlerLabel, buildID string, res runnerGuardR
 	if !res.Found || RunsBuild(b.runnerAgent(), res.RunnerAgent) {
 		return nil
 	}
-	err := fmt.Errorf("%w: build %s runs on %s, not %s", ErrForeignRunner, buildID, model.BuildServiceName(res.RunnerAgent), b.ServiceName())
+	err := fmt.Errorf("%w: build %s runs on %s, not %s", ErrForeignRunner, buildID, buildplan.BuildServiceName(res.RunnerAgent), b.ServiceName())
 	RecordReconcileError(handlerLabel, err)
 	return restate.ToTerminalError(err, restate.WithErrorCode(http.StatusConflict))
 }
@@ -100,7 +101,7 @@ func (b *BuildObject) checkCreateOwner(agent string) error {
 	if RunsBuild(b.runnerAgent(), agent) {
 		return nil
 	}
-	err := fmt.Errorf("%w: build owned by %q belongs on %s, not %s", store.ErrInvalidBuildInput, strings.TrimSpace(agent), model.BuildServiceName(store.NormalizeRunnerAgent(agent)), b.ServiceName())
+	err := fmt.Errorf("%w: build owned by %q belongs on %s, not %s", store.ErrInvalidBuildInput, strings.TrimSpace(agent), buildplan.BuildServiceName(store.NormalizeRunnerAgent(agent)), b.ServiceName())
 	RecordReconcileError(labelCreate, err)
 	return restate.ToTerminalError(err, restate.WithErrorCode(http.StatusBadRequest))
 }
@@ -155,6 +156,6 @@ func (c *crossBuildReconciles) list() []store.BuildRoute {
 // to each build's own runner, which evaluates it under its own lock and token.
 func sendCrossBuildReconciles(rt objectRuntime, routes []store.BuildRoute) {
 	for _, route := range routes {
-		rt.SendReconcile(model.BuildServiceName(route.RunnerAgent), route.BuildID, ReconcileReasonWidgetSync)
+		rt.SendReconcile(buildplan.BuildServiceName(route.RunnerAgent), route.BuildID, ReconcileReasonWidgetSync)
 	}
 }

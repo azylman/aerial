@@ -17,6 +17,7 @@ import (
 	restate "github.com/restatedev/sdk-go"
 	"github.com/restatedev/sdk-go/server"
 
+	"github.com/azylman/aerial/pkg/buildplan"
 	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/pkg/pgutil"
 	"github.com/azylman/aerial/pkg/pubsub"
@@ -25,7 +26,6 @@ import (
 	"github.com/azylman/aerial/services/vanadis-restate/internal/build"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/ericlient"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/executor"
-	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/prstate"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/router"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
@@ -189,7 +189,7 @@ func newPRStateServices(projection *prstate.PgProjectionStore, eri prstate.EriEf
 
 // ownsPRState reports whether agent is the default agent that owns prstate.
 func ownsPRState(agent string) bool {
-	return model.BuildServiceName(agent) == model.BuildServiceName("")
+	return buildplan.BuildServiceName(agent) == buildplan.BuildServiceName("")
 }
 
 // SetupHealthMux creates the ServeMux for health, metrics, and coverage flush.
