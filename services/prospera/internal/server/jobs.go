@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/pkg/restateingress"
+	"github.com/azylman/aerial/services/prospera/internal/delivery"
 	"github.com/azylman/aerial/services/prospera/internal/model"
 )
 
@@ -82,6 +84,17 @@ func (s *Server) HandleReportJob(ctx context.Context, msg pubsub.Message) error 
 			slog.WarnContext(ctx, "prospera: term empty call_id report job failed", "error", termErr)
 		}
 		return nil
+	}
+
+	cfg := s.cfgSrc.Current()
+	if cfg != nil && strings.TrimSpace(cfg.RestateIngressURL) != "" {
+		endpoint := fmt.Sprintf("%s/ProsperaReport/%s/DeliverReport/send", strings.TrimRight(cfg.RestateIngressURL, "/"), callID)
+		idempotencyKey := "prospera:report:" + callID
+		_, ingressErr := restateingress.Post(ctx, s.httpClient, endpoint, idempotencyKey, delivery.DeliverReportRequest{CallID: callID}, 1024)
+		if ingressErr == nil {
+			return nil
+		}
+		slog.WarnContext(ctx, "jobs: post to restate ingress failed, falling back to direct delivery", "call_id", callID, "error", ingressErr)
 	}
 
 	if err := s.reporter.DeliverCallReport(ctx, callID); err != nil {
