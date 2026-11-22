@@ -1,4 +1,4 @@
-package main
+package server
 
 import (
 	"context"
@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+
+	"github.com/azylman/aerial/mcp/kernel-mcp/internal/config"
 )
 
 var testUpgrader = websocket.Upgrader{
@@ -213,7 +215,7 @@ func (s *fakeCDPServer) serveWS(ws *websocket.Conn) {
 	}
 }
 
-func startFakeCDPServer(t *testing.T, opts fakeCDPOptions) (*fakeCDPServer, *Config) {
+func startFakeCDPServer(t *testing.T, opts fakeCDPOptions) (*fakeCDPServer, *config.Config) {
 	t.Helper()
 	fakeSrv := &fakeCDPServer{opts: opts}
 	fakeSrv.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -243,7 +245,7 @@ func startFakeCDPServer(t *testing.T, opts fakeCDPOptions) (*fakeCDPServer, *Con
 	})
 
 	u, _ := url.Parse(fakeSrv.URL)
-	cfg := &Config{Port: "4018", CDPHost: u.Hostname(), CDPPort: u.Port(), SettleDelay: time.Millisecond}
+	cfg := &config.Config{Port: "4018", CDPHost: u.Hostname(), CDPPort: u.Port(), SettleDelay: time.Millisecond}
 	if opts.emptyHost {
 		cfg.CDPHost = ""
 	}
@@ -445,7 +447,7 @@ func TestCDPClient_WaitSettle(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			client := NewCDPClient(&Config{SettleDelay: tc.delay})
+			client := NewCDPClient(&config.Config{SettleDelay: tc.delay})
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			if tc.canceled {
