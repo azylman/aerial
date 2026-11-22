@@ -1,4 +1,4 @@
-package main
+package store
 
 import (
 	"context"
@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	_ "github.com/jackc/pgx/v5/stdlib"
 
 	"github.com/azylman/aerial/pkg/transcriptwire"
 )
@@ -519,5 +521,35 @@ func TestTruncateSingleLine(t *testing.T) {
 				t.Errorf("truncateSingleLine(%q, %d) = %q, want %q", tc.s, tc.maxLen, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestSearchClosedDBErrors(t *testing.T) {
+	t.Parallel()
+	store := newTestStore(t, "aerial")
+	_ = store.db.Close()
+	ctx := context.Background()
+
+	if _, err := store.SearchSessions(ctx, "aerial", "query", 10); err == nil {
+		t.Errorf("expected SearchSessions error on closed db")
+	}
+	if _, _, err := store.GetThreadTrajectory(ctx, "aerial", "thread-1", 10); err == nil {
+		t.Errorf("expected GetThreadTrajectory error on closed db")
+	}
+	if _, err := store.GetWatermark(ctx, "aerial", "sess-1"); err == nil {
+		t.Errorf("expected GetWatermark error on closed db")
+	}
+}
+
+func TestSearchNilDBErrors(t *testing.T) {
+	t.Parallel()
+	store := NewStore(nil, "aerial")
+	ctx := context.Background()
+
+	if _, err := store.SearchSessions(ctx, "aerial", "query", 10); err == nil {
+		t.Errorf("expected SearchSessions error on nil db")
+	}
+	if _, _, err := store.GetThreadTrajectory(ctx, "aerial", "thread-1", 10); err == nil {
+		t.Errorf("expected GetThreadTrajectory error on nil db")
 	}
 }
