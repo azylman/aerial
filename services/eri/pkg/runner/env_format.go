@@ -111,9 +111,16 @@ var secretSuffixes = []string{
 	"_PRIVATE_KEY",
 }
 
+// agentPassthroughKeys are secret-shaped keys deliberately passed to agent turns.
+// ATLAS_DEV_PASSWORD only creates and drops throwaway Atlas dev databases.
+var agentPassthroughKeys = map[string]struct{}{
+	"CLAUDE_CODE_OAUTH_TOKEN": {},
+	"ATLAS_DEV_PASSWORD":      {},
+}
+
 func isSecretEnvKey(key string) bool {
 	upper := strings.ToUpper(strings.TrimSpace(key))
-	if upper == "CLAUDE_CODE_OAUTH_TOKEN" {
+	if _, ok := agentPassthroughKeys[upper]; ok {
 		return false
 	}
 	if upper == "DATABASE_URL" {
