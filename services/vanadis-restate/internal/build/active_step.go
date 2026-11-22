@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
 	restate "github.com/restatedev/sdk-go"
@@ -27,9 +28,67 @@ type AckResponse struct {
 	Status string `json:"status"`
 }
 
+type activeStepSyncState struct {
+	mu       sync.Mutex
+	inFlight bool
+	dirty    bool
+}
+
 func (b *BuildObject) syncActiveStepWidget(ctx context.Context, build model.VanadisBuild, chunks []model.VanadisChunk) error {
 	_, err := b.executor.SyncBuildWidget(ctx, b.store, build, chunks, "")
 	return err
+}
+
+func (b *BuildObject) coalesceActiveStepSync(rc restate.RunContext, buildID, chunkID string) (bool, error) {
+	val, _ := b.activeStepSyncs.LoadOrStore(buildID, &activeStepSyncState{})
+	state, ok := val.(*activeStepSyncState)
+	if !ok || state == nil {
+		return false, nil
+	}
+
+	state.mu.Lock()
+	if state.inFlight {
+		state.dirty = true
+		state.mu.Unlock()
+		return true, nil
+	}
+	state.inFlight = true
+	state.mu.Unlock()
+
+	defer func() {
+		state.mu.Lock()
+		state.inFlight = false
+		state.dirty = false
+		state.mu.Unlock()
+	}()
+
+	for {
+		bld, chunks, gErr := b.store.GetBuild(rc, buildID)
+		if gErr != nil {
+			if errors.Is(gErr, store.ErrBuildNotFound) {
+				return false, nil
+			}
+			slog.WarnContext(rc, "[vanadis-restate] get build warning on active step update", "build_id", buildID, "chunk_id", chunkID, "error", gErr)
+			return true, nil
+		}
+		if bld == nil || bld.Quiet {
+			return true, nil
+		}
+		stepCtx, cancel := context.WithTimeout(rc, 3*time.Second)
+		if sErr := b.syncActiveStepWidget(stepCtx, *bld, chunks); sErr != nil {
+			slog.WarnContext(rc, "[vanadis-restate] sync widget warning on active step update", "build_id", buildID, "chunk_id", chunkID, "error", sErr)
+		}
+		cancel()
+
+		state.mu.Lock()
+		if !state.dirty {
+			state.inFlight = false
+			state.mu.Unlock()
+			return true, nil
+		}
+		state.dirty = false
+		state.mu.Unlock()
+	}
 }
 
 // UpdateActiveStep updates the running chunk's live active step description and refreshes the Discord widget.
@@ -58,23 +117,7 @@ func (b *BuildObject) UpdateActiveStep(ctx restate.ObjectSharedContext, req Upda
 		if b == nil || b.store == nil || b.executor == nil || buildID == "" {
 			return true, nil
 		}
-		bld, chunks, gErr := b.store.GetBuild(rc, buildID)
-		if gErr != nil {
-			if errors.Is(gErr, store.ErrBuildNotFound) {
-				return false, nil
-			}
-			slog.WarnContext(rc, "[vanadis-restate] get build warning on active step update", "build_id", buildID, "chunk_id", chunkID, "error", gErr)
-			return true, nil
-		}
-		if bld == nil || bld.Quiet {
-			return true, nil
-		}
-		stepCtx, cancel := context.WithTimeout(rc, 3*time.Second)
-		defer cancel()
-		if sErr := b.syncActiveStepWidget(stepCtx, *bld, chunks); sErr != nil {
-			slog.WarnContext(rc, "[vanadis-restate] sync widget warning on active step update", "build_id", buildID, "chunk_id", chunkID, "error", sErr)
-		}
-		return true, nil
+		return b.coalesceActiveStepSync(rc, buildID, chunkID)
 	}, restate.WithName("update-active-step"))
 	if err != nil {
 		widget.ClearChunkActiveStep(chunkID)

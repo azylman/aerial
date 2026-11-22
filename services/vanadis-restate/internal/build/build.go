@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -293,12 +294,13 @@ func (r restateObjectRuntime) SendReconcile(service, buildID, reason string) {
 
 // BuildObject implements the Restate-authoritative Virtual Object for multi-chunk builds.
 type BuildObject struct {
-	store          store.VanadisStore
-	executor       *executor.Executor
-	vanadisURL     string
-	httpClient     *http.Client
-	runtimeFactory func(restate.ObjectContext) objectRuntime
-	agentName      string
+	store           store.VanadisStore
+	executor        *executor.Executor
+	vanadisURL      string
+	httpClient      *http.Client
+	runtimeFactory  func(restate.ObjectContext) objectRuntime
+	agentName       string
+	activeStepSyncs sync.Map
 }
 
 // NewBuildObject creates a new BuildObject bound to vanadisURL with an optional HTTP client.
