@@ -41,6 +41,33 @@ func TestEriJetStreamInit(t *testing.T) {
 		emptyCleanup()
 	}
 
+	// attachEriEventBus with the default factory and an unparseable URL: the
+	// connect fails before any dial, leaving the pool without a bus.
+	badURLPool := queue.New(nil, queue.WorkerPoolConfig{NATSURL: "nats://bad%zz"})
+	badURLCleanup := attachEriEventBus(ctx, badURLPool)
+	if badURLCleanup == nil {
+		t.Error("expected non-nil no-op cleanup when the default factory fails")
+	} else {
+		badURLCleanup()
+	}
+	if badURLPool.EventBus() != nil {
+		t.Error("expected nil event bus when the default factory fails")
+	}
+
+	// attachEriEventBusWithFactory cleanup still closes a bus whose Close errors
+	closeErrPool := queue.New(nil, queue.WorkerPoolConfig{NATSURL: "nats://close-err"})
+	closeBus := &closeErrBus{Bus: pubsub.NewMemoryBus()}
+	closeErrCleanup := attachEriEventBusWithFactory(ctx, closeErrPool, func(_ context.Context, _ string) (pubsub.Bus, error) {
+		return closeBus, nil
+	})
+	if closeErrCleanup == nil {
+		t.Fatal("expected cleanup for an attached bus")
+	}
+	closeErrCleanup()
+	if !closeBus.closed {
+		t.Error("expected cleanup to call Close on the attached bus")
+	}
+
 	// attachEriEventBusWithFactory error branch
 	pool := queue.New(nil, queue.WorkerPoolConfig{
 		NATSURL: "nats://127.0.0.1:4222",
@@ -74,6 +101,18 @@ func TestEriJetStreamInit(t *testing.T) {
 	if cleanupSuccess != nil {
 		cleanupSuccess()
 	}
+}
+
+type closeErrBus struct {
+	pubsub.Bus
+
+	closed bool
+}
+
+func (b *closeErrBus) Close() error {
+	b.closed = true
+	_ = b.Bus.Close()
+	return errors.New("simulated close error")
 }
 
 type failEnsureBus struct {

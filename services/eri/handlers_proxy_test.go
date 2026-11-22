@@ -274,6 +274,15 @@ func proxyFallbackAndErrorCases() []proxyTestCase {
 			expectedQuery:    "",
 		},
 		{
+			name:           "UnparseableIndexerURLReturns500",
+			method:         http.MethodGet,
+			reqPath:        "/transcripts/search",
+			reqQuery:       "q=test",
+			configuredURL:  "http://bad%zz",
+			expectProxied:  false,
+			expectedStatus: http.StatusInternalServerError,
+		},
+		{
 			name:             "MethodNotAllowedPostWhenProxied",
 			method:           http.MethodPost,
 			reqPath:          "/transcripts/search",

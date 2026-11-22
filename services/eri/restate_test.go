@@ -838,25 +838,39 @@ func TestRestateIngressClient_CancelDispatchImmediate(t *testing.T) {
 
 func TestHandleVoiceAskSSE_RestateNoBusWithPool(t *testing.T) {
 	tests := []struct {
-		name       string
-		statusCode int
-		serverResp string
-		wantEvent  string
-		wantSubstr string
+		name          string
+		statusCode    int
+		serverResp    string
+		cancelRequest bool
+		failWrites    bool
+		wantSSE       []string
+		wantSubstr    string
 	}{
 		{
 			name:       "restate no-bus ask voice success",
 			statusCode: http.StatusOK,
 			serverResp: `{"reply":"restate non-streaming reply","conversation_id":"conv-nobus-1","device_key":"kiosk-nobus"}`,
-			wantEvent:  "event: reply",
+			wantSSE:    []string{"reply", "done"},
 			wantSubstr: "restate non-streaming reply",
 		},
 		{
 			name:       "restate no-bus ask voice error",
 			statusCode: http.StatusInternalServerError,
 			serverResp: `{"error":"restate voice failure"}`,
-			wantEvent:  "event: error",
+			wantSSE:    []string{"error", "done"},
 			wantSubstr: "restate voice failure",
+		},
+		{
+			name:          "client gone before ask emits nothing",
+			statusCode:    http.StatusOK,
+			serverResp:    `{"reply":"unseen","conversation_id":"conv-gone","device_key":"kiosk-nobus"}`,
+			cancelRequest: true,
+		},
+		{
+			name:       "failed chunk writes emit nothing",
+			statusCode: http.StatusOK,
+			serverResp: `{"reply":"unwritable","conversation_id":"conv-unwritable","device_key":"kiosk-nobus"}`,
+			failWrites: true,
 		},
 	}
 
@@ -876,16 +890,30 @@ func TestHandleVoiceAskSSE_RestateNoBusWithPool(t *testing.T) {
 			mockPool := queue.New(cfg, queue.WorkerPoolConfig{})
 			handler := handleVoiceAsk(mockPool)
 
-			req := httptest.NewRequest(http.MethodPost, "/voice/ask?stream=true", strings.NewReader(`{"prompt":"hello","node_id":"kiosk-nobus"}`))
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if tc.cancelRequest {
+				cancel()
+			}
+			req := httptest.NewRequestWithContext(ctx, http.MethodPost, "/voice/ask?stream=true", strings.NewReader(`{"prompt":"hello","node_id":"kiosk-nobus"}`))
 			req.Header.Set("Accept", "text/event-stream")
 			rec := httptest.NewRecorder()
-			handler(rec, req)
+			var w http.ResponseWriter = rec
+			if tc.failWrites {
+				w = errWriteRecorder{rec}
+			}
+			handler(w, req)
 
 			assert.Equal(t, http.StatusOK, rec.Code)
 			body := rec.Body.String()
-			assert.Contains(t, body, tc.wantEvent)
+			var gotSSE []string
+			for line := range strings.SplitSeq(body, "\n") {
+				if ev, ok := strings.CutPrefix(line, "event: "); ok {
+					gotSSE = append(gotSSE, ev)
+				}
+			}
+			assert.Equal(t, tc.wantSSE, gotSSE)
 			assert.Contains(t, body, tc.wantSubstr)
-			assert.Contains(t, body, "event: done")
 		})
 	}
 }
@@ -1065,6 +1093,7 @@ func TestNewRestateLLMFunc(t *testing.T) {
 		name         string
 		agent        string
 		cancelCaller bool
+		nilClient    bool
 		stubStatus   int
 		stubBody     string
 		wantResponse string
@@ -1075,6 +1104,9 @@ func TestNewRestateLLMFunc(t *testing.T) {
 		{name: "sibling agent service", agent: "miorine", stubStatus: http.StatusOK, stubBody: `{"response":"ok"}`, wantResponse: "ok", wantPath: "/LLM-miorine/Complete"},
 		{name: "restate failure", agent: "aerial", stubStatus: http.StatusInternalServerError, stubBody: `{"message":"boom"}`, wantErrSub: "boom", wantPath: "/LLM/Complete"},
 		{name: "cancelled caller returns promptly", agent: "aerial", cancelCaller: true, wantErrSub: "context canceled", wantPath: "/LLM/Complete"},
+		{name: "oversized response rejected", agent: "aerial", stubStatus: http.StatusOK, stubBody: `{"response":"` + strings.Repeat("a", 1<<20) + `"}`, wantErrSub: "exceeds 1MiB limit", wantPath: "/LLM/Complete"},
+		{name: "malformed response rejected", agent: "aerial", stubStatus: http.StatusOK, stubBody: `{"response":`, wantErrSub: "unmarshal restate llm response", wantPath: "/LLM/Complete"},
+		{name: "nil client sends nothing", nilClient: true, wantErrSub: "restate ingress client is nil"},
 	}
 
 	for _, tc := range tests {
@@ -1102,18 +1134,31 @@ func TestNewRestateLLMFunc(t *testing.T) {
 
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
+			client := NewRestateIngressClient(ts.URL, tc.agent, ts.Client())
+			if tc.nilClient {
+				client = nil
+			}
 			done := make(chan struct{})
 			var resp string
 			var err error
 			go func() {
 				defer close(done)
-				resp, err = NewRestateLLMFunc(NewRestateIngressClient(ts.URL, tc.agent, ts.Client()))(ctx, "flash", "summarize")
+				resp, err = NewRestateLLMFunc(client)(ctx, "flash", "summarize")
 			}()
-			got := <-seen
+			var got llmIngressCapture
 			if tc.cancelCaller {
+				got = <-seen
 				cancel()
 			}
 			<-done
+			if !tc.cancelCaller {
+				// The stub records the request before it writes the response, so
+				// a finished call has already published its capture (if any).
+				select {
+				case got = <-seen:
+				default:
+				}
+			}
 
 			if tc.wantErrSub != "" {
 				require.ErrorContains(t, err, tc.wantErrSub)
@@ -1122,8 +1167,10 @@ func TestNewRestateLLMFunc(t *testing.T) {
 			}
 			assert.Equal(t, tc.wantResponse, resp)
 			assert.False(t, got.hasKey, "unkeyed call must not send Idempotency-Key")
-			assert.Equal(t, llmcall.Request{Prompt: "summarize", Model: "flash"}, got.req)
 			assert.Equal(t, tc.wantPath, got.path)
+			if tc.wantPath != "" {
+				assert.Equal(t, llmcall.Request{Prompt: "summarize", Model: "flash"}, got.req)
+			}
 		})
 	}
 }
