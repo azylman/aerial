@@ -47,7 +47,7 @@ func TestEvaluateEgress(t *testing.T) {
 		{
 			name: "blocklisted base64 value hit", secret: egressQuotedSecret, blocked: true, wantBlocked: true,
 			args: json.RawMessage(`{"content":"` + egressQuotedSecretB64 + `"}`),
-			want: []EgressViolation{{Category: "InfisicalSecret", Sample: "ZW***=="}},
+			want: []EgressViolation{{Category: "InfisicalSecret", Sample: "ZW***Mg"}},
 		},
 		{
 			name: "blocklisted value nested in JSON-string arguments", secret: egressQuotedSecret, blocked: true, wantBlocked: true,
