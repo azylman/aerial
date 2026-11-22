@@ -38,7 +38,7 @@ func translateFluxAlertGitRepoCases(now time.Time) []translateFluxAlertCase {
 			wantEvent:  "sync_success",
 			wantStatus: "success",
 			wantJob:    "git-sync",
-			wantRepo:   "azylman/aerial",
+			wantRepo:   "aerial",
 			wantSHA:    "1234567890abcdef",
 			wantDetail: "stored new artifact for commit 'main@sha1:1234567890abcdef'",
 		},
@@ -57,7 +57,7 @@ func translateFluxAlertGitRepoCases(now time.Time) []translateFluxAlertCase {
 			wantEvent:  "sync_success",
 			wantStatus: "success",
 			wantJob:    "git-sync",
-			wantRepo:   "azylman/aerial",
+			wantRepo:   "aerial",
 			wantSHA:    "abcdef1234567890",
 			wantDetail: "sync succeeded",
 		},
@@ -75,7 +75,7 @@ func translateFluxAlertGitRepoCases(now time.Time) []translateFluxAlertCase {
 			wantEvent:  "sync_failed",
 			wantStatus: "failed",
 			wantJob:    "git-sync",
-			wantRepo:   "azylman/aerial",
+			wantRepo:   "aerial",
 			wantDetail: "authentication failed",
 		},
 		{
@@ -92,7 +92,7 @@ func translateFluxAlertGitRepoCases(now time.Time) []translateFluxAlertCase {
 			wantEvent:  "sync_failed",
 			wantStatus: "failed",
 			wantJob:    "git-sync",
-			wantRepo:   "azylman/aerial",
+			wantRepo:   "aerial",
 			wantDetail: "clone timeout",
 		},
 		{
@@ -125,7 +125,7 @@ func translateFluxAlertKustomizationSuccessCases(now time.Time) []translateFluxA
 			wantEvent:  "deploy_started",
 			wantStatus: "started",
 			wantJob:    "synapse",
-			wantRepo:   "azylman/aerial",
+			wantRepo:   "aerial",
 			wantSHA:    "1111222233334444",
 			wantDetail: "reconciling",
 		},
@@ -144,7 +144,7 @@ func translateFluxAlertKustomizationSuccessCases(now time.Time) []translateFluxA
 			wantEvent:  "deploy_success",
 			wantStatus: "success",
 			wantJob:    "synapse",
-			wantRepo:   "azylman/aerial",
+			wantRepo:   "aerial",
 			wantSHA:    "5555666677778888",
 			wantDetail: "applied revision",
 		},
@@ -167,7 +167,7 @@ func translateFluxAlertKustomizationFailureCases(now time.Time) []translateFluxA
 			wantEvent:  "deploy_failed",
 			wantStatus: "failed",
 			wantJob:    "synapse",
-			wantRepo:   "azylman/aerial",
+			wantRepo:   "aerial",
 			wantDetail: "dry-run failed",
 		},
 		{
@@ -184,7 +184,7 @@ func translateFluxAlertKustomizationFailureCases(now time.Time) []translateFluxA
 			wantEvent:  "deploy_failed",
 			wantStatus: "failed",
 			wantJob:    "synapse",
-			wantRepo:   "azylman/aerial",
+			wantRepo:   "aerial",
 			wantDetail: "readiness probe timed out",
 		},
 		{
@@ -201,7 +201,7 @@ func translateFluxAlertKustomizationFailureCases(now time.Time) []translateFluxA
 			wantEvent:  "deploy_failed",
 			wantStatus: "failed",
 			wantJob:    "synapse",
-			wantRepo:   "azylman/aerial",
+			wantRepo:   "aerial",
 			wantDetail: "kustomize build error",
 		},
 		{
@@ -218,7 +218,7 @@ func translateFluxAlertKustomizationFailureCases(now time.Time) []translateFluxA
 			wantEvent:  "deploy_failed",
 			wantStatus: "failed",
 			wantJob:    "synapse",
-			wantRepo:   "azylman/aerial",
+			wantRepo:   "aerial",
 			wantDetail: "artifact not found",
 		},
 		{
@@ -235,7 +235,7 @@ func translateFluxAlertKustomizationFailureCases(now time.Time) []translateFluxA
 			wantEvent:  "deploy_failed",
 			wantStatus: "failed",
 			wantJob:    "synapse",
-			wantRepo:   "azylman/aerial",
+			wantRepo:   "aerial",
 			wantDetail: "schema validation error",
 		},
 		{
@@ -252,7 +252,7 @@ func translateFluxAlertKustomizationFailureCases(now time.Time) []translateFluxA
 			wantEvent:  "deploy_failed",
 			wantStatus: "failed",
 			wantJob:    "synapse",
-			wantRepo:   "azylman/aerial",
+			wantRepo:   "aerial",
 			wantDetail: "unspecified error",
 		},
 		{
@@ -360,10 +360,16 @@ func TestAlertPayloadRepoAndResolveFluxRepo(t *testing.T) {
 			wantRepo: "acme/meta",
 		},
 		{
-			name:     "empty repo falls back to azylman/aerial",
+			name:     "empty repo falls back to the bare default repo",
 			alert:    model.FluxAlertEvent{},
 			wantP:    "",
-			wantRepo: "azylman/aerial",
+			wantRepo: "aerial",
+		},
+		{
+			name:     "bare payload repo passes through",
+			alert:    model.FluxAlertEvent{Repo: " mirrormere "},
+			wantP:    "mirrormere",
+			wantRepo: "mirrormere",
 		},
 	}
 	for _, tc := range tests {

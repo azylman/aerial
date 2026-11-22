@@ -80,7 +80,7 @@ func EvaluateFluxEventTriggers(ctx context.Context, bus pubsub.Bus, evt model.De
 	if evt.Event != "sync_success" && evt.Event != "sync_failed" {
 		return
 	}
-	repo := model.NormalizeRepo(evt.Repo)
+	repo := strings.TrimSpace(evt.Repo)
 	if repo == "" {
 		return
 	}
@@ -137,7 +137,7 @@ func EvaluateGitHubEventTriggers(ctx context.Context, bus pubsub.Bus, res *Resol
 	if res == nil {
 		return
 	}
-	repo := model.NormalizeRepo(res.Repo)
+	repo := strings.TrimSpace(res.Repo)
 	if repo == "" {
 		return
 	}

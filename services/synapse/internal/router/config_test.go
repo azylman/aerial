@@ -22,6 +22,7 @@ func TestRouterServerNilConfigGuards(t *testing.T) {
 
 	liveSrv := &RouterServer{
 		cfgSrc: fixedConfig(Config{
+			GitHubOwner: "azylman",
 			CollaboratorCIAlerts: []CollaboratorCIAlertRule{
 				{Repo: "azylman/mirrormere", ChannelID: "123", Authors: map[string]string{"user": "@user"}},
 			},

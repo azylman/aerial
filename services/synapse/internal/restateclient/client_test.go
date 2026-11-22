@@ -13,6 +13,9 @@ import (
 	"github.com/azylman/aerial/pkg/restateingress"
 )
 
+// testOwner is the GitHub owner the client qualifies bare repos with.
+const testOwner = "azylman"
+
 type recordedRequest struct {
 	method         string
 	path           string
@@ -59,7 +62,10 @@ func TestClient(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			c := NewClient(tc.baseURL, tc.prService, tc.repoService, nil)
+			c := NewClient(tc.baseURL, " acme ", tc.prService, tc.repoService, nil)
+			if c.owner != "acme" {
+				t.Errorf("owner = %q, want %q", c.owner, "acme")
+			}
 			if c.baseURL != tc.wantBaseURL {
 				t.Errorf("baseURL = %q, want %q", c.baseURL, tc.wantBaseURL)
 			}
@@ -123,6 +129,7 @@ func TestSendPREvent(t *testing.T) {
 	tests := []struct {
 		name           string
 		baseURL        string
+		owner          string
 		handler        string
 		event          prwire.PREvent
 		serverStatus   int
@@ -134,19 +141,22 @@ func TestSendPREvent(t *testing.T) {
 		wantRequests   int
 		wantIdemPrefix string
 	}{
-		{name: "owned check failed routes to PRObject", handler: "HandleCheckFailed", event: prwire.PREvent{Event: "check_failed", Repo: "aerial", PRNumber: 101, HeadSHA: "abc123", CheckName: "lint", BuildID: "build-1"}, serverStatus: 200, wantPath: "/PRObject/azylman%2Faerial%23101/HandleCheckFailed/send", wantBodySubs: []string{`"head_sha":"abc123"`, `"build_id":"build-1"`}, wantRequests: 1, wantIdemPrefix: "HandleCheckFailed:"},
-		{name: "idempotency key propagated when set", handler: "HandleCheckFailed", event: prwire.PREvent{Event: "check_failed", Repo: "aerial", PRNumber: 101, HeadSHA: "abc123", CheckName: "lint"}, identity: "gh:delivery-1", serverStatus: 200, wantPath: "/PRObject/azylman%2Faerial%23101/HandleCheckFailed/send", wantBodySubs: []string{`"head_sha":"abc123"`}, wantRequests: 1, wantIdemPrefix: "HandleCheckFailed:gh:delivery-1:"},
-		{name: "bare repo normalizes with owner prefix", handler: "HandleCheckPassed", event: prwire.PREvent{Event: "check_passed", Repo: "mirrormere", PRNumber: 7, HeadSHA: "def456"}, serverStatus: 202, wantPath: "/PRObject/azylman%2Fmirrormere%237/HandleCheckPassed/send", wantBodySubs: []string{`"repo":"azylman/mirrormere"`}, wantRequests: 1, wantIdemPrefix: "HandleCheckPassed:"},
-		{name: "owned merged carries merge sha", handler: "HandleMerged", event: prwire.PREvent{Event: "merged", Repo: "azylman/aerial", PRNumber: 101, MergeSHA: "merge999", BuildID: "build-9"}, serverStatus: 200, wantPath: "/PRObject/azylman%2Faerial%23101/HandleMerged/send", wantBodySubs: []string{`"merge_sha":"merge999"`}, wantRequests: 1, wantIdemPrefix: "HandleMerged:"},
-		{name: "unknown handler sends nothing", handler: "RoutePREvent", event: prwire.PREvent{Event: "merged", Repo: "aerial", PRNumber: 101, HeadSHA: "abc123"}, serverStatus: 200, wantErr: "unknown pr handler", wantRequests: 0},
-		{name: "empty repo sends nothing", handler: "HandleClosed", event: prwire.PREvent{Event: "closed", Repo: "", PRNumber: 101, HeadSHA: "abc123"}, serverStatus: 200, wantErr: "repo is required", wantRequests: 0},
-		{name: "bad pr number sends nothing", handler: "HandleClosed", event: prwire.PREvent{Event: "closed", Repo: "aerial", PRNumber: 0, HeadSHA: "abc123"}, serverStatus: 200, wantErr: "pr_number is required", wantRequests: 0},
-		{name: "unconfigured endpoint sends nothing", baseURL: "unconfigured", handler: "HandleCheckFailed", event: prwire.PREvent{Event: "check_failed", Repo: "aerial", PRNumber: 101, HeadSHA: "abc123"}, serverStatus: 200, wantErr: "restate is not configured", wantRequests: 0},
-		{name: "refused endpoint surfaces error", baseURL: "http://127.0.0.1:1", handler: "HandleCheckFailed", event: prwire.PREvent{Event: "check_failed", Repo: "aerial", PRNumber: 101, HeadSHA: "abc123"}, serverStatus: 200, wantErr: "restate ingress request failed", wantRequests: 0},
-		{name: "malformed endpoint surfaces error", baseURL: "http://restate bad", handler: "HandleCheckFailed", event: prwire.PREvent{Event: "check_failed", Repo: "aerial", PRNumber: 101, HeadSHA: "abc123"}, serverStatus: 200, wantErr: "restate ingress request failed", wantRequests: 0},
-		{name: "server error surfaces status", handler: "HandleCheckFailed", event: prwire.PREvent{Event: "check_failed", Repo: "aerial", PRNumber: 101, HeadSHA: "abc123"}, serverStatus: 500, wantErr: "returned HTTP 500", wantRequests: 1},
-		{name: "truncated success body surfaces read error", handler: "HandleCheckFailed", event: prwire.PREvent{Event: "check_failed", Repo: "aerial", PRNumber: 101, HeadSHA: "abc123"}, serverStatus: 200, truncate: true, wantErr: "restate ingress request failed", wantRequests: 1},
-		{name: "unreadable error body surfaces read error", handler: "HandleCheckFailed", event: prwire.PREvent{Event: "check_failed", Repo: "aerial", PRNumber: 101, HeadSHA: "abc123"}, serverStatus: 500, truncate: true, wantErr: "restate ingress request failed", wantRequests: 1},
+		{name: "owned check failed routes to PRObject", owner: testOwner, handler: "HandleCheckFailed", event: prwire.PREvent{Event: "check_failed", Repo: "aerial", PRNumber: 101, HeadSHA: "abc123", CheckName: "lint", BuildID: "build-1"}, serverStatus: 200, wantPath: "/PRObject/azylman%2Faerial%23101/HandleCheckFailed/send", wantBodySubs: []string{`"head_sha":"abc123"`, `"build_id":"build-1"`}, wantRequests: 1, wantIdemPrefix: "HandleCheckFailed:"},
+		{name: "idempotency key propagated when set", owner: testOwner, handler: "HandleCheckFailed", event: prwire.PREvent{Event: "check_failed", Repo: "aerial", PRNumber: 101, HeadSHA: "abc123", CheckName: "lint"}, identity: "gh:delivery-1", serverStatus: 200, wantPath: "/PRObject/azylman%2Faerial%23101/HandleCheckFailed/send", wantBodySubs: []string{`"head_sha":"abc123"`}, wantRequests: 1, wantIdemPrefix: "HandleCheckFailed:gh:delivery-1:"},
+		{name: "bare repo normalizes with owner prefix", owner: testOwner, handler: "HandleCheckPassed", event: prwire.PREvent{Event: "check_passed", Repo: "mirrormere", PRNumber: 7, HeadSHA: "def456"}, serverStatus: 202, wantPath: "/PRObject/azylman%2Fmirrormere%237/HandleCheckPassed/send", wantBodySubs: []string{`"repo":"azylman/mirrormere"`}, wantRequests: 1, wantIdemPrefix: "HandleCheckPassed:"},
+		{name: "owned merged carries merge sha", owner: testOwner, handler: "HandleMerged", event: prwire.PREvent{Event: "merged", Repo: "azylman/aerial", PRNumber: 101, MergeSHA: "merge999", BuildID: "build-9"}, serverStatus: 200, wantPath: "/PRObject/azylman%2Faerial%23101/HandleMerged/send", wantBodySubs: []string{`"merge_sha":"merge999"`}, wantRequests: 1, wantIdemPrefix: "HandleMerged:"},
+		{name: "qualified repo keeps its owner", owner: testOwner, handler: "HandleCheckPassed", event: prwire.PREvent{Event: "check_passed", Repo: "x/y", PRNumber: 3}, serverStatus: 200, wantPath: "/PRObject/x%2Fy%233/HandleCheckPassed/send", wantBodySubs: []string{`"repo":"x/y"`}, wantRequests: 1, wantIdemPrefix: "HandleCheckPassed:"},
+		{name: "bare repo without owner sends nothing", handler: "HandleCheckPassed", event: prwire.PREvent{Event: "check_passed", Repo: "aerial", PRNumber: 3}, serverStatus: 200, wantErr: "github_owner is unset", wantRequests: 0},
+		{name: "qualified repo needs no owner", handler: "HandleCheckPassed", event: prwire.PREvent{Event: "check_passed", Repo: "azylman/aerial", PRNumber: 3}, serverStatus: 200, wantPath: "/PRObject/azylman%2Faerial%233/HandleCheckPassed/send", wantRequests: 1, wantIdemPrefix: "HandleCheckPassed:"},
+		{name: "unknown handler sends nothing", owner: testOwner, handler: "RoutePREvent", event: prwire.PREvent{Event: "merged", Repo: "aerial", PRNumber: 101, HeadSHA: "abc123"}, serverStatus: 200, wantErr: "unknown pr handler", wantRequests: 0},
+		{name: "empty repo sends nothing", owner: testOwner, handler: "HandleClosed", event: prwire.PREvent{Event: "closed", Repo: "", PRNumber: 101, HeadSHA: "abc123"}, serverStatus: 200, wantErr: "repo is required", wantRequests: 0},
+		{name: "bad pr number sends nothing", owner: testOwner, handler: "HandleClosed", event: prwire.PREvent{Event: "closed", Repo: "aerial", PRNumber: 0, HeadSHA: "abc123"}, serverStatus: 200, wantErr: "pr_number is required", wantRequests: 0},
+		{name: "unconfigured endpoint sends nothing", owner: testOwner, baseURL: "unconfigured", handler: "HandleCheckFailed", event: prwire.PREvent{Event: "check_failed", Repo: "aerial", PRNumber: 101, HeadSHA: "abc123"}, serverStatus: 200, wantErr: "restate is not configured", wantRequests: 0},
+		{name: "refused endpoint surfaces error", owner: testOwner, baseURL: "http://127.0.0.1:1", handler: "HandleCheckFailed", event: prwire.PREvent{Event: "check_failed", Repo: "aerial", PRNumber: 101, HeadSHA: "abc123"}, serverStatus: 200, wantErr: "restate ingress request failed", wantRequests: 0},
+		{name: "malformed endpoint surfaces error", owner: testOwner, baseURL: "http://restate bad", handler: "HandleCheckFailed", event: prwire.PREvent{Event: "check_failed", Repo: "aerial", PRNumber: 101, HeadSHA: "abc123"}, serverStatus: 200, wantErr: "restate ingress request failed", wantRequests: 0},
+		{name: "server error surfaces status", owner: testOwner, handler: "HandleCheckFailed", event: prwire.PREvent{Event: "check_failed", Repo: "aerial", PRNumber: 101, HeadSHA: "abc123"}, serverStatus: 500, wantErr: "returned HTTP 500", wantRequests: 1},
+		{name: "truncated success body surfaces read error", owner: testOwner, handler: "HandleCheckFailed", event: prwire.PREvent{Event: "check_failed", Repo: "aerial", PRNumber: 101, HeadSHA: "abc123"}, serverStatus: 200, truncate: true, wantErr: "restate ingress request failed", wantRequests: 1},
+		{name: "unreadable error body surfaces read error", owner: testOwner, handler: "HandleCheckFailed", event: prwire.PREvent{Event: "check_failed", Repo: "aerial", PRNumber: 101, HeadSHA: "abc123"}, serverStatus: 500, truncate: true, wantErr: "restate ingress request failed", wantRequests: 1},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -154,7 +164,7 @@ func TestSendPREvent(t *testing.T) {
 			var recs []recordedRequest
 			srv := newRecordedServer(t, tc.serverStatus, tc.truncate, &recs)
 			defer srv.Close()
-			c := NewClient(resolveBaseURL(srv, tc.baseURL), "", "", nil)
+			c := NewClient(resolveBaseURL(srv, tc.baseURL), tc.owner, "", "", nil)
 			ctx := t.Context()
 			if tc.identity != "" {
 				ctx = WithEventIdentity(ctx, tc.identity)
@@ -195,7 +205,7 @@ func TestSendRepoEvent(t *testing.T) {
 			var recs []recordedRequest
 			srv := newRecordedServer(t, tc.serverStatus, false, &recs)
 			defer srv.Close()
-			c := NewClient(resolveBaseURL(srv, tc.baseURL), "", "", nil)
+			c := NewClient(resolveBaseURL(srv, tc.baseURL), testOwner, "", "", nil)
 			ctx := t.Context()
 			if tc.identity != "" {
 				ctx = WithEventIdentity(ctx, tc.identity)
@@ -222,7 +232,7 @@ func TestUnmanagedGuard(t *testing.T) {
 			var recs []recordedRequest
 			srv := newRecordedServer(t, 200, false, &recs)
 			defer srv.Close()
-			c := NewClient(srv.URL, "", "", nil)
+			c := NewClient(srv.URL, testOwner, "", "", nil)
 			if err := c.SendPREvent(t.Context(), "HandleCollaboratorAlert", tc.event); err != nil {
 				t.Fatalf("SendPREvent() = %v, want nil", err)
 			}
@@ -260,7 +270,7 @@ func TestSingleObjectServiceRouting(t *testing.T) {
 			var recs []recordedRequest
 			srv := newRecordedServer(t, 200, false, &recs)
 			defer srv.Close()
-			c := NewClient(srv.URL, "", "", nil)
+			c := NewClient(srv.URL, testOwner, "", "", nil)
 
 			if err := c.SendPREvent(t.Context(), "HandleCheckPassed", prwire.PREvent{Repo: "aerial", PRNumber: 1, Agent: tc.agent}); err != nil {
 				t.Fatalf("SendPREvent failed: %v", err)

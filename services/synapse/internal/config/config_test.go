@@ -147,6 +147,7 @@ type loadConfigCase struct {
 	wantCollaboratorAlerts []CollaboratorCIAlertRule
 	wantStrictErr          bool
 	wantGHCredential       string
+	wantGitHubOwner        string
 }
 
 // withRestateURL prefixes a non-empty YAML fixture with the restate_url every
@@ -217,6 +218,7 @@ func assertLoadedConfigFields(t *testing.T, tc loadConfigCase, cfg Config) {
 		{cfg.SystemChannelID, tc.wantSysChan, "SystemChannelID"},
 		{cfg.BotID, tc.wantBotID, "BotID"},
 		{cfg.GitHubCredential, tc.wantGHCredential, "GitHubCredential"},
+		{cfg.GitHubOwner, tc.wantGitHubOwner, "GitHubOwner"},
 	} {
 		if check.want != "" && check.got != check.want {
 			t.Errorf("%s = %q, want %q", check.field, check.got, check.want)
@@ -426,8 +428,9 @@ func loadConfigYAMLAdvancedCases() []loadConfigCase {
 			wantBotID: "aerial",
 		},
 		{
-			name:      "collaborator_ci_alerts loaded from local yaml",
-			localYAML: "collaborator_ci_alerts:\n  - repo: \"mirrormere\"\n    channel_id: \"123456789012345678\"\n    authors:\n      Collaborator-User: \"<@111222>\"\n",
+			name:            "collaborator_ci_alerts loaded from local yaml",
+			localYAML:       "github_owner: \" azylman \"\ncollaborator_ci_alerts:\n  - repo: \"mirrormere\"\n    channel_id: \"123456789012345678\"\n    authors:\n      Collaborator-User: \"<@111222>\"\n",
+			wantGitHubOwner: "azylman",
 			wantCollaboratorAlerts: []CollaboratorCIAlertRule{
 				{
 					Repo:      "azylman/mirrormere",
@@ -441,10 +444,10 @@ func loadConfigYAMLAdvancedCases() []loadConfigCase {
 		{
 			name:       "collaborator_ci_alerts loaded from aerial config fallback",
 			localYAML:  "port: \"4020\"\n",
-			aerialYAML: "collaborator_ci_alerts:\n  - repo: \"azylman/aerial\"\n    channel_id: \"987654321098765432\"\n    authors:\n      Collaborator: \"<@333444>\"\n",
+			aerialYAML: "collaborator_ci_alerts:\n  - repo: \"acme/aerial\"\n    channel_id: \"987654321098765432\"\n    authors:\n      Collaborator: \"<@333444>\"\n",
 			wantCollaboratorAlerts: []CollaboratorCIAlertRule{
 				{
-					Repo:      "azylman/aerial",
+					Repo:      "acme/aerial",
 					ChannelID: "987654321098765432",
 					Authors: map[string]string{
 						"collaborator": "<@333444>",
@@ -509,6 +512,7 @@ func TestRestartRequired(t *testing.T) {
 		{name: "kube api server requires restart", next: withField(base, Config{KubeAPIServer: "https://192.0.2.2:443"}), want: true},
 		{name: "kube token requires restart", next: withField(base, Config{KubeToken: "kube2"}), want: true},
 		{name: "nats url requires restart", next: withField(base, Config{NATSURL: "nats://nats2:4222"}), want: true},
+		{name: "github owner requires restart", next: withField(base, Config{GitHubOwner: "acme"}), want: true},
 		{name: "k8s auth enabled requires restart", next: withField(base, Config{K8sAuthEnabled: true}), want: true},
 		{name: "bots count mismatch requires restart", next: withField(base, Config{Bots: map[string]BotConfig{"aerial": base.Bots["aerial"], "agent-alpha": {DefaultOwner: true}}}), want: true},
 		{name: "bots value mismatch requires restart", next: withField(base, Config{Bots: map[string]BotConfig{"aerial": {DiscordToken: "different"}}}), want: true},
@@ -786,6 +790,7 @@ func TestNormalizeCollaboratorCIAlerts(t *testing.T) {
 
 	tests := []struct {
 		name  string
+		owner string
 		rules []CollaboratorCIAlertRule
 		want  []CollaboratorCIAlertRule
 	}{
@@ -809,7 +814,8 @@ func TestNormalizeCollaboratorCIAlerts(t *testing.T) {
 			want: nil,
 		},
 		{
-			name: "normalizes valid rules and lowercases author logins",
+			name:  "normalizes valid rules and lowercases author logins",
+			owner: "azylman",
 			rules: []CollaboratorCIAlertRule{
 				{
 					Repo:      " mirrormere ",
@@ -830,12 +836,23 @@ func TestNormalizeCollaboratorCIAlerts(t *testing.T) {
 				},
 			},
 		},
+		{
+			name:  "qualified rule repo keeps its owner",
+			owner: "acme",
+			rules: []CollaboratorCIAlertRule{{Repo: "x/y", ChannelID: "123456789012345678", Authors: map[string]string{"user": "<@1>"}}},
+			want:  []CollaboratorCIAlertRule{{Repo: "x/y", ChannelID: "123456789012345678", Authors: map[string]string{"user": "<@1>"}}},
+		},
+		{
+			name:  "empty owner keeps bare rule repo",
+			rules: []CollaboratorCIAlertRule{{Repo: "aerial", ChannelID: "123456789012345678", Authors: map[string]string{"user": "<@1>"}}},
+			want:  []CollaboratorCIAlertRule{{Repo: "aerial", ChannelID: "123456789012345678", Authors: map[string]string{"user": "<@1>"}}},
+		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := NormalizeCollaboratorCIAlerts(tc.rules)
+			got := NormalizeCollaboratorCIAlerts(tc.owner, tc.rules)
 			if !reflect.DeepEqual(got, tc.want) {
 				t.Errorf("NormalizeCollaboratorCIAlerts() = %+v, want %+v", got, tc.want)
 			}
@@ -855,7 +872,7 @@ func TestLookupCollaboratorCIAlert(t *testing.T) {
 			},
 		},
 	}
-	cfg := Config{CollaboratorCIAlerts: rules}
+	cfg := Config{GitHubOwner: "azylman", CollaboratorCIAlerts: rules}
 
 	tests := []struct {
 		name          string

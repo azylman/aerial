@@ -19,6 +19,7 @@ func TestHandleRetryPRReadinessRestateOwned(t *testing.T) {
 		k8s         bool
 		token       string
 		noURL       bool
+		owner       string
 		bots        map[string]BotConfig
 		body        string
 		callCode    int
@@ -32,6 +33,8 @@ func TestHandleRetryPRReadinessRestateOwned(t *testing.T) {
 			name: "accepted gate is pending", body: validReq, callCode: 200, callBody: `{"status":202,"kustomization_requests":{"core":{"namespace":"flux-system","requested_at":"t1"}}}`,
 			wantStatus: http.StatusAccepted, wantRespSub: `"readiness_pending"`, wantCallSub: `{"merge_sha":"m1"}`, wantCalls: 1,
 		},
+		{name: "bare repo is qualified with the configured owner", owner: "azylman", body: `{"repo":"aerial","pr_number":42,"expected_merge_sha":"m1"}`, callCode: 200, callBody: `{"status":202}`, wantStatus: http.StatusAccepted, wantCallSub: `{"merge_sha":"m1"}`, wantCalls: 1},
+		{name: "bare repo without an owner never reaches restate", body: `{"repo":"aerial","pr_number":42,"expected_merge_sha":"m1"}`, wantStatus: http.StatusServiceUnavailable, wantRespSub: "github_owner is unset"},
 		{name: "no matching gate is a conflict", body: validReq, callCode: 200, callBody: `{"status":409}`, wantStatus: http.StatusConflict, wantRespSub: "no matching merged rollout gate", wantCalls: 1},
 		{name: "restate owner fence is a conflict", body: validReq, callCode: 409, callBody: "owner", wantStatus: http.StatusConflict, wantCalls: 1},
 		{name: "restate outage is unavailable", body: validReq, callCode: 500, callBody: "boom", wantStatus: http.StatusServiceUnavailable, wantCalls: 1},
@@ -53,7 +56,7 @@ func TestHandleRetryPRReadinessRestateOwned(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			ingress := &ownedIngress{sendCode: http.StatusAccepted, callCode: tc.callCode, callBody: tc.callBody}
-			cfg := Config{Bots: tc.bots}
+			cfg := Config{Bots: tc.bots, GitHubOwner: tc.owner}
 			if !tc.noURL {
 				cfg.RestateURL = ingress.serve(t)
 			}

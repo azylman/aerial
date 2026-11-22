@@ -4,11 +4,10 @@ import (
 	"context"
 	"errors"
 	"slices"
+	"strings"
 	"sync"
 
 	"github.com/bwmarrin/discordgo"
-
-	"github.com/azylman/aerial/services/synapse/internal/model"
 )
 
 type mockOutboundDispatcher struct {
@@ -66,7 +65,7 @@ func (m *mockOutboundDispatcher) DiscoverRepoKustomizations(ctx context.Context,
 	if m.repoDiscoverErr != nil {
 		return nil, m.repoDiscoverErr
 	}
-	return m.repoKustomizations[model.NormalizeRepo(repo)], nil
+	return m.repoKustomizations[strings.TrimSpace(repo)], nil
 }
 
 func (m *mockOutboundDispatcher) DispatchPrompt(ctx context.Context, req PromptRequest) error {

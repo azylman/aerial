@@ -12,7 +12,6 @@ import (
 	"github.com/azylman/aerial/pkg/prwire"
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/synapse/internal/metrics"
-	"github.com/azylman/aerial/services/synapse/internal/model"
 	"github.com/azylman/aerial/services/synapse/internal/restateclient"
 )
 
@@ -73,7 +72,7 @@ func (s *RouterServer) restateClient() (*restateclient.Client, error) {
 	if url == "" {
 		return nil, errors.New("no restate_url configured")
 	}
-	return restateclient.NewClient(url, cfg.RestatePRService, cfg.RestateRepoService, &http.Client{Timeout: restateTimeout}), nil
+	return restateclient.NewClient(url, cfg.GitHubOwner, cfg.RestatePRService, cfg.RestateRepoService, &http.Client{Timeout: restateTimeout}), nil
 }
 
 // restateSendError is a failed Restate send. Nothing else performs the
@@ -134,7 +133,7 @@ func (s *RouterServer) restateSend(ctx context.Context, handler string, send fun
 // knows (empty when unknown); synapse never looks the owner up. PR-less
 // events have no PRObject key and send nothing.
 func (s *RouterServer) sendOwnedPR(ctx context.Context, handler string, ev prwire.PREvent) error {
-	if ev.PRNumber <= 0 || model.NormalizeRepo(ev.Repo) == "" {
+	if ev.PRNumber <= 0 || strings.TrimSpace(ev.Repo) == "" {
 		return nil
 	}
 	return s.restateSend(ctx, handler, func(c *restateclient.Client) error {
@@ -144,7 +143,7 @@ func (s *RouterServer) sendOwnedPR(ctx context.Context, handler string, ev prwir
 
 // sendOwnedRepo sends one RepoObject event.
 func (s *RouterServer) sendOwnedRepo(ctx context.Context, handler string, ev prwire.RepoEvent) error {
-	if model.NormalizeRepo(ev.Repo) == "" {
+	if strings.TrimSpace(ev.Repo) == "" {
 		return nil
 	}
 	return s.restateSend(ctx, handler, func(c *restateclient.Client) error {
@@ -160,7 +159,7 @@ func (s *RouterServer) sendOwnedPROrSHA(ctx context.Context, shaHandler, prHandl
 		return s.sendOwnedPR(ctx, prHandler, ev)
 	}
 	sha = strings.TrimSpace(sha)
-	if sha == "" || prwire.IsZeroSHA(sha) || model.NormalizeRepo(ev.Repo) == "" {
+	if sha == "" || prwire.IsZeroSHA(sha) || strings.TrimSpace(ev.Repo) == "" {
 		return nil
 	}
 	return s.restateSend(ctx, shaHandler, func(c *restateclient.Client) error {

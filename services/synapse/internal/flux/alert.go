@@ -4,6 +4,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/azylman/aerial/pkg/strutil"
 	"github.com/azylman/aerial/services/synapse/internal/kube"
 	"github.com/azylman/aerial/services/synapse/internal/model"
 )
@@ -30,12 +31,13 @@ func AlertPayloadRepo(alert model.FluxAlertEvent) string {
 	return strings.TrimSpace(alert.Metadata["repo"])
 }
 
-// ResolveFluxRepo determines the normalized repo name from an alert event.
+// defaultFluxRepo is the repo an alert naming none belongs to. It is bare:
+// synapse qualifies it with the configured GitHub owner.
+const defaultFluxRepo = "aerial"
+
+// ResolveFluxRepo returns the repo an alert carries, or defaultFluxRepo.
 func ResolveFluxRepo(alert model.FluxAlertEvent) string {
-	if candidate := AlertPayloadRepo(alert); candidate != "" {
-		return model.NormalizeRepo(candidate)
-	}
-	return "azylman/aerial"
+	return strutil.FirstNonEmpty(AlertPayloadRepo(alert), defaultFluxRepo)
 }
 
 // CleanRevisionSHA extracts the commit SHA from a Flux revision metadata string.

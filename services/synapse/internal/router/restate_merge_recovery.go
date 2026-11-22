@@ -8,7 +8,6 @@ import (
 	"github.com/azylman/aerial/pkg/prwire"
 	"github.com/azylman/aerial/services/synapse/internal/github"
 	"github.com/azylman/aerial/services/synapse/internal/metrics"
-	"github.com/azylman/aerial/services/synapse/internal/model"
 	"github.com/azylman/aerial/services/synapse/internal/restateclient"
 )
 
@@ -28,7 +27,7 @@ func (s *RouterServer) resolveCommitPR(ctx context.Context, repo, sha string) (g
 // under: repo#pr plus the merge SHA, so every deploy event of one rollout
 // that recovers the same merge dedups at the Restate ingress.
 func mergeRecoveryIdentity(repo string, prNumber int, mergeSHA string) string {
-	return "merge-recovery:" + restateclient.PRObjectKey(repo, prNumber) + "@" + strings.ToLower(strings.TrimSpace(mergeSHA))
+	return "merge-recovery:" + prwire.PRObjectKey(repo, prNumber) + "@" + strings.ToLower(strings.TrimSpace(mergeSHA))
 }
 
 // shouldRecoverMerge decides whether a GitHub commit lookup for sha proves
@@ -57,7 +56,7 @@ func (s *RouterServer) recoverLostMerge(ctx context.Context, path, repo, sha str
 	if err != nil {
 		return
 	}
-	repo = model.NormalizeRepo(repo)
+	repo = strings.TrimSpace(repo)
 	view, err := c.GetDeployView(ctx, repo, pr.Number)
 	if err != nil {
 		slog.WarnContext(ctx, "[synapse] restate merge recovery skipped: deploy view read failed",
@@ -79,5 +78,5 @@ func (s *RouterServer) recoverLostMerge(ctx context.Context, path, repo, sha str
 	}
 	metrics.RecordRestateMergeRecovered(path)
 	slog.InfoContext(ctx, "[synapse] restate merge recovered from deploy path",
-		"pr", restateclient.PRObjectKey(repo, pr.Number), "merge_sha", sha, "head_sha", pr.HeadSHA, "path", path)
+		"pr", prwire.PRObjectKey(repo, pr.Number), "merge_sha", sha, "head_sha", pr.HeadSHA, "path", path)
 }

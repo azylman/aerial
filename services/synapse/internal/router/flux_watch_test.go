@@ -545,6 +545,7 @@ func TestHandleFluxWebhookSourceRepo(t *testing.T) {
 		{name: "alert without repo resolves from its flux source", payload: `{"involvedObject":{"kind":"Kustomization","name":"stack-core","namespace":"flux-system"},"reason":"Progressing","metadata":{"revision":"main@sha1:abc"}}`, sourceRepo: "acme/stack", wantRepo: "acme/stack"},
 		{name: "payload repo wins over source lookup", payload: `{"involvedObject":{"kind":"Kustomization","name":"stack-core"},"reason":"Progressing","metadata":{"repo":"acme/payload","revision":"main@sha1:abc"}}`, sourceRepo: "acme/stack", wantRepo: "acme/payload"},
 		{name: "source lookup failure falls back to the default repo", payload: `{"involvedObject":{"kind":"GitRepository","name":"stack"},"reason":"NewArtifact","metadata":{"revision":"main@sha1:abc"}}`, sourceErr: errors.New("forbidden"), wantRepo: "azylman/aerial"},
+		{name: "bare payload repo is qualified with the owner", payload: `{"involvedObject":{"kind":"Kustomization","name":"stack-core"},"reason":"Progressing","metadata":{"repo":"mirrormere","revision":"main@sha1:abc"}}`, wantRepo: "azylman/mirrormere"},
 		{name: "no dispatcher falls back to the default repo", payload: `{"involvedObject":{"kind":"GitRepository","name":"stack"},"reason":"NewArtifact","metadata":{"revision":"main@sha1:abc"}}`, noDisp: true, wantRepo: "azylman/aerial"},
 	}
 	for _, tc := range tests {
@@ -554,7 +555,7 @@ func TestHandleFluxWebhookSourceRepo(t *testing.T) {
 			if !tc.noDisp {
 				disp = &mockOutboundDispatcher{sourceRepo: tc.sourceRepo, sourceRepoErr: tc.sourceErr}
 			}
-			srv := newTestRouter(Config{}, nil, disp)
+			srv := newTestRouter(Config{GitHubOwner: "azylman"}, nil, disp)
 			bus := &mockEventBus{}
 			srv.SetEventBus(bus)
 			req := httptest.NewRequest(http.MethodPost, "/webhooks/flux", strings.NewReader(tc.payload))
