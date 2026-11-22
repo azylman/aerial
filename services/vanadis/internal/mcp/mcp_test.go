@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
-	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -21,84 +20,8 @@ import (
 	"github.com/azylman/aerial/services/vanadis/internal/model"
 	"github.com/azylman/aerial/services/vanadis/internal/restate"
 	"github.com/azylman/aerial/services/vanadis/internal/store"
+	"github.com/azylman/aerial/services/vanadis/internal/storetest"
 )
-
-// memoryStore is an airgapped store.Store fixture seeded directly by tests.
-type memoryStore struct {
-	store.VanadisStore
-
-	builds          map[string]model.VanadisBuild
-	chunks          map[string][]model.VanadisChunk
-	getErr, listErr error
-}
-
-func newMemoryStore() *memoryStore {
-	return &memoryStore{builds: make(map[string]model.VanadisBuild), chunks: make(map[string][]model.VanadisChunk)}
-}
-
-func (m *memoryStore) GetBuild(_ context.Context, buildID string) (*model.VanadisBuild, []model.VanadisChunk, error) {
-	if m.getErr != nil {
-		return nil, nil, m.getErr
-	}
-	b, ok := m.builds[buildID]
-	if !ok {
-		return nil, nil, model.ErrBuildNotFound
-	}
-	return &b, m.chunks[buildID], nil
-}
-
-func (m *memoryStore) ListBuilds(_ context.Context, limit int) ([]model.VanadisBuildEntry, error) {
-	if m.listErr != nil {
-		return nil, m.listErr
-	}
-	if limit <= 0 || limit > 100 {
-		limit = 50
-	}
-	bList := make([]model.VanadisBuild, 0, len(m.builds))
-	for _, b := range m.builds {
-		bList = append(bList, b)
-	}
-	sort.Slice(bList, func(i, j int) bool {
-		return bList[i].CreatedAt.After(bList[j].CreatedAt) || (bList[i].CreatedAt.Equal(bList[j].CreatedAt) && bList[i].ID > bList[j].ID)
-	})
-	if len(bList) > limit {
-		bList = bList[:limit]
-	}
-	entries := make([]model.VanadisBuildEntry, len(bList))
-	for i, b := range bList {
-		entries[i] = model.SummarizeBuildEntry(b, m.chunks[b.ID])
-	}
-	return entries, nil
-}
-
-func (m *memoryStore) GetChunk(_ context.Context, chunkID string) (*model.VanadisChunk, *model.VanadisBuild, error) {
-	if m.getErr != nil {
-		return nil, nil, m.getErr
-	}
-	for bID, list := range m.chunks {
-		for _, c := range list {
-			if c.ID == chunkID {
-				b, ok := m.builds[bID]
-				if !ok {
-					return nil, nil, model.ErrBuildNotFound
-				}
-				return &c, &b, nil
-			}
-		}
-	}
-	return nil, nil, model.ErrChunkNotFound
-}
-
-func mkBuild(id, threadID, title, objective, status string) model.VanadisBuild {
-	return model.VanadisBuild{ID: id, ThreadID: threadID, Title: title, Objective: objective, Status: status, Tier: 2}
-}
-
-func mkChunk(id, buildID string, idx int, title, instr, effort, status string) model.VanadisChunk {
-	if effort == "" {
-		effort = "medium"
-	}
-	return model.VanadisChunk{ID: id, BuildID: buildID, ChunkIndex: idx, Mode: "pr", Repo: "aerial", Title: title, Instructions: instr, Effort: effort, Status: status, TargetFiles: []string{}, TargetSymbols: []string{}, AcceptanceCriteria: []string{}, DependsOn: []string{}}
-}
 
 func newTestHandler(st store.VanadisStore, ingressURL string, enabled bool) *Handler {
 	return NewHandler(st, restate.NewClient(config.RestateConfig{RestateIngressURL: ingressURL}, nil), enabled)
@@ -106,7 +29,7 @@ func newTestHandler(st store.VanadisStore, ingressURL string, enabled bool) *Han
 
 func TestMCP_HTTPTransport(t *testing.T) {
 	t.Parallel()
-	handler := newTestHandler(newMemoryStore(), "", true).NewHTTPHandler()
+	handler := newTestHandler(storetest.New(), "", true).NewHTTPHandler()
 	ts := httptest.NewServer(handler)
 	t.Cleanup(ts.Close)
 
@@ -214,7 +137,7 @@ func TestMCP_HTTPTransport(t *testing.T) {
 
 func TestServerInstructions(t *testing.T) {
 	t.Parallel()
-	handler := newTestHandler(newMemoryStore(), "", true).NewHTTPHandler()
+	handler := newTestHandler(storetest.New(), "", true).NewHTTPHandler()
 	ts := httptest.NewServer(handler)
 	t.Cleanup(ts.Close)
 
@@ -264,37 +187,37 @@ type mcpToolCase struct {
 // newMCPToolsStore seeds two builds on thread 1234567890 (one running with a
 // running and a pending chunk, one completed) and one completed build on thread
 // 9876543210, then applies the injected list/get store errors.
-func newMCPToolsStore(listErr, getErr error) *memoryStore {
+func newMCPToolsStore(listErr, getErr error) *storetest.Store {
 	now := time.Now().UTC()
-	b1 := mkBuild("build-mcp-1", "1234567890", "Build 1 Title", "Objective 1", "running")
+	b1 := storetest.Build("build-mcp-1", "1234567890", "Build 1 Title", "Objective 1", "running")
 	b1.SharedContext = "Context 1"
 	b1.CreatedAt = now.Add(-10 * time.Minute)
 
-	b2 := mkBuild("build-mcp-2", "1234567890", "Build 2 Title", "Objective 2", "completed")
+	b2 := storetest.Build("build-mcp-2", "1234567890", "Build 2 Title", "Objective 2", "completed")
 	b2.CreatedAt = now.Add(-5 * time.Minute)
 
-	b3 := mkBuild("build-mcp-3", "9876543210", "Build 3 Title", "Objective 3", "completed")
+	b3 := storetest.Build("build-mcp-3", "9876543210", "Build 3 Title", "Objective 3", "completed")
 	b3.CreatedAt = now.Add(-1 * time.Minute)
 
-	c1_0 := mkChunk("chunk-1", "build-mcp-1", 0, "Chunk 1", "Inst 1", "medium", "running")
+	c1_0 := storetest.Chunk("chunk-1", "build-mcp-1", 0, "Chunk 1", "Inst 1", "medium", "running")
 	c1_0.PRNumber = 101
 
-	c1_1 := mkChunk("chunk-2", "build-mcp-1", 1, "Chunk 2", "Inst 2", "high", "pending")
+	c1_1 := storetest.Chunk("chunk-2", "build-mcp-1", 1, "Chunk 2", "Inst 2", "high", "pending")
 	c1_1.DependsOn = []string{"chunk-1"}
 
-	st := newMemoryStore()
-	st.builds["build-mcp-1"], st.chunks["build-mcp-1"] = b1, []model.VanadisChunk{c1_0, c1_1}
-	st.builds["build-mcp-2"], st.chunks["build-mcp-2"] = b2, []model.VanadisChunk{mkChunk("chunk-2-0", "build-mcp-2", 0, "C2", "I2", "low", "completed")}
-	st.builds["build-mcp-3"], st.chunks["build-mcp-3"] = b3, []model.VanadisChunk{mkChunk("chunk-3-0", "build-mcp-3", 0, "C3", "I3", "low", "completed")}
-	b4 := mkBuild("build-mcp-4", "4444444444", "Build 4 Title", "Objective 4", "running")
+	st := storetest.New()
+	st.Builds["build-mcp-1"], st.Chunks["build-mcp-1"] = b1, []model.VanadisChunk{c1_0, c1_1}
+	st.Builds["build-mcp-2"], st.Chunks["build-mcp-2"] = b2, []model.VanadisChunk{storetest.Chunk("chunk-2-0", "build-mcp-2", 0, "C2", "I2", "low", "completed")}
+	st.Builds["build-mcp-3"], st.Chunks["build-mcp-3"] = b3, []model.VanadisChunk{storetest.Chunk("chunk-3-0", "build-mcp-3", 0, "C3", "I3", "low", "completed")}
+	b4 := storetest.Build("build-mcp-4", "4444444444", "Build 4 Title", "Objective 4", "running")
 	b4.Agent = "agent-alpha"
 	b4.CreatedAt = now.Add(-20 * time.Minute)
-	st.builds["build-mcp-4"], st.chunks["build-mcp-4"] = b4, []model.VanadisChunk{
-		mkChunk("chunk-4-0", "build-mcp-4", 0, "C4", "I4", "low", "running"),
-		mkChunk("chunk-4-1", "build-mcp-4", 1, "C4b", "I4b", "low", "pending"),
+	st.Builds["build-mcp-4"], st.Chunks["build-mcp-4"] = b4, []model.VanadisChunk{
+		storetest.Chunk("chunk-4-0", "build-mcp-4", 0, "C4", "I4", "low", "running"),
+		storetest.Chunk("chunk-4-1", "build-mcp-4", 1, "C4b", "I4b", "low", "pending"),
 	}
-	st.listErr = listErr
-	st.getErr = getErr
+	st.ListErr = listErr
+	st.GetErr = getErr
 	return st
 }
 
@@ -404,7 +327,7 @@ func callMCPTool(t *testing.T, tc mcpToolCase, toolName string) []byte {
 	mem := newMCPToolsStore(tc.listErr, tc.getErr)
 	var st store.VanadisStore = mem
 	if tc.actionGeneration != nil {
-		c := &mem.chunks["build-mcp-1"][0]
+		c := &mem.Chunks["build-mcp-1"][0]
 		c.Mode, c.PRNumber, c.StallNudges = "action", 0, *tc.actionGeneration
 	}
 	if tc.nilStore {

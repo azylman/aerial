@@ -183,6 +183,8 @@ func TestConsumerStats(t *testing.T) {
 		{name: "known consumer", stats: pubsubtest.ConsumerStats{Pending: map[string]int64{"c": 7}, Inflight: map[string]int64{"c": 3}}, consumer: "c", wantPending: 7, wantInflight: 3},
 		{name: "unknown consumer is zero", stats: pubsubtest.ConsumerStats{Pending: map[string]int64{"c": 7}}, consumer: "other"},
 		{name: "error wins", stats: pubsubtest.ConsumerStats{Pending: map[string]int64{"c": 7}, Err: errBoom}, consumer: "c", wantErr: "boom"},
+		{name: "per-consumer error", stats: pubsubtest.ConsumerStats{Pending: map[string]int64{"c": 7}, Errs: map[string]error{"c": errBoom}}, consumer: "c", wantErr: "boom"},
+		{name: "other consumer error ignored", stats: pubsubtest.ConsumerStats{Pending: map[string]int64{"c": 7}, Errs: map[string]error{"other": errBoom}}, consumer: "c", wantPending: 7},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
