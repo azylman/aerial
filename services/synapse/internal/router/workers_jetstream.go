@@ -190,6 +190,7 @@ func (s *RouterServer) HandleDiscordIngressJob(ctx context.Context, msg pubsub.M
 		maxAge = 30 * time.Minute
 	}
 
+	attempt := 0
 	for {
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -199,6 +200,7 @@ func (s *RouterServer) HandleDiscordIngressJob(ctx context.Context, msg pubsub.M
 			isStale = true
 		}
 		if isStale {
+			slog.WarnContext(ctx, "[synapse] [jetstream] dropping expired discord ingress job", "message_id", args.MessageID, "agent", args.Agent, "attempts", attempt, "elapsed", time.Since(start))
 			metrics.RecordJobDropped(QueueDiscordIngress, "discord_ingress", "ttl_expired")
 			if termErr := msg.Term(); termErr != nil {
 				slog.WarnContext(ctx, "[synapse] [jetstream] error terming expired discord ingress job", "error", termErr)
@@ -209,13 +211,16 @@ func (s *RouterServer) HandleDiscordIngressJob(ctx context.Context, msg pubsub.M
 		if pErr == nil {
 			return nil
 		}
+		attempt++
 		if model.Is4xxClientError(pErr) {
+			slog.WarnContext(ctx, "[synapse] [jetstream] dropping discord ingress job rejected by eri", "message_id", args.MessageID, "agent", args.Agent, "error", pErr)
 			metrics.RecordJobDropped(QueueDiscordIngress, "discord_ingress", "client_4xx")
 			if termErr := msg.Term(); termErr != nil {
 				slog.WarnContext(ctx, "[synapse] [jetstream] error terming client 4xx discord ingress job", "error", termErr)
 			}
 			return nil
 		}
+		slog.WarnContext(ctx, "[synapse] [jetstream] discord ingress dispatch failed, retrying", "message_id", args.MessageID, "agent", args.Agent, "attempt", attempt, "elapsed", time.Since(start), "retry_in", delay, "error", pErr)
 		metrics.RecordJobRetry(QueueDiscordIngress, "discord_ingress", "discord_ingress_backoff")
 		select {
 		case <-time.After(delay):
