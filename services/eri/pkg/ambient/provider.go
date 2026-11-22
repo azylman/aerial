@@ -97,14 +97,13 @@ func ambientTemplateFuncMap() template.FuncMap {
 			return strings.ToUpper(stringifyTemplateArg(s))
 		},
 		"json": func(v any) string {
-			if v == nil {
-				return ""
+			// nil and (unreachable: template data is decoded JSON) marshal failures render empty.
+			if v != nil {
+				if b, err := json.Marshal(v); err == nil {
+					return string(b)
+				}
 			}
-			b, err := json.Marshal(v)
-			if err != nil {
-				return ""
-			}
-			return string(b)
+			return ""
 		},
 	}
 }

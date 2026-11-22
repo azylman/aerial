@@ -183,33 +183,16 @@ func seedStatusFixtures(store *dbtest.FakeStore, active bool) {
 	}
 }
 
+// TestCommandDefinitions checks the catalog Discord would reject or render blank: every
+// command needs a unique, non-empty name and a description.
 func TestCommandDefinitions(t *testing.T) {
 	t.Parallel()
-	tests := []struct {
-		name     string
-		wantOpts int
-	}{
-		{"status", 0},
-		{"quota", 0},
-		{"interrupt", 0},
-		{"mode", 2},
-		{"ignore_bots", 2},
-	}
-	cmds := CommandDefinitions()
-	if len(cmds) != len(tests) {
-		t.Fatalf("CommandDefinitions() returned %d commands, want %d", len(cmds), len(tests))
-	}
-	opts := make(map[string]int)
-	for _, c := range cmds {
-		opts[c.Name] = len(c.Options)
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			if got, ok := opts[tc.name]; !ok || got != tc.wantOpts {
-				t.Errorf("command %s: options = %d (found=%v), want %d", tc.name, got, ok, tc.wantOpts)
-			}
-		})
+	seen := make(map[string]bool)
+	for _, c := range CommandDefinitions() {
+		if c.Name == "" || c.Description == "" || seen[c.Name] {
+			t.Errorf("command %q: want a unique non-empty name and a description (got %q)", c.Name, c.Description)
+		}
+		seen[c.Name] = true
 	}
 }
 

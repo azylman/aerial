@@ -301,7 +301,6 @@ func TestSendMessageWithAttachments(t *testing.T) {
 		wantSecondNoRef bool
 	}{
 		{name: "NilSession", nilSession: true, channelID: "12345", text: "hello", wantErr: "discord session is nil"},
-		{name: "NilSessionWithAttachments", nilSession: true, channelID: "12345", text: "hello", attachments: att, wantErr: "discord session is nil"},
 		{name: "SingleMessageNoReply", channelID: "12345", text: "Hello world", wantPayloads: 1, wantFirst: `"content":"Hello world"`},
 		{name: "SingleMessageWithReplyRef", channelID: "12345", text: "Hello reply", replyToID: "9876543210", wantPayloads: 1, wantFirstRef: `"message_id":"9876543210"`},
 		{

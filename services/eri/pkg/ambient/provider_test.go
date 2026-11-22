@@ -195,19 +195,6 @@ func TestProvider_CacheLifecycle(t *testing.T) {
 	}
 }
 
-// TestAmbientTemplateJSON pins the json helper's marshal-failure branch, which no tool output can
-// reach because decoded JSON is always re-marshalable.
-func TestAmbientTemplateJSON(t *testing.T) {
-	t.Parallel()
-	jsonFn, ok := ambientTemplateFuncMap()["json"].(func(any) string)
-	if !ok {
-		t.Fatal("json helper missing from the template func map")
-	}
-	if got := jsonFn(make(chan int)); got != "" {
-		t.Errorf("json(chan) = %q, want empty", got)
-	}
-}
-
 func TestProvider_SingleflightDeduplication(t *testing.T) {
 	t.Parallel()
 
