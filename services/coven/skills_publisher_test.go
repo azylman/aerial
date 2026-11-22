@@ -12,8 +12,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	_ "modernc.org/sqlite"
 )
 
 type validateCompiledSkillMarkdownCase struct {
@@ -830,27 +828,24 @@ func (m *mockSkillPublisher) NotifyShortFriction(ctx context.Context, content st
 }
 
 type consolidateProceduralSkillsCase struct {
-	name                    string
-	lockExtraction          bool
-	nilStore                bool
-	nilPublisher            bool
-	nilLLM                  bool
-	storeFailOp             string
-	cands                   []ProceduralCandidate
-	customSkillsDir         string
-	llmResp                 string
-	llmErr                  error
-	pubPR                   int
-	pubErr                  error
-	alertErr                error
-	wantPR                  int
-	wantErr                 bool
-	wantMarkConsolidate     bool
-	wantMarkSkipped         bool
-	wantChangesLen          int
-	wantAlertsLen           int
-	wantConsolidatedIndices []int
-	wantPendingIndices      []int
+	name            string
+	lockExtraction  bool
+	nilStore        bool
+	nilPublisher    bool
+	nilLLM          bool
+	sabotage        string
+	cands           []ProceduralCandidate
+	customSkillsDir string
+	llmResp         string
+	llmErr          error
+	pubPR           int
+	pubErr          error
+	alertErr        error
+	wantPR          int
+	wantErr         bool
+	wantChangesLen  int
+	wantAlertsLen   int
+	wantRows        []string
 }
 
 // haOpsCands is a single pending candidate scoped to the existing ha-ops skill.
@@ -870,18 +865,24 @@ func unscopedCandPair(firstID int64) []ProceduralCandidate {
 func consolidateProceduralSkillsCases(validSkillMD, validNewSkillMD string) []consolidateProceduralSkillsCase {
 	createResp := fmt.Sprintf(`{"action":"CREATE","name":"new-flow","domain":"discord","commit_summary":"add new flow","markdown":%q}`, validNewSkillMD)
 	editResp := fmt.Sprintf(`{"action":"EDIT","name":"ha-ops","domain":"discord","commit_summary":"update ha-ops","markdown":%q}`, validSkillMD)
+	onePending := []string{"1:pending:-"}
+	twoPending := []string{"1:pending:-", "2:pending:-"}
+	fiveSkipped := []string{"1:skipped:-", "2:skipped:-", "3:skipped:-", "4:skipped:-", "5:skipped:-"}
+	fivePending := []string{"1:pending:-", "2:pending:-", "3:pending:-", "4:pending:-", "5:pending:-"}
 	return []consolidateProceduralSkillsCase{
-		{name: "ExtractionMutexLockedReturnsZero", lockExtraction: true},
+		{name: "ExtractionMutexLockedReturnsZero", lockExtraction: true, cands: haOpsCands(1), wantRows: onePending},
 		{name: "NilStoreFails", nilStore: true, wantErr: true},
 		{name: "NilPublisherFails", nilPublisher: true, wantErr: true},
 		{name: "NilLLMFails", nilLLM: true, wantErr: true},
-		{name: "GetPendingCandidatesStoreError", storeFailOp: "GetPendingProceduralCandidates", wantErr: true},
+		// The candidates table is gone, so its rows are not asserted.
+		{name: "GetPendingCandidatesStoreError", sabotage: sabotageProcedural, wantErr: true},
 		{name: "NoPendingCandidatesReturnsZero"},
 		{
 			name:            "ScanCustomSkillsDirError",
 			cands:           []ProceduralCandidate{testProcCand(1, "ha-ops", "trigger", []string{"avoid"}, nil)},
 			customSkillsDir: "FILE_AS_DIR",
 			wantErr:         true,
+			wantRows:        onePending,
 		},
 		{
 			name: "PlanYieldsNoBatchesUnmatchedBlockedCoreSkillsRemainPending",
@@ -889,37 +890,39 @@ func consolidateProceduralSkillsCases(validSkillMD, validNewSkillMD string) []co
 				testProcCand(10, "self-improvement", "trigger 1", nil, nil),
 				testProcCand(11, "writing-plans", "trigger 2", nil, nil),
 			},
-			wantPendingIndices: []int{0, 1},
+			wantRows: twoPending,
 		},
-		{name: "LLMInvocationErrorBatchSkipped", cands: haOpsCands(20), llmErr: errors.New("llm execution error")},
-		{name: "LLMMalformedJSONBatchSkipped", cands: haOpsCands(21), llmResp: "not a json object"},
-		{name: "DesignerReturnsNOOPCandidateMarkedSkipped", cands: haOpsCands(22), llmResp: `{"action":"NOOP"}`, wantMarkSkipped: true},
-		{name: "DesignerReturnsUnknownActionBatchSkipped", cands: haOpsCands(23), llmResp: `{"action":"DELETE"}`},
-		{name: "DesignerValidationFailsBatchSkipped", cands: haOpsCands(24), llmResp: `{"action":"EDIT","name":"ha-ops","markdown":"short"}`},
-		{name: "PublisherFailsReturnsError", cands: unscopedCandPair(25), llmResp: createResp, pubErr: errors.New("github publish error"), wantErr: true},
-		{name: "SuccessCREATEBatch", cands: unscopedCandPair(30), llmResp: createResp, pubPR: 88, wantPR: 88, wantMarkConsolidate: true},
-		{name: "SuccessEDITBatch", cands: haOpsCands(40), llmResp: editResp, pubPR: 89, wantPR: 89, wantMarkConsolidate: true},
-		{name: "PublisherReturnsZeroPRAlreadyOpenCandidatesNotConsolidated", cands: haOpsCands(50), llmResp: editResp},
+		{name: "LLMInvocationErrorBatchSkipped", cands: haOpsCands(20), llmErr: errors.New("llm execution error"), wantRows: onePending},
+		{name: "LLMMalformedJSONBatchSkipped", cands: haOpsCands(21), llmResp: "not a json object", wantRows: onePending},
+		{name: "DesignerReturnsNOOPCandidateMarkedSkipped", cands: haOpsCands(22), llmResp: `{"action":"NOOP"}`, wantRows: []string{"1:skipped:-"}},
+		{name: "DesignerNOOPMarkSkippedErrorLogged", sabotage: sabotageProceduralUpdate, cands: haOpsCands(22), llmResp: `{"action":"NOOP"}`, wantRows: onePending},
+		{name: "DesignerReturnsUnknownActionBatchSkipped", cands: haOpsCands(23), llmResp: `{"action":"DELETE"}`, wantRows: onePending},
+		{name: "DesignerValidationFailsBatchSkipped", cands: haOpsCands(24), llmResp: `{"action":"EDIT","name":"ha-ops","markdown":"short"}`, wantRows: onePending},
+		{name: "PublisherFailsReturnsError", cands: unscopedCandPair(25), llmResp: createResp, pubErr: errors.New("github publish error"), wantErr: true, wantChangesLen: 1, wantRows: twoPending},
+		{name: "SuccessCREATEBatch", cands: unscopedCandPair(30), llmResp: createResp, pubPR: 88, wantPR: 88, wantChangesLen: 1, wantRows: []string{"1:consolidated:88", "2:consolidated:88"}},
+		{name: "SuccessEDITBatch", cands: haOpsCands(40), llmResp: editResp, pubPR: 89, wantPR: 89, wantChangesLen: 1, wantRows: []string{"1:consolidated:89"}},
+		{name: "SuccessMarkConsolidatedErrorLogged", sabotage: sabotageProceduralUpdate, cands: haOpsCands(40), llmResp: editResp, pubPR: 89, wantPR: 89, wantChangesLen: 1, wantRows: onePending},
+		{name: "PublisherReturnsZeroPRAlreadyOpenCandidatesNotConsolidated", cands: haOpsCands(50), llmResp: editResp, wantChangesLen: 1, wantRows: onePending},
 		{
 			name: "CollidingBatchesInSamePassDeferred",
 			cands: []ProceduralCandidate{
 				testProcCand(60, "ha-ops", "trigger 1", []string{"instruction 1"}, nil),
 				testProcCand(61, "", "trigger 2", nil, testEmbeddingAt(0, 1.0)),
 			},
-			llmResp:                 editResp,
-			pubPR:                   95,
-			wantPR:                  95,
-			wantChangesLen:          1,
-			wantConsolidatedIndices: []int{0},
-			wantPendingIndices:      []int{1},
+			llmResp:        editResp,
+			pubPR:          95,
+			wantPR:         95,
+			wantChangesLen: 1,
+			wantRows:       []string{"1:consolidated:95", "2:pending:-"},
 		},
-		{name: "ShortFrictionAlertBatchNotifiedAndMarkedSkipped", cands: makeProceduralCandidateBatch(81, 5), wantMarkSkipped: true, wantAlertsLen: 1},
+		{name: "ShortFrictionAlertBatchNotifiedAndMarkedSkipped", cands: makeProceduralCandidateBatch(81, 5), wantAlertsLen: 1, wantRows: fiveSkipped},
+		{name: "ShortFrictionAlertMarkSkippedErrorLogged", sabotage: sabotageProceduralUpdate, cands: makeProceduralCandidateBatch(81, 5), wantAlertsLen: 1, wantRows: fivePending},
 		{
-			name:               "ShortFrictionAlertErrorRetainsPending",
-			cands:              makeProceduralCandidateBatch(91, 5),
-			alertErr:           errors.New("alert post failed"),
-			wantAlertsLen:      1,
-			wantPendingIndices: []int{0, 1, 2, 3, 4},
+			name:          "ShortFrictionAlertErrorRetainsPending",
+			cands:         makeProceduralCandidateBatch(91, 5),
+			alertErr:      errors.New("alert post failed"),
+			wantAlertsLen: 1,
+			wantRows:      fivePending,
 		},
 	}
 }
@@ -947,78 +950,15 @@ func setupConsolidateProceduralSkillsDir(t *testing.T, validSkillMD, customSkill
 	return skillsDir
 }
 
-func setupConsolidateProceduralStore(ctx context.Context, failOp string, cands []ProceduralCandidate) (*TestMemStore, []int64) {
-	mem := newTestMemStore()
-	if failOp != "" {
-		mem.failOp = failOp
-		mem.failErr = errors.New("simulated store failure")
-	}
-	insertedIDs := make([]int64, 0, len(cands))
-	for _, cand := range cands {
-		id, _ := mem.InsertProceduralCandidate(ctx, cand)
-		insertedIDs = append(insertedIDs, id)
-	}
-	return mem, insertedIDs
-}
-
-func assertConsolidateProceduralCandidateStatus(t *testing.T, tc consolidateProceduralSkillsCase, mem *TestMemStore, insertedIDs []int64) {
+func runConsolidateProceduralSkillsCase(t *testing.T, validSkillMD string, tc consolidateProceduralSkillsCase) {
 	t.Helper()
-	if tc.wantMarkConsolidate {
-		for _, id := range insertedIDs {
-			if mem.proceduralCandidates[id].Status != "consolidated" {
-				t.Errorf("candidate %d status = %q, want consolidated", id, mem.proceduralCandidates[id].Status)
-			}
-			if mem.proceduralCandidates[id].PRNumber != tc.wantPR {
-				t.Errorf("candidate %d pr_number = %d, want %d", id, mem.proceduralCandidates[id].PRNumber, tc.wantPR)
-			}
-		}
-	}
-	if tc.wantMarkSkipped {
-		for _, id := range insertedIDs {
-			if mem.proceduralCandidates[id].Status != "skipped" {
-				t.Errorf("candidate %d status = %q, want skipped", id, mem.proceduralCandidates[id].Status)
-			}
-		}
-	}
-	for _, idx := range tc.wantConsolidatedIndices {
-		if idx < len(insertedIDs) {
-			id := insertedIDs[idx]
-			if mem.proceduralCandidates[id].Status != "consolidated" {
-				t.Errorf("candidate %d status = %q, want consolidated", id, mem.proceduralCandidates[id].Status)
-			}
-		}
-	}
-	for _, idx := range tc.wantPendingIndices {
-		if idx < len(insertedIDs) {
-			id := insertedIDs[idx]
-			if mem.proceduralCandidates[id].Status != "pending" {
-				t.Errorf("candidate %d status = %q, want pending", id, mem.proceduralCandidates[id].Status)
-			}
-		}
-	}
-}
-
-func assertConsolidateProceduralPublisherOutput(t *testing.T, tc consolidateProceduralSkillsCase, pub *mockSkillPublisher) {
-	t.Helper()
-	if tc.wantChangesLen > 0 && len(pub.changes) != tc.wantChangesLen {
-		t.Errorf("published changes len = %d, want %d", len(pub.changes), tc.wantChangesLen)
-	}
-	if tc.wantAlertsLen > 0 && len(pub.alerts) != tc.wantAlertsLen {
-		t.Errorf("alerts len = %d, want %d", len(pub.alerts), tc.wantAlertsLen)
-	}
-}
-
-func runConsolidateProceduralSkillsCase(ctx context.Context, t *testing.T, validSkillMD string, tc consolidateProceduralSkillsCase) {
-	t.Helper()
-	if tc.lockExtraction {
-		extractionMutex.Lock()
-		defer extractionMutex.Unlock()
-	}
-
 	targetSkillsDir := setupConsolidateProceduralSkillsDir(t, validSkillMD, tc.customSkillsDir)
-	mem, insertedIDs := setupConsolidateProceduralStore(ctx, tc.storeFailOp, tc.cands)
+	sqlStore := newTestStore(t)
+	db := sqlStore.DB()
+	seedProceduralCandidates(t, sqlStore, tc.cands)
+	execSQL(t, db, tc.sabotage)
 
-	var store Store = mem
+	var store Store = sqlStore
 	if tc.nilStore {
 		store = nil
 	}
@@ -1045,24 +985,33 @@ func runConsolidateProceduralSkillsCase(ctx context.Context, t *testing.T, valid
 
 	ollama := &MockOllamaClient{embedding: testEmbeddingAt(0, 1.0)}
 
-	prNum, err := ConsolidateProceduralSkills(ctx, store, ollama, llm, publisher, targetSkillsDir)
+	if tc.lockExtraction {
+		extractionMutex.Lock()
+		defer extractionMutex.Unlock()
+	}
+	prNum, err := ConsolidateProceduralSkills(context.Background(), store, ollama, llm, publisher, targetSkillsDir)
 	if (err != nil) != tc.wantErr {
 		t.Fatalf("ConsolidateProceduralSkills() err = %v, wantErr = %v", err, tc.wantErr)
-	}
-	if tc.wantErr {
-		return
 	}
 	if prNum != tc.wantPR {
 		t.Errorf("prNum = %d, want %d", prNum, tc.wantPR)
 	}
-
-	assertConsolidateProceduralCandidateStatus(t, tc, mem, insertedIDs)
-	assertConsolidateProceduralPublisherOutput(t, tc, pub)
+	if len(pub.changes) != tc.wantChangesLen {
+		t.Errorf("published changes len = %d, want %d", len(pub.changes), tc.wantChangesLen)
+	}
+	if len(pub.alerts) != tc.wantAlertsLen {
+		t.Errorf("alerts len = %d, want %d", len(pub.alerts), tc.wantAlertsLen)
+	}
+	if tc.sabotage != sabotageProcedural {
+		if got := procStatusRows(t, db); !equalStrings(got, tc.wantRows) {
+			t.Errorf("candidate rows = %q, want %q", got, tc.wantRows)
+		}
+	}
 }
 
+// TestConsolidateProceduralSkills is serial: ConsolidateProceduralSkills
+// single-flights on the package-global extractionMutex.
 func TestConsolidateProceduralSkills(t *testing.T) {
-	ctx := context.Background()
-
 	validSkillMD := `---
 name: ha-ops
 description: Home assistant operations workflow and automation routines.
@@ -1082,79 +1031,83 @@ description: Novel procedure for orchestrating automated deployments.
 
 	for _, tc := range consolidateProceduralSkillsCases(validSkillMD, validNewSkillMD) {
 		t.Run(tc.name, func(t *testing.T) {
-			runConsolidateProceduralSkillsCase(ctx, t, validSkillMD, tc)
+			runConsolidateProceduralSkillsCase(t, validSkillMD, tc)
 		})
 	}
 }
 
-func TestWorker_RunDaily_ProceduralSkills(t *testing.T) {
-	ctx := context.Background()
+// writeHAOpsSkillDir writes custom-skills/discord/ha-ops/SKILL.md under a temp
+// dir and returns the custom-skills root.
+func writeHAOpsSkillDir(t *testing.T, md string) string {
+	t.Helper()
+	root := filepath.Join(t.TempDir(), "custom-skills")
+	skillsDir := filepath.Join(root, "discord", "ha-ops")
+	if err := os.MkdirAll(skillsDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(skillsDir, "SKILL.md"), []byte(md), 0o644); err != nil {
+		t.Fatalf("write SKILL.md: %v", err)
+	}
+	return root
+}
 
-	tmpDir := t.TempDir()
-	skillsDir := filepath.Join(tmpDir, "custom-skills", "discord", "ha-ops")
-	_ = os.MkdirAll(skillsDir, 0o755)
-	validMD := `---
+const haOpsShortSkillMD = `---
 name: ha-ops
 description: Home assistant operations workflow and automation routines.
 ---
 # Home Assistant Operations
 Procedure steps.
 `
-	_ = os.WriteFile(filepath.Join(skillsDir, "SKILL.md"), []byte(validMD), 0o644)
 
-	mem := newTestMemStore()
-	_, _ = mem.InsertProceduralCandidate(ctx, testProcCand(1, "ha-ops", "trigger 1", []string{"avoid"}, nil))
+// TestWorker_RunDaily_ProceduralSkills is serial: skill consolidation
+// single-flights on the package-global extractionMutex.
+func TestWorker_RunDaily_ProceduralSkills(t *testing.T) {
+	customSkills := writeHAOpsSkillDir(t, haOpsShortSkillMD)
+
+	store := newTestStore(t)
+	seedProceduralCandidates(t, store, []ProceduralCandidate{testProcCand(1, "ha-ops", "trigger 1", []string{"avoid"}, nil)})
 
 	pub := &mockSkillPublisher{prNum: 55}
 	llm := func(c context.Context, prompt string) (string, error) {
-		return fmt.Sprintf(`{"action":"EDIT","name":"ha-ops","markdown":%q}`, validMD), nil
+		return fmt.Sprintf(`{"action":"EDIT","name":"ha-ops","markdown":%q}`, haOpsShortSkillMD), nil
 	}
 
 	w := NewWorker(WorkerConfig{
-		Store:           mem,
+		Store:           store,
 		Ollama:          &MockOllamaClient{embedding: testEmbeddingAt(0, 1.0)},
 		LLMClient:       llm,
 		Publisher:       pub,
-		CustomSkillsDir: filepath.Join(tmpDir, "custom-skills"),
+		CustomSkillsDir: customSkills,
 	})
 
 	// Tick 60 is daily decay + dreaming + procedural consolidation
-	w.Tick(ctx, 60)
+	w.Tick(context.Background(), 60)
 
 	if len(pub.changes) != 1 {
 		t.Errorf("publisher changes len = %d, want 1", len(pub.changes))
 	}
+	if got, want := procStatusRows(t, store.DB()), []string{"1:consolidated:55"}; !equalStrings(got, want) {
+		t.Errorf("candidate rows = %q, want %q", got, want)
+	}
 }
 
+// TestToolHandler_Consolidate_ProceduralSkills is serial: consolidation
+// single-flights on the package-global extractionMutex.
 func TestToolHandler_Consolidate_ProceduralSkills(t *testing.T) {
-	ctx := context.Background()
+	customSkills := writeHAOpsSkillDir(t, haOpsShortSkillMD)
 
-	tmpDir := t.TempDir()
-	skillsDir := filepath.Join(tmpDir, "custom-skills", "discord", "ha-ops")
-	_ = os.MkdirAll(skillsDir, 0o755)
-	validMD := `---
-name: ha-ops
-description: Home assistant operations workflow and automation routines.
----
-# Home Assistant Operations
-Procedure steps.
-`
-	_ = os.WriteFile(filepath.Join(skillsDir, "SKILL.md"), []byte(validMD), 0o644)
-
-	mem := newTestMemStore()
-	_, _ = mem.InsertProceduralCandidate(ctx, testProcCand(1, "ha-ops", "trigger 1", []string{"avoid"}, nil))
+	store := newTestStore(t)
+	seedProceduralCandidates(t, store, []ProceduralCandidate{testProcCand(1, "ha-ops", "trigger 1", []string{"avoid"}, nil)})
 
 	pub := &mockSkillPublisher{prNum: 77}
-	cfg := &Config{
-		CustomSkillsDir: filepath.Join(tmpDir, "custom-skills"),
-	}
+	cfg := &Config{CustomSkillsDir: customSkills}
 
-	h := NewToolHandler(cfg, mem, &MockOllamaClient{embedding: testEmbeddingAt(0, 1.0)}, pub)
+	h := NewToolHandler(cfg, store, &MockOllamaClient{embedding: testEmbeddingAt(0, 1.0)}, pub)
 	h.llmClient = func(c context.Context, prompt string) (string, error) {
-		return fmt.Sprintf(`{"action":"EDIT","name":"ha-ops","markdown":%q}`, validMD), nil
+		return fmt.Sprintf(`{"action":"EDIT","name":"ha-ops","markdown":%q}`, haOpsShortSkillMD), nil
 	}
 
-	count, err := h.Consolidate(ctx)
+	count, err := h.Consolidate(context.Background())
 	if err != nil {
 		t.Fatalf("Consolidate() err = %v", err)
 	}
@@ -1163,5 +1116,8 @@ Procedure steps.
 	}
 	if len(pub.changes) != 1 {
 		t.Errorf("pub.changes len = %d, want 1", len(pub.changes))
+	}
+	if got, want := procStatusRows(t, store.DB()), []string{"1:consolidated:77"}; !equalStrings(got, want) {
+		t.Errorf("candidate rows = %q, want %q", got, want)
 	}
 }
