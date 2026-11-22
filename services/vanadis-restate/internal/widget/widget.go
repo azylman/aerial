@@ -182,7 +182,7 @@ func BuildStatusWidgetChunk(c model.VanadisChunk, deployUIURL ...string) ericlie
 	chunkStatus := NormalizeWidgetStatus(c.Status)
 	activeStep := FormatChunkActiveStep(c, baseURL)
 	if activeStep == "" && !isChunkTerminal(chunkStatus) {
-		activeStep = GetChunkActiveStep(c.ID)
+		activeStep = strings.TrimSpace(c.ActiveStep)
 	}
 	return ericlient.StatusWidgetChunk{
 		ID:          c.ID,

@@ -2,14 +2,21 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/azylman/aerial/pkg/k8sauth"
 	"github.com/azylman/aerial/pkg/k8sauthtest"
@@ -145,4 +152,376 @@ func TestServer_MissingCallerInContext(t *testing.T) {
 			}
 		})
 	}
+}
+
+type coalescingTestCase struct {
+	name              string
+	initialSteps      map[string]string
+	initialInFlight   bool
+	lastForwardOffset time.Duration
+	minInterval       time.Duration
+	uninitializedMaps bool
+	req               UpdateActiveStepRequest
+	wantRestateCall   bool
+	wantCode          int
+	wantSteps         map[string]string
+}
+
+func setupCoalescingTestServer(mockURL string, client *http.Client, now time.Time, tc coalescingTestCase) *VanadisServer {
+	if tc.uninitializedMaps {
+		return &VanadisServer{
+			restateCfg: RestateConfig{RestateIngressURL: mockURL},
+			httpClient: client,
+			nowFn:      func() time.Time { return now },
+		}
+	}
+	srv := NewVanadisServer(Config{}, RestateConfig{RestateIngressURL: mockURL}, nil, client)
+	srv.nowFn = func() time.Time { return now }
+	if tc.minInterval > 0 {
+		srv.minActiveStepInterval = tc.minInterval
+	}
+	if tc.initialSteps != nil {
+		srv.stepsByBuild["b1"] = maps.Clone(tc.initialSteps)
+	}
+	if tc.initialInFlight {
+		srv.inFlightBuilds["b1"] = true
+	}
+	if tc.lastForwardOffset != 0 {
+		srv.lastForwardedAt["b1"] = now.Add(tc.lastForwardOffset)
+	}
+	return srv
+}
+
+func assertCoalescingState(t *testing.T, srv *VanadisServer, tc coalescingTestCase) {
+	t.Helper()
+	srv.activeStepMu.Lock()
+	defer srv.activeStepMu.Unlock()
+	if tc.wantSteps == nil {
+		if srv.stepsByBuild["b1"] != nil {
+			t.Fatalf("expected nil steps map for b1, got %+v", srv.stepsByBuild["b1"])
+		}
+	} else if !reflect.DeepEqual(srv.stepsByBuild["b1"], tc.wantSteps) {
+		t.Fatalf("stepsByBuild[b1] = %+v, want %+v", srv.stepsByBuild["b1"], tc.wantSteps)
+	}
+	if !tc.initialInFlight && srv.inFlightBuilds["b1"] {
+		t.Fatal("expected inFlightBuilds[b1] to be false after completion")
+	}
+}
+
+func TestProcessActiveStepUpdate_Coalescing(t *testing.T) {
+	t.Parallel()
+
+	tests := []coalescingTestCase{
+		{
+			name:            "initial step forwards to restate",
+			req:             UpdateActiveStepRequest{ChunkID: "c1", ActiveStep: "step 1"},
+			wantRestateCall: true,
+			wantCode:        http.StatusOK,
+			wantSteps:       map[string]string{"c1": "step 1"},
+		},
+		{
+			name:              "uninitialized maps and zero minInterval forward safely",
+			uninitializedMaps: true,
+			req:               UpdateActiveStepRequest{ChunkID: "c1", Step: "fallback step"},
+			wantRestateCall:   true,
+			wantCode:          http.StatusOK,
+			wantSteps:         map[string]string{"c1": "fallback step"},
+		},
+		{
+			name:              "duplicate non-empty step returns ok without calling restate",
+			initialSteps:      map[string]string{"c1": "step 1"},
+			lastForwardOffset: -5 * time.Second,
+			req:               UpdateActiveStepRequest{ChunkID: "c1", ActiveStep: "step 1"},
+			wantRestateCall:   false,
+			wantCode:          http.StatusOK,
+			wantSteps:         map[string]string{"c1": "step 1"},
+		},
+		{
+			name:            "update while in flight returns ok without calling restate but records new step",
+			initialSteps:    map[string]string{"c1": "step 1"},
+			initialInFlight: true,
+			req:             UpdateActiveStepRequest{ChunkID: "c1", ActiveStep: "step 2"},
+			wantRestateCall: false,
+			wantCode:        http.StatusOK,
+			wantSteps:       map[string]string{"c1": "step 2"},
+		},
+		{
+			name:              "throttled update within minInterval returns ok without calling restate",
+			initialSteps:      map[string]string{"c1": "step 1"},
+			lastForwardOffset: -500 * time.Millisecond,
+			minInterval:       2 * time.Second,
+			req:               UpdateActiveStepRequest{ChunkID: "c1", ActiveStep: "step 2"},
+			wantRestateCall:   false,
+			wantCode:          http.StatusOK,
+			wantSteps:         map[string]string{"c1": "step 2"},
+		},
+		{
+			name:              "update after minInterval forwards with all active steps",
+			initialSteps:      map[string]string{"c1": "step 1", "c2": "other step"},
+			lastForwardOffset: -3 * time.Second,
+			minInterval:       2 * time.Second,
+			req:               UpdateActiveStepRequest{ChunkID: "c1", ActiveStep: "step 2"},
+			wantRestateCall:   true,
+			wantCode:          http.StatusOK,
+			wantSteps:         map[string]string{"c1": "step 2", "c2": "other step"},
+		},
+		{
+			name:              "clear removes chunk and forwards when not in flight",
+			initialSteps:      map[string]string{"c1": "step 1", "c2": "step 2"},
+			lastForwardOffset: -500 * time.Millisecond,
+			minInterval:       2 * time.Second,
+			req:               UpdateActiveStepRequest{ChunkID: "c1", ActiveStep: ""},
+			wantRestateCall:   true,
+			wantCode:          http.StatusOK,
+			wantSteps:         map[string]string{"c2": "step 2"},
+		},
+		{
+			name:              "clear last chunk deletes build entry from map",
+			initialSteps:      map[string]string{"c1": "step 1"},
+			lastForwardOffset: -3 * time.Second,
+			req:               UpdateActiveStepRequest{ChunkID: "c1", ActiveStep: ""},
+			wantRestateCall:   true,
+			wantCode:          http.StatusOK,
+			wantSteps:         nil,
+		},
+		{
+			name:            "clear while in flight updates map and returns ok without calling restate",
+			initialSteps:    map[string]string{"c1": "step 1"},
+			initialInFlight: true,
+			req:             UpdateActiveStepRequest{ChunkID: "c1", ActiveStep: ""},
+			wantRestateCall: false,
+			wantCode:        http.StatusOK,
+			wantSteps:       nil,
+		},
+		{
+			name:            "forwarding error returns 500 status",
+			req:             UpdateActiveStepRequest{ChunkID: "c1", ActiveStep: "trigger-err"},
+			wantRestateCall: true,
+			wantCode:        http.StatusInternalServerError,
+			wantSteps:       map[string]string{"c1": "trigger-err"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			called := false
+			var lastFwdReq UpdateActiveStepRequest
+			var lastFwdMu sync.Mutex
+			mockRestate := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				called = true
+				if tc.req.ActiveStep == "trigger-err" {
+					w.WriteHeader(http.StatusInternalServerError)
+					return
+				}
+				var fwdReq UpdateActiveStepRequest
+				if err := json.NewDecoder(r.Body).Decode(&fwdReq); err != nil {
+					w.WriteHeader(http.StatusBadRequest)
+					_, _ = w.Write([]byte(err.Error()))
+					return
+				}
+				lastFwdMu.Lock()
+				lastFwdReq = fwdReq
+				lastFwdMu.Unlock()
+				if fwdReq.ChunkID == "" && fwdReq.ActiveSteps == nil && !fwdReq.ClearAll {
+					w.WriteHeader(http.StatusBadRequest)
+					_, _ = w.Write([]byte(`{"error":"chunk_id cannot be empty without active_steps"}`))
+					return
+				}
+				w.WriteHeader(http.StatusOK)
+				_, _ = w.Write([]byte(`{"status":"ok"}`))
+			}))
+			defer mockRestate.Close()
+
+			now := time.Date(2026, 11, 22, 12, 0, 0, 0, time.UTC)
+			srv := setupCoalescingTestServer(mockRestate.URL, mockRestate.Client(), now, tc)
+
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, "/builds/b1/active-step", http.NoBody)
+			srv.processActiveStepUpdate(rec, req, &VanadisBuild{ID: "b1", Agent: "aerial"}, tc.req)
+
+			if rec.Code != tc.wantCode {
+				t.Fatalf("code = %d, want %d", rec.Code, tc.wantCode)
+			}
+			if called != tc.wantRestateCall {
+				t.Fatalf("restate called = %v, want %v", called, tc.wantRestateCall)
+			}
+			if tc.wantSteps == nil && tc.wantRestateCall {
+				lastFwdMu.Lock()
+				fwd := lastFwdReq
+				lastFwdMu.Unlock()
+				if !fwd.ClearAll {
+					t.Fatal("expected ClearAll to be true on final clear forward")
+				}
+			}
+			assertCoalescingState(t, srv, tc)
+		})
+	}
+}
+
+func TestProcessActiveStepUpdate_TrailingFlushAndPrune(t *testing.T) {
+	t.Parallel()
+	flushed := make(chan struct{}, 5)
+	var lastPayload UpdateActiveStepRequest
+	var payloadMu sync.Mutex
+	mockRestate := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req UpdateActiveStepRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		payloadMu.Lock()
+		lastPayload = req
+		payloadMu.Unlock()
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
+		flushed <- struct{}{}
+	}))
+	defer mockRestate.Close()
+
+	srv := NewVanadisServer(Config{}, RestateConfig{RestateIngressURL: mockRestate.URL}, nil, mockRestate.Client())
+	baseTime := time.Date(2026, 11, 22, 12, 0, 0, 0, time.UTC)
+	currentTime := baseTime
+	srv.nowFn = func() time.Time { return currentTime }
+	srv.minActiveStepInterval = 20 * time.Millisecond
+	b := &VanadisBuild{ID: "b-trail", Agent: "aerial"}
+
+	rec1 := httptest.NewRecorder()
+	req1 := httptest.NewRequest(http.MethodPost, "/builds/b-trail/active-step", http.NoBody)
+	srv.processActiveStepUpdate(rec1, req1, b, UpdateActiveStepRequest{ChunkID: "c1", ActiveStep: "step 1"})
+	if rec1.Code != http.StatusOK {
+		t.Fatalf("step 1 code = %d", rec1.Code)
+	}
+
+	select {
+	case <-flushed:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for initial flush")
+	}
+
+	currentTime = baseTime.Add(5 * time.Millisecond) // Inside 20ms debounce window
+	rec2 := httptest.NewRecorder()
+	req2 := httptest.NewRequest(http.MethodPost, "/builds/b-trail/active-step", http.NoBody)
+	srv.processActiveStepUpdate(rec2, req2, b, UpdateActiveStepRequest{ChunkID: "c1", ActiveStep: "step 2"})
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("step 2 code = %d", rec2.Code)
+	}
+
+	select {
+	case <-flushed:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for trailing flush")
+	}
+
+	payloadMu.Lock()
+	gotStep := lastPayload.ActiveSteps["c1"]
+	payloadMu.Unlock()
+	if gotStep != "step 2" {
+		t.Fatalf("expected trailing flush to send 'step 2', got %q", gotStep)
+	}
+
+	// Test prune stale builds
+	srv.activeStepMu.Lock()
+	now := time.Now()
+	for i := range 300 {
+		id := fmt.Sprintf("old-b-%d", i)
+		srv.lastForwardedAt[id] = now.Add(-2 * time.Hour)
+		srv.stepsByBuild[id] = map[string]string{"c": "s"}
+	}
+	srv.pruneStaleBuildsLocked(now)
+	tracked := len(srv.lastForwardedAt)
+	srv.activeStepMu.Unlock()
+	if tracked > maxTrackedActiveStepBuilds {
+		t.Fatalf("expected pruned entries <= %d, got %d", maxTrackedActiveStepBuilds, tracked)
+	}
+}
+
+func TestProcessActiveStepUpdate_DirtyLoopAndFlushBranches(t *testing.T) {
+	t.Parallel()
+	var forwardCalls atomic.Int32
+	var srv *VanadisServer
+	mockRestate := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var fwdReq UpdateActiveStepRequest
+		if err := json.NewDecoder(r.Body).Decode(&fwdReq); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if fwdReq.ChunkID == "" && fwdReq.ActiveSteps == nil && !fwdReq.ClearAll {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		n := forwardCalls.Add(1)
+		if n == 1 && srv != nil {
+			srv.activeStepMu.Lock()
+			srv.dirtyBuilds["b-loop"] = true
+			srv.stepsByBuild["b-loop"]["c2"] = "step 2"
+			srv.activeStepMu.Unlock()
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
+	}))
+	defer mockRestate.Close()
+
+	srv = NewVanadisServer(Config{}, RestateConfig{RestateIngressURL: mockRestate.URL}, nil, mockRestate.Client())
+	b := &VanadisBuild{ID: "b-loop", Agent: "aerial"}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/builds/b-loop/active-step", http.NoBody)
+	srv.processActiveStepUpdate(rec, req, b, UpdateActiveStepRequest{ChunkID: "c1", ActiveStep: "step 1"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code = %d", rec.Code)
+	}
+	if forwardCalls.Load() != 2 {
+		t.Fatalf("expected 2 forward calls in loop, got %d", forwardCalls.Load())
+	}
+
+	// Test flushTrailingActiveStep when in flight
+	srv.activeStepMu.Lock()
+	srv.inFlightBuilds["b-loop"] = true
+	srv.activeStepMu.Unlock()
+	srv.flushTrailingActiveStep(context.Background(), b)
+	srv.activeStepMu.Lock()
+	if !srv.dirtyBuilds["b-loop"] {
+		t.Fatal("expected dirtyBuilds to be true when flushing during in flight")
+	}
+	delete(srv.inFlightBuilds, "b-loop")
+	srv.activeStepMu.Unlock()
+
+	// Test flushTrailingActiveStep when empty steps
+	var emptyCalls atomic.Int32
+	emptyMock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		emptyCalls.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer emptyMock.Close()
+	emptySrv := NewVanadisServer(Config{}, RestateConfig{RestateIngressURL: emptyMock.URL}, nil, emptyMock.Client())
+	emptyBuild := &VanadisBuild{ID: "b-empty", Agent: "aerial"}
+	emptySrv.flushTrailingActiveStep(context.Background(), emptyBuild)
+	if emptyCalls.Load() != 0 {
+		t.Fatalf("expected no restate calls for empty steps build, got %d", emptyCalls.Load())
+	}
+	emptySrv.activeStepMu.Lock()
+	if emptySrv.inFlightBuilds["b-empty"] {
+		t.Fatal("expected inFlightBuilds to be false for empty steps build")
+	}
+	emptySrv.activeStepMu.Unlock()
+
+	// Test flushTrailingActiveStep error logging cleans up in flight flag
+	var errCalls atomic.Int32
+	errMock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		errCalls.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer errMock.Close()
+	errSrv := NewVanadisServer(Config{}, RestateConfig{RestateIngressURL: errMock.URL}, nil, errMock.Client())
+	errBuild := &VanadisBuild{ID: "b-err", Agent: "aerial"}
+	errSrv.activeStepMu.Lock()
+	errSrv.stepsByBuild["b-err"] = map[string]string{"c1": "s1"}
+	errSrv.activeStepMu.Unlock()
+	errSrv.flushTrailingActiveStep(context.Background(), errBuild)
+	if errCalls.Load() != 1 {
+		t.Fatalf("expected 1 restate call on error build, got %d", errCalls.Load())
+	}
+	errSrv.activeStepMu.Lock()
+	if errSrv.inFlightBuilds["b-err"] {
+		t.Fatal("expected inFlightBuilds to be cleaned up after forward error")
+	}
+	errSrv.activeStepMu.Unlock()
 }
