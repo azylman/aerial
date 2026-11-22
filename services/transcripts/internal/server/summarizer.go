@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 	"strings"
@@ -18,16 +17,6 @@ const maxSummaryPromptChars = 2000
 // ErrSummaryLockBusy reports a per-thread summary lock held by another worker.
 // RunOnce skips the session without error so a busy thread never blocks the sweep.
 var ErrSummaryLockBusy = errors.New("transcripts summary lock busy")
-
-// summaryCandidate is one session whose indexed steps outran its summary watermark.
-type summaryCandidate struct {
-	agent       string
-	sessionID   string
-	threadID    string
-	summary     string
-	lastIndexed int
-	watermark   int
-}
 
 // Summarizer refreshes per-session summaries from indexed steps for one stack.
 // It never marks a session settled and never advances the summary watermark on
@@ -119,7 +108,7 @@ func (s *Summarizer) RunOnce(ctx context.Context) (int, error) {
 			if errors.Is(err, ErrSummaryLockBusy) {
 				continue
 			}
-			failures = append(failures, fmt.Errorf("summarize session %s: %w", cand.sessionID, err))
+			failures = append(failures, fmt.Errorf("summarize session %s: %w", cand.SessionID, err))
 			continue
 		}
 		summarized += done
@@ -132,64 +121,20 @@ func (s *Summarizer) RunOnce(ctx context.Context) (int, error) {
 
 // selectDueSessions lists sessions whose indexed steps outran the summary
 // watermark, oldest first, bounded by the configured batch limit.
-func (s *Summarizer) selectDueSessions(ctx context.Context) ([]summaryCandidate, error) {
-	if err := s.store.CheckWriter(); err != nil {
-		return nil, err
-	}
-	queryCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
+func (s *Summarizer) selectDueSessions(ctx context.Context) ([]store.SummaryCandidate, error) {
 	nowFn := s.now
 	if nowFn == nil {
 		nowFn = time.Now
 	}
-	cutoff := nowFn().UTC().Add(-s.cfg.IdleThreshold)
-	scanLimit := s.cfg.BatchLimit * 4
-	rows, err := s.store.DB().QueryContext(queryCtx,
-		`SELECT agent, session_id, thread_id, summary, last_indexed_step, summary_step_watermark, last_mtime, is_settled FROM session_summaries
-		 WHERE summary_step_watermark < last_indexed_step
-		   AND (summary = '' OR (summary_step_watermark > 0 AND last_indexed_step - summary_step_watermark >= $1))
-		 ORDER BY updated_at ASC LIMIT $2`, s.cfg.MinStepDelta, scanLimit)
-	if err != nil {
-		return nil, fmt.Errorf("select summary candidates: %w", err)
-	}
-	defer rows.Close()
-	var out []summaryCandidate
-	for rows.Next() {
-		var cand summaryCandidate
-		var rawMtime any
-		var isSettled sql.NullBool
-		if err := rows.Scan(&cand.agent, &cand.sessionID, &cand.threadID, &cand.summary, &cand.lastIndexed, &cand.watermark, &rawMtime, &isSettled); err != nil {
-			return nil, fmt.Errorf("scan summary candidate: %w", err)
-		}
-		cand.agent = strings.TrimSpace(cand.agent)
-		cand.sessionID = strings.TrimSpace(cand.sessionID)
-		cand.threadID = strings.TrimSpace(cand.threadID)
-		cand.summary = strings.TrimSpace(cand.summary)
-		if cand.sessionID == "" {
-			continue
-		}
-		var lastMtime time.Time
-		if t, ok := store.ParseDBTime(rawMtime); ok {
-			lastMtime = t
-		}
-		settled := isSettled.Valid && isSettled.Bool
-		if !settled && !lastMtime.IsZero() && lastMtime.After(cutoff) {
-			continue
-		}
-		out = append(out, cand)
-		if len(out) >= s.cfg.BatchLimit {
-			break
-		}
-	}
-	return out, rows.Err()
+	return s.store.ListDueSessions(ctx, s.cfg.IdleThreshold, s.cfg.MinStepDelta, s.cfg.BatchLimit, nowFn())
 }
 
 // summarizeSession refreshes one session's summary from steps after its
 // watermark. It returns 1 when the summary advanced and 0 when skipped.
-func (s *Summarizer) summarizeSession(ctx context.Context, cand summaryCandidate) (int, error) {
-	lockKey := cand.threadID
+func (s *Summarizer) summarizeSession(ctx context.Context, cand store.SummaryCandidate) (int, error) {
+	lockKey := cand.ThreadID
 	if lockKey == "" {
-		lockKey = cand.sessionID
+		lockKey = cand.SessionID
 	}
 	release, err := s.acquire(ctx, lockKey)
 	if err != nil {
@@ -197,20 +142,20 @@ func (s *Summarizer) summarizeSession(ctx context.Context, cand summaryCandidate
 	}
 	defer release()
 
-	fromStep := cand.watermark + 1
-	endStep := cand.lastIndexed
+	fromStep := cand.Watermark + 1
+	endStep := cand.LastIndexed
 	if s.cfg.MaxSteps > 0 && endStep-fromStep+1 > s.cfg.MaxSteps {
 		fromStep = endStep - s.cfg.MaxSteps + 1
 	}
-	steps, err := s.store.GetSteps(ctx, cand.agent, cand.sessionID, fromStep, endStep)
+	steps, err := s.store.GetSteps(ctx, cand.Agent, cand.SessionID, fromStep, endStep)
 	if err != nil {
 		return 0, fmt.Errorf("load summary steps: %w", err)
 	}
 	if len(steps) == 0 {
 		return 0, nil
 	}
-	llmCtx := withLLMKey(ctx, fmt.Sprintf("transcripts:summary:%s:%s:%d", cand.agent, cand.sessionID, fromStep))
-	summary, err := s.llm.Complete(llmCtx, buildSummaryPrompt(cand.sessionID, cand.summary, steps))
+	llmCtx := withLLMKey(ctx, fmt.Sprintf("transcripts:summary:%s:%s:%d", cand.Agent, cand.SessionID, fromStep))
+	summary, err := s.llm.Complete(llmCtx, buildSummaryPrompt(cand.SessionID, cand.Summary, steps))
 	if err != nil {
 		return 0, fmt.Errorf("summarize session with llm: %w", err)
 	}
@@ -229,14 +174,6 @@ func (s *Summarizer) summarizeSession(ctx context.Context, cand summaryCandidate
 // storeSummary persists the refreshed summary and advances only the summary
 // watermark. It never touches is_settled or last_indexed_step: a failed LLM
 // or embedding call returns before this runs, so failures cannot settle.
-func (s *Summarizer) storeSummary(ctx context.Context, cand summaryCandidate, summary string) error {
-	queryCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-	if _, err := s.store.DB().ExecContext(queryCtx,
-		`UPDATE session_summaries SET summary = $1, summary_step_watermark = $2, updated_at = CURRENT_TIMESTAMP
-		 WHERE agent = $3 AND session_id = $4`,
-		summary, cand.lastIndexed, cand.agent, cand.sessionID); err != nil {
-		return fmt.Errorf("store session summary: %w", err)
-	}
-	return nil
+func (s *Summarizer) storeSummary(ctx context.Context, cand store.SummaryCandidate, summary string) error {
+	return s.store.SaveSummary(ctx, cand.Agent, cand.SessionID, summary, cand.LastIndexed)
 }

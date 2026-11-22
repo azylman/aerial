@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -70,18 +71,18 @@ func seedSummarizerSession(t *testing.T, st *store.Store, session, thread string
 	}
 }
 
-func presetSummaryWatermark(t *testing.T, st *store.Store, session string, watermark int, summary string) {
+func presetSummaryWatermark(t *testing.T, db *sql.DB, session string, watermark int, summary string) {
 	t.Helper()
-	if _, err := st.DB().ExecContext(context.Background(),
+	if _, err := db.ExecContext(context.Background(),
 		`UPDATE session_summaries SET summary_step_watermark = $1, summary = $2 WHERE agent = 'aerial' AND session_id = $3`,
 		watermark, summary, session); err != nil {
 		t.Fatalf("preset watermark: %v", err)
 	}
 }
 
-func readSummaryRow(t *testing.T, st *store.Store, session string) (summary string, watermark int, settled bool) {
+func readSummaryRow(t *testing.T, db *sql.DB, session string) (summary string, watermark int, settled bool) {
 	t.Helper()
-	if err := st.DB().QueryRowContext(context.Background(),
+	if err := db.QueryRowContext(context.Background(),
 		`SELECT summary, summary_step_watermark, is_settled FROM session_summaries WHERE agent = 'aerial' AND session_id = $1`,
 		session).Scan(&summary, &watermark, &settled); err != nil {
 		t.Fatalf("read summary row: %v", err)
@@ -157,9 +158,9 @@ type summarizerRunCase struct {
 	wantPromptFrag  string
 }
 
-func seedSummarizerRunCase(t *testing.T, tc summarizerRunCase) *store.Store {
+func seedSummarizerRunCase(t *testing.T, tc summarizerRunCase) (*store.Store, *sql.DB) {
 	t.Helper()
-	st := newTestStore(t, "aerial")
+	st, db := newTestStoreWithDB(t, "aerial")
 	thread := "thread-1"
 	if tc.emptyThread {
 		thread = ""
@@ -169,29 +170,29 @@ func seedSummarizerRunCase(t *testing.T, tc summarizerRunCase) *store.Store {
 		seedSummarizerSession(t, st, fmt.Sprintf("sess-extra-%d", i), "thread-1", 0, 1, false)
 	}
 	if tc.applyPreset {
-		presetSummaryWatermark(t, st, "sess-1", tc.presetWatermark, tc.presetSummary)
+		presetSummaryWatermark(t, db, "sess-1", tc.presetWatermark, tc.presetSummary)
 	}
 	if tc.recentMtime {
 		testNow := time.Date(2026, 11, 18, 13, 0, 0, 0, time.UTC)
-		if _, err := st.DB().ExecContext(context.Background(),
+		if _, err := db.ExecContext(context.Background(),
 			`UPDATE session_summaries SET last_mtime = $1 WHERE agent = 'aerial' AND session_id = 'sess-1'`,
 			testNow.Add(-5*time.Minute)); err != nil {
 			t.Fatalf("preset recent mtime: %v", err)
 		}
 	}
 	if tc.deleteSteps {
-		if _, err := st.DB().ExecContext(context.Background(),
+		if _, err := db.ExecContext(context.Background(),
 			`DELETE FROM transcript_steps WHERE agent = 'aerial' AND session_id = 'sess-1'`); err != nil {
 			t.Fatalf("delete steps: %v", err)
 		}
 	}
 	if tc.failStore {
-		if _, err := st.DB().ExecContext(context.Background(),
+		if _, err := db.ExecContext(context.Background(),
 			`CREATE TRIGGER abort_summary_update BEFORE UPDATE ON session_summaries WHEN NEW.session_id = 'sess-1' BEGIN SELECT RAISE(ABORT, 'no summary'); END;`); err != nil {
 			t.Fatalf("create trigger: %v", err)
 		}
 	}
-	return st
+	return st, db
 }
 
 func runSummarizerSweep(t *testing.T, st *store.Store, tc summarizerRunCase) (int, *fakeSummaryLLM, *fakeSummaryEmbedder, error) {
@@ -248,7 +249,7 @@ func TestStartSummarizerLoopEnabled(t *testing.T) {
 	}
 }
 
-func assertSummarizerSweep(t *testing.T, st *store.Store, tc summarizerRunCase, got int, err error, llm *fakeSummaryLLM, embedder *fakeSummaryEmbedder) {
+func assertSummarizerSweep(t *testing.T, db *sql.DB, tc summarizerRunCase, got int, err error, llm *fakeSummaryLLM, embedder *fakeSummaryEmbedder) {
 	t.Helper()
 	if (err != nil) != tc.wantErr {
 		t.Fatalf("RunOnce() err = %v, wantErr = %v", err, tc.wantErr)
@@ -268,7 +269,7 @@ func assertSummarizerSweep(t *testing.T, st *store.Store, tc summarizerRunCase, 
 	if tc.wantWatermark == -2 {
 		return
 	}
-	summary, watermark, settled := readSummaryRow(t, st, "sess-1")
+	summary, watermark, settled := readSummaryRow(t, db, "sess-1")
 	if watermark != tc.wantWatermark {
 		t.Errorf("watermark = %d, want %d", watermark, tc.wantWatermark)
 	}
@@ -303,9 +304,9 @@ func TestSummarizerRunOnce(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			st := seedSummarizerRunCase(t, tc)
+			st, db := seedSummarizerRunCase(t, tc)
 			got, llm, embedder, err := runSummarizerSweep(t, st, tc)
-			assertSummarizerSweep(t, st, tc, got, err, llm, embedder)
+			assertSummarizerSweep(t, db, tc, got, err, llm, embedder)
 		})
 	}
 }
@@ -358,18 +359,18 @@ func TestSummarizerRunOnceNilDeps(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			st := newTestStore(t, "aerial")
+			st, db := newTestStoreWithDB(t, "aerial")
 			s := st
 			if tc.nilStore {
 				s = nil
 			}
 			if tc.closedDB {
-				if err := st.DB().Close(); err != nil {
+				if err := db.Close(); err != nil {
 					t.Fatalf("close: %v", err)
 				}
 			}
 			if tc.emptyStack {
-				s = store.NewStore(st.DB(), "")
+				s = store.NewStore(db, "")
 			}
 			var llm LLMClient = &fakeSummaryLLM{response: "x"}
 			if tc.nilLLM {
@@ -503,7 +504,7 @@ func TestEmbedderGenerate(t *testing.T) {
 
 func TestSummarizerMultiAgentSweep(t *testing.T) {
 	t.Parallel()
-	st := newTestStore(t, "aerial")
+	st, db := newTestStoreWithDB(t, "aerial")
 	epoch := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
 
 	// Seed session 1 for aerial
@@ -532,7 +533,7 @@ func TestSummarizerMultiAgentSweep(t *testing.T) {
 	}
 
 	// Verify aerial summary
-	sumAerial, markAerial, _ := readSummaryRow(t, st, "sess-aerial")
+	sumAerial, markAerial, _ := readSummaryRow(t, db, "sess-aerial")
 	if markAerial != 2 || sumAerial != "multi-agent summary" {
 		t.Errorf("aerial session: watermark = %d, summary = %q", markAerial, sumAerial)
 	}
@@ -540,7 +541,7 @@ func TestSummarizerMultiAgentSweep(t *testing.T) {
 	// Verify agent-alpha summary
 	var sumAlpha string
 	var markAlpha int
-	if err := st.DB().QueryRowContext(context.Background(),
+	if err := db.QueryRowContext(context.Background(),
 		`SELECT summary, summary_step_watermark FROM session_summaries WHERE agent = 'agent-alpha' AND session_id = 'sess-alpha'`).Scan(&sumAlpha, &markAlpha); err != nil {
 		t.Fatalf("read agent-alpha summary: %v", err)
 	}

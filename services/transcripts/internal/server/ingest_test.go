@@ -12,6 +12,7 @@ import (
 
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/pkg/transcriptwire"
+	"github.com/azylman/aerial/services/transcripts/internal/store"
 )
 
 type fakeBatchMessage struct {
@@ -213,10 +214,7 @@ func TestHandleBatchMessageNil(t *testing.T) {
 
 func TestHandleBatchMessageApplyError(t *testing.T) {
 	t.Parallel()
-	st := newTestStore(t, "aerial")
-	if err := st.DB().Close(); err != nil {
-		t.Fatalf("close: %v", err)
-	}
+	st := store.NewStore(nil, "aerial")
 	ingester := NewIngester(st, nil)
 	epoch := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
 	msg := &fakeBatchMessage{data: marshalBatch(t, testBatch("sess-err", epoch, 0, 1, false, false))}

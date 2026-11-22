@@ -59,7 +59,7 @@ CREATE TABLE transcript_steps (
 
 var testStoreSeq atomic.Int64
 
-func newTestStore(t *testing.T, stack string) *store.Store {
+func newTestStoreWithDB(t *testing.T, stack string) (*store.Store, *sql.DB) {
 	t.Helper()
 	dsn := fmt.Sprintf("file:transcripts-server-%d?mode=memory&cache=shared", testStoreSeq.Add(1))
 	db, err := sql.Open("sqlite", dsn)
@@ -70,7 +70,13 @@ func newTestStore(t *testing.T, stack string) *store.Store {
 	if _, err := db.Exec(transcriptsTestSchema); err != nil {
 		t.Fatalf("create fixture schema: %v", err)
 	}
-	return store.NewStore(db, stack)
+	return store.NewStore(db, stack), db
+}
+
+func newTestStore(t *testing.T, stack string) *store.Store {
+	t.Helper()
+	st, _ := newTestStoreWithDB(t, stack)
+	return st
 }
 
 func testBatch(session string, mtime time.Time, first, last int, final, reset bool) transcriptwire.TranscriptStepBatch {
@@ -181,19 +187,19 @@ func newDegradedStore(t *testing.T, fixture degradedFixture) *store.Store {
 	case degradedNilDB:
 		return store.NewStore(nil, "aerial")
 	case degradedClosedDB:
-		st := newTestStore(t, "aerial")
-		if err := st.DB().Close(); err != nil {
+		st, db := newTestStoreWithDB(t, "aerial")
+		if err := db.Close(); err != nil {
 			t.Fatalf("close fixture db: %v", err)
 		}
 		return st
 	case degradedDroppedSteps:
-		st := newTestStore(t, "aerial")
+		st, db := newTestStoreWithDB(t, "aerial")
 		ctx := context.Background()
 		epoch := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
 		if _, err := st.ApplyBatch(ctx, testBatch("sess-a", epoch, 0, 1, false, false)); err != nil {
 			t.Fatalf("seed: %v", err)
 		}
-		if _, err := st.DB().ExecContext(ctx, `DROP TABLE transcript_steps`); err != nil {
+		if _, err := db.ExecContext(ctx, `DROP TABLE transcript_steps`); err != nil {
 			t.Fatalf("drop steps: %v", err)
 		}
 		return st
@@ -559,7 +565,8 @@ func TestRunApp(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			if tc.stubDB {
-				defer stubOpenDB(t, newTestStore(t, "aerial").DB(), tc.openErr)()
+				_, db := newTestStoreWithDB(t, "aerial")
+				defer stubOpenDB(t, db, tc.openErr)()
 			}
 			stubNewBus(t, tc.bus)
 			if tc.shutdownErr != nil {
