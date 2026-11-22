@@ -80,41 +80,25 @@ func TestWorker_PassesSessionIDToAgentPool(t *testing.T) {
 	defer procPool.Close()
 
 	cfg := newTestConfig(func(d *config.ConfigData) { d.DataDir = tempData })
-	completedCh := make(chan string, 10)
 	pool := New(cfg, WorkerPoolConfig{
 		ProcessPool:    procPool,
 		SessionManager: session.New(tmpHome, tempData),
 		Store:          store,
-		OnMessageCompleted: func(msg db.Message, status string) {
-			if status == db.StatusCompleted {
-				completedCh <- msg.ID
-			}
-		},
 	})
 	defer pool.Stop()
 
+	ctx := context.Background()
 	expectedSessID := "a1111111-2222-3333-4444-555555555555"
-	_ = store.SaveSessionID(context.Background(), "thread-with-sess", expectedSessID)
-	msg1 := db.Message{ID: "msg-with-sess", ThreadID: "thread-with-sess", Content: "Resume turn", Status: db.StatusPending, CreatedAt: time.Now()}
-	_ = store.InsertMessage(context.Background(), msg1)
-	pool.Enqueue(msg1)
-
-	waitCompleted := func(expectedID string) {
-		select {
-		case id := <-completedCh:
-			if id != expectedID {
-				t.Fatalf("unexpected message completed: %s", id)
-			}
-		case <-time.After(5 * time.Second):
-			t.Fatalf("timeout waiting for %s", expectedID)
+	_ = store.SaveSessionID(ctx, "thread-with-sess", expectedSessID)
+	for _, m := range []db.Message{
+		{ID: "msg-with-sess", ThreadID: "thread-with-sess", Content: "Resume turn", Status: db.StatusPending, CreatedAt: time.Now()},
+		{ID: "msg-fresh", ThreadID: "thread-fresh", Content: "First turn", Status: db.StatusPending, CreatedAt: time.Now()},
+	} {
+		_ = store.InsertMessage(ctx, m)
+		if lt := runLiveBurst(ctx, pool, m.ThreadID, "turn-"+m.ID, m.ID); lt.err != nil || lt.outcome != OutcomeCompleted {
+			t.Fatalf("turn %s = (%s, %v), want completed", m.ID, lt.outcome, lt.err)
 		}
 	}
-	waitCompleted("msg-with-sess")
-
-	msg2 := db.Message{ID: "msg-fresh", ThreadID: "thread-fresh", Content: "First turn", Status: db.StatusPending, CreatedAt: time.Now()}
-	_ = store.InsertMessage(context.Background(), msg2)
-	pool.Enqueue(msg2)
-	waitCompleted("msg-fresh")
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -145,31 +129,19 @@ func TestWorker_PersistentDaemonExecutionErrors(t *testing.T) {
 				_ = os.WriteFile(binPath, []byte(tc.script), 0o755)
 			}
 			cfg := newTestConfig(func(d *config.ConfigData) { d.AgyBin, d.DataDir = binPath, tempData })
-			failedCh := make(chan struct{})
 			pool := New(cfg, WorkerPoolConfig{
 				SessionManager: session.New(tmpHome, tempData), Store: store,
 				MaxAttempts: 1,
-				OnMessageCompleted: func(msg db.Message, status string) {
-					if status == db.StatusFailed {
-						select {
-						case <-failedCh:
-						default:
-							close(failedCh)
-						}
-					}
-				},
 			})
 			defer pool.Stop()
 
-			_ = store.SaveSessionID(context.Background(), tc.threadID, tc.sessID)
+			ctx := context.Background()
+			_ = store.SaveSessionID(ctx, tc.threadID, tc.sessID)
 			msg := db.Message{ID: "msg-" + tc.threadID, ThreadID: tc.threadID, Content: "fail", Status: db.StatusPending, CreatedAt: time.Now()}
-			_ = store.InsertMessage(context.Background(), msg)
-			pool.Enqueue(msg)
-
-			select {
-			case <-failedCh:
-			case <-time.After(5 * time.Second):
-				t.Fatalf("timed out waiting for failure completion")
+			_ = store.InsertMessage(ctx, msg)
+			lt := runLiveBurst(ctx, pool, tc.threadID, "turn-1", msg.ID)
+			if row, _ := store.GetMessage(ctx, msg.ID); lt.err != nil || row == nil || row.Status != db.StatusFailed {
+				t.Fatalf("turn = (%s, %v), row = %+v; want the row FAILED", lt.outcome, lt.err, row)
 			}
 		})
 	}
@@ -278,7 +250,6 @@ func runPersistentDaemonTurnCase(t *testing.T, tc persistentDaemonTurnCase) {
 
 	var deliveryMu sync.Mutex
 	var deliveredText string
-	doneCh := make(chan struct{}, 1)
 	haroBus, getOneShots := newMockHaroOneShotBus(t)
 	pool := New(cfg, WorkerPoolConfig{
 		ProcessPool: procPool, SessionManager: session.New(tmpHome, tempData),
@@ -289,26 +260,16 @@ func runPersistentDaemonTurnCase(t *testing.T, tc persistentDaemonTurnCase) {
 			deliveryMu.Unlock()
 			return nil
 		},
-		OnMessageCompleted: func(msg db.Message, status string) {
-			if status == tc.expectedFinalStatus {
-				select {
-				case doneCh <- struct{}{}:
-				default:
-				}
-			}
-		},
 	})
 	defer pool.Stop()
 
+	ctx := context.Background()
 	msgID := "msg-" + tc.threadID
 	msg := db.Message{ID: msgID, ThreadID: tc.threadID, Content: "run turn", Status: db.StatusPending, CreatedAt: time.Now()}
-	_ = store.InsertMessage(context.Background(), msg)
-	pool.Enqueue(msg)
-
-	select {
-	case <-doneCh:
-	case <-time.After(5 * time.Second):
-		t.Fatalf("timed out waiting for message completion")
+	_ = store.InsertMessage(ctx, msg)
+	lt := runLiveBurst(ctx, pool, tc.threadID, "turn-1", msgID)
+	if row, _ := store.GetMessage(ctx, msgID); lt.err != nil || row == nil || row.Status != tc.expectedFinalStatus {
+		t.Fatalf("turn = (%s, %v), row = %+v; want status %s", lt.outcome, lt.err, row, tc.expectedFinalStatus)
 	}
 
 	deliveryMu.Lock()
@@ -387,7 +348,6 @@ func TestWorkerPool_TransientRetry_RotatesBloatedSession(t *testing.T) {
 
 	var sessionsSeen []string
 	var mu sync.Mutex
-	doneCh := make(chan struct{})
 
 	pool := New(cfg, WorkerPoolConfig{
 		SessionManager: session.New(tmpHome, tempData), Store: store, MaxAttempts: 2, BackoffBase: 10 * time.Millisecond,
@@ -407,26 +367,13 @@ func TestWorkerPool_TransientRetry_RotatesBloatedSession(t *testing.T) {
 			return mockJSONResponse(uuid.New().String(), "Recovered successfully"), "", 0, nil
 		},
 		DeliveryFunc: func(sess *discordgo.Session, channelID, content string) error { return nil },
-		OnMessageCompleted: func(msg db.Message, status string) {
-			if status == db.StatusCompleted {
-				select {
-				case <-doneCh:
-				default:
-					close(doneCh)
-				}
-			}
-		},
 	})
 	defer pool.Stop()
 
 	msg := db.Message{ID: "msg-transient-bloated", ThreadID: threadID, Content: "run transient test", Status: db.StatusPending, CreatedAt: time.Now()}
 	_ = store.InsertMessage(context.Background(), msg)
-	pool.Enqueue(msg)
-
-	select {
-	case <-doneCh:
-	case <-time.After(5 * time.Second):
-		t.Fatalf("timed out waiting for transient recovery completion")
+	if lt := runLiveBurst(context.Background(), pool, threadID, "turn-1", msg.ID); lt.err != nil || lt.outcome != OutcomeCompleted {
+		t.Fatalf("turn = (%s, %v), want completed", lt.outcome, lt.err)
 	}
 
 	mu.Lock()
@@ -486,31 +433,19 @@ func TestWorker_DualPoolRouting(t *testing.T) {
 			cfg := newTestConfig(func(d *config.ConfigData) {
 				d.DataDir, d.LowEffortModel, d.MediumEffortModel = tempData, "gemini-3.8-flash-low", "gemini-3.8-flash-medium"
 			})
-			doneCh := make(chan struct{}, 1)
 			pool := New(cfg, WorkerPoolConfig{
 				ProcessPool: primaryPool, LowEffortProcessPool: lowPool, MediumEffortProcessPool: medPool,
 				SessionManager: session.New(tmpHome, tempData), Store: store,
-				OnMessageCompleted: func(msg db.Message, status string) {
-					if status == db.StatusCompleted {
-						select {
-						case doneCh <- struct{}{}:
-						default:
-						}
-					}
-				},
 			})
 			pool.Start()
 			defer pool.Stop()
 
+			ctx := context.Background()
 			threadID := "thread-" + strings.ToLower(tt.name)
 			msg := db.Message{ID: "msg-" + strings.ToLower(tt.name), ThreadID: threadID, Content: "run task", Effort: tt.effort, Status: db.StatusPending, CreatedAt: time.Now()}
-			_ = store.InsertMessage(context.Background(), msg)
-			pool.Enqueue(msg)
-
-			select {
-			case <-doneCh:
-			case <-time.After(5 * time.Second):
-				t.Fatalf("timeout waiting for turn completion")
+			_ = store.InsertMessage(ctx, msg)
+			if lt := runLiveBurst(ctx, pool, threadID, "turn-1", msg.ID); lt.err != nil || lt.outcome != OutcomeCompleted {
+				t.Fatalf("turn = (%s, %v), want completed", lt.outcome, lt.err)
 			}
 			if p := int(primarySpawnCount.Load()); p != tt.wantPrimaryCount {
 				t.Errorf("primarySpawnCount = %d, want %d", p, tt.wantPrimaryCount)
@@ -613,7 +548,6 @@ func TestWorker_EphemeralLowEffortPool_SkipsColdStartContextAndRotates(t *testin
 	var spawnSeq int
 	var mu sync.Mutex
 	var capturedPrompts []string
-	doneCh := make(chan struct{}, 2)
 
 	lowSpawner := &mockDaemonSpawner{
 		SpawnFn: func(ctx context.Context, cfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
@@ -640,10 +574,6 @@ func TestWorker_EphemeralLowEffortPool_SkipsColdStartContextAndRotates(t *testin
 						capturedPrompts = append(capturedPrompts, string(buf[:n]))
 						mu.Unlock()
 						_, _ = fmt.Fprintf(outW, "{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"ephemeral ok\",\"conversation_id\":%q,\"usage\":{\"total_tokens\":5}}}\n", sessUUID)
-						select {
-						case doneCh <- struct{}{}:
-						default:
-						}
 					}
 				}
 			}()
@@ -675,22 +605,14 @@ func TestWorker_EphemeralLowEffortPool_SkipsColdStartContextAndRotates(t *testin
 	_ = store.RotateSessionID(ctx, threadID, primarySessUUID)
 	_ = store.SaveThreadSummary(ctx, threadID, "Cached summary that must not be injected", "hist-1")
 
-	d1 := db.Dispatch{ID: "msg-ephem-1", Source: "vanadis", Prompt: "execute vanadis chunk 1", Effort: "low", Status: db.StatusPending, CreatedAt: time.Now(), UpdatedAt: time.Now()}
-	_, _ = store.InsertDispatch(ctx, d1)
-	pool.EnqueueDispatch(d1)
-	select {
-	case <-doneCh:
-	case <-time.After(5 * time.Second):
-		t.Fatalf("timeout waiting for ephemeral turn 1")
-	}
-
-	d2 := db.Dispatch{ID: "msg-ephem-2", Source: "vanadis", Prompt: "execute vanadis chunk 2", Effort: "low", Status: db.StatusPending, CreatedAt: time.Now(), UpdatedAt: time.Now()}
-	_, _ = store.InsertDispatch(ctx, d2)
-	pool.EnqueueDispatch(d2)
-	select {
-	case <-doneCh:
-	case <-time.After(5 * time.Second):
-		t.Fatalf("timeout waiting for ephemeral turn 2")
+	for _, d := range []db.Dispatch{
+		{ID: "msg-ephem-1", Source: "vanadis", Prompt: "execute vanadis chunk 1", Effort: "low", Status: db.StatusPending, CreatedAt: time.Now(), UpdatedAt: time.Now()},
+		{ID: "msg-ephem-2", Source: "vanadis", Prompt: "execute vanadis chunk 2", Effort: "low", Status: db.StatusPending, CreatedAt: time.Now(), UpdatedAt: time.Now()},
+	} {
+		_, _ = store.InsertDispatch(ctx, d)
+		if lt := runLiveDispatch(ctx, pool, "dispatch-"+d.ID, "turn-"+d.ID, d.ID); lt.err != nil || lt.outcome != OutcomeCompleted {
+			t.Fatalf("dispatch %s = (%s, %v), want completed", d.ID, lt.outcome, lt.err)
+		}
 	}
 
 	// Snapshot under mu: releasing turn 2's lease rotates the worker daemon asynchronously,
@@ -754,13 +676,9 @@ func TestWorker_EphemeralHighEffort_FailsBurst(t *testing.T) {
 	defer primaryPool.Close()
 
 	cfg := newTestConfig(func(d *config.ConfigData) { d.DataDir = tempData })
-	doneCh := make(chan string, 1)
 	pool := New(cfg, WorkerPoolConfig{
 		ProcessPool:    &mockAcquireLeaseFailPool{AgentPool: primaryPool},
 		SessionManager: session.New(tmpHome, tempData), Store: store,
-		OnMessageCompleted: func(msg db.Message, status string) {
-			doneCh <- status
-		},
 	})
 	defer pool.Stop()
 
@@ -773,14 +691,9 @@ func TestWorker_EphemeralHighEffort_FailsBurst(t *testing.T) {
 		Effort: "high", Status: db.StatusPending, CreatedAt: time.Now(),
 	}
 	_ = store.InsertMessage(ctx, msg)
-	pool.Enqueue(msg)
-	select {
-	case status := <-doneCh:
-		if status != db.StatusFailed {
-			t.Fatalf("expected status %q, got %q", db.StatusFailed, status)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatalf("timeout waiting for failed burst")
+	lt := runLiveBurst(ctx, pool, threadID, "turn-1", msg.ID)
+	if row, _ := store.GetMessage(ctx, msg.ID); lt.err != nil || row == nil || row.Status != db.StatusFailed {
+		t.Fatalf("turn = (%s, %v), row = %+v; want status %s", lt.outcome, lt.err, row, db.StatusFailed)
 	}
 
 	if got := spawned.Load(); got != 0 {
@@ -863,7 +776,6 @@ func runStatefulResumeCase(t *testing.T, tc statefulResumeCase) {
 		d.LowEffortModel = "gemini-3.8-flash-low"
 		d.MediumEffortModel = "gemini-3.8-flash-medium"
 	})
-	doneCh := make(chan struct{}, 1)
 	pool := New(cfg, WorkerPoolConfig{
 		Pools: map[PoolKey]runner.AgentPool{
 			{Ephemeral: false, Effort: "high"}:   primaryPool,
@@ -873,11 +785,6 @@ func runStatefulResumeCase(t *testing.T, tc statefulResumeCase) {
 			{Ephemeral: true, Effort: "low"}:     ephemLow,
 		},
 		SessionManager: session.New(tmpHome, tempData), Store: store,
-		OnMessageCompleted: func(msg db.Message, status string) {
-			if status == db.StatusCompleted {
-				doneCh <- struct{}{}
-			}
-		},
 	})
 	defer pool.Stop()
 
@@ -890,11 +797,8 @@ func runStatefulResumeCase(t *testing.T, tc statefulResumeCase) {
 		Effort: tc.effort, Status: db.StatusPending, CreatedAt: time.Now(),
 	}
 	_ = store.InsertMessage(ctx, msg)
-	pool.Enqueue(msg)
-	select {
-	case <-doneCh:
-	case <-time.After(5 * time.Second):
-		t.Fatalf("timeout waiting for stateful %s turn", tc.effort)
+	if lt := runLiveBurst(ctx, pool, threadID, "turn-1", msg.ID); lt.err != nil || lt.outcome != OutcomeCompleted {
+		t.Fatalf("stateful %s turn = (%s, %v), want completed", tc.effort, lt.outcome, lt.err)
 	}
 	pool.Stop()
 
@@ -1364,11 +1268,14 @@ func TestWorkerPool_ProcessInteractiveTurn_PublishesTurnCompleted(t *testing.T) 
 		ThreadID:  threadID,
 		AuthorID:  "user-1",
 		Content:   "Hello from interactive turn",
+		Status:    db.StatusPending,
 		CreatedAt: time.Now().UTC(),
 	}
 	_ = insertMessage(store, msg)
 
-	pool.processBurst([]db.Message{msg})
+	if lt := runLiveBurst(context.Background(), pool, threadID, "turn-1", msg.ID); lt.err != nil || lt.outcome != OutcomeCompleted {
+		t.Fatalf("turn = (%s, %v), want completed", lt.outcome, lt.err)
+	}
 
 	gotMsg := tracker.waitForFirst(t)
 	if gotMsg.subject != "aerial.turn.completed" {
