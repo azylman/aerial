@@ -4,184 +4,96 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
+	"strings"
 	"testing"
 )
 
-func TestLoadConsoleYAMLConfigs_TableDriven(t *testing.T) {
+// configTestPath writes yaml (when non-empty) to name inside a temp dir and returns the
+// path to pass the loader; an empty name stays "" so the empty-path guard is exercised.
+func configTestPath(t *testing.T, name, yaml string) string {
+	t.Helper()
+	if name == "" {
+		return ""
+	}
+	path := filepath.Join(t.TempDir(), name)
+	if yaml != "" {
+		if err := os.WriteFile(path, []byte(yaml), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return path
+}
+
+func TestLoadQuickLaunchLinks(t *testing.T) {
 	t.Parallel()
-	defaults := DefaultQuickLaunchLinks()
-	if len(defaults) != 0 {
-		t.Fatalf("expected 0 default quick launch links, got %d", len(defaults))
-	}
-
-	tests := []loadConsoleYAMLTestCase{
+	tests := []struct {
+		name string
+		file string
+		yaml string
+		want []QuickLaunchLink
+	}{
+		{name: "empty path", want: []QuickLaunchLink{}},
+		{name: "missing file", file: "missing.yaml", want: []QuickLaunchLink{}},
+		{name: "invalid yaml", file: "c.yaml", yaml: "console: [invalid-yaml\ninvalid: [yaml: broken\n", want: []QuickLaunchLink{}},
+		{name: "repos only", file: "c.yaml", yaml: "github_repos: [\"example/alpha\"]\n", want: []QuickLaunchLink{}},
 		{
-			name:      "EmptyPath",
-			noFile:    true,
-			wantLinks: []QuickLaunchLink{},
-			wantRepos: nil,
+			name: "console quick_launch_links skip nameless and urlless",
+			file: "c.yaml",
+			yaml: "console:\n  quick_launch_links:\n    - {name: HOME, url: \"https://home.example.com\", icon: \"🏠\", description: Hub}\n" +
+				"    - {name: \"\", url: \"https://skip.example.com\"}\n    - {name: NO_URL, url: \"\"}\n",
+			want: []QuickLaunchLink{{Name: "HOME", URL: "https://home.example.com", Icon: "🏠", Description: "Hub", Target: "_blank", IsCustom: true}},
 		},
 		{
-			name:        "NonExistentFile",
-			nonExistent: true,
-			wantLinks:   []QuickLaunchLink{},
-			wantRepos:   nil,
+			name: "root quick_links keeps target",
+			file: "c.yaml",
+			yaml: "quick_links:\n  - {name: ROOT, url: \"https://root.example.com\", target: _self}\n",
+			want: []QuickLaunchLink{{Name: "ROOT", URL: "https://root.example.com", Target: "_self", IsCustom: true}},
 		},
 		{
-			name: "InvalidYAML",
-			yamlData: `console: [invalid-yaml
-invalid: [yaml: broken
-`,
-			wantLinks: []QuickLaunchLink{},
-			wantRepos: nil,
-		},
-		{
-			name: "QuickLaunchLinks_ConsoleConfig",
-			yamlData: `
-console:
-  quick_launch_links:
-    - name: "HOME"
-      url: "https://home.example.com"
-      icon: "🏠"
-      description: "Home Infrastructure Hub"
-    - name: ""
-      url: "https://skip.com"
-    - name: "NO_URL"
-      url: ""
-`,
-			wantLinks: []QuickLaunchLink{
-				{
-					Name:        "HOME",
-					URL:         "https://home.example.com",
-					Icon:        "🏠",
-					Description: "Home Infrastructure Hub",
-					Target:      "_blank",
-					IsCustom:    true,
-				},
-			},
-		},
-		{
-			name: "QuickLaunchLinks_RootQuickLinksFallback",
-			yamlData: `
-quick_links:
-  - name: "HOME_ROOT"
-    url: "https://home.root.example.com"
-    target: "_self"
-`,
-			wantLinks: []QuickLaunchLink{
-				{
-					Name:     "HOME_ROOT",
-					URL:      "https://home.root.example.com",
-					Target:   "_self",
-					IsCustom: true,
-				},
-			},
-		},
-		{
-			name: "QuickLaunchLinks_TopLevelQuickLaunchLinks",
-			yamlData: `
-quick_launch_links:
-  - name: "GRAFANA"
-    url: "https://grafana.example.com"
-    icon: "📊"
-    description: "Grafana Telemetry"
-`,
-			wantLinks: []QuickLaunchLink{
-				{
-					Name:        "GRAFANA",
-					URL:         "https://grafana.example.com",
-					Icon:        "📊",
-					Description: "Grafana Telemetry",
-					Target:      "_blank",
-					IsCustom:    true,
-				},
-			},
-		},
-		{
-			name: "GitHubRepos_ConsoleBlock",
-			yamlData: `
-console:
-  github_repos:
-    - "azylman/aerial"
-    - " azylman/aerial "
-    - ""
-    - "azylman/mirrormere"
-`,
-			wantLinks: []QuickLaunchLink{},
-			wantRepos: []string{"azylman/aerial", "azylman/mirrormere"},
-		},
-		{
-			name: "GitHubRepos_ConsoleReposFallback",
-			yamlData: `
-console:
-  repos:
-    - "azylman/coven"
-`,
-			wantLinks: []QuickLaunchLink{},
-			wantRepos: []string{"azylman/coven"},
-		},
-		{
-			name: "GitHubRepos_RootFallback",
-			yamlData: `
-github_repos:
-  - "azylman/root-repo"
-`,
-			wantLinks: []QuickLaunchLink{},
-			wantRepos: []string{"azylman/root-repo"},
+			name: "root quick_launch_links",
+			file: "c.yaml",
+			yaml: "quick_launch_links:\n  - {name: GRAFANA, url: \"https://grafana.example.com\", icon: \"📊\"}\n",
+			want: []QuickLaunchLink{{Name: "GRAFANA", URL: "https://grafana.example.com", Icon: "📊", Target: "_blank", IsCustom: true}},
 		},
 	}
-
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			runLoadConsoleYAMLConfigsCase(t, tc)
+			if got := loadQuickLaunchLinks(configTestPath(t, tc.file, tc.yaml)); !slices.Equal(got, tc.want) {
+				t.Errorf("loadQuickLaunchLinks() = %+v, want %+v", got, tc.want)
+			}
 		})
 	}
 }
 
-type loadConsoleYAMLTestCase struct {
-	name        string
-	yamlData    string
-	noFile      bool
-	nonExistent bool
-	wantLinks   []QuickLaunchLink
-	wantRepos   []string
-}
-
-func runLoadConsoleYAMLConfigsCase(t *testing.T, tc loadConsoleYAMLTestCase) {
-	t.Helper()
-	path := ""
-	if !tc.noFile {
-		if tc.nonExistent {
-			path = filepath.Join(t.TempDir(), "nonexistent.yaml")
-		} else {
-			path = filepath.Join(t.TempDir(), "config.yaml")
-			_ = os.WriteFile(path, []byte(tc.yamlData), 0o644)
-		}
+func TestLoadConsoleRepos(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		file string
+		yaml string
+		want []string
+	}{
+		{name: "empty path"},
+		{name: "missing file", file: "missing.yaml"},
+		{name: "invalid yaml", file: "c.yaml", yaml: "console: [invalid-yaml\n"},
+		{
+			name: "console github_repos trimmed and deduped",
+			file: "c.yaml",
+			yaml: "console:\n  github_repos: [\"example/alpha\", \" example/alpha \", \"\", \"example/beta\"]\n",
+			want: []string{"example/alpha", "example/beta"},
+		},
+		{name: "console repos fallback", file: "c.yaml", yaml: "console:\n  repos: [\"example/gamma\"]\n", want: []string{"example/gamma"}},
+		{name: "root github_repos fallback", file: "c.yaml", yaml: "github_repos: [\"example/root\"]\n", want: []string{"example/root"}},
 	}
-
-	if tc.wantLinks != nil || tc.noFile || tc.nonExistent || tc.yamlData != "" {
-		gotLinks := loadQuickLaunchLinks(path)
-		if len(gotLinks) != len(tc.wantLinks) {
-			t.Fatalf("expected %d links, got %d", len(tc.wantLinks), len(gotLinks))
-		}
-		for i := range gotLinks {
-			if gotLinks[i] != tc.wantLinks[i] {
-				t.Errorf("link [%d] = %+v, want %+v", i, gotLinks[i], tc.wantLinks[i])
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := loadConsoleRepos(configTestPath(t, tc.file, tc.yaml)); !slices.Equal(got, tc.want) {
+				t.Errorf("loadConsoleRepos() = %q, want %q", got, tc.want)
 			}
-		}
-	}
-
-	if tc.wantRepos != nil || tc.noFile || tc.nonExistent || tc.yamlData != "" {
-		gotRepos := loadConsoleRepos(path)
-		if len(gotRepos) != len(tc.wantRepos) {
-			t.Fatalf("expected %d repos, got %d: %v vs %v", len(tc.wantRepos), len(gotRepos), tc.wantRepos, gotRepos)
-		}
-		for i := range gotRepos {
-			if gotRepos[i] != tc.wantRepos[i] {
-				t.Errorf("repo [%d] = %q, want %q", i, gotRepos[i], tc.wantRepos[i])
-			}
-		}
+		})
 	}
 }
 
@@ -208,7 +120,7 @@ func TestResolveConfigPath(t *testing.T) {
 		{"local config empty falls back to fallbackFile", "", emptyLocal, fallbackFile, fallbackFile},
 		{"local config missing falls back to fallbackFile", "", nonExistent, fallbackFile, fallbackFile},
 		{"fallback missing falls back to default", "", nonExistent, fallback, fallback},
-		{"fallback empty falls back to DefaultConfigPath", "", nonExistent, "", DefaultConfigPath},
+		{"fallback empty falls back to the in-container default", "", nonExistent, "", "/config/console.yaml"},
 	}
 
 	for _, tc := range tests {
@@ -227,383 +139,169 @@ func TestResolveConfigPath(t *testing.T) {
 	}
 }
 
-func loadConfigFileCases(tmpDir string) []loadConfigFileTestCase {
-	validPath := filepath.Join(tmpDir, "console.yaml")
-	singleRepoPath := filepath.Join(tmpDir, "single_repo.yaml")
-	eriPath := filepath.Join(tmpDir, "eri.yaml")
-	noBrainPath := filepath.Join(tmpDir, "no_brain.yaml")
-	kubePath := filepath.Join(tmpDir, "kube.yaml")
-	badYAMLPath := filepath.Join(tmpDir, "bad.yaml")
-
-	fallbackCases := loadConfigFileFallbackCases(validPath, badYAMLPath, tmpDir)
-	cases := make([]loadConfigFileTestCase, 0, 7+len(fallbackCases))
-	cases = append(cases, loadConfigFilePrimaryCases(validPath, singleRepoPath, eriPath, noBrainPath, kubePath)...)
-	return append(cases, fallbackCases...)
-}
-
-func loadConfigFilePrimaryCases(validPath, singleRepoPath, eriPath, noBrainPath, kubePath string) []loadConfigFileTestCase {
-	return []loadConfigFileTestCase{
-		{
-			name: "valid full configuration with token and commit",
-			path: validPath,
-			env: map[string]string{
-				"GITHUB_PAT": "pat-12345",
-				"GIT_COMMIT": "abcdef012345",
-			},
-			wantPort:       "8084",
-			wantBrainURL:   "http://eri.aerial",
-			wantMemoryURL:  "http://coven.aerial",
-			wantHaroURL:    "http://haro.aerial",
-			wantVanadisURL: "http://vanadis.aerial",
-			wantDocketURL:  "http://docket-mcp.aerial",
-			wantGHRepo:     "azylman/aerial",
-			wantGHRepos:    []string{"azylman/aerial", "azylman/aerial-config"},
-			wantGHToken:    "pat-12345",
-			wantConfigPath: validPath,
-		},
-		{
-			name: "single repo and custom config_path",
-			path: singleRepoPath,
-			env: map[string]string{
-				"GITHUB_PAT": "token-from-env",
-			},
-			wantPort:       "8084",
-			wantBrainURL:   "http://eri.aerial",
-			wantMemoryURL:  "http://coven.aerial",
-			wantHaroURL:    "http://haro.aerial",
-			wantVanadisURL: "http://vanadis.aerial",
-			wantGHRepo:     "azylman/single-repo",
-			wantGHRepos:    []string{"azylman/single-repo"},
-			wantGHToken:    "token-from-env",
-			wantConfigPath: "/custom/path/config.yaml",
-		},
-		{
-			name:           "eri_url in yaml",
-			path:           eriPath,
-			wantPort:       "8084",
-			wantBrainURL:   "http://eri-direct.aerial",
-			wantMemoryURL:  "http://coven.aerial",
-			wantHaroURL:    "http://haro.aerial",
-			wantVanadisURL: "http://vanadis.aerial",
-			wantGHRepo:     "azylman/aerial",
-			wantGHRepos:    []string{"azylman/aerial"},
-			wantConfigPath: eriPath,
-		},
-		{
-			name: "ERI_URL env fallback when absent from yaml",
-			path: noBrainPath,
-			env: map[string]string{
-				"ERI_URL": "http://env-eri.aerial:8088",
-			},
-			wantPort:       "8084",
-			wantBrainURL:   "http://env-eri.aerial:8088",
-			wantMemoryURL:  "http://coven.aerial",
-			wantHaroURL:    "http://haro.aerial",
-			wantVanadisURL: "http://vanadis.aerial",
-			wantGHRepo:     "azylman/aerial",
-			wantGHRepos:    []string{"azylman/aerial"},
-			wantConfigPath: noBrainPath,
-		},
-		{
-			name:           "LoadConfig wrapper",
-			path:           validPath,
-			callLoadConfig: true,
-			wantPort:       "8084",
-			wantGHRepo:     "azylman/aerial",
-		},
-		{
-			name:      "nil lookup defaults to os.Getenv",
-			path:      validPath,
-			nilLookup: true,
-			wantPort:  "8084",
-		},
-		{
-			name:              "kube_api_server in yaml",
-			path:              kubePath,
-			wantPort:          "8084",
-			wantBrainURL:      "http://eri.aerial",
-			wantMemoryURL:     "http://coven.aerial",
-			wantHaroURL:       "http://haro.aerial",
-			wantVanadisURL:    "http://vanadis.aerial",
-			wantGHRepo:        "azylman/aerial",
-			wantGHRepos:       []string{"azylman/aerial"},
-			wantKubeAPIServer: "http://kube.cluster:6443",
-			wantConfigPath:    kubePath,
-		},
-	}
-}
-
-func loadConfigFileFallbackCases(validPath, badYAMLPath, tmpDir string) []loadConfigFileTestCase {
-	return []loadConfigFileTestCase{
-		{
-			name: "KUBE_API_SERVER env fallback when absent from yaml",
-			path: validPath,
-			env: map[string]string{
-				"KUBE_API_SERVER": "https://k8s-env.cluster:6443",
-			},
-			wantPort:          "8084",
-			wantBrainURL:      "http://eri.aerial",
-			wantMemoryURL:     "http://coven.aerial",
-			wantHaroURL:       "http://haro.aerial",
-			wantVanadisURL:    "http://vanadis.aerial",
-			wantGHRepo:        "azylman/aerial",
-			wantGHRepos:       []string{"azylman/aerial", "azylman/aerial-config"},
-			wantKubeAPIServer: "https://k8s-env.cluster:6443",
-			wantConfigPath:    validPath,
-		},
-		{
-			name: "KUBERNETES_SERVICE_HOST and PORT env fallback",
-			path: validPath,
-			env: map[string]string{
-				"KUBERNETES_SERVICE_HOST": "192.0.2.1",
-				"KUBERNETES_SERVICE_PORT": "6443",
-			},
-			wantPort:          "8084",
-			wantBrainURL:      "http://eri.aerial",
-			wantMemoryURL:     "http://coven.aerial",
-			wantHaroURL:       "http://haro.aerial",
-			wantVanadisURL:    "http://vanadis.aerial",
-			wantGHRepo:        "azylman/aerial",
-			wantGHRepos:       []string{"azylman/aerial", "azylman/aerial-config"},
-			wantKubeAPIServer: "https://192.0.2.1:6443",
-			wantConfigPath:    validPath,
-		},
-		{
-			name: "KUBERNETES_SERVICE_HOST default port 443 fallback",
-			path: validPath,
-			env: map[string]string{
-				"KUBERNETES_SERVICE_HOST": "192.0.2.1",
-			},
-			wantPort:          "8084",
-			wantBrainURL:      "http://eri.aerial",
-			wantMemoryURL:     "http://coven.aerial",
-			wantHaroURL:       "http://haro.aerial",
-			wantVanadisURL:    "http://vanadis.aerial",
-			wantGHRepo:        "azylman/aerial",
-			wantGHRepos:       []string{"azylman/aerial", "azylman/aerial-config"},
-			wantKubeAPIServer: "https://192.0.2.1:443",
-			wantConfigPath:    validPath,
-		},
-		{
-			name:    "empty path error",
-			path:    "",
-			wantErr: true,
-		},
-		{
-			name:    "nonexistent file error",
-			path:    filepath.Join(tmpDir, "nonexistent.yaml"),
-			wantErr: true,
-		},
-		{
-			name:    "bad yaml syntax error",
-			path:    badYAMLPath,
-			wantErr: true,
-		},
-	}
-}
-
-func writeConfigFileFixtures(t *testing.T, tmpDir string) {
-	t.Helper()
-	validYAML := `
-port: "8084"
-eri_url: "http://eri.aerial"
-memory_url: "http://coven.aerial"
-hangar_url: "http://hangar.aerial"
-haro_url: "http://haro.aerial"
-vanadis_url: "http://vanadis.aerial"
-docket_url: " http://docket-mcp.aerial "
-nomad_addr: "http://nomad.cluster:4646"
-github_repos:
-  - "azylman/aerial"
-  - "azylman/aerial-config"
-  - "azylman/aerial"
-`
-	if err := os.WriteFile(filepath.Join(tmpDir, "console.yaml"), []byte(validYAML), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	singleRepoYAML := `
-port: "8084"
-eri_url: "http://eri.aerial"
-memory_url: "http://coven.aerial"
-hangar_url: "http://hangar.aerial"
-haro_url: "http://haro.aerial"
-vanadis_url: "http://vanadis.aerial"
-github_repos:
-  - "azylman/single-repo"
-config_path: "/custom/path/config.yaml"
-`
-	if err := os.WriteFile(filepath.Join(tmpDir, "single_repo.yaml"), []byte(singleRepoYAML), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	eriYAML := `
-port: "8084"
-eri_url: "http://eri-direct.aerial"
-memory_url: "http://coven.aerial"
-hangar_url: "http://hangar.aerial"
-haro_url: "http://haro.aerial"
-vanadis_url: "http://vanadis.aerial"
-github_repos:
-  - "azylman/aerial"
-`
-	if err := os.WriteFile(filepath.Join(tmpDir, "eri.yaml"), []byte(eriYAML), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	noBrainYAML := `
-port: "8084"
-memory_url: "http://coven.aerial"
-hangar_url: "http://hangar.aerial"
-haro_url: "http://haro.aerial"
-vanadis_url: "http://vanadis.aerial"
-github_repos:
-  - "azylman/aerial"
-`
-	if err := os.WriteFile(filepath.Join(tmpDir, "no_brain.yaml"), []byte(noBrainYAML), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	kubeYAML := `
-port: "8084"
-eri_url: "http://eri.aerial"
-memory_url: "http://coven.aerial"
-hangar_url: "http://hangar.aerial"
-haro_url: "http://haro.aerial"
-vanadis_url: "http://vanadis.aerial"
-kube_api_server: "http://kube.cluster:6443"
-github_repos:
-  - "azylman/aerial"
-`
-	if err := os.WriteFile(filepath.Join(tmpDir, "kube.yaml"), []byte(kubeYAML), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := os.WriteFile(filepath.Join(tmpDir, "bad.yaml"), []byte("port: [unclosed"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func TestLoadConfigFile_TableDriven(t *testing.T) {
-	tmpDir := t.TempDir()
-	writeConfigFileFixtures(t, tmpDir)
-
-	for _, tc := range loadConfigFileCases(tmpDir) {
-		t.Run(tc.name, func(t *testing.T) {
-			runLoadConfigFileCase(t, tc)
-		})
-	}
-}
-
-type loadConfigFileTestCase struct {
-	name              string
-	path              string
-	env               map[string]string
-	nilLookup         bool
-	callLoadConfig    bool
-	wantErr           bool
-	wantPort          string
-	wantBrainURL      string
-	wantMemoryURL     string
-	wantHaroURL       string
-	wantVanadisURL    string
-	wantDocketURL     string
-	wantGHRepo        string
-	wantGHRepos       []string
-	wantGHToken       string
-	wantKubeAPIServer string
-	wantConfigPath    string
-}
+// consoleYAMLServices is the required service block every valid console.yaml row shares.
+const consoleYAMLServices = "port: \"8084\"\nmemory_url: \"http://coven.example\"\nharo_url: \"http://haro.example\"\nvanadis_url: \"http://vanadis.example\"\n"
 
 // loadConfigEnvKeys are the env vars LoadConfig and a nil-lookup LoadConfigFile read from the
 // process env; every row pins them so the pod's own values never leak into a result.
 var loadConfigEnvKeys = []string{"ERI_URL", "GITHUB_PAT", "KUBE_API_SERVER", "KUBERNETES_SERVICE_HOST", "KUBERNETES_SERVICE_PORT"}
 
-func runLoadConfigFileCase(t *testing.T, tc loadConfigFileTestCase) {
-	t.Helper()
-	for _, k := range loadConfigEnvKeys {
-		t.Setenv(k, "")
+// consoleConfigWant is the expected config for a consoleYAMLServices file; ConfigPath ""
+// means the loaded file's own path.
+func consoleConfigWant(eri, kube string, repos ...string) ConsoleConfig {
+	return ConsoleConfig{
+		Port: "8084", BrainURL: eri, EriURL: eri, MemoryURL: "http://coven.example", HaroURL: "http://haro.example",
+		VanadisURL: "http://vanadis.example", GHRepo: repos[0], GHRepos: repos, KubeAPIServer: kube,
 	}
-	if tc.callLoadConfig {
-		for k, v := range tc.env {
-			t.Setenv(k, v)
-		}
-		cfg, err := LoadConfig(tc.path)
-		if (err != nil) != tc.wantErr {
-			t.Fatalf("LoadConfig() err = %v, wantErr = %v", err, tc.wantErr)
-		}
-		if tc.wantErr {
-			return
-		}
-		if cfg.Port != tc.wantPort {
-			t.Errorf("Port = %q, want %q", cfg.Port, tc.wantPort)
-		}
-		return
-	}
+}
 
-	var lookup func(string) string
-	if !tc.nilLookup {
-		lookup = func(k string) string {
-			if tc.env == nil {
-				return ""
+func TestLoadConfigFile(t *testing.T) {
+	eriAlpha := "eri_url: \"http://eri.example\"\ngithub_repos: [\"example/alpha\"]\n"
+	tests := []struct {
+		name    string
+		file    string
+		yaml    string
+		env     map[string]string // nil passes a nil lookup, which reads the (pinned-empty) process env
+		want    ConsoleConfig
+		wantErr string
+	}{
+		{
+			name: "full configuration with token",
+			file: "c.yaml",
+			yaml: consoleYAMLServices + "eri_url: \"http://eri.example\"\ndocket_url: \" http://docket.example \"\ngithub_repos: [\"example/alpha\", \"example/beta\", \"example/alpha\"]\n",
+			env:  map[string]string{"GITHUB_PAT": "pat-12345", "GIT_COMMIT": "abcdef012345"},
+			want: ConsoleConfig{
+				Port: "8084", BrainURL: "http://eri.example", EriURL: "http://eri.example", MemoryURL: "http://coven.example",
+				HaroURL: "http://haro.example", VanadisURL: "http://vanadis.example", DocketURL: "http://docket.example",
+				GHRepo: "example/alpha", GHRepos: []string{"example/alpha", "example/beta"}, GHToken: "pat-12345",
+			},
+		},
+		{
+			name: "single repo and custom config_path",
+			file: "c.yaml",
+			yaml: consoleYAMLServices + eriAlpha + "config_path: \"/custom/path/config.yaml\"\n",
+			env:  map[string]string{"GITHUB_PAT": "token-from-env"},
+			want: ConsoleConfig{
+				Port: "8084", BrainURL: "http://eri.example", EriURL: "http://eri.example", MemoryURL: "http://coven.example",
+				HaroURL: "http://haro.example", VanadisURL: "http://vanadis.example", GHRepo: "example/alpha", GHRepos: []string{"example/alpha"},
+				GHToken: "token-from-env", ConfigPath: "/custom/path/config.yaml",
+			},
+		},
+		{
+			name: "nil lookup reads process env",
+			file: "c.yaml",
+			yaml: consoleYAMLServices + eriAlpha,
+			want: consoleConfigWant("http://eri.example", "", "example/alpha"),
+		},
+		{
+			name: "ERI_URL env fallback when absent from yaml",
+			file: "c.yaml",
+			yaml: consoleYAMLServices + "github_repos: [\"example/alpha\"]\n",
+			env:  map[string]string{"ERI_URL": "http://env-eri.example:8088"},
+			want: consoleConfigWant("http://env-eri.example:8088", "", "example/alpha"),
+		},
+		{
+			name: "kube_api_server in yaml",
+			file: "c.yaml",
+			yaml: consoleYAMLServices + eriAlpha + "kube_api_server: \"http://kube.example:6443\"\n",
+			env:  map[string]string{},
+			want: consoleConfigWant("http://eri.example", "http://kube.example:6443", "example/alpha"),
+		},
+		{
+			name: "KUBE_API_SERVER env fallback",
+			file: "c.yaml",
+			yaml: consoleYAMLServices + eriAlpha,
+			env:  map[string]string{"KUBE_API_SERVER": "https://k8s-env.example:6443"},
+			want: consoleConfigWant("http://eri.example", "https://k8s-env.example:6443", "example/alpha"),
+		},
+		{
+			name: "KUBERNETES_SERVICE_HOST and PORT env fallback",
+			file: "c.yaml",
+			yaml: consoleYAMLServices + eriAlpha,
+			env:  map[string]string{"KUBERNETES_SERVICE_HOST": "192.0.2.1", "KUBERNETES_SERVICE_PORT": "6443"},
+			want: consoleConfigWant("http://eri.example", "https://192.0.2.1:6443", "example/alpha"),
+		},
+		{
+			name: "KUBERNETES_SERVICE_HOST default port 443",
+			file: "c.yaml",
+			yaml: consoleYAMLServices + eriAlpha,
+			env:  map[string]string{"KUBERNETES_SERVICE_HOST": "192.0.2.1"},
+			want: consoleConfigWant("http://eri.example", "https://192.0.2.1:443", "example/alpha"),
+		},
+		{name: "empty path", wantErr: "config: path cannot be empty"},
+		{name: "missing file", file: "missing.yaml", wantErr: "config: failed to read"},
+		{name: "bad yaml syntax", file: "c.yaml", yaml: "port: [unclosed", wantErr: "config: failed to parse YAML"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, k := range loadConfigEnvKeys {
+				t.Setenv(k, "")
 			}
-			return tc.env[k]
-		}
-	}
-
-	cfg, err := LoadConfigFile(tc.path, lookup)
-	if (err != nil) != tc.wantErr {
-		t.Fatalf("LoadConfigFile() err = %v, wantErr = %v", err, tc.wantErr)
-	}
-	if tc.wantErr {
-		return
-	}
-	assertLoadedConfigFields(t, &cfg, tc)
-}
-
-func assertLoadedConfigFields(t *testing.T, cfg *ConsoleConfig, tc loadConfigFileTestCase) {
-	t.Helper()
-	assertLoadedConfigURLs(t, cfg, tc)
-	assertLoadedConfigReposAndAuth(t, cfg, tc)
-	if tc.wantPort != "" && cfg.Port != tc.wantPort {
-		t.Errorf("Port = %q, want %q", cfg.Port, tc.wantPort)
-	}
-	if tc.wantConfigPath != "" && cfg.ConfigPath != tc.wantConfigPath {
-		t.Errorf("ConfigPath = %q, want %q", cfg.ConfigPath, tc.wantConfigPath)
-	}
-}
-
-func assertLoadedConfigURLs(t *testing.T, cfg *ConsoleConfig, tc loadConfigFileTestCase) {
-	t.Helper()
-	if tc.wantBrainURL != "" && (cfg.BrainURL != tc.wantBrainURL || cfg.EriURL != tc.wantBrainURL) {
-		t.Errorf("BrainURL = %q, EriURL = %q, want %q", cfg.BrainURL, cfg.EriURL, tc.wantBrainURL)
-	}
-	if tc.wantMemoryURL != "" && cfg.MemoryURL != tc.wantMemoryURL {
-		t.Errorf("MemoryURL = %q, want %q", cfg.MemoryURL, tc.wantMemoryURL)
-	}
-	if tc.wantHaroURL != "" && cfg.HaroURL != tc.wantHaroURL {
-		t.Errorf("HaroURL = %q, want %q", cfg.HaroURL, tc.wantHaroURL)
-	}
-	if tc.wantVanadisURL != "" && cfg.VanadisURL != tc.wantVanadisURL {
-		t.Errorf("VanadisURL = %q, want %q", cfg.VanadisURL, tc.wantVanadisURL)
-	}
-	if tc.wantDocketURL != "" && cfg.DocketURL != tc.wantDocketURL {
-		t.Errorf("DocketURL = %q, want %q", cfg.DocketURL, tc.wantDocketURL)
-	}
-	if tc.wantKubeAPIServer != "" && cfg.KubeAPIServer != tc.wantKubeAPIServer {
-		t.Errorf("KubeAPIServer = %q, want %q", cfg.KubeAPIServer, tc.wantKubeAPIServer)
+			path := configTestPath(t, tc.file, tc.yaml)
+			var lookup func(string) string
+			if tc.env != nil {
+				lookup = func(k string) string { return tc.env[k] }
+			}
+			got, err := LoadConfigFile(path, lookup)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("LoadConfigFile() err = %v, want containing %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("LoadConfigFile() err = %v", err)
+			}
+			want := tc.want
+			if want.ConfigPath == "" {
+				want.ConfigPath = path
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Errorf("LoadConfigFile() = %+v, want %+v", got, want)
+			}
+		})
 	}
 }
 
-func assertLoadedConfigReposAndAuth(t *testing.T, cfg *ConsoleConfig, tc loadConfigFileTestCase) {
-	t.Helper()
-	if tc.wantGHRepo != "" && cfg.GHRepo != tc.wantGHRepo {
-		t.Errorf("GHRepo = %q, want %q", cfg.GHRepo, tc.wantGHRepo)
+func TestLoadConfig(t *testing.T) {
+	tests := []struct {
+		name    string
+		file    string
+		env     map[string]string
+		want    ConsoleConfig
+		wantErr string
+	}{
+		{
+			name: "reads token from process env",
+			file: "c.yaml",
+			env:  map[string]string{"GITHUB_PAT": "pat-env"},
+			want: ConsoleConfig{
+				Port: "8084", BrainURL: "http://eri.example", EriURL: "http://eri.example", MemoryURL: "http://coven.example",
+				HaroURL: "http://haro.example", VanadisURL: "http://vanadis.example", GHRepo: "example/alpha", GHRepos: []string{"example/alpha"}, GHToken: "pat-env",
+			},
+		},
+		{name: "empty path", wantErr: "config: path cannot be empty"},
 	}
-	if len(tc.wantGHRepos) > 0 && !reflect.DeepEqual(cfg.GHRepos, tc.wantGHRepos) {
-		t.Errorf("GHRepos = %v, want %v", cfg.GHRepos, tc.wantGHRepos)
-	}
-	if tc.wantGHToken != "" && cfg.GHToken != tc.wantGHToken {
-		t.Errorf("GHToken = %q, want %q", cfg.GHToken, tc.wantGHToken)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, k := range loadConfigEnvKeys {
+				t.Setenv(k, tc.env[k])
+			}
+			path := configTestPath(t, tc.file, consoleYAMLServices+"eri_url: \"http://eri.example\"\ngithub_repos: [\"example/alpha\"]\n")
+			got, err := LoadConfig(path)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("LoadConfig() err = %v, want containing %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("LoadConfig() err = %v", err)
+			}
+			tc.want.ConfigPath = path
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("LoadConfig() = %+v, want %+v", got, tc.want)
+			}
+		})
 	}
 }
