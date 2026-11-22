@@ -12,7 +12,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -219,19 +218,8 @@ func TestReadTurnQueueModeFile(t *testing.T) {
 	}
 }
 
-func TestDiscoveryTimeoutReconciliationAndH2C(t *testing.T) {
+func TestDiscoveryManifestTimeoutsAndH2C(t *testing.T) {
 	t.Parallel()
-
-	var mu sync.Mutex
-	reconcileCount := 0
-	adminServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		mu.Lock()
-		reconcileCount++
-		mu.Unlock()
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"status":"ok"}`))
-	}))
-	defer adminServer.Close()
 
 	var h2cProtocols http.Protocols
 	h2cProtocols.SetHTTP1(true)
@@ -241,13 +229,7 @@ func TestDiscoveryTimeoutReconciliationAndH2C(t *testing.T) {
 	rawHandler, err := srv.Handler()
 	require.NoError(t, err)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	trigger := startDiscoveryTimeoutReconciler(ctx, adminServer.URL, "aerial", adminServer.Client(), 3, 50*time.Millisecond)
-	wrappedHandler := wrapDiscoveryTimeoutReconciler(rawHandler, trigger.Trigger)
-
-	server := httptest.NewUnstartedServer(wrappedHandler)
+	server := httptest.NewUnstartedServer(rawHandler)
 	server.Config.Protocols = &h2cProtocols
 	server.Start()
 	defer server.Close()
@@ -259,7 +241,7 @@ func TestDiscoveryTimeoutReconciliationAndH2C(t *testing.T) {
 		tr.Protocols = &clientProtocols
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, server.URL+"/discover", http.NoBody)
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, server.URL+"/discover", http.NoBody)
 	require.NoError(t, err)
 	req.Header.Set("Accept", "application/vnd.restate.endpointmanifest.v3+json")
 
@@ -270,159 +252,36 @@ func TestDiscoveryTimeoutReconciliationAndH2C(t *testing.T) {
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	assert.Equal(t, "HTTP/2.0", resp.Proto)
 
-	// Verify that the /discover request triggered timeout reconciliation against adminServer
-	require.Eventually(t, func() bool {
-		mu.Lock()
-		defer mu.Unlock()
-		return reconcileCount >= 5 // 5 services reconciled
-	}, 3*time.Second, 50*time.Millisecond)
-}
-
-type errRoundTripper struct {
-	err error
-}
-
-func (e *errRoundTripper) RoundTrip(*http.Request) (*http.Response, error) {
-	return nil, e.err
-}
-
-type timeoutReconcileCase struct {
-	name           string
-	agent          string
-	adminURL       string
-	statusCode     int
-	returnBody     string
-	transportError bool
-	wantErrorSub   string
-	wantCallCount  int
-	wantPaths      []string
-	wantBodies     []string
-}
-
-func runTimeoutReconcileCase(t *testing.T, tc timeoutReconcileCase) {
-	t.Helper()
-	t.Parallel()
-
-	var mu sync.Mutex
-	recordedPaths := make([]string, 0)
-	recordedBodies := make([]string, 0)
-	recordedMethods := make([]string, 0)
-
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		mu.Lock()
-		recordedPaths = append(recordedPaths, r.URL.Path)
-		recordedMethods = append(recordedMethods, r.Method)
-		bodyBytes, _ := io.ReadAll(r.Body)
-		recordedBodies = append(recordedBodies, string(bodyBytes))
-		mu.Unlock()
-
-		w.WriteHeader(tc.statusCode)
-		_, _ = w.Write([]byte(tc.returnBody))
-	}))
-	defer ts.Close()
-
-	targetURL := ts.URL
-	if tc.adminURL != "" {
-		targetURL = tc.adminURL
+	var manifest struct {
+		Services []struct {
+			Name              string `json:"name"`
+			InactivityTimeout int64  `json:"inactivityTimeout"`
+			AbortTimeout      int64  `json:"abortTimeout"`
+		} `json:"services"`
 	}
-	client := ts.Client()
-	if tc.transportError {
-		client = &http.Client{
-			Transport: &errRoundTripper{err: assert.AnError},
-		}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&manifest))
+
+	type timeouts struct {
+		inactivity int64
+		abort      int64
+	}
+	got := make(map[string]timeouts, len(manifest.Services))
+	for _, s := range manifest.Services {
+		got[s.Name] = timeouts{inactivity: s.InactivityTimeout, abort: s.AbortTimeout}
 	}
 
-	err := ReconcileRestateServiceTimeouts(context.Background(), targetURL, tc.agent, client)
-	if tc.wantErrorSub != "" {
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), tc.wantErrorSub)
-		return
-	}
+	wantTurnHoldMs := queue.TurnHoldTimeout.Milliseconds()
+	wantHourMs := time.Hour.Milliseconds()
 
-	require.NoError(t, err)
-	mu.Lock()
-	defer mu.Unlock()
-	assert.Equal(t, tc.wantCallCount, len(recordedPaths))
-	if len(tc.wantPaths) > 0 {
-		assert.Equal(t, tc.wantPaths, recordedPaths)
+	wantTimeouts := map[string]timeouts{
+		"ThreadSession":   {inactivity: wantTurnHoldMs, abort: wantTurnHoldMs},
+		"DispatchSession": {inactivity: wantTurnHoldMs, abort: wantTurnHoldMs},
+		"VoiceSession":    {inactivity: wantHourMs, abort: wantHourMs},
+		"SessionManager":  {inactivity: wantHourMs, abort: wantHourMs},
+		"TurnRunner":      {inactivity: wantTurnHoldMs, abort: wantTurnHoldMs},
+		"LLM":             {inactivity: wantHourMs, abort: wantHourMs},
 	}
-	assert.Equal(t, tc.wantBodies, recordedBodies)
-	for i := range recordedPaths {
-		assert.Equal(t, http.MethodPatch, recordedMethods[i])
-		var p map[string]any
-		require.NoError(t, json.Unmarshal([]byte(recordedBodies[i]), &p))
-		assert.NotContains(t, p, "retry_policy")
-	}
-}
-
-func TestReconcileRestateServiceTimeouts(t *testing.T) {
-	t.Parallel()
-
-	tests := []timeoutReconcileCase{
-		{
-			name:          "successful timeout reconciliation for all 5 services",
-			agent:         "aerial",
-			statusCode:    http.StatusOK,
-			returnBody:    `{"status":"ok"}`,
-			wantCallCount: 5,
-			wantPaths: []string{
-				"/services/ThreadSession",
-				"/services/DispatchSession",
-				"/services/VoiceSession",
-				"/services/TurnRunner",
-				"/services/LLM",
-			},
-			wantBodies: []string{
-				`{"inactivity_timeout":"255m","abort_timeout":"255m"}`,
-				`{"inactivity_timeout":"255m","abort_timeout":"255m"}`,
-				`{"inactivity_timeout":"1h","abort_timeout":"1h"}`,
-				`{"inactivity_timeout":"255m","abort_timeout":"255m"}`,
-				`{"inactivity_timeout":"1h","abort_timeout":"1h"}`,
-			},
-		},
-		{
-			name:          "successful timeout reconciliation with namespaced agent",
-			agent:         "agent-alpha",
-			statusCode:    http.StatusOK,
-			returnBody:    `{"status":"ok"}`,
-			wantCallCount: 5,
-			wantPaths: []string{
-				"/services/ThreadSession-agent-alpha",
-				"/services/DispatchSession-agent-alpha",
-				"/services/VoiceSession-agent-alpha",
-				"/services/TurnRunner-agent-alpha",
-				"/services/LLM-agent-alpha",
-			},
-			wantBodies: []string{
-				`{"inactivity_timeout":"255m","abort_timeout":"255m"}`,
-				`{"inactivity_timeout":"255m","abort_timeout":"255m"}`,
-				`{"inactivity_timeout":"1h","abort_timeout":"1h"}`,
-				`{"inactivity_timeout":"255m","abort_timeout":"255m"}`,
-				`{"inactivity_timeout":"1h","abort_timeout":"1h"}`,
-			},
-		},
-		{
-			name:          "admin returns 500 error",
-			agent:         "aerial",
-			statusCode:    http.StatusInternalServerError,
-			returnBody:    `{"error":"internal"}`,
-			wantErrorSub:  "failed with status 500",
-			wantCallCount: 1,
-		},
-		{
-			name:           "http transport error",
-			agent:          "aerial",
-			transportError: true,
-			wantErrorSub:   "patch service",
-			wantCallCount:  1,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			runTimeoutReconcileCase(t, tc)
-		})
-	}
+	assert.Equal(t, wantTimeouts, got)
 }
 
 type configEnvCase struct {
@@ -430,7 +289,6 @@ type configEnvCase struct {
 	env             map[string]string
 	wantRestatePort string
 	wantHealthPort  string
-	wantAdminURL    string
 	wantAgentName   string
 }
 
@@ -442,7 +300,6 @@ func runConfigEnvCase(t *testing.T, tc configEnvCase) {
 	cfg := LoadConfigFromEnv()
 	assert.Equal(t, tc.wantRestatePort, cfg.RestatePort)
 	assert.Equal(t, tc.wantHealthPort, cfg.HealthPort)
-	assert.Equal(t, tc.wantAdminURL, cfg.AdminURL)
 	assert.Equal(t, tc.wantAgentName, cfg.AgentName)
 	assert.Equal(t, "/etc/aerial/podinfo/turn-queue", cfg.TurnQueueModeFile)
 }
@@ -451,26 +308,23 @@ func TestLoadConfigFromEnv(t *testing.T) {
 	tests := []configEnvCase{
 		{
 			name:            "default values",
-			env:             map[string]string{"RESTATE_PORT": "", "PORT": "", "HEALTH_PORT": "", "RESTATE_ADMIN_URL": "", "AGENT_NAME": ""},
+			env:             map[string]string{"RESTATE_PORT": "", "PORT": "", "HEALTH_PORT": "", "AGENT_NAME": ""},
 			wantRestatePort: "9080",
 			wantHealthPort:  "4028",
-			wantAdminURL:    "http://restate.aerial:9070",
 			wantAgentName:   "aerial",
 		},
 		{
 			name:            "PORT fallback for restate port",
-			env:             map[string]string{"RESTATE_PORT": "", "PORT": "9081", "HEALTH_PORT": "4029", "RESTATE_ADMIN_URL": "http://admin:9070/", "AGENT_NAME": "agent-alpha"},
+			env:             map[string]string{"RESTATE_PORT": "", "PORT": "9081", "HEALTH_PORT": "4029", "AGENT_NAME": "agent-alpha"},
 			wantRestatePort: "9081",
 			wantHealthPort:  "4029",
-			wantAdminURL:    "http://admin:9070",
 			wantAgentName:   "agent-alpha",
 		},
 		{
 			name:            "explicit environment overrides",
-			env:             map[string]string{"RESTATE_PORT": "9090", "HEALTH_PORT": "4030", "RESTATE_ADMIN_URL": "http://restate-custom:9070", "AGENT_NAME": "agent-beta"},
+			env:             map[string]string{"RESTATE_PORT": "9090", "HEALTH_PORT": "4030", "AGENT_NAME": "agent-beta"},
 			wantRestatePort: "9090",
 			wantHealthPort:  "4030",
-			wantAdminURL:    "http://restate-custom:9070",
 			wantAgentName:   "agent-beta",
 		},
 	}
@@ -673,7 +527,6 @@ func TestRunApp_CanceledContext(t *testing.T) {
 	cfg := Config{
 		RestatePort: "19080",
 		HealthPort:  "14028",
-		AdminURL:    "http://127.0.0.1:19070",
 		AgentName:   "aerial-test",
 	}
 
@@ -708,11 +561,37 @@ func TestRunApp_CanceledContext(t *testing.T) {
 	)
 	assert.NoError(t, err)
 
+	// Test provisioner sync error branch in RunApp
+	appCfgBadSync := config.NewFromData(&config.ConfigData{
+		DatabaseURL:   "sqlite://" + tmpDir + "/test.db",
+		GeminiHomeDir: tmpDir + "/home",
+		DataDir:       "/proc/nonexistent-sync-dir/data",
+		Port:          "4028",
+		CredentialSources: config.CredentialSources{
+			OAuth: config.CredentialSource{Disabled: true},
+			Codex: config.CredentialSource{Disabled: true},
+			Muse:  config.CredentialSource{Disabled: true},
+		},
+	})
+	err = RunApp(ctx, cfg,
+		WithStore(fakeStore, nil),
+		WithAppConfig(appCfgBadSync),
+		WithDaemonSpawner(&dummySpawner{}),
+	)
+	assert.NoError(t, err)
+
+	// Test nil Current() config fallback
+	err = RunApp(ctx, cfg,
+		WithStore(fakeStore, nil),
+		WithAppConfig(config.NewFromData(nil)),
+		WithDaemonSpawner(&dummySpawner{}),
+	)
+	assert.NoError(t, err)
+
 	// Test database error branch when store is not injected
 	cfgBadDB := Config{
 		RestatePort: "19080",
 		HealthPort:  "14028",
-		AdminURL:    "http://127.0.0.1:19070",
 		AgentName:   "aerial-test",
 	}
 	err = RunApp(ctx, cfgBadDB,
@@ -800,19 +679,6 @@ func TestStartUsagePoller(t *testing.T) {
 	}
 }
 
-func TestReconcileRestateServiceTimeouts_DefaultAndInvalidURL(t *testing.T) {
-	t.Parallel()
-
-	// 1. Default URL (adminURL == "")
-	client := &http.Client{Transport: &errRoundTripper{err: assert.AnError}}
-	err := ReconcileRestateServiceTimeouts(context.Background(), "", "aerial", client)
-	require.Error(t, err)
-
-	// 2. Invalid URL path leading to request creation error
-	err = ReconcileRestateServiceTimeouts(context.Background(), "http://localhost\x7f", "aerial", client)
-	require.Error(t, err)
-}
-
 func TestSetupHealthMux_LoopbackReload(t *testing.T) {
 	t.Parallel()
 
@@ -882,7 +748,6 @@ func TestRunApp_ListenFailures(t *testing.T) {
 	cfgInvalidRestate := Config{
 		RestatePort: "-1",
 		HealthPort:  "14028",
-		AdminURL:    "http://127.0.0.1:19070",
 		AgentName:   "aerial-test",
 	}
 	err := RunApp(ctx, cfgInvalidRestate, WithStore(fakeStore, nil), WithAppConfig(appCfg), WithDaemonSpawner(&dummySpawner{}))
@@ -893,7 +758,6 @@ func TestRunApp_ListenFailures(t *testing.T) {
 	cfgInvalidHealth := Config{
 		RestatePort: "0",
 		HealthPort:  "-1",
-		AdminURL:    "http://127.0.0.1:19070",
 		AgentName:   "aerial-test",
 	}
 	err = RunApp(ctx, cfgInvalidHealth, WithStore(fakeStore, nil), WithAppConfig(appCfg), WithDaemonSpawner(&dummySpawner{}))
@@ -947,7 +811,6 @@ func TestRunApp_DefaultDatabaseInitializationAndShutdown(t *testing.T) {
 		cfg := Config{
 			RestatePort: "0",
 			HealthPort:  "0",
-			AdminURL:    "http://127.0.0.1:19070",
 			AgentName:   "aerial-test",
 		}
 
@@ -966,24 +829,6 @@ func TestRunApp_DefaultDatabaseInitializationAndShutdown(t *testing.T) {
 		err := RunApp(ctx, cfg, WithAppConfig(appCfg), WithDaemonSpawner(&dummySpawner{}))
 		require.NoError(t, err)
 	})
-}
-
-func TestWrapDiscoveryTimeoutReconciler_NonDiscoverPath(t *testing.T) {
-	t.Parallel()
-	called := false
-	trigger := func() { called = true }
-	handler := wrapDiscoveryTimeoutReconciler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}), trigger)
-
-	req := httptest.NewRequest(http.MethodGet, "/other", http.NoBody)
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
-	assert.Equal(t, http.StatusOK, rec.Code)
-	assert.False(t, called)
-
-	nilWrapped := wrapDiscoveryTimeoutReconciler(handler, nil)
-	assert.NotNil(t, nilWrapped)
 }
 
 func TestWireOutboundIntegrations(t *testing.T) {
@@ -1010,32 +855,6 @@ func TestWireOutboundIntegrations(t *testing.T) {
 				closeFn()
 			}
 		})
-	}
-}
-
-func TestStartDiscoveryTimeoutReconciler_ContextCanceledDuringRetry(t *testing.T) {
-	t.Parallel()
-
-	ctx, cancel := context.WithCancel(t.Context())
-	called := make(chan struct{})
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
-		select {
-		case <-called:
-		default:
-			close(called)
-		}
-	}))
-	defer ts.Close()
-
-	trigger := startDiscoveryTimeoutReconciler(ctx, ts.URL, "aerial", ts.Client(), 3, 500*time.Millisecond)
-	trigger.Trigger()
-	<-called
-	cancel() // cancel during retry delay
-	select {
-	case <-trigger.Done():
-	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for trigger.Done()")
 	}
 }
 

@@ -1,16 +1,13 @@
 package app
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
 	"log"
 	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -47,7 +44,6 @@ import (
 type Config struct {
 	RestatePort string
 	HealthPort  string
-	AdminURL    string
 	PostgresURL string
 	AgentName   string
 	// TurnQueueModeFile is the downward-API file carrying the pod's aerial.dev/turn-queue
@@ -113,18 +109,12 @@ func LoadConfigFromEnv() Config {
 		healthPort = "4028"
 	}
 
-	adminURL := strings.TrimRight(strings.TrimSpace(os.Getenv("RESTATE_ADMIN_URL")), "/")
-	if adminURL == "" {
-		adminURL = "http://restate.aerial:9070"
-	}
-
 	pgURL := strings.TrimSpace(strutil.FirstNonEmpty(os.Getenv("DATABASE_URL"), os.Getenv("POSTGRES_URL"), httpkit.BuildPostgresDSN(os.Getenv, "aerial")))
 	agentName := strings.TrimSpace(strutil.FirstNonEmpty(os.Getenv("AGENT_NAME"), "aerial"))
 
 	return Config{
 		RestatePort: restatePort,
 		HealthPort:  healthPort,
-		AdminURL:    adminURL,
 		PostgresURL: pgURL,
 		AgentName:   agentName,
 		// A code constant, not an env var: the mount path is fixed by the manifest.
@@ -172,126 +162,6 @@ func NewEriRestateServer(pool *queue.WorkerPool, agentName, mode string, llmFn r
 		srv = srv.Bind(def)
 	}
 	return srv
-}
-
-// serviceTimeouts is the admin PATCH body for one service. It deliberately has no retry policy
-// field: every Eri service runs under the Restate server's default retry policy.
-type serviceTimeouts struct {
-	InactivityTimeout string `json:"inactivity_timeout"`
-	AbortTimeout      string `json:"abort_timeout"`
-}
-
-// formatRestateDuration renders d as a humantime string ("1h", "75m").
-func formatRestateDuration(d time.Duration) string {
-	if d%time.Hour == 0 {
-		return fmt.Sprintf("%dh", d/time.Hour)
-	}
-	return fmt.Sprintf("%dm", d/time.Minute)
-}
-
-type serviceTimeoutPatch struct {
-	service string
-	body    serviceTimeouts
-}
-
-// serviceTimeoutPatches lists the per-service timeout PATCH bodies for agent.
-func serviceTimeoutPatches(agent string) []serviceTimeoutPatch {
-	hour := serviceTimeouts{InactivityTimeout: formatRestateDuration(time.Hour), AbortTimeout: formatRestateDuration(time.Hour)}
-	turnHold := serviceTimeouts{InactivityTimeout: formatRestateDuration(queue.TurnHoldTimeout), AbortTimeout: formatRestateDuration(queue.TurnHoldTimeout)}
-	runnerOpts := queue.TurnRunnerReflectOptions()
-	return []serviceTimeoutPatch{
-		{service: queue.ThreadSessionServiceName(agent), body: turnHold},
-		{service: queue.DispatchSessionServiceName(agent), body: turnHold},
-		{service: queue.VoiceSessionServiceName(agent), body: hour},
-		{service: queue.TurnRunnerServiceName(agent), body: serviceTimeouts{
-			InactivityTimeout: formatRestateDuration(runnerOpts.InactivityTimeout),
-			AbortTimeout:      formatRestateDuration(runnerOpts.AbortTimeout),
-		}},
-		{service: llmcall.ServiceName(agent), body: hour},
-	}
-}
-
-func startDiscoveryTimeoutReconciler(
-	ctx context.Context,
-	adminURL, agent string,
-	httpClient *http.Client,
-	maxAttempts int,
-	retryDelay time.Duration,
-) *bootstrap.ReloadTrigger {
-	reconcileFn := func(source string) {
-		log.Printf("[eri-restate] Service timeout reconciliation triggered via %s", source)
-		for attempt := 1; attempt <= maxAttempts; attempt++ {
-			recCtx, recCancel := context.WithTimeout(ctx, 30*time.Second)
-			err := ReconcileRestateServiceTimeouts(recCtx, adminURL, agent, httpClient)
-			recCancel()
-			if err == nil {
-				log.Printf("[eri-restate] Successfully reconciled service timeouts for agent %q", agent)
-				return
-			}
-			log.Printf("[eri-restate] Service timeout reconciliation attempt %d/%d failed: %v", attempt, maxAttempts, err)
-			if attempt == maxAttempts {
-				break
-			}
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(retryDelay):
-			}
-		}
-	}
-
-	return bootstrap.NewReloadTrigger(ctx, reconcileFn)
-}
-
-func wrapDiscoveryTimeoutReconciler(next http.Handler, triggerFn func()) http.Handler {
-	if triggerFn == nil {
-		return next
-	}
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		next.ServeHTTP(w, r)
-		if r.URL != nil && strings.HasPrefix(r.URL.Path, "/discover") {
-			triggerFn()
-		}
-	})
-}
-
-// ReconcileRestateServiceTimeouts sets per-service timeouts on Eri services via the Restate admin
-// API (TurnRunner 75m/1h, the others including LLM 1h/1h). It never sets a retry policy.
-func ReconcileRestateServiceTimeouts(ctx context.Context, adminURL string, agent string, httpClient ...*http.Client) error {
-	adminURL = strings.TrimRight(strings.TrimSpace(adminURL), "/")
-	if adminURL == "" {
-		adminURL = "http://restate.aerial:9070"
-	}
-
-	client := &http.Client{Timeout: 10 * time.Second}
-	if len(httpClient) > 0 && httpClient[0] != nil {
-		client = httpClient[0]
-	}
-
-	for _, patch := range serviceTimeoutPatches(agent) {
-		svc := patch.service
-		payload, mErr := json.Marshal(patch.body)
-		if mErr != nil {
-			return fmt.Errorf("encode timeout payload for %s: %w", svc, mErr)
-		}
-		reqURL := fmt.Sprintf("%s/services/%s", adminURL, url.PathEscape(svc))
-		req, reqErr := http.NewRequestWithContext(ctx, http.MethodPatch, reqURL, bytes.NewReader(payload))
-		if reqErr != nil {
-			return fmt.Errorf("create timeout reconcile request for %s: %w", svc, reqErr)
-		}
-		req.Header.Set("Content-Type", "application/json")
-
-		resp, doErr := client.Do(req)
-		if doErr != nil {
-			return fmt.Errorf("patch service %s timeouts: %w", svc, doErr)
-		}
-		resp.Body.Close()
-
-		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-			return fmt.Errorf("patch service %s timeouts failed with status %d", svc, resp.StatusCode)
-		}
-	}
-	return nil
 }
 
 // HealthMuxOptions configures the health and internal endpoint HTTP mux.
@@ -397,7 +267,6 @@ type appOptions struct {
 	txStore        db.TranscriptStore
 	processSpawner runner.DaemonSpawner
 	llmFn          runner.LLMFunc
-	httpClient     *http.Client
 	appConfig      *config.Config
 }
 
@@ -418,11 +287,9 @@ func startUsagePoller(ctx context.Context, cur *config.ConfigData, ephemeralHome
 }
 
 var (
-	openDefaultDB        = db.New
-	onServerReady        func(restateAddr, healthAddr string)
-	startUsagePollerFn   = metrics.StartUsagePoller
-	reconcileRetryDelay  = 2 * time.Second
-	reconcileMaxAttempts = 3
+	openDefaultDB      = db.New
+	onServerReady      func(restateAddr, healthAddr string)
+	startUsagePollerFn = metrics.StartUsagePoller
 )
 
 type agentPoolsBundle struct {
@@ -667,10 +534,7 @@ func RunApp(ctx context.Context, cfg Config, opts ...AppOption) error {
 		Config:        appCfg,
 	})
 
-	reconcileTrigger := startDiscoveryTimeoutReconciler(ctx, cfg.AdminURL, cfg.AgentName, appOpts.httpClient, reconcileMaxAttempts, reconcileRetryDelay)
-	reconcileTrigger.Trigger()
-
-	return runServers(ctx, cfg, wrapDiscoveryTimeoutReconciler(restateHandler, reconcileTrigger.Trigger), healthMux)
+	return runServers(ctx, cfg, restateHandler, healthMux)
 }
 
 func runServers(ctx context.Context, cfg Config, restateHandler http.Handler, healthMux http.Handler) error {
