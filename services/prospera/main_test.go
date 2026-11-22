@@ -51,13 +51,13 @@ func TestRunApp_MainSignal(t *testing.T) {
 		},
 		{
 			name:         "port change requests graceful restart",
-			reloadCfg:    &config.Config{Port: "9090", DatabaseURL: "sqlite://:memory:"},
+			reloadCfg:    &config.Config{Port: "9090", DatabaseURL: "postgres://prospera.invalid/prospera"},
 			wantStatus:   "restarting",
 			wantCanceled: true,
 		},
 		{
 			name:       "live field change keeps running",
-			reloadCfg:  &config.Config{Port: "4019", DatabaseURL: "sqlite://:memory:", DefaultDiscordChannel: "new-chan"},
+			reloadCfg:  &config.Config{Port: "4019", DatabaseURL: "postgres://prospera.invalid/prospera", DefaultDiscordChannel: "new-chan"},
 			wantStatus: "reloaded",
 		},
 	}
@@ -84,7 +84,7 @@ func runMainSignalCase(t *testing.T, tc runAppMainSignalTestCase) {
 		if loads > 1 && tc.reloadCfg != nil {
 			return tc.reloadCfg, nil
 		}
-		return &config.Config{Port: "4019", DatabaseURL: "sqlite://:memory:"}, nil
+		return &config.Config{Port: "4019", DatabaseURL: "postgres://prospera.invalid/prospera"}, nil
 	}
 	var gotStatus httpkit.ReloadStatus
 	canceled := false
