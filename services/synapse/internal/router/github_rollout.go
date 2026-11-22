@@ -35,41 +35,6 @@ func classifyCheckState(status, conclusion string) string {
 	return github.ClassifyCheckState(status, conclusion)
 }
 
-// resolveLegacyWorkflowRunImages is the bounded compatibility adapter for runs
-// whose exact executed workflow blob is in the immutable legacy allowlist. It
-// infers services from historical job and step names and must never be reached
-// for metadata-capable producer runs.
-func (s *RouterServer) resolveLegacyWorkflowRunImages(ctx context.Context, repo string, runID int64) ([]string, error) {
-	repo = model.NormalizeRepo(repo)
-	if repo == "" || runID <= 0 {
-		return nil, fmt.Errorf("invalid repo or runID for workflow run images resolution")
-	}
-	var jobsResp GitHubWorkflowJobsResponse
-	if err := s.getGitHubJSON(ctx, fmt.Sprintf("/repos/%s/actions/runs/%d/jobs?per_page=100", repo, runID), 5<<20, &jobsResp); err != nil {
-		return nil, err
-	}
-
-	if hasSkippedImagePromotionJob(jobsResp.Jobs) {
-		return nil, nil
-	}
-
-	owner := "azylman"
-	if parts := strings.Split(repo, "/"); len(parts) == 2 {
-		owner = strings.ToLower(parts[0])
-	}
-
-	var rawImages []string
-	for _, job := range jobsResp.Jobs {
-		if job.Status != ghStatusCompleted || job.Conclusion != conclusionSuccess || !hasExecutedBuildStep(job.Steps) {
-			continue
-		}
-		if service, ok := buildJobService(job.Name); ok {
-			rawImages = append(rawImages, fmt.Sprintf("ghcr.io/%s/%s:latest", owner, service))
-		}
-	}
-	return model.DedupeTrimmedStrings(rawImages), nil
-}
-
 func (s *RouterServer) fetchLatestRoboRevComment(ctx context.Context, repo string, prNumber int, headSHA string) string {
 	repo = model.NormalizeRepo(repo)
 	if s == nil || repo == "" || prNumber <= 0 {

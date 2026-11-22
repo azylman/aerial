@@ -42,7 +42,6 @@ type (
 	KustomizationObservation     = model.KustomizationObservation
 	GitHubCheckRunsResponse      = model.GitHubCheckRunsResponse
 	GitHubMetadataCheck          = model.GitHubMetadataCheck
-	LegacyBuildWorkflow          = config.LegacyBuildWorkflow
 )
 
 const (

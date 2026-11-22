@@ -12,7 +12,6 @@ import (
 	"strings"
 
 	"github.com/azylman/aerial/pkg/prwire"
-	"github.com/azylman/aerial/services/synapse/internal/config"
 	"github.com/azylman/aerial/services/synapse/internal/model"
 )
 
@@ -38,10 +37,9 @@ var (
 )
 
 // GitHubGetter specifies the outbound operations required to inspect workflow
-// runs, logs, and checks on GitHub.
+// runs and checks on GitHub.
 type GitHubGetter interface {
 	GetGitHubJSON(ctx context.Context, path string, maxBytes int64, out any) error
-	FetchRunLogsArchive(ctx context.Context, repo string, runID int64, attempt int) ([]byte, error)
 }
 
 // MetadataWorkflowRun is the authoritative workflow run API identity.
@@ -73,7 +71,6 @@ type MetadataSource int
 const (
 	MetadataPending    MetadataSource = iota // running producer that has not published yet
 	MetadataStructured                       // validated structured metadata
-	MetadataLegacy                           // inventoried historical workflow blob
 )
 
 // MetadataWorkflowPath returns the image producer workflow for a repository,
@@ -363,8 +360,6 @@ func PRBuildRevision(lifecycle model.PRBuildLifecycle, sha string) (pullRequest,
 	}
 }
 
-type LegacyImageResolver func(ctx context.Context, repo string, runID int64) ([]string, error)
-
 // PRMetadataRegistry is the PR state store build metadata tracking reads and writes (PRObject, through Restate).
 type PRMetadataRegistry interface {
 	LoadPRBuildLifecycle(ctx context.Context, repo string, prNumber int) (model.PRBuildLifecycle, error)
@@ -373,18 +368,14 @@ type PRMetadataRegistry interface {
 }
 
 type Consumer struct {
-	gh             GitHubGetter
-	registry       PRMetadataRegistry
-	cfgSrc         config.ConfigSource
-	legacyResolver LegacyImageResolver
+	gh       GitHubGetter
+	registry PRMetadataRegistry
 }
 
-func NewConsumer(gh GitHubGetter, registry PRMetadataRegistry, cfgSrc config.ConfigSource, legacy LegacyImageResolver) *Consumer {
+func NewConsumer(gh GitHubGetter, registry PRMetadataRegistry) *Consumer {
 	return &Consumer{
-		gh:             gh,
-		registry:       registry,
-		cfgSrc:         cfgSrc,
-		legacyResolver: legacy,
+		gh:       gh,
+		registry: registry,
 	}
 }
 
@@ -455,56 +446,6 @@ func (c *Consumer) recordPRBuildSnapshot(ctx context.Context, repo string, prNum
 	}
 }
 
-// LegacyWorkflowRevision returns the revision whose workflow blob actually ran.
-func (c *Consumer) LegacyWorkflowRevision(ctx context.Context, repo string, r MetadataWorkflowRun) (string, error) {
-	if r.Event != model.GHEventPullRequest {
-		return r.HeadSHA, nil
-	}
-	if c.gh == nil {
-		return "", fmt.Errorf("github client not initialized")
-	}
-	raw, err := c.gh.FetchRunLogsArchive(ctx, repo, r.ID, r.RunAttempt)
-	if err != nil {
-		return "", err
-	}
-	revision, err := CheckoutRevisionFromArchive(raw)
-	if err != nil {
-		return "", err
-	}
-	if err = c.ValidateMetadataExecution(ctx, repo, r, revision); err != nil {
-		return "", err
-	}
-	return revision, nil
-}
-
-func (c *Consumer) IsLegacyWorkflowRun(ctx context.Context, repo string, r MetadataWorkflowRun) (bool, error) {
-	revision, err := c.LegacyWorkflowRevision(ctx, repo, r)
-	if err != nil {
-		return false, err
-	}
-	var blob struct {
-		SHA string `json:"sha"`
-	}
-	if c.gh == nil {
-		return false, fmt.Errorf("github client not initialized")
-	}
-	if err = c.gh.GetGitHubJSON(ctx, fmt.Sprintf("/repos/%s/contents/%s?ref=%s", repo, r.Path, url.QueryEscape(revision)), 2<<20, &blob); err != nil {
-		return false, err
-	}
-	if !model.MetadataSHA.MatchString(blob.SHA) {
-		return false, fmt.Errorf("invalid workflow blob for %s", r.Path)
-	}
-	if c.cfgSrc == nil || c.cfgSrc.Current() == nil {
-		return false, nil
-	}
-	for _, legacy := range c.cfgSrc.Current().LegacyBuildWorkflows {
-		if legacy.Repository == repo && legacy.WorkflowPath == r.Path && legacy.BlobSHA == blob.SHA {
-			return true, nil
-		}
-	}
-	return false, nil
-}
-
 // ValidateMetadataExecution binds the execution revision: a branch build runs
 // its source commit; a PR build runs GitHub's merge of the source head.
 func (c *Consumer) ValidateMetadataExecution(ctx context.Context, repo string, r MetadataWorkflowRun, executionSHA string) error {
@@ -535,9 +476,8 @@ func (c *Consumer) ValidateMetadataExecution(ctx context.Context, repo string, r
 	return nil
 }
 
-// ResolveRunMetadata returns the run's current-attempt snapshot. A run without
-// structured records is legacy only when its exact executed workflow blob is in
-// the immutable allowlist; a completed run otherwise lacks required metadata.
+// ResolveRunMetadata returns the run's current-attempt snapshot. A completed
+// run without structured records lacks required metadata.
 func (c *Consumer) ResolveRunMetadata(ctx context.Context, repo string, r MetadataWorkflowRun) (prwire.BuildMetadata, MetadataSource, error) {
 	checks, err := c.listCommitCheckRuns(ctx, repo, r.HeadSHA)
 	if err != nil {
@@ -560,14 +500,7 @@ func (c *Consumer) ResolveRunMetadata(ctx context.Context, repo string, r Metada
 	if r.Status != statusCompleted {
 		return m, MetadataPending, nil
 	}
-	legacy, err := c.IsLegacyWorkflowRun(ctx, repo, r)
-	if err != nil {
-		return m, MetadataPending, err
-	}
-	if !legacy {
-		return m, MetadataPending, ErrBuildMetadataMissing
-	}
-	return m, MetadataLegacy, nil
+	return m, MetadataPending, ErrBuildMetadataMissing
 }
 
 // ResolveWorkflowRunImages returns the images a successful main-branch producer
@@ -599,15 +532,9 @@ func (c *Consumer) ResolveWorkflowRunImages(ctx context.Context, repo string, ev
 	case r.Status != statusCompleted || r.Conclusion != model.ConclusionSuccess:
 		return nil, fmt.Errorf("workflow run has not succeeded (%s/%s)", r.Status, r.Conclusion)
 	}
-	m, source, err := c.ResolveRunMetadata(ctx, repo, r)
+	m, _, err := c.ResolveRunMetadata(ctx, repo, r)
 	if err != nil {
 		return nil, err
-	}
-	if source == MetadataLegacy {
-		if c.legacyResolver == nil {
-			return nil, fmt.Errorf("legacy image resolver not configured")
-		}
-		return c.legacyResolver(ctx, repo, r.ID)
 	}
 	if !MetadataPublishable(m, r) {
 		return nil, fmt.Errorf("build metadata for run %d attempt %d is not publishable", r.ID, r.RunAttempt)
@@ -623,7 +550,7 @@ func (c *Consumer) ResolveWorkflowRunImages(ctx context.Context, repo string, ev
 
 // RefreshPRBuildMetadata re-resolves the newest eligible producer run for the
 // PR's current revision and atomically records its snapshot. Stale revisions,
-// runs that have not published yet, and inventoried legacy runs record nothing.
+// and runs that have not published yet record nothing.
 func (c *Consumer) RefreshPRBuildMetadata(ctx context.Context, repo string, pr int, sha string) (bool, error) {
 	repo = model.NormalizeRepo(repo)
 	if c.registry == nil || pr <= 0 || MetadataWorkflowPath(repo) == "" || !model.MetadataSHA.MatchString(sha) {

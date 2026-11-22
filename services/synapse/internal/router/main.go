@@ -65,30 +65,6 @@ func (s *RouterServer) GetGitHubJSON(ctx context.Context, path string, maxBytes 
 	return s.getGitHubJSON(ctx, path, maxBytes, out)
 }
 
-func (s *RouterServer) FetchRunLogsArchive(ctx context.Context, repo string, runID int64, attempt int) ([]byte, error) {
-	path := fmt.Sprintf("/repos/%s/actions/runs/%d/attempts/%d/logs", repo, runID, attempt)
-	req, err := s.newGitHubRequest(ctx, http.MethodGet, path, nil)
-	if err != nil {
-		return nil, err
-	}
-	resp, err := s.githubClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("historical execution logs unavailable: status %d", resp.StatusCode)
-	}
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, 16<<20+1))
-	if err != nil {
-		return nil, err
-	}
-	if len(raw) > 16<<20 {
-		return nil, fmt.Errorf("historical log archive too large")
-	}
-	return raw, nil
-}
-
 // NewRouterServer constructs a new RouterServer instance. Every GitHub REST
 // call goes through githubClient, whose githubauth.Transport attaches the
 // credential (WithGitHubTokenSource, else the static PAT) and records

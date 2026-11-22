@@ -963,28 +963,6 @@ func assertBotConfig(t *testing.T, botID string, got, want BotConfig) {
 	}
 }
 
-func TestNormalizeLegacyBuildWorkflows(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name, repo, path, sha string
-		valid                 bool
-	}{
-		{"valid", "owner/repo", ".github/workflows/ci.yml", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", true},
-		{"bad repo", "repo", ".github/workflows/ci.yml", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", false},
-		{"traversal", "owner/repo", ".github/workflows/../ci.yml", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", false},
-		{"bad hash", "owner/repo", ".github/workflows/ci.yml", "main", false},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			_, err := NormalizeLegacyBuildWorkflows([]LegacyBuildWorkflow{{Repository: tc.repo, WorkflowPath: tc.path, BlobSHA: tc.sha}})
-			if (err == nil) != tc.valid {
-				t.Fatalf("err=%v", err)
-			}
-		})
-	}
-}
-
 func TestNormalizeGitHubCredential(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
