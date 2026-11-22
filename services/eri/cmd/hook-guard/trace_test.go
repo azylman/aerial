@@ -33,60 +33,70 @@ func announceServer(t *testing.T, status int, hang bool, got chan<- string) *htt
 	return srv
 }
 
+type traceCase struct {
+	name             string
+	status           int    // announce response status; 0 means 204
+	hang             bool   // server blocks until the client gives up
+	closeServer      bool   // server is closed before the call (connection refused)
+	endpointOverride string // replaces the server URL when set
+	unsetEndpoint    bool   // ERI_HOOK_ENDPOINT is empty
+	daemonID         string
+	stdin            string
+	stdinErr         bool // stdin read fails
+	failWrite        bool // stdout write fails
+	wantPost         string
+	wantOut          string // "" means the agy allow decision
+}
+
+// traceEndpoint starts the announce server for a row and returns the endpoint value and client.
+func traceEndpoint(t *testing.T, tc traceCase, got chan<- string) (string, *http.Client) {
+	t.Helper()
+	status := tc.status
+	if status == 0 {
+		status = http.StatusNoContent
+	}
+	srv := announceServer(t, status, tc.hang, got)
+	endpoint := srv.URL + "/internal/mcp-proxy/announce"
+	if tc.closeServer {
+		srv.Close()
+	}
+	if tc.endpointOverride != "" {
+		endpoint = tc.endpointOverride
+	}
+	if tc.unsetEndpoint {
+		endpoint = ""
+	}
+	client := srv.Client()
+	client.Timeout = traceAnnounceTimeout
+	return endpoint, client
+}
+
 func TestRunTrace(t *testing.T) {
 	t.Parallel()
 	wantPost := `POST /internal/mcp-proxy/announce {"daemon_id":"p1/discord-1","conversation_id":"conv-1","server":"docket","tool":"create"}`
-	tests := []struct {
-		name      string
-		endpoint  string // "ok", "fail", "hang", "refused", "badurl" or "" (unset)
-		daemonID  string
-		stdin     string
-		stdinErr  bool // stdin read fails
-		failWrite bool // stdout write fails
-		wantPost  string
-		wantOut   string // "" means the agy allow decision
-	}{
-		{name: "posts names only and allows", endpoint: "ok", daemonID: "p1/discord-1", stdin: agyMCPCall, wantPost: wantPost},
-		{name: "non-2xx still allows", endpoint: "fail", daemonID: "p1/discord-1", stdin: agyMCPCall, wantPost: wantPost},
-		{name: "timeout still allows", endpoint: "hang", daemonID: "p1/discord-1", stdin: agyMCPCall, wantPost: wantPost},
-		{name: "refused connection allows", endpoint: "refused", daemonID: "p1/discord-1", stdin: agyMCPCall},
-		{name: "unset endpoint does nothing", endpoint: "", daemonID: "p1/discord-1", stdin: agyMCPCall},
-		{name: "malformed stdin allows without posting", endpoint: "ok", stdin: `{not json`},
-		{name: "payload without server allows without posting", endpoint: "ok", stdin: `{"toolCall":{"name":"call_mcp_tool","args":{}}}`},
+	tests := []traceCase{
+		{name: "posts names only and allows", daemonID: "p1/discord-1", stdin: agyMCPCall, wantPost: wantPost},
+		{name: "non-2xx still allows", status: http.StatusInternalServerError, daemonID: "p1/discord-1", stdin: agyMCPCall, wantPost: wantPost},
+		{name: "timeout still allows", hang: true, daemonID: "p1/discord-1", stdin: agyMCPCall, wantPost: wantPost},
+		{name: "refused connection allows", closeServer: true, daemonID: "p1/discord-1", stdin: agyMCPCall},
+		{name: "unset endpoint does nothing", unsetEndpoint: true, daemonID: "p1/discord-1", stdin: agyMCPCall},
+		{name: "malformed stdin allows without posting", stdin: `{not json`},
+		{name: "payload without server allows without posting", stdin: `{"toolCall":{"name":"call_mcp_tool","args":{}}}`},
 		{
-			name: "claude mcp call announces and allows in claude schema", endpoint: "ok", daemonID: "p1/discord-1", stdin: claudeMCPCall,
+			name: "claude mcp call announces and allows in claude schema", daemonID: "p1/discord-1", stdin: claudeMCPCall,
 			wantPost: `POST /internal/mcp-proxy/announce {"daemon_id":"p1/discord-1","conversation_id":"sess-9","server":"docket","tool":"create"}`,
 			wantOut:  `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow"}}` + "\n",
 		},
-		{name: "unreadable stdin allows without posting", endpoint: "ok", stdinErr: true},
-		{name: "invalid endpoint allows without posting", endpoint: "badurl", stdin: agyMCPCall},
-		{name: "stdout failure exits non-zero", endpoint: "ok", daemonID: "p1/discord-1", stdin: agyMCPCall, failWrite: true, wantPost: wantPost},
-		{name: "empty daemon id still announces conversation", endpoint: "ok", stdin: agyMCPCall, wantPost: `POST /internal/mcp-proxy/announce {"daemon_id":"","conversation_id":"conv-1","server":"docket","tool":"create"}`},
+		{name: "unreadable stdin allows without posting", stdinErr: true},
+		{name: "invalid endpoint allows without posting", endpointOverride: "http://[::1", stdin: agyMCPCall},
+		{name: "stdout failure exits non-zero", daemonID: "p1/discord-1", stdin: agyMCPCall, failWrite: true, wantPost: wantPost},
+		{name: "empty daemon id still announces conversation", stdin: agyMCPCall, wantPost: `POST /internal/mcp-proxy/announce {"daemon_id":"","conversation_id":"conv-1","server":"docket","tool":"create"}`},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			got := make(chan string, 1)
-			var srv *httptest.Server
-			switch tc.endpoint {
-			case "fail":
-				srv = announceServer(t, http.StatusInternalServerError, false, got)
-			case "hang":
-				srv = announceServer(t, http.StatusOK, true, got)
-			default:
-				srv = announceServer(t, http.StatusNoContent, false, got)
-			}
-			endpoint := srv.URL + "/internal/mcp-proxy/announce"
-			switch tc.endpoint {
-			case "refused":
-				srv.Close()
-			case "badurl":
-				endpoint = "http://[::1"
-			case "":
-				endpoint = ""
-			}
-			client := srv.Client()
-			client.Timeout = traceAnnounceTimeout
+			endpoint, client := traceEndpoint(t, tc, got)
 			env := map[string]string{"ERI_HOOK_ENDPOINT": endpoint, "ERI_DAEMON_ID": tc.daemonID}
 			var out bytes.Buffer
 			var stdout io.Writer = &out

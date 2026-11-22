@@ -24,22 +24,8 @@ func TestClipContent(t *testing.T) {
 		hasMarker bool
 		want      string
 	}{
-		{
-			name:      "short content untouched",
-			content:   "hello world",
-			headLimit: 10,
-			tailLimit: 10,
-			hasMarker: false,
-			want:      "hello world",
-		},
-		{
-			name:      "exact boundary content untouched",
-			content:   "1234567890",
-			headLimit: 5,
-			tailLimit: 5,
-			hasMarker: false,
-			want:      "1234567890",
-		},
+		{name: "short content untouched", content: "hello world", headLimit: 10, tailLimit: 10, hasMarker: false, want: "hello world"},
+		{name: "exact boundary content untouched", content: "1234567890", headLimit: 5, tailLimit: 5, hasMarker: false, want: "1234567890"},
 		{
 			name:      "oversized content clipped",
 			content:   "HEAD-12345--MIDDLE-SPAM--67890-TAIL",
@@ -167,48 +153,12 @@ func TestIsSubstantiveStep(t *testing.T) {
 		content  string
 		want     bool
 	}{
-		{
-			name:     "empty content",
-			stepType: "TOOL",
-			toolName: "run_command",
-			content:  "",
-			want:     false,
-		},
-		{
-			name:     "whitespace only content",
-			stepType: "TOOL",
-			toolName: "run_command",
-			content:  "   \n\t  ",
-			want:     false,
-		},
-		{
-			name:     "heartbeat step type",
-			stepType: "heartbeat",
-			toolName: "",
-			content:  "ping",
-			want:     false,
-		},
-		{
-			name:     "heartbeat tool name",
-			stepType: "TOOL",
-			toolName: "heartbeat",
-			content:  "alive",
-			want:     false,
-		},
-		{
-			name:     "short heartbeat content",
-			stepType: "GENERIC",
-			toolName: "",
-			content:  "heartbeat ack",
-			want:     false,
-		},
-		{
-			name:     "manage_task status tool name",
-			stepType: "TOOL",
-			toolName: "manage_task status",
-			content:  `{"task_id":"123"}`,
-			want:     false,
-		},
+		{name: "empty content", stepType: "TOOL", toolName: "run_command", content: "", want: false},
+		{name: "whitespace only content", stepType: "TOOL", toolName: "run_command", content: "   \n\t  ", want: false},
+		{name: "heartbeat step type", stepType: "heartbeat", toolName: "", content: "ping", want: false},
+		{name: "heartbeat tool name", stepType: "TOOL", toolName: "heartbeat", content: "alive", want: false},
+		{name: "short heartbeat content", stepType: "GENERIC", toolName: "", content: "heartbeat ack", want: false},
+		{name: "manage_task status tool name", stepType: "TOOL", toolName: "manage_task status", content: `{"task_id":"123"}`, want: false},
 		{
 			name:     "manage_task polling status action",
 			stepType: "TOOL",
@@ -341,7 +291,7 @@ type executeTranscriptSearchCase struct {
 	nilStore     bool
 	closedStore  bool
 	cancelCtx    bool
-	embedderType string
+	embedder     *searchEmbedder // nil means no embedder
 	stack        string
 	query        string
 	mode         string
@@ -378,21 +328,26 @@ func setupSearchContext(tc executeTranscriptSearchCase) context.Context {
 	return ctx
 }
 
+// searchEmbedder is a declarative embedder fake: it returns vector and err as set per row.
+type searchEmbedder struct {
+	vector []float32
+	err    error
+}
+
+func (e *searchEmbedder) embed(context.Context, string) ([]float32, error) { return e.vector, e.err }
+
+// searchUnitVector is a valid embedding of the expected dimension.
+var searchUnitVector = func() []float32 {
+	v := make([]float32, db.ExpectedEmbeddingDim)
+	v[0] = 1.0
+	return v
+}()
+
 func setupSearchEmbedder(tc executeTranscriptSearchCase) func(ctx context.Context, text string) ([]float32, error) {
-	switch tc.embedderType {
-	case "dummy":
-		return func(ctx context.Context, text string) ([]float32, error) {
-			v := make([]float32, db.ExpectedEmbeddingDim)
-			v[0] = 1.0
-			return v, nil
-		}
-	case "fail":
-		return func(ctx context.Context, text string) ([]float32, error) {
-			return nil, errors.New("ollama service unavailable")
-		}
-	default:
+	if tc.embedder == nil {
 		return nil
 	}
+	return tc.embedder.embed
 }
 
 func assertSearchResult(t *testing.T, tc executeTranscriptSearchCase, res SearchResult, err error) {
@@ -459,15 +414,7 @@ func TestExecuteTranscriptSearch(t *testing.T) {
 			wantErr:    true,
 			wantSubstr: "transcript store cannot be nil",
 		},
-		{
-			name:       "context cancelled returns error",
-			cancelCtx:  true,
-			query:      "query",
-			mode:       "auto",
-			limit:      10,
-			wantErr:    true,
-			wantSubstr: "context canceled",
-		},
+		{name: "context cancelled returns error", cancelCtx: true, query: "query", mode: "auto", limit: 10, wantErr: true, wantSubstr: "context canceled"},
 		{
 			name:         "mode sessions searches only session summaries",
 			seedCase:     1,
@@ -502,19 +449,19 @@ func TestExecuteTranscriptSearch(t *testing.T) {
 			wantTotal:    1,
 		},
 		{
-			name:         "stack filter excludes other stacks",
-			seedCase:     3,
-			embedderType: "dummy",
-			stack:        "elsewhere",
-			query:        "pgvector",
-			mode:         "auto",
-			limit:        10,
-			wantMode:     "auto",
+			name:     "stack filter excludes other stacks",
+			seedCase: 3,
+			embedder: &searchEmbedder{vector: searchUnitVector},
+			stack:    "elsewhere",
+			query:    "pgvector",
+			mode:     "auto",
+			limit:    10,
+			wantMode: "auto",
 		},
 		{
 			name:         "mode auto searches both sessions and steps with embedder",
 			seedCase:     3,
-			embedderType: "dummy",
+			embedder:     &searchEmbedder{vector: searchUnitVector},
 			query:        "pgvector",
 			mode:         "auto",
 			limit:        10,
@@ -525,7 +472,7 @@ func TestExecuteTranscriptSearch(t *testing.T) {
 		{
 			name:         "embedder error falls back gracefully to text search",
 			seedCase:     4,
-			embedderType: "fail",
+			embedder:     &searchEmbedder{err: errors.New("ollama service unavailable")},
 			query:        "Grafana",
 			mode:         "sessions",
 			limit:        10,
@@ -533,29 +480,9 @@ func TestExecuteTranscriptSearch(t *testing.T) {
 			wantSteps:    0,
 			wantTotal:    1,
 		},
-		{
-			name:     "default limit and unknown mode fall back to auto",
-			query:    "any",
-			mode:     "unknown_mode",
-			limit:    0,
-			wantMode: "auto",
-		},
-		{
-			name:        "store search error propagation sessions",
-			closedStore: true,
-			query:       "query",
-			mode:        "sessions",
-			limit:       5,
-			wantErr:     true,
-		},
-		{
-			name:        "store search error propagation steps",
-			closedStore: true,
-			query:       "query",
-			mode:        "steps",
-			limit:       5,
-			wantErr:     true,
-		},
+		{name: "default limit and unknown mode fall back to auto", query: "any", mode: "unknown_mode", limit: 0, wantMode: "auto"},
+		{name: "store search error propagation sessions", closedStore: true, query: "query", mode: "sessions", limit: 5, wantErr: true},
+		{name: "store search error propagation steps", closedStore: true, query: "query", mode: "steps", limit: 5, wantErr: true},
 		{
 			name:         "empty query with mode steps and session returns steps",
 			seedCase:     2,
@@ -696,15 +623,7 @@ func TestGetTranscriptStepWindow(t *testing.T) {
 			wantErr:    true,
 			wantSubstr: "context canceled",
 		},
-		{
-			name:        "normal center step window",
-			sessionID:   "sess-win-1",
-			stepIndex:   5,
-			context:     2,
-			wantCount:   5,
-			wantContext: 2,
-			wantCenter:  5,
-		},
+		{name: "normal center step window", sessionID: "sess-win-1", stepIndex: 5, context: 2, wantCount: 5, wantContext: 2, wantCenter: 5},
 		{
 			name:        "start clamped to zero at low step",
 			sessionID:   "sess-win-1",
@@ -714,15 +633,7 @@ func TestGetTranscriptStepWindow(t *testing.T) {
 			wantContext: 3,
 			wantCenter:  1,
 		},
-		{
-			name:        "negative context defaults to 2",
-			sessionID:   "sess-win-1",
-			stepIndex:   5,
-			context:     -1,
-			wantCount:   5,
-			wantContext: 2,
-			wantCenter:  5,
-		},
+		{name: "negative context defaults to 2", sessionID: "sess-win-1", stepIndex: 5, context: -1, wantCount: 5, wantContext: 2, wantCenter: 5},
 		{
 			name:        "excessive context clamped to 20",
 			sessionID:   "sess-win-1",
@@ -732,24 +643,8 @@ func TestGetTranscriptStepWindow(t *testing.T) {
 			wantContext: 20,
 			wantCenter:  5,
 		},
-		{
-			name:        "empty session returns zero steps",
-			sessionID:   "",
-			stepIndex:   5,
-			context:     2,
-			wantCount:   0,
-			wantContext: 2,
-			wantCenter:  5,
-		},
-		{
-			name:        "unknown session returns zero steps",
-			sessionID:   "sess-nonexistent",
-			stepIndex:   5,
-			context:     2,
-			wantCount:   0,
-			wantContext: 2,
-			wantCenter:  5,
-		},
+		{name: "empty session returns zero steps", sessionID: "", stepIndex: 5, context: 2, wantCount: 0, wantContext: 2, wantCenter: 5},
+		{name: "unknown session returns zero steps", sessionID: "sess-nonexistent", stepIndex: 5, context: 2, wantCount: 0, wantContext: 2, wantCenter: 5},
 	}
 
 	for _, tc := range tests {
@@ -772,37 +667,10 @@ func TestExecuteTranscriptSearch_Options(t *testing.T) {
 		wantTotal    int
 		wantErr      bool
 	}{
-		{
-			name:     "nil store returns error",
-			nilStore: true,
-			opts:     SearchOptions{Mode: "auto", Query: "test"},
-			wantErr:  true,
-		},
-		{
-			name: "empty query with mode steps and session id",
-			opts: SearchOptions{
-				Mode:      "steps",
-				SessionID: "sess-2",
-			},
-			wantSteps: 1,
-			wantTotal: 1,
-		},
-		{
-			name: "empty query with mode steps and session filter",
-			opts: SearchOptions{
-				Mode:          "steps",
-				SessionFilter: "sess-2",
-			},
-			wantSteps: 1,
-			wantTotal: 1,
-		},
-		{
-			name: "empty query with mode auto returns zero results",
-			opts: SearchOptions{
-				Mode: "auto",
-			},
-			wantTotal: 0,
-		},
+		{name: "nil store returns error", nilStore: true, opts: SearchOptions{Mode: "auto", Query: "test"}, wantErr: true},
+		{name: "empty query with mode steps and session id", opts: SearchOptions{Mode: "steps", SessionID: "sess-2"}, wantSteps: 1, wantTotal: 1},
+		{name: "empty query with mode steps and session filter", opts: SearchOptions{Mode: "steps", SessionFilter: "sess-2"}, wantSteps: 1, wantTotal: 1},
+		{name: "empty query with mode auto returns zero results", opts: SearchOptions{Mode: "auto"}, wantTotal: 0},
 	}
 
 	for _, tc := range tests {
