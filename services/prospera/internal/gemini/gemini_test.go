@@ -12,36 +12,13 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/propagation"
-	sdktrace "go.opentelemetry.io/otel/sdk/trace"
-	"go.opentelemetry.io/otel/trace"
+
+	"github.com/azylman/aerial/services/prospera/internal/fakes"
 )
 
 func TestMain(m *testing.M) {
-	otel.SetTracerProvider(sdktrace.NewTracerProvider())
-	otel.SetTextMapPropagator(propagation.TraceContext{})
+	fakes.InstallTestTracing()
 	os.Exit(m.Run())
-}
-
-// traceCaller returns a context carrying a sampled caller span (or a bare context) and the
-// caller's trace id ("" without a span).
-func traceCaller(withParent bool) (context.Context, string) {
-	if !withParent {
-		return context.Background(), ""
-	}
-	ctx, span := otel.Tracer("test").Start(context.Background(), "caller")
-	span.End()
-	return ctx, span.SpanContext().TraceID().String()
-}
-
-// headerTraceID returns the trace id of a W3C traceparent header, or "" when absent or invalid.
-func headerTraceID(h http.Header) string {
-	sc := trace.SpanContextFromContext(propagation.TraceContext{}.Extract(context.Background(), propagation.HeaderCarrier(h)))
-	if !sc.IsValid() {
-		return ""
-	}
-	return sc.TraceID().String()
 }
 
 func TestDialGeminiLive(t *testing.T) {
@@ -449,12 +426,12 @@ func TestNewHTTPContextConsultClient_TraceHeaders(t *testing.T) {
 				_, _ = w.Write([]byte("remembered"))
 			}))
 			t.Cleanup(srv.Close)
-			ctx, parentTraceID := traceCaller(tc.withParent)
+			ctx, parentTraceID := fakes.TraceCaller(tc.withParent)
 			client := NewHTTPContextConsultClient("", "", withTestCovenURL(srv.URL))
 			if _, err := client.ConsultMemory(ctx, "dentist"); err != nil {
 				t.Fatalf("ConsultMemory: %v", err)
 			}
-			id := headerTraceID(got)
+			id := fakes.HeaderTraceID(got)
 			if id == "" || (id == parentTraceID) != tc.withParent {
 				t.Errorf("traceparent %q, caller trace %q, want continues=%v", got.Get("Traceparent"), parentTraceID, tc.withParent)
 			}

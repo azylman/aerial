@@ -11,6 +11,7 @@ import (
 
 	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/services/prospera/internal/config"
+	"github.com/azylman/aerial/services/prospera/internal/fakes"
 )
 
 type runAppMainSignalTestCase struct {
@@ -23,7 +24,7 @@ type runAppMainSignalTestCase struct {
 }
 
 func TestRunApp_MainSignal(t *testing.T) {
-	t.Cleanup(installTestTracing) // runMain runs tracing.Init, which replaces the test tracer
+	t.Cleanup(fakes.InstallTestTracing) // runMain runs tracing.Init, which replaces the test tracer
 	origLoad := loadConfigFn
 	origRun := runAppFn
 	origExit := exitFn
