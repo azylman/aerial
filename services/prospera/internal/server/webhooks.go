@@ -13,8 +13,10 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/pkg/restateingress"
 	"github.com/azylman/aerial/pkg/strutil"
 	"github.com/azylman/aerial/services/prospera/internal/config"
+	"github.com/azylman/aerial/services/prospera/internal/delivery"
 	"github.com/azylman/aerial/services/prospera/internal/model"
 	"github.com/azylman/aerial/services/prospera/internal/twilio"
 )
@@ -294,33 +296,56 @@ func (s *Server) handleTwilioStatus(w http.ResponseWriter, r *http.Request) {
 	writeXML(w, "<Response/>")
 }
 
-// triggerPostCallReportIfPending asynchronously dispatches post-call report delivery
-// when a terminal Twilio status webhook arrives. The atomic CAS ("pending" -> "processing")
-// is performed inside Reporter.DeliverCallReport so the report is not left permanently stuck.
-// When an event bus is configured, the job is published to AERIAL_JOBS with fallback to bgWg.
-func (s *Server) triggerPostCallReportIfPending(ctx context.Context, callID string) {
+// triggerPostCallReport enqueues post-call report delivery into Restate ingress.
+// If Restate ingress is unreachable or not configured, it falls back to pubsub or synchronous delivery.
+func (s *Server) triggerPostCallReport(ctx context.Context, callID string) error {
 	cleanID := strings.TrimSpace(callID)
 	if cleanID == "" {
-		return
+		return nil
 	}
+	cfg := s.cfgSrc.Current()
+	if cfg != nil && strings.TrimSpace(cfg.RestateIngressURL) != "" {
+		endpoint := fmt.Sprintf("%s/ProsperaReport/%s/DeliverReport/send", strings.TrimRight(cfg.RestateIngressURL, "/"), cleanID)
+		idempotencyKey := "prospera:report:" + cleanID
+		_, err := restateingress.Post(ctx, s.httpClient, endpoint, idempotencyKey, delivery.DeliverReportRequest{CallID: cleanID}, 1024)
+		if err == nil {
+			return nil
+		}
+		slog.WarnContext(ctx, "server: post to restate ingress failed, falling back to legacy delivery", "call_id", cleanID, "error", err)
+	}
+
 	if bus := s.EventBus(); bus != nil {
 		msgID := "prospera:report:" + cleanID
 		args := pubsub.ProsperaReportJobArgs{CallID: cleanID}
 		pubErr := bus.Publish(ctx, pubsub.SubjectProsperaReportJob, msgID, args)
 		if pubErr == nil {
-			return
+			return nil
 		}
 		slog.WarnContext(ctx, "server: publish report job failed, falling back to goroutine", "call_id", cleanID, "error", pubErr)
 	}
 
-	s.bgWg.Add(1)
-	go func(id string) {
-		defer s.bgWg.Done()
-		// The report outlives the request that triggered it.
-		if delivErr := s.reporter.DeliverCallReport(context.WithoutCancel(ctx), id); delivErr != nil {
-			slog.ErrorContext(ctx, "server: deliver call report failed", "call_id", id, "error", delivErr)
-		}
-	}(cleanID)
+	if s.reporter != nil {
+		s.bgWg.Add(1)
+		go func(id string) {
+			defer s.bgWg.Done()
+			// The report outlives the request that triggered it.
+			if delivErr := s.reporter.DeliverCallReport(context.WithoutCancel(ctx), id); delivErr != nil {
+				slog.ErrorContext(ctx, "server: deliver call report failed", "call_id", id, "error", delivErr)
+			}
+		}(cleanID)
+		return nil
+	}
+	return fmt.Errorf("no report delivery mechanism available for %s", cleanID)
+}
+
+// triggerPostCallReportIfPending asynchronously dispatches post-call report delivery
+// when a terminal Twilio status webhook arrives. The atomic CAS ("pending" -> "processing")
+// is performed inside Reporter.DeliverCallReport so the report is not left permanently stuck.
+// When an event bus is configured, the job is published to AERIAL_JOBS with fallback to bgWg.
+func (s *Server) triggerPostCallReportIfPending(ctx context.Context, callID string) {
+	if err := s.triggerPostCallReport(ctx, callID); err != nil {
+		slog.ErrorContext(ctx, "server: trigger post call report failed", "call_id", callID, "error", err)
+	}
 }
 
 func (s *Server) handleTwilioVoicemail(w http.ResponseWriter, r *http.Request) {
