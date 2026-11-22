@@ -144,30 +144,10 @@ func TestFactItemUnmarshalJSON_TableDriven(t *testing.T) {
 		wantAgent string
 		wantText  string
 	}{
-		{
-			name:      "agent field present",
-			rawJSON:   `{"id":1,"fact_text":"dark mode","agent":"agent-alpha"}`,
-			wantAgent: "agent-alpha",
-			wantText:  "dark mode",
-		},
-		{
-			name:      "source_agent decoded as agent when agent empty",
-			rawJSON:   `{"id":2,"fact_text":"voice setting","source_agent":"agent-beta"}`,
-			wantAgent: "agent-beta",
-			wantText:  "voice setting",
-		},
-		{
-			name:      "agent takes precedence over source_agent",
-			rawJSON:   `{"id":3,"fact_text":"both fields","agent":"agent-alpha","source_agent":"agent-beta"}`,
-			wantAgent: "agent-alpha",
-			wantText:  "both fields",
-		},
-		{
-			name:      "neither present leaves agent empty",
-			rawJSON:   `{"id":4,"fact_text":"neither"}`,
-			wantAgent: "",
-			wantText:  "neither",
-		},
+		{name: "agent field present", rawJSON: `{"id":1,"fact_text":"dark mode","agent":"agent-alpha"}`, wantAgent: "agent-alpha", wantText: "dark mode"},
+		{name: "source_agent fallback", rawJSON: `{"id":2,"fact_text":"voice setting","source_agent":"agent-beta"}`, wantAgent: "agent-beta", wantText: "voice setting"},
+		{name: "agent wins", rawJSON: `{"id":3,"fact_text":"both","agent":"agent-alpha","source_agent":"agent-beta"}`, wantAgent: "agent-alpha", wantText: "both"},
+		{name: "neither present leaves agent empty", rawJSON: `{"id":4,"fact_text":"neither"}`, wantText: "neither"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -192,44 +172,20 @@ func TestCachedDiscoveredAgents_TableDriven(t *testing.T) {
 	tests := []struct {
 		name      string
 		initial   []string
-		fetchTime time.Time
 		queryTime time.Time
-		ttl       time.Duration
 		wantHit   bool
 		wantCount int
 	}{
-		{
-			name:      "empty cache misses",
-			initial:   nil,
-			fetchTime: time.Time{},
-			queryTime: now,
-			ttl:       30 * time.Second,
-			wantHit:   false,
-		},
-		{
-			name:      "fresh cache hits",
-			initial:   []string{"aerial", "agent-alpha"},
-			fetchTime: now,
-			queryTime: now.Add(10 * time.Second),
-			ttl:       30 * time.Second,
-			wantHit:   true,
-			wantCount: 2,
-		},
-		{
-			name:      "expired cache misses",
-			initial:   []string{"aerial", "agent-alpha"},
-			fetchTime: now,
-			queryTime: now.Add(31 * time.Second),
-			ttl:       30 * time.Second,
-			wantHit:   false,
-		},
+		{name: "empty cache misses", queryTime: now},
+		{name: "fresh cache hits", initial: []string{"aerial", "agent-alpha"}, queryTime: now.Add(10 * time.Second), wantHit: true, wantCount: 2},
+		{name: "expired cache misses", initial: []string{"aerial", "agent-alpha"}, queryTime: now.Add(31 * time.Second)},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			c := &cachedDiscoveredAgents{ttl: tc.ttl}
+			c := &cachedDiscoveredAgents{ttl: 30 * time.Second}
 			if len(tc.initial) > 0 {
-				c.set(tc.initial, tc.fetchTime)
+				c.set(tc.initial, now)
 			}
 			got, ok := c.get(tc.queryTime)
 			if ok != tc.wantHit {
@@ -280,26 +236,9 @@ func TestFetchUpstreamDiscoveredAgents_TableDriven(t *testing.T) {
 		wantCount  int
 		wantAgents []string
 	}{
-		{
-			name:       "empty urls return empty",
-			haroURL:    "",
-			vanadisURL: "",
-			wantCount:  0,
-		},
-		{
-			name:       "haro only discovers schedule agents",
-			haroURL:    mockServer.URL,
-			vanadisURL: "",
-			wantCount:  2,
-			wantAgents: []string{"agent-haro", "agent-oneshot"},
-		},
-		{
-			name:       "vanadis only discovers build agents",
-			haroURL:    "",
-			vanadisURL: mockServer.URL,
-			wantCount:  1,
-			wantAgents: []string{"agent-vanadis"},
-		},
+		{name: "empty urls return empty"},
+		{name: "haro only discovers schedule agents", haroURL: mockServer.URL, wantCount: 2, wantAgents: []string{"agent-haro", "agent-oneshot"}},
+		{name: "vanadis only discovers build agents", vanadisURL: mockServer.URL, wantCount: 1, wantAgents: []string{"agent-vanadis"}},
 		{
 			name:       "both upstream urls query concurrently",
 			haroURL:    mockServer.URL,
@@ -307,12 +246,7 @@ func TestFetchUpstreamDiscoveredAgents_TableDriven(t *testing.T) {
 			wantCount:  3,
 			wantAgents: []string{"agent-haro", "agent-oneshot", "agent-vanadis"},
 		},
-		{
-			name:       "upstream errors return empty gracefully",
-			haroURL:    mockServer.URL + "/error",
-			vanadisURL: mockServer.URL + "/error",
-			wantCount:  0,
-		},
+		{name: "upstream errors return empty gracefully", haroURL: mockServer.URL + "/error", vanadisURL: mockServer.URL + "/error"},
 	}
 
 	for _, tc := range tests {

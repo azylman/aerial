@@ -384,26 +384,10 @@ func TestResolveStaticDir(t *testing.T) {
 		candidates []string
 		wantDir    string
 	}{
-		{
-			name:       "default_candidates_fallback_to_static",
-			candidates: nil,
-			wantDir:    "static",
-		},
-		{
-			name:       "custom_dir_with_index",
-			candidates: []string{tempDirWithIndex},
-			wantDir:    tempDirWithIndex,
-		},
-		{
-			name:       "first_missing_second_exists",
-			candidates: []string{tempDirWithoutIndex, tempDirWithIndex},
-			wantDir:    tempDirWithIndex,
-		},
-		{
-			name:       "none_matching_fallback_to_static",
-			candidates: []string{tempDirWithoutIndex, "/nonexistent/static/dir"},
-			wantDir:    "static",
-		},
+		{name: "default_candidates_fallback_to_static", wantDir: "static"},
+		{name: "custom_dir_with_index", candidates: []string{tempDirWithIndex}, wantDir: tempDirWithIndex},
+		{name: "first_missing_second_exists", candidates: []string{tempDirWithoutIndex, tempDirWithIndex}, wantDir: tempDirWithIndex},
+		{name: "none_matching_fallback_to_static", candidates: []string{tempDirWithoutIndex, "/nonexistent/static/dir"}, wantDir: "static"},
 	}
 
 	for _, tc := range tests {
@@ -531,24 +515,9 @@ func TestFetchActiveTasksFromBrain_Extended(t *testing.T) {
 		wantPrompt  string
 		wantErr     bool
 	}{
-		{
-			name:     "EmptyURL",
-			brainURL: "",
-		},
-		{
-			name:       "HTTP500_Error",
-			brainURL:   "http://brain",
-			statusCode: http.StatusInternalServerError,
-			body:       "error",
-			wantErr:    true,
-		},
-		{
-			name:       "BadJSON_Error",
-			brainURL:   "http://brain",
-			statusCode: http.StatusOK,
-			body:       "bad json",
-			wantErr:    true,
-		},
+		{name: "EmptyURL"},
+		{name: "HTTP500_Error", brainURL: "http://brain", statusCode: http.StatusInternalServerError, body: "error", wantErr: true},
+		{name: "BadJSON_Error", brainURL: "http://brain", statusCode: http.StatusOK, body: "bad json", wantErr: true},
 		{
 			name:        "SummaryFallbackToPrompt",
 			brainURL:    "http://brain",
@@ -898,23 +867,9 @@ func TestMain_Execution(t *testing.T) {
 		wantRunCall  bool
 		wantExitCall bool
 	}{
-		{
-			name:         "clean execution",
-			wantRunCall:  true,
-			wantExitCall: false,
-		},
-		{
-			name:         "config load error exits",
-			loadErr:      errors.New("mock config error"),
-			wantRunCall:  false,
-			wantExitCall: true,
-		},
-		{
-			name:         "run server error exits",
-			runErr:       errors.New("mock run error"),
-			wantRunCall:  true,
-			wantExitCall: true,
-		},
+		{name: "clean execution", wantRunCall: true},
+		{name: "config load error exits", loadErr: errors.New("mock config error"), wantExitCall: true},
+		{name: "run server error exits", runErr: errors.New("mock run error"), wantRunCall: true, wantExitCall: true},
 	}
 
 	for _, tc := range tests {
