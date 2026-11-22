@@ -230,7 +230,7 @@ func TestBindRestateServices(t *testing.T) {
 		{name: "empty agent owns pr state", agent: "", wantBuild: "Build", wantRouter: "BuildRouter", wantPRState: true, wantServices: 4},
 		{name: "aerial agent owns pr state", agent: "aerial", wantBuild: "Build", wantRouter: "BuildRouter", wantPRState: true, wantServices: 4},
 		{name: "mixed case aerial owns pr state", agent: " Aerial ", wantBuild: "Build", wantRouter: "BuildRouter", wantPRState: true, wantServices: 4},
-		{name: "sibling agent never binds pr state", agent: "agent-alpha", noProjection: true, noGitHub: true, wantBuild: "Build-agent-alpha", wantRouter: "BuildRouter-agent-alpha", wantPRState: false, wantServices: 2},
+		{name: "sibling agent never binds pr state", agent: "agent-alpha", noProjection: true, noGitHub: true, wantBuild: "Build", wantRouter: "BuildRouter", wantPRState: false, wantServices: 2},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

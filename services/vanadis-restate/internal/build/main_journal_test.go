@@ -30,6 +30,10 @@ func observeJournalCallback(t *testing.T, mc *mocks.MockContext, want error, cod
 	t.Helper()
 	mc.EXPECT().Run(mock.Anything, mock.Anything, mock.Anything).RunAndReturn(func(fn func(restate.RunContext) (any, error), output any, opts ...restate.RunOption) restate.TerminalError {
 		res, err := fn(mockRunContext{Context: context.Background()})
+		if _, isGuard := res.(runnerGuardResult); isGuard {
+			assert.NoError(t, err)
+			return runMockRunContext(func(restate.RunContext) (any, error) { return res, err }, output, opts...)
+		}
 		if code != 0 {
 			var terminal restate.TerminalError
 			require.ErrorAs(t, err, &terminal)

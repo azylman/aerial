@@ -281,11 +281,11 @@ func TestAttachStandalonePR_RecordsOwnerAndRunner(t *testing.T) {
 			if _, _, _, err := st.AttachChunkPR(context.Background(), req); err != nil {
 				t.Fatalf("AttachChunkPR: %v", err)
 			}
-			if len(buildArgs) < 3 {
-				t.Fatalf("build insert args = %v, want id, agent, runner_agent first", buildArgs)
+			if len(buildArgs) < 2 {
+				t.Fatalf("build insert args = %v, want id, agent first", buildArgs)
 			}
-			if buildArgs[1] != tc.wantAgent || buildArgs[2] != tc.wantRunner {
-				t.Errorf("inserted agent, runner_agent = %v, %v; want %q, %q", buildArgs[1], buildArgs[2], tc.wantAgent, tc.wantRunner)
+			if buildArgs[1] != tc.wantAgent {
+				t.Errorf("inserted agent = %v; want %q", buildArgs[1], tc.wantAgent)
 			}
 		})
 	}

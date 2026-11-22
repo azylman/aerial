@@ -15,7 +15,6 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
-	"github.com/azylman/aerial/pkg/buildplan"
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/deploygate"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/executor"
@@ -36,6 +35,8 @@ type fakeObjectRuntime struct {
 	reconcilesSent     []sentReconcile
 	invocationID       string
 	deferredSends      []deferredSend
+	runnerGuardCalled  bool
+	runnerGuardErr     error
 }
 
 // deferredSend records one delayed deferral Reconcile.
@@ -500,36 +501,16 @@ func (f *fakeObjectRuntime) ScheduleDeferredReconcile(delay time.Duration, seq i
 
 func (f *fakeObjectRuntime) InvocationID() string { return f.invocationID }
 
-func (*fakeObjectRuntime) RunRunnerGuard(fn func(ctx context.Context) (runnerGuardResult, error)) (runnerGuardResult, error) {
+func (f *fakeObjectRuntime) RunRunnerGuard(fn func(ctx context.Context) (runnerGuardResult, error)) (runnerGuardResult, error) {
+	f.runnerGuardCalled = true
+	if f.runnerGuardErr != nil {
+		return runnerGuardResult{}, f.runnerGuardErr
+	}
 	return fn(context.Background())
 }
 
 func (f *fakeObjectRuntime) SendReconcile(service, buildID, reason string) {
 	f.reconcilesSent = append(f.reconcilesSent, sentReconcile{Service: service, BuildID: buildID, Reason: reason})
-}
-
-func TestBuildServiceName_Derivation(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name      string
-		agent     string
-		wantBuild string
-	}{
-		{name: "empty defaults to legacy", agent: "", wantBuild: "Build"},
-		{name: "aerial defaults to legacy", agent: "aerial", wantBuild: "Build"},
-		{name: "aerial case insensitive", agent: "Aerial", wantBuild: "Build"},
-		{name: "agent-beta scoped", agent: "agent-beta", wantBuild: "Build-agent-beta"},
-		{name: "agent-alpha scoped", agent: "agent-alpha", wantBuild: "Build-agent-alpha"},
-		{name: "whitespace trimmed", agent: "  agent-beta  ", wantBuild: "Build-agent-beta"},
-		{name: "mixed case scoped normalized", agent: "Agent-Beta", wantBuild: "Build-agent-beta"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			assert.Equal(t, tc.wantBuild, buildplan.BuildServiceName(tc.agent))
-			assert.Equal(t, tc.wantBuild, NewBuildObjectWithAgent("", tc.agent, nil).ServiceName())
-		})
-	}
 }
 
 func TestBuildObject_NilStoreBranches(t *testing.T) {

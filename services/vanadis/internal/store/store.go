@@ -52,18 +52,16 @@ type RowScanner interface {
 
 // BuildColumns is the vanadis_builds SELECT list ScanBuild consumes, in its destination order.
 // Every query whose rows go through ScanBuild must select exactly these columns.
-const BuildColumns = `id, COALESCE(NULLIF(agent, ''), 'aerial'), thread_id, tier, COALESCE(NULLIF(title, ''), objective), objective, COALESCE(shared_context, ''), status, status_message_id, quiet, created_at, updated_at, COALESCE(NULLIF(runner_agent, ''), 'aerial')`
+const BuildColumns = `id, COALESCE(NULLIF(agent, ''), 'aerial'), thread_id, tier, COALESCE(NULLIF(title, ''), objective), objective, COALESCE(shared_context, ''), status, status_message_id, quiet, created_at, updated_at`
 
 // ScanBuild scans one row selected with BuildColumns.
 func ScanBuild(s RowScanner) (model.VanadisBuild, error) {
 	var b model.VanadisBuild
-	err := s.Scan(&b.ID, &b.Agent, &b.ThreadID, &b.Tier, &b.Title, &b.Objective, &b.SharedContext, &b.Status, &b.StatusMessageID, &b.Quiet, &b.CreatedAt, &b.UpdatedAt, &b.RunnerAgent)
+	err := s.Scan(&b.ID, &b.Agent, &b.ThreadID, &b.Tier, &b.Title, &b.Objective, &b.SharedContext, &b.Status, &b.StatusMessageID, &b.Quiet, &b.CreatedAt, &b.UpdatedAt)
 	if err == nil && strings.TrimSpace(b.Agent) == "" {
 		b.Agent = "aerial"
 	}
-	if err == nil && strings.TrimSpace(b.RunnerAgent) == "" {
-		b.RunnerAgent = "aerial"
-	}
+	b.RunnerAgent = "aerial"
 	return b, err
 }
 

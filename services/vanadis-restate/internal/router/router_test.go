@@ -24,7 +24,6 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
-	"github.com/azylman/aerial/pkg/buildplan"
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/pkg/strutil"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/build"
@@ -184,12 +183,7 @@ func TestBuildRouterService_InvokerWiring(t *testing.T) {
 		runner      string
 		wantService string
 	}{
-		{name: "empty runner targets legacy Build", routerAgent: "", runner: "", wantService: "Build"},
-		{name: "default runner targets legacy Build", routerAgent: "", runner: "aerial", wantService: "Build"},
-		{name: "sibling runner targets scoped Build", routerAgent: "", runner: "agent-alpha", wantService: "Build-agent-alpha"},
-		{name: "mixed case runner normalized", routerAgent: "", runner: " Agent-Alpha ", wantService: "Build-agent-alpha"},
-		{name: "router agent never overrides runner", routerAgent: "agent-beta", runner: "aerial", wantService: "Build"},
-		{name: "scoped router targets other runner", routerAgent: "agent-beta", runner: "agent-alpha", wantService: "Build-agent-alpha"},
+		{name: "routes all handlers to canonical Build", routerAgent: "", runner: "", wantService: "Build"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -360,14 +354,14 @@ func fillBuildDest(b model.VanadisBuild, dest []any) error {
 	if len(dest) == 7 {
 		return scanValues(dest, b.ID, b.ThreadID, b.Tier, b.Title, b.Objective, b.Status, b.StatusMessageID)
 	}
-	if len(dest) != 13 {
-		return fmt.Errorf("scan build: %d destinations, want 13", len(dest))
+	if len(dest) != 12 {
+		return fmt.Errorf("scan build: %d destinations, want 12", len(dest))
 	}
 	agent := b.Agent
 	if agent == "" {
 		agent = "aerial"
 	}
-	return scanValues(dest, b.ID, agent, b.ThreadID, b.Tier, b.Title, b.Objective, b.SharedContext, b.Status, b.StatusMessageID, b.Quiet, b.CreatedAt, b.UpdatedAt, b.RunnerAgent)
+	return scanValues(dest, b.ID, agent, b.ThreadID, b.Tier, b.Title, b.Objective, b.SharedContext, b.Status, b.StatusMessageID, b.Quiet, b.CreatedAt, b.UpdatedAt)
 }
 
 func (r *mockRow) Scan(dest ...any) error {
@@ -449,12 +443,12 @@ func (r *mockRows) Scan(dest ...any) error {
 		return r.scanErr
 	}
 	switch len(dest) {
-	case 3:
+	case 2, 3:
 		if len(r.items) > 0 && r.idx > 0 && r.idx <= len(r.items) {
 			return scanValues(dest, r.items[r.idx-1].BuildID, r.items[r.idx-1].ID)
 		}
 		return nil
-	case 13:
+	case 12:
 		return r.scan12(dest)
 	case 10:
 		return r.scan10(dest)
@@ -684,7 +678,6 @@ func TestBuildRouterService_RoutePREvent(t *testing.T) {
 			wantBuildID: "b-matched",
 			wantRunner:  "aerial",
 		},
-		{name: "primary lookup routes to sibling runner", ev: pubsub.PRLifecycleEvent{Repo: "aerial", PRNumber: 101, Event: "synchronize"}, db: dbScript{row: valuesRow("c1", "b-alpha", 0, "medium", false, "agent-alpha")}, wantBuildID: "b-alpha", wantRunner: "agent-alpha"},
 		{
 			name: "branch-based fallback resolution",
 			ev: pubsub.PRLifecycleEvent{
@@ -695,10 +688,10 @@ func TestBuildRouterService_RoutePREvent(t *testing.T) {
 			},
 			db: dbScript{
 				row:    errRow(pgx.ErrNoRows),
-				routes: []sqlRoute{{match: "FROM vanadis_chunks c JOIN vanadis_builds b ON b.id = c.build_id WHERE c.id = $1", row: valuesRow("b-branch", "agent-alpha")}},
+				routes: []sqlRoute{{match: "FROM vanadis_chunks c WHERE c.id = $1", row: valuesRow("b-branch")}},
 			},
 			wantBuildID: "b-branch",
-			wantRunner:  "agent-alpha",
+			wantRunner:  "aerial",
 		},
 		{
 			name: "thread and repo fallback resolution",
@@ -768,7 +761,7 @@ func TestBuildRouterService_RoutePREvent(t *testing.T) {
 			},
 			db: dbScript{
 				row:    errRow(pgx.ErrNoRows),
-				routes: []sqlRoute{{match: "FROM vanadis_chunks c JOIN vanadis_builds b ON b.id = c.build_id WHERE c.id = $1", row: errRow(errors.New("lookup err"))}},
+				routes: []sqlRoute{{match: "FROM vanadis_chunks c WHERE c.id = $1", row: errRow(errors.New("lookup err"))}},
 			},
 			wantErr: true,
 		},
@@ -966,30 +959,6 @@ func TestBuildRouterService_TypedNilStoreNormalized(t *testing.T) {
 	assert.True(t, router.store == nil)
 }
 
-func TestBuildRouterServiceName_Derivation(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name       string
-		agent      string
-		wantRouter string
-	}{
-		{name: "empty defaults to legacy", agent: "", wantRouter: "BuildRouter"},
-		{name: "aerial defaults to legacy", agent: "aerial", wantRouter: "BuildRouter"},
-		{name: "aerial case insensitive", agent: "Aerial", wantRouter: "BuildRouter"},
-		{name: "agent-alpha scoped", agent: "agent-alpha", wantRouter: "BuildRouter-agent-alpha"},
-		{name: "agent-beta scoped", agent: "agent-beta", wantRouter: "BuildRouter-agent-beta"},
-		{name: "whitespace trimmed", agent: "  agent-alpha  ", wantRouter: "BuildRouter-agent-alpha"},
-		{name: "mixed case scoped normalized", agent: "Agent-Alpha", wantRouter: "BuildRouter-agent-alpha"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			assert.Equal(t, tc.wantRouter, buildplan.BuildRouterServiceName(tc.agent))
-			assert.Equal(t, tc.wantRouter, NewBuildRouterServiceWithAgent(nil, tc.agent).ServiceName())
-		})
-	}
-}
-
 func TestBuildRouterService_RouteDispatchOutcomeRunner(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -998,8 +967,7 @@ func TestBuildRouterService_RouteDispatchOutcomeRunner(t *testing.T) {
 		wantBuildID string
 		wantRunner  string
 	}{
-		{name: "default runner", row: valuesRow("b1", "aerial"), wantBuildID: "b1", wantRunner: "aerial"},
-		{name: "sibling runner", row: valuesRow("b2", "agent-alpha"), wantBuildID: "b2", wantRunner: "agent-alpha"},
+		{name: "default runner", row: valuesRow("b1"), wantBuildID: "b1", wantRunner: "aerial"},
 		{name: "unknown chunk not routed", row: errRow(pgx.ErrNoRows)},
 	}
 	for _, tc := range tests {
@@ -1022,8 +990,7 @@ func TestBuildRouterService_RouteFailChunkRunner(t *testing.T) {
 		row        pgx.Row
 		wantRunner string
 	}{
-		{name: "default runner", row: valuesRow("b1", "aerial"), wantRunner: "aerial"},
-		{name: "sibling runner", row: valuesRow("b1", "agent-alpha"), wantRunner: "agent-alpha"},
+		{name: "default runner", row: valuesRow("b1"), wantRunner: "aerial"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1049,13 +1016,12 @@ func TestBuildRouterService_RouteAttachPRRunner(t *testing.T) {
 		wantBuildID string
 		wantRunner  string
 	}{
-		{name: "existing chunk on sibling runner", row: valuesRow("b1", "agent-alpha"), req: store.AttachChunkPRRequest{ChunkID: "c1", PRNumber: 7}, wantBuildID: "b1", wantRunner: "agent-alpha"},
-		{name: "existing pr on default runner", routerAgent: "agent-beta", row: valuesRow("c1", "b2", 0, "medium", false, "aerial"), req: store.AttachChunkPRRequest{Repo: "aerial", PRNumber: 7}, wantBuildID: "b2", wantRunner: "aerial"},
+		{name: "existing pr on default runner", routerAgent: "agent-beta", row: valuesRow("c1", "b2", 0, "medium", false), req: store.AttachChunkPRRequest{Repo: "aerial", PRNumber: 7}, wantBuildID: "b2", wantRunner: "aerial"},
 		{name: "new build without caller runs on default agent", row: errRow(pgx.ErrNoRows), req: store.AttachChunkPRRequest{Repo: "aerial", PRNumber: 7}, wantRunner: "aerial"},
 		{name: "new build without caller ignores scoped router", routerAgent: "agent-beta", row: errRow(pgx.ErrNoRows), req: store.AttachChunkPRRequest{Repo: "aerial", PRNumber: 7}, wantRunner: "aerial"},
 		{name: "new build runs on default runner", row: errRow(pgx.ErrNoRows), req: store.AttachChunkPRRequest{Repo: "aerial", PRNumber: 7, Agent: "agent-alpha"}, wantRunner: "aerial"},
 		{name: "new build caller agent normalized", row: errRow(pgx.ErrNoRows), req: store.AttachChunkPRRequest{Repo: "aerial", PRNumber: 7, Agent: " Agent-Alpha "}, wantRunner: "aerial"},
-		{name: "existing build ignores caller agent", row: valuesRow("b1", "aerial"), req: store.AttachChunkPRRequest{ChunkID: "c1", PRNumber: 7, Agent: "agent-alpha"}, wantBuildID: "b1", wantRunner: "aerial"},
+		{name: "existing build ignores caller agent", row: valuesRow("b1"), req: store.AttachChunkPRRequest{ChunkID: "c1", PRNumber: 7, Agent: "agent-alpha"}, wantBuildID: "b1", wantRunner: "aerial"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1087,7 +1053,6 @@ func TestBuildRouterService_RouteBuildReconcile(t *testing.T) {
 	}{
 		{name: "empty build id rejected", buildID: " ", wantErr: true},
 		{name: "default runner", buildID: "b1", db: dbScript{buildRow: &mockRow{b: &model.VanadisBuild{ID: "b1", RunnerAgent: "aerial"}}}, wantBuildID: "b1", wantRunner: "aerial", wantReason: "widget_sync"},
-		{name: "sibling runner", buildID: "b2", db: dbScript{buildRow: &mockRow{b: &model.VanadisBuild{ID: "b2", RunnerAgent: "agent-alpha"}}}, wantBuildID: "b2", wantRunner: "agent-alpha", wantReason: "widget_sync"},
 		{name: "unknown build dropped", buildID: "b3", db: dbScript{buildRow: errRow(pgx.ErrNoRows)}},
 		{name: "storage error propagates", buildID: "b4", db: dbScript{buildRow: errRow(errors.New("db down"))}, wantErr: true},
 	}
