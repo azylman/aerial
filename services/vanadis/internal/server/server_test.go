@@ -21,9 +21,10 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 
 	"github.com/azylman/aerial/pkg/httpkit"
+	"github.com/azylman/aerial/pkg/pubsubtest"
 	"github.com/azylman/aerial/pkg/tracing"
 	"github.com/azylman/aerial/services/vanadis/internal/metrics"
-	"github.com/azylman/aerial/services/vanadis/internal/model"
+	"github.com/azylman/aerial/services/vanadis/internal/storetest"
 )
 
 func scrapeRootMetrics(t *testing.T) string {
@@ -56,7 +57,7 @@ func TestServerDelegateEdges(t *testing.T) {
 				case "nil-store":
 					srv = &VanadisServer{}
 				case "list-error":
-					srv = NewVanadisServer(Config{}, RestateConfig{}, &memoryVanadisStore{listErr: errors.New("db down")}, nil)
+					srv = NewVanadisServer(Config{}, RestateConfig{}, &storetest.Store{ListErr: errors.New("db down")}, nil)
 				}
 				srv.collectBuildMetrics(context.Background())
 				if body := scrapeRootMetrics(t); !strings.Contains(body, tc.want) {
@@ -75,18 +76,18 @@ func TestServerDelegateEdges(t *testing.T) {
 
 func TestMetricsEndToEndSeededStore(t *testing.T) {
 	memStore := newMemoryVanadisStore()
-	bRun := mkBuild("b-e2e-run", "111", "Running", "obj", "running")
-	bQueue := mkBuild("b-e2e-queue", "222", "Queued", "obj", "running")
-	bDone := mkBuild("b-e2e-done", "333", "Done", "obj", "completed")
-	cRun1, cRun2 := mkChunk("c-e2e-1", "b-e2e-run", 0, "C1", "I1", "", "running"), mkChunk("c-e2e-2", "b-e2e-run", 1, "C2", "I2", "", "pending")
+	bRun := storetest.Build("b-e2e-run", "111", "Running", "obj", "running")
+	bQueue := storetest.Build("b-e2e-queue", "222", "Queued", "obj", "running")
+	bDone := storetest.Build("b-e2e-done", "333", "Done", "obj", "completed")
+	cRun1, cRun2 := storetest.Chunk("c-e2e-1", "b-e2e-run", 0, "C1", "I1", "", "running"), storetest.Chunk("c-e2e-2", "b-e2e-run", 1, "C2", "I2", "", "pending")
 	cRun1.TargetFiles, cRun2.TargetFiles = []string{"a.go"}, []string{"b.go"}
 	if err := memStore.CreateBuild(context.Background(), bRun, []VanadisChunk{cRun1, cRun2}); err != nil {
 		t.Fatalf("seed running build: %v", err)
 	}
-	if err := memStore.CreateBuild(context.Background(), bQueue, []VanadisChunk{mkChunk("c-e2e-3", "b-e2e-queue", 0, "C3", "I3", "", "pending")}); err != nil {
+	if err := memStore.CreateBuild(context.Background(), bQueue, []VanadisChunk{storetest.Chunk("c-e2e-3", "b-e2e-queue", 0, "C3", "I3", "", "pending")}); err != nil {
 		t.Fatalf("seed queued build: %v", err)
 	}
-	if err := memStore.CreateBuild(context.Background(), bDone, []VanadisChunk{mkChunk("c-e2e-4", "b-e2e-done", 0, "C4", "I4", "", "merged")}); err != nil {
+	if err := memStore.CreateBuild(context.Background(), bDone, []VanadisChunk{storetest.Chunk("c-e2e-4", "b-e2e-done", 0, "C4", "I4", "", "merged")}); err != nil {
 		t.Fatalf("seed completed build: %v", err)
 	}
 	srv := NewVanadisServer(Config{}, RestateConfig{}, memStore, nil)
@@ -121,7 +122,7 @@ func TestVanadisConsumerStatsQuerier(t *testing.T) {
 	if srv.consumerStatsQuerier() != nil {
 		t.Errorf("expected nil when no stats or bus configured")
 	}
-	mockQ := &mockConsumerStatsQuerier{}
+	mockQ := &pubsubtest.ConsumerStats{}
 	srv.queueStats = mockQ
 	if srv.consumerStatsQuerier() != mockQ {
 		t.Errorf("expected queueStats override")
@@ -129,9 +130,12 @@ func TestVanadisConsumerStatsQuerier(t *testing.T) {
 }
 
 type fakeQueueStatsBus struct {
-	mockConsumerStatsQuerier
-
+	stats    pubsubtest.ConsumerStats
 	closeErr error
+}
+
+func (f *fakeQueueStatsBus) ConsumerStats(ctx context.Context, stream, consumer string) (int64, int64, error) {
+	return f.stats.ConsumerStats(ctx, stream, consumer)
 }
 
 func (f *fakeQueueStatsBus) Close() error { return f.closeErr }
@@ -243,10 +247,10 @@ func testHTTPEndpointsBuildCreation(t *testing.T, srv *VanadisServer, memStore *
 		}
 	}
 	// Simulate storing the created build in memStore for subsequent tests
-	c1 := mkChunk(buildID+"-chunk-1", buildID, 0, "Part 1", "Do part 1", "low", "pending")
-	c2 := mkChunk("custom-chunk-2", buildID, 1, "Part 2", "Do part 2", "high", "pending")
+	c1 := storetest.Chunk(buildID+"-chunk-1", buildID, 0, "Part 1", "Do part 1", "low", "pending")
+	c2 := storetest.Chunk("custom-chunk-2", buildID, 1, "Part 2", "Do part 2", "high", "pending")
 	c2.DependsOn = []string{c1.ID}
-	if err := memStore.CreateBuild(context.Background(), mkBuild(buildID, "1555999", "Implement Feature X Build Title", "Implement feature X", "running"), []VanadisChunk{c1, c2}); err != nil {
+	if err := memStore.CreateBuild(context.Background(), storetest.Build(buildID, "1555999", "Implement Feature X Build Title", "Implement feature X", "running"), []VanadisChunk{c1, c2}); err != nil {
 		t.Fatalf("failed to seed created build in memStore: %v", err)
 	}
 	return buildID
@@ -273,13 +277,13 @@ func testHTTPEndpointsBuildCancel(t *testing.T, srv *VanadisServer, memStore *me
 	for _, tc := range routes {
 		checkCode(tc.m, tc.p, nil, tc.w)
 	}
-	memStore.getErr = errors.New("get error")
+	memStore.GetErr = errors.New("get error")
 	checkCode(http.MethodGet, "/builds/"+buildID, nil, http.StatusInternalServerError)
-	memStore.getErr = nil
-	if err := memStore.CreateBuild(context.Background(), mkBuild("b-conflict", "1555999", "Conflict", "obj", "completed"), nil); err != nil {
+	memStore.GetErr = nil
+	if err := memStore.CreateBuild(context.Background(), storetest.Build("b-conflict", "1555999", "Conflict", "obj", "completed"), nil); err != nil {
 		t.Fatalf("seed conflict build: %v", err)
 	}
-	runnerBuild := mkBuild("b-runner-alpha", "1555999", "Runner", "obj", "running")
+	runnerBuild := storetest.Build("b-runner-alpha", "1555999", "Runner", "obj", "running")
 	runnerBuild.Agent = "agent-alpha"
 	if err := memStore.CreateBuild(context.Background(), runnerBuild, nil); err != nil {
 		t.Fatalf("seed runner build: %v", err)
@@ -298,18 +302,18 @@ func testHTTPEndpointsListAndFilter(t *testing.T, srv *VanadisServer, doReq func
 		t.Fatalf("expected 405 on handleListBuilds POST, got %d", wPost.Code)
 	}
 	now := time.Now().UTC()
-	bRunning, bCompleted, bQueued := mkBuild("b-run", "111", "", "", "running"), mkBuild("b-comp", "222", "", "", "completed"), mkBuild("b-q", "333", "", "", "running")
+	bRunning, bCompleted, bQueued := storetest.Build("b-run", "111", "", "", "running"), storetest.Build("b-comp", "222", "", "", "completed"), storetest.Build("b-q", "333", "", "", "running")
 	bRunning.CreatedAt, bCompleted.CreatedAt, bQueued.CreatedAt = now.Add(-time.Minute), now.Add(-5*time.Minute), now.Add(-10*time.Minute)
 	listStore := newMemoryVanadisStore()
-	_ = listStore.CreateBuild(context.Background(), bRunning, []VanadisChunk{mkChunk("c-run-1", "b-run", 0, "C1", "", "", "running")})
-	_ = listStore.CreateBuild(context.Background(), bCompleted, []VanadisChunk{mkChunk("c-comp-1", "b-comp", 0, "C2", "", "", "completed")})
-	_ = listStore.CreateBuild(context.Background(), bQueued, []VanadisChunk{mkChunk("c-q-1", "b-q", 0, "C3", "", "", "pending")})
+	_ = listStore.CreateBuild(context.Background(), bRunning, []VanadisChunk{storetest.Chunk("c-run-1", "b-run", 0, "C1", "", "", "running")})
+	_ = listStore.CreateBuild(context.Background(), bCompleted, []VanadisChunk{storetest.Chunk("c-comp-1", "b-comp", 0, "C2", "", "", "completed")})
+	_ = listStore.CreateBuild(context.Background(), bQueued, []VanadisChunk{storetest.Chunk("c-q-1", "b-q", 0, "C3", "", "", "pending")})
 	srv.SetStore(listStore)
-	listStore.listErr = errors.New("simulated list failure")
+	listStore.ListErr = errors.New("simulated list failure")
 	if rec := doReq(http.MethodGet, "/builds", nil); rec.Code != http.StatusInternalServerError {
 		t.Fatalf("expected 500 on listErr, got %d", rec.Code)
 	}
-	listStore.listErr = nil
+	listStore.ListErr = nil
 	recList := doReq(http.MethodGet, "/builds", nil)
 	var resp struct {
 		Total          int                 `json:"total"`
@@ -429,81 +433,6 @@ func TestInitPostgresAndRunServer(t *testing.T) {
 	}
 }
 
-type mockConsumerStatsQuerier struct {
-	stats map[string][2]int64
-	err   error
-}
-
-func (m *mockConsumerStatsQuerier) ConsumerStats(_ context.Context, stream, consumer string) (int64, int64, error) {
-	if m.err != nil {
-		return 0, 0, m.err
-	}
-	if v, ok := m.stats[stream+"/"+consumer]; ok {
-		return v[0], v[1], nil
-	}
-	return 0, 0, nil
-}
-
-func TestVanadisEndpointCounterIncrements(t *testing.T) {
-	restateSrv := newMockRestateServer()
-	defer restateSrv.Close()
-
-	memStore := newMemoryVanadisStore()
-	srv := NewVanadisServer(Config{}, RestateConfig{}, memStore, restateSrv.Client())
-	srv.restateCfg.RestateIngressURL = restateSrv.URL
-
-	// 1. handleCreateBuild success -> created
-	reqBody := `{"thread_id":"123456789012345678","tier":2,"objective":"Metric test build","chunks":[{"repo":"aerial","title":"C1","instructions":"I1","depends_on":[]}]}`
-	recCreate := httptest.NewRecorder()
-	srv.handleCreateBuild(recCreate, httptest.NewRequest(http.MethodPost, "/builds", strings.NewReader(reqBody)))
-	if recCreate.Code != http.StatusAccepted {
-		t.Fatalf("handleCreateBuild status = %d, want %d", recCreate.Code, http.StatusAccepted)
-	}
-
-	// 2. handleCreateBuild enqueue failure -> failed
-	srvFailInsert := NewVanadisServer(Config{}, RestateConfig{}, memStore, restateSrv.Client())
-	srvFailInsert.restateCfg.RestateIngressURL = restateSrv.URL + "/fail"
-	recCreateFail := httptest.NewRecorder()
-	srvFailInsert.handleCreateBuild(recCreateFail, httptest.NewRequest(http.MethodPost, "/builds", strings.NewReader(reqBody)))
-	if recCreateFail.Code != http.StatusInternalServerError {
-		t.Fatalf("handleCreateBuild failure status = %d, want %d", recCreateFail.Code, http.StatusInternalServerError)
-	}
-
-	// 3. handleBuildCancel -> cancelled
-	if err := memStore.CreateBuild(context.Background(), mkBuild("b-to-cancel", "123456789012345678", "Cancel", "obj", "running"), nil); err != nil {
-		t.Fatalf("seed cancel build: %v", err)
-	}
-	recCancel := httptest.NewRecorder()
-	srv.handleBuildCancel(recCancel, httptest.NewRequest(http.MethodPost, "/builds/b-to-cancel/cancel", http.NoBody), "b-to-cancel")
-	if recCancel.Code != http.StatusOK {
-		t.Fatalf("handleBuildCancel status = %d, want %d", recCancel.Code, http.StatusOK)
-	}
-}
-
-func TestParseCreateBuildChunks_InitialStatus(t *testing.T) {
-	t.Parallel()
-	now := time.Date(2026, 11, 16, 12, 0, 0, 0, time.UTC)
-	raw := []CreateChunkInput{
-		{Title: "First Chunk", Instructions: "Do 1", Repo: "aerial", DependsOn: []string{}},
-		{Title: "Second Chunk", Instructions: "Do 2", Repo: "aerial", DependsOn: []string{"b-initial-chunk-1"}},
-	}
-	chunks, err := model.ParseCreateBuildChunks("b-initial", now, raw)
-	if err != nil {
-		t.Fatalf("ParseCreateBuildChunks failed: %v", err)
-	}
-	if len(chunks) != 2 {
-		t.Fatalf("expected 2 chunks, got %d", len(chunks))
-	}
-	for i, c := range chunks {
-		if c.Status != "pending" {
-			t.Errorf("chunk[%d].Status = %q, want %q", i, c.Status, "pending")
-		}
-		if !c.StartedAt.IsZero() {
-			t.Errorf("chunk[%d].StartedAt = %v, want zero time", i, c.StartedAt)
-		}
-	}
-}
-
 func TestCreateBuildTerminalResponses(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -535,23 +464,11 @@ func TestCreateBuildTerminalResponses(t *testing.T) {
 	}
 }
 
-func TestInitPostgres(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-	srv := &VanadisServer{}
-
-	// invalid postgres URL
-	_, err := initPostgres(ctx, srv, ":::invalid-url")
-	if err == nil {
-		t.Fatal("expected error on invalid postgres url")
-	}
-}
-
 func TestVanadisServer_StoreHTTPEndpointErrors(t *testing.T) {
 	t.Parallel()
 
 	sErr := newMemoryVanadisStore()
-	sErr.getErr = errors.New("simulated get err")
+	sErr.GetErr = errors.New("simulated get err")
 
 	srv := &VanadisServer{store: sErr}
 	mux := srv.Routes()
@@ -680,7 +597,7 @@ func TestRetryActionRouteWiring(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			mem := newMemoryVanadisStore()
-			if err := mem.CreateBuild(context.Background(), mkBuild("b1", "1555999", "Retry", "obj", "failed"), nil); err != nil {
+			if err := mem.CreateBuild(context.Background(), storetest.Build("b1", "1555999", "Retry", "obj", "failed"), nil); err != nil {
 				t.Fatalf("seed retry build: %v", err)
 			}
 			srv := NewVanadisServer(Config{Port: "0"}, RestateConfig{}, mem, nil)
@@ -776,7 +693,7 @@ func TestWriteStoreErrMapping(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			st := newMemoryVanadisStore()
-			st.getErr = tc.storeErr
+			st.GetErr = tc.storeErr
 			srv := NewVanadisServer(Config{Port: "0"}, RestateConfig{}, st, nil)
 			ts := httptest.NewServer(srv.Routes())
 			t.Cleanup(ts.Close)
@@ -811,7 +728,7 @@ func TestMCPHandlerLiveDependencies(t *testing.T) {
 	t.Cleanup(ts.Close)
 
 	seeded := newMemoryVanadisStore()
-	if err := seeded.CreateBuild(context.Background(), mkBuild("build-live", "1234567890", "Live Title", "Live Objective", "running"), []VanadisChunk{mkChunk("chunk-1", "build-live", 0, "Chunk 1", "Inst 1", "medium", "pending")}); err != nil {
+	if err := seeded.CreateBuild(context.Background(), storetest.Build("build-live", "1234567890", "Live Title", "Live Objective", "running"), []VanadisChunk{storetest.Chunk("chunk-1", "build-live", 0, "Chunk 1", "Inst 1", "medium", "pending")}); err != nil {
 		t.Fatalf("seed store: %v", err)
 	}
 	srv.SetStore(seeded)

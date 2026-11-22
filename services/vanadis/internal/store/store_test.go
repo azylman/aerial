@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/azylman/aerial/services/vanadis/internal/model"
+	"github.com/azylman/aerial/services/vanadis/internal/storetest"
 )
 
 type scriptRow struct {
@@ -328,17 +329,6 @@ func (s dbScript) open() *PostgresVanadisStore {
 	return &PostgresVanadisStore{db: &mockDB{queryRowFn: queryRow, queryFn: query}}
 }
 
-func mkBuild(id, threadID, title, objective, status string) model.VanadisBuild {
-	return model.VanadisBuild{ID: id, ThreadID: threadID, Title: title, Objective: objective, Status: status, Tier: 2}
-}
-
-func mkChunk(id, buildID string, idx int, title, instr, effort, status string) model.VanadisChunk {
-	if effort == "" {
-		effort = "medium"
-	}
-	return model.VanadisChunk{ID: id, BuildID: buildID, ChunkIndex: idx, Mode: "pr", Repo: "aerial", Title: title, Instructions: instr, Effort: effort, Status: status, TargetFiles: []string{}, TargetSymbols: []string{}, AcceptanceCriteria: []string{}, DependsOn: []string{}}
-}
-
 func buildVals(b model.VanadisBuild) []any {
 	return []any{b.ID, b.Agent, b.ThreadID, b.Tier, b.Title, b.Objective, b.SharedContext, b.Status, b.StatusMessageID, b.Quiet, b.CreatedAt, b.UpdatedAt}
 }
@@ -361,7 +351,7 @@ type getBuildCase struct {
 
 func TestGetBuild(t *testing.T) {
 	t.Parallel()
-	pop := mkBuild("b-1", "thread-1", "Build Title", "Objective", "running")
+	pop := storetest.Build("b-1", "thread-1", "Build Title", "Objective", "running")
 	tests := []getBuildCase{
 		{name: "nil receiver errors", bare: nilReceiver, buildID: "b-1", wantErr: true},
 		{name: "nil db errors", bare: nilDB, buildID: "b-1", wantErr: true},
@@ -369,11 +359,11 @@ func TestGetBuild(t *testing.T) {
 		{name: "missing build maps to not found", buildID: "b-404", buildErr: pgx.ErrNoRows, wantErrIs: model.ErrBuildNotFound},
 		{name: "build query error propagates", buildID: "b-err", buildErr: errors.New("db down"), wantErr: true},
 		{name: "chunks query error propagates", buildID: "b-1", build: pop, chunksErr: errors.New("chunks down"), wantErr: true},
-		{name: "chunk scan error propagates", buildID: "b-1", build: pop, chunks: []model.VanadisChunk{mkChunk("c-1", "b-1", 0, "T", "I", "", "")}, scanErr: errors.New("scan down"), wantErr: true},
-		{name: "chunk rows error propagates", buildID: "b-1", build: pop, chunks: []model.VanadisChunk{mkChunk("c-1", "b-1", 0, "T", "I", "", "")}, rowsErr: errors.New("rows down"), wantErr: true},
-		{name: "success scans build and chunks", buildID: "b-1", build: pop, chunks: []model.VanadisChunk{mkChunk("c-1", "b-1", 0, "T1", "I1", "medium", ""), mkChunk("c-2", "b-1", 1, "T2", "I2", "low", "")}, wantChunks: 2},
-		{name: "null json leaves maps nil", buildID: "b-1", build: pop, chunks: []model.VanadisChunk{mkChunk("c-9", "b-1", 0, "null-json", "I", "medium", "")}, wantChunks: 1, wantNilMaps: true},
-		{name: "invalid json leaves maps nil", buildID: "b-1", build: pop, chunks: []model.VanadisChunk{mkChunk("c-10", "b-1", 0, "bad-json", "I", "medium", "")}, wantChunks: 1, wantNilMaps: true},
+		{name: "chunk scan error propagates", buildID: "b-1", build: pop, chunks: []model.VanadisChunk{storetest.Chunk("c-1", "b-1", 0, "T", "I", "", "")}, scanErr: errors.New("scan down"), wantErr: true},
+		{name: "chunk rows error propagates", buildID: "b-1", build: pop, chunks: []model.VanadisChunk{storetest.Chunk("c-1", "b-1", 0, "T", "I", "", "")}, rowsErr: errors.New("rows down"), wantErr: true},
+		{name: "success scans build and chunks", buildID: "b-1", build: pop, chunks: []model.VanadisChunk{storetest.Chunk("c-1", "b-1", 0, "T1", "I1", "medium", ""), storetest.Chunk("c-2", "b-1", 1, "T2", "I2", "low", "")}, wantChunks: 2},
+		{name: "null json leaves maps nil", buildID: "b-1", build: pop, chunks: []model.VanadisChunk{storetest.Chunk("c-9", "b-1", 0, "null-json", "I", "medium", "")}, wantChunks: 1, wantNilMaps: true},
+		{name: "invalid json leaves maps nil", buildID: "b-1", build: pop, chunks: []model.VanadisChunk{storetest.Chunk("c-10", "b-1", 0, "bad-json", "I", "medium", "")}, wantChunks: 1, wantNilMaps: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -424,7 +414,7 @@ type listBuildsCase struct {
 func TestListBuilds(t *testing.T) {
 	t.Parallel()
 	now := time.Now().UTC()
-	b1, b2 := mkBuild("b-1", "100", "", "", "running"), mkBuild("b-2", "101", "", "", "completed")
+	b1, b2 := storetest.Build("b-1", "100", "", "", "running"), storetest.Build("b-2", "101", "", "", "completed")
 	b1.CreatedAt, b2.CreatedAt = now.Add(-time.Hour), now.Add(-2*time.Hour)
 	tests := []listBuildsCase{
 		{name: "nil receiver errors", bare: nilReceiver, wantErr: true},
@@ -434,9 +424,9 @@ func TestListBuilds(t *testing.T) {
 		{name: "build rows error propagates", builds: []model.VanadisBuild{b1}, rowsErr: errors.New("rows down"), wantErr: true},
 		{name: "empty builds returns empty entries", wantTotal: 0},
 		{name: "chunks query error propagates", builds: []model.VanadisBuild{b1}, chunksErr: errors.New("chunks down"), wantErr: true},
-		{name: "success groups chunks by build", builds: []model.VanadisBuild{b1, b2}, chunks: []model.VanadisChunk{mkChunk("c-1", "b-1", 0, "C1", "", "", "running"), mkChunk("c-3", "b-2", 0, "C3", "", "", "merged")}, wantTotal: 2, wantStates: []string{"running", "completed"}},
-		{name: "nonpositive limit clamps to default", limit: 0, builds: []model.VanadisBuild{b1}, chunks: []model.VanadisChunk{mkChunk("c-1", "b-1", 0, "C1", "", "", "running")}, wantTotal: 1, wantLimit: 50},
-		{name: "oversize limit clamps to default", limit: 500, builds: []model.VanadisBuild{b1}, chunks: []model.VanadisChunk{mkChunk("c-1", "b-1", 0, "C1", "", "", "running")}, wantTotal: 1, wantLimit: 50},
+		{name: "success groups chunks by build", builds: []model.VanadisBuild{b1, b2}, chunks: []model.VanadisChunk{storetest.Chunk("c-1", "b-1", 0, "C1", "", "", "running"), storetest.Chunk("c-3", "b-2", 0, "C3", "", "", "merged")}, wantTotal: 2, wantStates: []string{"running", "completed"}},
+		{name: "nonpositive limit clamps to default", limit: 0, builds: []model.VanadisBuild{b1}, chunks: []model.VanadisChunk{storetest.Chunk("c-1", "b-1", 0, "C1", "", "", "running")}, wantTotal: 1, wantLimit: 50},
+		{name: "oversize limit clamps to default", limit: 500, builds: []model.VanadisBuild{b1}, chunks: []model.VanadisChunk{storetest.Chunk("c-1", "b-1", 0, "C1", "", "", "running")}, wantTotal: 1, wantLimit: 50},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -525,7 +515,7 @@ func TestGetChunk(t *testing.T) {
 		{name: "missing chunk maps to not found", chunkID: "c1", wantErrIs: model.ErrChunkNotFound},
 		{name: "missing build maps to not found", chunkID: "c1", chunks: c1, buildErr: pgx.ErrNoRows, wantErrIs: model.ErrBuildNotFound},
 		{name: "build query error propagates", chunkID: "c1", chunks: c1, buildErr: errors.New("build down"), wantErr: true},
-		{name: "success returns chunk and build", chunkID: "c1", chunks: c1, build: mkBuild("b1", "", "Build Title", "", ""), wantChunk: "c1", wantBuild: "b1"},
+		{name: "success returns chunk and build", chunkID: "c1", chunks: c1, build: storetest.Build("b1", "", "Build Title", "", ""), wantChunk: "c1", wantBuild: "b1"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -568,14 +558,14 @@ func TestScanChunks(t *testing.T) {
 	t.Parallel()
 	start := time.Date(2026, 10, 16, 18, 0, 0, 0, time.UTC)
 	complete := time.Date(2026, 10, 16, 18, 15, 0, 0, time.UTC)
-	timed := mkChunk("c-1", "b-1", 0, "T1", "I1", "", "")
+	timed := storetest.Chunk("c-1", "b-1", 0, "T1", "I1", "", "")
 	timed.StartedAt, timed.CompletedAt = start, complete
 	tests := []scanChunksCase{
 		{name: "empty rows scan to empty", wantTotal: 0},
-		{name: "scan error propagates", items: []model.VanadisChunk{mkChunk("c-1", "b-1", 0, "T", "I", "", "")}, scanErr: errors.New("scan down")},
-		{name: "rows error propagates", items: []model.VanadisChunk{mkChunk("c-1", "b-1", 0, "T", "I", "", "")}, rowsErr: errors.New("rows down")},
+		{name: "scan error propagates", items: []model.VanadisChunk{storetest.Chunk("c-1", "b-1", 0, "T", "I", "", "")}, scanErr: errors.New("scan down")},
+		{name: "rows error propagates", items: []model.VanadisChunk{storetest.Chunk("c-1", "b-1", 0, "T", "I", "", "")}, rowsErr: errors.New("rows down")},
 		{name: "times and checks decode", items: []model.VanadisChunk{timed}, wantTotal: 1, wantEffort: "medium", wantChecks: true},
-		{name: "low effort preserved", items: []model.VanadisChunk{mkChunk("c-2", "b-1", 1, "T2", "I2", "low", "")}, wantTotal: 1, wantEffort: "low"},
+		{name: "low effort preserved", items: []model.VanadisChunk{storetest.Chunk("c-2", "b-1", 1, "T2", "I2", "low", "")}, wantTotal: 1, wantEffort: "low"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

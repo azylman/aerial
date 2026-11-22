@@ -15,73 +15,18 @@ import (
 
 	"github.com/azylman/aerial/pkg/buildplan"
 	"github.com/azylman/aerial/pkg/k8sauth"
+	"github.com/azylman/aerial/pkg/k8sauthtest"
+	"github.com/azylman/aerial/services/vanadis/internal/storetest"
 )
 
-type staticAuthRoundTripper struct {
-	authStatus int
-	authBody   string
-	sarStatus  int
-	sarBody    string
-	err        error
-}
-
-func (s *staticAuthRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
-	if s.err != nil {
-		return nil, s.err
+// authFake answers TokenReview as the eri service account (or unauthenticated
+// when authOK is false) and SubjectAccessReview with sarOK.
+func authFake(authOK, sarOK bool) *k8sauthtest.RoundTripper {
+	rt := &k8sauthtest.RoundTripper{AuthBody: k8sauthtest.TokenReviewDenied(), SARBody: k8sauthtest.SAR(sarOK, "")}
+	if authOK {
+		rt.AuthBody = k8sauthtest.TokenReview("system:serviceaccount:default:eri-aerial")
 	}
-	if strings.Contains(req.URL.Path, "tokenreviews") {
-		return &http.Response{
-			StatusCode: s.authStatus,
-			Body:       io.NopCloser(strings.NewReader(s.authBody)),
-			Header:     make(http.Header),
-			Request:    req,
-		}, nil
-	}
-	if strings.Contains(req.URL.Path, "subjectaccessreviews") {
-		return &http.Response{
-			StatusCode: s.sarStatus,
-			Body:       io.NopCloser(strings.NewReader(s.sarBody)),
-			Header:     make(http.Header),
-			Request:    req,
-		}, nil
-	}
-	return &http.Response{
-		StatusCode: http.StatusOK,
-		Body:       io.NopCloser(strings.NewReader(`{}`)),
-		Header:     make(http.Header),
-		Request:    req,
-	}, nil
-}
-
-func newTestAuthenticator(t *testing.T, tr *staticAuthRoundTripper) *k8sauth.Authenticator {
-	t.Helper()
-	tokenFile := filepath.Join(t.TempDir(), "token")
-	if err := os.WriteFile(tokenFile, []byte("host-token"), 0o600); err != nil {
-		t.Fatalf("failed to write host token: %v", err)
-	}
-	return k8sauth.NewAuthenticator(k8sauth.Config{
-		Enabled:      true,
-		TokenPath:    tokenFile,
-		APIServerURL: "https://k8s.local",
-		HTTPClient:   &http.Client{Transport: tr},
-	})
-}
-
-func authRoundTripper(authOk, sarOk bool) *staticAuthRoundTripper {
-	authBody := `{"apiVersion":"authentication.k8s.io/v1","kind":"TokenReview","status":{"authenticated":false}}`
-	if authOk {
-		authBody = `{"apiVersion":"authentication.k8s.io/v1","kind":"TokenReview","status":{"authenticated":true,"user":{"username":"system:serviceaccount:default:eri-aerial"}}}`
-	}
-	sarBody := `{"apiVersion":"authorization.k8s.io/v1","kind":"SubjectAccessReview","status":{"allowed":false}}`
-	if sarOk {
-		sarBody = `{"apiVersion":"authorization.k8s.io/v1","kind":"SubjectAccessReview","status":{"allowed":true}}`
-	}
-	return &staticAuthRoundTripper{
-		authStatus: http.StatusOK,
-		authBody:   authBody,
-		sarStatus:  http.StatusOK,
-		sarBody:    sarBody,
-	}
+	return rt
 }
 
 func TestWriteStoreErr(t *testing.T) {
@@ -154,7 +99,7 @@ func TestServer_AuthMiddleware_ExemptAndProtected(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			auth := newTestAuthenticator(t, authRoundTripper(tc.authOk, tc.sarOk))
+			auth := k8sauthtest.Authenticator(t, authFake(tc.authOk, tc.sarOk))
 			mem := newMemoryVanadisStore()
 			srv := NewVanadisServer(Config{}, RestateConfig{}, mem, nil, auth)
 			mux := srv.Routes()
@@ -202,14 +147,14 @@ func TestServer_RBAC_Endpoints(t *testing.T) {
 	defer restateSrv.Close()
 
 	now := time.Now().UTC()
-	b1 := mkBuild("b1", "1234567890", "Build 1", "Obj 1", "running")
+	b1 := storetest.Build("b1", "1234567890", "Build 1", "Obj 1", "running")
 	b1.Agent = "aerial"
 	b1.CreatedAt = now
-	c1 := mkChunk("c1", "b1", 0, "Chunk 1", "Inst 1", "medium", "running")
+	c1 := storetest.Chunk("c1", "b1", 0, "Chunk 1", "Inst 1", "medium", "running")
 
-	bEmpty := mkBuild("b-empty", "1234567890", "Build Empty", "Obj", "running")
+	bEmpty := storetest.Build("b-empty", "1234567890", "Build Empty", "Obj", "running")
 	bEmpty.CreatedAt = now
-	cEmpty := mkChunk("c-empty", "b-empty", 0, "Chunk Empty", "Inst", "medium", "running")
+	cEmpty := storetest.Chunk("c-empty", "b-empty", 0, "Chunk Empty", "Inst", "medium", "running")
 
 	tests := []struct {
 		name       string
@@ -273,7 +218,7 @@ func TestServer_RBAC_Endpoints(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			auth := newTestAuthenticator(t, authRoundTripper(true, tc.sarOk))
+			auth := k8sauthtest.Authenticator(t, authFake(true, tc.sarOk))
 			mem := newMemoryVanadisStore()
 			_ = mem.CreateBuild(context.Background(), b1, []VanadisChunk{c1})
 			_ = mem.CreateBuild(context.Background(), bEmpty, []VanadisChunk{cEmpty})
@@ -318,19 +263,19 @@ func TestServer_ActiveStepEndpoints(t *testing.T) {
 	defer restateSrv.Close()
 
 	now := time.Now().UTC()
-	b1 := mkBuild("b1", "1234567890", "Build 1", "Obj 1", "running")
+	b1 := storetest.Build("b1", "1234567890", "Build 1", "Obj 1", "running")
 	b1.Agent = "aerial"
 	b1.CreatedAt = now
-	c1 := mkChunk("c1", "b1", 0, "Chunk 1", "Inst 1", "medium", "running")
+	c1 := storetest.Chunk("c1", "b1", 0, "Chunk 1", "Inst 1", "medium", "running")
 
-	bErr := mkBuild("error-build", "1234567890", "Error Build", "Obj", "running")
+	bErr := storetest.Build("error-build", "1234567890", "Error Build", "Obj", "running")
 	bErr.Agent = "aerial"
 	bErr.CreatedAt = now
-	cErr := mkChunk("c-err", "error-build", 0, "Chunk Err", "Inst", "medium", "running")
+	cErr := storetest.Chunk("c-err", "error-build", 0, "Chunk Err", "Inst", "medium", "running")
 
-	bEmptyActive := mkBuild("b-empty-active", "1234567890", "Build Empty", "Obj", "running")
+	bEmptyActive := storetest.Build("b-empty-active", "1234567890", "Build Empty", "Obj", "running")
 	bEmptyActive.CreatedAt = now
-	cEmptyActive := mkChunk("c-empty-active", "b-empty-active", 0, "Chunk", "Inst", "medium", "running")
+	cEmptyActive := storetest.Chunk("c-empty-active", "b-empty-active", 0, "Chunk", "Inst", "medium", "running")
 
 	tests := []struct {
 		name       string
@@ -359,7 +304,7 @@ func TestServer_ActiveStepEndpoints(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			auth := newTestAuthenticator(t, authRoundTripper(true, tc.sarOk))
+			auth := k8sauthtest.Authenticator(t, authFake(true, tc.sarOk))
 			mem := newMemoryVanadisStore()
 			_ = mem.CreateBuild(context.Background(), b1, []VanadisChunk{c1})
 			_ = mem.CreateBuild(context.Background(), bErr, []VanadisChunk{cErr})
@@ -427,10 +372,10 @@ func TestServer_NilStore_Endpoints(t *testing.T) {
 
 func TestServer_MissingCallerInContext(t *testing.T) {
 	t.Parallel()
-	auth := newTestAuthenticator(t, authRoundTripper(true, true))
+	auth := k8sauthtest.Authenticator(t, authFake(true, true))
 	mem := newMemoryVanadisStore()
-	b1 := mkBuild("b1", "1234567890", "Build 1", "Obj 1", "running")
-	c1 := mkChunk("c1", "b1", 0, "Chunk 1", "Inst 1", "medium", "running")
+	b1 := storetest.Build("b1", "1234567890", "Build 1", "Obj 1", "running")
+	c1 := storetest.Chunk("c1", "b1", 0, "Chunk 1", "Inst 1", "medium", "running")
 	_ = mem.CreateBuild(context.Background(), b1, []VanadisChunk{c1})
 
 	srv := NewVanadisServer(Config{}, RestateConfig{}, mem, nil, auth)
