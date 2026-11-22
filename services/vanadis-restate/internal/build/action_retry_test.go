@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	restate "github.com/restatedev/sdk-go"
+	"github.com/stretchr/testify/require"
 
 	"github.com/azylman/aerial/pkg/eriwire"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/executor"
@@ -77,26 +78,28 @@ func (f *retryAuthorityFixture) GetBuild(context.Context, string) (*model.Vanadi
 
 func TestBuildRetryAction(t *testing.T) {
 	t.Parallel()
+	const invalid = "invalid vanadis build input"
 	tests := []struct {
 		name                                          string
 		lostCommit, lostJournal                       bool
-		failBuild                                     bool
+		failBuild, noAuthority                        bool
 		reconcileErr                                  error
 		reqBuild, identity                            string
-		wantErr                                       bool
+		wantErr                                       string
 		expectedInstructions, replacementInstructions *string
 	}{
-		{name: "missing expected", replacementInstructions: new("corrected"), wantErr: true},
-		{name: "missing replacement", expectedInstructions: new("verify"), wantErr: true},
-		{name: "blank expected", expectedInstructions: new(" "), replacementInstructions: new("corrected"), wantErr: true},
-		{name: "blank replacement", expectedInstructions: new("verify"), replacementInstructions: new(" "), wantErr: true},
+		{name: "missing expected", replacementInstructions: new("corrected"), wantErr: invalid},
+		{name: "missing replacement", expectedInstructions: new("verify"), wantErr: invalid},
+		{name: "blank expected", expectedInstructions: new(" "), replacementInstructions: new("corrected"), wantErr: invalid},
+		{name: "blank replacement", expectedInstructions: new("verify"), replacementInstructions: new(" "), wantErr: invalid},
 		{name: "accepted"},
 		{name: "commit response lost", lostCommit: true},
 		{name: "reset journal lost", lostJournal: true},
 		{name: "reconcile crash", reconcileErr: errors.New("worker interrupted")},
-		{name: "wrong build", reqBuild: "other", wantErr: true},
-		{name: "stale", identity: "vanadis-c1-turn-8", wantErr: true},
-		{name: "build write fails", failBuild: true, wantErr: true},
+		{name: "wrong build", reqBuild: "other", wantErr: invalid},
+		{name: "stale", identity: "vanadis-c1-turn-8", wantErr: "action retry preconditions changed"},
+		{name: "build write fails", failBuild: true, wantErr: "build write failed"},
+		{name: "no authority", noAuthority: true, wantErr: "retry authority not configured"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -109,6 +112,9 @@ func TestBuildRetryAction(t *testing.T) {
 			authority := &retryAuthorityFixture{VanadisStore: st, current: &current, buildStatus: &status}
 			rt := &retryJournalRuntime{fakeObjectRuntime: newFakeObjectRuntime("b1"), journal: map[string]reconcileStepOutput{}, loseReset: tc.lostJournal, reconcileErr: tc.reconcileErr}
 			bo := NewBuildObject("", nil, func(restate.ObjectContext) objectRuntime { return rt }).WithAuthority(authority, nil)
+			if tc.noAuthority {
+				bo = bo.WithAuthority(nil, nil)
+			}
 			req := store.RetryActionChunkRequest{BuildID: cmp.Or(tc.reqBuild, "b1"), ChunkID: "c1", ExpectedDispatchID: cmp.Or(tc.identity, "vanadis-c1-turn-0"), Reason: "retry", ExpectedInstructions: tc.expectedInstructions, ReplacementInstructions: tc.replacementInstructions}
 			got, err := bo.RetryActionChunk(nil, req)
 			if tc.lostCommit || tc.lostJournal || tc.reconcileErr != nil {
@@ -117,15 +123,12 @@ func TestBuildRetryAction(t *testing.T) {
 				}
 				got, err = bo.RetryActionChunk(nil, req)
 			}
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("got=%+v err=%v", got, err)
-			}
-			if tc.wantErr {
-				if current.Status != "failed" || current.StallNudges != 0 {
-					t.Fatalf("rejected request mutated %+v", current)
-				}
+			if tc.wantErr != "" {
+				require.ErrorContains(t, err, tc.wantErr)
+				require.Equal(t, model.VanadisChunk{ID: "c1", BuildID: "b1", Mode: "action", Status: "failed"}, current, "rejected request mutated the chunk")
 				return
 			}
+			require.NoError(t, err)
 			if !got.Accepted || got.DispatchID != "vanadis-c1-turn-1" || current.StallNudges != 1 || status != "running" {
 				t.Fatalf("result=%+v chunk=%+v status=%s", got, current, status)
 			}
@@ -134,17 +137,6 @@ func TestBuildRetryAction(t *testing.T) {
 				t.Fatalf("journal replay=%+v err=%v", again, err)
 			}
 		})
-	}
-}
-
-func TestBuildRetryAction_NoAuthority(t *testing.T) {
-	t.Parallel()
-	bo := NewBuildObject("", nil, func(restate.ObjectContext) objectRuntime {
-		return newFakeObjectRuntime("b1")
-	}).WithAuthority(nil, nil)
-	_, err := bo.RetryActionChunk(nil, store.RetryActionChunkRequest{BuildID: "b1", ChunkID: "c1", ExpectedDispatchID: "vanadis-c1-turn-0", Reason: "retry"})
-	if err == nil || !strings.Contains(err.Error(), "retry authority not configured") {
-		t.Fatalf("err = %v, want retry authority error", err)
 	}
 }
 

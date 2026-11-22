@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -92,6 +93,63 @@ func TestPostgresVanadisStore_BuildCRUD(t *testing.T) {
 			st, _ := open(tc.db)
 			err := st.CreateBuild(context.Background(), b1, c1)
 			assertStoreErr(t, err, tc.wantErrIs, tc.wantErr)
+		})
+	}
+}
+
+// createConflictTx models atomic visibility at the database boundary:
+// inserts remain private until Commit and disappear on Rollback.
+type createConflictTx struct {
+	sqltest.Tx
+
+	pending []string
+	durable []string
+	failure error
+}
+
+func (tx *createConflictTx) Exec(_ context.Context, query string, args ...any) (pgconn.CommandTag, error) {
+	if strings.Contains(query, "INSERT INTO vanadis_chunks") {
+		return pgconn.CommandTag{}, tx.failure
+	}
+	id, ok := args[0].(string)
+	if !ok {
+		return pgconn.CommandTag{}, errors.New("expected build ID")
+	}
+	tx.pending = append(tx.pending, id)
+	return pgconn.NewCommandTag("INSERT 0 1"), nil
+}
+
+func (tx *createConflictTx) Commit(context.Context) error {
+	tx.durable = append(tx.durable, tx.pending...)
+	tx.pending = nil
+	return nil
+}
+
+func (tx *createConflictTx) Rollback(context.Context) error {
+	tx.pending = nil
+	return nil
+}
+
+// TestPostgresVanadisStore_CreateBuildConflictAtomicity pins rollback on a
+// chunk unique conflict: the build insert never becomes durable.
+func TestPostgresVanadisStore_CreateBuildConflictAtomicity(t *testing.T) {
+	t.Parallel()
+	tests := []struct{ name, constraint string }{
+		{"chunk ID", "vanadis_chunks_pkey"},
+		{"chunk index", "uq_vanadis_chunks_build_index"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			tx := &createConflictTx{failure: &pgconn.PgError{Code: "23505", ConstraintName: tc.constraint}}
+			st := New(sqltest.DB{BeginFn: func(context.Context) (pgx.Tx, error) { return tx, nil }}, "example-org")
+			err := st.CreateBuild(context.Background(), model.VanadisBuild{ID: "b1", ThreadID: "th1", Objective: "Obj"}, []model.VanadisChunk{{ID: "c1", Title: "Chunk", Instructions: "Work", Repo: "aerial", DependsOn: []string{}}})
+			if !errors.Is(err, ErrBuildConflict) {
+				t.Fatalf("err = %v, want %v", err, ErrBuildConflict)
+			}
+			if len(tx.durable) != 0 || len(tx.pending) != 0 {
+				t.Fatalf("durable=%v pending=%v, want both empty", tx.durable, tx.pending)
+			}
 		})
 	}
 }
