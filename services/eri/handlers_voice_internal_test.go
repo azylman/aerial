@@ -17,6 +17,7 @@ import (
 
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/eri/pkg/db/dbtest"
+	"github.com/azylman/aerial/services/eri/pkg/metrics"
 	"github.com/azylman/aerial/services/eri/pkg/queue"
 )
 
@@ -276,6 +277,8 @@ channels:
 func TestHandleInternalDiscordInteraction(t *testing.T) {
 	origRouter := activeInteractionRouter.Swap(nil)
 	defer activeInteractionRouter.Store(origRouter)
+	SetFunnelQuotaProvider(func() metrics.QuotaSnapshot { return metrics.QuotaSnapshot{} })
+	defer SetFunnelQuotaProvider(nil)
 
 	tests := []struct {
 		name           string
@@ -297,6 +300,13 @@ func TestHandleInternalDiscordInteraction(t *testing.T) {
 			name:       "ValidWrappedInteraction",
 			method:     http.MethodPost,
 			body:       `{"interaction":{"id":"int-2","type":2,"data":{"name":"status"}}}`,
+			wantStatus: http.StatusOK,
+			wantSubstr: `"ok"`,
+		},
+		{
+			name:       "QuotaCommand",
+			method:     http.MethodPost,
+			body:       `{"id":"int-quota","type":2,"data":{"name":"quota"}}`,
 			wantStatus: http.StatusOK,
 			wantSubstr: `"ok"`,
 		},
@@ -376,12 +386,16 @@ type syncVoiceMsg struct {
 func (m syncVoiceMsg) Data() []byte    { return m.data }
 func (m syncVoiceMsg) Subject() string { return m.subject }
 
-type syncVoiceSub struct{}
+type syncVoiceSub struct {
+	err error
+}
 
-func (syncVoiceSub) Unsubscribe() error { return nil }
+func (s syncVoiceSub) Unsubscribe() error { return s.err }
 
 type syncVoiceBus struct {
 	pubsub.Bus
+
+	unsubscribeErr error
 
 	mu       sync.RWMutex
 	handlers map[string]pubsub.Handler
@@ -398,7 +412,7 @@ func (b *syncVoiceBus) Subscribe(_ context.Context, subject, _ string, handler p
 	b.mu.Lock()
 	b.handlers[subject] = handler
 	b.mu.Unlock()
-	return syncVoiceSub{}, nil
+	return syncVoiceSub{err: b.unsubscribeErr}, nil
 }
 
 func (b *syncVoiceBus) Publish(ctx context.Context, subject, _ string, data any) error {
@@ -415,16 +429,43 @@ func (b *syncVoiceBus) Publish(ctx context.Context, subject, _ string, data any)
 	return nil
 }
 
+// noCancelTransport detaches outbound requests from the caller's context so a
+// cancelled stream cannot also complete the in-flight AskVoice call.
+type noCancelTransport struct {
+	base http.RoundTripper
+}
+
+func (n noCancelTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	return n.base.RoundTrip(req.WithContext(context.WithoutCancel(req.Context())))
+}
+
+// awaitVoiceCallback blocks until a stream callback reports event, skipping
+// unrelated follow-ups such as the "done" emitted after a reply.
+func awaitVoiceCallback(handled <-chan string, event string) {
+	for got := range handled {
+		if got == event {
+			return
+		}
+	}
+}
+
+// TestStreamRestateVoiceEvents drives the fake ingress in lockstep with the
+// stream loop: after publishing each event the ingress waits until the loop has
+// handed it to a callback, and only then publishes the next one or answers. The
+// ask result therefore never races a pending event, so every row covers the same
+// statements on every run regardless of goroutine scheduling.
 func TestStreamRestateVoiceEvents(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name          string
-		events        []queue.VoiceStreamEvent
-		status        int
-		wantStatuses  []string
-		wantSentences []string
-		wantSSE       []string
+		name           string
+		events         []queue.VoiceStreamEvent
+		status         int
+		holdAsk        bool
+		unsubscribeErr error
+		wantStatuses   []string
+		wantSentences  []string
+		wantSSE        []string
 	}{
 		{
 			name: "buffered events emit reply once",
@@ -448,6 +489,26 @@ func TestStreamRestateVoiceEvents(t *testing.T) {
 			status:  http.StatusInternalServerError,
 			wantSSE: []string{"error", "done"},
 		},
+		{
+			name:          "stream error event suppresses ask error",
+			events:        []queue.VoiceStreamEvent{{Event: "sentence", Text: "Partial"}, {Event: "error", Error: "model crashed"}},
+			status:        http.StatusInternalServerError,
+			wantSentences: []string{"Partial"},
+			wantSSE:       []string{"error", "done"},
+		},
+		{
+			name:           "unsubscribe failure after reply is logged",
+			status:         http.StatusOK,
+			unsubscribeErr: errors.New("simulated unsubscribe failure"),
+			wantSSE:        []string{"reply", "done"},
+		},
+		{
+			name:         "caller cancellation ends stream while ask in flight",
+			events:       []queue.VoiceStreamEvent{{Event: "status", Status: "thinking"}},
+			status:       http.StatusOK,
+			holdAsk:      true,
+			wantStatuses: []string{"thinking"},
+		},
 	}
 
 	for _, tc := range tests {
@@ -455,6 +516,9 @@ func TestStreamRestateVoiceEvents(t *testing.T) {
 			t.Parallel()
 
 			bus := newSyncVoiceBus()
+			bus.unsubscribeErr = tc.unsubscribeErr
+			handled := make(chan string, 16)
+			release := make(chan struct{})
 			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				var req queue.VoiceSessionRequest
 				if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -464,6 +528,10 @@ func TestStreamRestateVoiceEvents(t *testing.T) {
 				topic := "voice.stream." + req.TurnID
 				for i, ev := range tc.events {
 					_ = bus.Publish(r.Context(), topic, fmt.Sprintf("step-%d", i), ev)
+					awaitVoiceCallback(handled, ev.Event)
+				}
+				if tc.holdAsk {
+					<-release
 				}
 				if tc.status != http.StatusOK {
 					http.Error(w, "boom", tc.status)
@@ -478,16 +546,31 @@ func TestStreamRestateVoiceEvents(t *testing.T) {
 				})
 			}))
 			defer ts.Close()
+			defer close(release)
 
-			client := NewRestateIngressClient(ts.URL, "aerial", ts.Client())
+			client := NewRestateIngressClient(ts.URL, "aerial", &http.Client{Transport: noCancelTransport{base: ts.Client().Transport}})
 
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
 			var statuses, sentences, sseEvents []string
-			onStatus := func(s string) { statuses = append(statuses, s) }
-			onSentence := func(s string) { sentences = append(sentences, s) }
-			emitSSE := func(event string, payload any) { sseEvents = append(sseEvents, event) }
+			onStatus := func(s string) {
+				statuses = append(statuses, s)
+				if tc.holdAsk {
+					cancel()
+				}
+				handled <- "status"
+			}
+			onSentence := func(s string) {
+				sentences = append(sentences, s)
+				handled <- "sentence"
+			}
+			emitSSE := func(event string, payload any) {
+				sseEvents = append(sseEvents, event)
+				handled <- event
+			}
 
 			req := VoiceAskRequest{Prompt: "test buffered voice", NodeID: "kiosk-1"}
-			streamRestateVoiceEvents(context.Background(), nil, client, bus, req, "kiosk-1", onStatus, onSentence, emitSSE)
+			streamRestateVoiceEvents(ctx, nil, client, bus, req, "kiosk-1", onStatus, onSentence, emitSSE)
 
 			if strings.Join(statuses, ",") != strings.Join(tc.wantStatuses, ",") {
 				t.Fatalf("statuses = %+v, want %+v", statuses, tc.wantStatuses)
