@@ -1,4 +1,4 @@
-package main
+package store
 
 import (
 	"context"
@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/azylman/aerial/mcp/docket-mcp/internal/config"
 )
 
 type testConnector struct {
@@ -169,6 +171,13 @@ const (
 	sqlFetchResolutions = "SELECT id, COALESCE(resolution, '') FROM tasks WHERE id = ANY($1);"
 )
 
+func errText(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
+}
+
 func TestSQLTaskStore_UpdateTaskEmbedding(t *testing.T) {
 	t.Parallel()
 
@@ -300,14 +309,14 @@ func TestSQLTaskStore_SearchTasksRRF(t *testing.T) {
 		limit     int
 		rows      *testRows
 		queryErr  error
-		want      []ScoredTaskSummary
+		want      []config.ScoredTaskSummary
 		wantArgs  []driver.Value // limit, query text, status filter, hasVector
 		wantErr   string
 	}{
 		{
 			name: "successful search with rows", embedding: emb, queryText: "fix bug", status: "open", limit: 5,
 			rows:     sqlRows(scored, []driver.Value{int64(1), "Fix bug", false, "", 0.95}, []driver.Value{int64(2), "Closed task", true, "completed", 0.70}),
-			want:     []ScoredTaskSummary{{ID: 1, Title: "Fix bug", Status: "open", Score: 0.95}, {ID: 2, Title: "Closed task", Status: "completed", Score: 0.70}},
+			want:     []config.ScoredTaskSummary{{ID: 1, Title: "Fix bug", Status: "open", Score: 0.95}, {ID: 2, Title: "Closed task", Status: "completed", Score: 0.70}},
 			wantArgs: []driver.Value{5, "fix bug", "open", true},
 		},
 		{name: "empty embedding uses default vector and vector gate false", queryText: "search term", rows: sqlRows(scored), wantArgs: []driver.Value{10, "search term", "open", false}},

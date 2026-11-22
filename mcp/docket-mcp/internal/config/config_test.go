@@ -1,4 +1,4 @@
-package main
+package config
 
 import (
 	"cmp"
@@ -188,7 +188,7 @@ func TestLoadCloseNeighborhood(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got, err := loadCloseNeighborhood(context.Background(), tc.src, tc.id)
+			got, err := LoadCloseNeighborhood(context.Background(), tc.src, tc.id)
 			assertErrString(t, err, tc.wantErr)
 			gotIDs := slices.Sorted(maps.Keys(got))
 			if !slices.Equal(gotIDs, tc.wantIDs) {
@@ -695,5 +695,52 @@ func TestParseTaskID(t *testing.T) {
 				t.Fatalf("got %d, want %d", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestTaskToNode_And_SummarizeNode(t *testing.T) {
+	t.Parallel()
+	parentID := int64(9)
+	vt := VikunjaTask{
+		ID: 1, Title: "Test", Description: "Desc", Done: true,
+		RelatedTasks: map[string][]VikunjaTask{
+			"parenttask":    {{ID: parentID}},
+			"subtask":       {{ID: 2}},
+			"blocking":      {{ID: 3}},
+			"blocked":       {{ID: 4}},
+			RelationRelated: {{ID: 5}},
+		},
+	}
+	node := TaskToNode(vt, "completed")
+	if node.ParentID == nil || *node.ParentID != parentID {
+		t.Fatalf("node.ParentID = %v, want %d", node.ParentID, parentID)
+	}
+	if node.Status != TaskStatusCompleted {
+		t.Fatalf("node.Status = %q, want %q", node.Status, TaskStatusCompleted)
+	}
+	if !slices.Equal(node.SubtaskIDs, []int64{2}) {
+		t.Fatalf("node.SubtaskIDs = %v, want [2]", node.SubtaskIDs)
+	}
+	if !slices.Equal(node.Blocks, []int64{3}) {
+		t.Fatalf("node.Blocks = %v, want [3]", node.Blocks)
+	}
+	if !slices.Equal(node.BlockedBy, []int64{4}) {
+		t.Fatalf("node.BlockedBy = %v, want [4]", node.BlockedBy)
+	}
+	if !slices.Equal(node.Related, []int64{5}) {
+		t.Fatalf("node.Related = %v, want [5]", node.Related)
+	}
+	summary := SummarizeNode(node)
+	if summary.ID != 1 || summary.Title != "Test" || summary.Status != TaskStatusCompleted {
+		t.Fatalf("SummarizeNode() = %+v", summary)
+	}
+	if summary.ParentID == nil || *summary.ParentID != parentID {
+		t.Fatalf("summary.ParentID = %v, want %d", summary.ParentID, parentID)
+	}
+	if !slices.Equal(summary.Blocks, []int64{3}) {
+		t.Fatalf("summary.Blocks = %v, want [3]", summary.Blocks)
+	}
+	if !slices.Equal(summary.BlockedBy, []int64{4}) {
+		t.Fatalf("summary.BlockedBy = %v, want [4]", summary.BlockedBy)
 	}
 }
