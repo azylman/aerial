@@ -105,7 +105,7 @@ func (s dbScript) open() (*store.Store, *[]string) {
 		return s.bare.store, new([]string)
 	}
 	db, candidates := s.openRaw()
-	return store.New(db, "azylman"), candidates
+	return store.New(db, "example-owner"), candidates
 }
 
 func (s dbScript) openRaw() (mockDB, *[]string) {
@@ -363,7 +363,7 @@ func (db mockDB) Begin(ctx context.Context) (pgx.Tx, error) {
 }
 
 func newMockStore(db mockDB) *store.Store {
-	return store.New(db, "azylman")
+	return store.New(db, "example-owner")
 }
 
 func attachRoutes(mode string, exists, cancelled bool) []sqlRoute {
@@ -470,79 +470,6 @@ func buildRow(id, status string) pgx.Row {
 	return valuesRow(id, "aerial", "thread", 3, "title", "objective", "", status, "", false, time.Time{}, time.Time{})
 }
 
-// The database boundary keeps transaction writes private until commit.
-type recoveryReadFailureStore struct{ *store.Store }
-
-func (recoveryReadFailureStore) GetBuild(context.Context, string) (*model.VanadisBuild, []model.VanadisChunk, error) {
-	return nil, nil, errors.New("read unavailable")
-}
-
-type recoveryLifecycleStore struct {
-	*store.Store
-
-	parent *string
-	chunks *[]model.VanadisChunk
-}
-
-func (s recoveryLifecycleStore) GetBuild(context.Context, string) (*model.VanadisBuild, []model.VanadisChunk, error) {
-	return &model.VanadisBuild{ID: "b1", Status: *s.parent}, *s.chunks, nil
-}
-
-func (s recoveryLifecycleStore) FailChunk(context.Context, string, string, string) (*model.VanadisBuild, *model.VanadisChunk, bool, error) {
-	(*s.chunks)[0].Status = "failed"
-	return &model.VanadisBuild{ID: "b1", Status: *s.parent}, &(*s.chunks)[0], true, nil
-}
-
-func recoveryFixtureStore(mu *sync.Mutex, parent *string, chunks *[]model.VanadisChunk, failParent bool) *store.Store {
-	return newMockStore(mockDB{execFn: func(context.Context, string, ...any) (pgconn.CommandTag, error) {
-		return pgconn.NewCommandTag("UPDATE 0"), nil
-	}, beginFn: func(context.Context) (pgx.Tx, error) {
-		var local []model.VanadisChunk
-		var state string
-		locked, closed := false, false
-		tx := &mockTx{
-			queryRowFn: func(_ context.Context, q string, _ ...any) pgx.Row {
-				if strings.Contains(q, "SELECT build_id") {
-					return valuesRow("b1")
-				}
-				mu.Lock()
-				locked = true
-				state = *parent
-				local = append([]model.VanadisChunk(nil), (*chunks)...)
-				return buildRow("b1", state)
-			}, queryFn: func(context.Context, string, ...any) (pgx.Rows, error) { return &mockRows{items: local}, nil },
-			execFn: func(_ context.Context, q string, args ...any) (pgconn.CommandTag, error) {
-				if !locked {
-					return pgconn.CommandTag{}, errors.New("write without lock")
-				}
-				if strings.Contains(q, "UPDATE vanadis_chunks") {
-					applyRecoveryFixtureHead(local, args, strings.Contains(q, "SET ci_checks = COALESCE"))
-				} else {
-					if failParent {
-						return pgconn.CommandTag{}, errors.New("parent write failed")
-					}
-					state = "running"
-				}
-				return pgconn.NewCommandTag("UPDATE 1"), nil
-			},
-		}
-		return &retryTransaction{mockTx: tx, finish: func(commit bool) error {
-			if closed {
-				return pgx.ErrTxClosed
-			}
-			closed = true
-			if locked {
-				defer mu.Unlock()
-			}
-			if commit {
-				*chunks = local
-				*parent = state
-			}
-			return nil
-		}}, nil
-	}})
-}
-
 func recoveryFixtureChecks(c model.VanadisChunk) []byte {
 	if len(c.CIChecks) > 0 {
 		checks := maps.Clone(c.CIChecks)
@@ -561,17 +488,6 @@ func recoveryFixtureChecks(c model.VanadisChunk) []byte {
 	checks := map[string]string{"_head_sha": c.HeadSHA, "_merge_sha": c.MergeSHA}
 	raw, _ := json.Marshal(checks)
 	return raw
-}
-
-func applyRecoveryFixtureHead(chunks []model.VanadisChunk, args []any, baseline bool) {
-	for i := range chunks {
-		if chunks[i].ID == args[0] {
-			if !baseline {
-				chunks[i].Status = "pr_opened"
-			}
-			chunks[i].HeadSHA, _ = args[1].(string)
-		}
-	}
 }
 
 type mockEriClient struct {

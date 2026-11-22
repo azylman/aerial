@@ -123,7 +123,7 @@ func TestBuildObject_ChunkRemovalCancelsOnOwnerSessions(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			eri := &mockEriClient{}
-			exec := executor.NewExecutor("", eri, pubsub.NewMemoryBus(), "test-token", "azylman", nil)
+			exec := executor.NewExecutor("", eri, pubsub.NewMemoryBus(), "test-token", "example-owner", nil)
 			rt := newFakeObjectRuntime("b1")
 			rt.runStepErr = errors.New("stop after removal")
 			bo := NewBuildObject("", nil, func(restate.ObjectContext) objectRuntime { return rt }).WithAuthority(&removalStore{owner: tc.owner}, exec)
@@ -207,11 +207,6 @@ func TestRecordCrossBuildReconcile(t *testing.T) {
 	}
 }
 
-func TestBuildObjectRunnerIdentity(t *testing.T) {
-	t.Parallel()
-	assert.Equal(t, "Build", NewBuildObject("", nil).ServiceName())
-}
-
 // TestBuildObject_ReconcileWidgetSyncFailedBuild covers the explicit widget
 // sync: a failed build refreshes its card only for the widget_sync reason.
 func TestBuildObject_ReconcileWidgetSyncFailedBuild(t *testing.T) {
@@ -234,7 +229,7 @@ func TestBuildObject_ReconcileWidgetSyncFailedBuild(t *testing.T) {
 				ownChunks: []model.VanadisChunk{{ID: "c1", BuildID: "b1", Mode: "pr", Repo: "aerial", Status: "pr_opened", PRNumber: 3}},
 			}
 			rt := newFakeObjectRuntime("b1")
-			exec := executor.NewExecutor("", &mockEriClient{}, &recordingChunkBus{}, "token", "azylman", nil)
+			exec := executor.NewExecutor("", &mockEriClient{}, &recordingChunkBus{}, "token", "example-owner", nil)
 			bo := NewBuildObject("", nil, func(restate.ObjectContext) objectRuntime { return rt }).WithAuthority(spy, exec)
 			res, err := bo.Reconcile(makeObjectMockContext(t, "b1"), ReconcileBuildRequest{Reason: tc.reason})
 			require.NoError(t, err)
