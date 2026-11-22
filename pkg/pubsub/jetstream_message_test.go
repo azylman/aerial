@@ -3,16 +3,14 @@ package pubsub
 import (
 	"context"
 	"errors"
-	"net"
 	"net/http"
 	"slices"
-	"strconv"
-	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
@@ -35,72 +33,50 @@ func traceparentHeader(traceparent, msgID string) nats.Header {
 	return h
 }
 
-// recordingNatsDialer is a fake NATS server that records every byte the
-// client writes, so tests can observe ack frames published on reply subjects.
-type recordingNatsDialer struct {
-	mu   sync.Mutex
-	wire strings.Builder
+// fakeMsg is a jetstream.Msg double that records the settlement tokens
+// (+ACK, -NAK, +WPI, +TERM) the bus sends, in order, and fails every
+// settlement call with settleErr.
+type fakeMsg struct {
+	subject   string
+	data      []byte
+	header    nats.Header
+	meta      *jetstream.MsgMetadata
+	settleErr error
+
+	mu     sync.Mutex
+	tokens []string
 }
 
-func (d *recordingNatsDialer) Dial(string, string) (net.Conn, error) {
-	c1, c2 := net.Pipe()
-	go func() {
-		defer c2.Close()
-		_, _ = c2.Write([]byte("INFO {\"server_id\":\"TEST\",\"version\":\"2.10.0\",\"proto\":1,\"jetstream\":true,\"max_payload\":1048576}\r\n"))
-		buf := make([]byte, 1024)
-		for {
-			n, err := c2.Read(buf)
-			if err != nil {
-				return
-			}
-			d.mu.Lock()
-			d.wire.Write(buf[:n])
-			d.mu.Unlock()
-			if strings.Contains(string(buf[:n]), "PING") {
-				_, _ = c2.Write([]byte("PONG\r\n"))
-			}
-		}
-	}()
-	return c1, nil
+func (f *fakeMsg) record(token string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.tokens = append(f.tokens, token)
+	return f.settleErr
 }
 
-// ackTokens returns the leading token (+ACK, -NAK, +WPI, +TERM, ...) of every
-// payload the client published to reply, in order. Call it after nc.Flush so
-// the fake server has read every prior frame.
-func (d *recordingNatsDialer) ackTokens(reply string) []string {
-	d.mu.Lock()
-	wire := d.wire.String()
-	d.mu.Unlock()
-	var tokens []string
-	prefix := "PUB " + reply + " "
-	for {
-		i := strings.Index(wire, prefix)
-		if i < 0 {
-			return tokens
-		}
-		size, rest, _ := strings.Cut(wire[i+len(prefix):], "\r\n")
-		n, _ := strconv.Atoi(size)
-		tokens = append(tokens, strings.Fields(rest[:n])[0])
-		wire = rest[n:]
-	}
+func (f *fakeMsg) recorded() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.tokens)
 }
 
-// boundTestSub connects a NATS client to a recording fake server and returns
-// a subscription the dispatched message can be bound to for acking.
-func boundTestSub(t *testing.T) (*nats.Conn, *nats.Subscription, *recordingNatsDialer) {
-	t.Helper()
-	dialer := &recordingNatsDialer{}
-	nc, err := nats.Connect("nats://127.0.0.1:4222", nats.SetCustomDialer(dialer), nats.Timeout(time.Second), nats.NoReconnect())
-	if err != nil {
-		t.Fatalf("nats.Connect failed: %v", err)
+func (f *fakeMsg) Metadata() (*jetstream.MsgMetadata, error) {
+	if f.meta == nil {
+		return nil, jetstream.ErrNotJSMessage
 	}
-	t.Cleanup(nc.Close)
-	sub, err := nc.SubscribeSync("aerial.events.>")
-	if err != nil {
-		t.Fatalf("SubscribeSync failed: %v", err)
-	}
-	return nc, sub, dialer
+	return f.meta, nil
 }
+func (f *fakeMsg) Data() []byte                     { return f.data }
+func (f *fakeMsg) Headers() nats.Header             { return f.header }
+func (f *fakeMsg) Subject() string                  { return f.subject }
+func (*fakeMsg) Reply() string                      { return "" }
+func (f *fakeMsg) Ack() error                       { return f.record("+ACK") }
+func (f *fakeMsg) DoubleAck(context.Context) error  { return f.record("+ACK") }
+func (f *fakeMsg) Nak() error                       { return f.record("-NAK") }
+func (f *fakeMsg) NakWithDelay(time.Duration) error { return f.record("-NAK") }
+func (f *fakeMsg) InProgress() error                { return f.record("+WPI") }
+func (f *fakeMsg) Term() error                      { return f.record("+TERM") }
+func (f *fakeMsg) TermWithReason(string) error      { return f.record("+TERM") }
 
 func TestJetStreamBus_Dispatch(t *testing.T) {
 	t.Parallel()
@@ -108,7 +84,7 @@ func TestJetStreamBus_Dispatch(t *testing.T) {
 	tests := []struct {
 		name          string
 		subject       string
-		reply         string
+		meta          *jetstream.MsgMetadata
 		data          string
 		group         string
 		header        nats.Header
@@ -119,9 +95,8 @@ func TestJetStreamBus_Dispatch(t *testing.T) {
 		wantSpan      spanShape
 	}{
 		{
-			// $JS.ACK.<stream>.<consumer>.<numDelivered>.<streamSeq>.<consumerSeq>.<timestamp>.<numPending>
-			name:    "ack reply metadata exposes delivery count",
-			subject: "aerial.events.meta", reply: "$JS.ACK.AERIAL_EVENTS.durable.4.1.1.1600000000.0", data: "with-meta", group: "durable",
+			name:    "message metadata exposes delivery count",
+			subject: "aerial.events.meta", meta: &jetstream.MsgMetadata{NumDelivered: 4}, data: "with-meta", group: "durable",
 			want:     dispatchObservation{invoked: true, subject: "aerial.events.meta", data: "with-meta", numDelivered: 4},
 			wantAcks: []string{"+ACK"},
 			wantSpan: spanShape{key: "proc", name: "aerial.events.meta process", kind: trace.SpanKindConsumer, attrs: map[string]string{
@@ -131,7 +106,7 @@ func TestJetStreamBus_Dispatch(t *testing.T) {
 		},
 		{
 			name:    "traceparent header parents the process span seen by the handler",
-			subject: "aerial.events.head", reply: "_INBOX.head", data: "h", group: "workers",
+			subject: "aerial.events.head", data: "h", group: "workers",
 			header:   traceparentHeader(testTraceparent, "evt-head"),
 			want:     dispatchObservation{invoked: true, subject: "aerial.events.head", data: "h", numDelivered: 1, traceID: testTraceID},
 			wantAcks: []string{"+ACK"},
@@ -142,7 +117,7 @@ func TestJetStreamBus_Dispatch(t *testing.T) {
 		},
 		{
 			name:    "handler error is auto-naked and fails the process span",
-			subject: "aerial.events.err", reply: "_INBOX.err", data: "err",
+			subject: "aerial.events.err", data: "err",
 			handlerErr: errors.New("handler failed"),
 			want:       dispatchObservation{invoked: true, subject: "aerial.events.err", data: "err", numDelivered: 1},
 			wantAcks:   []string{"-NAK"},
@@ -153,7 +128,7 @@ func TestJetStreamBus_Dispatch(t *testing.T) {
 		},
 		{
 			name:    "handler settling via InProgress and Term skips auto-settlement",
-			subject: "aerial.events.term", reply: "_INBOX.term", data: "term",
+			subject: "aerial.events.term", data: "term",
 			termInHandler: true,
 			want:          dispatchObservation{invoked: true, subject: "aerial.events.term", data: "term", numDelivered: 1},
 			wantAcks:      []string{"+WPI", "+TERM"},
@@ -167,14 +142,13 @@ func TestJetStreamBus_Dispatch(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			nc, sub, dialer := boundTestSub(t)
 			bus := newJetStreamBusWithContext(nil, &mockJetStream{existingStreams: make(map[string]*nats.StreamInfo)})
 			// Keep the background heartbeat out of the recorded ack stream.
 			bus.heartbeatInterval = time.Hour
 
 			var got dispatchObservation
 			var handlerSpan trace.SpanID
-			msg := &nats.Msg{Subject: tc.subject, Reply: tc.reply, Sub: sub, Data: []byte(tc.data), Header: tc.header}
+			msg := &fakeMsg{subject: tc.subject, meta: tc.meta, data: []byte(tc.data), header: tc.header}
 			bus.dispatch(t.Context(), msg, tc.group, func(ctx context.Context, msg Message) error {
 				got = dispatchObservation{invoked: true, subject: msg.Subject(), data: string(msg.Data()), numDelivered: msg.NumDelivered()}
 				spanCtx := trace.SpanContextFromContext(ctx)
@@ -191,10 +165,7 @@ func TestJetStreamBus_Dispatch(t *testing.T) {
 			if got != tc.want {
 				t.Errorf("handler observed %+v, want %+v", got, tc.want)
 			}
-			if err := nc.Flush(); err != nil {
-				t.Fatalf("Flush failed: %v", err)
-			}
-			if acks := dialer.ackTokens(tc.reply); !slices.Equal(acks, tc.wantAcks) {
+			if acks := msg.recorded(); !slices.Equal(acks, tc.wantAcks) {
 				t.Errorf("ack frames = %v, want %v", acks, tc.wantAcks)
 			}
 			spans := assertSpanShapes(t, testSpans.await(tc.subject, 1), []spanShape{tc.wantSpan})
@@ -282,7 +253,7 @@ func TestJSMessage_SettledSettlementIsNoop(t *testing.T) {
 	t.Parallel()
 
 	msg := &jsMessage{
-		raw:     &nats.Msg{Subject: "aerial.jobs.jsmsg", Data: []byte("raw"), Header: nats.Header{}},
+		raw:     &fakeMsg{subject: "aerial.jobs.jsmsg", data: []byte("raw"), header: nats.Header{}},
 		bus:     newJetStreamBusWithContext(nil, &mockJetStream{}),
 		settled: true,
 	}
@@ -313,45 +284,9 @@ type plainBus struct {
 	Bus
 }
 
-func setupSnoozeRawMsg(t *testing.T, boundSub bool, dialer *recordingNatsDialer, header nats.Header) (*nats.Msg, func()) {
-	t.Helper()
-	if !boundSub {
-		return &nats.Msg{
-			Subject: "aerial.jobs.snooze",
-			Data:    []byte("s"),
-			Header:  header,
-		}, func() {}
-	}
-
-	nc, err := nats.Connect("nats://127.0.0.1:4222",
-		nats.SetCustomDialer(dialer),
-		nats.Timeout(1*time.Second),
-		nats.NoReconnect(),
-		nats.MaxReconnects(0),
-	)
-	if err != nil {
-		t.Fatalf("Connect failed: %v", err)
-	}
-
-	sub, err := nc.SubscribeSync("aerial.jobs.snooze")
-	if err != nil {
-		nc.Close()
-		t.Fatalf("SubscribeSync failed: %v", err)
-	}
-
-	raw := &nats.Msg{
-		Subject: "aerial.jobs.snooze",
-		Reply:   "test.reply.inbox",
-		Sub:     sub,
-		Data:    []byte("s"),
-		Header:  header,
-	}
-	return raw, func() { nc.Close() }
-}
-
-func countInProgressTokens(dialer *recordingNatsDialer, reply string) int {
+func countInProgressTokens(tokens []string) int {
 	var count int
-	for _, tok := range dialer.ackTokens(reply) {
+	for _, tok := range tokens {
 		if tok == "+WPI" {
 			count++
 		}
@@ -370,7 +305,8 @@ func TestJSMessage_Snooze(t *testing.T) {
 		header            nats.Header
 		publishErr        error
 		plainBus          bool
-		boundSub          bool
+		settleErr         error
+		countInProgress   bool
 		cancelCtx         bool
 		wantErr           error
 		wantSettled       bool
@@ -378,8 +314,9 @@ func TestJSMessage_Snooze(t *testing.T) {
 		wantMaxInProgress int
 	}{
 		{
-			name:        "unbound message without msg id publishes then fails to ack",
-			wantErr:     nats.ErrMsgNotBound,
+			name:        "message without msg id publishes then fails to ack",
+			settleErr:   jetstream.ErrMsgNotBound,
+			wantErr:     jetstream.ErrMsgNotBound,
 			wantSettled: true,
 		},
 		{
@@ -392,7 +329,8 @@ func TestJSMessage_Snooze(t *testing.T) {
 			name:        "existing snooze sequence on a non-header publisher bus",
 			header:      nats.Header{HeaderMsgID: []string{"task-1:snooze:2"}},
 			plainBus:    true,
-			wantErr:     nats.ErrMsgNotBound,
+			settleErr:   jetstream.ErrMsgNotBound,
+			wantErr:     jetstream.ErrMsgNotBound,
 			wantSettled: true,
 		},
 		{
@@ -403,19 +341,19 @@ func TestJSMessage_Snooze(t *testing.T) {
 			wantSettled: false,
 		},
 		{
-			name:              "bound message with delay exceeding heartbeat interval triggers in progress and settles",
+			name:              "message with delay exceeding heartbeat interval triggers in progress and settles",
 			delay:             15 * time.Millisecond,
 			hbInterval:        3 * time.Millisecond,
-			boundSub:          true,
+			countInProgress:   true,
 			wantSettled:       true,
 			wantMinInProgress: 1,
 			wantMaxInProgress: 100,
 		},
 		{
-			name:              "bound message with delay below heartbeat interval settles without in progress",
+			name:              "message with delay below heartbeat interval settles without in progress",
 			delay:             5 * time.Millisecond,
 			hbInterval:        50 * time.Millisecond,
-			boundSub:          true,
+			countInProgress:   true,
 			wantSettled:       true,
 			wantMinInProgress: 0,
 			wantMaxInProgress: 0,
@@ -441,9 +379,7 @@ func TestJSMessage_Snooze(t *testing.T) {
 				bus = plainBus{bus}
 			}
 
-			dialer := &recordingNatsDialer{}
-			raw, cleanup := setupSnoozeRawMsg(t, tc.boundSub, dialer, tc.header)
-			defer cleanup()
+			raw := &fakeMsg{subject: "aerial.jobs.snooze", data: []byte("s"), header: tc.header, settleErr: tc.settleErr}
 
 			var doneCh <-chan struct{}
 			if tc.cancelCtx {
@@ -462,8 +398,8 @@ func TestJSMessage_Snooze(t *testing.T) {
 			if settled != tc.wantSettled {
 				t.Errorf("settled = %v, want %v", settled, tc.wantSettled)
 			}
-			if tc.boundSub {
-				gotIP := countInProgressTokens(dialer, "test.reply.inbox")
+			if tc.countInProgress {
+				gotIP := countInProgressTokens(raw.recorded())
 				if gotIP < tc.wantMinInProgress || gotIP > tc.wantMaxInProgress {
 					t.Errorf("inProgress tokens = %d, want between %d and %d", gotIP, tc.wantMinInProgress, tc.wantMaxInProgress)
 				}
@@ -480,13 +416,9 @@ func TestJSMessage_NumDelivered(t *testing.T) {
 		msg  *jsMessage
 		want uint64
 	}{
-		{name: "cached metadata", msg: &jsMessage{raw: &nats.Msg{}, meta: &nats.MsgMetadata{NumDelivered: 42}}, want: 42},
-		{name: "no metadata defaults to first delivery", msg: &jsMessage{raw: &nats.Msg{}}, want: 1},
-		{
-			name: "parsed from raw ack reply",
-			msg:  &jsMessage{raw: &nats.Msg{Reply: "$JS.ACK.AERIAL_JOBS.test-cons.3.100.200.1600000000.5", Sub: &nats.Subscription{}}},
-			want: 3,
-		},
+		{name: "cached metadata", msg: &jsMessage{raw: &fakeMsg{}, meta: &jetstream.MsgMetadata{NumDelivered: 42}}, want: 42},
+		{name: "no metadata defaults to first delivery", msg: &jsMessage{raw: &fakeMsg{}}, want: 1},
+		{name: "read from raw metadata", msg: &jsMessage{raw: &fakeMsg{meta: &jetstream.MsgMetadata{NumDelivered: 3}}}, want: 3},
 	}
 
 	for _, tc := range tests {
@@ -504,22 +436,21 @@ func TestJSMessage_Header(t *testing.T) {
 
 	tests := []struct {
 		name      string
-		raw       *nats.Msg
+		raw       nats.Header
 		wantValue string
 	}{
-		{name: "existing header is returned as-is", raw: &nats.Msg{Header: nats.Header{"X-Test": []string{"1"}}}, wantValue: "1"},
-		{name: "missing header is initialized on the raw message", raw: &nats.Msg{}, wantValue: ""},
+		{name: "existing header is returned as-is", raw: nats.Header{"X-Test": []string{"1"}}, wantValue: "1"},
+		{name: "missing header is replaced by a stable empty header", raw: nil, wantValue: "set"},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			msg := &jsMessage{raw: tc.raw}
-			h := msg.Header()
-			if h == nil || tc.raw.Header == nil {
-				t.Fatalf("Header() = %v, raw.Header = %v, want both non-nil", h, tc.raw.Header)
+			msg := &jsMessage{raw: &fakeMsg{header: tc.raw}}
+			if msg.Header().Get("X-Test") == "" {
+				msg.Header().Set("X-Test", "set")
 			}
-			if got := h.Get("X-Test"); got != tc.wantValue {
+			if got := msg.Header().Get("X-Test"); got != tc.wantValue {
 				t.Errorf("Header().Get(X-Test) = %q, want %q", got, tc.wantValue)
 			}
 		})
