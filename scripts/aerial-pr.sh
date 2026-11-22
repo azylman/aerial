@@ -405,6 +405,7 @@ attach_pr_in_vanadis() {
     local vanadis_url="$1"
     local attach_payload="$2"
     local pr_num="$3"
+    local chunk_id="${4:-}"
     local max_attempts="${AERIAL_VANADIS_ATTACH_RETRIES:-3}"
     local delay="${AERIAL_VANADIS_ATTACH_RETRY_DELAY:-1}"
     local attempt=1
@@ -424,6 +425,27 @@ attach_pr_in_vanadis() {
             echo "$attach_resp"
             return 0
         fi
+
+        # If attach POST returned empty response or non-attached status, probe GET /chunks/<id>
+        if [ -n "$chunk_id" ]; then
+            local chunk_check_resp=""
+            chunk_check_resp=$(curl -sS --connect-timeout 2 --max-time 5 \
+                ${VANADIS_AUTH_ARGS[@]+"${VANADIS_AUTH_ARGS[@]}"} \
+                "${vanadis_url%/}/chunks/${chunk_id}" 2>/dev/null || true)
+            if [ -n "$chunk_check_resp" ] && echo "$chunk_check_resp" | jq -e --argjson pr "$pr_num" '.chunk.pr_number == ($pr | tonumber)' >/dev/null 2>&1; then
+                local thread_id
+                thread_id=$(echo "$chunk_check_resp" | jq -r '.build.thread_id // empty' 2>/dev/null || true)
+                local synth_resp
+                synth_resp=$(jq -n \
+                    --arg chunk_id "$chunk_id" \
+                    --arg thread_id "$thread_id" \
+                    '{status: "attached", chunk_id: $chunk_id, thread_id: (if $thread_id != "" then $thread_id else null end)}')
+                echo "🔗 [aerial-pr] Verified PR #${pr_num} already attached to Vanadis chunk ${chunk_id} (thread: ${thread_id:-none})." >&2
+                echo "$synth_resp"
+                return 0
+            fi
+        fi
+
         if [ "$attempt" -lt "$max_attempts" ]; then
             echo "⚠️ [aerial-pr] Warning: PR #${pr_num} Vanadis attachment attempt ${attempt}/${max_attempts} failed (${vanadis_url}): ${attach_resp:-unreachable}. Retrying in ${delay}s..." >&2
             if [ "$delay" -gt 0 ] 2>/dev/null; then
@@ -435,6 +457,9 @@ attach_pr_in_vanadis() {
     done
 
     echo "❌ [aerial-pr] ERROR: Failed to attach PR #${pr_num} to Vanadis (${vanadis_url}) after ${max_attempts} attempts: ${attach_resp:-unreachable}" >&2
+    if [ -n "$attach_resp" ]; then
+        echo "$attach_resp"
+    fi
     return 1
 }
 
@@ -1183,15 +1208,32 @@ submit_scratch() {
             --arg target_id "$target_id" \
             '{chunk_id: $chunk_id, pr_number: $pr_number, repo: $repo, branch: $branch, title: $title, target_id: $target_id}')
         local vanadis_attach_out
-        if vanadis_attach_out=$(attach_pr_in_vanadis "$vanadis_url" "$attach_payload" "$pr_num"); then
+        if vanadis_attach_out=$(attach_pr_in_vanadis "$vanadis_url" "$attach_payload" "$pr_num" "$vanadis_chunk_id"); then
             local returned_thread
             returned_thread=$(echo "$vanadis_attach_out" | jq -r '.thread_id // empty' 2>/dev/null || true)
             if [ -n "$returned_thread" ]; then
                 target_id="$returned_thread"
             fi
         else
-            echo "ERROR: Failed to attach PR #${pr_num} to Vanadis (chunk: '${vanadis_chunk_id:-standalone}')." >&2
-            exit 1
+            # Check whether the last attach response was a deterministic 4xx rejection.
+            # If the response was empty, not valid JSON, or a timeout/5xx, treat as acceptance unknown.
+            local is_deterministic_rejection=0
+            if [ -n "$vanadis_attach_out" ] && echo "$vanadis_attach_out" | jq -e . >/dev/null 2>&1; then
+                local err_text status_text
+                err_text=$(echo "$vanadis_attach_out" | jq -r '(.error // .message // "") | ascii_downcase' 2>/dev/null || echo "")
+                status_text=$(echo "$vanadis_attach_out" | jq -r '(.status // "") | ascii_downcase' 2>/dev/null || echo "")
+                if [[ "$err_text" =~ conflict|not[[:space:]_-]*found|invalid|terminal|bad[[:space:]_-]*request ]] || \
+                   [[ "$status_text" =~ conflict|invalid|cancelled|completed ]]; then
+                    is_deterministic_rejection=1
+                fi
+            fi
+
+            if [ "$is_deterministic_rejection" -eq 1 ]; then
+                echo "ERROR: Failed to attach PR #${pr_num} to Vanadis (chunk: '${vanadis_chunk_id:-standalone}'): ${vanadis_attach_out}" >&2
+                exit 1
+            else
+                echo "⚠️ [aerial-pr] Warning: Vanadis attach-pr timed out or returned non-deterministic error for PR #${pr_num} (acceptance unknown: ${vanadis_attach_out:-timeout}); continuing to register PR." >&2
+            fi
         fi
     elif [ -n "$vanadis_chunk_id" ]; then
         echo "ERROR: Cannot attach PR #${pr_num} to Vanadis chunk '${vanadis_chunk_id}': Vanadis URL could not be resolved." >&2
@@ -1205,6 +1247,11 @@ submit_scratch() {
     local bot_id
     bot_id="${AERIAL_BOT_ID:-$(read_config_yaml_val bot_id)}"
 
+    local reg_meta="{}"
+    if [ -n "$vanadis_chunk_id" ]; then
+        reg_meta=$(jq -n --arg cid "$vanadis_chunk_id" '{"vanadis_chunk_id": $cid}')
+    fi
+
     local reg_payload
     if [ -n "$bot_id" ]; then
         reg_payload=$(jq -n \
@@ -1215,7 +1262,8 @@ submit_scratch() {
             --arg target_id "$target_id" \
             --arg title "$clean_title" \
             --arg bot_id "$bot_id" \
-            '{repo: $repo, pr_number: $pr_num, branch: $branch, head_sha: $head_sha, target_id: $target_id, title: $title, bot_id: $bot_id, metadata: "{}"}')
+            --arg meta "$reg_meta" \
+            '{repo: $repo, pr_number: $pr_num, branch: $branch, head_sha: $head_sha, target_id: $target_id, title: $title, bot_id: $bot_id, metadata: $meta}')
     else
         reg_payload=$(jq -n \
             --arg repo "${REPO_NAME}" \
@@ -1224,7 +1272,8 @@ submit_scratch() {
             --arg head_sha "$commit_sha" \
             --arg target_id "$target_id" \
             --arg title "$clean_title" \
-            '{repo: $repo, pr_number: $pr_num, branch: $branch, head_sha: $head_sha, target_id: $target_id, title: $title, metadata: "{}"}')
+            --arg meta "$reg_meta" \
+            '{repo: $repo, pr_number: $pr_num, branch: $branch, head_sha: $head_sha, target_id: $target_id, title: $title, metadata: $meta}')
     fi
 
     if [ -n "$brain_reg_url" ]; then

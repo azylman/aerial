@@ -1711,8 +1711,8 @@ VANADIS_ATTACH_CHECK=$(bash -c "
         printf '503 Service Unavailable'
     }
     export -f curl
-    out6=\$(AERIAL_VANADIS_ATTACH_RETRIES=3 AERIAL_VANADIS_ATTACH_RETRY_DELAY=0 attach_pr_in_vanadis 'http://vanadis.aerial:8080' '{\"chunk_id\":\"c-3\"}' 103 2>/dev/null || echo 'failed')
-    [ \"\$out6\" = 'failed' ] && [ \"\$(wc -l < \"\$ATTEMPT_FILE\")\" -eq 3 ] && echo 'att3:ok'
+    out6=\$(AERIAL_VANADIS_ATTACH_RETRIES=3 AERIAL_VANADIS_ATTACH_RETRY_DELAY=0 attach_pr_in_vanadis 'http://vanadis.aerial:8080' '{\"chunk_id\":\"c-3\"}' 103 2>/dev/null) && out6_status=0 || out6_status=1
+    [ \"\$out6_status\" -eq 1 ] && [ \"\$(wc -l < \"\$ATTEMPT_FILE\")\" -eq 3 ] && echo 'att3:ok'
     rm -f \"\$ATTEMPT_FILE\"
 
     # Subtest 6b: attach_pr_in_vanadis passes SA bearer token from AERIAL_SA_TOKEN_PATH
@@ -1737,6 +1737,20 @@ VANADIS_ATTACH_CHECK=$(bash -c "
     AERIAL_SA_TOKEN_PATH=\"\$TMP_TOKEN\" register_pr_in_brain 'http://synapse.aerial:4020/internal/pr/register' '{\"repo\":\"aerial\",\"pr_number\":104}' 104 'th-999' 2>/dev/null
     grep -q -- \"Authorization: Bearer test-sa-jwt-token\" \"\$ARGS_FILE\" && echo 'reg_sa:ok'
     rm -f \"\$TMP_TOKEN\" \"\$ARGS_FILE\"
+
+    # Subtest 6d: attach_pr_in_vanadis recovers via GET /chunks/<id> when POST /chunks/attach-pr times out after attaching
+    curl() {
+        if [[ \"\$*\" == *'/chunks/attach-pr'* ]]; then
+            printf ''
+        elif [[ \"\$*\" == *'/chunks/c-recover'* ]]; then
+            printf '{\"chunk\":{\"id\":\"c-recover\",\"pr_number\":105},\"build\":{\"thread_id\":\"th-recover\"}}'
+        fi
+    }
+    export -f curl
+    out6d=\$(AERIAL_VANADIS_ATTACH_RETRIES=1 AERIAL_VANADIS_ATTACH_RETRY_DELAY=0 attach_pr_in_vanadis 'http://vanadis.aerial:8080' '{\"chunk_id\":\"c-recover\"}' 105 'c-recover' 2>/dev/null)
+    [ \"\$(echo \"\$out6d\" | jq -r '.status')\" = 'attached' ] && \
+    [ \"\$(echo \"\$out6d\" | jq -r '.thread_id')\" = 'th-recover' ] && \
+    [ \"\$(echo \"\$out6d\" | jq -r '.chunk_id')\" = 'c-recover' ] && echo 'att_recover:ok'
 ")
 assert_eq "true" "$(echo "$VANADIS_ATTACH_CHECK" | grep -q 'v_url1:ok' && echo true || echo false)" "resolve_vanadis_url resolves from VANADIS_URL env"
 assert_eq "true" "$(echo "$VANADIS_ATTACH_CHECK" | grep -q 'v_url2:ok' && echo true || echo false)" "resolve_vanadis_url resolves from config.yaml"
@@ -1746,6 +1760,7 @@ assert_eq "true" "$(echo "$VANADIS_ATTACH_CHECK" | grep -q 'att2:ok' && echo tru
 assert_eq "true" "$(echo "$VANADIS_ATTACH_CHECK" | grep -q 'att3:ok' && echo true || echo false)" "attach_pr_in_vanadis fails after exhausting retries"
 assert_eq "true" "$(echo "$VANADIS_ATTACH_CHECK" | grep -q 'att_sa:ok' && echo true || echo false)" "attach_pr_in_vanadis passes SA bearer token from AERIAL_SA_TOKEN_PATH"
 assert_eq "true" "$(echo "$VANADIS_ATTACH_CHECK" | grep -q 'reg_sa:ok' && echo true || echo false)" "register_pr_in_brain passes SA bearer token from AERIAL_SA_TOKEN_PATH"
+assert_eq "true" "$(echo "$VANADIS_ATTACH_CHECK" | grep -q 'att_recover:ok' && echo true || echo false)" "attach_pr_in_vanadis recovers via GET /chunks/<id> when POST /chunks/attach-pr times out after attaching"
 
 # Subtest 7: submit_scratch attaches PR to Vanadis and registers with Synapse without vanadis_chunk_id
 SUBMIT_VANADIS_CHECK=$(bash -c "
@@ -1818,7 +1833,7 @@ EOF
        [ \"\$(echo \"\$attach_pl\" | jq -r '.pr_number')\" -eq 88 ] && \
        [ \"\$(echo \"\$reg_pl\" | jq -r '.pr_number')\" -eq 88 ] && \
        [ \"\$(echo \"\$reg_pl\" | jq -r '.target_id')\" = '199999999999999999' ] && \
-       [ -z \"\$(echo \"\$reg_pl\" | jq -r '.vanadis_chunk_id // empty')\" ] && \
+       [ \"\$(echo \"\$reg_pl\" | jq -r '(.metadata | fromjson | .vanadis_chunk_id) // empty')\" = 'chunk-88' ] && \
        [ -z \"\$(echo \"\$reg_pl\" | jq -r '.bot_id // empty')\" ]; then
         echo 'submit_vanadis_attach:ok'
     else
@@ -1966,7 +1981,7 @@ EOF
             elif [[ \"\$*\" == *'graphql'* ]]; then
                 printf '{\"data\":{\"enablePullRequestAutoMerge\":{\"pullRequest\":{\"autoMergeRequest\":{\"enabledAt\":\"now\"}}}}}'
             elif [[ \"\$*\" == *'/chunks/attach-pr'* ]]; then
-                printf '500 Internal Server Error'
+                printf '{\"error\":\"conflict: chunk already attached to another pr\"}'
             elif [[ \"\$*\" == *'/internal/pr/register'* ]]; then
                 printf '{\"status\":\"registered\"}'
             fi
@@ -1974,6 +1989,36 @@ EOF
         export -f curl
         submit_scratch \"\$WORK_DIR1\" 'feat: fail attach' --vanadis-chunk 'chunk-89' >/dev/null 2>&1
     ) && echo 'attach_fail:unexpected_success' || echo 'attach_fail:ok'
+
+    # Subtest 8b: submit_scratch continues to pr_registry and auto-merge when attach-pr times out with empty response
+    WORK_DIR_TIMEOUT=\$(mktemp -d /tmp/aerial-pr-fail-timeout.XXXXXX)
+    git clone -q --single-branch -b main \"\$REMOTE_DIR\" \"\$WORK_DIR_TIMEOUT\"
+    git -C \"\$WORK_DIR_TIMEOUT\" config user.name 'Tester'
+    git -C \"\$WORK_DIR_TIMEOUT\" config user.email 'tester@example.com'
+    git -C \"\$WORK_DIR_TIMEOUT\" checkout -q -b feat/timeout-attach
+    echo 'Summary' > \"\$WORK_DIR_TIMEOUT/PR_DESCRIPTION.md\"
+    echo 'content' > \"\$WORK_DIR_TIMEOUT/file.txt\"
+
+    (
+        REPO_TEST_MODE=1
+        source \"${AERIAL_PR}\" --source-only 2>/dev/null || true
+        curl() {
+            if [[ \"\$*\" == *'/pulls'* ]] && [[ \"\$*\" == *'-X POST'* ]]; then
+                printf '{\"number\":95,\"html_url\":\"https://github.com/azylman/aerial/pull/95\",\"node_id\":\"PR_kwDO95\"}\n201'
+            elif [[ \"\$*\" == *'graphql'* ]]; then
+                printf '{\"data\":{\"enablePullRequestAutoMerge\":{\"pullRequest\":{\"autoMergeRequest\":{\"enabledAt\":\"now\"}}}}}'
+            elif [[ \"\$*\" == *'/chunks/attach-pr'* ]]; then
+                printf ''
+            elif [[ \"\$*\" == *'/chunks/chunk-95'* ]]; then
+                printf '{\"chunk\":{\"id\":\"chunk-95\",\"pr_number\":0}}'
+            elif [[ \"\$*\" == *'/internal/pr/register'* ]]; then
+                printf '{\"status\":\"registered\"}'
+            fi
+        }
+        export -f curl
+        submit_scratch \"\$WORK_DIR_TIMEOUT\" 'feat: timeout attach' --vanadis-chunk 'chunk-95' >/dev/null 2>&1
+    ) && echo 'attach_timeout_continue:ok' || echo 'attach_timeout_continue:fail'
+    rm -rf \"\$WORK_DIR_TIMEOUT\"
 
     # Subtest 9: pr/register failure causes submit_scratch to exit non-zero
     git clone -q --single-branch -b main \"\$REMOTE_DIR\" \"\$WORK_DIR2\"
@@ -2001,7 +2046,8 @@ EOF
         submit_scratch \"\$WORK_DIR2\" 'feat: fail reg' --vanadis-chunk 'chunk-90' >/dev/null 2>&1
     ) && echo 'reg_fail:unexpected_success' || echo 'reg_fail:ok'
 ")
-assert_eq "true" "$(echo "$SUBMIT_FAIL_CLOSED_CHECK" | grep -q 'attach_fail:ok' && echo true || echo false)" "submit_scratch fails non-zero when vanadis attach-pr returns HTTP 500"
+assert_eq "true" "$(echo "$SUBMIT_FAIL_CLOSED_CHECK" | grep -q 'attach_fail:ok' && echo true || echo false)" "submit_scratch fails non-zero when vanadis attach-pr returns deterministic conflict"
+assert_eq "true" "$(echo "$SUBMIT_FAIL_CLOSED_CHECK" | grep -q 'attach_timeout_continue:ok' && echo true || echo false)" "submit_scratch continues to registration and auto-merge when attach-pr times out with empty response"
 assert_eq "true" "$(echo "$SUBMIT_FAIL_CLOSED_CHECK" | grep -q 'reg_fail:ok' && echo true || echo false)" "submit_scratch fails non-zero when internal pr/register returns HTTP 500"
 
 # Subtest 10: submit_scratch with --vanadis-chunk injects PR description and Vanadis context into commit body and PR body
