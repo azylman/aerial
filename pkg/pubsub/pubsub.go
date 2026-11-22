@@ -631,6 +631,20 @@ func durableConsumerConfig(subject, durable string) jetstream.ConsumerConfig {
 	}
 }
 
+// resumeConsumerConfig returns the pull config for durable resuming at stream
+// sequence seq. Work-queue streams only accept DeliverAll consumers; they have
+// already removed every acked message, so DeliverAll resumes at the first
+// unacked one there.
+func resumeConsumerConfig(stream jetstream.Stream, subject, durable string, seq uint64) jetstream.ConsumerConfig {
+	cfg := durableConsumerConfig(subject, durable)
+	if stream.CachedInfo().Config.Retention == jetstream.WorkQueuePolicy {
+		return cfg
+	}
+	cfg.DeliverPolicy = jetstream.DeliverByStartSequencePolicy
+	cfg.OptStartSeq = seq
+	return cfg
+}
+
 // durableCompatible reports whether an existing consumer can be consumed
 // as-is: a pull consumer (no deliver subject) filtering subject.
 func durableCompatible(cfg jetstream.ConsumerConfig, subject string) bool {
@@ -672,9 +686,11 @@ func readConsumer(ctx context.Context, stream jetstream.Stream, durable string) 
 // a different filter) are deleted and recreated as pull consumers starting
 // right after their ack floor: pull and push consumers cannot be updated into
 // each other in place. Nothing at or below the floor is redelivered and no
-// unacked message is skipped. On WorkQueue streams acked messages are already
-// gone; on limits streams messages acked out of order above the floor may be
-// redelivered, so delivery stays at-least-once and handlers must be idempotent.
+// unacked message is skipped. Work-queue streams reject a start sequence, so
+// there the recreated consumer delivers all, which is equivalent because acked
+// messages are already gone (see resumeConsumerConfig). On limits streams
+// messages acked out of order above the floor may be redelivered, so delivery
+// stays at-least-once and handlers must be idempotent.
 //
 // This startup migration is the only place the bus ever deletes a push
 // consumer; subscription recovery never does (see jsSubscription.recover).
@@ -701,10 +717,9 @@ func (b *JetStreamBus) ensureDurableConsumer(ctx context.Context, subject, durab
 	case err == nil && durableCompatible(info.Config, subject):
 		return stream, cons, nil
 	case err == nil:
-		desired.DeliverPolicy = jetstream.DeliverByStartSequencePolicy
-		desired.OptStartSeq = info.AckFloor.Stream + 1
-		log.Printf("[pubsub] migrating consumer %s/%s (filter %q, deliver subject %q) to pull, resuming at stream seq %d",
-			name, durable, info.Config.FilterSubject, info.Config.DeliverSubject, desired.OptStartSeq)
+		desired = resumeConsumerConfig(stream, subject, durable, info.AckFloor.Stream+1)
+		log.Printf("[pubsub] migrating consumer %s/%s (filter %q, deliver subject %q) to pull, resuming after ack floor %d",
+			name, durable, info.Config.FilterSubject, info.Config.DeliverSubject, info.AckFloor.Stream)
 		if deleteErr := stream.DeleteConsumer(ctx, durable); deleteErr != nil && !errors.Is(deleteErr, jetstream.ErrConsumerNotFound) {
 			return nil, nil, fmt.Errorf("delete incompatible consumer %s/%s: %w", name, durable, deleteErr)
 		}
@@ -898,10 +913,9 @@ func (s *jsSubscription) recover(subCtx context.Context, cause error) bool {
 // recreate creates the missing durable as a pull consumer at the resume
 // cursor. A creation race is resolved by the next probe.
 func (s *jsSubscription) recreate(ctx context.Context, name string) {
-	cfg := durableConsumerConfig(s.subject, s.durable)
-	cfg.DeliverPolicy = jetstream.DeliverByStartSequencePolicy
-	cfg.OptStartSeq = s.cursor.start()
-	log.Printf("[pubsub] recreating missing consumer %s/%s as pull, resuming at stream seq %d", name, s.durable, cfg.OptStartSeq)
+	start := s.cursor.start()
+	cfg := resumeConsumerConfig(s.stream, s.subject, s.durable, start)
+	log.Printf("[pubsub] recreating missing consumer %s/%s as pull, resuming at stream seq %d", name, s.durable, start)
 	if _, err := s.stream.CreateConsumer(ctx, cfg); err != nil && !isConsumerExists(err) {
 		log.Printf("[pubsub] warning: recreating consumer %s/%s: %v", name, s.durable, err)
 	}

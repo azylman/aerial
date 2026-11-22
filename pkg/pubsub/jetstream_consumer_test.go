@@ -428,6 +428,11 @@ func TestJetStreamBus_EnsureDurableConsumer(t *testing.T) {
 			wantErr:    "delete incompatible consumer AERIAL_EVENTS/haro-events: delete refused",
 			wantFilter: subj, wantPolicy: nats.DeliverAllPolicy,
 		},
+		{
+			name: "push consumer on a work queue recreated as pull delivering all", subject: "aerial.jobs.haro.oneshot", durable: "haro-oneshot",
+			existing:   &nats.ConsumerConfig{Durable: "haro-oneshot", FilterSubject: "aerial.jobs.haro.oneshot", AckPolicy: nats.AckExplicitPolicy, DeliverSubject: "_DELIVER.AERIAL_JOBS.haro-oneshot", DeliverGroup: "haro-oneshot"},
+			wantFilter: "aerial.jobs.haro.oneshot", wantPolicy: nats.DeliverAllPolicy,
+		},
 		{name: "stream lookup failure", subject: "unknown.subject", durable: "haro-events", wantErr: "resolve stream for unknown.subject"},
 		{name: "invalid durable name fails the consumer read", subject: subj, durable: "bad.name", wantErr: "consumer info AERIAL_EVENTS/bad.name"},
 		{
@@ -455,8 +460,13 @@ func TestJetStreamBus_EnsureDurableConsumer(t *testing.T) {
 				}
 			} else if err != nil {
 				t.Fatalf("unexpected err: %v", err)
-			} else if got := cons.CachedInfo().Stream; got != StreamAerialEvents {
-				t.Errorf("consumer stream = %q, want %q", got, StreamAerialEvents)
+			}
+			streamName, err := bus.js.StreamNameBySubject(tc.subject)
+			if err != nil {
+				if tc.wantFilter != "" {
+					t.Fatalf("stream for %s: %v", tc.subject, err)
+				}
+				return
 			}
 			if tc.wantFilter == "" {
 				return
@@ -465,7 +475,7 @@ func TestJetStreamBus_EnsureDurableConsumer(t *testing.T) {
 			if tc.existing != nil && tc.deleteErr != nil {
 				wantDeliver = tc.existing.DeliverSubject
 			}
-			assertConsumerConfig(t, bus, tc.durable, nats.ConsumerConfig{
+			assertConsumerConfig(t, bus, streamName, tc.durable, nats.ConsumerConfig{
 				DeliverSubject: wantDeliver, FilterSubject: tc.wantFilter, DeliverPolicy: tc.wantPolicy, OptStartSeq: tc.wantStart,
 			})
 		})
@@ -488,10 +498,10 @@ func seedConsumer(t *testing.T, bus *JetStreamBus, cfg *nats.ConsumerConfig) {
 }
 
 // assertConsumerConfig checks the deliver subject, filter, deliver policy and
-// start sequence of durable on AERIAL_EVENTS against want.
-func assertConsumerConfig(t *testing.T, bus *JetStreamBus, durable string, want nats.ConsumerConfig) {
+// start sequence of durable on stream against want.
+func assertConsumerConfig(t *testing.T, bus *JetStreamBus, stream, durable string, want nats.ConsumerConfig) {
 	t.Helper()
-	info, err := bus.js.ConsumerInfo(StreamAerialEvents, durable)
+	info, err := bus.js.ConsumerInfo(stream, durable)
 	if err != nil {
 		t.Fatalf("ConsumerInfo: %v", err)
 	}
@@ -604,6 +614,32 @@ func TestJetStreamBus_RecoverConsumerDeletedWhileHandlerBusy(t *testing.T) {
 	if info.Config.DeliverSubject != "" || info.Config.OptStartSeq != 2 {
 		t.Errorf("recreated consumer deliver subject %q start %d, want pull starting at 2", info.Config.DeliverSubject, info.Config.OptStartSeq)
 	}
+}
+
+func TestJetStreamBus_RecoverWorkQueueConsumerDeliversAll(t *testing.T) {
+	t.Parallel()
+	const subj, queue = "aerial.jobs.recover.queue", "recover-queue"
+	bus := newServerBus(t)
+	handler, handled := recordingHandler("", nil)
+	sub, err := bus.ConsumeQueue(t.Context(), subj, queue, handler)
+	if err != nil {
+		t.Fatalf("ConsumeQueue: %v", err)
+	}
+	t.Cleanup(func() { _ = sub.Unsubscribe() })
+	publishAll(t, bus, subj, "m1")
+	receive(t, handled, 1)
+	awaitConsumer(t, bus, StreamAerialJobs, queue, func(ci *nats.ConsumerInfo) bool { return ci.AckFloor.Stream == 1 && ci.NumWaiting == 1 })
+
+	if err := bus.js.DeleteConsumer(StreamAerialJobs, queue); err != nil {
+		t.Fatalf("delete consumer: %v", err)
+	}
+	publishAll(t, bus, subj, "m2")
+	if got := receive(t, handled, 1); got[0] != (handledMsg{"m2", 1}) {
+		t.Errorf("after recovery got %+v, want m2 delivered once", got[0])
+	}
+	awaitConsumer(t, bus, StreamAerialJobs, queue, func(ci *nats.ConsumerInfo) bool { return ci.NumAckPending == 0 && ci.NumPending == 0 })
+	assertNoMore(t, handled)
+	assertConsumerConfig(t, bus, StreamAerialJobs, queue, nats.ConsumerConfig{FilterSubject: subj, DeliverPolicy: nats.DeliverAllPolicy})
 }
 
 func TestJetStreamBus_RecoverLeavesPushConsumerAlone(t *testing.T) {
