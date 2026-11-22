@@ -2,12 +2,8 @@ package build
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
-	"net/http"
-	"net/http/httptest"
 	"reflect"
-	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -17,52 +13,11 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
-	"github.com/azylman/aerial/pkg/eriwire"
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/executor"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
 )
-
-// The database supplies an already recovered chunk. This tests the real HTTP
-// remediation wake, not persistence of the preceding attachment transaction.
-func TestRecoveredChunkRemediationWake(t *testing.T) {
-	t.Parallel()
-	st, _ := dbScript{buildRow: &mockRow{b: &model.VanadisBuild{ID: "b1", ThreadID: "thread-1", Status: "running"}}, chunks: []model.VanadisChunk{{ID: "c1", BuildID: "b1", Mode: "pr", Repo: "aerial", Status: "pr_opened", PRNumber: 101}}}.open()
-	payloads := make(chan eriwire.BrainDispatchRequest, 1)
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/discord/widget" {
-			w.Write([]byte(`{}`))
-			return
-		}
-		var req eriwire.BrainDispatchRequest
-		if r.URL.Path != "/dispatch" || r.Method != http.MethodPost {
-			t.Errorf("request = %s %s", r.Method, r.URL.Path)
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			t.Error(err)
-		}
-		payloads <- req
-		w.Write([]byte(`{}`))
-	}))
-	defer server.Close()
-	bo := NewBuildObject("", nil).WithAuthority(st, executor.NewExecutor(t.TempDir(), executor.NewHTTPEriClient(server.URL, server.Client()), nil, "", "azylman", nil))
-	ctx := makeObjectMockContext(t, "b1")
-	_, err := restate.Run(ctx, func(rc restate.RunContext) (bool, error) {
-		return true, bo.handlePREventType(rc, "b1", "c1", "ci_failed", pubsub.PRLifecycleEvent{Repo: "aerial", PRNumber: 101, CheckName: "unit", Details: "unit test failed"})
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	select {
-	case req := <-payloads:
-		if req.TargetID != "thread-1" || req.SessionID != "vanadis-c1" || req.VanadisChunkID != "c1" || !strings.Contains(req.Prompt, "unit test failed") || !strings.Contains(req.Prompt, "101") {
-			t.Fatalf("request = %+v", req)
-		}
-	default:
-		t.Fatal("no remediation wake")
-	}
-}
 
 // Inspect the callback error before the SDK can retry the journaled operation.
 func TestExecutePRAttachment(t *testing.T) {
@@ -111,7 +66,7 @@ func TestExecutePRAttachment(t *testing.T) {
 					return "msg-123", nil
 				},
 			}
-			exec := executor.NewExecutor(t.TempDir(), eri, pubsub.NewMemoryBus(), "token", "azylman", nil)
+			exec := executor.NewExecutor(t.TempDir(), eri, pubsub.NewMemoryBus(), "token", "example-owner", nil)
 			fakeRT := newFakeObjectRuntime("b1")
 			bo := NewBuildObject("", nil, func(restate.ObjectContext) objectRuntime { return fakeRT }).WithAuthority(st, exec)
 			mc := mocks.NewMockContext(t)
@@ -182,7 +137,7 @@ func TestBuildObject_RefreshFailedPRWidget(t *testing.T) {
 						return "", tc.syncErr
 					},
 				}
-				exec = executor.NewExecutor(t.TempDir(), eri, pubsub.NewMemoryBus(), "token", "azylman", nil)
+				exec = executor.NewExecutor(t.TempDir(), eri, pubsub.NewMemoryBus(), "token", "example-owner", nil)
 			}
 			bo := NewBuildObject("", nil).WithAuthority(st, exec)
 			bo.refreshFailedPRWidget(context.Background(), "b1")

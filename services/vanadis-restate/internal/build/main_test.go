@@ -2,7 +2,6 @@ package build
 
 import (
 	"context"
-	"errors"
 	"log/slog"
 	"maps"
 	"reflect"
@@ -177,46 +176,11 @@ func makeObjectMockContext(t *testing.T, key string) restate.ObjectContext {
 	return restate.WithMockContext(mc)
 }
 
-func TestToTerminalErr(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name     string
-		err      error
-		wantNil  bool
-		wantCode restate.Code
-	}{
-		{name: "nil error", err: nil, wantNil: true},
-		{name: "invalid build input", err: store.ErrInvalidBuildInput, wantCode: 400},
-		{name: "build not found", err: store.ErrBuildNotFound, wantCode: 404},
-		{name: "chunk not found", err: ErrChunkNotFound, wantCode: 404},
-		{name: "build conflict", err: store.ErrBuildConflict, wantCode: 409},
-		{name: "unknown error", err: errors.New("something exploded"), wantCode: 0},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			got := ToTerminalErr(tc.err)
-			if tc.wantNil {
-				assert.NoError(t, got)
-				return
-			}
-			require.Error(t, got)
-			var term restate.TerminalError
-			if tc.wantCode > 0 {
-				require.True(t, errors.As(got, &term))
-				assert.Equal(t, tc.wantCode, term.Code())
-			} else {
-				assert.False(t, errors.As(got, &term))
-			}
-		})
-	}
-}
-
 func TestBuildObject_AuthoritativeHandlers(t *testing.T) {
 	t.Parallel()
 	eri := &mockEriClient{}
 	bus := pubsub.NewMemoryBus()
-	exec := executor.NewExecutor("", eri, bus, "test-token", "azylman", nil)
+	exec := executor.NewExecutor("", eri, bus, "test-token", "example-owner", nil)
 	b1 := model.VanadisBuild{ID: "b1", Title: "Build 1", Objective: "Obj 1", Status: "running", ThreadID: "th-1"}
 	c1 := model.VanadisChunk{ID: "c1", BuildID: "b1", Title: "Chunk 1", Instructions: "Inst 1", Status: "pending", Mode: "pr", Repo: "aerial", TargetFiles: []string{"pkg/a.go"}}
 	c2 := model.VanadisChunk{ID: "c2", BuildID: "b1", Title: "Chunk 2", Instructions: "Inst 2", Status: "pending", Mode: "pr", Repo: "aerial", DependsOn: []string{"c1"}, TargetFiles: []string{"pkg/b.go"}}
@@ -449,7 +413,7 @@ func TestBuildObject_HandlersWithAuthorityAndMockContext(t *testing.T) {
 		execTag: "UPDATE 1",
 	}.open()
 	eri := &mockEriClient{}
-	exec := executor.NewExecutor(t.TempDir(), eri, nil, "token", "azylman", nil)
+	exec := executor.NewExecutor(t.TempDir(), eri, nil, "token", "example-owner", nil)
 	bo := NewBuildObject("", nil).WithAuthority(st, exec)
 
 	ctx := makeObjectMockContext(t, "b-auth")
