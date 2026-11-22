@@ -3,11 +3,14 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -179,7 +182,7 @@ func seedEventTriggers(ctx context.Context, t *testing.T, db *sql.DB) {
 		{ID: "et-3", ChannelID: "111111111111111111", Source: "nomad", Target: "app-alpha", EventType: "deploy_success", Prompt: "App deployed", CreatedAt: now},
 		{ID: "et-4", ChannelID: "111111111111111111", Source: "nomad", Target: "app-alpha", EventType: "deploy_success", Prompt: "App deployed with defaults", Effort: "invalid-effort"},
 		{ID: "et-5", ChannelID: "111111111111111111", Source: "camera", Target: "garage", EventType: "person_arrived", Prompt: "Standing camera watch garage", Effort: "medium", CreatedAt: now, Persistent: true},
-		{ID: "et-6", ChannelID: "111111111111111111", Source: "camera", Target: "garage", EventType: "person_arrived", Prompt: "One-shot camera watch", Effort: "low", CreatedAt: now},
+		{ID: "et-6", ChannelID: "111111111111111111", Source: "camera", Target: "garage", EventType: "person_arrived", Prompt: "One-shot camera watch", Effort: "low", CreatedAt: now.Add(time.Second)},
 	}
 	for i, trig := range triggers {
 		if err := InsertEventTrigger(ctx, db, trig); err != nil {
@@ -275,7 +278,7 @@ func TestClaimEventTriggers(t *testing.T) {
 		{name: "second claim within debounce window suppresses duplicate persistent trigger"},
 		{
 			name:    "claim after debounce window returns persistent trigger again",
-			ageSQL:  "UPDATE event_triggers SET updated_at = datetime('now', '-10 seconds') WHERE id = 'et-5'",
+			ageSQL:  "UPDATE event_triggers SET updated_at = CURRENT_TIMESTAMP - INTERVAL '10 seconds' WHERE id = 'et-5'",
 			wantIDs: []string{"et-5"},
 		},
 	}
@@ -296,6 +299,85 @@ func TestClaimEventTriggers(t *testing.T) {
 			}
 			if strings.Join(ids, ",") != strings.Join(tc.wantIDs, ",") {
 				t.Fatalf("ClaimEventTriggers IDs = %v, want %v", ids, tc.wantIDs)
+			}
+		})
+	}
+}
+
+// seedClaimTriggers inserts n camera/garage/person_arrived triggers with ids prefix0..prefixN-1.
+func seedClaimTriggers(ctx context.Context, t *testing.T, db *sql.DB, prefix string, n int, persistent bool) {
+	t.Helper()
+	base := time.Date(2026, 3, 4, 5, 6, 7, 0, time.UTC)
+	for i := range n {
+		trig := model.EventTrigger{ID: prefix + strconv.Itoa(i), ChannelID: "ch", Source: "camera", Target: "garage", EventType: "person_arrived", Prompt: "p", CreatedAt: base.Add(time.Duration(i) * time.Second), Persistent: persistent}
+		if err := InsertEventTrigger(ctx, db, trig); err != nil {
+			t.Fatalf("InsertEventTrigger %s err = %v", trig.ID, err)
+		}
+	}
+}
+
+// raceClaims releases claimers goroutines at once against db and returns every
+// claimed id (sorted) plus how often each id was handed out.
+func raceClaims(ctx context.Context, t *testing.T, db *sql.DB, claimers int) ([]string, map[string]int) {
+	t.Helper()
+	start := make(chan struct{})
+	results := make([][]model.EventTrigger, claimers)
+	errs := make([]error, claimers)
+	var wg sync.WaitGroup
+	for i := range claimers {
+		wg.Go(func() {
+			<-start
+			results[i], errs[i] = ClaimEventTriggers(ctx, db, "camera", []string{"garage"}, "person_arrived")
+		})
+	}
+	close(start)
+	wg.Wait()
+	if err := errors.Join(errs...); err != nil {
+		t.Fatalf("ClaimEventTriggers err = %v", err)
+	}
+	var ids []string
+	counts := map[string]int{}
+	for _, claimed := range results {
+		for _, trig := range claimed {
+			counts[trig.ID]++
+			ids = append(ids, trig.ID)
+		}
+	}
+	slices.Sort(ids)
+	return ids, counts
+}
+
+// TestClaimEventTriggersConcurrent races several claimers on one database: every matching
+// trigger must be handed out exactly once (non-persistent rows are deleted by one claimer,
+// a persistent row's debounce update is won by one claimer), and the claimers' results
+// must be disjoint.
+func TestClaimEventTriggersConcurrent(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name          string
+		nonPersistent int
+		persistent    int
+		claimers      int
+		wantIDs       []string
+	}{
+		{name: "two claimers split one-shot rows", nonPersistent: 12, claimers: 2, wantIDs: []string{"np-0", "np-1", "np-10", "np-11", "np-2", "np-3", "np-4", "np-5", "np-6", "np-7", "np-8", "np-9"}},
+		{name: "persistent row fires once inside debounce window", nonPersistent: 3, persistent: 1, claimers: 4, wantIDs: []string{"np-0", "np-1", "np-2", "p-0"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			db := openStoreTestDB(t)
+			ctx := context.Background()
+			seedClaimTriggers(ctx, t, db, "np-", tc.nonPersistent, false)
+			seedClaimTriggers(ctx, t, db, "p-", tc.persistent, true)
+			ids, counts := raceClaims(ctx, t, db, tc.claimers)
+			for id, n := range counts {
+				if n != 1 {
+					t.Errorf("trigger %s claimed %d times, want 1", id, n)
+				}
+			}
+			if !slices.Equal(ids, tc.wantIDs) {
+				t.Errorf("claimed IDs = %v, want %v", ids, tc.wantIDs)
 			}
 		})
 	}
@@ -334,7 +416,7 @@ func TestListEventTriggersErrors(t *testing.T) {
 		wantErr   string
 	}{
 		{"nil db errors", "", true, false, "database is nil"},
-		{"missing table fails query", "", false, true, "no such table"},
+		{"missing table fails query", "", false, true, `relation "event_triggers" does not exist`},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -365,10 +447,10 @@ func TestClaimEventTriggersErrors(t *testing.T) {
 		wantErr string
 	}{
 		{name: "nil db errors", nilDB: true, wantErr: "database is nil"},
-		{name: "missing table fails select", seedSQL: `DROP TABLE event_triggers`, wantErr: "no such table"},
+		{name: "missing table fails select", seedSQL: `DROP TABLE event_triggers`, wantErr: `relation "event_triggers" does not exist`},
 		{
 			name:    "bad row fails scan",
-			seedSQL: `INSERT INTO event_triggers (id, channel_id, source, target, event_type, prompt, effort, created_at, persistent) VALUES ('bad-1', 'c', 'camera', 'garage', 'person_arrived', 'p', 'low', 'not-a-date', FALSE)`,
+			seedSQL: `ALTER TABLE event_triggers ALTER COLUMN created_at TYPE TEXT; INSERT INTO event_triggers (id, channel_id, source, target, event_type, prompt, effort, created_at, persistent) VALUES ('bad-1', 'c', 'camera', 'garage', 'person_arrived', 'p', 'low', 'not-a-date', FALSE)`,
 			wantErr: "Scan error",
 		},
 	}

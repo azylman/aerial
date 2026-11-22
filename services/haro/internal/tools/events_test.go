@@ -194,7 +194,7 @@ func TestHandleWatchEvent(t *testing.T) {
 			}
 			if tc.wantNoTarget != "" {
 				var count int
-				if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM event_triggers WHERE target = ?", tc.wantNoTarget).Scan(&count); err != nil {
+				if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM event_triggers WHERE target = $1", tc.wantNoTarget).Scan(&count); err != nil {
 					t.Fatalf("failed to count event triggers: %v", err)
 				}
 				if count != 0 {

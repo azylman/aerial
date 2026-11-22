@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"net/http"
 	"net/url"
 	"strings"
@@ -222,51 +221,6 @@ func BuildEventTriggerFilterArgs(source string, targets []string, eventType stri
 	return strings.Join(placeholders, ", "), args, true
 }
 
-func claimEventTriggersTx(ctx context.Context, database *sql.DB, placeholders string, args []any) ([]model.EventTrigger, error) {
-	tx, txErr := database.BeginTx(ctx, nil)
-	if txErr != nil {
-		return nil, txErr
-	}
-	defer func() {
-		if rErr := tx.Rollback(); rErr != nil && !errors.Is(rErr, sql.ErrTxDone) {
-			log.Printf("[Haro] failed to rollback claim transaction: %v", rErr)
-		}
-	}()
-
-	now := time.Now().UTC()
-	cutoff := now.Add(-5 * time.Second)
-	cutoffPlaceholder := fmt.Sprintf("$%d", len(args)+1)
-	nowPlaceholder := fmt.Sprintf("$%d", len(args)+2)
-	argsWithCutoff := make([]any, len(args), len(args)+2)
-	copy(argsWithCutoff, args)
-	argsWithCutoff = append(argsWithCutoff, cutoff, now)
-
-	selectQuery := fmt.Sprintf(`SELECT id, agent, channel_id, source, target, event_type, prompt, COALESCE(NULLIF(effort, ''), 'medium') AS effort, created_at, persistent FROM event_triggers WHERE source = $1 AND event_type = $2 AND target IN (%s) AND (persistent = FALSE OR (updated_at IS NULL OR updated_at < %s)) ORDER BY created_at ASC`, placeholders, cutoffPlaceholder)
-	rows, qErr := tx.QueryContext(ctx, selectQuery, argsWithCutoff[:len(args)+1]...)
-	if qErr != nil {
-		return nil, qErr
-	}
-	triggers, scanErr := scanEventTriggerRows(rows)
-	if scanErr != nil {
-		return nil, scanErr
-	}
-
-	deleteQuery := fmt.Sprintf(`DELETE FROM event_triggers WHERE source = $1 AND event_type = $2 AND target IN (%s) AND persistent = FALSE`, placeholders)
-	if _, dErr := tx.ExecContext(ctx, deleteQuery, args...); dErr != nil {
-		return nil, dErr
-	}
-
-	updateQuery := fmt.Sprintf(`UPDATE event_triggers SET updated_at = %s WHERE source = $1 AND event_type = $2 AND target IN (%s) AND persistent = TRUE AND (updated_at IS NULL OR updated_at < %s)`, nowPlaceholder, placeholders, cutoffPlaceholder)
-	if _, uErr := tx.ExecContext(ctx, updateQuery, argsWithCutoff...); uErr != nil {
-		return nil, uErr
-	}
-
-	if err := tx.Commit(); err != nil {
-		return nil, err
-	}
-	return triggers, nil
-}
-
 // ClaimEventTriggers atomically deletes and returns matching event triggers from event_triggers.
 func ClaimEventTriggers(ctx context.Context, database *sql.DB, source string, targets []string, eventType string) ([]model.EventTrigger, error) {
 	ctx, err := normCtxAndDB(ctx, database)
@@ -276,10 +230,6 @@ func ClaimEventTriggers(ctx context.Context, database *sql.DB, source string, ta
 	placeholders, args, ok := BuildEventTriggerFilterArgs(source, targets, eventType)
 	if !ok {
 		return nil, nil
-	}
-
-	if isSQLiteDBFn(database) {
-		return claimEventTriggersTx(ctx, database, placeholders, args)
 	}
 
 	rawQuery := fmt.Sprintf(`WITH deleted AS (
