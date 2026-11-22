@@ -238,7 +238,7 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 		origRestate := activeRestateIngressClient.Swap(restateClient)
 		defer activeRestateIngressClient.Store(origRestate)
 		eriRestateURL := os.Getenv("ERI_RESTATE_URL")
-		remoteLLMFn = NewRemoteEphemeralLLMFunc(eriRestateURL)
+		remoteLLMFn = NewRestateLLMFunc(restateClient)
 		remoteQuotaProvider := NewRemoteQuotaProvider(eriRestateURL)
 		cls.LLMFunc = remoteLLMFn
 		cls.TitleLLMFunc = remoteLLMFn

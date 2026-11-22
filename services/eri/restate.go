@@ -1,12 +1,10 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"net/url"
@@ -18,6 +16,7 @@ import (
 
 	"github.com/azylman/aerial/pkg/eriwire"
 	"github.com/azylman/aerial/pkg/restateingress"
+	"github.com/azylman/aerial/services/eri/pkg/llmcall"
 	"github.com/azylman/aerial/services/eri/pkg/metrics"
 	"github.com/azylman/aerial/services/eri/pkg/queue"
 	"github.com/azylman/aerial/services/eri/pkg/runner"
@@ -76,61 +75,20 @@ func (p *RemoteQuotaProvider) ProviderFunc() func() metrics.QuotaSnapshot {
 	return p.LatestQuotaSnapshot
 }
 
-// NewRemoteEphemeralLLMFunc creates a runner.LLMFunc that delegates ephemeral LLM generation to eri-restate over HTTP.
-func NewRemoteEphemeralLLMFunc(eriRestateURL string, httpClient ...*http.Client) runner.LLMFunc {
-	eriRestateURL = strings.TrimRight(strings.TrimSpace(eriRestateURL), "/")
-	if eriRestateURL == "" {
-		eriRestateURL = "http://eri-restate-health:4028"
-	}
-	client := &http.Client{Timeout: 60 * time.Second}
-	if len(httpClient) > 0 && httpClient[0] != nil {
-		client = httpClient[0]
-	}
-	return func(ctx context.Context, model, prompt string) (string, error) {
-		reqBody, err := json.Marshal(map[string]string{
-			"prompt": prompt,
-			"model":  model,
-		})
-		if err != nil {
-			return "", fmt.Errorf("marshal internal llm request: %w", err)
-		}
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, eriRestateURL+"/internal/llm", bytes.NewReader(reqBody))
-		if err != nil {
-			return "", fmt.Errorf("create internal llm request: %w", err)
-		}
-		req.Header.Set("Content-Type", "application/json")
-		resp, err := client.Do(req)
-		if err != nil {
-			return "", fmt.Errorf("post internal llm request: %w", err)
-		}
-		defer resp.Body.Close()
+// llmCallTimeout bounds one CompleteLLM wait. The Restate invocation itself
+// keeps running past it; a retry with the same Idempotency-Key attaches.
+const llmCallTimeout = 10 * time.Minute
 
-		const maxInternalLLMResponseBytes = 1 << 20
-		respBytes, err := io.ReadAll(io.LimitReader(resp.Body, maxInternalLLMResponseBytes+1))
-		if err != nil {
-			return "", fmt.Errorf("read internal llm response: %w", err)
-		}
-		if len(respBytes) > maxInternalLLMResponseBytes {
-			return "", errors.New("internal llm response body exceeds 1MiB limit")
-		}
-		if resp.StatusCode != http.StatusOK {
-			return "", fmt.Errorf("internal llm returned status %d: %s", resp.StatusCode, string(respBytes))
-		}
-		var out struct {
-			Response string `json:"response"`
-		}
-		if err := json.Unmarshal(respBytes, &out); err != nil {
-			return "", fmt.Errorf("unmarshal internal llm response: %w", err)
-		}
-		return out.Response, nil
-	}
-}
+// maxLLMResponseBytes caps the CompleteLLM response body.
+const maxLLMResponseBytes = 1 << 20
 
 // RestateIngressClient delivers HTTP invocations to Eri actors via Restate Ingress.
 type RestateIngressClient struct {
 	ingressURL string
 	agentName  string
 	httpClient *http.Client
+	// llmClient serves CompleteLLM, whose calls outlast httpClient's timeout.
+	llmClient *http.Client
 }
 
 var activeRestateIngressClient atomic.Pointer[RestateIngressClient]
@@ -161,6 +119,39 @@ func NewRestateIngressClient(ingressURL, agentName string, httpClient ...*http.C
 		ingressURL: ingressURL,
 		agentName:  strings.TrimSpace(agentName),
 		httpClient: client,
+		llmClient:  &http.Client{Transport: client.Transport, Timeout: llmCallTimeout},
+	}
+}
+
+// CompleteLLM runs req as one invocation of the Restate LLM service and returns
+// the model's response. A non-blank llmcall.IdempotencyKey(req) is sent as the
+// Idempotency-Key, so a retry of the same logical call attaches to the running
+// or finished invocation. Cancelling ctx only abandons the wait. A non-2xx
+// Restate status is returned wrapping *restateingress.HTTPError.
+func (c *RestateIngressClient) CompleteLLM(ctx context.Context, req llmcall.Request) (string, error) {
+	if c == nil || c.llmClient == nil {
+		return "", errors.New("restate ingress client is nil")
+	}
+	endpoint := fmt.Sprintf("%s/%s/Complete", c.ingressURL, url.PathEscape(llmcall.ServiceName(c.agentName)))
+	body, err := restateingress.Post(ctx, c.llmClient, endpoint, llmcall.IdempotencyKey(req), req, maxLLMResponseBytes+1)
+	if err != nil {
+		return "", fmt.Errorf("restate llm call: %w", err)
+	}
+	if len(body) > maxLLMResponseBytes {
+		return "", errors.New("restate llm response body exceeds 1MiB limit")
+	}
+	var out llmcall.Response
+	if err := json.Unmarshal(body, &out); err != nil {
+		return "", fmt.Errorf("unmarshal restate llm response: %w", err)
+	}
+	return out.Response, nil
+}
+
+// NewRestateLLMFunc returns a runner.LLMFunc that runs each call unkeyed through
+// the Restate LLM service. The caller ctx bounds only the HTTP wait.
+func NewRestateLLMFunc(client *RestateIngressClient) runner.LLMFunc {
+	return func(ctx context.Context, model, prompt string) (string, error) {
+		return client.CompleteLLM(ctx, llmcall.Request{Prompt: prompt, Model: model})
 	}
 }
 
