@@ -602,7 +602,7 @@ func TestRunRolloutRechecksRateLimit(t *testing.T) {
 
 type rateLimitSource struct {
 	mu     sync.Mutex
-	calls  int
+	times  []time.Time
 	cancel context.CancelFunc
 	err    error
 }
@@ -612,8 +612,8 @@ func (*rateLimitSource) String() string { return "rateLimitSource" }
 func (s *rateLimitSource) List(context.Context, KubeClient, RolloutSink) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.calls++
-	if s.calls >= 2 {
+	s.times = append(s.times, time.Now())
+	if len(s.times) >= 2 {
 		s.cancel()
 	}
 	return "", s.err
@@ -632,17 +632,22 @@ func TestKubeWatcherRunRateLimit(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	const rlDelay = 50 * time.Millisecond
 	src := &rateLimitSource{
 		cancel: cancel,
-		err:    &githubapi.StatusError{StatusCode: 429, RateLimited: true, RetryAfter: 5 * time.Millisecond},
+		err:    &githubapi.StatusError{StatusCode: 429, RateLimited: true, RetryAfter: rlDelay},
 	}
 	watcher := NewKubeWatcher(nil, nil, src, time.Millisecond)
 	watcher.Run(ctx)
 
 	src.mu.Lock()
 	defer src.mu.Unlock()
-	if src.calls < 2 {
-		t.Fatalf("expected at least 2 list calls, got %d", src.calls)
+	if len(src.times) < 2 {
+		t.Fatalf("expected at least 2 list calls, got %d", len(src.times))
+	}
+	gap := src.times[1].Sub(src.times[0])
+	if gap < 35*time.Millisecond {
+		t.Fatalf("gap between calls = %v, want at least %v", gap, 35*time.Millisecond)
 	}
 }
 

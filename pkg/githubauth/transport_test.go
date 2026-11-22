@@ -11,6 +11,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/azylman/aerial/pkg/tracing"
 )
 
 type fakeSource struct {
@@ -328,9 +330,6 @@ func TestTransportRateLimitState(t *testing.T) {
 	api, _, _ := newTransportServers(t, 200, "5000")
 	apiURL, _ := url.Parse(api.URL)
 	tr := NewTransport(nil, &fakeSource{value: "tok", source: "app"}, apiURL.Host)
-	if tr.Unwrap() == nil {
-		t.Fatal("expected non-nil base roundtripper from Unwrap()")
-	}
 	tr.rateLimitResetUnix.Store(time.Now().Add(time.Minute).Unix())
 	if tr.RateLimitResetAt().IsZero() {
 		t.Fatal("expected active rate limit")
@@ -344,5 +343,24 @@ func TestTransportRateLimitState(t *testing.T) {
 	resp.Body.Close()
 	if !tr.RateLimitResetAt().IsZero() {
 		t.Fatalf("RateLimitResetAt() = %v, want cleared to zero", tr.RateLimitResetAt())
+	}
+}
+
+func TestRateLimitResetAtWithTracing(t *testing.T) {
+	t.Parallel()
+	api, _, _ := newTransportServers(t, http.StatusTooManyRequests, "")
+	apiURL, _ := url.Parse(api.URL)
+	tr := NewTransport(nil, &fakeSource{value: "tok", source: "app"}, apiURL.Host)
+	client := tracing.Client(&http.Client{Transport: tr})
+
+	req, _ := http.NewRequest(http.MethodGet, api.URL+"/repos/o/r", http.NoBody)
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	resp.Body.Close()
+
+	if resetAt := RateLimitResetAt(client.Transport); resetAt.IsZero() {
+		t.Fatal("expected non-zero rate-limit reset time through tracing-wrapped transport")
 	}
 }

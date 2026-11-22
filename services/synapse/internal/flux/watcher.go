@@ -299,12 +299,13 @@ func (w *KubeWatcher) Run(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		if rlDelay, ok := githubapi.RateLimitDelay(err); ok && rlDelay > delay {
-			delay = rlDelay
+		wait := delay
+		if rlDelay, ok := githubapi.RateLimitDelay(err); ok && rlDelay > wait {
+			wait = rlDelay
 		}
-		log.Printf("[synapse] [flux-watch] error watching %s (retrying in %s): %v", w.source, delay, err)
+		log.Printf("[synapse] [flux-watch] error watching %s (retrying in %s): %v", w.source, wait, err)
 		select {
-		case <-time.After(delay):
+		case <-time.After(wait):
 			delay = ericlient.AdvanceBackoffDelay(delay, true)
 		case <-ctx.Done():
 			return

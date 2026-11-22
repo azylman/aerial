@@ -492,8 +492,8 @@ func TestClient(t *testing.T) {
 			if !ok {
 				t.Fatalf("transport = %T, want *transport", got.Transport)
 			}
-			if got.Timeout != tc.wantTimeout || rt.base != tc.wantBase || !rt.propagate || rt.Unwrap() != tc.wantBase {
-				t.Errorf("timeout %v base %T propagate %v unwrap %T, want %v %T true %T", got.Timeout, rt.base, rt.propagate, rt.Unwrap(), tc.wantTimeout, tc.wantBase, tc.wantBase)
+			if got.Timeout != tc.wantTimeout || rt.base != tc.wantBase || !rt.propagate {
+				t.Errorf("timeout %v base %T propagate %v, want %v %T true", got.Timeout, rt.base, rt.propagate, tc.wantTimeout, tc.wantBase)
 			}
 		})
 	}
@@ -525,8 +525,8 @@ func TestExternalClient(t *testing.T) {
 			if !ok {
 				t.Fatalf("transport = %T, want *transport", got.Transport)
 			}
-			if got.Timeout != tc.wantTimeout || rt.base != tc.wantBase || rt.propagate || rt.Unwrap() != tc.wantBase {
-				t.Errorf("timeout %v base %T propagate %v unwrap %T, want %v %T false %T", got.Timeout, rt.base, rt.propagate, rt.Unwrap(), tc.wantTimeout, tc.wantBase, tc.wantBase)
+			if got.Timeout != tc.wantTimeout || rt.base != tc.wantBase || rt.propagate {
+				t.Errorf("timeout %v base %T propagate %v, want %v %T false", got.Timeout, rt.base, rt.propagate, tc.wantTimeout, tc.wantBase)
 			}
 		})
 	}
