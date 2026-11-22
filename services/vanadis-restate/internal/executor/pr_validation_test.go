@@ -9,6 +9,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
+	"github.com/azylman/aerial/pkg/eriwire"
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
@@ -42,9 +43,9 @@ func TestDispatchAccepted(t *testing.T) {
 			}))
 			defer srv.Close()
 			c := NewHTTPEriClient(srv.URL, srv.Client())
-			err := c.DispatchAccepted(context.Background(), BrainDispatchRequest{ID: tc.reqID})
+			err := c.DispatchAccepted(context.Background(), eriwire.BrainDispatchRequest{ID: tc.reqID})
 			if tc.wantActive {
-				assert.ErrorIs(t, err, ErrDispatchActive)
+				assert.ErrorIs(t, err, eriwire.ErrDispatchActive)
 				return
 			}
 			if tc.wantErr {

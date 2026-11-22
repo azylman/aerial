@@ -94,15 +94,6 @@ func (c *RestateEriClient) SetDiscordAuth(available bool) {
 	}
 }
 
-// SetWidgetDeliverer dynamically sets the widget deliverer.
-func (c *RestateEriClient) SetWidgetDeliverer(wd StatusWidgetDeliverer) {
-	if c != nil {
-		c.widgetMu.Lock()
-		c.widgetDeliverer = wd
-		c.widgetMu.Unlock()
-	}
-}
-
 // postRestateJSON posts req to a Restate ingress endpoint, keeping
 // ericlient's "restate <op> ..." error text.
 func (c *RestateEriClient) postRestateJSON(ctx context.Context, endpoint, idempotencyKey, opLabel string, req any) ([]byte, error) {
@@ -182,7 +173,7 @@ func dispatchIdempotencyKey(ctx context.Context, dispatchID string) string {
 	return dispatchID
 }
 
-func (c *RestateEriClient) executeRestateDispatch(ctx context.Context, req BrainDispatchRequest) (restateDispatchResult, error) {
+func (c *RestateEriClient) executeRestateDispatch(ctx context.Context, req eriwire.BrainDispatchRequest) (restateDispatchResult, error) {
 	if c == nil {
 		return restateDispatchResult{}, errors.New("restate eri client is nil")
 	}
@@ -203,7 +194,7 @@ func (c *RestateEriClient) executeRestateDispatch(ctx context.Context, req Brain
 	return parseDispatchResponse(respBytes)
 }
 
-func (c *RestateEriClient) Dispatch(ctx context.Context, req BrainDispatchRequest) error {
+func (c *RestateEriClient) Dispatch(ctx context.Context, req eriwire.BrainDispatchRequest) error {
 	if c == nil {
 		return errors.New("restate eri client is nil")
 	}
@@ -219,7 +210,7 @@ func (c *RestateEriClient) Dispatch(ctx context.Context, req BrainDispatchReques
 		return err
 	}
 	if res.Status == eriwire.StatusSkippedActive {
-		return ErrDispatchActive
+		return eriwire.ErrDispatchActive
 	}
 	switch res.Status {
 	case "", statusOK, eriwire.StatusAccepted, eriwire.StatusAlreadyExists:
@@ -229,7 +220,7 @@ func (c *RestateEriClient) Dispatch(ctx context.Context, req BrainDispatchReques
 	}
 }
 
-func (c *RestateEriClient) DispatchAccepted(ctx context.Context, req BrainDispatchRequest) error {
+func (c *RestateEriClient) DispatchAccepted(ctx context.Context, req eriwire.BrainDispatchRequest) error {
 	if c == nil {
 		return errors.New("restate eri client is nil")
 	}
@@ -245,7 +236,7 @@ func (c *RestateEriClient) DispatchAccepted(ctx context.Context, req BrainDispat
 		return err
 	}
 	if res.Status == eriwire.StatusSkippedActive {
-		return ErrDispatchActive
+		return eriwire.ErrDispatchActive
 	}
 	effectiveID := res.DispatchID
 	if effectiveID == "" {
@@ -343,7 +334,7 @@ func (c *RestateEriClient) PromptAgent(ctx context.Context, agentName, threadID,
 // DispatchRestate enqueues a background dispatch on req.Agent's
 // DispatchSession through Restate ingress with Dispatch's status mapping.
 // It never falls back to eri HTTP.
-func (c *RestateEriClient) DispatchRestate(ctx context.Context, req BrainDispatchRequest) error {
+func (c *RestateEriClient) DispatchRestate(ctx context.Context, req eriwire.BrainDispatchRequest) error {
 	if c == nil {
 		return errors.New("restate eri client is nil")
 	}

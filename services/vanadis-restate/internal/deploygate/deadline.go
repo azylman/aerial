@@ -17,6 +17,7 @@ import (
 
 	restate "github.com/restatedev/sdk-go"
 
+	"github.com/azylman/aerial/pkg/eriwire"
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/pkg/strutil"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/ericlient"
@@ -369,7 +370,7 @@ func (g *Gate) DeliverDeadline(ctx context.Context, buildID string, a Attempt) (
 		if agent != "" {
 			wakeCtx = ericlient.WithAgent(ctx, agent)
 		}
-		e = g.exec.EriClient.DispatchAccepted(wakeCtx, executor.BrainDispatchRequest{
+		e = g.exec.EriClient.DispatchAccepted(wakeCtx, eriwire.BrainDispatchRequest{
 			ID:        id,
 			Source:    "discord",
 			SessionID: "vanadis-deploy-deadline-" + c.ID,

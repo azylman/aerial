@@ -18,6 +18,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/azylman/aerial/pkg/eriwire"
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/deploygate"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/executor"
@@ -281,14 +282,14 @@ func newRemediationTestHarness(t *testing.T, spy *checkStatusSpyStore, dispatchE
 	t.Helper()
 	eri := &mockEriClient{}
 	var active bool
-	var activeDispatch *executor.BrainDispatchRequest
-	eri.dispatchFn = func(_ context.Context, req executor.BrainDispatchRequest) error {
+	var activeDispatch *eriwire.BrainDispatchRequest
+	eri.dispatchFn = func(_ context.Context, req eriwire.BrainDispatchRequest) error {
 		if dispatchErr != nil {
 			return dispatchErr
 		}
 		if req.SkipIfActive && active {
 			eri.lastDispatch = activeDispatch
-			return executor.ErrDispatchActive
+			return eriwire.ErrDispatchActive
 		}
 		active = true
 		activeDispatch = &req
@@ -325,13 +326,13 @@ func TestBuildObject_OnPREvent_RemediationDeferralAndRetry(t *testing.T) {
 			name:             "ci_failed skipped_active ignores active worker without failing or incrementing budget",
 			ev:               ciFailEv("unit-tests", "abcdef1234"),
 			remediatedSHA:    "abcdef1234",
-			firstDispatchErr: executor.ErrDispatchActive,
+			firstDispatchErr: eriwire.ErrDispatchActive,
 			wantErr:          false,
 		},
 		{
 			name:             "conflict skipped_active ignores active worker without failing",
 			ev:               pubsub.PRLifecycleEvent{Event: "conflict", HeadSHA: "abcdef1234", Repo: "aerial", PRNumber: 42},
-			firstDispatchErr: executor.ErrDispatchActive,
+			firstDispatchErr: eriwire.ErrDispatchActive,
 			wantErr:          false,
 		},
 		{

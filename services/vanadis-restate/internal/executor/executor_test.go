@@ -13,19 +13,20 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/azylman/aerial/pkg/eriwire"
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
 )
 
 type mockEriClient struct {
-	dispatchFn func(ctx context.Context, req BrainDispatchRequest) error
+	dispatchFn func(ctx context.Context, req eriwire.BrainDispatchRequest) error
 	cancelFn   func(ctx context.Context, chunkID string) error
 	promptFn   func(ctx context.Context, threadID, prompt string) error
 	widgetFn   func(ctx context.Context, req StatusWidgetRequest) (string, error)
 	messageFn  func(ctx context.Context, channelID, content string) error
 
-	lastDispatch *BrainDispatchRequest
+	lastDispatch *eriwire.BrainDispatchRequest
 	lastCancel   string
 	lastThreadID string
 	lastPrompt   string
@@ -34,7 +35,7 @@ type mockEriClient struct {
 	lastMsgCont  string
 }
 
-func (m *mockEriClient) DispatchAccepted(ctx context.Context, req BrainDispatchRequest) error {
+func (m *mockEriClient) DispatchAccepted(ctx context.Context, req eriwire.BrainDispatchRequest) error {
 	return m.Dispatch(ctx, req)
 }
 
@@ -51,7 +52,7 @@ type mockBusExecutor struct {
 	lastSubj string
 }
 
-func (m *mockEriClient) Dispatch(ctx context.Context, req BrainDispatchRequest) error {
+func (m *mockEriClient) Dispatch(ctx context.Context, req eriwire.BrainDispatchRequest) error {
 	m.lastDispatch = &req
 	if m.dispatchFn != nil {
 		return m.dispatchFn(ctx, req)
@@ -218,7 +219,7 @@ func TestExecutor_NilEriAndDirectHelpers(t *testing.T) {
 	if err := execNil.DispatchDirectMessage(ctx, "ch1", "msg"); err != nil {
 		t.Fatal(err)
 	}
-	if err := execNil.DispatchChunkRemediation(ctx, BrainDispatchRequest{}); err == nil {
+	if err := execNil.DispatchChunkRemediation(ctx, eriwire.BrainDispatchRequest{}); err == nil {
 		t.Error("expected error from nil eri client on DispatchChunkRemediation")
 	}
 
@@ -363,7 +364,7 @@ func TestExecutorCoordinatorBranches(t *testing.T) {
 	}
 
 	// Successful remediation dispatch records the request.
-	req := BrainDispatchRequest{ID: "d1", Source: "test"}
+	req := eriwire.BrainDispatchRequest{ID: "d1", Source: "test"}
 	if err := exec.DispatchChunkRemediation(ctx, req); err != nil {
 		t.Fatalf("DispatchChunkRemediation failed: %v", err)
 	}
@@ -438,14 +439,14 @@ func TestExecuteLaunchChunk_RetryReservation(t *testing.T) {
 		{name: "retry reservation unavailable after acceptance", nudges: 1, reserveErr: unavailable, wantErr: unavailable, wantReserved: []string{"c"}},
 		{name: "retry reservation missing chunk after acceptance", nudges: 1, reserveErr: store.ErrChunkNotFound, wantErr: store.ErrChunkNotFound, wantReserved: []string{"c"}},
 		{name: "initial reservation failure only warns", nudges: 0, reserveErr: unavailable, wantReserved: []string{"c"}},
-		{name: "deferred launch keeps pre-launch status", nudges: 0, dispatchErr: ErrDispatchActive, wantErr: ErrDispatchActive},
+		{name: "deferred launch keeps pre-launch status", nudges: 0, dispatchErr: eriwire.ErrDispatchActive, wantErr: eriwire.ErrDispatchActive},
 		{name: "rejected launch keeps pre-launch status", nudges: 1, dispatchErr: unavailable, wantErr: unavailable},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			dispatchErr := tc.dispatchErr
-			eri := &mockEriClient{dispatchFn: func(context.Context, BrainDispatchRequest) error { return dispatchErr }}
+			eri := &mockEriClient{dispatchFn: func(context.Context, eriwire.BrainDispatchRequest) error { return dispatchErr }}
 			st := &mockStoreForLaunch{reserveErr: tc.reserveErr}
 			executor := NewExecutor(t.TempDir(), eri, nil, "", nil)
 			err := executor.ExecuteLaunchChunk(context.Background(), st, model.VanadisBuild{ID: "b"}, []model.VanadisChunk{{ID: "c", Mode: "action", Status: "pending", StallNudges: tc.nudges}}, 0, "")

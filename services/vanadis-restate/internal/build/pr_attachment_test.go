@@ -17,6 +17,7 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
+	"github.com/azylman/aerial/pkg/eriwire"
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/executor"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
@@ -28,13 +29,13 @@ import (
 func TestRecoveredChunkRemediationWake(t *testing.T) {
 	t.Parallel()
 	st, _ := dbScript{buildRow: &mockRow{b: &model.VanadisBuild{ID: "b1", ThreadID: "thread-1", Status: "running"}}, chunks: []model.VanadisChunk{{ID: "c1", BuildID: "b1", Mode: "pr", Repo: "aerial", Status: "pr_opened", PRNumber: 101}}}.open()
-	payloads := make(chan executor.BrainDispatchRequest, 1)
+	payloads := make(chan eriwire.BrainDispatchRequest, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/discord/widget" {
 			w.Write([]byte(`{}`))
 			return
 		}
-		var req executor.BrainDispatchRequest
+		var req eriwire.BrainDispatchRequest
 		if r.URL.Path != "/dispatch" || r.Method != http.MethodPost {
 			t.Errorf("request = %s %s", r.Method, r.URL.Path)
 		}

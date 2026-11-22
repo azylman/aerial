@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/azylman/aerial/pkg/eriwire"
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/deploygate"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/executor"
@@ -164,12 +165,12 @@ func TestBuildObject_Transitions_Table(t *testing.T) {
 			wantChunks:   []string{"c1"},
 			wantReserved: []string{"c1"},
 		},
-		{name: "deferred_launch_stays_pending_and_starts_lease_chain", build: runningBuild, chunks: leaseChunks("pending", 0), dispatchErr: executor.ErrDispatchActive, wantStatus: "running", wantSends: []deferredSend{{Delay: time.Second, Seq: 1}}, wantDeferralCounts: map[string]int{"c1": 1}, wantSeq: 1},
-		{name: "deferred_launch_while_chain_pending_schedules_nothing", build: runningBuild, chunks: leaseChunks("pending", 0), dispatchErr: executor.ErrDispatchActive, priorSeq: 3, wantStatus: "running", wantDeferralCounts: map[string]int{"c1": 1}, wantSeq: 3},
-		{name: "chain_tick_schedules_next_tick", build: runningBuild, chunks: leaseChunks("running", 0), dispatchErr: executor.ErrDispatchActive, priorSeq: 3, tick: 3, wantStatus: "running", wantSends: []deferredSend{{Delay: time.Second, Seq: 4}}, wantDeferralCounts: map[string]int{"c1": 1}, wantSeq: 4},
-		{name: "lease_expiry_fails_pending_action_chunk_resumably", build: runningBuild, chunks: leaseChunks("pending", 0), dispatchErr: executor.ErrDispatchActive, priorDeferrals: expiredLease("c1"), priorSeq: 40, tick: 40, wantStatus: statusFailed, wantReserved: []string{"c1"}, wantFailed: []string{"c1 vanadis-c1-turn-0 RESUMABLE: dispatch never accepted by eri (skipped_active for 10m)"}},
-		{name: "lease_expiry_fails_running_retry_generation", build: runningBuild, chunks: leaseChunks("running", 2), dispatchErr: executor.ErrDispatchActive, priorDeferrals: expiredLease("dispatch:vanadis-c1-turn-2"), wantStatus: statusFailed, wantFailed: []string{"c1 vanadis-c1-turn-2 RESUMABLE: dispatch never accepted by eri (skipped_active for 10m)"}},
-		{name: "lease_expiry_fail_write_error_retries_step", build: runningBuild, chunks: leaseChunks("running", 0), dispatchErr: executor.ErrDispatchActive, priorDeferrals: expiredLease("c1"), failErr: errors.New("database unavailable"), wantErr: true},
+		{name: "deferred_launch_stays_pending_and_starts_lease_chain", build: runningBuild, chunks: leaseChunks("pending", 0), dispatchErr: eriwire.ErrDispatchActive, wantStatus: "running", wantSends: []deferredSend{{Delay: time.Second, Seq: 1}}, wantDeferralCounts: map[string]int{"c1": 1}, wantSeq: 1},
+		{name: "deferred_launch_while_chain_pending_schedules_nothing", build: runningBuild, chunks: leaseChunks("pending", 0), dispatchErr: eriwire.ErrDispatchActive, priorSeq: 3, wantStatus: "running", wantDeferralCounts: map[string]int{"c1": 1}, wantSeq: 3},
+		{name: "chain_tick_schedules_next_tick", build: runningBuild, chunks: leaseChunks("running", 0), dispatchErr: eriwire.ErrDispatchActive, priorSeq: 3, tick: 3, wantStatus: "running", wantSends: []deferredSend{{Delay: time.Second, Seq: 4}}, wantDeferralCounts: map[string]int{"c1": 1}, wantSeq: 4},
+		{name: "lease_expiry_fails_pending_action_chunk_resumably", build: runningBuild, chunks: leaseChunks("pending", 0), dispatchErr: eriwire.ErrDispatchActive, priorDeferrals: expiredLease("c1"), priorSeq: 40, tick: 40, wantStatus: statusFailed, wantReserved: []string{"c1"}, wantFailed: []string{"c1 vanadis-c1-turn-0 RESUMABLE: dispatch never accepted by eri (skipped_active for 10m)"}},
+		{name: "lease_expiry_fails_running_retry_generation", build: runningBuild, chunks: leaseChunks("running", 2), dispatchErr: eriwire.ErrDispatchActive, priorDeferrals: expiredLease("dispatch:vanadis-c1-turn-2"), wantStatus: statusFailed, wantFailed: []string{"c1 vanadis-c1-turn-2 RESUMABLE: dispatch never accepted by eri (skipped_active for 10m)"}},
+		{name: "lease_expiry_fail_write_error_retries_step", build: runningBuild, chunks: leaseChunks("running", 0), dispatchErr: eriwire.ErrDispatchActive, priorDeferrals: expiredLease("c1"), failErr: errors.New("database unavailable"), wantErr: true},
 		{name: "accepted_launch_clears_lease", build: runningBuild, chunks: leaseChunks("pending", 0), priorDeferrals: expiredLease("c1"), priorSeq: 5, wantStatus: "running", wantChunks: []string{"c1"}, wantReserved: []string{"c1"}},
 		{
 			name:  "successful_mutate_completed_clears_state",
@@ -235,7 +236,7 @@ func TestBuildObject_Transitions_Table(t *testing.T) {
 			}
 			raw, _ := script.open()
 			st := &leaseStore{VanadisStore: raw, failErr: tc.failErr}
-			eri := &mockEriClient{dispatchFn: func(context.Context, executor.BrainDispatchRequest) error { return tc.dispatchErr }}
+			eri := &mockEriClient{dispatchFn: func(context.Context, eriwire.BrainDispatchRequest) error { return tc.dispatchErr }}
 			bus := pubsub.NewMemoryBus()
 			exec := executor.NewExecutor(t.TempDir(), eri, bus, "token", nil)
 			bo := NewBuildObject("", nil)

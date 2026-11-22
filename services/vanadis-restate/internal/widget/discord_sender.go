@@ -241,23 +241,6 @@ func (d *DiscordWidgetDeliverer) senderForAgent(agent string) (DiscordWidgetSend
 	return s, nil
 }
 
-// SetAgentSender sets or overrides the DiscordWidgetSender for a specific agent.
-func (d *DiscordWidgetDeliverer) SetAgentSender(agent string, s DiscordWidgetSender) {
-	if d == nil {
-		return
-	}
-	clean := strings.ToLower(strings.TrimSpace(agent))
-	if clean == "" {
-		clean = defaultAgent
-	}
-	d.configMu.Lock()
-	defer d.configMu.Unlock()
-	if d.agentSenders == nil {
-		d.agentSenders = make(map[string]DiscordWidgetSender)
-	}
-	d.agentSenders[clean] = s
-}
-
 // shouldSinkWidget reports whether the status widget messageID is buried enough to re-post: either
 // WidgetSinkMessageThreshold regular messages sit below it, or at least one does and the newest of
 // them is at least WidgetSinkIdleThreshold older than now. Other Components V2 widgets never count.

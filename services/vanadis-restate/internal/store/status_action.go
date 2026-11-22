@@ -2,7 +2,7 @@ package store
 
 // Status and action-completion persistence for vanadis-restate.
 //
-// execUpdateByID, UpdateChunkStatus, UpdateBuildStatus,
+// execUpdateByID, UpdateBuildStatus,
 // UpdateBuildStatusMessageID, ReserveChunkForLaunch, CompleteActionChunk and
 // FailChunk plus actionCompletionAllowed and finishActionBuildIfAllCompleted
 // moved here from the root package so they promote through the embedded
@@ -52,10 +52,6 @@ func (s *Store) execUpdateByID(ctx context.Context, idLabel, id, valLabel, val s
 	default:
 		return nil
 	}
-}
-
-func (s *Store) UpdateChunkStatus(ctx context.Context, chunkID, status string) error {
-	return s.execUpdateByID(ctx, "chunk id", chunkID, "status", status, false, `UPDATE vanadis_chunks SET status = $1, started_at = CASE WHEN $1 IN ('running', 'coding') THEN COALESCE(started_at, CURRENT_TIMESTAMP) ELSE started_at END, completed_at = CASE WHEN $1 IN ('merged', 'completed', 'failed', 'cancelled') THEN COALESCE(completed_at, CURRENT_TIMESTAMP) ELSE NULL END, updated_at = CURRENT_TIMESTAMP WHERE id = $2;`, "failed to update vanadis chunk status", ErrChunkNotFound)
 }
 
 func (s *Store) UpdateBuildStatus(ctx context.Context, buildID, status string) error {
