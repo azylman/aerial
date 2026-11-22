@@ -593,6 +593,13 @@ func TestDelivery_ErrorBranches(t *testing.T) {
 			t.Fatal("expected error with nonexistent call")
 		}
 
+		storeWithOpErr := fakes.NewFakeStore()
+		storeWithOpErr.OpErr = errors.New("db error")
+		opErrReporter := NewReporter(fakes.StaticConfig{Cfg: &config.Config{BrainURL: "http://brain"}}, storeWithOpErr, &fakes.FakeTwilio{})
+		if err := opErrReporter.FlushLiveTranscript(context.Background(), "call-operr"); err == nil {
+			t.Fatal("expected error with store op error")
+		}
+
 		// Empty text turns advance cursor without posting to discord
 		_ = store.CreateOutboundCall(context.Background(), model.VoiceCall{
 			CallID: "call-empty-turn",

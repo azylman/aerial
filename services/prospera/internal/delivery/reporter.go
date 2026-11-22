@@ -7,12 +7,15 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"strings"
 	"time"
+
+	restate "github.com/restatedev/sdk-go"
 
 	"github.com/azylman/aerial/pkg/tracing"
 	"github.com/azylman/aerial/services/prospera/internal/config"
@@ -29,9 +32,10 @@ const (
 )
 
 const (
-	serviceName      = "prospera"
-	roleUser         = "user"
-	directionInbound = "inbound"
+	serviceName         = "prospera"
+	roleUser            = "user"
+	directionInbound    = "inbound"
+	contentTypeAudioWAV = "audio/wav"
 )
 
 // Reporter coordinates live transcript batching, post-call reports, voicemail transcription, and SMS delivery.
@@ -194,6 +198,170 @@ func (r *Reporter) FlushLiveTranscript(ctx context.Context, callID string) error
 	return nil
 }
 
+// DeliverReportRequest represents the input payload to ProsperaReport.DeliverReport.
+type DeliverReportRequest struct {
+	CallID string `json:"call_id,omitempty"`
+}
+
+// DeliverReportStep1Output holds the result of load-and-mark-processing.
+type DeliverReportStep1Output struct {
+	AlreadyDelivered bool             `json:"already_delivered"`
+	Call             *model.VoiceCall `json:"call,omitempty"`
+}
+
+// ProsperaReport is a Restate Virtual Object keyed by call_id that delivers call reports durably.
+type ProsperaReport struct {
+	reporter *Reporter
+}
+
+// NewProsperaReport constructs a ProsperaReport Virtual Object handler.
+func NewProsperaReport(reporter *Reporter) *ProsperaReport {
+	return &ProsperaReport{reporter: reporter}
+}
+
+// Definition returns the Restate service definition for ProsperaReport.
+func (p *ProsperaReport) Definition() restate.ServiceDefinition {
+	return restate.Reflect(p,
+		restate.WithInactivityTimeout(5*time.Minute),
+		restate.WithAbortTimeout(5*time.Minute),
+	)
+}
+
+func (p *ProsperaReport) step1LoadAndMarkProcessing(rc restate.RunContext, callID string) (DeliverReportStep1Output, error) {
+	if p.reporter == nil || p.reporter.store == nil {
+		return DeliverReportStep1Output{}, restate.TerminalErrorf("reporter: store is nil")
+	}
+
+	call, err := p.reporter.store.GetCall(rc, callID)
+	if err != nil {
+		if errors.Is(err, store.ErrCallNotFound) {
+			return DeliverReportStep1Output{}, restate.ToTerminalError(err, restate.WithErrorCode(http.StatusNotFound))
+		}
+		return DeliverReportStep1Output{}, err
+	}
+	if call == nil {
+		return DeliverReportStep1Output{}, restate.ToTerminalError(fmt.Errorf("reporter: call %q not found", callID), restate.WithErrorCode(http.StatusNotFound))
+	}
+
+	if call.ReportStatus == reportStatusDelivered {
+		return DeliverReportStep1Output{AlreadyDelivered: true, Call: call}, nil
+	}
+
+	// Accept pending, failed, or processing on crash replay
+	ok, err := p.reporter.store.TransitionReportStatus(rc, callID, []string{reportStatusPending, reportStatusFailed, reportStatusProcessing}, reportStatusProcessing, "")
+	if err != nil {
+		return DeliverReportStep1Output{}, err
+	}
+	if !ok {
+		// Row could not be transitioned to processing (e.g. awaiting_recording, or concurrently delivered)
+		reloaded, reloadErr := p.reporter.store.GetCall(rc, callID)
+		if reloadErr == nil && reloaded != nil && reloaded.ReportStatus == reportStatusDelivered {
+			return DeliverReportStep1Output{AlreadyDelivered: true, Call: reloaded}, nil
+		}
+		return DeliverReportStep1Output{AlreadyDelivered: true, Call: call}, nil
+	}
+
+	// Flush any unsent live transcript turns before report
+	if flushErr := p.reporter.FlushLiveTranscript(rc, callID); flushErr != nil {
+		slog.ErrorContext(rc, "reporter: flush live transcript before report", "call_id", callID, "error", flushErr)
+	}
+
+	updatedCall, err := p.reporter.store.GetCall(rc, callID)
+	if err == nil && updatedCall != nil {
+		call = updatedCall
+	}
+
+	return DeliverReportStep1Output{AlreadyDelivered: false, Call: call}, nil
+}
+
+func (p *ProsperaReport) step2GenerateSummary(rc restate.RunContext, call *model.VoiceCall) (string, error) {
+	cfg := p.reporter.cfgSrc.Current()
+	prompt := model.BuildPostCallSummaryPrompt(call)
+	geminiSummary, genErr := p.reporter.generateGeminiSummary(rc, cfg, prompt)
+	if genErr != nil || strings.TrimSpace(geminiSummary) == "" {
+		geminiSummary = fmt.Sprintf("Call %s ended with state %q (reason: %q). Total turns: %d.", call.CallID, call.State, call.EndReason, len(call.Transcript))
+	}
+	return geminiSummary, nil
+}
+
+func (p *ProsperaReport) step3DeliverDiscordAndMarkDelivered(rc restate.RunContext, call *model.VoiceCall, summary string) (struct{}, error) {
+	cfg := p.reporter.cfgSrc.Current()
+	withNumber := call.ToNumber
+	if call.Direction == directionInbound {
+		withNumber = call.FromNumber
+	}
+
+	channel := ResolveDiscordChannel(cfg, call.DiscordChannelID)
+	msgContent := fmt.Sprintf("📋 **Call Summary (%s)**\n**Direction**: %s | **With**: %s\n**State**: %s | **End Reason**: %s\n\n%s",
+		call.CallID, call.Direction, withNumber, call.State, call.EndReason, summary)
+
+	var attachments []discordAttachmentPayload
+	if p.reporter.recordingProvider != nil {
+		if wavBytes := p.reporter.recordingProvider(call.CallID); len(wavBytes) > 0 {
+			attachments = []discordAttachmentPayload{
+				{
+					Filename:      call.CallID + ".wav",
+					ContentType:   contentTypeAudioWAV,
+					ContentBase64: base64.StdEncoding.EncodeToString(wavBytes),
+				},
+			}
+		}
+	}
+
+	if postErr := p.reporter.postDiscordMessage(rc, cfg, channel, call.DiscordThreadID, msgContent, attachments); postErr != nil {
+		if _, transErr := p.reporter.store.TransitionReportStatus(rc, call.CallID, []string{reportStatusProcessing}, reportStatusFailed, "discord post failed: "+postErr.Error()); transErr != nil {
+			slog.ErrorContext(rc, "reporter: transition report status to failed", "error", transErr)
+		}
+		return struct{}{}, postErr
+	}
+
+	if _, transErr := p.reporter.store.TransitionReportStatus(rc, call.CallID, []string{reportStatusProcessing, reportStatusFailed, reportStatusPending}, reportStatusDelivered, summary); transErr != nil {
+		slog.ErrorContext(rc, "reporter: transition report status to delivered", "error", transErr)
+		return struct{}{}, transErr
+	}
+	return struct{}{}, nil
+}
+
+// DeliverReport runs a 3-step journaled post-call report delivery chain.
+func (p *ProsperaReport) DeliverReport(ctx restate.ObjectContext, req DeliverReportRequest) error {
+	callID := restate.Key(ctx)
+	if callID == "" {
+		callID = strings.TrimSpace(req.CallID)
+	}
+
+	// Step 1: load-and-mark-processing
+	step1, err := restate.Run(ctx, func(rc restate.RunContext) (DeliverReportStep1Output, error) {
+		return p.step1LoadAndMarkProcessing(rc, callID)
+	}, restate.WithName("load-and-mark-processing"))
+	if err != nil {
+		return err
+	}
+	if step1.AlreadyDelivered {
+		return nil
+	}
+
+	call := step1.Call
+
+	// Step 2: generate-summary
+	summary, err := restate.Run(ctx, func(rc restate.RunContext) (string, error) {
+		return p.step2GenerateSummary(rc, call)
+	}, restate.WithName("generate-summary"))
+	if err != nil {
+		return err
+	}
+
+	// Step 3: deliver-discord-and-mark-delivered
+	_, err = restate.Run(ctx, func(rc restate.RunContext) (struct{}, error) {
+		return p.step3DeliverDiscordAndMarkDelivered(rc, call, summary)
+	}, restate.WithName("deliver-discord-and-mark-delivered"))
+	if err != nil {
+		return err
+	}
+
+	restate.ClearAll(ctx)
+	return nil
+}
+
 // DeliverCallReport generates a post-call summary using Gemini with tools: [] and posts it to Discord.
 func (r *Reporter) DeliverCallReport(ctx context.Context, callID string) error {
 	cfg := r.cfgSrc.Current()
@@ -244,7 +412,7 @@ func (r *Reporter) DeliverCallReport(ctx context.Context, callID string) error {
 			attachments = []discordAttachmentPayload{
 				{
 					Filename:      call.CallID + ".wav",
-					ContentType:   "audio/wav",
+					ContentType:   contentTypeAudioWAV,
 					ContentBase64: base64.StdEncoding.EncodeToString(wavBytes),
 				},
 			}
@@ -299,7 +467,7 @@ func (r *Reporter) ProcessVoicemailRecording(ctx context.Context, callID, record
 		return fmt.Errorf("reporter: download recording: %w", err)
 	}
 	if contentType == "" {
-		contentType = "audio/wav"
+		contentType = contentTypeAudioWAV
 	}
 
 	transcript, tErr := r.transcribeAudio(ctx, cfg, audioBytes, contentType)
