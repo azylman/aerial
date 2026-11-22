@@ -14,103 +14,60 @@ import (
 
 var errFakeProjection = errors.New("fake projection store error")
 
+// projSnap is a valid open-row projection snapshot for azylman/aerial.
+func projSnap(repo string, pr int, status string, gen uint64) ProjectionSnapshot {
+	return ProjectionSnapshot{Repo: repo, PRNumber: pr, Branch: "feat/x", HeadSHA: "abc123", Title: "x", TargetID: "123", Status: status, Generation: gen}
+}
+
 // TestProjectRegistry freezes the journaled projection send: valid snapshots
 // project exactly once, invalid snapshots never reach the store, and store
 // failures propagate without recording a write. The state transition itself
 // is never gated on this result; callers keep the committed state.
 func TestProjectRegistry(t *testing.T) {
 	t.Parallel()
+	merged := projSnap("azylman/aerial", 102, "merged", 1)
+	merged.MergeSHA = "def456"
+	ciFailed := projSnap("azylman/aerial", 103, "ci_failed", 1)
+	ciFailed.Metadata.CIChecks = map[string]string{"lint": "failed"}
 	tests := []struct {
 		name         string
 		snap         ProjectionSnapshot
-		storeErr     error
-		nilStore     bool
+		store        ProjectionStore
 		cancelCtx    bool
 		wantErr      bool
-		wantRecorded int
+		wantRecorded bool
 	}{
-		{
-			name:         "open pr projects",
-			snap:         ProjectionSnapshot{Repo: "azylman/aerial", PRNumber: 101, Branch: "feat/x", HeadSHA: "abc123", Title: "x", TargetID: "123", Status: "open", Generation: 2, Metadata: ProjectionMetadata{}},
-			wantErr:      false,
-			wantRecorded: 1,
-		},
-		{
-			name:         "merged pr projects merge sha",
-			snap:         ProjectionSnapshot{Repo: "azylman/aerial", PRNumber: 102, Branch: "feat/y", HeadSHA: "abc123", MergeSHA: "def456", Title: "y", TargetID: "123", Status: "merged", Generation: 1, Metadata: ProjectionMetadata{}},
-			wantErr:      false,
-			wantRecorded: 1,
-		},
-		{
-			name:         "ci failed pr projects",
-			snap:         ProjectionSnapshot{Repo: "azylman/aerial", PRNumber: 103, Branch: "feat/z", HeadSHA: "abc123", Title: "z", TargetID: "123", Status: "ci_failed", Generation: 1, Metadata: ProjectionMetadata{CIChecks: map[string]string{"lint": "failed"}}},
-			wantErr:      false,
-			wantRecorded: 1,
-		},
-		{
-			name:         "empty repo never reaches store",
-			snap:         ProjectionSnapshot{Repo: "", PRNumber: 101, Branch: "feat/x", HeadSHA: "abc123", Title: "x", TargetID: "123", Status: "open"},
-			wantErr:      true,
-			wantRecorded: 0,
-		},
-		{
-			name:         "zero pr never reaches store",
-			snap:         ProjectionSnapshot{Repo: "azylman/aerial", PRNumber: 0, Branch: "feat/x", HeadSHA: "abc123", Title: "x", TargetID: "123", Status: "open"},
-			wantErr:      true,
-			wantRecorded: 0,
-		},
-		{
-			name:         "empty status never reaches store",
-			snap:         ProjectionSnapshot{Repo: "azylman/aerial", PRNumber: 101, Branch: "feat/x", HeadSHA: "abc123", Title: "x", TargetID: "123", Status: ""},
-			wantErr:      true,
-			wantRecorded: 0,
-		},
-		{
-			name:         "nil store errors without panic",
-			snap:         ProjectionSnapshot{Repo: "azylman/aerial", PRNumber: 101, Branch: "feat/x", HeadSHA: "abc123", Title: "x", TargetID: "123", Status: "open"},
-			nilStore:     true,
-			wantErr:      true,
-			wantRecorded: 0,
-		},
-		{
-			name:         "store failure propagates unrecorded",
-			snap:         ProjectionSnapshot{Repo: "azylman/aerial", PRNumber: 101, Branch: "feat/x", HeadSHA: "abc123", Title: "x", TargetID: "123", Status: "open"},
-			storeErr:     errFakeProjection,
-			wantErr:      true,
-			wantRecorded: 0,
-		},
-		{
-			name:         "cancelled context errors before store",
-			snap:         ProjectionSnapshot{Repo: "azylman/aerial", PRNumber: 101, Branch: "feat/x", HeadSHA: "abc123", Title: "x", TargetID: "123", Status: "open"},
-			cancelCtx:    true,
-			wantErr:      true,
-			wantRecorded: 0,
-		},
+		{name: "open pr projects", snap: projSnap("azylman/aerial", 101, "open", 2), store: &FakeProjectionStore{}, wantRecorded: true},
+		{name: "merged pr projects merge sha", snap: merged, store: &FakeProjectionStore{}, wantRecorded: true},
+		{name: "ci failed pr projects", snap: ciFailed, store: &FakeProjectionStore{}, wantRecorded: true},
+		{name: "empty repo never reaches store", snap: projSnap("", 101, "open", 0), store: &FakeProjectionStore{}, wantErr: true},
+		{name: "zero pr never reaches store", snap: projSnap("azylman/aerial", 0, "open", 0), store: &FakeProjectionStore{}, wantErr: true},
+		{name: "empty status never reaches store", snap: projSnap("azylman/aerial", 101, "", 0), store: &FakeProjectionStore{}, wantErr: true},
+		{name: "nil store errors without panic", snap: projSnap("azylman/aerial", 101, "open", 0), store: nil, wantErr: true},
+		{name: "store failure propagates unrecorded", snap: projSnap("azylman/aerial", 101, "open", 0), store: &FakeProjectionStore{Err: errFakeProjection}, wantErr: true},
+		{name: "cancelled context errors before store", snap: projSnap("azylman/aerial", 101, "open", 0), store: &FakeProjectionStore{}, cancelCtx: true, wantErr: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			store := &FakeProjectionStore{Err: tc.storeErr}
-			ctx := context.Background()
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
 			if tc.cancelCtx {
-				var cancel context.CancelFunc
-				ctx, cancel = context.WithCancel(ctx)
 				cancel()
 			}
-			var err error
-			if tc.nilStore {
-				err = ProjectRegistry(ctx, nil, tc.snap)
-			} else {
-				err = ProjectRegistry(ctx, store, tc.snap)
-			}
+			err := ProjectRegistry(ctx, tc.store, tc.snap)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("ProjectRegistry err = %v, wantErr %v", err, tc.wantErr)
 			}
-			if got := store.RecordedCount(); got != tc.wantRecorded {
-				t.Fatalf("recorded = %d, want %d", got, tc.wantRecorded)
+			var got, want []ProjectionSnapshot
+			if fake, ok := tc.store.(*FakeProjectionStore); ok {
+				got = fake.Recorded
 			}
-			if tc.wantRecorded > 0 && !reflect.DeepEqual(store.Recorded[0], tc.snap) {
-				t.Fatalf("recorded snapshot mangled: got %+v, want %+v", store.Recorded[0], tc.snap)
+			if tc.wantRecorded {
+				want = []ProjectionSnapshot{tc.snap}
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("recorded = %+v, want %+v", got, want)
 			}
 		})
 	}
@@ -132,12 +89,6 @@ func (f *FakeProjectionStore) UpsertProjection(_ context.Context, snap Projectio
 	}
 	f.Recorded = append(f.Recorded, snap)
 	return nil
-}
-
-func (f *FakeProjectionStore) RecordedCount() int {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return len(f.Recorded)
 }
 
 // fullState is a PRState carrying every registry row field.
@@ -260,13 +211,13 @@ func TestProjectionUpsertQuery(t *testing.T) {
 		},
 		{
 			name: "typed scalars and a pre-final build snapshot",
-			snap: ProjectionSnapshot{Repo: "azylman/aerial", PRNumber: 6, Agent: "miorine", Status: "ci_failed", Metadata: ProjectionMetadata{
-				VanadisChunkID: "c1", BotID: "miorine", CIFailCount: 3, DeployFailedPublished: true, Banner: "b", WidgetState: "w",
+			snap: ProjectionSnapshot{Repo: "azylman/aerial", PRNumber: 6, Agent: "agent-beta", Status: "ci_failed", Metadata: ProjectionMetadata{
+				VanadisChunkID: "c1", BotID: "agent-beta", CIFailCount: 3, DeployFailedPublished: true, Banner: "b", WidgetState: "w",
 				BuildMetadata: &BuildMetadata{Version: 1, Kind: "pre", Repository: "azylman/aerial", WorkflowPath: "ci.yml", RunID: 9, RunNumber: 8, RunAttempt: 2, Event: "pull_request", SourceSHA: "s1", ExecutionSHA: "e1"},
 			}},
 			wantArgs: []any{
-				"azylman/aerial", 6, "miorine", "", "", "", "", "", "ci_failed",
-				"c1", "miorine", 3, true, false, "b", "w",
+				"azylman/aerial", 6, "agent-beta", "", "", "", "", "", "ci_failed",
+				"c1", "agent-beta", 3, true, false, "b", "w",
 				1, "pre", "azylman/aerial", "ci.yml", int64(9), int64(8), 2, "pull_request", "s1", "e1", (*int)(nil),
 				(*string)(nil), (*string)(nil), (*string)(nil), (*bool)(nil), (*int)(nil), []string(nil), (*string)(nil),
 			},
