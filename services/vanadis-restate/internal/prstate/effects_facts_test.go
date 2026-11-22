@@ -713,22 +713,84 @@ func TestPRObjectServiceLifecycleFacts(t *testing.T) {
 	merged := pubsub.PRLifecycleEvent{Event: "merged", HeadSHA: "h1", MergeSHA: "m1", Status: "merged"}
 	carried := merged
 	carried.TargetID = "333333333333333333"
+
+	mainFact := merged
+	mainFact.Branch = "main"
+
+	refsMainFact := merged
+	refsMainFact.Branch = "refs/heads/main"
+
+	featureFact := merged
+	featureFact.Branch = "feat/other-feature"
+	featureFact.Title = "Carried Title"
+
 	tests := []struct {
-		name       string
-		ev         PREvent
-		wantCalls  int
-		wantErr    bool
-		wantTarget string
+		name        string
+		stateBranch string
+		stateTitle  string
+		ev          PREvent
+		wantCalls   int
+		wantErr     bool
+		wantTarget  string
+		wantBranch  string
+		wantTitle   string
 	}{
 		{name: "restate owner publishes the fact with the stored target", ev: PREvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "h1", MergeSHA: "m1", Facts: []pubsub.PRLifecycleEvent{merged}}, wantCalls: 1, wantTarget: testTarget},
 		{name: "restate owner keeps a carried target", ev: PREvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "h1", MergeSHA: "m1", Facts: []pubsub.PRLifecycleEvent{carried}}, wantCalls: 1, wantTarget: "333333333333333333"},
 		{name: "stale event fires nothing", ev: PREvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "h9", Facts: []pubsub.PRLifecycleEvent{merged}}},
+		{
+			name:        "empty fact branch and title take stored PR branch and title",
+			stateBranch: "feat/aerial-pr-vanadis-c1-abcdef",
+			stateTitle:  "Add Vanadis feature",
+			ev:          PREvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "h1", MergeSHA: "m1", Facts: []pubsub.PRLifecycleEvent{merged}},
+			wantCalls:   1,
+			wantTarget:  testTarget,
+			wantBranch:  "feat/aerial-pr-vanadis-c1-abcdef",
+			wantTitle:   "Add Vanadis feature",
+		},
+		{
+			name:        "main branch on fact is replaced by stored PR head branch",
+			stateBranch: "feat/aerial-pr-vanadis-c1-abcdef",
+			stateTitle:  "Add Vanadis feature",
+			ev:          PREvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "h1", MergeSHA: "m1", Facts: []pubsub.PRLifecycleEvent{mainFact}},
+			wantCalls:   1,
+			wantTarget:  testTarget,
+			wantBranch:  "feat/aerial-pr-vanadis-c1-abcdef",
+			wantTitle:   "Add Vanadis feature",
+		},
+		{
+			name:        "refs/heads/main branch on fact is replaced by stored PR head branch",
+			stateBranch: "feat/aerial-pr-vanadis-c1-abcdef",
+			stateTitle:  "Add Vanadis feature",
+			ev:          PREvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "h1", MergeSHA: "m1", Facts: []pubsub.PRLifecycleEvent{refsMainFact}},
+			wantCalls:   1,
+			wantTarget:  testTarget,
+			wantBranch:  "feat/aerial-pr-vanadis-c1-abcdef",
+			wantTitle:   "Add Vanadis feature",
+		},
+		{
+			name:        "carried distinct feature branch and title are preserved",
+			stateBranch: "feat/aerial-pr-vanadis-c1-abcdef",
+			stateTitle:  "Stored Title",
+			ev:          PREvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "h1", MergeSHA: "m1", Facts: []pubsub.PRLifecycleEvent{featureFact}},
+			wantCalls:   1,
+			wantTarget:  testTarget,
+			wantBranch:  "feat/other-feature",
+			wantTitle:   "Carried Title",
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			pub := &fakeFactPublisher{}
-			mc, _ := newStateMock(t, effectPR())
+			st := effectPR()
+			if tc.stateBranch != "" {
+				st.Branch = tc.stateBranch
+			}
+			if tc.stateTitle != "" {
+				st.Title = tc.stateTitle
+			}
+			mc, _ := newStateMock(t, st)
 			stubRun(mc, false)
 			err := NewPRObjectService().WithFactPublisher(pub).HandleMerged(restate.WithMockContext(mc), tc.ev)
 			require.Equal(t, tc.wantErr, restate.IsTerminalError(err), "err = %v", err)
@@ -736,6 +798,8 @@ func TestPRObjectServiceLifecycleFacts(t *testing.T) {
 			require.Len(t, calls, tc.wantCalls)
 			if tc.wantCalls > 0 {
 				require.Equal(t, tc.wantTarget, calls[0].fact.TargetID)
+				require.Equal(t, tc.wantBranch, calls[0].fact.Branch)
+				require.Equal(t, tc.wantTitle, calls[0].fact.Title)
 			}
 		})
 	}
