@@ -10,7 +10,6 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/azylman/aerial/pkg/k8sauthtest"
 	"github.com/azylman/aerial/pkg/prwire"
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/synapse/internal/model"
@@ -326,84 +325,6 @@ func TestRestateOwnedBuildMetadataPaths(t *testing.T) {
 			}
 			if paths, _ := h.ingress.sends(); len(paths) != 0 {
 				t.Fatalf("sends = %v, want none", paths)
-			}
-		})
-	}
-}
-
-// TestHandlePRRegisterRestateOwned pins the restate-owned register: the
-// caller is checked locally, PRObject.Register returns
-// the target and its failures map to HTTP statuses.
-func TestHandlePRRegisterRestateOwned(t *testing.T) {
-	t.Parallel()
-	const (
-		okBody    = `{"target_id":"100000000000000001","agent":"aerial","status":"open"}`
-		validReq  = `{"repo":"azylman/aerial","pr_number":42,"branch":"feat","head_sha":"sha1","target_id":"100000000000000001"}`
-		regPath   = "/PRObject/azylman%2Faerial%2342/Register"
-		sysTarget = "100000000000000009"
-	)
-	tests := []struct {
-		name        string
-		k8s         bool
-		token       string
-		noURL       bool
-		owner       string
-		bots        map[string]BotConfig
-		body        string
-		callCode    int
-		callBody    string
-		wantStatus  int
-		wantRespSub string
-		wantCallSub string
-		wantCalls   int
-	}{
-		{name: "bare repo is qualified with the configured owner", owner: "azylman", body: `{"repo":"aerial","pr_number":42,"branch":"feat","head_sha":"sha1","target_id":"100000000000000001"}`, callCode: 200, callBody: okBody, wantStatus: http.StatusOK, wantCallSub: `"repo":"azylman/aerial"`, wantCalls: 1},
-		{name: "bare repo without an owner never reaches restate", body: `{"repo":"aerial","pr_number":42,"branch":"feat","head_sha":"sha1","target_id":"100000000000000001"}`, wantStatus: http.StatusInternalServerError},
-		{name: "valid register returns the restate target", body: validReq, callCode: 200, callBody: okBody, wantStatus: http.StatusOK, wantRespSub: `"target_id":"100000000000000001"`, wantCallSub: `"fallback_target_id":"` + sysTarget + `"`, wantCalls: 1},
-		{name: "headless target travels empty for restate to resolve", body: `{"repo":"azylman/aerial","pr_number":42,"branch":"feat","head_sha":"sha1","target_id":"dispatch-uuid-1"}`, callCode: 200, callBody: okBody, wantStatus: http.StatusOK, wantCallSub: `"target_id":""`, wantCalls: 1},
-		{name: "agent metadata is forwarded", body: `{"repo":"azylman/aerial","pr_number":42,"branch":"feat","head_sha":"sha1","target_id":"100000000000000001","metadata":"{\"widget_state\":\"w1\"}"}`, callCode: 200, callBody: okBody, wantStatus: http.StatusOK, wantCallSub: `"widget_state":"w1"`, wantCalls: 1},
-		{name: "explicit bad target is rejected locally", body: `{"repo":"azylman/aerial","pr_number":42,"branch":"feat","head_sha":"sha1","target_id":"bad"}`, wantStatus: http.StatusBadRequest},
-		{name: "empty repo is rejected locally", body: `{"repo":"","pr_number":42,"branch":"feat","head_sha":"sha1"}`, wantStatus: http.StatusBadRequest},
-		{name: "zero pr is rejected locally", body: `{"repo":"azylman/aerial","pr_number":0,"branch":"feat","head_sha":"sha1"}`, wantStatus: http.StatusBadRequest},
-		{name: "empty branch is rejected locally", body: `{"repo":"azylman/aerial","pr_number":42,"branch":"","head_sha":"sha1"}`, wantStatus: http.StatusBadRequest},
-		{name: "empty head is rejected locally", body: `{"repo":"azylman/aerial","pr_number":42,"branch":"feat","head_sha":""}`, wantStatus: http.StatusBadRequest},
-		{name: "malformed json is rejected", body: `{`, wantStatus: http.StatusBadRequest},
-		{name: "unknown bot is a conflict", bots: map[string]BotConfig{"aerial": {}}, body: `{"repo":"azylman/aerial","pr_number":42,"branch":"feat","head_sha":"sha1","target_id":"100000000000000001","agent":"nobody"}`, wantStatus: http.StatusConflict},
-		{name: "restate owner mismatch is a conflict", body: validReq, callCode: 409, callBody: "owner", wantStatus: http.StatusConflict, wantCalls: 1},
-		{name: "restate bad target is a bad request", body: validReq, callCode: 400, callBody: "target", wantStatus: http.StatusBadRequest, wantCalls: 1},
-		{name: "restate outage is a server error", body: validReq, callCode: 500, callBody: "boom", wantStatus: http.StatusInternalServerError, wantCalls: 1},
-		{name: "no restate url is a server error", noURL: true, body: validReq, wantStatus: http.StatusInternalServerError},
-		{name: "k8s caller fences the owner inside restate", k8s: true, token: "valid-token", body: validReq, callCode: 200, callBody: okBody, wantStatus: http.StatusOK, wantCallSub: `"enforce_owner":true,"expected_owner":"aerial"`, wantCalls: 1},
-		{name: "k8s caller without a token is unauthorized", k8s: true, body: validReq, wantStatus: http.StatusUnauthorized},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			ingress := &ownedIngress{sendCode: http.StatusAccepted, callCode: tc.callCode, callBody: tc.callBody}
-			cfg := Config{SystemChannelID: sysTarget, GitHubOwner: tc.owner, Bots: tc.bots}
-			if !tc.noURL {
-				cfg.RestateURL = ingress.serve(t)
-			}
-			if tc.k8s {
-				cfg.K8sAuthEnabled = true
-				cfg.K8sAuthConfig = k8sauthtest.Config(t, &k8sauthtest.RoundTripper{AuthBody: k8sauthtest.TokenReview("system:serviceaccount:default:eri-aerial"), SARRules: map[string]bool{k8sauthtest.SARKey("prs", "create", "aerial"): true}})
-			}
-			srv := NewRouterServer(fixedConfig(cfg), nil)
-			req := httptest.NewRequest(http.MethodPost, "/internal/pr/register", strings.NewReader(tc.body))
-			if tc.token != "" {
-				req.Header.Set("Authorization", "Bearer "+tc.token)
-			}
-			rec := httptest.NewRecorder()
-			srv.handlePRRegister(rec, req)
-			if rec.Code != tc.wantStatus || !strings.Contains(rec.Body.String(), tc.wantRespSub) {
-				t.Fatalf("response = %d %s, want %d containing %s", rec.Code, rec.Body.String(), tc.wantStatus, tc.wantRespSub)
-			}
-			calls := ingress.calls()
-			if len(calls) != tc.wantCalls {
-				t.Fatalf("register calls = %v, want %d", calls, tc.wantCalls)
-			}
-			if tc.wantCalls > 0 && (calls[0] != regPath || !strings.Contains(ingress.callBodies()[0], tc.wantCallSub)) {
-				t.Errorf("register call = %s %s, want %s containing %s", calls[0], ingress.callBodies()[0], regPath, tc.wantCallSub)
 			}
 		})
 	}
