@@ -13,6 +13,7 @@ import (
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/azylman/aerial/pkg/pubsubtest"
 	"github.com/azylman/aerial/pkg/tracing"
 )
 
@@ -186,10 +187,7 @@ func TestDiscordInteractionWorker_ResumesGatewayTrace(t *testing.T) {
 			srv := newTraceparentServer(t, 0, `{"status":"ok"}`)
 			router := newTestRouter(Config{}, nil, NewDefaultOutboundDispatcher(srv.URL, srv.Client()))
 			body := fmt.Sprintf(`{"interaction_id":"inter-traced","interaction":{"id":"inter-traced","type":2,"data":{"id":"cmd-1","name":"ask"}},"traceparent":%q}`, tc.bodyTraceparent)
-			msg := &synapseMemoryMsg{
-				data:    []byte(body),
-				subject: "aerial.jobs.synapse.discord_interaction",
-			}
+			msg := &pubsubtest.Message{Payload: []byte(body), Subj: "aerial.jobs.synapse.discord_interaction", Delivered: 1}
 			ctx := tracing.ContextWithTraceparent(context.Background(), tc.headerTraceparent)
 			if err := router.HandleDiscordInteractionJob(ctx, msg); err != nil {
 				t.Fatalf("HandleDiscordInteractionJob: %v", err)

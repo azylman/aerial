@@ -5,13 +5,14 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/azylman/aerial/pkg/k8sauthtest"
 )
 
 func TestHandleRetryPRReadinessRestateOwned(t *testing.T) {
 	t.Parallel()
 	const (
 		validReq = `{"repo":"azylman/aerial","pr_number":42,"expected_merge_sha":"m1"}`
-		authOK   = `{"apiVersion":"authentication.k8s.io/v1","kind":"TokenReview","status":{"authenticated":true,"user":{"username":"system:serviceaccount:default:eri-aerial"}}}`
 		callPath = "/PRObject/azylman%2Faerial%2342/RetryReadiness"
 	)
 	tests := []struct {
@@ -62,7 +63,7 @@ func TestHandleRetryPRReadinessRestateOwned(t *testing.T) {
 			}
 			if tc.k8s {
 				cfg.K8sAuthEnabled = true
-				cfg.K8sAuthConfig = newTestK8sAuthConfig(t, &staticAuthRoundTripper{authStatus: http.StatusOK, authBody: authOK, sarRules: []sarRule{{Resource: "prs", Verb: "create", Name: "aerial"}}})
+				cfg.K8sAuthConfig = k8sauthtest.Config(t, &k8sauthtest.RoundTripper{AuthBody: k8sauthtest.TokenReview("system:serviceaccount:default:eri-aerial"), SARRules: map[string]bool{k8sauthtest.SARKey("prs", "create", "aerial"): true}})
 			}
 			srv := NewRouterServer(fixedConfig(cfg), nil)
 			srv.SetDispatcher(&mockOutboundDispatcher{})

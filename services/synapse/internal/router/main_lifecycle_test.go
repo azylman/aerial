@@ -13,6 +13,7 @@ import (
 
 	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/pkg/pubsubtest"
 	"github.com/azylman/aerial/services/synapse/internal/config"
 	"github.com/azylman/aerial/services/synapse/internal/metrics"
 )
@@ -97,13 +98,9 @@ func TestServerEndpoints_HealthMetricsAndCoverage(t *testing.T) {
 			}
 
 			srv := NewRouterServer(fixedConfig(Config{Port: "4020"}), nil)
-			mockQ := &mockConsumerStatsQuerier{
-				stats: map[string][2]int64{
-					"AERIAL_JOBS/synapse-github": {4, 1},
-				},
-			}
+			mockQ := &pubsubtest.ConsumerStats{Pending: map[string]int64{"synapse-github": 4}, Inflight: map[string]int64{"synapse-github": 1}}
 			if tc.queueStatsErr {
-				mockQ.err = errors.New("simulated queue query error")
+				mockQ.Err = errors.New("simulated queue query error")
 			}
 			srv.queueStats = mockQ
 			srv.SetGatewayLatencyFn(func() time.Duration {
@@ -144,7 +141,7 @@ func TestConsumerStatsQuerier(t *testing.T) {
 	if srv.consumerStatsQuerier() == nil {
 		t.Errorf("expected bus stats querier when bus implements consumerStatsQuerier")
 	}
-	mockQ := &mockConsumerStatsQuerier{}
+	mockQ := &pubsubtest.ConsumerStats{}
 	srv.queueStats = mockQ
 	if srv.consumerStatsQuerier() != mockQ {
 		t.Errorf("expected queueStats override")

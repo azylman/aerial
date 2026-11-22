@@ -6,30 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nats-io/nats.go"
+	"github.com/azylman/aerial/pkg/pubsubtest"
 )
-
-// policyJobMsg records the ack decision handleJetStreamJob makes.
-type policyJobMsg struct {
-	numDelivered uint64
-	termed       bool
-	nakDelay     time.Duration
-	naked        bool
-}
-
-func (*policyJobMsg) Data() []byte           { return []byte(`{}`) }
-func (*policyJobMsg) Subject() string        { return "aerial.jobs.synapse.github" }
-func (*policyJobMsg) Header() nats.Header    { return nil }
-func (m *policyJobMsg) NumDelivered() uint64 { return m.numDelivered }
-func (*policyJobMsg) Ack() error             { return nil }
-func (m *policyJobMsg) NakWithDelay(d time.Duration) error {
-	m.naked = true
-	m.nakDelay = d
-	return nil
-}
-func (m *policyJobMsg) Term() error              { m.termed = true; return nil }
-func (*policyJobMsg) Snooze(time.Duration) error { return nil }
-func (*policyJobMsg) InProgress() error          { return nil }
 
 func TestHandleJetStreamJobRestatePolicy(t *testing.T) {
 	t.Parallel()
@@ -55,16 +33,16 @@ func TestHandleJetStreamJobRestatePolicy(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			msg := &policyJobMsg{numDelivered: tc.numDelivered}
+			msg := &pubsubtest.Message{Payload: []byte(`{}`), Subj: "aerial.jobs.synapse.github", Delivered: tc.numDelivered}
 			err := handleJetStreamJob(context.Background(), msg, maxDeliverGitHubWebhook, "github", func(struct{}) error { return tc.processErr })
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("handleJetStreamJob() err = %v, wantErr %v", err, tc.wantErr)
 			}
-			if msg.termed != tc.wantTerm {
-				t.Errorf("termed = %v, want %v", msg.termed, tc.wantTerm)
+			if msg.Termed() != tc.wantTerm {
+				t.Errorf("termed = %v, want %v", msg.Termed(), tc.wantTerm)
 			}
-			if msg.naked != tc.wantNak || msg.nakDelay != tc.wantNakDelay {
-				t.Errorf("nak = %v/%v, want %v/%v", msg.naked, msg.nakDelay, tc.wantNak, tc.wantNakDelay)
+			if nakDelay, naked := msg.NakDelay(); naked != tc.wantNak || nakDelay != tc.wantNakDelay {
+				t.Errorf("nak = %v/%v, want %v/%v", naked, nakDelay, tc.wantNak, tc.wantNakDelay)
 			}
 		})
 	}

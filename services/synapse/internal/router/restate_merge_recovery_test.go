@@ -3,16 +3,15 @@ package router
 import (
 	"context"
 	"encoding/json"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
-	"sync"
 	"testing"
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
 
 	"github.com/azylman/aerial/pkg/prwire"
+	"github.com/azylman/aerial/pkg/restateingresstest"
 	"github.com/azylman/aerial/services/synapse/internal/github"
 	"github.com/azylman/aerial/services/synapse/internal/metrics"
 )
@@ -22,56 +21,28 @@ const (
 	recoveryMerge = "353b1b0500000000000000000000000000002327"
 )
 
-// recoveryIngress is a hermetic Restate ingress: request-response calls
-// answer from bodies by handler (code from codes, default 200) and one-way
-// sends are captured with their Idempotency-Key.
-type recoveryIngress struct {
-	mu       sync.Mutex
-	bodies   map[string]string
-	codes    map[string]int
-	sendCode int
-	sends    []recoverySend
-}
+// recoveryRepo and recoveryPR are the decoded Restate object path prefixes
+// the recovery path calls: the RepoObject SHA index and the PRObject.
+const (
+	recoveryRepo = "/RepoObject/azylman/aerial/"
+	recoveryPR   = "/PRObject/azylman/aerial#2327/"
+)
 
-// recoverySend is one captured one-way send.
-type recoverySend struct {
-	handler string
-	key     string
-	body    string
-}
-
-func (in *recoveryIngress) serve(t *testing.T) string {
-	t.Helper()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		raw, _ := io.ReadAll(r.Body)
-		parts := strings.Split(strings.TrimSuffix(r.URL.EscapedPath(), "/send"), "/")
-		handler := parts[len(parts)-1]
-		in.mu.Lock()
-		defer in.mu.Unlock()
-		if strings.HasSuffix(r.URL.EscapedPath(), "/send") {
-			in.sends = append(in.sends, recoverySend{handler: handler, key: r.Header.Get("Idempotency-Key"), body: string(raw)})
-			code := http.StatusAccepted
-			if in.sendCode != 0 {
-				code = in.sendCode
-			}
-			w.WriteHeader(code)
-			return
+// recoverySends returns the one-way sends the ingress received, in order.
+func recoverySends(in *restateingresstest.Server) []restateingresstest.Call {
+	var sends []restateingresstest.Call
+	for _, c := range in.Calls() {
+		if strings.HasSuffix(c.Path, "/send") {
+			sends = append(sends, c)
 		}
-		code := http.StatusOK
-		if c, ok := in.codes[handler]; ok {
-			code = c
-		}
-		w.WriteHeader(code)
-		_, _ = w.Write([]byte(in.bodies[handler]))
-	}))
-	t.Cleanup(srv.Close)
-	return srv.URL
+	}
+	return sends
 }
 
-func (in *recoveryIngress) captured() []recoverySend {
-	in.mu.Lock()
-	defer in.mu.Unlock()
-	return append([]recoverySend(nil), in.sends...)
+// recoveryHandler is the Restate handler a send targeted.
+func recoveryHandler(c restateingresstest.Call) string {
+	path := strings.TrimSuffix(c.Path, "/send")
+	return path[strings.LastIndex(path, "/")+1:]
 }
 
 // recoveryGitHub serves the commits/<sha>/pulls lookup with code and body
@@ -150,15 +121,13 @@ func TestResolveOwnedSHAPRMergeRecovery(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			ingress := &recoveryIngress{
-				bodies:   map[string]string{"ResolvePRBySHA": tc.index, "GetDeployView": tc.view},
-				codes:    map[string]int{},
-				sendCode: tc.sendCode,
+			ingress := restateingresstest.New(t)
+			ingress.Routes = map[string]restateingresstest.Response{
+				recoveryRepo + "ResolvePRBySHA":  {Body: tc.index},
+				recoveryPR + "GetDeployView":     {Status: tc.viewCode, Body: tc.view},
+				recoveryPR + "HandleMerged/send": {Status: tc.sendCode},
 			}
-			if tc.viewCode != 0 {
-				ingress.codes["GetDeployView"] = tc.viewCode
-			}
-			cfg := Config{RestateURL: ingress.serve(t), GitHubAPIURL: recoveryGitHub(t, tc.ghCode, tc.ghBody)}
+			cfg := Config{RestateURL: ingress.URL(), GitHubAPIURL: recoveryGitHub(t, tc.ghCode, tc.ghBody)}
 			srv := NewRouterServer(fixedConfig(cfg), nil)
 			ctx := context.Background()
 			counter := metrics.RestateMergeRecoveredTotal.WithLabelValues(mergeRecoveryPathOwnedDeploy)
@@ -167,10 +136,10 @@ func TestResolveOwnedSHAPRMergeRecovery(t *testing.T) {
 			if prNum != tc.wantPR {
 				t.Errorf("resolveOwnedSHAPR() pr = %d, want %d", prNum, tc.wantPR)
 			}
-			sends := ingress.captured()
+			sends := recoverySends(ingress)
 			handlers := make([]string, 0, len(sends))
 			for _, s := range sends {
-				handlers = append(handlers, s.handler)
+				handlers = append(handlers, recoveryHandler(s))
 			}
 			if strings.Join(handlers, ",") != strings.Join(tc.wantSends, ",") {
 				t.Errorf("sends = %v, want %v", handlers, tc.wantSends)
@@ -204,27 +173,26 @@ func TestOwnedDeployEventRecoversMergeFirst(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			ingress := &recoveryIngress{
-				bodies: map[string]string{
-					"ResolvePRBySHA": `{"found":false}`,
-					"GetDeployView":  `{"found":true,"repo":"azylman/aerial","pr_number":2327,"status":"open","target_id":"100000000000000003","head_sha":"` + recoveryHead + `"}`,
-				},
+			ingress := restateingresstest.New(t)
+			ingress.Routes = map[string]restateingresstest.Response{
+				recoveryRepo + "ResolvePRBySHA": {Body: `{"found":false}`},
+				recoveryPR + "GetDeployView":    {Body: `{"found":true,"repo":"azylman/aerial","pr_number":2327,"status":"open","target_id":"100000000000000003","head_sha":"` + recoveryHead + `"}`},
 			}
-			cfg := Config{RestateURL: ingress.serve(t), GitHubAPIURL: recoveryGitHub(t, 200, mergedPR)}
+			cfg := Config{RestateURL: ingress.URL(), GitHubAPIURL: recoveryGitHub(t, 200, mergedPR)}
 			srv := newTestRouter(cfg, nil, &mockOutboundDispatcher{}, &mockEventBus{})
 			ctx := context.Background()
 			if _, err := srv.processOwnedDeployEvent(ctx, tc.evt); err != nil {
 				t.Fatalf("processOwnedDeployEvent() err = %v", err)
 			}
-			sends := ingress.captured()
-			if len(sends) != 2 || sends[1].handler != tc.wantSecond {
+			sends := recoverySends(ingress)
+			if len(sends) != 2 || recoveryHandler(sends[1]) != tc.wantSecond {
 				t.Fatalf("sends = %+v, want the recovered merge then the deploy event", sends)
 			}
-			if sends[0].handler != tc.wantFirst || !strings.Contains(sends[0].key, tc.wantKeyPart) {
-				t.Errorf("first send = %s key %q, want %s keyed %q", sends[0].handler, sends[0].key, tc.wantFirst, tc.wantKeyPart)
+			if recoveryHandler(sends[0]) != tc.wantFirst || !strings.Contains(sends[0].IdempotencyKey, tc.wantKeyPart) {
+				t.Errorf("first send = %s key %q, want %s keyed %q", recoveryHandler(sends[0]), sends[0].IdempotencyKey, tc.wantFirst, tc.wantKeyPart)
 			}
 			var ev prwire.PREvent
-			if err := json.Unmarshal([]byte(sends[0].body), &ev); err != nil {
+			if err := json.Unmarshal(sends[0].Body, &ev); err != nil {
 				t.Fatal(err)
 			}
 			if ev.HeadSHA != recoveryHead || ev.MergeSHA != recoveryMerge {

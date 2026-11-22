@@ -11,25 +11,10 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
-
-	"github.com/nats-io/nats.go"
 
 	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/pkg/pubsubtest"
 )
-
-// acceptJobMsg is one queued JetStream job replayed into its consumer.
-type acceptJobMsg struct{ data []byte }
-
-func (m *acceptJobMsg) Data() []byte                   { return m.data }
-func (*acceptJobMsg) Subject() string                  { return "aerial.jobs.synapse" }
-func (*acceptJobMsg) Header() nats.Header              { return nil }
-func (*acceptJobMsg) NumDelivered() uint64             { return 1 }
-func (*acceptJobMsg) Ack() error                       { return nil }
-func (*acceptJobMsg) NakWithDelay(time.Duration) error { return nil }
-func (*acceptJobMsg) Term() error                      { return nil }
-func (*acceptJobMsg) Snooze(time.Duration) error       { return nil }
-func (*acceptJobMsg) InProgress() error                { return nil }
 
 // acceptBus records every publish: queued webhook jobs and aerial.pr.>
 // lifecycle facts.
@@ -71,8 +56,8 @@ func (b *acceptBus) factCount() int {
 
 // parityAcceptStep reports whether a golden synapse input is a real accept
 // point (register, GitHub webhook, deploy alert, watcher observation).
-// Rollout, promotion and attempt-failure steps call legacy internals
-// directly; their restate-owned twins are reached through the workflow_run
+// Rollout, promotion and attempt-failure steps have no synapse accept
+// point; their restate-owned twins are reached through the workflow_run
 // webhook and are pinned by the restate_owned_deploy tests.
 func parityAcceptStep(kind string) bool {
 	return slices.Contains([]string{"register", "github", "deploy", "kustomization"}, kind)
@@ -244,9 +229,9 @@ func replayAcceptJob(ctx context.Context, t *testing.T, srv *RouterServer, job a
 	}
 	switch job.(type) {
 	case GitHubWebhookArgs:
-		err = srv.HandleGitHubJob(ctx, &acceptJobMsg{data: data})
+		err = srv.HandleGitHubJob(ctx, &pubsubtest.Message{Payload: data, Subj: "aerial.jobs.synapse", Delivered: 1})
 	case DeployWebhookArgs:
-		err = srv.HandleDeployJob(ctx, &acceptJobMsg{data: data})
+		err = srv.HandleDeployJob(ctx, &pubsubtest.Message{Payload: data, Subj: "aerial.jobs.synapse", Delivered: 1})
 	}
 	if err != nil {
 		t.Fatalf("replay job: %v", err)

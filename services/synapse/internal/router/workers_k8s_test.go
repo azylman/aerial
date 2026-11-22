@@ -8,21 +8,6 @@ import (
 	"testing"
 )
 
-type mockConsumerStatsQuerier struct {
-	stats map[string][2]int64
-	err   error
-}
-
-func (m *mockConsumerStatsQuerier) ConsumerStats(ctx context.Context, stream, consumer string) (int64, int64, error) {
-	if m.err != nil {
-		return 0, 0, m.err
-	}
-	if v, ok := m.stats[stream+"/"+consumer]; ok {
-		return v[0], v[1], nil
-	}
-	return 0, 0, nil
-}
-
 // kubeRoute is a canned kube API response keyed by "METHOD path" in a kubeFixture.
 func TestDefaultOutboundDispatcher_DiscoverImageKustomizations(t *testing.T) {
 	t.Parallel()
