@@ -41,8 +41,7 @@ type Config struct {
 	GitHubOwner string
 	// GitHubAppID and GitHubAppInstallationID identify the GitHub App
 	// (non-secret): github_app_id / github_app_installation_id from the
-	// service YAML, falling back to the GITHUB_APP_ID /
-	// GITHUB_APP_INSTALLATION_ID env while that is transitional. The token
+	// service YAML, with no env fallback. The token
 	// source is built once at startup, so both require a restart.
 	GitHubAppID             string
 	GitHubAppInstallationID string
@@ -102,8 +101,7 @@ type RouterYAMLConfig struct {
 	// request. Changing it requires a restart.
 	GitHubOwner string `yaml:"github_owner"`
 	// GitHubAppID and GitHubAppInstallationID are the GitHub App's numeric
-	// IDs (not secrets; the private key stays env). Empty falls back to the
-	// GITHUB_APP_ID / GITHUB_APP_INSTALLATION_ID env.
+	// IDs (not secrets; the private key stays env). Empty means PAT auth.
 	GitHubAppID             string `yaml:"github_app_id"`
 	GitHubAppInstallationID string `yaml:"github_app_installation_id"`
 }
@@ -515,8 +513,8 @@ func buildConfig(fileCfg RouterYAMLConfig) Config {
 		GitHubCredential:        ghCredential,
 		GitHubWebhookSecret:     strings.TrimSpace(os.Getenv("GITHUB_WEBHOOK_SECRET")),
 		GitHubOwner:             owner,
-		GitHubAppID:             strutil.FirstNonEmpty(strings.TrimSpace(fileCfg.GitHubAppID), strings.TrimSpace(os.Getenv("GITHUB_APP_ID"))),
-		GitHubAppInstallationID: strutil.FirstNonEmpty(strings.TrimSpace(fileCfg.GitHubAppInstallationID), strings.TrimSpace(os.Getenv("GITHUB_APP_INSTALLATION_ID"))),
+		GitHubAppID:             strings.TrimSpace(fileCfg.GitHubAppID),
+		GitHubAppInstallationID: strings.TrimSpace(fileCfg.GitHubAppInstallationID),
 		BrainURL:                eriURL,
 		EriURL:                  eriURL,
 		NATSURL:                 strutil.FirstNonEmpty(os.Getenv("NATS_URL"), fileCfg.NATSURL, "nats://nats.aerial:4222"),
