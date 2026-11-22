@@ -59,6 +59,9 @@ type processDeployEventOwnedCase struct {
 	wantBodies  []string
 	wantEffects int
 	wantErr     bool
+	// wantBusEvent is the exact "source:event_type" trigger list fired on
+	// the event bus ("" when no trigger fires).
+	wantBusEvent string
 }
 
 func processDeployEventOwnedCases() []processDeployEventOwnedCase {
@@ -98,24 +101,24 @@ func processDeployEventOwnedCases() []processDeployEventOwnedCase {
 			wantBodies: []string{`"job_name":"eri"`},
 		},
 		{
-			name: "sync with expected jobs records them and publishes sync_success", evt: DeployEvent{Event: eventSyncSuccess, Repo: cfgRepo, PRNumber: 42, CommitSHA: ownedMerge, ExpectedJobs: []string{"eri"}},
+			name: "sync with expected jobs records them and publishes sync_success", wantBusEvent: "flux:sync_success", evt: DeployEvent{Event: eventSyncSuccess, Repo: cfgRepo, PRNumber: 42, CommitSHA: ownedMerge, ExpectedJobs: []string{"eri"}},
 			bodies:     map[string]string{"GetDeployView": deployViewBody("aerial-config", prMerged, "")},
 			wantPaths:  []string{cfgPRKey + "HandleDeployObserved/send", cfgPRKey + "HandleDeployObserved/send"},
 			wantBodies: []string{`"expected_jobs":["eri"]`, `"event":"sync_success"`},
 		},
 		{
-			name: "sync without expected jobs defers to the watcher", evt: DeployEvent{Event: eventSyncSuccess, Repo: cfgRepo, PRNumber: 42, CommitSHA: ownedMerge},
+			name: "sync without expected jobs defers to the watcher", wantBusEvent: "flux:sync_success", evt: DeployEvent{Event: eventSyncSuccess, Repo: cfgRepo, PRNumber: 42, CommitSHA: ownedMerge},
 			bodies: map[string]string{"GetDeployView": deployViewBody("aerial-config", prMerged, "")}, repoRefs: cfgRefs,
 			wantPaths: []string{cfgPRKey + "HandleKustomizationRequested/send"},
 		},
 		{
-			name: "sync of a repo without flux completes with git-sync", evt: DeployEvent{Event: eventSyncSuccess, Repo: cfgRepo, PRNumber: 42, CommitSHA: ownedMerge},
+			name: "sync of a repo without flux completes with git-sync", wantBusEvent: "flux:sync_success", evt: DeployEvent{Event: eventSyncSuccess, Repo: cfgRepo, PRNumber: 42, CommitSHA: ownedMerge},
 			bodies:     map[string]string{"GetDeployView": deployViewBody("aerial-config", prMerged, "")},
 			wantPaths:  []string{cfgPRKey + "HandleDeploySuccess/send"},
 			wantBodies: []string{`"job_name":"git-sync"`},
 		},
 		{
-			name: "sync failure publishes through the deploy observation", evt: DeployEvent{Event: eventSyncFailed, Repo: cfgRepo, PRNumber: 42, CommitSHA: ownedMerge},
+			name: "sync failure publishes through the deploy observation", wantBusEvent: "flux:sync_failed", evt: DeployEvent{Event: eventSyncFailed, Repo: cfgRepo, PRNumber: 42, CommitSHA: ownedMerge},
 			bodies:     map[string]string{"GetDeployView": deployViewBody("aerial-config", prMerged, "")},
 			wantPaths:  []string{cfgPRKey + "HandleDeployObserved/send"},
 			wantBodies: []string{`"event":"sync_failed"`},
@@ -162,7 +165,7 @@ func processDeployEventOwnedCases() []processDeployEventOwnedCase {
 			bodies: map[string]string{"GetDeployView": `{"found":false}`}, repoRefs: cfgRefs, wantEffects: 1,
 		},
 		{
-			name: "pr-less sync failure keeps the stateless system alert", evt: DeployEvent{Event: eventSyncFailed, Repo: cfgRepo, Details: "fetch failed"},
+			name: "pr-less sync failure keeps the stateless system alert", wantBusEvent: "flux:sync_failed", evt: DeployEvent{Event: eventSyncFailed, Repo: cfgRepo, Details: "fetch failed"},
 			wantEffects: 3,
 		},
 		{
@@ -178,10 +181,10 @@ func processDeployEventOwnedCases() []processDeployEventOwnedCase {
 			wantEffects: 3,
 		},
 		{
-			name: "pr-less sync success does nothing", evt: DeployEvent{Event: eventSyncSuccess, Repo: cfgRepo},
+			name: "pr-less sync success only fires the flux trigger", wantBusEvent: "flux:sync_success", evt: DeployEvent{Event: eventSyncSuccess, Repo: cfgRepo},
 		},
 		{
-			name: "sync deferral discovery failure retries", evt: DeployEvent{Event: eventSyncSuccess, Repo: cfgRepo, PRNumber: 42, CommitSHA: ownedMerge},
+			name: "sync deferral discovery failure retries", wantBusEvent: "flux:sync_success", evt: DeployEvent{Event: eventSyncSuccess, Repo: cfgRepo, PRNumber: 42, CommitSHA: ownedMerge},
 			bodies: map[string]string{"GetDeployView": deployViewBody("aerial-config", prMerged, "")}, repoRefs: map[string][]fluxKustomizationRef{"discover-error": nil}, wantErr: true,
 		},
 	}
@@ -215,6 +218,9 @@ func TestProcessDeployEventRestateOwned(t *testing.T) {
 				t.Fatalf("ProcessDeployEvent() err = %v, wantErr %v", err, tc.wantErr)
 			}
 			assertOwnedDeploy(t, h, tc.wantPaths, tc.wantBodies, tc.wantEffects)
+			if got := h.triggerEvents(); got != tc.wantBusEvent {
+				t.Errorf("trigger events = %q, want %q", got, tc.wantBusEvent)
+			}
 		})
 	}
 }

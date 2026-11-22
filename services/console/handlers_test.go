@@ -2,10 +2,10 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,613 +15,194 @@ import (
 	"github.com/azylman/aerial/pkg/k8sauth"
 )
 
-func newFactsMockBrain(capturedQuery *url.Values) *httptest.Server {
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		*capturedQuery = r.URL.Query()
-		w.Header().Set("Content-Type", "application/json")
-		if r.URL.Path != "/facts" {
-			http.NotFound(w, r)
-			return
+// consoleRouteCase is one request through the production mux: cfg wires the upstreams, the
+// row asserts status plus exact body (wantBody) or required/forbidden substrings.
+type consoleRouteCase struct {
+	name         string
+	cfg          ConsoleConfig
+	method       string
+	target       string
+	wantStatus   int
+	wantBody     string
+	wantContains []string
+	wantMissing  []string
+}
+
+func runConsoleRouteCase(t *testing.T, tc consoleRouteCase) {
+	t.Helper()
+	rr := httptest.NewRecorder()
+	SetupConsoleMux(tc.cfg, nil).ServeHTTP(rr, httptest.NewRequest(tc.method, tc.target, http.NoBody))
+	body := strings.TrimSpace(rr.Body.String())
+	if rr.Code != tc.wantStatus {
+		t.Fatalf("status = %d, want %d (body: %s)", rr.Code, tc.wantStatus, body)
+	}
+	if tc.wantBody != "" && body != tc.wantBody {
+		t.Errorf("body mismatch\n got: %s\nwant: %s", body, tc.wantBody)
+	}
+	for _, sub := range tc.wantContains {
+		if !strings.Contains(body, sub) {
+			t.Errorf("body %s missing %q", body, sub)
 		}
-		if capturedQuery.Get("q") == "error500" {
+	}
+	for _, sub := range tc.wantMissing {
+		if strings.Contains(body, sub) {
+			t.Errorf("body %s must not contain %q", body, sub)
+		}
+	}
+}
+
+// newFactsUpstream fakes the memory /facts endpoint. q picks the error and nil-facts branches;
+// every other request echoes the forwarded query as the fact text so rows assert what reached
+// upstream without shared capture state.
+func newFactsUpstream(t *testing.T) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		q := r.URL.Query()
+		switch {
+		case r.URL.Path != "/facts":
+			http.NotFound(w, r)
+		case q.Get("q") == "error500":
 			w.WriteHeader(http.StatusInternalServerError)
 			_, _ = w.Write([]byte(`{"error":"db failure"}`))
-			return
-		}
-		if capturedQuery.Get("q") == "badjson" {
-			w.WriteHeader(http.StatusOK)
+		case q.Get("q") == "badjson":
 			_, _ = w.Write([]byte(`not-valid-json`))
-			return
+		case q.Get("q") == "nilfacts":
+			_, _ = w.Write([]byte(`{"status":"ok","facts":null,"total":0,"limit":10,"offset":5}`))
+		case q.Get("q") == "dark mode":
+			_, _ = w.Write([]byte(`{"facts":[{"id":1,"fact_text":"User prefers dark mode","reinforce_count":2,"last_reinforced_at":"2026-01-02T03:04:05Z","created_at":"2026-01-01T03:04:05Z"}],"total":1,"limit":25}`))
+		default:
+			_, _ = fmt.Fprintf(w, `{"facts":[{"id":1,"fact_text":%q,"reinforce_count":1,"created_at":"2026-01-01T03:04:05Z","agent":"aerial"}],"total":120,"limit":50}`, "query:"+r.URL.RawQuery)
 		}
-		if capturedQuery.Get("limit") == "50" && capturedQuery.Get("agent") == "aerial" {
-			_ = json.NewEncoder(w).Encode(FactsAPIResponse{
-				Facts: []FactItem{
-					{
-						ID:             1,
-						FactText:       "Fact 1",
-						ReinforceCount: 1,
-						CreatedAt:      time.Now().UTC(),
-						Agent:          "aerial",
-					},
-				},
-				Total:  120,
-				Limit:  50,
-				Offset: 0,
-			})
-			return
-		}
-		if capturedQuery.Get("limit") == "10" && capturedQuery.Get("offset") == "5" {
-			_ = json.NewEncoder(w).Encode(FactsAPIResponse{
-				Facts:  nil,
-				Total:  0,
-				Limit:  10,
-				Offset: 5,
-				Status: "ok",
-			})
-			return
-		}
-		if capturedQuery.Get("limit") == "25" && capturedQuery.Get("q") == "dark mode" {
-			_ = json.NewEncoder(w).Encode(FactsAPIResponse{
-				Facts: []FactItem{
-					{
-						ID:               1,
-						FactText:         "User prefers dark mode",
-						ReinforceCount:   2,
-						LastReinforcedAt: time.Now().UTC(),
-						CreatedAt:        time.Now().UTC(),
-					},
-				},
-				Total:  1,
-				Limit:  25,
-				Offset: 0,
-			})
-			return
-		}
-		_ = json.NewEncoder(w).Encode(FactsAPIResponse{
-			Facts: []FactItem{
-				{
-					ID:             1,
-					FactText:       "Fact 1",
-					ReinforceCount: 1,
-					CreatedAt:      time.Now().UTC(),
-				},
-			},
-			Total:  1,
-			Limit:  0,
-			Offset: 0,
-		})
 	}))
+	t.Cleanup(srv.Close)
+	return srv
 }
 
-func TestFactsHandler_TableDriven(t *testing.T) {
-	var capturedQuery url.Values
-	mockBrain := newFactsMockBrain(&capturedQuery)
-	defer mockBrain.Close()
+func TestFactsHandler(t *testing.T) {
+	t.Parallel()
+	mock := ConsoleConfig{BrainURL: newFactsUpstream(t).URL}
+	offline := ConsoleConfig{BrainURL: downServerURL(t)}
+	invalid := ConsoleConfig{BrainURL: "http://brain:\x7f8080"}
+	longQ := strings.Repeat("searchterm", 10)
 
-	offlineURL := downServerURL(t)
-
-	tests := []factsHandlerTestCase{
-		{
-			name:           "Success_QueryFilter",
-			brainURL:       mockBrain.URL,
-			method:         http.MethodGet,
-			target:         "/api/facts?limit=25&q=dark%20mode",
-			wantStatus:     http.StatusOK,
-			wantBodySubstr: []string{"User prefers dark mode", `"last_reinforced_at":`},
-		},
-		{
-			name:           "Success_AgentFilter_Other",
-			brainURL:       mockBrain.URL,
-			method:         http.MethodGet,
-			target:         "/api/facts?agent=agent-alpha",
-			wantStatus:     http.StatusOK,
-			wantBodySubstr: []string{`"facts":[]`},
-		},
-		{
-			name:           "Success_PreservesUpstreamTotalLargerThanPage",
-			brainURL:       mockBrain.URL,
-			method:         http.MethodGet,
-			target:         "/api/facts?limit=50&agent=aerial",
-			wantStatus:     http.StatusOK,
-			wantBodySubstr: []string{"Fact 1", `"total":120`},
-		},
-		{
-			name:               "Success_UnlimitedDefault",
-			brainURL:           mockBrain.URL,
-			method:             http.MethodGet,
-			target:             "/api/facts",
-			wantStatus:         http.StatusOK,
-			wantBodyNotSubstr:  []string{`"last_reinforced_at"`},
-			wantForwardedLimit: "none",
-		},
-		{
-			name:               "Success_HighLimit",
-			brainURL:           mockBrain.URL,
-			method:             http.MethodGet,
-			target:             "/api/facts?limit=500",
-			wantStatus:         http.StatusOK,
-			wantForwardedLimit: "500",
-		},
-		{
-			name:           "Success_AllParamsAndNilFacts",
-			brainURL:       mockBrain.URL,
-			method:         http.MethodGet,
-			target:         "/api/facts?limit=10&offset=5&category=ignored&q=" + strings.Repeat("searchterm", 10),
-			wantStatus:     http.StatusOK,
-			wantBodySubstr: []string{`"facts":[]`},
-			wantMaxQRunes:  64,
-		},
-		{
-			name:           "DegradedFallback",
-			brainURL:       offlineURL,
-			method:         http.MethodGet,
-			target:         "/api/facts",
-			wantStatus:     http.StatusServiceUnavailable,
-			wantBodySubstr: []string{`"status":"degraded"`, `"facts":[]`},
-		},
-		{
-			name:       "Upstream500",
-			brainURL:   mockBrain.URL,
-			method:     http.MethodGet,
-			target:     "/api/facts?q=error500",
-			wantStatus: http.StatusInternalServerError,
-		},
-		{
-			name:       "BadGateway_InvalidJSON",
-			brainURL:   mockBrain.URL,
-			method:     http.MethodGet,
-			target:     "/api/facts?q=badjson",
-			wantStatus: http.StatusBadGateway,
-		},
-		{
-			name:       "MethodNotAllowed",
-			brainURL:   mockBrain.URL,
-			method:     http.MethodPost,
-			target:     "/api/facts",
-			wantStatus: http.StatusMethodNotAllowed,
-		},
-		{
-			name:       "InvalidUpstreamURL",
-			brainURL:   "http://brain:\x7f8080",
-			method:     http.MethodGet,
-			target:     "/api/facts",
-			wantStatus: http.StatusInternalServerError,
-		},
+	tests := []consoleRouteCase{
+		{name: "QueryFilter", cfg: mock, method: http.MethodGet, target: "/api/facts?limit=25&q=dark%20mode", wantStatus: http.StatusOK, wantContains: []string{"User prefers dark mode", `"last_reinforced_at":`}},
+		{name: "AgentFilter_Other", cfg: mock, method: http.MethodGet, target: "/api/facts?agent=agent-alpha", wantStatus: http.StatusOK, wantContains: []string{`"facts":[]`}},
+		{name: "PreservesUpstreamTotalLargerThanPage", cfg: mock, method: http.MethodGet, target: "/api/facts?limit=50&agent=aerial", wantStatus: http.StatusOK, wantContains: []string{`"fact_text":"query:agent=aerial\u0026limit=50"`, `"total":120`}},
+		{name: "UnlimitedDefault_ForwardsNoLimit", cfg: mock, method: http.MethodGet, target: "/api/facts", wantStatus: http.StatusOK, wantBody: `{"facts":[{"id":1,"fact_text":"query:","reinforce_count":1,"created_at":"2026-01-01T03:04:05Z","agent":"aerial"}],"total":120,"limit":50,"offset":0}`},
+		{name: "ConsolePrefix_HighLimitForwarded", cfg: mock, method: http.MethodGet, target: "/console/api/facts?limit=500", wantStatus: http.StatusOK, wantContains: []string{`"fact_text":"query:limit=500"`}},
+		{name: "QueryTruncatedTo64Runes", cfg: mock, method: http.MethodGet, target: "/api/facts?q=" + longQ, wantStatus: http.StatusOK, wantContains: []string{`"fact_text":"query:q=` + longQ[:64] + `"`}},
+		{name: "AllParamsAndNilFacts", cfg: mock, method: http.MethodGet, target: "/api/facts?limit=10&offset=5&category=ignored&q=nilfacts", wantStatus: http.StatusOK, wantBody: `{"facts":[],"total":0,"limit":10,"offset":5,"status":"ok"}`},
+		{name: "DegradedFallback", cfg: offline, method: http.MethodGet, target: "/api/facts", wantStatus: http.StatusServiceUnavailable, wantContains: []string{`"status":"degraded"`, `"facts":[]`}},
+		{name: "Upstream500", cfg: mock, method: http.MethodGet, target: "/api/facts?q=error500", wantStatus: http.StatusInternalServerError},
+		{name: "BadGateway_InvalidJSON", cfg: mock, method: http.MethodGet, target: "/api/facts?q=badjson", wantStatus: http.StatusBadGateway},
+		{name: "MethodNotAllowed", cfg: mock, method: http.MethodPost, target: "/api/facts", wantStatus: http.StatusMethodNotAllowed},
+		{name: "InvalidUpstreamURL", cfg: invalid, method: http.MethodGet, target: "/api/facts", wantStatus: http.StatusInternalServerError},
 	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			runFactsHandlerCase(t, tt, &capturedQuery)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			runConsoleRouteCase(t, tc)
 		})
 	}
 }
 
-type factsHandlerTestCase struct {
-	name               string
-	brainURL           string
-	method             string
-	target             string
-	wantStatus         int
-	wantBodySubstr     []string
-	wantBodyNotSubstr  []string
-	wantForwardedLimit string
-	wantMaxQRunes      int
-}
+const (
+	schedulesUpstreamBody = `{"status":"ok","summary":{"total_active":3,"cron_count":2,"one_shot_count":1,"total_runs_24h":15,"success_rate_24h":93.3},` +
+		`"crons":[{"id":"cron-1","channel_id":"chan-1","title_prefix":"Morning Brief","cron_expr":"0 9 * * *","prompt":"Generate morning brief","enabled":true,"agent":"aerial"},` +
+		`{"id":"cron-2","channel_id":"chan-2","title_prefix":"Alpha Brief","cron_expr":"0 10 * * *","prompt":"Generate alpha brief","enabled":true,"agent":"agent-alpha"}],` +
+		`"one_shots":[{"id":"oneshot-1","thread_id":"thread-1","prompt":"Remind about tea","run_at":"2026-01-02T03:04:05Z","agent":"aerial"}]}`
+	scheduleRunsUpstreamFormat = `{"status":"ok","total":42,"limit":10,"offset":5,"runs":[` +
+		`{"id":"cron-brief-101","schedule_id":"cron-1","schedule_type":"cron","prompt":%[1]q,"status":"success","started_at":"2026-01-02T03:04:05Z","duration_ms":1250,"agent":"aerial"},` +
+		`{"id":"cron-brief-102","schedule_id":"cron-2","schedule_type":"cron","prompt":%[1]q,"status":"success","started_at":"2026-01-02T03:04:05Z","duration_ms":1100,"agent":"agent-alpha"}]}`
+)
 
-func runFactsHandlerCase(t *testing.T, tt factsHandlerTestCase, capturedQuery *url.Values) {
+// newSchedulesUpstream fakes haro's /schedules and /schedules/runs. A base-path segment picks
+// the error and nil-slice branches; runs echo the forwarded query as their prompt.
+func newSchedulesUpstream(t *testing.T) *httptest.Server {
 	t.Helper()
-	h := factsHandler(tt.brainURL)
-	req := httptest.NewRequest(tt.method, tt.target, http.NoBody)
-	rr := httptest.NewRecorder()
-	h(rr, req)
-	if rr.Code != tt.wantStatus {
-		t.Fatalf("expected status %d, got %d", tt.wantStatus, rr.Code)
-	}
-	bodyStr := rr.Body.String()
-	for _, sub := range tt.wantBodySubstr {
-		if !strings.Contains(bodyStr, sub) {
-			t.Errorf("expected body to contain %q, got: %s", sub, bodyStr)
-		}
-	}
-	for _, sub := range tt.wantBodyNotSubstr {
-		if strings.Contains(bodyStr, sub) {
-			t.Errorf("expected body NOT to contain %q, got: %s", sub, bodyStr)
-		}
-	}
-	if tt.wantForwardedLimit != "" {
-		if tt.wantForwardedLimit == "none" {
-			if capturedQuery.Get("limit") != "" {
-				t.Errorf("expected empty limit forwarded, got %q", capturedQuery.Get("limit"))
-			}
-		} else if capturedQuery.Get("limit") != tt.wantForwardedLimit {
-			t.Errorf("expected limit=%s forwarded, got %q", tt.wantForwardedLimit, capturedQuery.Get("limit"))
-		}
-	}
-	if tt.wantMaxQRunes > 0 {
-		gotQ := capturedQuery.Get("q")
-		if len([]rune(gotQ)) > tt.wantMaxQRunes {
-			t.Errorf("expected q truncated to %d runes, got len %d: %q", tt.wantMaxQRunes, len([]rune(gotQ)), gotQ)
-		}
-	}
-}
-
-type schedulesAndRunsTestCase struct {
-	name           string
-	isRuns         bool
-	useMux         bool
-	haroURL        string
-	brainURL       string
-	method         string
-	target         string
-	wantStatus     int
-	wantBodySubstr []string
-}
-
-func schedulesAndRunsTestCases(mockBrainURL, mockHaroURL, offlineURL string) []schedulesAndRunsTestCase {
-	cases := schedulesAndRunsPrimaryCases(mockBrainURL, offlineURL)
-	return append(cases, schedulesAndRunsSecondaryCases(mockBrainURL, mockHaroURL, offlineURL)...)
-}
-
-func schedulesAndRunsPrimaryCases(mockBrainURL, offlineURL string) []schedulesAndRunsTestCase {
-	return []schedulesAndRunsTestCase{
-		{
-			name:           "Schedules_Success",
-			brainURL:       mockBrainURL,
-			method:         "GET",
-			target:         "/api/schedules",
-			wantStatus:     http.StatusOK,
-			wantBodySubstr: []string{"Morning Brief", "Remind about tea", `"total_active":3`},
-		},
-		{
-			name:           "Schedules_AgentFilter_Aerial",
-			brainURL:       mockBrainURL,
-			method:         "GET",
-			target:         "/api/schedules?agent=aerial",
-			wantStatus:     http.StatusOK,
-			wantBodySubstr: []string{"Morning Brief", "Remind about tea", `"total_active":2`},
-		},
-		{
-			name:           "Schedules_AgentFilter_Other",
-			brainURL:       mockBrainURL,
-			method:         "GET",
-			target:         "/api/schedules?agent=agent-alpha",
-			wantStatus:     http.StatusOK,
-			wantBodySubstr: []string{"Alpha Brief", `"total_active":1`},
-		},
-		{
-			name:           "Schedules_SuccessParams_NilSlices",
-			brainURL:       mockBrainURL + "/nil",
-			method:         "GET",
-			target:         "/api/schedules?limit=5&offset=2&active=true&q=weather",
-			wantStatus:     http.StatusOK,
-			wantBodySubstr: []string{`"crons":[]`, `"one_shots":[]`},
-		},
-		{
-			name:       "Schedules_ActiveFalse",
-			brainURL:   mockBrainURL,
-			method:     "GET",
-			target:     "/api/schedules?active=false",
-			wantStatus: http.StatusOK,
-		},
-		{
-			name:           "Schedules_DegradedFallback",
-			brainURL:       offlineURL,
-			method:         "GET",
-			target:         "/api/schedules",
-			wantStatus:     http.StatusServiceUnavailable,
-			wantBodySubstr: []string{`"status":"degraded"`, "Brain service unreachable. Retrying...", `"crons":[]`, `"one_shots":[]`},
-		},
-		{
-			name:       "Schedules_Upstream500",
-			brainURL:   mockBrainURL + "/error500",
-			method:     "GET",
-			target:     "/api/schedules",
-			wantStatus: http.StatusInternalServerError,
-		},
-		{
-			name:       "Schedules_BadGateway",
-			brainURL:   mockBrainURL + "/badjson",
-			method:     "GET",
-			target:     "/api/schedules",
-			wantStatus: http.StatusBadGateway,
-		},
-		{
-			name:       "Schedules_MethodNotAllowed",
-			brainURL:   offlineURL,
-			method:     "POST",
-			target:     "/api/schedules",
-			wantStatus: http.StatusMethodNotAllowed,
-		},
-		{
-			name:       "Schedules_InvalidUpstreamURL",
-			brainURL:   "http://brain:\x7f8080",
-			method:     "GET",
-			target:     "/api/schedules",
-			wantStatus: http.StatusInternalServerError,
-		},
-		{
-			name:           "ScheduleRuns_Success",
-			isRuns:         true,
-			brainURL:       mockBrainURL,
-			method:         "GET",
-			target:         "/api/schedules/runs?limit=10&offset=5&schedule_id=cron-1&status=success",
-			wantStatus:     http.StatusOK,
-			wantBodySubstr: []string{"cron-brief-101", `"total":42`, `"duration_ms":1250`},
-		},
-		{
-			name:           "ScheduleRuns_AgentFilter_Aerial",
-			isRuns:         true,
-			brainURL:       mockBrainURL,
-			method:         "GET",
-			target:         "/api/schedules/runs?limit=10&offset=5&schedule_id=cron-1&status=success&agent=aerial",
-			wantStatus:     http.StatusOK,
-			wantBodySubstr: []string{"cron-brief-101", `"total":42`},
-		},
-		{
-			name:           "ScheduleRuns_AgentFilter_Other",
-			isRuns:         true,
-			brainURL:       mockBrainURL,
-			method:         "GET",
-			target:         "/api/schedules/runs?limit=10&offset=5&schedule_id=cron-1&status=success&agent=agent-alpha",
-			wantStatus:     http.StatusOK,
-			wantBodySubstr: []string{"cron-brief-102", `"total":42`},
-		},
-		{
-			name:           "ScheduleRuns_SuccessParams_NilSlices",
-			isRuns:         true,
-			brainURL:       mockBrainURL + "/nil/runs",
-			method:         "GET",
-			target:         "/api/schedules/runs?limit=10&offset=5&status=SUCCESS&schedule_id=42",
-			wantStatus:     http.StatusOK,
-			wantBodySubstr: []string{`"runs":[]`},
-		},
-	}
-}
-
-func schedulesAndRunsSecondaryCases(mockBrainURL, mockHaroURL, offlineURL string) []schedulesAndRunsTestCase {
-	return []schedulesAndRunsTestCase{
-		{
-			name:           "ScheduleRuns_DegradedFallback",
-			isRuns:         true,
-			brainURL:       offlineURL,
-			method:         "GET",
-			target:         "/api/schedules/runs?limit=20&offset=10",
-			wantStatus:     http.StatusServiceUnavailable,
-			wantBodySubstr: []string{`"status":"degraded"`, "Brain service unreachable. Retrying...", `"runs":[]`},
-		},
-		{
-			name:       "ScheduleRuns_Upstream500",
-			isRuns:     true,
-			brainURL:   mockBrainURL + "/error500",
-			method:     "GET",
-			target:     "/api/schedules/runs",
-			wantStatus: http.StatusInternalServerError,
-		},
-		{
-			name:       "ScheduleRuns_BadGateway",
-			isRuns:     true,
-			brainURL:   mockBrainURL + "/badjson",
-			method:     "GET",
-			target:     "/api/schedules/runs",
-			wantStatus: http.StatusBadGateway,
-		},
-		{
-			name:       "ScheduleRuns_MethodNotAllowed",
-			isRuns:     true,
-			brainURL:   offlineURL,
-			method:     "DELETE",
-			target:     "/api/schedules/runs",
-			wantStatus: http.StatusMethodNotAllowed,
-		},
-		{
-			name:       "ScheduleRuns_InvalidUpstreamURL",
-			isRuns:     true,
-			brainURL:   "http://brain:\x7f8080",
-			method:     "GET",
-			target:     "/api/schedules/runs",
-			wantStatus: http.StatusInternalServerError,
-		},
-		{
-			name:           "SetupConsoleMux_Schedules_RoutesToHaro",
-			useMux:         true,
-			brainURL:       offlineURL,
-			haroURL:        mockHaroURL,
-			method:         "GET",
-			target:         "/api/schedules",
-			wantStatus:     http.StatusOK,
-			wantBodySubstr: []string{"Haro Schedule", `"total_active":1`},
-		},
-		{
-			name:           "SetupConsoleMux_ConsoleSchedules_RoutesToHaro",
-			useMux:         true,
-			brainURL:       offlineURL,
-			haroURL:        mockHaroURL,
-			method:         "GET",
-			target:         "/console/api/schedules",
-			wantStatus:     http.StatusOK,
-			wantBodySubstr: []string{"Haro Schedule", `"total_active":1`},
-		},
-		{
-			name:           "SetupConsoleMux_ScheduleRuns_RoutesToHaro",
-			useMux:         true,
-			isRuns:         true,
-			brainURL:       offlineURL,
-			haroURL:        mockHaroURL,
-			method:         "GET",
-			target:         "/api/schedules/runs?limit=10&offset=5&schedule_id=cron-1&status=success",
-			wantStatus:     http.StatusOK,
-			wantBodySubstr: []string{"Haro Brief #101", `"total":42`},
-		},
-		{
-			name:           "SetupConsoleMux_ConsoleScheduleRuns_RoutesToHaro",
-			useMux:         true,
-			isRuns:         true,
-			brainURL:       offlineURL,
-			haroURL:        mockHaroURL,
-			method:         "GET",
-			target:         "/console/api/schedules/runs?limit=10&offset=5&schedule_id=cron-1&status=success",
-			wantStatus:     http.StatusOK,
-			wantBodySubstr: []string{"Haro Brief #101", `"total":42`},
-		},
-		{
-			name:           "SetupConsoleMux_Schedules_FallbackToBrainWhenHaroEmpty",
-			useMux:         true,
-			brainURL:       mockBrainURL,
-			haroURL:        "",
-			method:         "GET",
-			target:         "/api/schedules",
-			wantStatus:     http.StatusOK,
-			wantBodySubstr: []string{"Morning Brief", `"total_active":3`},
-		},
-	}
-}
-
-func newSchedulesMockBrain(t *testing.T) *httptest.Server {
-	t.Helper()
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
-		case strings.Contains(r.URL.Path, "/error500"):
+		case strings.HasPrefix(r.URL.Path, "/error500/"):
 			w.WriteHeader(http.StatusInternalServerError)
 			_, _ = w.Write([]byte(`{"error":"db failure"}`))
-		case strings.Contains(r.URL.Path, "/badjson"):
-			w.WriteHeader(http.StatusOK)
+		case strings.HasPrefix(r.URL.Path, "/badjson/"):
 			_, _ = w.Write([]byte(`not-valid-json`))
-		case strings.Contains(r.URL.Path, "/nil/schedules"):
-			_ = json.NewEncoder(w).Encode(SchedulesAPIResponse{
-				Status:   "ok",
-				Crons:    nil,
-				OneShots: nil,
-			})
-		case strings.Contains(r.URL.Path, "/nil/runs"):
-			_ = json.NewEncoder(w).Encode(ScheduleRunsAPIResponse{
-				Status: "ok",
-				Total:  0,
-				Limit:  10,
-				Offset: 5,
-				Runs:   nil,
-			})
-		case strings.HasSuffix(r.URL.Path, "/schedules/runs"):
-			q := r.URL.Query()
-			if q.Get("schedule_id") == "cron-1" && (q.Get("limit") != "10" || q.Get("offset") != "5" || q.Get("status") != "success") {
-				t.Errorf("unexpected upstream query params: %s", r.URL.RawQuery)
-			}
-			_ = json.NewEncoder(w).Encode(ScheduleRunsAPIResponse{
-				Status: "ok", Total: 42, Limit: 10, Offset: 5,
-				Runs: []ScheduleRun{
-					{ID: "cron-brief-101", ScheduleID: "cron-1", ScheduleType: "cron", Prompt: "Daily summary", Title: "Morning Brief #101", Status: "success", StartedAt: time.Now().UTC().Add(-1 * time.Hour), DurationMs: 1250, Agent: "aerial"},
-					{ID: "cron-brief-102", ScheduleID: "cron-2", ScheduleType: "cron", Prompt: "Alpha summary", Title: "Alpha Brief #102", Status: "success", StartedAt: time.Now().UTC().Add(-1 * time.Hour), DurationMs: 1100, Agent: "agent-alpha"},
-				},
-			})
-		case strings.HasSuffix(r.URL.Path, "/schedules"):
-			_ = json.NewEncoder(w).Encode(SchedulesAPIResponse{
-				Status:  "ok",
-				Summary: ScheduleSummaryMetrics{TotalActive: 3, CronCount: 2, OneShotCount: 1, TotalRuns24h: 15, SuccessRate24h: 93.3},
-				Crons: []CronSchedule{
-					{ID: "cron-1", ChannelID: "chan-1", TitlePrefix: "Morning Brief", CronExpr: "0 9 * * *", CronDescription: "Every day at 9:00 AM", Prompt: "Generate morning brief", Timezone: "America/Los_Angeles", Enabled: true, Agent: "aerial"},
-					{ID: "cron-2", ChannelID: "chan-2", TitlePrefix: "Alpha Brief", CronExpr: "0 10 * * *", CronDescription: "Every day at 10:00 AM", Prompt: "Generate alpha brief", Timezone: "America/Los_Angeles", Enabled: true, Agent: "agent-alpha"},
-				},
-				OneShots: []OneShotSchedule{
-					{ID: "oneshot-1", ThreadID: "thread-1", Prompt: "Remind about tea", RunAt: time.Now().UTC().Add(10 * time.Minute), Agent: "aerial"},
-				},
-			})
+		case r.URL.Path == "/nil/schedules":
+			_, _ = w.Write([]byte(`{"status":"ok","crons":null,"one_shots":null}`))
+		case r.URL.Path == "/nil/schedules/runs":
+			_, _ = w.Write([]byte(`{"status":"ok","total":0,"limit":10,"offset":5,"runs":null}`))
+		case r.URL.Path == "/schedules/runs":
+			_, _ = fmt.Fprintf(w, scheduleRunsUpstreamFormat, "query:"+r.URL.RawQuery)
+		case r.URL.Path == "/schedules":
+			_, _ = w.Write([]byte(schedulesUpstreamBody))
 		default:
 			http.NotFound(w, r)
 		}
 	}))
+	t.Cleanup(srv.Close)
+	return srv
 }
 
-func newSchedulesMockHaro() *httptest.Server {
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		switch {
-		case strings.HasSuffix(r.URL.Path, "/schedules/runs"):
-			_ = json.NewEncoder(w).Encode(ScheduleRunsAPIResponse{
-				Status: "ok", Total: 42, Limit: 10, Offset: 5,
-				Runs: []ScheduleRun{{ID: "haro-run-101", ScheduleID: "cron-1", ScheduleType: "cron", Prompt: "Haro summary", Title: "Haro Brief #101", Status: "success", StartedAt: time.Now().UTC().Add(-1 * time.Hour), DurationMs: 1250}},
-			})
-		case strings.HasSuffix(r.URL.Path, "/schedules"):
-			_ = json.NewEncoder(w).Encode(SchedulesAPIResponse{
-				Status:   "ok",
-				Summary:  ScheduleSummaryMetrics{TotalActive: 1, CronCount: 1, OneShotCount: 0, TotalRuns24h: 1, SuccessRate24h: 100.0},
-				Crons:    []CronSchedule{{ID: "haro-cron-1", ChannelID: "chan-1", TitlePrefix: "Haro Schedule", CronExpr: "0 * * * *", CronDescription: "Every hour", Prompt: "Haro run", Timezone: "America/Los_Angeles", Enabled: true}},
-				OneShots: []OneShotSchedule{},
-			})
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-}
-
-func TestSchedulesAndRunsHandlers_TableDriven(t *testing.T) {
-	mockBrain := newSchedulesMockBrain(t)
-	defer mockBrain.Close()
-
-	mockHaro := newSchedulesMockHaro()
-	defer mockHaro.Close()
-
+func TestSchedulesAndRunsHandlers(t *testing.T) {
+	t.Parallel()
+	mockURL := newSchedulesUpstream(t).URL
 	offlineURL := downServerURL(t)
-	tests := schedulesAndRunsTestCases(mockBrain.URL, mockHaro.URL, offlineURL)
+	haro := ConsoleConfig{HaroURL: mockURL}
+	haroNil := ConsoleConfig{HaroURL: mockURL + "/nil"}
+	haro500 := ConsoleConfig{HaroURL: mockURL + "/error500"}
+	haroBadJSON := ConsoleConfig{HaroURL: mockURL + "/badjson"}
+	offline := ConsoleConfig{HaroURL: offlineURL}
+	invalid := ConsoleConfig{HaroURL: "http://brain:\x7f8080"}
+	haroOverBrain := ConsoleConfig{BrainURL: offlineURL, HaroURL: mockURL}
+	brainFallback := ConsoleConfig{BrainURL: mockURL}
+	const runsQuery = "limit=10&offset=5&schedule_id=cron-1&status=success"
+	const runsEcho = `"prompt":"query:limit=10\u0026offset=5\u0026schedule_id=cron-1\u0026status=success"`
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			runSchedulesAndRunsCase(t, tt)
+	tests := []consoleRouteCase{
+		{name: "Schedules_Success", cfg: haro, method: http.MethodGet, target: "/api/schedules", wantStatus: http.StatusOK, wantContains: []string{"Morning Brief", "Remind about tea", `"total_active":3`}},
+		{name: "Schedules_AgentFilter_Aerial", cfg: haro, method: http.MethodGet, target: "/api/schedules?agent=aerial", wantStatus: http.StatusOK, wantContains: []string{"Morning Brief", "Remind about tea", `"total_active":2`}},
+		{name: "Schedules_AgentFilter_Other", cfg: haro, method: http.MethodGet, target: "/api/schedules?agent=agent-alpha", wantStatus: http.StatusOK, wantContains: []string{"Alpha Brief", `"total_active":1`}},
+		{name: "Schedules_SuccessParams_NilSlices", cfg: haroNil, method: http.MethodGet, target: "/api/schedules?limit=5&offset=2&active=true&q=weather", wantStatus: http.StatusOK, wantContains: []string{`"crons":[]`, `"one_shots":[]`}},
+		{name: "Schedules_ActiveFalse", cfg: haro, method: http.MethodGet, target: "/api/schedules?active=false", wantStatus: http.StatusOK},
+		{name: "Schedules_DegradedFallback", cfg: offline, method: http.MethodGet, target: "/api/schedules", wantStatus: http.StatusServiceUnavailable, wantContains: []string{`"status":"degraded"`, "Brain service unreachable. Retrying...", `"crons":[]`, `"one_shots":[]`}},
+		{name: "Schedules_Upstream500", cfg: haro500, method: http.MethodGet, target: "/api/schedules", wantStatus: http.StatusInternalServerError},
+		{name: "Schedules_BadGateway", cfg: haroBadJSON, method: http.MethodGet, target: "/api/schedules", wantStatus: http.StatusBadGateway},
+		{name: "Schedules_MethodNotAllowed", cfg: offline, method: http.MethodPost, target: "/api/schedules", wantStatus: http.StatusMethodNotAllowed},
+		{name: "Schedules_InvalidUpstreamURL", cfg: invalid, method: http.MethodGet, target: "/api/schedules", wantStatus: http.StatusInternalServerError},
+		{name: "Schedules_ConsolePrefix_HaroWinsOverBrain", cfg: haroOverBrain, method: http.MethodGet, target: "/console/api/schedules", wantStatus: http.StatusOK, wantContains: []string{"Morning Brief", `"total_active":3`}},
+		{name: "Schedules_FallbackToBrainWhenHaroEmpty", cfg: brainFallback, method: http.MethodGet, target: "/api/schedules", wantStatus: http.StatusOK, wantContains: []string{"Morning Brief", `"total_active":3`}},
+		{name: "ScheduleRuns_Success", cfg: haro, method: http.MethodGet, target: "/api/schedules/runs?" + runsQuery, wantStatus: http.StatusOK, wantContains: []string{"cron-brief-101", `"total":42`, `"duration_ms":1250`, runsEcho}},
+		{name: "ScheduleRuns_AgentFilter_Aerial", cfg: haro, method: http.MethodGet, target: "/api/schedules/runs?" + runsQuery + "&agent=aerial", wantStatus: http.StatusOK, wantContains: []string{"cron-brief-101", `"total":42`}, wantMissing: []string{"cron-brief-102"}},
+		{name: "ScheduleRuns_AgentFilter_Other", cfg: haro, method: http.MethodGet, target: "/api/schedules/runs?" + runsQuery + "&agent=agent-alpha", wantStatus: http.StatusOK, wantContains: []string{"cron-brief-102", `"total":42`}, wantMissing: []string{"cron-brief-101"}},
+		{name: "ScheduleRuns_SuccessParams_NilSlices", cfg: haroNil, method: http.MethodGet, target: "/api/schedules/runs?limit=10&offset=5&status=SUCCESS&schedule_id=42", wantStatus: http.StatusOK, wantBody: `{"status":"ok","total":0,"limit":10,"offset":5,"runs":[]}`},
+		{name: "ScheduleRuns_DegradedFallback", cfg: offline, method: http.MethodGet, target: "/api/schedules/runs?limit=20&offset=10", wantStatus: http.StatusServiceUnavailable, wantContains: []string{`"status":"degraded"`, "Brain service unreachable. Retrying...", `"runs":[]`}},
+		{name: "ScheduleRuns_Upstream500", cfg: haro500, method: http.MethodGet, target: "/api/schedules/runs", wantStatus: http.StatusInternalServerError},
+		{name: "ScheduleRuns_BadGateway", cfg: haroBadJSON, method: http.MethodGet, target: "/api/schedules/runs", wantStatus: http.StatusBadGateway},
+		{name: "ScheduleRuns_MethodNotAllowed", cfg: offline, method: http.MethodDelete, target: "/api/schedules/runs", wantStatus: http.StatusMethodNotAllowed},
+		{name: "ScheduleRuns_InvalidUpstreamURL", cfg: invalid, method: http.MethodGet, target: "/api/schedules/runs", wantStatus: http.StatusInternalServerError},
+		{name: "ScheduleRuns_ConsolePrefix_HaroWinsOverBrain", cfg: haroOverBrain, method: http.MethodGet, target: "/console/api/schedules/runs?" + runsQuery, wantStatus: http.StatusOK, wantContains: []string{"cron-brief-101", `"total":42`, runsEcho}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			runConsoleRouteCase(t, tc)
 		})
 	}
 }
 
-func runSchedulesAndRunsCase(t *testing.T, tt schedulesAndRunsTestCase) {
-	t.Helper()
-	var h http.Handler
-	switch {
-	case tt.useMux:
-		h = SetupConsoleMux(ConsoleConfig{
-			BrainURL: tt.brainURL,
-			HaroURL:  tt.haroURL,
-		}, nil)
-	case tt.isRuns:
-		h = scheduleRunsHandler(tt.brainURL)
-	default:
-		h = schedulesHandler(tt.brainURL)
-	}
-	req := httptest.NewRequest(tt.method, tt.target, http.NoBody)
-	rr := httptest.NewRecorder()
-	h.ServeHTTP(rr, req)
-	if rr.Code != tt.wantStatus {
-		t.Fatalf("expected status %d, got %d", tt.wantStatus, rr.Code)
-	}
-	bodyStr := rr.Body.String()
-	for _, sub := range tt.wantBodySubstr {
-		if !strings.Contains(bodyStr, sub) {
-			t.Errorf("expected body to contain %q, got: %s", sub, bodyStr)
-		}
-	}
-}
-
-type vanadisBuildTestCase struct {
-	name              string
-	isDetail          bool
-	useMux            bool
-	vanadisURL        string
-	method            string
-	target            string
-	wantStatus        int
-	wantBodySubstr    []string
-	wantBodyNotSubstr []string
-}
+// handlersTestSAToken is the service-account token goleak_test.go's init writes to the temp
+// token file the console's vanadis client reads.
+const handlersTestSAToken = "test-sa-token"
 
 // requireVanadisBearer mirrors vanadis authorizeBuildRead: every read needs the console
 // ServiceAccount bearer token, so each success row also proves console sent it. The
 // status=unauthorized query and build-401 detail force a 401 for the error-path rows.
-func requireVanadisBearer(t *testing.T, next http.Handler) http.Handler {
-	t.Helper()
-	tokenBytes, err := os.ReadFile(os.Getenv("AERIAL_SA_TOKEN_PATH"))
-	if err != nil {
-		t.Fatalf("read test ServiceAccount token: %v", err)
-	}
-	wantAuth := "Bearer " + strings.TrimSpace(string(tokenBytes))
+func requireVanadisBearer(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Authorization") != wantAuth || r.URL.Query().Get("status") == "unauthorized" || r.URL.Path == "/builds/build-401" {
+		if r.Header.Get("Authorization") != "Bearer "+handlersTestSAToken || r.URL.Query().Get("status") == "unauthorized" || r.URL.Path == "/builds/build-401" {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusUnauthorized)
 			_, _ = w.Write([]byte(`{"error":"missing or invalid bearer token"}`))
@@ -631,412 +212,85 @@ func requireVanadisBearer(t *testing.T, next http.Handler) http.Handler {
 	})
 }
 
-func newVanadisMockServer(t *testing.T) *httptest.Server {
+const (
+	vanadisBuildsUpstreamBody = `{"status":"ok","total":100,"running_count":10,"queued_count":20,"completed_count":70,"builds":[` +
+		`{"id":"build-101","tier":2,"title":"Vanadis Feature","shared_context":"drawer-only-shared-context","status":"running","queue_state":"running","agent":"aerial","chunks":[` +
+		`{"id":"chunk-0","build_id":"build-101","chunk_index":0,"title":"Chunk 0","depends_on":null,"status":"completed"},` +
+		`{"id":"chunk-1","build_id":"build-101","chunk_index":1,"title":"Chunk 1","instructions":"drawer-only-instructions","target_files":["main.go"],` +
+		`"target_symbols":["Run"],"acceptance_criteria":["pass"],"depends_on":["chunk-0"],"status":"completed"}]},` +
+		`{"id":"build-102","tier":2,"title":"Alpha Feature","shared_context":"drawer-only-shared-context","status":"running","queue_state":"running","agent":"agent-alpha","chunks":[` +
+		`{"id":"chunk-alpha-0","build_id":"build-102","chunk_index":0,"title":"Chunk Alpha 0","depends_on":null,"status":"completed"}]}]}`
+	vanadisBuildDetailUpstreamBody = `{"build":{"id":"build-101","title":"Vanadis Feature","shared_context":"drawer-only-shared-context","status":"running",` +
+		`"chunks":[{"id":"chunk-build-0","title":"Chunk Build 0","depends_on":null,"status":"completed"}]},` +
+		`"chunks":[{"id":"chunk-0","build_id":"build-101","chunk_index":0,"title":"Chunk 0","depends_on":null,"status":"completed"},` +
+		`{"id":"chunk-1","build_id":"build-101","chunk_index":1,"title":"Chunk 1","instructions":"drawer-only-instructions","depends_on":["chunk-0"],"status":"completed"}],` +
+		`"entry":{"id":"build-101","queue_state":"running","chunks":[{"id":"chunk-entry-0","title":"Chunk Entry 0","depends_on":null,"status":"completed"}]}}`
+)
+
+// newVanadisBuildsUpstream fakes vanadis /builds and /builds/{id} behind the bearer check;
+// the status query and the build ID pick each upstream branch.
+func newVanadisBuildsUpstream(t *testing.T) *httptest.Server {
 	t.Helper()
-	return httptest.NewServer(requireVanadisBearer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch {
-		case r.URL.Path == "/builds" && r.Method == http.MethodGet:
-			q := r.URL.Query()
-			if q.Get("status") == "error500" {
-				http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
-				return
-			}
-			if q.Get("status") == "badjson" {
-				w.Header().Set("Content-Type", "application/json")
-				_, _ = w.Write([]byte(`{not valid json`))
-				return
-			}
-			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(map[string]any{
-				"status":          "ok",
-				"total":           100,
-				"running_count":   10,
-				"queued_count":    20,
-				"completed_count": 70,
-				"builds": []map[string]any{
-					{
-						"id":             "build-101",
-						"tier":           2,
-						"title":          "Vanadis Feature",
-						"shared_context": "drawer-only-shared-context",
-						"status":         "running",
-						"queue_state":    "running",
-						"agent":          "aerial",
-						"chunks": []map[string]any{
-							{
-								"id":          "chunk-0",
-								"build_id":    "build-101",
-								"chunk_index": 0,
-								"title":       "Chunk 0",
-								"depends_on":  nil,
-								"status":      "completed",
-							},
-							{
-								"id":                  "chunk-1",
-								"build_id":            "build-101",
-								"chunk_index":         1,
-								"title":               "Chunk 1",
-								"instructions":        "drawer-only-instructions",
-								"target_files":        []string{"main.go"},
-								"target_symbols":      []string{"Run"},
-								"acceptance_criteria": []string{"pass"},
-								"depends_on":          []string{"chunk-0"},
-								"status":              "completed",
-							},
-						},
-					},
-					{
-						"id":             "build-102",
-						"tier":           2,
-						"title":          "Alpha Feature",
-						"shared_context": "drawer-only-shared-context",
-						"status":         "running",
-						"queue_state":    "running",
-						"agent":          "agent-alpha",
-						"chunks": []map[string]any{
-							{
-								"id":          "chunk-alpha-0",
-								"build_id":    "build-102",
-								"chunk_index": 0,
-								"title":       "Chunk Alpha 0",
-								"depends_on":  nil,
-								"status":      "completed",
-							},
-						},
-					},
-				},
-			})
-		case strings.HasPrefix(r.URL.Path, "/builds/"):
-			buildID := strings.TrimPrefix(r.URL.Path, "/builds/")
-			switch buildID {
-			case "build-101":
-				w.Header().Set("Content-Type", "application/json")
-				_ = json.NewEncoder(w).Encode(map[string]any{
-					"build": map[string]any{
-						"id":             "build-101",
-						"title":          "Vanadis Feature",
-						"shared_context": "drawer-only-shared-context",
-						"status":         "running",
-						"chunks": []map[string]any{
-							{
-								"id":         "chunk-build-0",
-								"title":      "Chunk Build 0",
-								"depends_on": nil,
-								"status":     "completed",
-							},
-						},
-					},
-					"chunks": []map[string]any{
-						{
-							"id":          "chunk-0",
-							"build_id":    "build-101",
-							"chunk_index": 0,
-							"title":       "Chunk 0",
-							"depends_on":  nil,
-							"status":      "completed",
-						},
-						{
-							"id":           "chunk-1",
-							"build_id":     "build-101",
-							"chunk_index":  1,
-							"title":        "Chunk 1",
-							"instructions": "drawer-only-instructions",
-							"depends_on":   []string{"chunk-0"},
-							"status":       "completed",
-						},
-					},
-					"entry": map[string]any{
-						"id":          "build-101",
-						"queue_state": "running",
-						"chunks": []map[string]any{
-							{
-								"id":         "chunk-entry-0",
-								"title":      "Chunk Entry 0",
-								"depends_on": nil,
-								"status":     "completed",
-							},
-						},
-					},
-				})
-			case "test-build-1", "test-build-2":
-				w.Header().Set("Content-Type", "application/json")
-				_ = json.NewEncoder(w).Encode(BuildDetailAPIResponse{Status: "ok", Chunks: []VanadisChunkDTO{}})
-			case "build-badjson":
-				w.Header().Set("Content-Type", "application/json")
-				_, _ = w.Write([]byte(`{invalid json detail`))
-			case "build-500":
-				http.Error(w, `{"error":"internal upstream error"}`, http.StatusInternalServerError)
-			default:
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusNotFound)
-				_ = json.NewEncoder(w).Encode(map[string]string{"error": "build not found"})
-			}
+	srv := httptest.NewServer(requireVanadisBearer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path + "?" + r.URL.Query().Get("status") {
+		case "/builds?error500", "/builds/build-500?":
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte(`{"error":"internal upstream error"}`))
+		case "/builds?badjson", "/builds/build-badjson?":
+			_, _ = w.Write([]byte(`{not valid json`))
+		case "/builds/build-101?":
+			_, _ = w.Write([]byte(vanadisBuildDetailUpstreamBody))
+		case "/builds/test-build-1?":
+			_, _ = w.Write([]byte(`{"status":"ok","chunks":[]}`))
 		default:
-			http.NotFound(w, r)
+			if r.URL.Path == "/builds" {
+				_, _ = w.Write([]byte(vanadisBuildsUpstreamBody))
+				return
+			}
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"error":"build not found"}`))
 		}
 	})))
-}
-
-func vanadisBuildsTestCases(mockVanadisURL, offlineURL string) []vanadisBuildTestCase {
-	cases := vanadisBuildsRootCases(mockVanadisURL, offlineURL)
-	cases = append(cases, vanadisBuildsDetailCases(mockVanadisURL, offlineURL)...)
-	return append(cases, vanadisBuildsMuxCases(mockVanadisURL)...)
-}
-
-func vanadisBuildsRootCases(mockVanadisURL, offlineURL string) []vanadisBuildTestCase {
-	return []vanadisBuildTestCase{
-		{
-			name:              "Builds_Success_WithQuery",
-			vanadisURL:        mockVanadisURL,
-			method:            http.MethodGet,
-			target:            "/api/builds?limit=25&status=running&queue_state=running",
-			wantStatus:        http.StatusOK,
-			wantBodySubstr:    []string{"build-101", "Vanadis Feature", "chunk-1", "chunk-0", `"depends_on":[]`, `"depends_on":["chunk-0"]`},
-			wantBodyNotSubstr: []string{"drawer-only-shared-context", "drawer-only-instructions", "target_files", "target_symbols", "acceptance_criteria", `"depends_on":null`},
-		},
-		{
-			name:              "Builds_AgentFilter_Aerial",
-			vanadisURL:        mockVanadisURL,
-			method:            http.MethodGet,
-			target:            "/api/builds?agent=aerial",
-			wantStatus:        http.StatusOK,
-			wantBodySubstr:    []string{"build-101", `"total":100`, `"running_count":10`},
-			wantBodyNotSubstr: []string{"build-102"},
-		},
-		{
-			name:              "Builds_AgentFilter_Other",
-			vanadisURL:        mockVanadisURL,
-			method:            http.MethodGet,
-			target:            "/api/builds?agent=agent-alpha",
-			wantStatus:        http.StatusOK,
-			wantBodySubstr:    []string{"build-102", `"total":100`, `"running_count":10`},
-			wantBodyNotSubstr: []string{"build-101"},
-		},
-		{
-			name:           "Builds_DegradedFallback",
-			vanadisURL:     offlineURL,
-			method:         http.MethodGet,
-			target:         "/api/builds",
-			wantStatus:     http.StatusServiceUnavailable,
-			wantBodySubstr: []string{`"status":"degraded"`, "Vanadis service unreachable. Retrying...", `"builds":[]`},
-		},
-		{
-			name:       "Builds_MethodNotAllowed",
-			vanadisURL: mockVanadisURL,
-			method:     http.MethodPost,
-			target:     "/api/builds",
-			wantStatus: http.StatusMethodNotAllowed,
-		},
-		{
-			name:       "Builds_Upstream500",
-			vanadisURL: mockVanadisURL,
-			method:     http.MethodGet,
-			target:     "/api/builds?status=error500",
-			wantStatus: http.StatusInternalServerError,
-		},
-		{
-			name:              "Builds_Upstream401_ErrorPayload",
-			vanadisURL:        mockVanadisURL,
-			method:            http.MethodGet,
-			target:            "/api/builds?status=unauthorized",
-			wantStatus:        http.StatusUnauthorized,
-			wantBodySubstr:    []string{`"status":"error"`, `"error":"Upstream vanadis error occurred"`, `"builds":[]`},
-			wantBodyNotSubstr: []string{`"status":"ok"`},
-		},
-		{
-			name:       "Builds_BadGateway_InvalidJSON",
-			vanadisURL: mockVanadisURL,
-			method:     http.MethodGet,
-			target:     "/api/builds?status=badjson",
-			wantStatus: http.StatusBadGateway,
-		},
-		{
-			name:       "Builds_InvalidUpstreamURL",
-			vanadisURL: "http://vanadis:\x7f8080",
-			method:     http.MethodGet,
-			target:     "/api/builds",
-			wantStatus: http.StatusInternalServerError,
-		},
-	}
-}
-
-func vanadisBuildsDetailCases(mockVanadisURL, offlineURL string) []vanadisBuildTestCase {
-	return []vanadisBuildTestCase{
-		{
-			name:              "BuildDetail_Success_APIPrefix",
-			isDetail:          true,
-			vanadisURL:        mockVanadisURL,
-			method:            http.MethodGet,
-			target:            "/api/builds/build-101",
-			wantStatus:        http.StatusOK,
-			wantBodySubstr:    []string{"build-101", "chunk-1", "drawer-only-shared-context", "drawer-only-instructions", "chunk-0", "chunk-build-0", "chunk-entry-0", `"depends_on":[]`, `"depends_on":["chunk-0"]`},
-			wantBodyNotSubstr: []string{`"depends_on":null`},
-		},
-		{
-			name:           "BuildDetail_Success_ConsolePrefix",
-			isDetail:       true,
-			vanadisURL:     mockVanadisURL,
-			method:         http.MethodGet,
-			target:         "/console/api/builds/build-101",
-			wantStatus:     http.StatusOK,
-			wantBodySubstr: []string{"build-101"},
-		},
-		{
-			name:           "BuildDetail_NotFound_404",
-			isDetail:       true,
-			vanadisURL:     mockVanadisURL,
-			method:         http.MethodGet,
-			target:         "/api/builds/nonexistent-build",
-			wantStatus:     http.StatusNotFound,
-			wantBodySubstr: []string{`"status":"error"`, "build not found", `"chunks":[]`},
-		},
-		{
-			name:       "BuildDetail_MethodNotAllowed",
-			isDetail:   true,
-			vanadisURL: mockVanadisURL,
-			method:     http.MethodDelete,
-			target:     "/api/builds/build-101",
-			wantStatus: http.StatusMethodNotAllowed,
-		},
-		{
-			name:           "BuildDetail_DegradedFallback",
-			isDetail:       true,
-			vanadisURL:     offlineURL,
-			method:         http.MethodGet,
-			target:         "/api/builds/build-101",
-			wantStatus:     http.StatusServiceUnavailable,
-			wantBodySubstr: []string{`"status":"degraded"`, "Vanadis service unreachable. Retrying...", `"chunks":[]`},
-		},
-		{
-			name:       "BuildDetail_BadGateway_InvalidJSON",
-			isDetail:   true,
-			vanadisURL: mockVanadisURL,
-			method:     http.MethodGet,
-			target:     "/api/builds/build-badjson",
-			wantStatus: http.StatusBadGateway,
-		},
-		{
-			name:       "BuildDetail_Upstream500",
-			isDetail:   true,
-			vanadisURL: mockVanadisURL,
-			method:     http.MethodGet,
-			target:     "/api/builds/build-500",
-			wantStatus: http.StatusInternalServerError,
-		},
-		{
-			name:           "BuildDetail_Upstream401_ErrorPayload",
-			isDetail:       true,
-			vanadisURL:     mockVanadisURL,
-			method:         http.MethodGet,
-			target:         "/api/builds/build-401",
-			wantStatus:     http.StatusUnauthorized,
-			wantBodySubstr: []string{`"status":"error"`, "missing or invalid bearer token", `"chunks":[]`},
-		},
-		{
-			name:       "BuildDetail_EmptyID_BadRequest",
-			isDetail:   true,
-			vanadisURL: mockVanadisURL,
-			method:     http.MethodGet,
-			target:     "/api/builds/",
-			wantStatus: http.StatusBadRequest,
-		},
-		{
-			name:       "BuildDetail_PathTraversal_BadRequest",
-			isDetail:   true,
-			vanadisURL: mockVanadisURL,
-			method:     http.MethodGet,
-			target:     "/api/builds/../traversal",
-			wantStatus: http.StatusBadRequest,
-		},
-		{
-			name:       "BuildDetail_InvalidUpstreamURL",
-			isDetail:   true,
-			vanadisURL: "http://vanadis:\x7f8080",
-			method:     http.MethodGet,
-			target:     "/api/builds/build-101",
-			wantStatus: http.StatusInternalServerError,
-		},
-	}
-}
-
-func vanadisBuildsMuxCases(mockVanadisURL string) []vanadisBuildTestCase {
-	return []vanadisBuildTestCase{
-		{
-			name:       "MuxWiring_BuildsRoot",
-			useMux:     true,
-			vanadisURL: mockVanadisURL,
-			method:     http.MethodGet,
-			target:     "/api/builds",
-			wantStatus: http.StatusOK,
-		},
-		{
-			name:       "MuxWiring_ConsoleBuildsRoot",
-			useMux:     true,
-			vanadisURL: mockVanadisURL,
-			method:     http.MethodGet,
-			target:     "/console/api/builds",
-			wantStatus: http.StatusOK,
-		},
-		{
-			name:       "MuxWiring_BuildDetail1",
-			useMux:     true,
-			vanadisURL: mockVanadisURL,
-			method:     http.MethodGet,
-			target:     "/api/builds/test-build-1",
-			wantStatus: http.StatusOK,
-		},
-		{
-			name:       "MuxWiring_ConsoleBuildDetail2",
-			useMux:     true,
-			vanadisURL: mockVanadisURL,
-			method:     http.MethodGet,
-			target:     "/console/api/builds/test-build-2",
-			wantStatus: http.StatusOK,
-		},
-	}
+	t.Cleanup(srv.Close)
+	return srv
 }
 
 func TestVanadisBuildsHandlers(t *testing.T) {
-	mockVanadis := newVanadisMockServer(t)
-	defer mockVanadis.Close()
+	t.Parallel()
+	mock := ConsoleConfig{VanadisURL: newVanadisBuildsUpstream(t).URL}
+	offline := ConsoleConfig{VanadisURL: downServerURL(t)}
+	invalid := ConsoleConfig{VanadisURL: "http://vanadis:\x7f8080"}
 
-	offlineURL := downServerURL(t)
-	tests := vanadisBuildsTestCases(mockVanadis.URL, offlineURL)
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			runVanadisBuildsCase(t, tt)
+	tests := []consoleRouteCase{
+		{name: "Builds_Success_WithQuery", cfg: mock, method: http.MethodGet, target: "/api/builds?limit=25&status=running&queue_state=running", wantStatus: http.StatusOK, wantContains: []string{"build-101", "Vanadis Feature", "chunk-1", "chunk-0", `"depends_on":[]`, `"depends_on":["chunk-0"]`}, wantMissing: []string{"drawer-only-shared-context", "drawer-only-instructions", "target_files", "target_symbols", "acceptance_criteria", `"depends_on":null`}},
+		{name: "Builds_AgentFilter_Aerial", cfg: mock, method: http.MethodGet, target: "/api/builds?agent=aerial", wantStatus: http.StatusOK, wantContains: []string{"build-101", `"total":100`, `"running_count":10`}, wantMissing: []string{"build-102"}},
+		{name: "Builds_AgentFilter_Other", cfg: mock, method: http.MethodGet, target: "/api/builds?agent=agent-alpha", wantStatus: http.StatusOK, wantContains: []string{"build-102", `"total":100`, `"running_count":10`}, wantMissing: []string{"build-101"}},
+		{name: "Builds_ConsolePrefix", cfg: mock, method: http.MethodGet, target: "/console/api/builds", wantStatus: http.StatusOK, wantContains: []string{"build-101", "build-102"}},
+		{name: "Builds_DegradedFallback", cfg: offline, method: http.MethodGet, target: "/api/builds", wantStatus: http.StatusServiceUnavailable, wantContains: []string{`"status":"degraded"`, "Vanadis service unreachable. Retrying...", `"builds":[]`}},
+		{name: "Builds_MethodNotAllowed", cfg: mock, method: http.MethodPost, target: "/api/builds", wantStatus: http.StatusMethodNotAllowed},
+		{name: "Builds_Upstream500", cfg: mock, method: http.MethodGet, target: "/api/builds?status=error500", wantStatus: http.StatusInternalServerError},
+		{name: "Builds_Upstream401_ErrorPayload", cfg: mock, method: http.MethodGet, target: "/api/builds?status=unauthorized", wantStatus: http.StatusUnauthorized, wantBody: `{"status":"error","total":0,"running_count":0,"queued_count":0,"completed_count":0,"builds":[],"error":"Upstream vanadis error occurred"}`},
+		{name: "Builds_BadGateway_InvalidJSON", cfg: mock, method: http.MethodGet, target: "/api/builds?status=badjson", wantStatus: http.StatusBadGateway},
+		{name: "Builds_InvalidUpstreamURL", cfg: invalid, method: http.MethodGet, target: "/api/builds", wantStatus: http.StatusInternalServerError},
+		{name: "BuildDetail_Success_APIPrefix", cfg: mock, method: http.MethodGet, target: "/api/builds/build-101", wantStatus: http.StatusOK, wantContains: []string{`"status":"ok"`, "build-101", "chunk-1", "drawer-only-shared-context", "drawer-only-instructions", "chunk-0", "chunk-build-0", "chunk-entry-0", `"depends_on":[]`, `"depends_on":["chunk-0"]`}, wantMissing: []string{`"depends_on":null`}},
+		{name: "BuildDetail_Success_ConsolePrefix", cfg: mock, method: http.MethodGet, target: "/console/api/builds/build-101", wantStatus: http.StatusOK, wantContains: []string{"build-101"}},
+		{name: "BuildDetail_UpstreamStatusKept", cfg: mock, method: http.MethodGet, target: "/api/builds/test-build-1", wantStatus: http.StatusOK, wantBody: `{"status":"ok","chunks":[]}`},
+		{name: "BuildDetail_NotFound_404", cfg: mock, method: http.MethodGet, target: "/api/builds/nonexistent-build", wantStatus: http.StatusNotFound, wantBody: `{"status":"error","chunks":[],"error":"build not found"}`},
+		{name: "BuildDetail_MethodNotAllowed", cfg: mock, method: http.MethodDelete, target: "/api/builds/build-101", wantStatus: http.StatusMethodNotAllowed},
+		{name: "BuildDetail_DegradedFallback", cfg: offline, method: http.MethodGet, target: "/api/builds/build-101", wantStatus: http.StatusServiceUnavailable, wantContains: []string{`"status":"degraded"`, "Vanadis service unreachable. Retrying...", `"chunks":[]`}},
+		{name: "BuildDetail_BadGateway_InvalidJSON", cfg: mock, method: http.MethodGet, target: "/api/builds/build-badjson", wantStatus: http.StatusBadGateway},
+		{name: "BuildDetail_Upstream500", cfg: mock, method: http.MethodGet, target: "/api/builds/build-500", wantStatus: http.StatusInternalServerError},
+		{name: "BuildDetail_Upstream401_ErrorPayload", cfg: mock, method: http.MethodGet, target: "/api/builds/build-401", wantStatus: http.StatusUnauthorized, wantBody: `{"status":"error","chunks":[],"error":"missing or invalid bearer token"}`},
+		{name: "BuildDetail_EmptyID_BadRequest", cfg: mock, method: http.MethodGet, target: "/api/builds/", wantStatus: http.StatusBadRequest, wantBody: `{"status":"error","chunks":[],"error":"missing or empty build ID"}`},
+		{name: "BuildDetail_PathTraversal_BadRequest", cfg: mock, method: http.MethodGet, target: "/console/api/builds/a..b", wantStatus: http.StatusBadRequest, wantBody: `{"status":"error","chunks":[],"error":"invalid build ID \"a..b\": path traversal not allowed"}`},
+		{name: "BuildDetail_InvalidUpstreamURL", cfg: invalid, method: http.MethodGet, target: "/api/builds/build-101", wantStatus: http.StatusInternalServerError},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			runConsoleRouteCase(t, tc)
 		})
-	}
-}
-
-func runVanadisBuildsCase(t *testing.T, tt vanadisBuildTestCase) {
-	t.Helper()
-	var h http.Handler
-	switch {
-	case tt.useMux:
-		h = SetupConsoleMux(ConsoleConfig{VanadisURL: tt.vanadisURL}, nil)
-	case tt.isDetail:
-		h = buildDetailHandler(tt.vanadisURL)
-	default:
-		h = buildsHandler(tt.vanadisURL)
-	}
-	req := httptest.NewRequest(tt.method, tt.target, http.NoBody)
-	rr := httptest.NewRecorder()
-	h.ServeHTTP(rr, req)
-	if rr.Code != tt.wantStatus {
-		t.Fatalf("expected status %d, got %d (body: %s)", tt.wantStatus, rr.Code, rr.Body.String())
-	}
-	bodyStr := rr.Body.String()
-	for _, sub := range tt.wantBodySubstr {
-		if !strings.Contains(bodyStr, sub) {
-			t.Errorf("expected body to contain %q, got: %s", sub, bodyStr)
-		}
-	}
-	for _, sub := range tt.wantBodyNotSubstr {
-		if strings.Contains(bodyStr, sub) {
-			t.Errorf("expected body NOT to contain %q, got: %s", sub, bodyStr)
-		}
 	}
 }
 

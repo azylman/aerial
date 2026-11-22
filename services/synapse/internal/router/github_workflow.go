@@ -47,8 +47,7 @@ type GitHubWorkflowRunPayload struct {
 }
 
 type (
-	metadataWorkflowRun = buildmeta.MetadataWorkflowRun
-	workflowRunEvent    = buildmeta.WorkflowRunEvent
+	workflowRunEvent = buildmeta.WorkflowRunEvent
 )
 
 var (

@@ -10,10 +10,10 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/nats-io/nats.go"
 
 	"github.com/azylman/aerial/pkg/eriwire"
 	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/pkg/pubsubtest"
 	"github.com/azylman/aerial/services/haro/internal/dispatch"
 	"github.com/azylman/aerial/services/haro/internal/model"
 	"github.com/azylman/aerial/services/haro/internal/store"
@@ -576,28 +576,6 @@ func TestTicker_EvaluateDueHeartbeats(t *testing.T) {
 	}
 }
 
-type outcomeMsg struct {
-	data         []byte
-	subject      string
-	naked        bool
-	numDelivered uint64
-}
-
-func (m *outcomeMsg) Data() []byte      { return m.data }
-func (m *outcomeMsg) Subject() string   { return m.subject }
-func (*outcomeMsg) Header() nats.Header { return nil }
-func (m *outcomeMsg) NumDelivered() uint64 {
-	if m.numDelivered > 0 {
-		return m.numDelivered
-	}
-	return 1
-}
-func (*outcomeMsg) Ack() error                           { return nil }
-func (m *outcomeMsg) NakWithDelay(_ time.Duration) error { m.naked = true; return nil }
-func (*outcomeMsg) Term() error                          { return nil }
-func (*outcomeMsg) Snooze(_ time.Duration) error         { return nil }
-func (*outcomeMsg) InProgress() error                    { return nil }
-
 type dispatchOutcomeTestCase struct {
 	name                string
 	rawPayload          string
@@ -667,7 +645,8 @@ func runDispatchOutcomeCase(t *testing.T, tc dispatchOutcomeTestCase, now time.T
 	if tc.nilDatabase {
 		database = nil
 	}
-	var msg pubsub.Message = &outcomeMsg{data: outcomePayload(t, tc.rawPayload, tc.event), subject: "aerial.dispatch.completed", numDelivered: tc.numDelivered}
+	om := &pubsubtest.Message{Payload: outcomePayload(t, tc.rawPayload, tc.event), Subj: "aerial.dispatch.completed", Delivered: max(tc.numDelivered, 1)}
+	var msg pubsub.Message = om
 	if tc.nilMessage {
 		msg = nil
 	}
@@ -697,12 +676,8 @@ func runDispatchOutcomeCase(t *testing.T, tc dispatchOutcomeTestCase, now time.T
 	if tc.nilDatabase || tc.nilMessage || tc.closeDatabase {
 		return
 	}
-	om, ok := msg.(*outcomeMsg)
-	if !ok {
-		t.Fatalf("message is %T, want *outcomeMsg", msg)
-	}
-	if got := om.naked; got != tc.wantNaked {
-		t.Errorf("msg.naked = %v, want %v", got, tc.wantNaked)
+	if _, got := om.NakDelay(); got != tc.wantNaked {
+		t.Errorf("msg naked = %v, want %v (calls %v)", got, tc.wantNaked, om.Calls())
 	}
 
 	assertOutcomeRun(ctx, t, db, tc)
