@@ -12,10 +12,10 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/nats-io/nats.go"
 
 	"github.com/azylman/aerial/pkg/eriwire"
 	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/pkg/pubsubtest"
 	"github.com/azylman/aerial/services/haro/internal/config"
 	"github.com/azylman/aerial/services/haro/internal/dispatch"
 	"github.com/azylman/aerial/services/haro/internal/metrics"
@@ -158,25 +158,6 @@ func TestServer_Metrics_Table(t *testing.T) {
 	}
 }
 
-// stubMessage is a minimal pubsub.Message carrying only a payload; the
-// one-shot ingestion path reads Data and nothing else.
-type stubMessage struct {
-	data         []byte
-	numDelivered uint64
-}
-
-func (m *stubMessage) Data() []byte  { return m.data }
-func (*stubMessage) Subject() string { return "" }
-func (*stubMessage) Header() nats.Header {
-	return nil
-}
-func (m *stubMessage) NumDelivered() uint64             { return m.numDelivered }
-func (*stubMessage) Ack() error                         { return nil }
-func (*stubMessage) NakWithDelay(_ time.Duration) error { return nil }
-func (*stubMessage) Term() error                        { return nil }
-func (*stubMessage) Snooze(_ time.Duration) error       { return nil }
-func (*stubMessage) InProgress() error                  { return nil }
-
 func TestHandleOneShotJob_Scenarios(t *testing.T) {
 	db, err := testutil.OpenSQLiteTestDB(":memory:")
 	if err != nil {
@@ -194,11 +175,11 @@ func TestHandleOneShotJob_Scenarios(t *testing.T) {
 		wantErr bool
 	}{
 		{"nil message returns error", nil, db, nil, true},
-		{"nil database returns error", nil, nil, &stubMessage{data: []byte(`{"id":"os-valid-1","thread_id":"th-1","prompt":"p1","run_at":"2026-11-14T12:00:00Z"}`)}, true},
-		{"invalid json drops cleanly", nil, db, &stubMessage{data: []byte(`not-json`)}, false},
-		{"missing fields drops cleanly", nil, db, &stubMessage{data: []byte(`{"thread_id":""}`)}, false},
-		{"valid insert succeeds", nil, db, &stubMessage{data: []byte(`{"id":"os-valid-1","thread_id":"th-1","prompt":"p1","run_at":"2026-11-14T12:00:00Z"}`)}, false},
-		{"duplicate insert stays valid", nil, db, &stubMessage{data: []byte(`{"id":"os-valid-1","thread_id":"th-1","prompt":"p1","run_at":"2026-11-14T12:00:00Z"}`)}, false},
+		{"nil database returns error", nil, nil, &pubsubtest.Message{Payload: []byte(`{"id":"os-valid-1","thread_id":"th-1","prompt":"p1","run_at":"2026-11-14T12:00:00Z"}`)}, true},
+		{"invalid json drops cleanly", nil, db, &pubsubtest.Message{Payload: []byte(`not-json`)}, false},
+		{"missing fields drops cleanly", nil, db, &pubsubtest.Message{Payload: []byte(`{"thread_id":""}`)}, false},
+		{"valid insert succeeds", nil, db, &pubsubtest.Message{Payload: []byte(`{"id":"os-valid-1","thread_id":"th-1","prompt":"p1","run_at":"2026-11-14T12:00:00Z"}`)}, false},
+		{"duplicate insert stays valid", nil, db, &pubsubtest.Message{Payload: []byte(`{"id":"os-valid-1","thread_id":"th-1","prompt":"p1","run_at":"2026-11-14T12:00:00Z"}`)}, false},
 	}
 
 	for _, tc := range tests {
@@ -219,7 +200,7 @@ func TestHandleOneShotJob_Scenarios(t *testing.T) {
 
 	toolHandler := tools.NewToolHandler(&config.Config{DatabaseURL: ":memory:"}, db)
 	srv := NewServer(toolHandler)
-	msgWithServer := &stubMessage{data: []byte(fmt.Sprintf(`{"thread_id":"th-2","prompt":"p2","run_at":%q}`, now.Format(time.RFC3339)))}
+	msgWithServer := &pubsubtest.Message{Payload: []byte(fmt.Sprintf(`{"thread_id":"th-2","prompt":"p2","run_at":%q}`, now.Format(time.RFC3339)))}
 	if err := HandleOneShotJob(ctx, srv, nil, msgWithServer); err != nil {
 		t.Fatalf("HandleOneShotJob with server failed: %v", err)
 	}
@@ -238,7 +219,7 @@ func TestHandleOneShotJob_ClosedDB(t *testing.T) {
 		msg     pubsub.Message
 		wantErr bool
 	}{
-		{"closed database returns error", &stubMessage{data: []byte(`{"id":"os-closed-1","thread_id":"th-1","prompt":"p1","run_at":"2026-11-14T12:00:00Z"}`)}, true},
+		{"closed database returns error", &pubsubtest.Message{Payload: []byte(`{"id":"os-closed-1","thread_id":"th-1","prompt":"p1","run_at":"2026-11-14T12:00:00Z"}`)}, true},
 	}
 
 	for _, tc := range tests {
@@ -369,6 +350,7 @@ func TestHandleExternalEvent_Scenarios(t *testing.T) {
 		checkDBID            string
 		wantInDB             bool
 		wantImmediateReclaim bool
+		wantDispatchMsgID    string
 	}{
 		{
 			name:      "healthcheck source is no-op and leaves trigger unclaimed",
@@ -422,12 +404,13 @@ func TestHandleExternalEvent_Scenarios(t *testing.T) {
 			wantImmediateReclaim: true,
 		},
 		{
-			name:      "successful dispatch claims and fires trigger",
-			server:    serverOK,
-			ev:        pubsub.ExternalEvent{EventID: "evt-cam-123", Source: "camera", EventType: "vehicle_detected", Targets: []string{"driveway"}, ContextHeader: "Camera Alert"},
-			wantErr:   false,
-			checkDBID: "trig-ext-1",
-			wantInDB:  false,
+			name:              "successful dispatch claims and fires trigger",
+			server:            serverOK,
+			ev:                pubsub.ExternalEvent{EventID: "evt-cam-123", Source: "camera", EventType: "vehicle_detected", Targets: []string{"driveway"}, ContextHeader: "Camera Alert"},
+			wantErr:           false,
+			checkDBID:         "trig-ext-1",
+			wantInDB:          false,
+			wantDispatchMsgID: uuid.NewSHA1(uuid.NameSpaceOID, []byte("event_watch:trig-ext-1:evt-cam-123")).String(),
 		},
 	}
 
@@ -449,9 +432,8 @@ func TestHandleExternalEvent_Scenarios(t *testing.T) {
 					t.Fatalf("expected persistent trigger %s to be immediately reclaimable, got %v", tc.checkDBID, reclaimed)
 				}
 			}
-			if tc.name == "successful dispatch claims and fires trigger" {
-				wantMsgID := uuid.NewSHA1(uuid.NameSpaceOID, []byte("event_watch:trig-ext-1:evt-cam-123")).String()
-				verifyDispatchedPrompt(t, mockDispOK, "100000000000000001", "Camera Alert\n\nVehicle in driveway", wantMsgID)
+			if tc.wantDispatchMsgID != "" {
+				verifyDispatchedPrompt(t, mockDispOK, "100000000000000001", "Camera Alert\n\nVehicle in driveway", tc.wantDispatchMsgID)
 			}
 		})
 	}
