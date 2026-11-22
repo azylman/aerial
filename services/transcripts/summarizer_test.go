@@ -622,3 +622,37 @@ func TestSummarizerMultiAgentSweep(t *testing.T) {
 		t.Errorf("agent-alpha session: watermark = %d, summary = %q", markAlpha, sumAlpha)
 	}
 }
+
+func TestHTTPLLMClientIdempotencyKeyHeader(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		key  string
+		want string
+	}{
+		{"key sent", "transcripts:summary:claude:s1:5", "transcripts:summary:claude:s1:5"},
+		{"blank key omits header", "  ", ""},
+		{"no key omits header", "", ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var got string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				got = r.Header.Get("Idempotency-Key")
+				_, _ = w.Write([]byte(`{"response":"ok"}`))
+			}))
+			defer srv.Close()
+			ctx := context.Background()
+			if tc.key != "" {
+				ctx = withLLMKey(ctx, tc.key)
+			}
+			if _, err := NewLLMClient(srv.URL, nil).Complete(ctx, "p"); err != nil {
+				t.Fatal(err)
+			}
+			if got != tc.want {
+				t.Errorf("Idempotency-Key = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}

@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -716,7 +717,13 @@ func compileSkillBatch(ctx context.Context, store Store, llmFunc LLMClientFunc, 
 	}
 
 	prompt := buildSkillDesignerPrompt(batch)
-	rawResp, err := llmFunc(ctx, prompt)
+	sortedIDs := slices.Sorted(slices.Values(batchIDs))
+	idParts := make([]string, len(sortedIDs))
+	for i, id := range sortedIDs {
+		idParts[i] = strconv.FormatInt(id, 10)
+	}
+	// Skill synthesis runs across all agents, so the agent segment is "all".
+	rawResp, err := llmFunc(withLLMKey(ctx, "coven:skill:all:"+hash16(strings.Join(idParts, ","))), prompt)
 	if err != nil {
 		log.Printf("[coven-skills] error invoking skill designer LLM: %v", err)
 		return

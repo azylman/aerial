@@ -249,7 +249,8 @@ func (s *Summarizer) summarizeSession(ctx context.Context, cand summaryCandidate
 	if len(steps) == 0 {
 		return 0, nil
 	}
-	summary, err := s.llm.Complete(ctx, buildSummaryPrompt(cand.sessionID, cand.summary, steps))
+	llmCtx := withLLMKey(ctx, fmt.Sprintf("transcripts:summary:%s:%s:%d", cand.agent, cand.sessionID, fromStep))
+	summary, err := s.llm.Complete(llmCtx, buildSummaryPrompt(cand.sessionID, cand.summary, steps))
 	if err != nil {
 		return 0, fmt.Errorf("summarize session with llm: %w", err)
 	}
