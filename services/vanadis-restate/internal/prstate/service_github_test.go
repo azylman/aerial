@@ -3,46 +3,16 @@ package prstate
 import (
 	"context"
 	"errors"
-	"reflect"
 	"testing"
 	"time"
 
 	restate "github.com/restatedev/sdk-go"
 	"github.com/restatedev/sdk-go/x/mocks"
-	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
 	"github.com/azylman/aerial/pkg/prwire"
 	"github.com/azylman/aerial/pkg/pubsub"
 )
-
-// stubRunKeepTerminal executes every restate.Run closure once like stubRun,
-// but a terminal closure error keeps its code, matching Restate, which
-// never retries a terminal error. Retryable closure errors stand in for
-// exhausted retries (code 500).
-func stubRunKeepTerminal(mc *mocks.MockContext) *runCapture {
-	rec := &runCapture{}
-	run := func(fn func(restate.RunContext) (any, error), output any, _ ...restate.RunOption) restate.TerminalError {
-		rec.ran = true
-		res, err := fn(projRunContext{Context: context.Background()})
-		if restate.IsTerminalError(err) {
-			return restate.AsTerminalError(err)
-		}
-		if err != nil {
-			return restate.TerminalErrorf("retries exhausted: %v", err)
-		}
-		if out := reflect.ValueOf(output); res != nil && out.Kind() == reflect.Pointer && !out.IsNil() {
-			out.Elem().Set(reflect.ValueOf(res))
-		}
-		return nil
-	}
-	// The mock flattens Run options into arguments: register every arity
-	// the handlers use (one to three options).
-	mc.On("Run", mock.Anything, mock.Anything, mock.Anything).Return(run).Maybe()
-	mc.On("Run", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(run).Maybe()
-	mc.On("Run", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(run).Maybe()
-	return rec
-}
 
 func TestJournalGitHub(t *testing.T) {
 	t.Parallel()
@@ -63,7 +33,7 @@ func TestJournalGitHub(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			mc := mocks.NewMockContext(t)
-			stubRunKeepTerminal(mc)
+			stubRun(mc, true)
 			j := journaled(restate.WithMockContext(mc), tc.gh)
 			got, gerr := j.UpdateBranch(context.Background(), "azylman/aerial", 7)
 			require.Equal(t, tc.want, got)
@@ -184,14 +154,8 @@ func TestRepoObjectServiceGitHubEffects(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			var mc *mocks.MockContext
-			rec := &stateCapture[*RepoState]{sends: &sendCapture{}}
-			if tc.failGet {
-				mc = newStateErrorMock(t)
-			} else {
-				mc, rec = newStateMock(t, tc.seed)
-			}
-			run := stubRunKeepTerminal(mc)
+			mc, rec := repoKV(t, tc.seed, tc.failGet)
+			run := stubRun(mc, true)
 			svc := NewRepoObjectService().WithGitHub(tc.gh)
 			var err error
 			if tc.handler == prwire.RepoHandlerWorkflowRerun {
@@ -262,14 +226,8 @@ func TestPRObjectServiceHandleConflictCheck(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			var mc *mocks.MockContext
-			rec := &stateCapture[*PRState]{}
-			if tc.failGet {
-				mc = newStateErrorMock(t)
-			} else {
-				mc, rec = newStateMock(t, tc.state)
-			}
-			stubRunKeepTerminal(mc)
+			mc, rec := prKV(t, tc.state, tc.failGet, false)
+			stubRun(mc, true)
 			facts := &fakeFactPublisher{}
 			eri := &fakeEriEffector{}
 			svc := NewPRObjectService().WithFactPublisher(facts).WithEriEffector(eri)
@@ -334,14 +292,8 @@ func TestPRObjectServiceHandleBranchConflict(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			var mc *mocks.MockContext
-			rec := &stateCapture[*PRState]{}
-			if tc.failGet {
-				mc = newStateErrorMock(t)
-			} else {
-				mc, rec = newStateMock(t, tc.state)
-			}
-			stubRunKeepTerminal(mc)
+			mc, rec := prKV(t, tc.state, tc.failGet, false)
+			stubRun(mc, true)
 			facts := &fakeFactPublisher{}
 			eri := &fakeEriEffector{}
 			err := NewPRObjectService().WithFactPublisher(facts).WithEriEffector(eri).HandleBranchConflict(restate.WithMockContext(mc), tc.ev)
@@ -389,14 +341,8 @@ func TestPRObjectServiceHandleHeadRefMissing(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			var mc *mocks.MockContext
-			rec := &stateCapture[*PRState]{}
-			if tc.failGet {
-				mc = newStateErrorMock(t)
-			} else {
-				mc, rec = newStateMock(t, tc.state)
-			}
-			stubRunKeepTerminal(mc)
+			mc, rec := prKV(t, tc.state, tc.failGet, false)
+			stubRun(mc, true)
 			facts := &fakeFactPublisher{}
 			err := NewPRObjectService().WithFactPublisher(facts).HandleHeadRefMissing(restate.WithMockContext(mc), tc.ev)
 			require.Equal(t, tc.wantErr, err != nil)

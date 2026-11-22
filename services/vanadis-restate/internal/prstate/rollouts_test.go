@@ -290,7 +290,7 @@ func TestPRObjectServiceHandleDeployObserved(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			mc, rec := newStateMock(t, tc.seed)
-			stubRunKeepTerminal(mc)
+			stubRun(mc, true)
 			pub := &fakeFactPublisher{}
 			require.NoError(t, NewPRObjectService().WithFactPublisher(pub).HandleDeployObserved(restate.WithMockContext(mc), tc.ev))
 			require.Equal(t, tc.wantEvents, factEvents(pub.Calls()))
@@ -316,7 +316,7 @@ func TestPRObjectServiceHandleKustomizationRequestedStartedFact(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			mc, _ := newStateMock(t, tc.seed)
-			stubRunKeepTerminal(mc)
+			stubRun(mc, true)
 			pub := &fakeFactPublisher{}
 			ev := PREvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "m1", Jobs: []string{"eri"}, KustomizationRequests: coreRequests, Facts: []pubsub.PRLifecycleEvent{started}}
 			require.NoError(t, NewPRObjectService().WithFactPublisher(pub).WithKube(&fakeKube{}).HandleKustomizationRequested(restate.WithMockContext(mc), ev))
@@ -347,7 +347,7 @@ func TestPRObjectServiceHandleReconcileLost(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			mc, _ := newStateMock(t, tc.seed)
-			stubRunKeepTerminal(mc)
+			stubRun(mc, true)
 			kube := &fakeKube{}
 			err := NewPRObjectService().WithKube(kube).HandleReconcileLost(restate.WithMockContext(mc), tc.ev)
 			require.Equal(t, tc.wantErr, restate.IsTerminalError(err), "err = %v", err)
@@ -501,7 +501,7 @@ func TestPRObjectServiceHandleKustomizationRequestedUntracked(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			mc, rec := newStateMock(t, tc.seed)
-			stubRunKeepTerminal(mc)
+			stubRun(mc, true)
 			kube := &fakeKube{}
 			pub := &fakeFactPublisher{}
 			ev := PREvent{Repo: "kubernetes-sigs/gateway-api", PRNumber: 5433, Jobs: []string{"gateway-api-crds"}, KustomizationRequests: requests, Facts: []pubsub.PRLifecycleEvent{started}}

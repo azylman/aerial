@@ -9,9 +9,6 @@ package prstate
 import (
 	"testing"
 
-	restate "github.com/restatedev/sdk-go"
-	"github.com/restatedev/sdk-go/x/mocks"
-
 	"github.com/azylman/aerial/pkg/prwire"
 )
 
@@ -175,106 +172,5 @@ func assertDeployPublishedState(t *testing.T, s *PRState, evHead, evJob string, 
 	}
 	if s.HeadSHA != wantHead {
 		t.Fatalf("HeadSHA = %q, want %q", s.HeadSHA, wantHead)
-	}
-}
-
-// deployServiceCase is one shared Restate-surface row for the deploy verdict
-// handlers: the decision handler never persists, the ack handler persists
-// exactly once per applied publish, and K/V failures surface.
-type deployServiceCase struct {
-	name           string
-	ack            bool
-	failGet        bool
-	preset         bool
-	stateHead      string
-	stateGen       uint64
-	terminal       TerminalState
-	recordDispatch bool
-	recordPRSlot   bool
-	recordSHASlot  bool
-	evHead         string
-	evMerge        string
-	evJob          string
-	wantPublish    bool
-	wantDeduped    bool
-	wantRecorded   bool
-	wantSet        bool
-	wantErr        bool
-}
-
-// deployServiceMock builds the shared K/V mock for one deploy verdict call:
-// a failing Get for error rows, else the preset state (nil for first touch).
-func deployServiceMock(t *testing.T, tc deployServiceCase) (*mocks.MockContext, *stateCapture[*PRState], PREvent) {
-	t.Helper()
-	rec := &stateCapture[*PRState]{}
-	ev := PREvent{Event: "deploy_success", Repo: "azylman/aerial", PRNumber: 101, HeadSHA: tc.evHead, MergeSHA: tc.evMerge, JobName: tc.evJob, GateGeneration: tc.stateGen}
-	if tc.failGet {
-		return newStateErrorMock(t), rec, ev
-	}
-	var existing *PRState
-	if tc.preset {
-		existing = decisionState(101, tc.stateHead, tc.stateGen, tc.terminal, tc.recordDispatch, tc.recordPRSlot, tc.recordSHASlot, tc.evHead, tc.evJob)
-	}
-	mc, rec := newStateMock(t, existing)
-	return mc, rec, ev
-}
-
-// deployVerdict normalizes both handler outcomes so one table covers the
-// decision and ack surface with a single comparison.
-type deployVerdict struct {
-	publish  bool
-	deduped  bool
-	recorded bool
-}
-
-// invokeDeployVerdict calls the decision or ack handler for one row and
-// normalizes the outcome. The decision never persists; the ack persists on
-// apply inside the handler.
-func invokeDeployVerdict(mc *mocks.MockContext, ev PREvent, ack bool) (deployVerdict, error) {
-	if ack {
-		out, err := NewPRObjectService().HandleDeploySuccessPublished(restate.WithMockContext(mc), ev)
-		return deployVerdict{deduped: out.Deduped, recorded: out.Recorded}, err
-	}
-	out, err := NewPRObjectService().HandleDeployDispatched(restate.WithMockContext(mc), ev)
-	return deployVerdict{publish: out.ShouldPublish, deduped: out.Deduped}, err
-}
-
-// TestPRObjectService_DeployDecision pins the Restate surface for the two
-// deploy verdict handlers through the shared K/V mock harness: the decision
-// handler never persists, the ack handler persists exactly once per applied
-// publish, and K/V failures surface without persisting.
-func TestPRObjectService_DeployDecision(t *testing.T) {
-	t.Parallel()
-	tests := []deployServiceCase{
-		{name: "decision resolves publish on fresh state", evHead: "aaa111", evMerge: "mmm999", evJob: "flux-a", wantPublish: true},
-		{name: "decision dedupes recorded publish without persisting", preset: true, stateHead: "aaa111", stateGen: 2, recordDispatch: true, recordPRSlot: true, recordSHASlot: true, evHead: "aaa111", evMerge: "mmm999", evJob: "flux-a", wantDeduped: true},
-		{name: "decision surfaces kv failure", failGet: true, evHead: "aaa111", evMerge: "mmm999", evJob: "flux-a", wantErr: true},
-		{name: "ack records fresh publish", ack: true, preset: true, stateHead: "aaa111", evHead: "aaa111", evMerge: "mmm999", evJob: "flux-a", wantRecorded: true, wantSet: true},
-		{name: "ack replays recorded publish", ack: true, preset: true, stateHead: "aaa111", stateGen: 2, recordDispatch: true, recordPRSlot: true, recordSHASlot: true, evHead: "aaa111", evMerge: "mmm999", evJob: "flux-a", wantRecorded: true, wantDeduped: true, wantSet: true},
-		{name: "ack drops stale head without persisting", ack: true, preset: true, stateHead: "aaa111", stateGen: 2, evHead: "zzz999", evMerge: "mmm999", evJob: "flux-a"},
-		{name: "ack surfaces kv failure", ack: true, failGet: true, evHead: "aaa111", evMerge: "mmm999", evJob: "flux-a", wantErr: true},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			mc, rec, ev := deployServiceMock(t, tc)
-			got, err := invokeDeployVerdict(mc, ev, tc.ack)
-			want := deployVerdict{publish: tc.wantPublish, deduped: tc.wantDeduped, recorded: tc.wantRecorded}
-			if tc.wantErr {
-				if err == nil {
-					t.Fatal("deploy verdict err = nil, want error")
-				}
-			} else {
-				if err != nil {
-					t.Fatalf("deploy verdict err = %v, want nil", err)
-				}
-				if got != want {
-					t.Fatalf("verdict = %+v, want %+v", got, want)
-				}
-			}
-			if rec.setCalled != tc.wantSet {
-				t.Fatalf("setCalled = %v, want %v", rec.setCalled, tc.wantSet)
-			}
-		})
 	}
 }

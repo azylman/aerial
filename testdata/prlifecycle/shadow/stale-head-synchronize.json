@@ -1,22 +1,22 @@
 {
-  "description": "PRObject.HandleSynchronized used to apply a synchronize only when the stored head was empty, equal to the event head or equal to its before SHA, so once PRObject missed one synchronize every later one dropped stale until merge: HeadSHA and the RepoObject SHA index stayed wedged and check/workflow events on the new heads were unroutable (aerial#2308, g3-shadow-soak-r8: stored c00b710c, before 79e9dfc2, head 701c341c, sha_pr_missing +5). A stored head matching neither now recovers last-write-wins like the legacy UpdatePRSync row unless the event head is one the PR already moved past (PriorHeads). Case 1: a registered miorine PR whose stored head is c00b receives the 79e9->701c synchronize. Legacy writes 701c to the row and publishes one synchronize fact; PRObject (legacy-owned shadow send) lands on 701c with c00b in PriorHeads, the projection agrees with the row, RepoObject resolves 701c to the PR and a check_run on 701c routes to it (ci_failed). The restate-owned replay publishes the same single synchronize fact at 701c. Case 2 (contrast): a late redelivery of c00b->79e9 after PRObject reached 701c drops stale: PRObject keeps 701c and publishes nothing restate-owned, while legacy UpdatePRSync regresses the row to 79e9 (last-write-wins, unchanged pre-existing behavior), so the shadow compare counts the row as superseded (head mismatch) rather than comparing it. Case 3 (contrast): the normal before==stored synchronize is unchanged.",
+  "description": "PRObject.HandleSynchronized used to apply a synchronize only when the stored head was empty, equal to the event head or equal to its before SHA, so once PRObject missed one synchronize every later one dropped stale until merge: HeadSHA and the RepoObject SHA index stayed wedged and check/workflow events on the new heads were unroutable (aerial#2308, g3-shadow-soak-r8: stored c00b710c, before 79e9dfc2, head 701c341c, sha_pr_missing +5). A stored head matching neither now recovers last-write-wins like the legacy UpdatePRSync row unless the event head is one the PR already moved past (PriorHeads). Case 1: a registered alpha PR whose stored head is c00b receives the 79e9->701c synchronize. Legacy writes 701c to the row and publishes one synchronize fact; PRObject (legacy-owned shadow send) lands on 701c with c00b in PriorHeads, the projection agrees with the row, RepoObject resolves 701c to the PR and a check_run on 701c routes to it (ci_failed). The restate-owned replay publishes the same single synchronize fact at 701c. Case 2 (contrast): a late redelivery of c00b->79e9 after PRObject reached 701c drops stale: PRObject keeps 701c and publishes nothing restate-owned, while legacy UpdatePRSync regresses the row to 79e9 (last-write-wins, unchanged pre-existing behavior), so the shadow compare counts the row as superseded (head mismatch) rather than comparing it. Case 3 (contrast): the normal before==stored synchronize is unchanged.",
   "bots": [
     "aerial",
-    "miorine",
-    "suletta"
+    "alpha",
+    "beta"
   ],
   "cases": [
     {
       "name": "missed synchronize recovers the stale head",
-      "body_bot": "miorine",
+      "body_bot": "alpha",
       "pr": {
         "repo": "azylman/aerial",
         "pr_number": 2308,
-        "branch": "feat/miorine-stale-head",
+        "branch": "feat/alpha-stale-head",
         "head_sha": "701c341c00000000000000000000000000002308",
         "before_sha": "79e9dfc200000000000000000000000000002308",
         "target_id": "100000000000000002",
-        "title": "Miorine stale head"
+        "title": "Alpha stale head"
       },
       "setup": [
         {
@@ -25,15 +25,15 @@
           "event": {
             "repo": "azylman/aerial",
             "pr_number": 2308,
-            "branch": "feat/miorine-stale-head",
+            "branch": "feat/alpha-stale-head",
             "head_sha": "c00b710c00000000000000000000000000002308",
             "target_id": "100000000000000002",
-            "title": "Miorine stale head",
-            "agent": "miorine",
-            "bot_id": "miorine",
+            "title": "Alpha stale head",
+            "agent": "alpha",
+            "bot_id": "alpha",
             "metadata": {
-              "agent": "miorine",
-              "bot_id": "miorine"
+              "agent": "alpha",
+              "bot_id": "alpha"
             }
           }
         }
@@ -54,10 +54,10 @@
             "repo": "azylman/aerial",
             "pr_number": 2308,
             "head_sha": "701c341c00000000000000000000000000002308",
-            "branch": "feat/miorine-stale-head",
-            "title": "Miorine stale head",
+            "branch": "feat/alpha-stale-head",
+            "title": "Alpha stale head",
             "target_id": "100000000000000002",
-            "agent": "miorine"
+            "agent": "alpha"
           }
         },
         {
@@ -68,9 +68,9 @@
             "pr_number": 2308,
             "head_sha": "701c341c00000000000000000000000000002308",
             "before_sha": "79e9dfc200000000000000000000000000002308",
-            "branch": "feat/miorine-stale-head",
-            "title": "Miorine stale head",
-            "agent": "miorine"
+            "branch": "feat/alpha-stale-head",
+            "title": "Alpha stale head",
+            "agent": "alpha"
           }
         }
       ],
@@ -83,8 +83,8 @@
             "pr_number": 2308,
             "head_sha": "701c341c00000000000000000000000000002308",
             "before_sha": "79e9dfc200000000000000000000000000002308",
-            "branch": "feat/miorine-stale-head",
-            "title": "Miorine stale head",
+            "branch": "feat/alpha-stale-head",
+            "title": "Alpha stale head",
             "facts": [
               {
                 "event": "synchronize",
@@ -111,7 +111,7 @@
         }
       },
       "want": {
-        "owner": "miorine",
+        "owner": "alpha",
         "head_sha": "701c341c00000000000000000000000000002308",
         "prior_heads": [
           "c00b710c00000000000000000000000000002308"
@@ -130,28 +130,28 @@
         "repo": "azylman/aerial",
         "pr_number": 2308,
         "agent": "aerial",
-        "branch": "feat/miorine-stale-head",
+        "branch": "feat/alpha-stale-head",
         "head_sha": "701c341c00000000000000000000000000002308",
         "target_id": "100000000000000002",
         "status": "open",
-        "title": "Miorine stale head",
+        "title": "Alpha stale head",
         "metadata": {
-          "agent": "miorine",
-          "bot_id": "miorine"
+          "agent": "alpha",
+          "bot_id": "alpha"
         }
       }
     },
     {
       "name": "late redelivery of a prior head drops stale",
-      "body_bot": "miorine",
+      "body_bot": "alpha",
       "pr": {
         "repo": "azylman/aerial",
         "pr_number": 2308,
-        "branch": "feat/miorine-stale-head",
+        "branch": "feat/alpha-stale-head",
         "head_sha": "79e9dfc200000000000000000000000000002308",
         "before_sha": "c00b710c00000000000000000000000000002308",
         "target_id": "100000000000000002",
-        "title": "Miorine stale head"
+        "title": "Alpha stale head"
       },
       "setup": [
         {
@@ -160,15 +160,15 @@
           "event": {
             "repo": "azylman/aerial",
             "pr_number": 2308,
-            "branch": "feat/miorine-stale-head",
+            "branch": "feat/alpha-stale-head",
             "head_sha": "c00b710c00000000000000000000000000002308",
             "target_id": "100000000000000002",
-            "title": "Miorine stale head",
-            "agent": "miorine",
-            "bot_id": "miorine",
+            "title": "Alpha stale head",
+            "agent": "alpha",
+            "bot_id": "alpha",
             "metadata": {
-              "agent": "miorine",
-              "bot_id": "miorine"
+              "agent": "alpha",
+              "bot_id": "alpha"
             }
           }
         },
@@ -180,8 +180,8 @@
             "pr_number": 2308,
             "head_sha": "79e9dfc200000000000000000000000000002308",
             "before_sha": "c00b710c00000000000000000000000000002308",
-            "branch": "feat/miorine-stale-head",
-            "title": "Miorine stale head"
+            "branch": "feat/alpha-stale-head",
+            "title": "Alpha stale head"
           }
         },
         {
@@ -192,8 +192,8 @@
             "pr_number": 2308,
             "head_sha": "701c341c00000000000000000000000000002308",
             "before_sha": "79e9dfc200000000000000000000000000002308",
-            "branch": "feat/miorine-stale-head",
-            "title": "Miorine stale head"
+            "branch": "feat/alpha-stale-head",
+            "title": "Alpha stale head"
           }
         }
       ],
@@ -213,10 +213,10 @@
             "repo": "azylman/aerial",
             "pr_number": 2308,
             "head_sha": "79e9dfc200000000000000000000000000002308",
-            "branch": "feat/miorine-stale-head",
-            "title": "Miorine stale head",
+            "branch": "feat/alpha-stale-head",
+            "title": "Alpha stale head",
             "target_id": "100000000000000002",
-            "agent": "miorine"
+            "agent": "alpha"
           }
         },
         {
@@ -227,9 +227,9 @@
             "pr_number": 2308,
             "head_sha": "79e9dfc200000000000000000000000000002308",
             "before_sha": "c00b710c00000000000000000000000000002308",
-            "branch": "feat/miorine-stale-head",
-            "title": "Miorine stale head",
-            "agent": "miorine"
+            "branch": "feat/alpha-stale-head",
+            "title": "Alpha stale head",
+            "agent": "alpha"
           }
         }
       ],
@@ -242,8 +242,8 @@
             "pr_number": 2308,
             "head_sha": "79e9dfc200000000000000000000000000002308",
             "before_sha": "c00b710c00000000000000000000000000002308",
-            "branch": "feat/miorine-stale-head",
-            "title": "Miorine stale head",
+            "branch": "feat/alpha-stale-head",
+            "title": "Alpha stale head",
             "facts": [
               {
                 "event": "synchronize",
@@ -256,14 +256,13 @@
         }
       ],
       "want": {
-        "owner": "miorine",
+        "owner": "alpha",
         "head_sha": "701c341c00000000000000000000000000002308",
         "prior_heads": [
           "c00b710c00000000000000000000000000002308",
           "79e9dfc200000000000000000000000000002308"
         ],
         "status": "open",
-        "superseded": true,
         "resolved_pr": 2308,
         "status_after_check": ""
       },
@@ -271,28 +270,28 @@
         "repo": "azylman/aerial",
         "pr_number": 2308,
         "agent": "aerial",
-        "branch": "feat/miorine-stale-head",
+        "branch": "feat/alpha-stale-head",
         "head_sha": "79e9dfc200000000000000000000000000002308",
         "target_id": "100000000000000002",
         "status": "open",
-        "title": "Miorine stale head",
+        "title": "Alpha stale head",
         "metadata": {
-          "agent": "miorine",
-          "bot_id": "miorine"
+          "agent": "alpha",
+          "bot_id": "alpha"
         }
       }
     },
     {
       "name": "synchronize from the stored head is unchanged",
-      "body_bot": "miorine",
+      "body_bot": "alpha",
       "pr": {
         "repo": "azylman/aerial",
         "pr_number": 2308,
-        "branch": "feat/miorine-stale-head",
+        "branch": "feat/alpha-stale-head",
         "head_sha": "79e9dfc200000000000000000000000000002308",
         "before_sha": "c00b710c00000000000000000000000000002308",
         "target_id": "100000000000000002",
-        "title": "Miorine stale head"
+        "title": "Alpha stale head"
       },
       "setup": [
         {
@@ -301,15 +300,15 @@
           "event": {
             "repo": "azylman/aerial",
             "pr_number": 2308,
-            "branch": "feat/miorine-stale-head",
+            "branch": "feat/alpha-stale-head",
             "head_sha": "c00b710c00000000000000000000000000002308",
             "target_id": "100000000000000002",
-            "title": "Miorine stale head",
-            "agent": "miorine",
-            "bot_id": "miorine",
+            "title": "Alpha stale head",
+            "agent": "alpha",
+            "bot_id": "alpha",
             "metadata": {
-              "agent": "miorine",
-              "bot_id": "miorine"
+              "agent": "alpha",
+              "bot_id": "alpha"
             }
           }
         }
@@ -330,10 +329,10 @@
             "repo": "azylman/aerial",
             "pr_number": 2308,
             "head_sha": "79e9dfc200000000000000000000000000002308",
-            "branch": "feat/miorine-stale-head",
-            "title": "Miorine stale head",
+            "branch": "feat/alpha-stale-head",
+            "title": "Alpha stale head",
             "target_id": "100000000000000002",
-            "agent": "miorine"
+            "agent": "alpha"
           }
         },
         {
@@ -344,9 +343,9 @@
             "pr_number": 2308,
             "head_sha": "79e9dfc200000000000000000000000000002308",
             "before_sha": "c00b710c00000000000000000000000000002308",
-            "branch": "feat/miorine-stale-head",
-            "title": "Miorine stale head",
-            "agent": "miorine"
+            "branch": "feat/alpha-stale-head",
+            "title": "Alpha stale head",
+            "agent": "alpha"
           }
         }
       ],
@@ -359,8 +358,8 @@
             "pr_number": 2308,
             "head_sha": "79e9dfc200000000000000000000000000002308",
             "before_sha": "c00b710c00000000000000000000000000002308",
-            "branch": "feat/miorine-stale-head",
-            "title": "Miorine stale head",
+            "branch": "feat/alpha-stale-head",
+            "title": "Alpha stale head",
             "facts": [
               {
                 "event": "synchronize",
@@ -387,7 +386,7 @@
         }
       },
       "want": {
-        "owner": "miorine",
+        "owner": "alpha",
         "head_sha": "79e9dfc200000000000000000000000000002308",
         "prior_heads": [
           "c00b710c00000000000000000000000000002308"
@@ -406,14 +405,14 @@
         "repo": "azylman/aerial",
         "pr_number": 2308,
         "agent": "aerial",
-        "branch": "feat/miorine-stale-head",
+        "branch": "feat/alpha-stale-head",
         "head_sha": "79e9dfc200000000000000000000000000002308",
         "target_id": "100000000000000002",
         "status": "open",
-        "title": "Miorine stale head",
+        "title": "Alpha stale head",
         "metadata": {
-          "agent": "miorine",
-          "bot_id": "miorine"
+          "agent": "alpha",
+          "bot_id": "alpha"
         }
       }
     }

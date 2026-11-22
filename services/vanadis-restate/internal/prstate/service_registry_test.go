@@ -4,7 +4,6 @@ import (
 	"testing"
 
 	restate "github.com/restatedev/sdk-go"
-	"github.com/restatedev/sdk-go/x/mocks"
 	"github.com/stretchr/testify/require"
 
 	"github.com/azylman/aerial/pkg/prwire"
@@ -86,7 +85,7 @@ func TestPRObjectService_RegistryRow(t *testing.T) {
 	mc05, rec05 := newStateMock(t, svcRow("h1", "", RegistryStatusOpen, TerminalNone))
 	mc06, rec06 := newStateMock(t, svcRow("h1", "", RegistryStatusOpen, TerminalNone))
 	mc07, rec07 := newStateMock(t, svcRow("h1", "m1", RegistryStatusMerged, TerminalMerged))
-	stubRun(mc07)
+	stubRun(mc07, false)
 	mc08, rec08 := newStateMock(t, deployingMerged())
 	mc09, rec09 := newStateMock(t, deployingMerged())
 	mc10, rec10 := newStateMock(t, deployingMerged())
@@ -221,13 +220,7 @@ func TestPRObjectService_Register(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			var mc *mocks.MockContext
-			rec := &stateCapture[*PRState]{sends: &sendCapture{}}
-			if tc.failGet {
-				mc = newStateErrorMock(t)
-			} else {
-				mc, rec = newStateMock(t, tc.existing)
-			}
+			mc, rec := prKV(t, tc.existing, tc.failGet, false)
 			got, err := NewPRObjectService().Register(restate.WithMockContext(mc), tc.req)
 			require.Equal(t, tc.wantErr, err != nil)
 			if tc.wantErr {
@@ -264,12 +257,7 @@ func TestPRObjectService_GetBuildLifecycle(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			var mc *mocks.MockContext
-			if tc.failGet {
-				mc = newStateErrorMock(t)
-			} else {
-				mc, _ = newStateMock(t, tc.existing)
-			}
+			mc, _ := prKV(t, tc.existing, tc.failGet, false)
 			got, err := NewPRObjectService().GetBuildLifecycle(restate.WithMockContext(mc), BuildLifecycleRequest{})
 			require.Equal(t, tc.wantErr, err != nil)
 			require.Equal(t, tc.want, got)

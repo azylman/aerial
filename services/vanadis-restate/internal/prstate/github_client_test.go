@@ -6,76 +6,23 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/azylman/aerial/pkg/githubapitest"
 )
 
-// apiResponse is one canned GitHub response.
-type apiResponse struct {
-	status     int
-	body       string
-	remaining  string
-	retryAfter string
-}
+// apiResponse is one canned response of the shared fake GitHub API.
+type apiResponse = githubapitest.Response
 
-// apiRequest is one request the fake GitHub API saw.
-type apiRequest struct {
-	method      string
-	path        string
-	auth        string
-	accept      string
-	contentType string
-}
-
-// fakeGitHubAPI serves canned responses per "METHOD path?query", in order;
-// the last response repeats. Unknown routes return 404.
-type fakeGitHubAPI struct {
-	mu        sync.Mutex
-	responses map[string][]apiResponse
-	requests  []apiRequest
-}
-
-func (f *fakeGitHubAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	route := r.Method + " " + r.URL.RequestURI()
-	f.requests = append(f.requests, apiRequest{method: r.Method, path: r.URL.RequestURI(), auth: r.Header.Get("Authorization"), accept: r.Header.Get("Accept"), contentType: r.Header.Get("Content-Type")})
-	queue := f.responses[route]
-	if len(queue) == 0 {
-		w.WriteHeader(http.StatusNotFound)
-		_, _ = w.Write([]byte(`{"message":"Not Found"}`))
-		return
-	}
-	resp := queue[0]
-	if len(queue) > 1 {
-		f.responses[route] = queue[1:]
-	}
-	if resp.remaining != "" {
-		w.Header().Set("X-Ratelimit-Remaining", resp.remaining)
-	}
-	if resp.retryAfter != "" {
-		w.Header().Set("Retry-After", resp.retryAfter)
-	}
-	w.WriteHeader(resp.status)
-	_, _ = w.Write([]byte(resp.body))
-}
-
-func (f *fakeGitHubAPI) Requests() []apiRequest {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return append([]apiRequest(nil), f.requests...)
-}
-
-// newFakeGitHub starts a fake API with routes and returns a client on it.
-func newFakeGitHub(t *testing.T, routes map[string][]apiResponse) (*GitHubClient, *fakeGitHubAPI) {
+// newFakeGitHub starts the shared fake GitHub API with routes and returns a
+// client on it.
+func newFakeGitHub(t *testing.T, routes map[string][]apiResponse) (*GitHubClient, *githubapitest.Server) {
 	t.Helper()
-	api := &fakeGitHubAPI{responses: routes}
-	srv := httptest.NewServer(api)
-	t.Cleanup(srv.Close)
-	return NewGitHubClient(srv.Client(), srv.URL+"/", "tok"), api
+	api := githubapitest.New(t, routes)
+	return NewGitHubClient(api.Client(), api.URL()+"/", "tok"), api
 }
 
 const (
@@ -127,17 +74,15 @@ func TestGitHubClientDo(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			api := &fakeGitHubAPI{responses: map[string][]apiResponse{tc.method + " /x": {{status: 200, body: "{}"}}}}
-			srv := httptest.NewServer(api)
-			t.Cleanup(srv.Close)
+			api := githubapitest.New(t, map[string][]apiResponse{tc.method + " /x": {{Body: "{}"}}})
 			var body io.Reader
 			if tc.body != "" {
 				body = strings.NewReader(tc.body)
 			}
-			status, _, gerr := NewGitHubClient(srv.Client(), srv.URL, tc.token).do(context.Background(), tc.method, "/x", body, 1<<10)
+			status, _, gerr := NewGitHubClient(api.Client(), api.URL(), tc.token).do(context.Background(), tc.method, "/x", body, 1<<10)
 			require.Nil(t, gerr)
 			require.Equal(t, http.StatusOK, status)
-			require.Equal(t, []apiRequest{{method: tc.method, path: "/x", auth: tc.wantAuth, accept: tc.wantAccept, contentType: tc.wantContentType}}, api.Requests())
+			require.Equal(t, []githubapitest.Request{{Method: tc.method, Path: "/x", Auth: tc.wantAuth, Accept: tc.wantAccept, ContentType: tc.wantContentType, Body: tc.body}}, api.Requests())
 		})
 	}
 }
@@ -216,26 +161,26 @@ func TestGitHubClientUpdateBranch(t *testing.T) {
 		wantRequests    int
 		wantMessage     string
 	}{
-		{name: "accepted", repo: "azylman/aerial", prNumber: 7, routes: map[string][]apiResponse{updateBranchRoute: {{status: 202}}}, want: UpdateBranchUpdated, wantRequests: 1},
-		{name: "conflict", repo: "azylman/aerial", prNumber: 7, routes: map[string][]apiResponse{updateBranchRoute: {{status: 409}}}, want: UpdateBranchConflict, wantRequests: 1},
+		{name: "accepted", repo: "azylman/aerial", prNumber: 7, routes: map[string][]apiResponse{updateBranchRoute: {{Status: 202}}}, want: UpdateBranchUpdated, wantRequests: 1},
+		{name: "conflict", repo: "azylman/aerial", prNumber: 7, routes: map[string][]apiResponse{updateBranchRoute: {{Status: 409}}}, want: UpdateBranchConflict, wantRequests: 1},
 		{
-			name: "rate limited", repo: "azylman/aerial", prNumber: 7, routes: map[string][]apiResponse{updateBranchRoute: {{status: 403, remaining: "0", body: `{"message":"API rate limit exceeded for installation."}`}}},
+			name: "rate limited", repo: "azylman/aerial", prNumber: 7, routes: map[string][]apiResponse{updateBranchRoute: {{Status: 403, Remaining: "0", Body: `{"message":"API rate limit exceeded for installation."}`}}},
 			wantErrStatus: 403, wantRateLimited: true, wantRetryAfter: time.Minute, wantRequests: 1, wantMessage: "github api rate limited (status 403, remaining: 0): API rate limit exceeded for installation.",
 		},
 		{
-			name: "secondary rate limit", repo: "azylman/aerial", prNumber: 7, routes: map[string][]apiResponse{updateBranchRoute: {{status: 403, retryAfter: "60", body: `{"message":"You have exceeded a secondary rate limit."}`}}},
+			name: "secondary rate limit", repo: "azylman/aerial", prNumber: 7, routes: map[string][]apiResponse{updateBranchRoute: {{Status: 403, RetryAfter: "60", Body: `{"message":"You have exceeded a secondary rate limit."}`}}},
 			wantErrStatus: 403, wantRateLimited: true, wantRetryAfter: 60 * time.Second, wantRequests: 1, wantMessage: "github api rate limited (status 403, remaining: ): You have exceeded a secondary rate limit.",
 		},
 		{
-			name: "permission 403 is terminal with github message", repo: "azylman/aerial", prNumber: 7, routes: map[string][]apiResponse{updateBranchRoute: {{status: 403, remaining: "4999", body: `{"message":"Resource not accessible by integration","documentation_url":"https://docs.github.com"}`}}},
+			name: "permission 403 is terminal with github message", repo: "azylman/aerial", prNumber: 7, routes: map[string][]apiResponse{updateBranchRoute: {{Status: 403, Remaining: "4999", Body: `{"message":"Resource not accessible by integration","documentation_url":"https://docs.github.com"}`}}},
 			wantErrStatus: 403, wantRequests: 1, wantMessage: "github api forbidden PUT /repos/azylman/aerial/pulls/7/update-branch (status 403): Resource not accessible by integration",
 		},
 		{
-			name: "403 without json body", repo: "azylman/aerial", prNumber: 7, routes: map[string][]apiResponse{updateBranchRoute: {{status: 403, body: "forbidden"}}},
+			name: "403 without json body", repo: "azylman/aerial", prNumber: 7, routes: map[string][]apiResponse{updateBranchRoute: {{Status: 403, Body: "forbidden"}}},
 			wantErrStatus: 403, wantRequests: 1, wantMessage: "github api forbidden PUT /repos/azylman/aerial/pulls/7/update-branch (status 403): no message",
 		},
 		{
-			name: "too many requests", repo: "azylman/aerial", prNumber: 7, routes: map[string][]apiResponse{updateBranchRoute: {{status: 429, body: `{"message":""}`}}},
+			name: "too many requests", repo: "azylman/aerial", prNumber: 7, routes: map[string][]apiResponse{updateBranchRoute: {{Status: 429, Body: `{"message":""}`}}},
 			wantErrStatus: 429, wantRateLimited: true, wantRetryAfter: time.Minute, wantRequests: 1, wantMessage: "github api rate limited (status 429, remaining: ): no message",
 		},
 		{name: "invalid input never calls github", repo: "", prNumber: 7, wantErrStatus: 400},
@@ -249,7 +194,7 @@ func TestGitHubClientUpdateBranch(t *testing.T) {
 			require.Len(t, api.Requests(), tc.wantRequests)
 			if tc.wantErrStatus == 0 {
 				require.Nil(t, gerr)
-				require.Equal(t, "Bearer tok", api.Requests()[0].auth)
+				require.Equal(t, "Bearer tok", api.Requests()[0].Auth)
 				return
 			}
 			require.Equal(t, tc.wantErrStatus, gerr.Status)
@@ -274,11 +219,11 @@ func TestGitHubClientListOpenPRs(t *testing.T) {
 	}{
 		{
 			name: "lists open prs", repo: "azylman/aerial",
-			routes: map[string][]apiResponse{openPRsRoute: {{status: 200, body: `[{"number":7,"draft":true,"user":{"login":"dependabot[bot]"},"head":{"ref":"b7","sha":"h7"}}]`}}},
+			routes: map[string][]apiResponse{openPRsRoute: {{Status: 200, Body: `[{"number":7,"draft":true,"user":{"login":"dependabot[bot]"},"head":{"ref":"b7","sha":"h7"}}]`}}},
 			want:   []GitHubPR{{Number: 7, Draft: true, User: GitHubUser{Login: "dependabot[bot]"}, Head: GitHubPRRef{Ref: "b7", SHA: "h7"}}},
 		},
-		{name: "server error", repo: "azylman/aerial", routes: map[string][]apiResponse{openPRsRoute: {{status: 503}}}, wantErrStatus: 503},
-		{name: "malformed body", repo: "azylman/aerial", routes: map[string][]apiResponse{openPRsRoute: {{status: 200, body: `{`}}}, wantErrStatus: 200},
+		{name: "server error", repo: "azylman/aerial", routes: map[string][]apiResponse{openPRsRoute: {{Status: 503}}}, wantErrStatus: 503},
+		{name: "malformed body", repo: "azylman/aerial", routes: map[string][]apiResponse{openPRsRoute: {{Status: 200, Body: `{`}}}, wantErrStatus: 200},
 		{name: "invalid repo", repo: " ", wantErrStatus: 400},
 	}
 	for _, tc := range tests {
@@ -309,29 +254,29 @@ func TestGitHubClientFetchPRMergeability(t *testing.T) {
 	}{
 		{
 			name: "known mergeability fetches once", prNumber: 7,
-			routes:       map[string][]apiResponse{pr7Route: {{status: 200, body: `{"number":7,"mergeable":false,"mergeable_state":"dirty"}`}}},
+			routes:       map[string][]apiResponse{pr7Route: {{Status: 200, Body: `{"number":7,"mergeable":false,"mergeable_state":"dirty"}`}}},
 			want:         GitHubPR{Number: 7, Mergeable: &conflicted, MergeableState: "dirty"},
 			wantRequests: 1,
 		},
 		{
 			name: "unknown mergeability refetches until computed", prNumber: 7,
 			routes: map[string][]apiResponse{pr7Route: {
-				{status: 200, body: `{"number":7,"mergeable_state":"unknown"}`},
-				{status: 200, body: `{"number":7}`},
-				{status: 200, body: `{"number":7,"mergeable_state":"behind"}`},
+				{Status: 200, Body: `{"number":7,"mergeable_state":"unknown"}`},
+				{Status: 200, Body: `{"number":7}`},
+				{Status: 200, Body: `{"number":7,"mergeable_state":"behind"}`},
 			}},
 			want:         GitHubPR{Number: 7, MergeableState: "behind"},
 			wantRequests: 3,
 		},
 		{
 			name: "never computed stops after the refetch budget", prNumber: 7,
-			routes:       map[string][]apiResponse{pr7Route: {{status: 200, body: `{"number":7}`}}},
+			routes:       map[string][]apiResponse{pr7Route: {{Status: 200, Body: `{"number":7}`}}},
 			want:         GitHubPR{Number: 7},
 			wantRequests: 4,
 		},
 		{
 			name: "refetch failure surfaces", prNumber: 7,
-			routes:        map[string][]apiResponse{pr7Route: {{status: 200, body: `{"number":7}`}, {status: 500}}},
+			routes:        map[string][]apiResponse{pr7Route: {{Status: 200, Body: `{"number":7}`}, {Status: 500}}},
 			wantErrStatus: 500, wantRequests: 2,
 		},
 		{name: "not found", prNumber: 7, wantErrStatus: 404, wantRequests: 1},
@@ -401,20 +346,20 @@ func TestGitHubClientHeadChecksBlocked(t *testing.T) {
 		routes map[string][]apiResponse
 		want   bool
 	}{
-		{name: "all passed", sha: "h1", routes: map[string][]apiResponse{checksRoute: {{status: 200, body: `{"check_runs":[{"id":1,"name":"lint","status":"completed","conclusion":"success"}]}`}}}},
-		{name: "pending run blocks", sha: "h1", routes: map[string][]apiResponse{checksRoute: {{status: 200, body: `{"check_runs":[{"id":1,"name":"lint","status":"in_progress"}]}`}}}, want: true},
-		{name: "failed run blocks", sha: "h1", routes: map[string][]apiResponse{checksRoute: {{status: 200, body: `{"check_runs":[{"id":1,"name":"test","status":"completed","conclusion":"failure"}]}`}}}, want: true},
-		{name: "failed gate aggregator alone does not block", sha: "h1", routes: map[string][]apiResponse{checksRoute: {{status: 200, body: `{"check_runs":[{"id":1,"name":"CI Gate","status":"completed","conclusion":"failure"}]}`}}}},
+		{name: "all passed", sha: "h1", routes: map[string][]apiResponse{checksRoute: {{Status: 200, Body: `{"check_runs":[{"id":1,"name":"lint","status":"completed","conclusion":"success"}]}`}}}},
+		{name: "pending run blocks", sha: "h1", routes: map[string][]apiResponse{checksRoute: {{Status: 200, Body: `{"check_runs":[{"id":1,"name":"lint","status":"in_progress"}]}`}}}, want: true},
+		{name: "failed run blocks", sha: "h1", routes: map[string][]apiResponse{checksRoute: {{Status: 200, Body: `{"check_runs":[{"id":1,"name":"test","status":"completed","conclusion":"failure"}]}`}}}, want: true},
+		{name: "failed gate aggregator alone does not block", sha: "h1", routes: map[string][]apiResponse{checksRoute: {{Status: 200, Body: `{"check_runs":[{"id":1,"name":"CI Gate","status":"completed","conclusion":"failure"}]}`}}}},
 		{
 			name: "newest rerun of a check wins", sha: "h1",
-			routes: map[string][]apiResponse{checksRoute: {{status: 200, body: `{"check_runs":[{"id":1,"name":"test","status":"completed","conclusion":"failure"},{"id":2,"name":"test","status":"completed","conclusion":"success"},{"id":0,"name":"Test","status":"completed","conclusion":"failure"}]}`}}},
+			routes: map[string][]apiResponse{checksRoute: {{Status: 200, Body: `{"check_runs":[{"id":1,"name":"test","status":"completed","conclusion":"failure"},{"id":2,"name":"test","status":"completed","conclusion":"success"},{"id":0,"name":"Test","status":"completed","conclusion":"failure"}]}`}}},
 		},
 		{
 			name: "build metadata, dependabot, and nameless runs are ignored", sha: "h1",
-			routes: map[string][]apiResponse{checksRoute: {{status: 200, body: `{"check_runs":[{"id":1,"name":"build-metadata","status":"queued"},{"id":2,"name":"build-metadata-result","status":"queued"},{"id":3,"name":"x","status":"queued","app":{"slug":"dependabot"}},{"id":4,"name":" ","status":"queued"}]}`}}},
+			routes: map[string][]apiResponse{checksRoute: {{Status: 200, Body: `{"check_runs":[{"id":1,"name":"build-metadata","status":"queued"},{"id":2,"name":"build-metadata-result","status":"queued"},{"id":3,"name":"x","status":"queued","app":{"slug":"dependabot"}},{"id":4,"name":" ","status":"queued"}]}`}}},
 		},
 		{name: "missing commit does not block", sha: "h1"},
-		{name: "read failure blocks", sha: "h1", routes: map[string][]apiResponse{checksRoute: {{status: 500}}}, want: true},
+		{name: "read failure blocks", sha: "h1", routes: map[string][]apiResponse{checksRoute: {{Status: 500}}}, want: true},
 		{name: "zero sha never blocks", sha: "0000"},
 	}
 	for _, tc := range tests {
@@ -435,8 +380,8 @@ func TestGitHubClientRerunFailedJobs(t *testing.T) {
 		wantErrStatus int
 		wantNil       bool
 	}{
-		{name: "created", runID: 55, routes: map[string][]apiResponse{rerunRoute: {{status: 201}}}, wantNil: true},
-		{name: "forbidden is a terminal error", runID: 55, routes: map[string][]apiResponse{rerunRoute: {{status: 403}}}, wantErrStatus: 403},
+		{name: "created", runID: 55, routes: map[string][]apiResponse{rerunRoute: {{Status: 201}}}, wantNil: true},
+		{name: "forbidden is a terminal error", runID: 55, routes: map[string][]apiResponse{rerunRoute: {{Status: 403}}}, wantErrStatus: 403},
 		{name: "not found", runID: 55, wantErrStatus: 404},
 		{name: "invalid run id", runID: 0, wantErrStatus: 400},
 	}
