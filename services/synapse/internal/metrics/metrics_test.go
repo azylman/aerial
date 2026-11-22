@@ -9,23 +9,9 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
 
+	"github.com/azylman/aerial/pkg/pubsubtest"
 	"github.com/azylman/aerial/services/synapse/internal/model"
 )
-
-type mockConsumerStatsQuerier struct {
-	stats map[string][2]int64
-	err   error
-}
-
-func (m *mockConsumerStatsQuerier) ConsumerStats(ctx context.Context, stream, consumer string) (int64, int64, error) {
-	if m.err != nil {
-		return 0, 0, m.err
-	}
-	if v, ok := m.stats[stream+"/"+consumer]; ok {
-		return v[0], v[1], nil
-	}
-	return 0, 0, nil
-}
 
 func TestCollectJetStreamQueueMetrics(t *testing.T) {
 	ctx := context.Background()
@@ -33,10 +19,9 @@ func TestCollectJetStreamQueueMetrics(t *testing.T) {
 	tests := []struct {
 		name           string
 		nilQuerier     bool
-		querierErr     error
 		bots           []string
 		defaultAgent   string
-		stats          map[string][2]int64
+		stats          pubsubtest.ConsumerStats
 		wantErr        bool
 		wantSubstr     string
 		wantDepth      map[[2]string]float64
@@ -53,7 +38,7 @@ func TestCollectJetStreamQueueMetrics(t *testing.T) {
 		},
 		{
 			name:         "querier error returns wrapped error",
-			querierErr:   errors.New("nats down"),
+			stats:        pubsubtest.ConsumerStats{Err: errors.New("nats down")},
 			defaultAgent: "alpha",
 			wantErr:      true,
 			wantSubstr:   "consumer stats",
@@ -61,11 +46,9 @@ func TestCollectJetStreamQueueMetrics(t *testing.T) {
 		{
 			name:         "aggregates pending and in_flight across static and default-agent consumers",
 			defaultAgent: "alpha",
-			stats: map[string][2]int64{
-				"AERIAL_JOBS/synapse-github":                    {3, 1},
-				"AERIAL_JOBS/synapse-deploy":                    {4, 2},
-				"AERIAL_JOBS/synapse-discord-ingress-alpha":     {5, 3},
-				"AERIAL_JOBS/synapse-discord-interaction-alpha": {2, 1},
+			stats: pubsubtest.ConsumerStats{
+				Pending:  map[string]int64{"synapse-github": 3, "synapse-deploy": 4, "synapse-discord-ingress-alpha": 5, "synapse-discord-interaction-alpha": 2},
+				Inflight: map[string]int64{"synapse-github": 1, "synapse-deploy": 2, "synapse-discord-ingress-alpha": 3, "synapse-discord-interaction-alpha": 1},
 			},
 			wantDepth: map[[2]string]float64{
 				{"default", "pending"}:               7,
@@ -78,11 +61,9 @@ func TestCollectJetStreamQueueMetrics(t *testing.T) {
 			name:         "sums per-agent durables into existing discord series",
 			bots:         []string{"beta", "alpha"},
 			defaultAgent: "alpha",
-			stats: map[string][2]int64{
-				"AERIAL_JOBS/synapse-discord-ingress-alpha":     {2, 1},
-				"AERIAL_JOBS/synapse-discord-ingress-beta":      {7, 1},
-				"AERIAL_JOBS/synapse-discord-interaction-alpha": {0, 0},
-				"AERIAL_JOBS/synapse-discord-interaction-beta":  {3, 2},
+			stats: pubsubtest.ConsumerStats{
+				Pending:  map[string]int64{"synapse-discord-ingress-alpha": 2, "synapse-discord-ingress-beta": 7, "synapse-discord-interaction-alpha": 0, "synapse-discord-interaction-beta": 3},
+				Inflight: map[string]int64{"synapse-discord-ingress-alpha": 1, "synapse-discord-ingress-beta": 1, "synapse-discord-interaction-alpha": 0, "synapse-discord-interaction-beta": 2},
 			},
 			wantDepth: map[[2]string]float64{
 				{"discord_ingress", "pending"}:       9,
@@ -102,9 +83,9 @@ func TestCollectJetStreamQueueMetrics(t *testing.T) {
 			name:         "default owner outside bots and sanitized agent get their own durables",
 			bots:         []string{" Ops.Bot "},
 			defaultAgent: "gamma",
-			stats: map[string][2]int64{
-				"AERIAL_JOBS/synapse-discord-ingress-ops_bot": {4, 0},
-				"AERIAL_JOBS/synapse-discord-ingress-gamma":   {6, 2},
+			stats: pubsubtest.ConsumerStats{
+				Pending:  map[string]int64{"synapse-discord-ingress-ops_bot": 4, "synapse-discord-ingress-gamma": 6},
+				Inflight: map[string]int64{"synapse-discord-ingress-ops_bot": 0, "synapse-discord-ingress-gamma": 2},
 			},
 			wantDepth: map[[2]string]float64{
 				{"discord_ingress", "pending"}:   10,
@@ -121,7 +102,7 @@ func TestCollectJetStreamQueueMetrics(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			var q ConsumerStatsQuerier
 			if !tc.nilQuerier {
-				q = &mockConsumerStatsQuerier{stats: tc.stats, err: tc.querierErr}
+				q = tc.stats
 			}
 			err := CollectJetStreamQueueMetrics(ctx, q, NewDiscordRouting(tc.bots, tc.defaultAgent))
 			if (err != nil) != tc.wantErr {
