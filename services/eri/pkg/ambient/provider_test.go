@@ -11,7 +11,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
-	"text/template"
 	"time"
 
 	"github.com/azylman/aerial/services/eri/pkg/config"
@@ -26,9 +25,14 @@ func (p *Provider) SetNowFunc(fn func() time.Time) {
 	}
 }
 
+// mockInvoker answers Execute from declarative per-tool fields; execFunc is only for the
+// concurrency tests that need to block or count inside the call.
 type mockInvoker struct {
 	mu       sync.Mutex
 	calls    int
+	results  map[string]string // tool name -> response text
+	errs     map[string]error  // tool name -> error
+	waitCtx  bool              // block until ctx is done and return its error
 	execFunc func(ctx context.Context, name string, args map[string]any) (string, error)
 }
 
@@ -37,8 +41,16 @@ func (m *mockInvoker) Execute(ctx context.Context, name string, args map[string]
 	m.calls++
 	fn := m.execFunc
 	m.mu.Unlock()
-	if fn != nil {
+	switch {
+	case fn != nil:
 		return fn(ctx, name, args)
+	case m.waitCtx:
+		<-ctx.Done()
+		return "", ctx.Err()
+	case m.errs[name] != nil:
+		return "", m.errs[name]
+	case m.results[name] != "":
+		return m.results[name], nil
 	}
 	return "{}", nil
 }
@@ -49,272 +61,151 @@ func (m *mockInvoker) CallCount() int {
 	return m.calls
 }
 
-func TestProvider_NilInvokerAndEmptyTools(t *testing.T) {
-	t.Parallel()
-
-	// 1. Nil invoker with configured tool
-	cfgWithTool := config.AmbientContextConfig{
-		Template: "Error: {{.ha.error}}",
-		Tools: []config.AmbientToolConfig{
-			{Name: "ha", Tool: "get_state"},
-		},
-	}
-	p, err := NewProvider(cfgWithTool, nil)
-	if err != nil {
-		t.Fatalf("unexpected NewProvider error: %v", err)
-	}
-	res, err := p.Retrieve(context.Background())
-	if err != nil {
-		t.Fatalf("unexpected Retrieve error: %v", err)
-	}
-	expected := "<ambient_context>\nError: nil mcp invoker\n</ambient_context>"
-	if res != expected {
-		t.Errorf("got %q, want %q", res, expected)
-	}
-
-	// 2. Empty tools list
-	cfgEmptyTools := config.AmbientContextConfig{
-		Template: "Time: {{.now}}",
-		Tools:    []config.AmbientToolConfig{},
-	}
-	p2, err := NewProvider(cfgEmptyTools, nil)
-	if err != nil {
-		t.Fatalf("unexpected NewProvider error: %v", err)
-	}
-	fixedTime := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
-	p2.SetNowFunc(func() time.Time { return fixedTime })
-	res2, err := p2.Retrieve(context.Background())
-	if err != nil {
-		t.Fatalf("unexpected Retrieve error: %v", err)
-	}
-	expected2 := "<ambient_context>\nTime: 12:00:00\n</ambient_context>"
-	if res2 != expected2 {
-		t.Errorf("got %q, want %q", res2, expected2)
-	}
-
-	// 3. Empty template should return empty string
-	cfgEmptyTmpl := config.AmbientContextConfig{
-		Template: "",
-	}
-	p3, err := NewProvider(cfgEmptyTmpl, nil)
-	if err != nil {
-		t.Fatalf("unexpected NewProvider error: %v", err)
-	}
-	res3, err := p3.Retrieve(context.Background())
-	if err != nil {
-		t.Fatalf("unexpected Retrieve error: %v", err)
-	}
-	if res3 != "" {
-		t.Errorf("expected empty string for empty template, got %q", res3)
-	}
-}
-
-func TestProvider_SuccessfulMultiToolExecution(t *testing.T) {
-	t.Parallel()
-
-	inv := &mockInvoker{
-		execFunc: func(ctx context.Context, name string, args map[string]any) (string, error) {
-			switch name {
-			case "music_status":
-				return `{"status": "playing", "artist": "lofi girl"}`, nil
-			case "weather_report":
-				return "72F Sunny with clouds", nil
-			default:
-				return "{}", nil
-			}
-		},
-	}
-
-	cfg := config.AmbientContextConfig{
-		Template: `Music: {{upper .music.status}} - {{.music.artist}}
-Weather: {{trim .weather.text}}
-JSON: {{json .music}}
-Time: {{.now}}`,
-		Tools: []config.AmbientToolConfig{
-			{Name: "music", Tool: "music_status"},
-			{Name: "weather", Tool: "weather_report"},
-		},
-	}
-
-	p, err := NewProvider(cfg, inv)
-	if err != nil {
-		t.Fatalf("NewProvider failed: %v", err)
-	}
-	fixedTime := time.Date(2026, 10, 1, 15, 30, 0, 0, time.UTC)
-	p.SetNowFunc(func() time.Time { return fixedTime })
-
-	res, err := p.Retrieve(context.Background())
-	if err != nil {
-		t.Fatalf("Retrieve failed: %v", err)
-	}
-
-	if !strings.HasPrefix(res, "<ambient_context>\n") || !strings.HasSuffix(res, "\n</ambient_context>") {
-		t.Errorf("response not properly wrapped in ambient_context tags: %q", res)
-	}
-	if !strings.Contains(res, "Music: PLAYING - lofi girl") {
-		t.Errorf("missing formatted music data: %q", res)
-	}
-	if !strings.Contains(res, "Weather: 72F Sunny with clouds") {
-		t.Errorf("missing formatted weather data: %q", res)
-	}
-	if !strings.Contains(res, `JSON: {"artist":"lofi girl","status":"playing"}`) {
-		t.Errorf("missing json helper output: %q", res)
-	}
-	if !strings.Contains(res, "Time: 15:30:00") {
-		t.Errorf("missing time output: %q", res)
-	}
-}
-
-func TestProvider_PartialFailureResilience(t *testing.T) {
-	t.Parallel()
-
-	inv := &mockInvoker{
-		execFunc: func(ctx context.Context, name string, args map[string]any) (string, error) {
-			if name == "failing_tool" {
-				return "", errors.New("connection timed out")
-			}
-			return `{"temperature": 68}`, nil
-		},
-	}
-
-	cfg := config.AmbientContextConfig{
-		Template: `Failed: {{.tool1.error}}
-Temp: {{.tool2.temperature}}`,
-		Tools: []config.AmbientToolConfig{
-			{Name: "tool1", Tool: "failing_tool"},
-			{Name: "tool2", Tool: "healthy_tool"},
-		},
-	}
-
-	p, err := NewProvider(cfg, inv)
-	if err != nil {
-		t.Fatalf("NewProvider failed: %v", err)
-	}
-
-	res, err := p.Retrieve(context.Background())
-	if err != nil {
-		t.Fatalf("expected Retrieve to succeed on partial failure, got err: %v", err)
-	}
-
-	if !strings.Contains(res, "Failed: connection timed out") {
-		t.Errorf("expected error string in rendered output, got: %q", res)
-	}
-	if !strings.Contains(res, "Temp: 68") {
-		t.Errorf("expected healthy tool data in rendered output, got: %q", res)
-	}
-}
-
-func TestProvider_MissingKeysZeroString(t *testing.T) {
-	t.Parallel()
-
-	cfg := config.AmbientContextConfig{
-		Template: `Missing: '{{.nonexistent}}'
-Defaulted: '{{default "fallback_val" .missing_key}}'
-Lower: '{{lower .not_found}}'
-Upper: '{{upper .not_found}}'
-Trim: '{{trim .not_found}}'`,
-	}
-
-	p, err := NewProvider(cfg, nil)
-	if err != nil {
-		t.Fatalf("NewProvider failed: %v", err)
-	}
-
-	res, err := p.Retrieve(context.Background())
-	if err != nil {
-		t.Fatalf("Retrieve failed: %v", err)
-	}
-
-	if strings.Contains(res, "<no value>") {
-		t.Errorf("rendered template contains '<no value>': %q", res)
-	}
-	if !strings.Contains(res, "Missing: ''") {
-		t.Errorf("expected missing key to render as empty string, got: %q", res)
-	}
-	if !strings.Contains(res, "Defaulted: 'fallback_val'") {
-		t.Errorf("expected default helper to provide fallback, got: %q", res)
-	}
-	if !strings.Contains(res, "Lower: ''") || !strings.Contains(res, "Upper: ''") || !strings.Contains(res, "Trim: ''") {
-		t.Errorf("expected string helpers on nil to render as empty string, got: %q", res)
-	}
-}
-
-type providerCacheLifecycleCase struct {
-	name          string
-	advanceBy     time.Duration
-	wantSubstr    string
-	wantCalls     int
-	wantMatchPrev bool
-}
-
-func runProviderCacheLifecycleSuite(t *testing.T, cases []providerCacheLifecycleCase) {
+// providerErrMatched fails on an unexpected or missing error and reports whether the row
+// expected one (so the caller stops).
+func providerErrMatched(t *testing.T, op string, err error, wantErr string) bool {
 	t.Helper()
+	if wantErr == "" {
+		if err != nil {
+			t.Fatalf("%s: %v", op, err)
+		}
+		return false
+	}
+	if err == nil || !strings.Contains(err.Error(), wantErr) {
+		t.Fatalf("%s error = %v, want %q", op, err, wantErr)
+	}
+	return true
+}
 
-	var counter int
-	var counterMu sync.Mutex
-
-	inv := &mockInvoker{
-		execFunc: func(ctx context.Context, name string, args map[string]any) (string, error) {
-			counterMu.Lock()
-			counter++
-			val := counter
-			counterMu.Unlock()
-			return fmt.Sprintf(`{"val": %d}`, val), nil
+func TestProvider_Retrieve(t *testing.T) {
+	t.Parallel()
+	tools := func(pairs ...string) []config.AmbientToolConfig {
+		var out []config.AmbientToolConfig
+		for i := 0; i+1 < len(pairs); i += 2 {
+			out = append(out, config.AmbientToolConfig{Name: pairs[i], Tool: pairs[i+1]})
+		}
+		return out
+	}
+	wrap := func(body string) string { return "<ambient_context>\n" + body + "\n</ambient_context>" }
+	tests := []struct {
+		name       string
+		template   string
+		tools      []config.AmbientToolConfig
+		inv        *mockInvoker // nil means a nil MCPInvoker
+		cancelCtx  bool
+		want       string
+		wantNewErr string // NewProvider error substring
+		wantErr    string // Retrieve error substring
+	}{
+		{name: "nil invoker renders tool error", template: "Error: {{.ha.error}}", tools: tools("ha", "get_state"), want: wrap("Error: nil mcp invoker")},
+		{name: "empty tools renders now", template: "Time: {{.now}}", tools: []config.AmbientToolConfig{}, want: wrap("Time: 12:00:00")},
+		{name: "empty template renders nothing", want: ""},
+		{
+			name:     "multi tool json and text helpers",
+			template: "Music: {{upper .music.status}} - {{.music.artist}}\nWeather: {{trim .weather.text}}\nJSON: {{json .music}}\nTime: {{.now}}",
+			tools:    tools("music", "music_status", "weather", "weather_report"),
+			inv:      &mockInvoker{results: map[string]string{"music_status": `{"status": "playing", "artist": "lofi"}`, "weather_report": "72F Sunny with clouds"}},
+			want:     wrap("Music: PLAYING - lofi\nWeather: 72F Sunny with clouds\nJSON: {\"artist\":\"lofi\",\"status\":\"playing\"}\nTime: 12:00:00"),
 		},
-	}
-
-	cfg := config.AmbientContextConfig{
-		CacheTTL: "5s",
-		Template: "Val: {{.tool.val}}",
-		Tools: []config.AmbientToolConfig{
-			{Name: "tool", Tool: "getter"},
+		{
+			name: "partial tool failure still renders", template: "Failed: {{.tool1.error}}\nTemp: {{.tool2.temperature}}", tools: tools("tool1", "failing_tool", "tool2", "healthy_tool"),
+			inv:  &mockInvoker{results: map[string]string{"healthy_tool": `{"temperature": 68}`}, errs: map[string]error{"failing_tool": errors.New("connection timed out")}},
+			want: wrap("Failed: connection timed out\nTemp: 68"),
 		},
+		{
+			name:     "missing keys render as empty strings",
+			template: "Missing: '{{.nonexistent}}'\nDefaulted: '{{default \"fallback_val\" .missing_key}}'\nLower: '{{lower .not_found}}'\nUpper: '{{upper .not_found}}'\nTrim: '{{trim .not_found}}'",
+			want:     wrap("Missing: ''\nDefaulted: 'fallback_val'\nLower: ''\nUpper: ''\nTrim: ''"),
+		},
+		{name: "cancelled context surfaces as tool error", template: "Ambient: {{.tool.error}}", tools: tools("tool", "slow_tool"), inv: &mockInvoker{waitCtx: true}, cancelCtx: true, want: wrap("Ambient: context canceled")},
+		{name: "template syntax error", template: "Unclosed {{.foo", wantNewErr: "failed to parse ambient template"},
+		{name: "template execution error", template: "{{call .now}}", tools: tools("tool", "test_tool"), inv: &mockInvoker{}, wantErr: "ambient template execution error"},
 	}
-
-	p, err := NewProvider(cfg, inv)
-	if err != nil {
-		t.Fatalf("NewProvider failed: %v", err)
-	}
-
-	simulatedTime := time.Date(2026, 10, 1, 8, 0, 0, 0, time.UTC)
-	var timeMu sync.Mutex
-	p.SetNowFunc(func() time.Time {
-		timeMu.Lock()
-		defer timeMu.Unlock()
-		return simulatedTime
-	})
-
-	var prev string
-	for _, tc := range cases {
-		if tc.advanceBy > 0 {
-			timeMu.Lock()
-			simulatedTime = simulatedTime.Add(tc.advanceBy)
-			timeMu.Unlock()
-		}
-
-		res, rErr := p.Retrieve(context.Background())
-		if rErr != nil {
-			t.Fatalf("[%s] Retrieve failed: %v", tc.name, rErr)
-		}
-		if tc.wantSubstr != "" && !strings.Contains(res, tc.wantSubstr) {
-			t.Errorf("[%s] expected substring %q in result, got %q", tc.name, tc.wantSubstr, res)
-		}
-		if tc.wantMatchPrev && res != prev {
-			t.Errorf("[%s] expected result %q to match prev %q", tc.name, res, prev)
-		}
-		if tc.wantCalls > 0 && inv.CallCount() != tc.wantCalls {
-			t.Errorf("[%s] expected invoker call count %d, got %d", tc.name, tc.wantCalls, inv.CallCount())
-		}
-		prev = res
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var inv MCPInvoker
+			if tc.inv != nil {
+				inv = tc.inv
+			}
+			p, err := NewProvider(config.AmbientContextConfig{Template: tc.template, Tools: tc.tools, TimeoutMs: 1000}, inv)
+			if providerErrMatched(t, "NewProvider", err, tc.wantNewErr) {
+				return
+			}
+			p.SetNowFunc(func() time.Time { return time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC) })
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if tc.cancelCtx {
+				cancel()
+			}
+			got, err := p.Retrieve(ctx)
+			if providerErrMatched(t, "Retrieve", err, tc.wantErr) {
+				return
+			}
+			if got != tc.want {
+				t.Errorf("Retrieve = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 
-func TestProvider_RAMCacheHit(t *testing.T) {
+// TestProvider_CacheLifecycle drives one provider (5s TTL, counting tool) through a
+// sequence of Retrieve calls per row, advancing the fake clock before each step.
+func TestProvider_CacheLifecycle(t *testing.T) {
 	t.Parallel()
-	runProviderCacheLifecycleSuite(t, []providerCacheLifecycleCase{
-		{name: "initial cache miss", wantSubstr: "Val: 1", wantCalls: 1},
-		{name: "hit within TTL", advanceBy: 2 * time.Second, wantMatchPrev: true, wantCalls: 1},
-	})
+	type step struct {
+		advanceBy time.Duration
+		want      string
+		wantCalls int
+	}
+	tests := []struct {
+		name  string
+		steps []step
+	}{
+		{"RAM cache hit within TTL", []step{{0, "Val: 1", 1}, {2 * time.Second, "Val: 1", 1}}},
+		{"refresh after hard expiry", []step{{0, "Val: 1", 1}, {12 * time.Second, "Val: 2", 2}}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var counter atomic.Int32
+			inv := &mockInvoker{execFunc: func(context.Context, string, map[string]any) (string, error) {
+				return fmt.Sprintf(`{"val": %d}`, counter.Add(1)), nil
+			}}
+			p, err := NewProvider(config.AmbientContextConfig{CacheTTL: "5s", Template: "Val: {{.tool.val}}", Tools: []config.AmbientToolConfig{{Name: "tool", Tool: "getter"}}}, inv)
+			if err != nil {
+				t.Fatalf("NewProvider: %v", err)
+			}
+			now := time.Date(2026, 10, 1, 8, 0, 0, 0, time.UTC)
+			p.SetNowFunc(func() time.Time { return now })
+			for i, st := range tc.steps {
+				now = now.Add(st.advanceBy)
+				got, err := p.Retrieve(context.Background())
+				if err != nil {
+					t.Fatalf("step %d: Retrieve: %v", i, err)
+				}
+				if want := "<ambient_context>\n" + st.want + "\n</ambient_context>"; got != want {
+					t.Errorf("step %d: Retrieve = %q, want %q", i, got, want)
+				}
+				if calls := inv.CallCount(); calls != st.wantCalls {
+					t.Errorf("step %d: invoker calls = %d, want %d", i, calls, st.wantCalls)
+				}
+			}
+		})
+	}
+}
+
+// TestAmbientTemplateJSON pins the json helper's marshal-failure branch, which no tool output can
+// reach because decoded JSON is always re-marshalable.
+func TestAmbientTemplateJSON(t *testing.T) {
+	t.Parallel()
+	jsonFn, ok := ambientTemplateFuncMap()["json"].(func(any) string)
+	if !ok {
+		t.Fatal("json helper missing from the template func map")
+	}
+	if got := jsonFn(make(chan int)); got != "" {
+		t.Errorf("json(chan) = %q, want empty", got)
+	}
 }
 
 func TestProvider_SingleflightDeduplication(t *testing.T) {
@@ -375,26 +266,6 @@ func TestProvider_SingleflightDeduplication(t *testing.T) {
 	// Singleflight should collapse all concurrent requests to 1 tool invocation
 	if toolInvocations != 1 {
 		t.Errorf("expected singleflight to collapse calls into 1 tool invocation, got %d", toolInvocations)
-	}
-}
-
-func TestProvider_ExpiredCacheRefresh(t *testing.T) {
-	t.Parallel()
-	runProviderCacheLifecycleSuite(t, []providerCacheLifecycleCase{
-		{name: "initial call", wantSubstr: "Val: 1", wantCalls: 1},
-		{name: "after expiration", advanceBy: 12 * time.Second, wantSubstr: "Val: 2", wantCalls: 2},
-	})
-}
-
-func TestProvider_TemplateSyntaxError(t *testing.T) {
-	t.Parallel()
-
-	cfg := config.AmbientContextConfig{
-		Template: "Unclosed {{.foo",
-	}
-	_, err := NewProvider(cfg, nil)
-	if err == nil {
-		t.Fatal("expected error on template syntax error, got nil")
 	}
 }
 
@@ -538,103 +409,6 @@ RawText: {{.raw.text}}
 	}
 	if !strings.Contains(res, "RawText: plain text response") {
 		t.Errorf("expected RawText, got %q", res)
-	}
-}
-
-func TestProvider_JsonMarshalError(t *testing.T) {
-	t.Parallel()
-
-	cfg := config.AmbientContextConfig{
-		Template: "{{json .tool.bad}}",
-		Tools: []config.AmbientToolConfig{
-			{Name: "tool", Tool: "chan_tool"},
-		},
-	}
-	p, err := NewProvider(cfg, nil)
-	if err != nil {
-		t.Fatalf("NewProvider failed: %v", err)
-	}
-	tmpl := p.parsedTmpl
-	var buf strings.Builder
-	badMap := map[string]any{
-		"tool": map[string]any{
-			"bad": make(chan int),
-		},
-	}
-	if err := tmpl.Execute(&buf, badMap); err != nil {
-		t.Fatalf("tmpl.Execute failed: %v", err)
-	}
-	if buf.String() != "" {
-		t.Errorf("expected empty string for json marshal error, got %q", buf.String())
-	}
-}
-
-func TestProvider_RetrieveContextCancelled(t *testing.T) {
-	t.Parallel()
-
-	inv := &mockInvoker{
-		execFunc: func(ctx context.Context, name string, args map[string]any) (string, error) {
-			<-ctx.Done()
-			return "", ctx.Err()
-		},
-	}
-
-	cfg := config.AmbientContextConfig{
-		Template: "Ambient: {{.tool.error}}",
-		Tools: []config.AmbientToolConfig{
-			{Name: "tool", Tool: "slow_tool"},
-		},
-		TimeoutMs: 50,
-	}
-
-	p, err := NewProvider(cfg, inv)
-	if err != nil {
-		t.Fatalf("NewProvider failed: %v", err)
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-
-	res, err := p.Retrieve(ctx)
-	if err != nil {
-		t.Fatalf("unexpected Retrieve error: %v", err)
-	}
-	if !strings.Contains(res, "context canceled") {
-		t.Errorf("expected context canceled in ambient output, got %q", res)
-	}
-}
-
-func TestProvider_TemplateExecutionError(t *testing.T) {
-	t.Parallel()
-
-	inv := &mockInvoker{
-		execFunc: func(ctx context.Context, name string, args map[string]any) (string, error) {
-			return `{}`, nil
-		},
-	}
-
-	cfg := config.AmbientContextConfig{
-		Template: "Ambient: {{.now}}",
-		Tools: []config.AmbientToolConfig{
-			{Name: "tool", Tool: "test_tool"},
-		},
-	}
-
-	p, err := NewProvider(cfg, inv)
-	if err != nil {
-		t.Fatalf("NewProvider failed: %v", err)
-	}
-
-	// Override template with a function that fails during execution
-	tmpl := template.New("ambient").Funcs(template.FuncMap{
-		"fail": func() (string, error) {
-			return "", errors.New("execution failure")
-		},
-	})
-	p.parsedTmpl, _ = tmpl.Parse("{{fail}}")
-	_, err = p.Retrieve(context.Background())
-	if err == nil {
-		t.Errorf("expected template execution error, got nil")
 	}
 }
 

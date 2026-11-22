@@ -64,12 +64,7 @@ func TestSplitMessage(t *testing.T) {
 	p2 := strings.Repeat("B", 1200)
 
 	tests := []splitMessageTestCase{
-		{
-			name:       "EmptyString",
-			text:       "",
-			limit:      2000,
-			wantChunks: 0,
-		},
+		{name: "EmptyString", text: "", limit: 2000, wantChunks: 0},
 		{
 			name:       "ShortTextWithinLimit",
 			text:       "Hello world! This is a simple test message.",
@@ -77,32 +72,10 @@ func TestSplitMessage(t *testing.T) {
 			wantChunks: 1,
 			wantFirst:  "Hello world! This is a simple test message.",
 		},
-		{
-			name:       "MultiParagraphExceedingLimit",
-			text:       p1 + "\n\n" + p2,
-			limit:      2000,
-			wantChunks: 2,
-			wantFirst:  p1,
-			wantLast:   p2,
-		},
-		{
-			name:       "GiantSingleContinuousString",
-			text:       strings.Repeat("X", 4500),
-			limit:      2000,
-			wantChunks: 3,
-		},
-		{
-			name:       "SmallLimitWordBoundary",
-			text:       "The quick brown fox jumps over the lazy dog",
-			limit:      20,
-			wantChunks: 3,
-		},
-		{
-			name:       "UnicodeAndEmojiSafety",
-			text:       strings.Repeat("✨🌸", 1500),
-			limit:      2000,
-			wantChunks: 2,
-		},
+		{name: "MultiParagraphExceedingLimit", text: p1 + "\n\n" + p2, limit: 2000, wantChunks: 2, wantFirst: p1, wantLast: p2},
+		{name: "GiantSingleContinuousString", text: strings.Repeat("X", 4500), limit: 2000, wantChunks: 3},
+		{name: "SmallLimitWordBoundary", text: "The quick brown fox jumps over the lazy dog", limit: 20, wantChunks: 3},
+		{name: "UnicodeAndEmojiSafety", text: strings.Repeat("✨🌸", 1500), limit: 2000, wantChunks: 2},
 		{
 			name:       "MarkdownFencesSplit",
 			text:       "```python\nline1 = 'hello'\nline2 = 'world'\nline3 = 'foo'\nline4 = 'bar'\n```",
@@ -110,46 +83,12 @@ func TestSplitMessage(t *testing.T) {
 			wantChunks: 2,
 			checkCode:  true,
 		},
-		{
-			name:       "ZeroLimitDefaultsToMax",
-			text:       "Hello world with zero limit",
-			limit:      0,
-			wantChunks: 1,
-			wantFirst:  "Hello world with zero limit",
-		},
-		{
-			name:       "CodeBlockOverflow",
-			text:       "```go\n" + strings.Repeat("x", 100) + "\n```",
-			limit:      40,
-			wantChunks: 3,
-			checkCode:  true,
-		},
-		{
-			name:       "LongCodeBlockLines",
-			text:       "```go\n" + strings.Repeat("x", 2500) + "\n```",
-			limit:      2000,
-			wantChunks: 2,
-			checkCode:  true,
-		},
-		{
-			name:       "CodeBlockClosedFollowedByText",
-			text:       "```python\nprint(1)\n```\n" + strings.Repeat("A", 1990),
-			limit:      2000,
-			wantChunks: 2,
-		},
-		{
-			name:       "ExactClosingFenceAtLimit",
-			text:       "```go\n" + strings.Repeat("x", 1990) + "\n```",
-			limit:      2000,
-			wantChunks: 1,
-		},
-		{
-			name:       "SmallLimitCodeFence",
-			text:       "```go\n" + strings.Repeat("a", 100) + "\n```",
-			limit:      50,
-			wantChunks: 3,
-			checkCode:  true,
-		},
+		{name: "ZeroLimitDefaultsToMax", text: "Hello world with zero limit", limit: 0, wantChunks: 1, wantFirst: "Hello world with zero limit"},
+		{name: "CodeBlockOverflow", text: "```go\n" + strings.Repeat("x", 100) + "\n```", limit: 40, wantChunks: 3, checkCode: true},
+		{name: "LongCodeBlockLines", text: "```go\n" + strings.Repeat("x", 2500) + "\n```", limit: 2000, wantChunks: 2, checkCode: true},
+		{name: "CodeBlockClosedFollowedByText", text: "```python\nprint(1)\n```\n" + strings.Repeat("A", 1990), limit: 2000, wantChunks: 2},
+		{name: "ExactClosingFenceAtLimit", text: "```go\n" + strings.Repeat("x", 1990) + "\n```", limit: 2000, wantChunks: 1},
+		{name: "SmallLimitCodeFence", text: "```go\n" + strings.Repeat("a", 100) + "\n```", limit: 50, wantChunks: 3, checkCode: true},
 		{
 			name:       "LongLineInsideCodeBlockExceedingLimit",
 			text:       "```python\n" + strings.Repeat("x", 2500) + "\n```",
@@ -210,116 +149,7 @@ func TestSplitMessage(t *testing.T) {
 	}
 }
 
-func TestSendMessageNilSession(t *testing.T) {
-	err := SendMessage(nil, "12345", "hello")
-	if err == nil {
-		t.Error("Expected error when sending message with nil session")
-	}
-
-	err = SendMessage(nil, "", "hello")
-	if err == nil {
-		t.Error("Expected error when sending message with empty channel ID")
-	}
-}
-
-func TestStartTypingNilSessionAndStop(t *testing.T) {
-	stop := StartTyping(nil, "12345")
-	if stop == nil {
-		t.Fatal("Expected non-nil stop function")
-	}
-	// Calling stop should not panic
-	stop()
-	stop() // multiple calls should be safe
-
-	stop = StartTyping(nil, "")
-	stop()
-}
-
-func TestResolveChannelByNameOrID(t *testing.T) {
-	// 1. Nil session
-	if _, err := ResolveChannelByNameOrID(nil, "aerial-dev"); err == nil {
-		t.Error("Expected error for nil session, got nil")
-	}
-
-	// 2. Empty string
-	sess := newMockDiscordSession(func(req *http.Request) (*http.Response, error) { return mockJSONResponse(http.StatusOK, `[]`) })
-	if _, err := ResolveChannelByNameOrID(sess, ""); err == nil {
-		t.Error("Expected error for empty channel name, got nil")
-	}
-	if _, err := ResolveChannelByNameOrID(sess, "#"); err == nil {
-		t.Error("Expected error for '#' channel name, got nil")
-	}
-
-	// 3. Snowflake numeric ID
-	snowflake := "123456789012345678"
-	resolved, err := ResolveChannelByNameOrID(sess, snowflake)
-	if err != nil || resolved != snowflake {
-		t.Errorf("Expected snowflake %q, got %q (err: %v)", snowflake, resolved, err)
-	}
-
-	// 4. Channel in State.Guilds
-	_ = sess.State.GuildAdd(&discordgo.Guild{
-		ID: "guild-1",
-		Channels: []*discordgo.Channel{
-			{ID: "chan-general", Name: "general"},
-			{ID: "chan-aerial-dev", Name: "aerial-dev"},
-		},
-	})
-
-	// Name without #
-	resolved, err = ResolveChannelByNameOrID(sess, "aerial-dev")
-	if err != nil || resolved != "chan-aerial-dev" {
-		t.Errorf("Expected chan-aerial-dev, got %q (err: %v)", resolved, err)
-	}
-
-	// Name with #
-	resolved, err = ResolveChannelByNameOrID(sess, "#aerial-dev")
-	if err != nil || resolved != "chan-aerial-dev" {
-		t.Errorf("Expected chan-aerial-dev, got %q (err: %v)", resolved, err)
-	}
-
-	// Case-insensitive name
-	resolved, err = ResolveChannelByNameOrID(sess, "#AERIAL-DEV")
-	if err != nil || resolved != "chan-aerial-dev" {
-		t.Errorf("Expected chan-aerial-dev for #AERIAL-DEV, got %q (err: %v)", resolved, err)
-	}
-
-	// Non-existent channel
-	if _, err := ResolveChannelByNameOrID(sess, "non-existent-channel"); err == nil {
-		t.Error("Expected error for non-existent channel name, got nil")
-	}
-}
-
-func TestSendSystemAlert(t *testing.T) {
-	// Nil session
-	if err := SendSystemAlert(nil, "aerial-dev", "Title", "Body"); err == nil {
-		t.Error("Expected error for nil session, got nil")
-	}
-
-	sess := newMockDiscordSession(func(req *http.Request) (*http.Response, error) { return mockJSONResponse(http.StatusOK, `[]`) })
-	// Channel not found
-	if err := SendSystemAlert(sess, "missing-chan", "Title", "Body"); err == nil {
-		t.Error("Expected error for missing channel, got nil")
-	}
-}
-
-func TestSendMessageWithAttachmentsNilSession(t *testing.T) {
-	err := SendMessageWithAttachments(nil, "12345", "hello", nil)
-	if err == nil {
-		t.Error("Expected error when sending message with nil session")
-	}
-
-	att := &Attachment{
-		Filename:    "test.png",
-		ContentType: "image/png",
-		Data:        []byte("fake png data"),
-	}
-	err = SendMessageWithAttachments(nil, "12345", "hello", []*Attachment{att})
-	if err == nil {
-		t.Error("Expected error when sending message with nil session and attachments")
-	}
-}
-
+// mockRoundTripper is the closure transport media_test.go uses for its internal HTTP client.
 type mockRoundTripper struct {
 	roundTrip func(req *http.Request) (*http.Response, error)
 }
@@ -328,326 +158,103 @@ func (m *mockRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) 
 	return m.roundTrip(req)
 }
 
-func newMockDiscordSession(handler func(req *http.Request) (*http.Response, error)) *discordgo.Session {
-	s, _ := discordgo.New("Bot mock_token")
-	s.Client = &http.Client{
-		Transport: &mockRoundTripper{roundTrip: handler},
+// deliveryRoute is one scripted Discord REST response.
+type deliveryRoute struct {
+	status int // 0 means 200
+	body   string
+	err    error // transport error instead of a response
+}
+
+// deliveryRequest is one request the fake Discord API received.
+type deliveryRequest struct {
+	Method, Path, Body string
+}
+
+// deliveryAPI is a declarative fake Discord REST API: routes are keyed by exact URL path and
+// every other request gets the default route. It records every request.
+type deliveryAPI struct {
+	def    deliveryRoute
+	routes map[string]deliveryRoute
+
+	mu       sync.Mutex
+	requests []deliveryRequest
+}
+
+func (f *deliveryAPI) RoundTrip(req *http.Request) (*http.Response, error) {
+	var body []byte
+	if req.Body != nil {
+		body, _ = io.ReadAll(req.Body)
 	}
+	f.mu.Lock()
+	f.requests = append(f.requests, deliveryRequest{Method: req.Method, Path: req.URL.Path, Body: string(body)})
+	f.mu.Unlock()
+	route, ok := f.routes[req.URL.Path]
+	if !ok {
+		route = f.def
+	}
+	if route.err != nil {
+		return nil, route.err
+	}
+	status := route.status
+	if status == 0 {
+		status = http.StatusOK
+	}
+	return &http.Response{StatusCode: status, Body: io.NopCloser(strings.NewReader(route.body)), Header: make(http.Header)}, nil
+}
+
+// session returns a bot session whose REST calls go to the fake.
+func (f *deliveryAPI) session() *discordgo.Session {
+	s, _ := discordgo.New("Bot mock_token")
+	s.Client = &http.Client{Transport: f}
 	return s
 }
 
-func mockJSONResponse(status int, body string) (*http.Response, error) {
-	return &http.Response{
-		StatusCode: status,
-		Body:       io.NopCloser(strings.NewReader(body)),
-		Header:     make(http.Header),
-	}, nil
+// payloads returns the non-empty request bodies in order.
+func (f *deliveryAPI) payloads() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []string
+	for _, r := range f.requests {
+		if r.Body != "" {
+			out = append(out, r.Body)
+		}
+	}
+	return out
 }
 
-type sendMessageMockCase struct {
-	name            string
-	channelID       string
-	text            string
-	attachments     []*Attachment
-	replyToID       string
-	apiStatus       int
-	wantErr         bool
-	wantPayloads    int
-	wantFirstRef    string
-	wantSecondNoRef bool
+func (f *deliveryAPI) last() deliveryRequest {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.requests) == 0 {
+		return deliveryRequest{}
+	}
+	return f.requests[len(f.requests)-1]
 }
 
-func assertSendMessagePayloads(t *testing.T, sentPayloads []string, tc sendMessageMockCase) {
+// deliverySession returns nil when nilSession is set, else a session on api (a default 200
+// message API when api is nil).
+func deliverySession(nilSession bool, api **deliveryAPI) *discordgo.Session {
+	if *api == nil {
+		*api = &deliveryAPI{def: deliveryRoute{body: messageResponse}}
+	}
+	if nilSession {
+		return nil
+	}
+	return (*api).session()
+}
+
+func checkDeliveryErr(t *testing.T, err error, wantErr string) bool {
 	t.Helper()
-	if len(sentPayloads) != tc.wantPayloads {
-		t.Fatalf("len(sentPayloads) = %d, want %d", len(sentPayloads), tc.wantPayloads)
-	}
-	if tc.wantPayloads > 0 && !strings.Contains(sentPayloads[0], `"flags":4`) {
-		t.Errorf("expected payload[0] to contain flags:4, got %s", sentPayloads[0])
-	}
-	if tc.wantFirstRef != "" {
-		if !strings.Contains(sentPayloads[0], tc.wantFirstRef) || !strings.Contains(sentPayloads[0], `"fail_if_not_exists":false`) {
-			t.Errorf("expected payload[0] to contain reference %s and fail_if_not_exists:false, got %s", tc.wantFirstRef, sentPayloads[0])
+	if wantErr == "" {
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
 		}
-	} else if tc.wantPayloads > 0 && strings.Contains(sentPayloads[0], `"message_reference"`) {
-		t.Errorf("expected payload[0] to omit message_reference, got %s", sentPayloads[0])
+		return false
 	}
-	if tc.wantSecondNoRef && len(sentPayloads) > 1 && strings.Contains(sentPayloads[1], `"message_reference"`) {
-		t.Errorf("expected payload[1] to omit message_reference, got %s", sentPayloads[1])
+	if err == nil || !strings.Contains(err.Error(), wantErr) {
+		t.Fatalf("error = %v, want %q", err, wantErr)
 	}
-}
-
-func runSendMessageMockCase(t *testing.T, tc sendMessageMockCase) {
-	t.Helper()
-	var sentPayloads []string
-	sess := newMockDiscordSession(func(req *http.Request) (*http.Response, error) {
-		if req.Body != nil {
-			bodyBytes, _ := io.ReadAll(req.Body)
-			sentPayloads = append(sentPayloads, string(bodyBytes))
-		}
-		if tc.apiStatus != http.StatusOK {
-			return mockJSONResponse(tc.apiStatus, `{"message":"Missing permissions","code":50013}`)
-		}
-		return mockJSONResponse(http.StatusOK, `{"id":"msg-123","channel_id":"12345","content":"ok"}`)
-	})
-
-	var err error
-	if tc.replyToID == "" && len(tc.attachments) == 0 && tc.channelID != "" && tc.text != "" {
-		err = SendMessage(sess, tc.channelID, tc.text)
-	} else {
-		err = SendMessageWithAttachments(sess, tc.channelID, tc.text, tc.attachments, tc.replyToID)
-	}
-	if (err != nil) != tc.wantErr {
-		t.Fatalf("err = %v, wantErr %v", err, tc.wantErr)
-	}
-	assertSendMessagePayloads(t, sentPayloads, tc)
-}
-
-func TestSendMessageWithAttachments_MockSession(t *testing.T) {
-	t.Parallel()
-	att := []*Attachment{{Filename: "img.png", ContentType: "image/png", Data: []byte("fake png")}}
-	tests := []sendMessageMockCase{
-		{name: "SingleMessageNoReply", channelID: "12345", text: "Hello world", apiStatus: http.StatusOK, wantPayloads: 1},
-		{name: "SingleMessageWithReplyRef", channelID: "12345", text: "Hello reply", replyToID: "9876543210", apiStatus: http.StatusOK, wantPayloads: 1, wantFirstRef: `"message_id":"9876543210"`},
-		{name: "MultiChunkAttachmentsAndReplyOnFirstChunkOnly", channelID: "12345", text: strings.Repeat("A", 2500), attachments: att, replyToID: "9876543210", apiStatus: http.StatusOK, wantPayloads: 2, wantFirstRef: `"message_id":"9876543210"`, wantSecondNoRef: true},
-		{name: "AttachmentsOnlyWithReplyRef", channelID: "12345", text: "", attachments: att, replyToID: "1122334455", apiStatus: http.StatusOK, wantPayloads: 1, wantFirstRef: `"message_id":"1122334455"`},
-		{name: "WhitespaceReplyIDIgnored", channelID: "12345", text: "Hello", replyToID: "   ", apiStatus: http.StatusOK, wantPayloads: 1},
-		{name: "EmptyTextAndEmptyAttachments", channelID: "12345", text: "", apiStatus: http.StatusOK, wantPayloads: 0},
-		{name: "EmptyChannelIDError", channelID: "", text: "hello", apiStatus: http.StatusOK, wantErr: true},
-		{name: "APITextSendFailure", channelID: "12345", text: "Hello fail", apiStatus: http.StatusBadRequest, wantErr: true, wantPayloads: 1},
-		{name: "APIAttachmentOnlySendFailure", channelID: "12345", text: "", attachments: att, apiStatus: http.StatusBadRequest, wantErr: true, wantPayloads: 1},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			runSendMessageMockCase(t, tc)
-		})
-	}
-}
-
-func TestStartTyping_MockSession(t *testing.T) {
-	typed := make(chan struct{}, 8)
-	sess := newMockDiscordSession(func(req *http.Request) (*http.Response, error) {
-		typed <- struct{}{}
-		return mockJSONResponse(http.StatusNoContent, "")
-	})
-
-	stop := StartTyping(sess, "12345")
-	<-typed
-	stop()
-
-	// Error branch from ChannelTyping
-	typedErr := make(chan struct{}, 8)
-	sessErr := newMockDiscordSession(func(req *http.Request) (*http.Response, error) {
-		typedErr <- struct{}{}
-		return nil, errors.New("simulated network typing failure")
-	})
-	stopErr := StartTyping(sessErr, "chan-typing-error")
-	<-typedErr
-	stopErr()
-}
-
-func TestSendSystemAlert_Success(t *testing.T) {
-	sess := newMockDiscordSession(func(req *http.Request) (*http.Response, error) {
-		return mockJSONResponse(http.StatusOK, `{"id":"alert-msg-123","channel_id":"chan-alerts"}`)
-	})
-
-	_ = sess.State.GuildAdd(&discordgo.Guild{
-		ID: "g1",
-		Channels: []*discordgo.Channel{
-			{ID: "chan-alerts", Name: "aerial-alerts"},
-		},
-	})
-
-	if err := SendSystemAlert(sess, "aerial-alerts", "System Alert", "Everything operational"); err != nil {
-		t.Fatalf("SendSystemAlert failed: %v", err)
-	}
-}
-
-func TestResolveChannelByNameOrID_APIFallback(t *testing.T) {
-	sess := newMockDiscordSession(func(req *http.Request) (*http.Response, error) {
-		if strings.Contains(req.URL.Path, "/users/@me/guilds") {
-			return mockJSONResponse(http.StatusOK, `[{"id":"g100","name":"My Guild"}]`)
-		}
-		if strings.Contains(req.URL.Path, "/guilds/g100/channels") {
-			return mockJSONResponse(http.StatusOK, `[{"id":"chan-remote-999","name":"remote-channel"}]`)
-		}
-		return mockJSONResponse(http.StatusNotFound, `{"message":"Not found"}`)
-	})
-	sess.Token = "Bot mock_token"
-
-	// Channel is not in state, so it queries API
-	chanID, err := ResolveChannelByNameOrID(sess, "remote-channel")
-	if err != nil || chanID != "chan-remote-999" {
-		t.Errorf("expected chan-remote-999 from API fallback, got %q (err: %v)", chanID, err)
-	}
-
-	// API error branch
-	sessGuildErr := newMockDiscordSession(func(req *http.Request) (*http.Response, error) {
-		if strings.Contains(req.URL.Path, "/users/@me/guilds") {
-			return mockJSONResponse(http.StatusOK, `[{"id":"g-err","name":"Error Guild"}]`)
-		}
-		if strings.Contains(req.URL.Path, "/guilds/g-err/channels") {
-			return nil, errors.New("guild channels fetch failed")
-		}
-		return mockJSONResponse(http.StatusNotFound, `{"message":"not found"}`)
-	})
-	sessGuildErr.Token = "Bot mock-token"
-	_, _ = ResolveChannelByNameOrID(sessGuildErr, "any-channel")
-}
-
-func TestEditMessage_And_DeleteMessage(t *testing.T) {
-	// 1. Validation errors with nil session or empty IDs
-	if err := EditMessage(nil, "ch1", "msg1", "hello"); err == nil {
-		t.Error("expected error for nil session in EditMessage")
-	}
-	if err := EditMessage(&discordgo.Session{}, "", "msg1", "hello"); err == nil {
-		t.Error("expected error for empty channelID in EditMessage")
-	}
-	if err := EditMessage(&discordgo.Session{}, "ch1", "", "hello"); err == nil {
-		t.Error("expected error for empty messageID in EditMessage")
-	}
-	if err := EditMessage(&discordgo.Session{}, "ch1", "msg1", "   "); err == nil {
-		t.Error("expected error for empty text in EditMessage")
-	}
-
-	if err := DeleteMessage(nil, "ch1", "msg1"); err == nil {
-		t.Error("expected error for nil session in DeleteMessage")
-	}
-	if err := DeleteMessage(&discordgo.Session{}, "", "msg1"); err == nil {
-		t.Error("expected error for empty channelID in DeleteMessage")
-	}
-	if err := DeleteMessage(&discordgo.Session{}, "ch1", ""); err == nil {
-		t.Error("expected error for empty messageID in DeleteMessage")
-	}
-
-	// 2. Successful mock calls
-	var lastMethod, lastPath string
-	var lastPatchBody string
-	sess := newMockDiscordSession(func(req *http.Request) (*http.Response, error) {
-		lastMethod = req.Method
-		lastPath = req.URL.Path
-		if req.Method == http.MethodPatch {
-			if req.Body != nil {
-				b, _ := io.ReadAll(req.Body)
-				lastPatchBody = string(b)
-			}
-			return mockJSONResponse(http.StatusOK, `{"id":"msg1","channel_id":"ch1","content":"updated"}`)
-		}
-		if req.Method == http.MethodDelete {
-			return mockJSONResponse(http.StatusNoContent, "")
-		}
-		return mockJSONResponse(http.StatusBadRequest, `{"message":"bad request"}`)
-	})
-
-	if err := EditMessage(sess, "ch1", "msg1", "updated text"); err != nil {
-		t.Fatalf("EditMessage failed: %v", err)
-	}
-	if err := EditMessage(sess, "ch1", "msg1", strings.Repeat("A", 2500)); err != nil {
-		t.Fatalf("EditMessage with truncation failed: %v", err)
-	}
-	if lastMethod != http.MethodPatch || !strings.Contains(lastPath, "/channels/ch1/messages/msg1") {
-		t.Errorf("unexpected edit request: %s %s", lastMethod, lastPath)
-	}
-	if !strings.Contains(lastPatchBody, `"flags":4`) {
-		t.Errorf("expected edit request body to contain flags:4, got %s", lastPatchBody)
-	}
-
-	if err := DeleteMessage(sess, "ch1", "msg1"); err != nil {
-		t.Fatalf("DeleteMessage failed: %v", err)
-	}
-	if lastMethod != http.MethodDelete || !strings.Contains(lastPath, "/channels/ch1/messages/msg1") {
-		t.Errorf("unexpected delete request: %s %s", lastMethod, lastPath)
-	}
-}
-
-func TestErrorClassifiers(t *testing.T) {
-	// Nil checks
-	if IsMessageNotFoundError(nil) {
-		t.Error("expected false for nil error")
-	}
-	if IsThreadArchivedOrLockedError(nil) {
-		t.Error("expected false for nil error")
-	}
-
-	// 404 / 10008 errors
-	errNotFound := errors.New("HTTP 404 Not Found, 10008 Unknown Message")
-	if !IsMessageNotFoundError(errNotFound) {
-		t.Error("expected true for 10008 Unknown Message")
-	}
-
-	// 50083 / 50084 errors
-	errArchived := errors.New("HTTP 400 Bad Request, 50083 Thread is archived")
-	if !IsThreadArchivedOrLockedError(errArchived) {
-		t.Error("expected true for 50083 Thread is archived")
-	}
-
-	errLocked := errors.New("HTTP 403 Forbidden, 50084 Thread is locked")
-	if !IsThreadArchivedOrLockedError(errLocked) {
-		t.Error("expected true for 50084 Thread is locked")
-	}
-
-	// Permission errors (403, 50001, 50013)
-	err403 := errors.New("HTTP 403 Forbidden")
-	if !IsPermissionError(err403) {
-		t.Error("expected true for HTTP 403 Forbidden")
-	}
-	err50001 := errors.New("HTTP 403 Forbidden, 50001 Missing Access")
-	if !IsPermissionError(err50001) {
-		t.Error("expected true for 50001 Missing Access")
-	}
-	err50013 := errors.New("HTTP 403 Forbidden, 50013 Missing Permissions")
-	if !IsPermissionError(err50013) {
-		t.Error("expected true for 50013 Missing Permissions")
-	}
-
-	// Unrelated errors
-	unrelated := errors.New("connection reset by peer")
-	if IsMessageNotFoundError(unrelated) || IsThreadArchivedOrLockedError(unrelated) || IsPermissionError(unrelated) {
-		t.Error("unrelated error should not match classifiers")
-	}
-	if IsPermissionError(nil) {
-		t.Error("expected false for nil error")
-	}
-}
-
-func TestErrorClassifiers_RESTError(t *testing.T) {
-	// 404
-	err404 := &discordgo.RESTError{Response: &http.Response{StatusCode: http.StatusNotFound}}
-	if !IsMessageNotFoundError(err404) {
-		t.Error("expected true for RESTError 404")
-	}
-	// 10008
-	err10008 := &discordgo.RESTError{Message: &discordgo.APIErrorMessage{Code: 10008}}
-	if !IsMessageNotFoundError(err10008) {
-		t.Error("expected true for RESTError 10008")
-	}
-	// 50083
-	err50083 := &discordgo.RESTError{Message: &discordgo.APIErrorMessage{Code: 50083}}
-	if !IsThreadArchivedOrLockedError(err50083) {
-		t.Error("expected true for RESTError 50083")
-	}
-	// 50084
-	err50084 := &discordgo.RESTError{Message: &discordgo.APIErrorMessage{Code: 50084}}
-	if !IsThreadArchivedOrLockedError(err50084) {
-		t.Error("expected true for RESTError 50084")
-	}
-	// 403
-	err403 := &discordgo.RESTError{Response: &http.Response{StatusCode: http.StatusForbidden}}
-	if !IsPermissionError(err403) {
-		t.Error("expected true for RESTError 403")
-	}
-	// 50001
-	err50001 := &discordgo.RESTError{Message: &discordgo.APIErrorMessage{Code: 50001}}
-	if !IsPermissionError(err50001) {
-		t.Error("expected true for RESTError 50001")
-	}
-	// 50013
-	err50013 := &discordgo.RESTError{Message: &discordgo.APIErrorMessage{Code: 50013}}
-	if !IsPermissionError(err50013) {
-		t.Error("expected true for RESTError 50013")
-	}
+	return true
 }
 
 const dummyOutboundSecret = "plain-dummy-outbound-secret"
@@ -658,38 +265,13 @@ func registerDummyOutboundSecret(t *testing.T) {
 	t.Cleanup(sanitizer.ResetSensitiveTokensForTest)
 }
 
-type outboundCapture struct {
-	mu      sync.Mutex
-	payload string
-}
-
-func (c *outboundCapture) last() string {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.payload
-}
-
-func newCaptureSession(responseBody string) (*discordgo.Session, *outboundCapture) {
-	c := &outboundCapture{}
-	sess := newMockDiscordSession(func(req *http.Request) (*http.Response, error) {
-		if req.Body != nil {
-			b, _ := io.ReadAll(req.Body)
-			c.mu.Lock()
-			c.payload = string(b)
-			c.mu.Unlock()
-		}
-		return mockJSONResponse(http.StatusOK, responseBody)
-	})
-	return sess, c
-}
-
-func assertRedactedPayload(t *testing.T, payload, wantSubstr string) {
+// assertNoSecret fails when any recorded payload carries the registered outbound secret.
+func assertNoSecret(t *testing.T, payloads []string) {
 	t.Helper()
-	if !strings.Contains(payload, wantSubstr) {
-		t.Errorf("payload missing %q: %s", wantSubstr, payload)
-	}
-	if strings.Contains(payload, dummyOutboundSecret) {
-		t.Errorf("payload leaked secret: %s", payload)
+	for i, p := range payloads {
+		if strings.Contains(p, dummyOutboundSecret) {
+			t.Errorf("payload %d leaked secret: %s", i, p)
+		}
 	}
 }
 
@@ -697,6 +279,315 @@ const (
 	messageResponse = `{"id":"msg-1","channel_id":"ch-1","content":"ok"}`
 	threadResponse  = `{"id":"th-1","type":11,"name":"t"}`
 )
+
+func TestSendMessageWithAttachments(t *testing.T) {
+	registerDummyOutboundSecret(t)
+	att := []*Attachment{{Filename: "img.png", ContentType: "image/png", Data: []byte("fake png")}}
+	failAPI := func() *deliveryAPI {
+		return &deliveryAPI{def: deliveryRoute{status: http.StatusBadRequest, body: `{"message":"Missing permissions","code":50013}`}}
+	}
+	tests := []struct {
+		name            string
+		nilSession      bool
+		api             *deliveryAPI // nil means a 200 message API
+		channelID       string
+		text            string
+		attachments     []*Attachment
+		replyToID       string
+		wantErr         string
+		wantPayloads    int
+		wantFirst       string // substring of payload[0]
+		wantFirstRef    string // message_reference id expected on payload[0]
+		wantSecondNoRef bool
+	}{
+		{name: "NilSession", nilSession: true, channelID: "12345", text: "hello", wantErr: "discord session is nil"},
+		{name: "NilSessionWithAttachments", nilSession: true, channelID: "12345", text: "hello", attachments: att, wantErr: "discord session is nil"},
+		{name: "SingleMessageNoReply", channelID: "12345", text: "Hello world", wantPayloads: 1, wantFirst: `"content":"Hello world"`},
+		{name: "SingleMessageWithReplyRef", channelID: "12345", text: "Hello reply", replyToID: "9876543210", wantPayloads: 1, wantFirstRef: `"message_id":"9876543210"`},
+		{
+			name: "MultiChunkAttachmentsAndReplyOnFirstChunkOnly", channelID: "12345", text: strings.Repeat("A", 2500), attachments: att, replyToID: "9876543210",
+			wantPayloads: 2, wantFirstRef: `"message_id":"9876543210"`, wantSecondNoRef: true,
+		},
+		{name: "AttachmentsOnlyWithReplyRef", channelID: "12345", attachments: att, replyToID: "1122334455", wantPayloads: 1, wantFirstRef: `"message_id":"1122334455"`},
+		{name: "WhitespaceReplyIDIgnored", channelID: "12345", text: "Hello", replyToID: "   ", wantPayloads: 1},
+		{name: "EmptyTextAndEmptyAttachments", channelID: "12345"},
+		{name: "EmptyChannelIDError", text: "hello", wantErr: "channelID cannot be empty"},
+		{name: "APITextSendFailure", api: failAPI(), channelID: "12345", text: "Hello fail", wantErr: "failed to send message chunk 0", wantPayloads: 1},
+		{name: "APIAttachmentOnlySendFailure", api: failAPI(), channelID: "12345", attachments: att, wantErr: "failed to send attachments", wantPayloads: 1},
+		{name: "SecretMaskedInMessage", channelID: "ch-1", text: "here is the key: " + dummyOutboundSecret, wantPayloads: 1, wantFirst: "here is the key: [REDACTED]"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			sess := deliverySession(tc.nilSession, &tc.api)
+			err := SendMessageWithAttachments(sess, tc.channelID, tc.text, tc.attachments, tc.replyToID)
+			checkDeliveryErr(t, err, tc.wantErr)
+			payloads := tc.api.payloads()
+			assertNoSecret(t, payloads)
+			if len(payloads) != tc.wantPayloads {
+				t.Fatalf("payloads = %d, want %d", len(payloads), tc.wantPayloads)
+			}
+			if tc.wantPayloads == 0 {
+				return
+			}
+			if !strings.Contains(payloads[0], `"flags":4`) {
+				t.Errorf("payload[0] missing flags:4: %s", payloads[0])
+			}
+			if !strings.Contains(payloads[0], tc.wantFirst) {
+				t.Errorf("payload[0] missing %q: %s", tc.wantFirst, payloads[0])
+			}
+			hasRef := strings.Contains(payloads[0], `"message_reference"`)
+			switch {
+			case tc.wantFirstRef == "" && hasRef:
+				t.Errorf("payload[0] should omit message_reference: %s", payloads[0])
+			case tc.wantFirstRef != "" && (!strings.Contains(payloads[0], tc.wantFirstRef) || !strings.Contains(payloads[0], `"fail_if_not_exists":false`)):
+				t.Errorf("payload[0] missing reference %s with fail_if_not_exists:false: %s", tc.wantFirstRef, payloads[0])
+			}
+			if tc.wantSecondNoRef && strings.Contains(payloads[1], `"message_reference"`) {
+				t.Errorf("payload[1] should omit message_reference: %s", payloads[1])
+			}
+		})
+	}
+}
+
+func TestStartTyping(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name         string
+		nilSession   bool
+		channelID    string
+		api          *deliveryAPI
+		wantRequests int
+	}{
+		{name: "NilSession", nilSession: true, channelID: "12345"},
+		{name: "EmptyChannel", channelID: "", api: &deliveryAPI{def: deliveryRoute{status: http.StatusNoContent}}},
+		{name: "TypingSent", channelID: "12345", api: &deliveryAPI{def: deliveryRoute{status: http.StatusNoContent}}, wantRequests: 1},
+		{name: "TypingErrorOnlyLogged", channelID: "chan-typing-error", api: &deliveryAPI{def: deliveryRoute{err: errors.New("simulated network typing failure")}}, wantRequests: 1},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			sess := deliverySession(tc.nilSession, &tc.api)
+			stop := StartTyping(sess, tc.channelID)
+			if stop == nil {
+				t.Fatal("StartTyping returned a nil stop function")
+			}
+			stop()
+			stop() // repeated stops are safe
+			tc.api.mu.Lock()
+			got := len(tc.api.requests)
+			tc.api.mu.Unlock()
+			if got != tc.wantRequests {
+				t.Errorf("typing requests = %d, want %d", got, tc.wantRequests)
+			}
+		})
+	}
+}
+
+// resolveStateGuild is the cached guild ResolveChannelByNameOrID rows find channels in.
+func resolveStateGuild() *discordgo.Guild {
+	return &discordgo.Guild{ID: "guild-1", Channels: []*discordgo.Channel{
+		{ID: "chan-general", Name: "general"},
+		{ID: "chan-aerial-dev", Name: "aerial-dev"},
+		{ID: "chan-alerts", Name: "aerial-alerts"},
+	}}
+}
+
+func TestResolveChannelByNameOrID(t *testing.T) {
+	t.Parallel()
+	emptyGuilds := func() *deliveryAPI { return &deliveryAPI{def: deliveryRoute{body: `[]`}} }
+	tests := []struct {
+		name       string
+		nilSession bool
+		inState    bool // seed resolveStateGuild into the session state
+		api        *deliveryAPI
+		in         string
+		want       string
+		wantErr    string
+	}{
+		{name: "NilSession", nilSession: true, in: "aerial-dev", wantErr: "discord session is nil"},
+		{name: "Empty", api: emptyGuilds(), in: "", wantErr: "cannot be empty"},
+		{name: "BareHash", api: emptyGuilds(), in: "#", wantErr: "cannot be empty"},
+		{name: "Snowflake", api: emptyGuilds(), in: "123456789012345678", want: "123456789012345678"},
+		{name: "StateName", inState: true, api: emptyGuilds(), in: "aerial-dev", want: "chan-aerial-dev"},
+		{name: "StateHashName", inState: true, api: emptyGuilds(), in: "#aerial-dev", want: "chan-aerial-dev"},
+		{name: "StateCaseInsensitive", inState: true, api: emptyGuilds(), in: "#AERIAL-DEV", want: "chan-aerial-dev"},
+		{name: "NotFound", inState: true, api: emptyGuilds(), in: "non-existent-channel", wantErr: `channel "non-existent-channel" not found`},
+		{
+			name: "RESTFallback", in: "remote-channel", want: "chan-remote-999",
+			api: &deliveryAPI{def: deliveryRoute{status: http.StatusNotFound, body: `{"message":"Not found"}`}, routes: map[string]deliveryRoute{
+				"/api/v9/users/@me/guilds":     {body: `[{"id":"g100","name":"Guild"}]`},
+				"/api/v9/guilds/g100/channels": {body: `[{"id":"chan-remote-999","name":"remote-channel"}]`},
+			}},
+		},
+		{
+			name: "RESTGuildChannelsErrorSkipsGuild", in: "any-channel", wantErr: `channel "any-channel" not found`,
+			api: &deliveryAPI{def: deliveryRoute{status: http.StatusNotFound, body: `{"message":"not found"}`}, routes: map[string]deliveryRoute{
+				"/api/v9/users/@me/guilds":      {body: `[{"id":"g-err","name":"Error Guild"}]`},
+				"/api/v9/guilds/g-err/channels": {err: errors.New("guild channels fetch failed")},
+			}},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			sess := deliverySession(tc.nilSession, &tc.api)
+			if tc.inState {
+				_ = sess.State.GuildAdd(resolveStateGuild())
+			}
+			got, err := ResolveChannelByNameOrID(sess, tc.in)
+			if checkDeliveryErr(t, err, tc.wantErr) {
+				return
+			}
+			if got != tc.want {
+				t.Errorf("ResolveChannelByNameOrID(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestSendSystemAlert(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		nilSession  bool
+		api         *deliveryAPI
+		channel     string
+		wantErr     string
+		wantPayload string
+	}{
+		{name: "NilSession", nilSession: true, channel: "aerial-dev", wantErr: "discord session is nil"},
+		{name: "ChannelNotFound", api: &deliveryAPI{def: deliveryRoute{body: `[]`}}, channel: "missing-chan", wantErr: `failed to resolve system alert channel "missing-chan"`},
+		{name: "Delivered", channel: "aerial-alerts", wantPayload: `Aerial System Alert: System Alert**\n\nEverything operational`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			sess := deliverySession(tc.nilSession, &tc.api)
+			if sess != nil {
+				_ = sess.State.GuildAdd(resolveStateGuild())
+			}
+			err := SendSystemAlert(sess, tc.channel, " System Alert ", " Everything operational ")
+			if checkDeliveryErr(t, err, tc.wantErr) {
+				return
+			}
+			if got := tc.api.last(); got.Path != "/api/v9/channels/chan-alerts/messages" || !strings.Contains(got.Body, tc.wantPayload) {
+				t.Errorf("alert request = %s %s, want body containing %q", got.Path, got.Body, tc.wantPayload)
+			}
+		})
+	}
+}
+
+func TestEditMessage(t *testing.T) {
+	registerDummyOutboundSecret(t)
+	tests := []struct {
+		name        string
+		nilSession  bool
+		channelID   string
+		messageID   string
+		text        string
+		wantErr     string
+		wantPayload string
+	}{
+		{name: "NilSession", nilSession: true, channelID: "ch1", messageID: "msg1", text: "hello", wantErr: "discord session is nil"},
+		{name: "EmptyChannel", messageID: "msg1", text: "hello", wantErr: "channelID cannot be empty"},
+		{name: "EmptyMessage", channelID: "ch1", text: "hello", wantErr: "messageID cannot be empty"},
+		{name: "BlankText", channelID: "ch1", messageID: "msg1", text: "   ", wantErr: "text cannot be empty"},
+		{name: "Edited", channelID: "ch1", messageID: "msg1", text: "updated text", wantPayload: `"content":"updated text"`},
+		{name: "TruncatedToDiscordLimit", channelID: "ch1", messageID: "msg1", text: strings.Repeat("A", 2500), wantPayload: `"content":"` + strings.Repeat("A", 2000) + `"`},
+		{name: "SecretMaskedInEdit", channelID: "ch1", messageID: "msg1", text: "updated key: " + dummyOutboundSecret, wantPayload: "updated key: [REDACTED]"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var api *deliveryAPI
+			sess := deliverySession(tc.nilSession, &api)
+			if checkDeliveryErr(t, EditMessage(sess, tc.channelID, tc.messageID, tc.text), tc.wantErr) {
+				return
+			}
+			got := api.last()
+			assertNoSecret(t, []string{got.Body})
+			if got.Method != http.MethodPatch || got.Path != "/api/v9/channels/ch1/messages/msg1" {
+				t.Errorf("edit request = %s %s, want PATCH /api/v9/channels/ch1/messages/msg1", got.Method, got.Path)
+			}
+			if !strings.Contains(got.Body, `"flags":4`) || !strings.Contains(got.Body, tc.wantPayload) {
+				t.Errorf("edit body = %s, want flags:4 and %q", got.Body, tc.wantPayload)
+			}
+		})
+	}
+}
+
+func TestDeleteMessage(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		nilSession bool
+		channelID  string
+		messageID  string
+		wantErr    string
+	}{
+		{name: "NilSession", nilSession: true, channelID: "ch1", messageID: "msg1", wantErr: "discord session is nil"},
+		{name: "EmptyChannel", messageID: "msg1", wantErr: "channelID cannot be empty"},
+		{name: "EmptyMessage", channelID: "ch1", wantErr: "messageID cannot be empty"},
+		{name: "Deleted", channelID: "ch1", messageID: "msg1"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			api := &deliveryAPI{def: deliveryRoute{status: http.StatusNoContent}}
+			sess := deliverySession(tc.nilSession, &api)
+			if checkDeliveryErr(t, DeleteMessage(sess, tc.channelID, tc.messageID), tc.wantErr) {
+				return
+			}
+			if got := api.last(); got.Method != http.MethodDelete || got.Path != "/api/v9/channels/ch1/messages/msg1" {
+				t.Errorf("delete request = %s %s, want DELETE /api/v9/channels/ch1/messages/msg1", got.Method, got.Path)
+			}
+		})
+	}
+}
+
+func TestErrorClassifiers(t *testing.T) {
+	t.Parallel()
+	restStatus := func(code int) error { return &discordgo.RESTError{Response: &http.Response{StatusCode: code}} }
+	restCode := func(code int) error {
+		return &discordgo.RESTError{Response: &http.Response{StatusCode: http.StatusBadRequest}, Message: &discordgo.APIErrorMessage{Code: code}}
+	}
+	tests := []struct {
+		name           string
+		err            error
+		wantNotFound   bool
+		wantArchived   bool
+		wantPermission bool
+	}{
+		{"nil", nil, false, false, false},
+		{"unrelated", errors.New("connection reset by peer"), false, false, false},
+		{"text 10008 unknown message", errors.New("HTTP 404 Not Found, 10008 Unknown Message"), true, false, false},
+		{"text 50083 archived", errors.New("HTTP 400 Bad Request, 50083 Thread is archived"), false, true, false},
+		{"text 50084 locked", errors.New("HTTP 403 Forbidden, 50084 Thread is locked"), false, true, true},
+		{"text 403", errors.New("HTTP 403 Forbidden"), false, false, true},
+		{"text 50001 missing access", errors.New("HTTP 403 Forbidden, 50001 Missing Access"), false, false, true},
+		{"text 50013 missing permissions", errors.New("HTTP 403 Forbidden, 50013 Missing Permissions"), false, false, true},
+		{"REST 404", restStatus(http.StatusNotFound), true, false, false},
+		{"REST 10008", restCode(10008), true, false, false},
+		{"REST 50083", restCode(50083), false, true, false},
+		{"REST 50084", restCode(50084), false, true, false},
+		{"REST 403", restStatus(http.StatusForbidden), false, false, true},
+		{"REST 50001", restCode(50001), false, false, true},
+		{"REST 50013", restCode(50013), false, false, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := IsMessageNotFoundError(tc.err); got != tc.wantNotFound {
+				t.Errorf("IsMessageNotFoundError = %v, want %v", got, tc.wantNotFound)
+			}
+			if got := IsThreadArchivedOrLockedError(tc.err); got != tc.wantArchived {
+				t.Errorf("IsThreadArchivedOrLockedError = %v, want %v", got, tc.wantArchived)
+			}
+			if got := IsPermissionError(tc.err); got != tc.wantPermission {
+				t.Errorf("IsPermissionError = %v, want %v", got, tc.wantPermission)
+			}
+		})
+	}
+}
 
 func TestRedactOutbound(t *testing.T) {
 	registerDummyOutboundSecret(t)
@@ -718,46 +609,6 @@ func TestRedactOutbound(t *testing.T) {
 	}
 }
 
-func TestSendMessageWithAttachments_Redaction(t *testing.T) {
-	registerDummyOutboundSecret(t)
-	tests := []struct {
-		name       string
-		text       string
-		wantSubstr string
-	}{
-		{"secret masked in message", "here is the key: " + dummyOutboundSecret, "here is the key: [REDACTED]"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			sess, c := newCaptureSession(messageResponse)
-			if err := SendMessageWithAttachments(sess, "ch-1", tc.text, nil); err != nil {
-				t.Fatalf("SendMessageWithAttachments: %v", err)
-			}
-			assertRedactedPayload(t, c.last(), tc.wantSubstr)
-		})
-	}
-}
-
-func TestEditMessage_Redaction(t *testing.T) {
-	registerDummyOutboundSecret(t)
-	tests := []struct {
-		name       string
-		text       string
-		wantSubstr string
-	}{
-		{"secret masked in edit", "updated key: " + dummyOutboundSecret, "updated key: [REDACTED]"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			sess, c := newCaptureSession(messageResponse)
-			if err := EditMessage(sess, "ch-1", "msg-1", tc.text); err != nil {
-				t.Fatalf("EditMessage: %v", err)
-			}
-			assertRedactedPayload(t, c.last(), tc.wantSubstr)
-		})
-	}
-}
-
 func TestSendSingleMessage(t *testing.T) {
 	registerDummyOutboundSecret(t)
 	tests := []struct {
@@ -766,25 +617,27 @@ func TestSendSingleMessage(t *testing.T) {
 		channelID  string
 		text       string
 		wantID     string
-		wantErr    bool
+		wantErr    string
 		wantSubstr string
 	}{
-		{"nil session", true, "ch-1", "hi", "", true, ""},
-		{"empty channel", false, "", "hi", "", true, ""},
-		{"secret masked in status message", false, "ch-1", "status " + dummyOutboundSecret, "msg-1", false, "status [REDACTED]"},
+		{name: "nil session", nilSession: true, channelID: "ch-1", text: "hi", wantErr: "discord session is nil"},
+		{name: "empty channel", text: "hi", wantErr: "channelID cannot be empty"},
+		{name: "secret masked in status message", channelID: "ch-1", text: "status " + dummyOutboundSecret, wantID: "msg-1", wantSubstr: "status [REDACTED]"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			sess, c := newCaptureSession(messageResponse)
-			if tc.nilSession {
-				sess = nil
+			var api *deliveryAPI
+			id, err := SendSingleMessage(deliverySession(tc.nilSession, &api), tc.channelID, tc.text)
+			if checkDeliveryErr(t, err, tc.wantErr) {
+				return
 			}
-			id, err := SendSingleMessage(sess, tc.channelID, tc.text)
-			if (err != nil) != tc.wantErr || id != tc.wantID {
-				t.Fatalf("SendSingleMessage = (%q, %v), want (%q, err=%v)", id, err, tc.wantID, tc.wantErr)
+			if id != tc.wantID {
+				t.Errorf("SendSingleMessage id = %q, want %q", id, tc.wantID)
 			}
-			if tc.wantSubstr != "" {
-				assertRedactedPayload(t, c.last(), tc.wantSubstr)
+			body := api.last().Body
+			assertNoSecret(t, []string{body})
+			if !strings.Contains(body, tc.wantSubstr) {
+				t.Errorf("payload missing %q: %s", tc.wantSubstr, body)
 			}
 		})
 	}
@@ -797,27 +650,26 @@ func TestStartMessageThread(t *testing.T) {
 		nilSession bool
 		title      string
 		wantID     string
-		wantErr    bool
+		wantErr    string
 		wantSubstr string
 	}{
-		{"nil session", true, "t", "", true, ""},
-		{"secret masked in thread title", false, "Title " + dummyOutboundSecret, "th-1", false, "Title [REDACTED]"},
+		{name: "nil session", nilSession: true, title: "t", wantErr: "discord session is nil"},
+		{name: "secret masked in thread title", title: "Title " + dummyOutboundSecret, wantID: "th-1", wantSubstr: "Title [REDACTED]"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			sess, c := newCaptureSession(threadResponse)
-			if tc.nilSession {
-				sess = nil
+			api := &deliveryAPI{def: deliveryRoute{body: threadResponse}}
+			ch, err := StartMessageThread(deliverySession(tc.nilSession, &api), "ch-1", "msg-1", tc.title)
+			if checkDeliveryErr(t, err, tc.wantErr) {
+				return
 			}
-			ch, err := StartMessageThread(sess, "ch-1", "msg-1", tc.title)
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("StartMessageThread err = %v, wantErr %v", err, tc.wantErr)
-			}
-			if tc.wantID != "" && (ch == nil || ch.ID != tc.wantID) {
+			if ch == nil || ch.ID != tc.wantID {
 				t.Fatalf("StartMessageThread channel = %+v, want ID %q", ch, tc.wantID)
 			}
-			if tc.wantSubstr != "" {
-				assertRedactedPayload(t, c.last(), tc.wantSubstr)
+			body := api.last().Body
+			assertNoSecret(t, []string{body})
+			if !strings.Contains(body, tc.wantSubstr) {
+				t.Errorf("payload missing %q: %s", tc.wantSubstr, body)
 			}
 		})
 	}
@@ -830,27 +682,26 @@ func TestStartThread(t *testing.T) {
 		nilSession bool
 		title      string
 		wantID     string
-		wantErr    bool
+		wantErr    string
 		wantSubstr string
 	}{
-		{"nil session", true, "t", "", true, ""},
-		{"secret masked in standalone thread title", false, "Routine " + dummyOutboundSecret, "th-1", false, "Routine [REDACTED]"},
+		{name: "nil session", nilSession: true, title: "t", wantErr: "discord session is nil"},
+		{name: "secret masked in standalone thread title", title: "Routine " + dummyOutboundSecret, wantID: "th-1", wantSubstr: "Routine [REDACTED]"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			sess, c := newCaptureSession(threadResponse)
-			if tc.nilSession {
-				sess = nil
+			api := &deliveryAPI{def: deliveryRoute{body: threadResponse}}
+			ch, err := StartThread(deliverySession(tc.nilSession, &api), "ch-1", tc.title)
+			if checkDeliveryErr(t, err, tc.wantErr) {
+				return
 			}
-			ch, err := StartThread(sess, "ch-1", tc.title)
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("StartThread err = %v, wantErr %v", err, tc.wantErr)
-			}
-			if tc.wantID != "" && (ch == nil || ch.ID != tc.wantID) {
+			if ch == nil || ch.ID != tc.wantID {
 				t.Fatalf("StartThread channel = %+v, want ID %q", ch, tc.wantID)
 			}
-			if tc.wantSubstr != "" {
-				assertRedactedPayload(t, c.last(), tc.wantSubstr)
+			body := api.last().Body
+			assertNoSecret(t, []string{body})
+			if !strings.Contains(body, tc.wantSubstr) {
+				t.Errorf("payload missing %q: %s", tc.wantSubstr, body)
 			}
 		})
 	}
