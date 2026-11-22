@@ -11,7 +11,7 @@ import (
 	restate "github.com/restatedev/sdk-go"
 	"github.com/stretchr/testify/require"
 
-	"github.com/azylman/aerial/services/vanadis-restate/internal/ericlient"
+	"github.com/azylman/aerial/pkg/eriwire"
 )
 
 // prlifecycleFixtureDir is the shared cross-module golden fixture directory
@@ -346,7 +346,7 @@ type sessionCall struct {
 	channel  string
 	content  string
 	key      string
-	dispatch ericlient.BrainDispatchRequest
+	dispatch eriwire.BrainDispatchRequest
 }
 
 // fakeSessionClient is the hermetic EriSessionClient boundary.
@@ -367,7 +367,7 @@ func (f *fakeSessionClient) PromptAgent(_ context.Context, agent, threadID, prom
 	return f.record(sessionCall{method: "prompt", agent: agent, channel: threadID, content: prompt, key: idempotencyKey})
 }
 
-func (f *fakeSessionClient) DispatchRestate(_ context.Context, req ericlient.BrainDispatchRequest) error {
+func (f *fakeSessionClient) DispatchRestate(_ context.Context, req eriwire.BrainDispatchRequest) error {
 	return f.record(sessionCall{method: "dispatch", dispatch: req})
 }
 
@@ -397,15 +397,15 @@ func TestSessionEriEffectorDeliverEri(t *testing.T) {
 		},
 		{
 			name: "background dispatches on the owner session", eff: EriEffect{Kind: EffectEriBackground, ChannelID: testTarget, Content: "fix", Effort: "medium", SkipIfActive: true},
-			wantCalls: []sessionCall{{method: "dispatch", dispatch: ericlient.BrainDispatchRequest{ID: idem, Agent: "agent-alpha", Source: "prstate", TargetID: testTarget, Prompt: "fix", Effort: "medium", SkipIfActive: true}}},
+			wantCalls: []sessionCall{{method: "dispatch", dispatch: eriwire.BrainDispatchRequest{ID: idem, Agent: "agent-alpha", Source: "prstate", TargetID: testTarget, Prompt: "fix", Effort: "medium", SkipIfActive: true}}},
 		},
 		{
-			name: "busy skip-if-active dispatch counts as delivered", clientErr: ericlient.ErrDispatchActive, eff: EriEffect{Kind: EffectEriBackground, Content: "fix", SkipIfActive: true},
-			wantCalls: []sessionCall{{method: "dispatch", dispatch: ericlient.BrainDispatchRequest{ID: idem, Agent: "agent-alpha", Source: "prstate", Prompt: "fix", SkipIfActive: true}}},
+			name: "busy skip-if-active dispatch counts as delivered", clientErr: eriwire.ErrDispatchActive, eff: EriEffect{Kind: EffectEriBackground, Content: "fix", SkipIfActive: true},
+			wantCalls: []sessionCall{{method: "dispatch", dispatch: eriwire.BrainDispatchRequest{ID: idem, Agent: "agent-alpha", Source: "prstate", Prompt: "fix", SkipIfActive: true}}},
 		},
 		{
 			name: "dispatch failure surfaces", clientErr: errFakeEri, eff: EriEffect{Kind: EffectEriBackground, Content: "fix"}, wantErr: true,
-			wantCalls: []sessionCall{{method: "dispatch", dispatch: ericlient.BrainDispatchRequest{ID: idem, Agent: "agent-alpha", Source: "prstate", Prompt: "fix"}}},
+			wantCalls: []sessionCall{{method: "dispatch", dispatch: eriwire.BrainDispatchRequest{ID: idem, Agent: "agent-alpha", Source: "prstate", Prompt: "fix"}}},
 		},
 		{
 			name: "direct message uses the owner sender", eff: dmEffect(),

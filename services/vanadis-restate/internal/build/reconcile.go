@@ -14,6 +14,7 @@ import (
 	restate "github.com/restatedev/sdk-go"
 
 	"github.com/azylman/aerial/pkg/buildplan"
+	"github.com/azylman/aerial/pkg/eriwire"
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/pkg/strutil"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/ericlient"
@@ -274,7 +275,7 @@ func (b *BuildObject) launchEligibleChunks(ctx context.Context, build model.Vana
 			activeCount++
 		}
 		if err := b.executor.ExecuteLaunchChunk(ctx, b.store, build, chunks, idx, ""); err != nil {
-			if errors.Is(err, executor.ErrDispatchActive) {
+			if errors.Is(err, eriwire.ErrDispatchActive) {
 				deferredKeys = append(deferredKeys, key)
 			}
 			launchErrors = append(launchErrors, err)
@@ -295,7 +296,7 @@ func (b *BuildObject) launchEligibleChunks(ctx context.Context, build model.Vana
 func classifyLaunchErrors(errs []error) error {
 	var failures []error
 	for _, err := range errs {
-		if !errors.Is(err, executor.ErrDispatchActive) {
+		if !errors.Is(err, eriwire.ErrDispatchActive) {
 			failures = append(failures, err)
 		}
 	}
@@ -303,13 +304,13 @@ func classifyLaunchErrors(errs []error) error {
 		return errors.Join(failures...)
 	}
 	if len(errs) > 0 {
-		return executor.ErrDispatchActive
+		return eriwire.ErrDispatchActive
 	}
 	return nil
 }
 
 func (b *BuildObject) shouldScheduleReconcile(out reconcileStepOutput) bool {
-	return b.store != nil && out.Error == executor.ErrDispatchActive.Error() && out.BuildStatus == statusRunning && !hasDispatchDeferrals(out)
+	return b.store != nil && out.Error == eriwire.ErrDispatchActive.Error() && out.BuildStatus == statusRunning && !hasDispatchDeferrals(out)
 }
 
 func hasDispatchDeferrals(out reconcileStepOutput) bool {
@@ -535,7 +536,7 @@ func (b *BuildObject) executeAuthoritativeTransition(ctx context.Context, buildI
 
 	launchedMap := cloneLaunchedMap(priorLaunched)
 	launchedChunks, deferredKeys, err := b.launchEligibleChunks(ctx, *build, chunks, launchedMap)
-	if err != nil && !errors.Is(err, executor.ErrDispatchActive) {
+	if err != nil && !errors.Is(err, eriwire.ErrDispatchActive) {
 		return reconcileStepOutput{}, err
 	}
 	deferrals, expired := advanceDispatchDeferrals(priorDispatchDeferrals(priorState), deferredKeys, time.Now().UTC())
@@ -544,7 +545,7 @@ func (b *BuildObject) executeAuthoritativeTransition(ctx context.Context, buildI
 	}
 	recoveryReason := ""
 	if len(deferrals) > 0 {
-		recoveryReason = executor.ErrDispatchActive.Error()
+		recoveryReason = eriwire.ErrDispatchActive.Error()
 	}
 	skipSync := len(launchedChunks) == 0 && widgetStateEqual(priorState, *build, chunks)
 	finalStatus, err := b.evaluateBuildTerminalStatus(ctx, build, chunks, skipSync)

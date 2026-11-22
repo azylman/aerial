@@ -29,6 +29,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
+	"github.com/azylman/aerial/pkg/eriwire"
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/pkg/strutil"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/ericlient"
@@ -575,13 +576,13 @@ func applyRecoveryFixtureHead(chunks []model.VanadisChunk, args []any, baseline 
 }
 
 type mockEriClient struct {
-	dispatchFn func(ctx context.Context, req executor.BrainDispatchRequest) error
+	dispatchFn func(ctx context.Context, req eriwire.BrainDispatchRequest) error
 	cancelFn   func(ctx context.Context, chunkID string) error
 	promptFn   func(ctx context.Context, threadID, prompt string) error
 	widgetFn   func(ctx context.Context, req executor.StatusWidgetRequest) (string, error)
 	messageFn  func(ctx context.Context, channelID, content string) error
 
-	lastDispatch *executor.BrainDispatchRequest
+	lastDispatch *eriwire.BrainDispatchRequest
 	lastCancel   string
 	cancelAgent  string
 	lastThreadID string
@@ -591,11 +592,11 @@ type mockEriClient struct {
 	lastMsgCont  string
 }
 
-func (m *mockEriClient) DispatchAccepted(ctx context.Context, req executor.BrainDispatchRequest) error {
+func (m *mockEriClient) DispatchAccepted(ctx context.Context, req eriwire.BrainDispatchRequest) error {
 	return m.Dispatch(ctx, req)
 }
 
-func (m *mockEriClient) Dispatch(ctx context.Context, req executor.BrainDispatchRequest) error {
+func (m *mockEriClient) Dispatch(ctx context.Context, req eriwire.BrainDispatchRequest) error {
 	m.lastDispatch = &req
 	if m.dispatchFn != nil {
 		return m.dispatchFn(ctx, req)
@@ -667,7 +668,7 @@ func launchRecoveryServer(t *testing.T, id, first string, ready *atomic.Bool) (*
 			_, _ = w.Write([]byte(`{}`))
 			return
 		}
-		var req executor.BrainDispatchRequest
+		var req eriwire.BrainDispatchRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			t.Error(err)
 			w.WriteHeader(http.StatusBadRequest)

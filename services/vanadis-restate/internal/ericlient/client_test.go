@@ -11,6 +11,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+
+	"github.com/azylman/aerial/pkg/eriwire"
 )
 
 type badReader struct{}
@@ -44,7 +46,7 @@ func TestHTTPEriClient(t *testing.T) {
 	client := NewHTTPEriClient(srv.URL, srv.Client())
 
 	ctx := context.Background()
-	assert.NoError(t, client.Dispatch(ctx, BrainDispatchRequest{ID: "d1"}))
+	assert.NoError(t, client.Dispatch(ctx, eriwire.BrainDispatchRequest{ID: "d1"}))
 	assert.NoError(t, client.CancelDispatch(ctx, "c1"))
 	assert.NoError(t, client.Prompt(ctx, "th1", "wake up"))
 	const wantMsgID = "vanadis-prompt-ad174723f0a135a9c1f7db8600f6ecb0"
@@ -66,7 +68,7 @@ func TestHTTPEriClient(t *testing.T) {
 
 	// Test errors
 	badClient := NewHTTPEriClient("http://invalid.localhost:99", srv.Client())
-	assert.Error(t, badClient.Dispatch(ctx, BrainDispatchRequest{}))
+	assert.Error(t, badClient.Dispatch(ctx, eriwire.BrainDispatchRequest{}))
 }
 
 func TestHTTPEriClientTransport(t *testing.T) {
@@ -116,7 +118,7 @@ func TestHTTPEriClientTransport(t *testing.T) {
 			var err error
 			switch tc.op {
 			case "dispatch":
-				err = c.Dispatch(ctx, BrainDispatchRequest{})
+				err = c.Dispatch(ctx, eriwire.BrainDispatchRequest{})
 			case "widget":
 				_, err = c.Widget(ctx, StatusWidgetRequest{})
 			case "cancel-empty":
@@ -180,13 +182,13 @@ func TestHTTPEriClientDispatchResponses(t *testing.T) {
 			c := NewHTTPEriClient(srv.URL, srv.Client())
 			var err error
 			if tc.accepted {
-				err = c.DispatchAccepted(ctx, BrainDispatchRequest{ID: tc.id})
+				err = c.DispatchAccepted(ctx, eriwire.BrainDispatchRequest{ID: tc.id})
 			} else {
-				err = c.Dispatch(ctx, BrainDispatchRequest{ID: tc.id})
+				err = c.Dispatch(ctx, eriwire.BrainDispatchRequest{ID: tc.id})
 			}
 			if tc.wantActive {
-				if !errors.Is(err, ErrDispatchActive) {
-					t.Errorf("expected ErrDispatchActive, got %v", err)
+				if !errors.Is(err, eriwire.ErrDispatchActive) {
+					t.Errorf("expected eriwire.ErrDispatchActive, got %v", err)
 				}
 				return
 			}
@@ -211,7 +213,7 @@ func TestHTTPEriClient_ReadError(t *testing.T) {
 		}),
 	}
 	c := NewHTTPEriClient("http://eri.test", client)
-	err := c.Dispatch(context.Background(), BrainDispatchRequest{})
+	err := c.Dispatch(context.Background(), eriwire.BrainDispatchRequest{})
 	if err == nil {
 		t.Fatal("expected error")
 	}

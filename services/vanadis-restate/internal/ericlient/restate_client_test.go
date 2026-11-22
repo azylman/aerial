@@ -7,6 +7,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/azylman/aerial/pkg/eriwire"
 )
 
 func TestServiceNaming(t *testing.T) {
@@ -61,7 +63,7 @@ type dispatchTestCase struct {
 	restateSrv bool
 	status     int
 	body       string
-	req        BrainDispatchRequest
+	req        eriwire.BrainDispatchRequest
 	fallback   bool
 	wantErr    bool
 	errContain string
@@ -122,23 +124,23 @@ func TestRestateEriClient_Dispatch(t *testing.T) {
 			restateSrv: true,
 			status:     http.StatusOK,
 			body:       `{"status":"accepted","dispatch_id":"d1"}`,
-			req:        BrainDispatchRequest{ID: "d1", VanadisChunkID: "c1", Source: "test"},
+			req:        eriwire.BrainDispatchRequest{ID: "d1", VanadisChunkID: "c1", Source: "test"},
 		},
 		{
-			name:       "restate skipped_active maps to ErrDispatchActive",
+			name:       "restate skipped_active maps to eriwire.ErrDispatchActive",
 			restateSrv: true,
 			status:     http.StatusOK,
 			body:       `{"status":"skipped_active"}`,
-			req:        BrainDispatchRequest{ID: "d1", Source: "test"},
+			req:        eriwire.BrainDispatchRequest{ID: "d1", Source: "test"},
 			wantErr:    true,
-			errIs:      ErrDispatchActive,
+			errIs:      eriwire.ErrDispatchActive,
 		},
 		{
 			name:       "restate rejected unknown status",
 			restateSrv: true,
 			status:     http.StatusOK,
 			body:       `{"status":"rejected"}`,
-			req:        BrainDispatchRequest{ID: "d1", Source: "test"},
+			req:        eriwire.BrainDispatchRequest{ID: "d1", Source: "test"},
 			wantErr:    true,
 			errContain: "restate rejected dispatch",
 		},
@@ -147,7 +149,7 @@ func TestRestateEriClient_Dispatch(t *testing.T) {
 			restateSrv: true,
 			status:     http.StatusInternalServerError,
 			body:       `{"message":"actor busy"}`,
-			req:        BrainDispatchRequest{ID: "d1", Source: "test"},
+			req:        eriwire.BrainDispatchRequest{ID: "d1", Source: "test"},
 			wantErr:    true,
 			errContain: "actor busy",
 		},
@@ -156,7 +158,7 @@ func TestRestateEriClient_Dispatch(t *testing.T) {
 			restateSrv: true,
 			status:     http.StatusBadRequest,
 			body:       `{"error":"invalid payload"}`,
-			req:        BrainDispatchRequest{ID: "d1", Source: "test"},
+			req:        eriwire.BrainDispatchRequest{ID: "d1", Source: "test"},
 			wantErr:    true,
 			errContain: "invalid payload",
 		},
@@ -165,11 +167,11 @@ func TestRestateEriClient_Dispatch(t *testing.T) {
 			fallback: true,
 			status:   http.StatusOK,
 			body:     `{"status":"accepted","dispatch_id":"d1"}`,
-			req:      BrainDispatchRequest{ID: "d1", Source: "test"},
+			req:      eriwire.BrainDispatchRequest{ID: "d1", Source: "test"},
 		},
 		{
 			name:       "neither url configured",
-			req:        BrainDispatchRequest{ID: "d1", Source: "test"},
+			req:        eriwire.BrainDispatchRequest{ID: "d1", Source: "test"},
 			wantErr:    true,
 			errContain: "neither restate url nor eri url configured",
 		},
@@ -194,7 +196,7 @@ func TestRestateEriClient_DispatchExplicitAgentPath(t *testing.T) {
 	defer srv.Close()
 
 	client := NewRestateEriClient(srv.URL, "", "aerial", nil)
-	err := client.Dispatch(context.Background(), BrainDispatchRequest{ID: "d1", Agent: "agent-alpha", VanadisChunkID: "c1", Source: "test"})
+	err := client.Dispatch(context.Background(), eriwire.BrainDispatchRequest{ID: "d1", Agent: "agent-alpha", VanadisChunkID: "c1", Source: "test"})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -212,7 +214,7 @@ func TestRestateEriClient_DispatchAccepted(t *testing.T) {
 		restateSrv bool
 		status     int
 		body       string
-		req        BrainDispatchRequest
+		req        eriwire.BrainDispatchRequest
 		fallback   bool
 		wantErr    bool
 		errContain string
@@ -225,7 +227,7 @@ func TestRestateEriClient_DispatchAccepted(t *testing.T) {
 			restateSrv: true,
 			status:     http.StatusOK,
 			body:       `{"status":"accepted","dispatch_id":"d1"}`,
-			req:        BrainDispatchRequest{ID: "d1", Source: "test"},
+			req:        eriwire.BrainDispatchRequest{ID: "d1", Source: "test"},
 			wantKey:    "d1",
 		},
 		{
@@ -233,7 +235,7 @@ func TestRestateEriClient_DispatchAccepted(t *testing.T) {
 			restateSrv: true,
 			status:     http.StatusOK,
 			body:       `{"status":"accepted","dispatch_id":"d1"}`,
-			req:        BrainDispatchRequest{ID: "d1", Source: "test"},
+			req:        eriwire.BrainDispatchRequest{ID: "d1", Source: "test"},
 			attempt:    "inv-7",
 			wantKey:    "d1:inv-7",
 		},
@@ -242,7 +244,7 @@ func TestRestateEriClient_DispatchAccepted(t *testing.T) {
 			restateSrv: true,
 			status:     http.StatusOK,
 			body:       `{"status":"accepted","dispatch_id":"d1"}`,
-			req:        BrainDispatchRequest{ID: "d1", Source: "test"},
+			req:        eriwire.BrainDispatchRequest{ID: "d1", Source: "test"},
 			attempt:    "  ",
 			wantKey:    "d1",
 		},
@@ -251,7 +253,7 @@ func TestRestateEriClient_DispatchAccepted(t *testing.T) {
 			restateSrv: true,
 			status:     http.StatusOK,
 			body:       `{"status":"accepted"}`,
-			req:        BrainDispatchRequest{Source: "test"},
+			req:        eriwire.BrainDispatchRequest{Source: "test"},
 			attempt:    "inv-7",
 			wantErr:    true,
 			errContain: "restate did not accept dispatch",
@@ -261,17 +263,17 @@ func TestRestateEriClient_DispatchAccepted(t *testing.T) {
 			restateSrv: true,
 			status:     http.StatusOK,
 			body:       `{"status":"already_exists","message_id":"d1"}`,
-			req:        BrainDispatchRequest{ID: "d1", Source: "test"},
+			req:        eriwire.BrainDispatchRequest{ID: "d1", Source: "test"},
 			wantKey:    "d1",
 		},
 		{
-			name:       "restate skipped_active maps to ErrDispatchActive",
+			name:       "restate skipped_active maps to eriwire.ErrDispatchActive",
 			restateSrv: true,
 			status:     http.StatusOK,
 			body:       `{"status":"skipped_active"}`,
-			req:        BrainDispatchRequest{ID: "d1", Source: "test"},
+			req:        eriwire.BrainDispatchRequest{ID: "d1", Source: "test"},
 			wantErr:    true,
-			errIs:      ErrDispatchActive,
+			errIs:      eriwire.ErrDispatchActive,
 			wantKey:    "d1",
 		},
 		{
@@ -279,10 +281,10 @@ func TestRestateEriClient_DispatchAccepted(t *testing.T) {
 			restateSrv: true,
 			status:     http.StatusOK,
 			body:       `{"status":"skipped_active"}`,
-			req:        BrainDispatchRequest{ID: "d1", Source: "test"},
+			req:        eriwire.BrainDispatchRequest{ID: "d1", Source: "test"},
 			attempt:    "inv-8",
 			wantErr:    true,
-			errIs:      ErrDispatchActive,
+			errIs:      eriwire.ErrDispatchActive,
 			wantKey:    "d1:inv-8",
 		},
 		{
@@ -290,7 +292,7 @@ func TestRestateEriClient_DispatchAccepted(t *testing.T) {
 			restateSrv: true,
 			status:     http.StatusOK,
 			body:       `{"status":"accepted","dispatch_id":"other"}`,
-			req:        BrainDispatchRequest{ID: "d1", Source: "test"},
+			req:        eriwire.BrainDispatchRequest{ID: "d1", Source: "test"},
 			wantErr:    true,
 			errContain: "restate did not accept dispatch",
 			wantKey:    "d1",
@@ -300,7 +302,7 @@ func TestRestateEriClient_DispatchAccepted(t *testing.T) {
 			fallback: true,
 			status:   http.StatusOK,
 			body:     `{"status":"accepted","dispatch_id":"d1"}`,
-			req:      BrainDispatchRequest{ID: "d1", Source: "test"},
+			req:      eriwire.BrainDispatchRequest{ID: "d1", Source: "test"},
 		},
 	}
 
@@ -674,10 +676,10 @@ func TestRestateEriClient_NilReceiver(t *testing.T) {
 	var nilClient *RestateEriClient
 	ctx := context.Background()
 
-	if err := nilClient.Dispatch(ctx, BrainDispatchRequest{}); err == nil {
+	if err := nilClient.Dispatch(ctx, eriwire.BrainDispatchRequest{}); err == nil {
 		t.Error("expected error on nil client Dispatch")
 	}
-	if err := nilClient.DispatchAccepted(ctx, BrainDispatchRequest{}); err == nil {
+	if err := nilClient.DispatchAccepted(ctx, eriwire.BrainDispatchRequest{}); err == nil {
 		t.Error("expected error on nil client DispatchAccepted")
 	}
 	if err := nilClient.CancelDispatch(ctx, "c1"); err == nil {
@@ -695,7 +697,7 @@ func TestRestateEriClient_NilReceiver(t *testing.T) {
 	if err := nilClient.PromptAgent(ctx, "a", "th1", "p", "k"); err == nil {
 		t.Error("expected error on nil client PromptAgent")
 	}
-	if err := nilClient.DispatchRestate(ctx, BrainDispatchRequest{}); err == nil {
+	if err := nilClient.DispatchRestate(ctx, eriwire.BrainDispatchRequest{}); err == nil {
 		t.Error("expected error on nil client DispatchRestate")
 	}
 	if err := nilClient.MessageAgent(ctx, "a", "ch1", "m"); err == nil {
@@ -708,7 +710,6 @@ func TestRestateEriClient_EdgeBehaviors(t *testing.T) {
 	ctx := context.Background()
 
 	client := NewRestateEriClient("", "", "", nil)
-	client.SetWidgetDeliverer(&mockDeliverer{})
 	client.SetDiscordAuth(true)
 	if err := client.Message(ctx, "", ""); err != nil {
 		t.Errorf("empty message should be no-op: %v", err)
@@ -726,7 +727,7 @@ func TestRestateEriClient_EdgeBehaviors(t *testing.T) {
 	defer emptyBodySrv.Close()
 
 	emptyClient := NewRestateEriClient(emptyBodySrv.URL, "", "aerial", nil)
-	if err := emptyClient.DispatchAccepted(ctx, BrainDispatchRequest{ID: "d1"}); err == nil {
+	if err := emptyClient.DispatchAccepted(ctx, eriwire.BrainDispatchRequest{ID: "d1"}); err == nil {
 		t.Error("expected error when DispatchAccepted receives empty body")
 	}
 
@@ -738,13 +739,13 @@ func TestRestateEriClient_EdgeBehaviors(t *testing.T) {
 	defer badJSONSrv.Close()
 
 	badJSONClient := NewRestateEriClient(badJSONSrv.URL, "", "aerial", nil)
-	if err := badJSONClient.Dispatch(ctx, BrainDispatchRequest{ID: "d1"}); err == nil {
+	if err := badJSONClient.Dispatch(ctx, eriwire.BrainDispatchRequest{ID: "d1"}); err == nil {
 		t.Error("expected error on malformed JSON response")
 	}
 
 	// Coverage for HTTP request creation failure (invalid URL)
 	badURLClient := NewRestateEriClient("http://127.0.0.1:0\nbad", "", "aerial", nil)
-	if err := badURLClient.Dispatch(ctx, BrainDispatchRequest{ID: "d1"}); err == nil {
+	if err := badURLClient.Dispatch(ctx, eriwire.BrainDispatchRequest{ID: "d1"}); err == nil {
 		t.Error("expected error on bad restate URL")
 	}
 
@@ -753,7 +754,7 @@ func TestRestateEriClient_EdgeBehaviors(t *testing.T) {
 	closedURL := closedSrv.URL
 	closedSrv.Close()
 	unreachableClient := NewRestateEriClient(closedURL, "", "aerial", nil)
-	if err := unreachableClient.Dispatch(ctx, BrainDispatchRequest{ID: "d1"}); err == nil {
+	if err := unreachableClient.Dispatch(ctx, eriwire.BrainDispatchRequest{ID: "d1"}); err == nil {
 		t.Error("expected error on unreachable restate server")
 	}
 
@@ -770,7 +771,7 @@ func TestRestateEriClient_EdgeBehaviors(t *testing.T) {
 	}))
 	defer nonJSONErrSrv.Close()
 	gatewayErrClient := NewRestateEriClient(nonJSONErrSrv.URL, "", "aerial", nil)
-	if err := gatewayErrClient.Dispatch(ctx, BrainDispatchRequest{ID: "d1"}); err == nil || !strings.Contains(err.Error(), "raw text gateway error") {
+	if err := gatewayErrClient.Dispatch(ctx, eriwire.BrainDispatchRequest{ID: "d1"}); err == nil || !strings.Contains(err.Error(), "raw text gateway error") {
 		t.Errorf("expected raw text error, got %v", err)
 	}
 }

@@ -8,6 +8,8 @@ import (
 	"net/http/httptest"
 	"sync"
 	"testing"
+
+	"github.com/azylman/aerial/pkg/eriwire"
 )
 
 // ingressCall is one request the fake Restate ingress received.
@@ -105,7 +107,7 @@ func TestRestateEriClient_PromptAgent(t *testing.T) {
 // to fall back to eri HTTP.
 func TestRestateEriClient_DispatchRestate(t *testing.T) {
 	t.Parallel()
-	req := BrainDispatchRequest{ID: "prstate-d1", Agent: "agent-alpha", Source: "prstate", TargetID: "T1", Prompt: "fix"}
+	req := eriwire.BrainDispatchRequest{ID: "prstate-d1", Agent: "agent-alpha", Source: "prstate", TargetID: "T1", Prompt: "fix"}
 	tests := []struct {
 		name      string
 		noRestate bool
@@ -114,7 +116,7 @@ func TestRestateEriClient_DispatchRestate(t *testing.T) {
 		wantPaths []string
 	}{
 		{name: "enqueues on the agent dispatch session", body: `{"status":"accepted","dispatch_id":"prstate-d1"}`, wantPaths: []string{"/DispatchSession-agent-alpha/dispatch-prstate-d1/Enqueue"}},
-		{name: "busy session maps to ErrDispatchActive", body: `{"status":"skipped_active"}`, wantErr: ErrDispatchActive, wantPaths: []string{"/DispatchSession-agent-alpha/dispatch-prstate-d1/Enqueue"}},
+		{name: "busy session maps to eriwire.ErrDispatchActive", body: `{"status":"skipped_active"}`, wantErr: eriwire.ErrDispatchActive, wantPaths: []string{"/DispatchSession-agent-alpha/dispatch-prstate-d1/Enqueue"}},
 		{name: "no restate url never falls back to eri", noRestate: true, wantErr: errRestateNotConfigured},
 	}
 	for _, tc := range tests {

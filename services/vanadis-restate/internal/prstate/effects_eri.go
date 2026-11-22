@@ -34,7 +34,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	restate "github.com/restatedev/sdk-go"
 
-	"github.com/azylman/aerial/services/vanadis-restate/internal/ericlient"
+	"github.com/azylman/aerial/pkg/eriwire"
 )
 
 // PRHandlerRetryEriEffect is the delayed self-send that retries one
@@ -252,7 +252,7 @@ func (s *PRObjectService) RetryEriEffect(ctx restate.ObjectContext, req EriEffec
 // HTTP.
 type EriSessionClient interface {
 	PromptAgent(ctx context.Context, agent, threadID, prompt, idempotencyKey string) error
-	DispatchRestate(ctx context.Context, req ericlient.BrainDispatchRequest) error
+	DispatchRestate(ctx context.Context, req eriwire.BrainDispatchRequest) error
 	MessageAgent(ctx context.Context, agent, channelID, content string) error
 }
 
@@ -277,7 +277,7 @@ func (e *SessionEriEffector) DeliverEri(ctx context.Context, agent string, key E
 	case EffectEriPrompt:
 		return e.client.PromptAgent(ctx, agent, eff.ChannelID, eff.Content, EffectIdempotencyKey(key))
 	case EffectEriBackground:
-		err := e.client.DispatchRestate(ctx, ericlient.BrainDispatchRequest{
+		err := e.client.DispatchRestate(ctx, eriwire.BrainDispatchRequest{
 			ID:           EffectIdempotencyKey(key),
 			Agent:        agent,
 			Source:       eriEffectSource,
@@ -286,7 +286,7 @@ func (e *SessionEriEffector) DeliverEri(ctx context.Context, agent string, key E
 			Effort:       eff.Effort,
 			SkipIfActive: eff.SkipIfActive,
 		})
-		if errors.Is(err, ericlient.ErrDispatchActive) {
+		if errors.Is(err, eriwire.ErrDispatchActive) {
 			return nil
 		}
 		return err

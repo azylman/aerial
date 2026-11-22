@@ -10,6 +10,7 @@ import (
 	restate "github.com/restatedev/sdk-go"
 	"github.com/stretchr/testify/require"
 
+	"github.com/azylman/aerial/pkg/eriwire"
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/executor"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
@@ -143,16 +144,16 @@ func (s *fakeStore) RecordPRRolloutState(_ context.Context, id, status string, r
 }
 
 type fakeEriClient struct {
-	dispatchFn   func(context.Context, executor.BrainDispatchRequest) error
-	lastDispatch *executor.BrainDispatchRequest
+	dispatchFn   func(context.Context, eriwire.BrainDispatchRequest) error
+	lastDispatch *eriwire.BrainDispatchRequest
 	dispatchIDs  []string
 }
 
-func (*fakeEriClient) Dispatch(context.Context, executor.BrainDispatchRequest) error {
+func (*fakeEriClient) Dispatch(context.Context, eriwire.BrainDispatchRequest) error {
 	return nil
 }
 
-func (f *fakeEriClient) DispatchAccepted(ctx context.Context, req executor.BrainDispatchRequest) error {
+func (f *fakeEriClient) DispatchAccepted(ctx context.Context, req eriwire.BrainDispatchRequest) error {
 	cp := req
 	f.lastDispatch = &cp
 	f.dispatchIDs = append(f.dispatchIDs, req.ID)
@@ -238,7 +239,7 @@ func TestDeploymentDeadlineLifecycle(t *testing.T) {
 			st := &fakeStore{chunks: []model.VanadisChunk{{ID: "c", PRNumber: 1, MergeSHA: tc.revision, Status: tc.status, Repo: "owner/repo", RolloutState: &pubsub.PRRolloutState{ExpectedJobs: []string{"web"}}}}}
 			eri := &fakeEriClient{}
 			failDelivery := tc.fail
-			eri.dispatchFn = func(_ context.Context, _ executor.BrainDispatchRequest) error {
+			eri.dispatchFn = func(_ context.Context, _ eriwire.BrainDispatchRequest) error {
 				if failDelivery {
 					return errors.New("delivery unavailable")
 				}

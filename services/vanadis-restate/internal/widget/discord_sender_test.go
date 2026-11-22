@@ -760,7 +760,7 @@ func TestDelivererWithNow(t *testing.T) {
 	mockSender := &mockWidgetSender{sendMsg: &discordgo.Message{ID: "m-clock"}}
 	d, err := NewDiscordWidgetDeliverer("", "", nil, filepath.Join(t.TempDir(), "config.yaml"))
 	require.NoError(t, err)
-	d.SetAgentSender("aerial", mockSender)
+	d.agentSenders = map[string]DiscordWidgetSender{"aerial": mockSender}
 	d.nowFn = func() time.Time { return fixedTime }
 
 	req := ericlient.StatusWidgetRequest{ChannelID: "chan-1", Title: "Build Clock @everyone"}
@@ -1089,7 +1089,7 @@ func TestDeliverStatusWidgetChannelSerialization(t *testing.T) {
 					mu.Unlock()
 				},
 			}
-			deliverer.SetAgentSender("aerial", firstSender)
+			deliverer.agentSenders = map[string]DiscordWidgetSender{"aerial": firstSender}
 
 			doneFirst := make(chan struct{})
 			go func() {
@@ -1110,7 +1110,7 @@ func TestDeliverStatusWidgetChannelSerialization(t *testing.T) {
 					mu.Unlock()
 				},
 			}
-			deliverer.SetAgentSender("aerial", secondSender)
+			deliverer.agentSenders = map[string]DiscordWidgetSender{"aerial": secondSender}
 
 			doneSecond := make(chan struct{})
 			go func() {
@@ -1207,16 +1207,11 @@ func TestDiscordWidgetDeliverer_AgentRouting(t *testing.T) {
 		})
 	}
 
-	var nilDeliverer *DiscordWidgetDeliverer
-	nilDeliverer.SetAgentSender("agent-beta", mockAlpha)
-
-	newD := &DiscordWidgetDeliverer{}
-	newD.SetAgentSender("", mockAerial)
+	newD := &DiscordWidgetDeliverer{agentSenders: map[string]DiscordWidgetSender{"aerial": mockAerial, "agent-beta": mockAlpha}}
 	got, err := newD.senderForAgent("aerial")
 	require.NoError(t, err)
 	assert.Same(t, mockAerial, got)
 
-	newD.SetAgentSender("agent-beta", mockAlpha)
 	got, err = newD.senderForAgent("agent-beta")
 	require.NoError(t, err)
 	assert.Same(t, mockAlpha, got)

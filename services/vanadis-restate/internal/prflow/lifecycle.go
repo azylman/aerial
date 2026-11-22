@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"strings"
 
+	"github.com/azylman/aerial/pkg/eriwire"
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/ericlient"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/executor"
@@ -122,7 +123,7 @@ func (f *Flow) DispatchChunkRemediationForChunk(ctx context.Context, bld *model.
 	} else if fromCtx := ericlient.AgentFromContext(ctx); fromCtx != "" {
 		agent = fromCtx
 	}
-	return f.Exec.DispatchChunkRemediation(ctx, executor.BrainDispatchRequest{
+	return f.Exec.DispatchChunkRemediation(ctx, eriwire.BrainDispatchRequest{
 		ID:             dispatchID,
 		Agent:          agent,
 		Source:         "vanadis-restate",
@@ -198,7 +199,7 @@ func (f *Flow) dispatchSilentThreadWakePrompt(ctx context.Context, buildID, chun
 		ctx = ericlient.WithAgent(ctx, bld.Agent)
 	}
 	if dErr := f.Exec.DispatchSilentWakePrompt(ctx, bld.ThreadID, chunkID, prompt, occurrence); dErr != nil {
-		if errors.Is(dErr, executor.ErrDispatchActive) {
+		if errors.Is(dErr, eriwire.ErrDispatchActive) {
 			return nil
 		}
 		slog.WarnContext(ctx, "[vanadis-restate] silent wake dispatch warning", "error", dErr)
@@ -316,7 +317,7 @@ func (f *Flow) HandleConflictEvent(ctx context.Context, buildID, chunkID string,
 	}
 	dispatchID := executor.ConflictRemediationDispatchID(chunkID, ev.HeadSHA)
 	err = f.DispatchChunkRemediationForChunk(ctx, bld, chunk, dispatchID, executor.FormatConflictPrompt(ev))
-	if errors.Is(err, executor.ErrDispatchActive) {
+	if errors.Is(err, eriwire.ErrDispatchActive) {
 		f.syncBuildWidget(ctx, buildID, "Merge conflict detected — remediation in progress")
 		return nil
 	}
@@ -378,7 +379,7 @@ func (f *Flow) HandleCIFailureEvent(ctx context.Context, buildID, chunkID, event
 	dispatchID := executor.CIRemediationDispatchID(chunkID, ev.HeadSHA, chunk.CIFailCount+1)
 	skipIfActive := cleanHead == "" || strings.EqualFold(strings.TrimSpace(chunk.RemediatedSHA), cleanHead)
 	if err = f.DispatchChunkRemediationForChunk(ctx, bld, chunk, dispatchID, executor.FormatCIFailurePrompt(ev, details), skipIfActive); err != nil {
-		if errors.Is(err, executor.ErrDispatchActive) {
+		if errors.Is(err, eriwire.ErrDispatchActive) {
 			f.syncBuildWidget(ctx, buildID, banner+" — remediation in progress")
 			return nil
 		}

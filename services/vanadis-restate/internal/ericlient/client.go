@@ -19,11 +19,6 @@ import (
 
 const statusOK = "ok"
 
-// ErrDispatchActive reports that Eri skipped a dispatch because a session is
-// already active. It aliases the shared eriwire sentinel so errors.Is matches
-// across services.
-var ErrDispatchActive = eriwire.ErrDispatchActive
-
 type agentContextKey struct{}
 
 // WithAgent returns a copy of parent context carrying the given agent identifier.
@@ -42,10 +37,6 @@ func AgentFromContext(ctx context.Context) string {
 	}
 	return ""
 }
-
-// BrainDispatchRequest is the JSON payload dispatched to Eri's POST /dispatch
-// endpoint (the shared eriwire wire type).
-type BrainDispatchRequest = eriwire.BrainDispatchRequest
 
 // StatusWidgetChunk represents a chunk in a Vanadis build or a PR task for widget rendering.
 type StatusWidgetChunk struct {
@@ -89,8 +80,8 @@ type SyncChunkPRWidgetRequest struct {
 
 // EriClient describes the outbound communication interface to Eri.
 type EriClient interface {
-	Dispatch(ctx context.Context, req BrainDispatchRequest) error
-	DispatchAccepted(ctx context.Context, req BrainDispatchRequest) error
+	Dispatch(ctx context.Context, req eriwire.BrainDispatchRequest) error
+	DispatchAccepted(ctx context.Context, req eriwire.BrainDispatchRequest) error
 	CancelDispatch(ctx context.Context, chunkID string) error
 	Prompt(ctx context.Context, threadID, prompt string) error
 	Widget(ctx context.Context, req StatusWidgetRequest) (string, error)
@@ -146,7 +137,7 @@ func (c *HTTPEriClient) postEriJSON(ctx context.Context, path string, payload an
 	return io.ReadAll(io.LimitReader(resp.Body, maxBytes))
 }
 
-func (c *HTTPEriClient) Dispatch(ctx context.Context, req BrainDispatchRequest) error {
+func (c *HTTPEriClient) Dispatch(ctx context.Context, req eriwire.BrainDispatchRequest) error {
 	body, err := c.postEriJSON(ctx, "/dispatch", req, 64<<10)
 	if err != nil {
 		return err
@@ -161,7 +152,7 @@ func (c *HTTPEriClient) Dispatch(ctx context.Context, req BrainDispatchRequest) 
 		return fmt.Errorf("decode eri dispatch response: %w", err)
 	}
 	if result.Status == eriwire.StatusSkippedActive {
-		return ErrDispatchActive
+		return eriwire.ErrDispatchActive
 	}
 	if result.Status != "" && result.Status != statusOK && result.Status != eriwire.StatusAccepted && result.Status != eriwire.StatusAlreadyExists {
 		return fmt.Errorf("eri rejected dispatch %q (status %q)", req.ID, result.Status)
@@ -171,7 +162,7 @@ func (c *HTTPEriClient) Dispatch(ctx context.Context, req BrainDispatchRequest) 
 
 // DispatchAccepted requires durable acceptance of the exact requested generation.
 // skipped_active is a retryable rejection, even though Eri returns HTTP 200.
-func (c *HTTPEriClient) DispatchAccepted(ctx context.Context, req BrainDispatchRequest) error {
+func (c *HTTPEriClient) DispatchAccepted(ctx context.Context, req eriwire.BrainDispatchRequest) error {
 	body, err := c.postEriJSON(ctx, "/dispatch", req, 64<<10)
 	if err != nil {
 		return err
@@ -184,7 +175,7 @@ func (c *HTTPEriClient) DispatchAccepted(ctx context.Context, req BrainDispatchR
 		return fmt.Errorf("decode eri dispatch acceptance: %w", err)
 	}
 	if result.Status == eriwire.StatusSkippedActive {
-		return ErrDispatchActive
+		return eriwire.ErrDispatchActive
 	}
 	if req.ID == "" || result.DispatchID != req.ID || (result.Status != eriwire.StatusAccepted && result.Status != eriwire.StatusAlreadyExists) {
 		return fmt.Errorf("eri did not accept dispatch %q (status %q, identity %q)", req.ID, result.Status, result.DispatchID)

@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/azylman/aerial/pkg/eriwire"
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/executor"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
@@ -148,13 +149,13 @@ func (s *checkStatusSpyStore) AttachChunkPR(_ context.Context, req store.AttachC
 }
 
 type mockEriClient struct {
-	dispatchFn func(ctx context.Context, req executor.BrainDispatchRequest) error
+	dispatchFn func(ctx context.Context, req eriwire.BrainDispatchRequest) error
 	cancelFn   func(ctx context.Context, chunkID string) error
 	promptFn   func(ctx context.Context, threadID, prompt string) error
 	widgetFn   func(ctx context.Context, req executor.StatusWidgetRequest) (string, error)
 	messageFn  func(ctx context.Context, channelID, content string) error
 
-	lastDispatch *executor.BrainDispatchRequest
+	lastDispatch *eriwire.BrainDispatchRequest
 	lastCancel   string
 	lastThreadID string
 	lastPrompt   string
@@ -163,11 +164,11 @@ type mockEriClient struct {
 	lastMsgCont  string
 }
 
-func (m *mockEriClient) DispatchAccepted(ctx context.Context, req executor.BrainDispatchRequest) error {
+func (m *mockEriClient) DispatchAccepted(ctx context.Context, req eriwire.BrainDispatchRequest) error {
 	return m.Dispatch(ctx, req)
 }
 
-func (m *mockEriClient) Dispatch(ctx context.Context, req executor.BrainDispatchRequest) error {
+func (m *mockEriClient) Dispatch(ctx context.Context, req eriwire.BrainDispatchRequest) error {
 	m.lastDispatch = &req
 	if m.dispatchFn != nil {
 		return m.dispatchFn(ctx, req)
@@ -417,14 +418,14 @@ func newRemediationTestHarness(t *testing.T, spy *checkStatusSpyStore, dispatchE
 	t.Helper()
 	eri := &mockEriClient{}
 	var active bool
-	var activeDispatch *executor.BrainDispatchRequest
-	eri.dispatchFn = func(_ context.Context, req executor.BrainDispatchRequest) error {
+	var activeDispatch *eriwire.BrainDispatchRequest
+	eri.dispatchFn = func(_ context.Context, req eriwire.BrainDispatchRequest) error {
 		if dispatchErr != nil {
 			return dispatchErr
 		}
 		if req.SkipIfActive && active {
 			eri.lastDispatch = activeDispatch
-			return executor.ErrDispatchActive
+			return eriwire.ErrDispatchActive
 		}
 		active = true
 		activeDispatch = &req
@@ -512,7 +513,7 @@ func TestBuildObject_HandlePREventType_Remediation(t *testing.T) {
 		{name: "ci_failed check with suffix gate is ignored", event: "ci_failed", prEvent: ciFailEv("Build Gate", "sha-1")},
 		{name: "ci_failed within cap dispatches background remediation and increments accepted count", event: "ci_failed", prEvent: ciFailEv("unit-tests", "abcdef1234"), failCount: 1, wantBanners: []string{`c1:ci_failed:CI check "unit-tests" failed`}, wantFailCountCalls: 1, wantDispatch: true, wantDispatchID: "vanadis-c1-cifail-abcdef1234-2", wantSkipIfActive: &falseVal},
 		{name: "six failing checks on same head coalesce into one accepted remediation attempt", event: "ci_failed", prEvent: ciFailEv("check-1", "abcdef1234"), extraEvents: sixChecks, wantBanners: sixBanners, wantFailCountCalls: 1, wantDispatch: true, wantDispatchID: "vanadis-c1-cifail-abcdef1234-1", wantSkipIfActive: &falseVal},
-		{name: "ci_failed skipped_active dispatch returns nil without consuming remediation attempt budget", event: "ci_failed", prEvent: ciFailEv("unit-tests", "abcdef1234"), remediatedSHA: "abcdef1234", dispatchErr: executor.ErrDispatchActive, wantErr: false, wantBanners: []string{`c1:ci_failed:CI check "unit-tests" failed`}, wantFailCountCalls: 0, wantDispatch: true, wantDispatchID: "vanadis-c1-cifail-abcdef1234-1", wantSkipIfActive: &trueVal},
+		{name: "ci_failed skipped_active dispatch returns nil without consuming remediation attempt budget", event: "ci_failed", prEvent: ciFailEv("unit-tests", "abcdef1234"), remediatedSHA: "abcdef1234", dispatchErr: eriwire.ErrDispatchActive, wantErr: false, wantBanners: []string{`c1:ci_failed:CI check "unit-tests" failed`}, wantFailCountCalls: 0, wantDispatch: true, wantDispatchID: "vanadis-c1-cifail-abcdef1234-1", wantSkipIfActive: &trueVal},
 		{name: "ci_failed dispatch transport error propagates without consuming remediation attempt budget", event: "ci_failed", prEvent: ciFailEv("unit-tests", "abcdef1234"), dispatchErr: dbErr, wantErr: true, wantBanners: []string{`c1:ci_failed:CI check "unit-tests" failed`}, wantFailCountCalls: 0, wantDispatch: true, wantDispatchID: "vanadis-c1-cifail-abcdef1234-1", wantSkipIfActive: &falseVal},
 		{name: "ci_failed banner update error propagates", event: "ci_failed", prEvent: ciFailEv("unit-tests", "abcdef1234"), bannerErr: dbErr, wantErr: true, wantBanners: []string{`c1:ci_failed:CI check "unit-tests" failed`}},
 		{name: "ci_failed get build error propagates", event: "ci_failed", prEvent: ciFailEv("unit-tests", "abcdef1234"), getBuildErr: dbErr, wantErr: true, wantBanners: []string{`c1:ci_failed:CI check "unit-tests" failed`}},
@@ -533,7 +534,7 @@ func TestBuildObject_HandlePREventType_Remediation(t *testing.T) {
 		{name: "conflict updates chunk banner and dispatches background remediation", event: "conflict", prEvent: pubsub.PRLifecycleEvent{Event: "conflict", HeadSHA: "abcdef1234", Repo: "aerial", PRNumber: 42}, wantBanners: []string{"c1:conflict:Merge conflict detected"}, wantDispatch: true, wantSkipIfActive: &trueVal},
 		{name: "conflict on superseded head skipped", event: "conflict", prEvent: pubsub.PRLifecycleEvent{Event: "conflict", HeadSHA: "superseded-sha"}, headSHA: "current-sha", wantErr: true},
 		{name: "conflict get build error propagates", event: "conflict", prEvent: pubsub.PRLifecycleEvent{Event: "conflict", HeadSHA: "abcdef1234", Repo: "aerial", PRNumber: 42}, getBuildErr: dbErr, wantErr: true},
-		{name: "conflict skipped_active dispatch returns nil", event: "conflict", prEvent: pubsub.PRLifecycleEvent{Event: "conflict", HeadSHA: "abcdef1234", Repo: "aerial", PRNumber: 42}, dispatchErr: executor.ErrDispatchActive, wantErr: false, wantBanners: []string{"c1:conflict:Merge conflict detected"}, wantDispatch: true, wantDispatchID: "vanadis-conflict-c1-abcdef1", wantSkipIfActive: &trueVal},
+		{name: "conflict skipped_active dispatch returns nil", event: "conflict", prEvent: pubsub.PRLifecycleEvent{Event: "conflict", HeadSHA: "abcdef1234", Repo: "aerial", PRNumber: 42}, dispatchErr: eriwire.ErrDispatchActive, wantErr: false, wantBanners: []string{"c1:conflict:Merge conflict detected"}, wantDispatch: true, wantDispatchID: "vanadis-conflict-c1-abcdef1", wantSkipIfActive: &trueVal},
 		{name: "conflict dispatch transport error propagates", event: "conflict", prEvent: pubsub.PRLifecycleEvent{Event: "conflict", HeadSHA: "abcdef1234"}, dispatchErr: dbErr, wantErr: true, wantBanners: []string{"c1:conflict:Merge conflict detected"}, wantDispatch: true, wantDispatchID: "vanadis-conflict-c1-abcdef1", wantSkipIfActive: &trueVal},
 		{name: "conflict update banner error propagates", event: "conflict", prEvent: pubsub.PRLifecycleEvent{Event: "conflict", HeadSHA: "abcdef1234"}, bannerErr: dbErr, wantErr: true, wantBanners: []string{"c1:conflict:Merge conflict detected"}},
 		{name: "merged cancels chunk dispatch and resets check state", event: "merged", prEvent: pubsub.PRLifecycleEvent{Event: "merged", HeadSHA: "head-sha", MergeSHA: "merge-sha"}, wantCancel: "c1"},
@@ -885,7 +886,7 @@ func TestFlow_ResumeNoPRChunk(t *testing.T) {
 			spy := &checkStatusSpyStore{}
 			eri := &mockEriClient{}
 			if tc.dispatchErr {
-				eri.dispatchFn = func(context.Context, executor.BrainDispatchRequest) error {
+				eri.dispatchFn = func(context.Context, eriwire.BrainDispatchRequest) error {
 					return errors.New("dispatch unavailable")
 				}
 			}
@@ -953,7 +954,7 @@ func TestFlow_ResumeActionChunk(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			eri := &mockEriClient{
-				dispatchFn: func(context.Context, executor.BrainDispatchRequest) error { return tc.dispatchErr },
+				dispatchFn: func(context.Context, eriwire.BrainDispatchRequest) error { return tc.dispatchErr },
 				widgetFn:   func(context.Context, executor.StatusWidgetRequest) (string, error) { return "msg-1", tc.widgetErr },
 			}
 			f := NewFlow(&checkStatusSpyStore{}, executor.NewExecutor(t.TempDir(), eri, nil, "token", nil))
@@ -1056,7 +1057,7 @@ func TestFlow_HandleDeployFailureEventBranches(t *testing.T) {
 		{name: "read error propagates", getBuildErr: dbErr, wantErr: true},
 		{name: "missing build reports not found", nilBuild: true, wantErr: true, wantNotFound: true},
 		{name: "silent wake error propagates", promptErr: dbErr, wantErr: true},
-		{name: "active dispatch treated as handled", promptErr: executor.ErrDispatchActive},
+		{name: "active dispatch treated as handled", promptErr: eriwire.ErrDispatchActive},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1064,7 +1065,7 @@ func TestFlow_HandleDeployFailureEventBranches(t *testing.T) {
 			spy := &checkStatusSpyStore{getBuildErr: tc.getBuildErr, nilBuild: tc.nilBuild}
 			eri := &mockEriClient{}
 			if tc.promptErr != nil {
-				eri.dispatchFn = func(context.Context, executor.BrainDispatchRequest) error { return tc.promptErr }
+				eri.dispatchFn = func(context.Context, eriwire.BrainDispatchRequest) error { return tc.promptErr }
 			}
 			exec := executor.NewExecutor(t.TempDir(), eri, nil, "token", nil)
 			var st store.VanadisStore = spy
