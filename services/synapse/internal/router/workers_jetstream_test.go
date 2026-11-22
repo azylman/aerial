@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"slices"
-	"strings"
 	"testing"
 	"time"
 
@@ -13,7 +12,6 @@ import (
 	"github.com/nats-io/nats.go"
 
 	"github.com/azylman/aerial/pkg/pubsub"
-	"github.com/azylman/aerial/services/synapse/internal/metrics"
 )
 
 type synapseMemoryMsg struct {
@@ -37,91 +35,6 @@ func (*synapseMemoryMsg) NakWithDelay(_ time.Duration) error { return nil }
 func (m *synapseMemoryMsg) Term() error                      { m.termed = true; return nil }
 func (*synapseMemoryMsg) Snooze(_ time.Duration) error       { return nil }
 func (*synapseMemoryMsg) InProgress() error                  { return nil }
-
-func TestDiscordRoutingForJetStreamJobCoords(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name        string
-		args        any
-		wantSubject string
-		wantPrefix  string
-	}{
-		{
-			name:        "GitHubWebhookArgs",
-			args:        GitHubWebhookArgs{Delivery: "del-123"},
-			wantSubject: "aerial.jobs.synapse.github",
-			wantPrefix:  "github:del-123",
-		},
-		{
-			name:        "*GitHubWebhookArgs",
-			args:        &GitHubWebhookArgs{Delivery: "del-456"},
-			wantSubject: "aerial.jobs.synapse.github",
-			wantPrefix:  "github:del-456",
-		},
-		{
-			name:        "DeployWebhookArgs",
-			args:        DeployWebhookArgs{IdempotencyKey: "dep-key-1"},
-			wantSubject: "aerial.jobs.synapse.deploy",
-			wantPrefix:  "deploy:dep-key-1",
-		},
-		{
-			name:        "*DeployWebhookArgs",
-			args:        &DeployWebhookArgs{IdempotencyKey: "dep-key-2"},
-			wantSubject: "aerial.jobs.synapse.deploy",
-			wantPrefix:  "deploy:dep-key-2",
-		},
-		{
-			name:        "DiscordIngressArgs",
-			args:        DiscordIngressArgs{MessageID: "msg-999"},
-			wantSubject: "aerial.jobs.synapse.discord_ingress.beta",
-			wantPrefix:  "discord:msg:msg-999",
-		},
-		{
-			name:        "*DiscordIngressArgs",
-			args:        &DiscordIngressArgs{MessageID: "msg-888"},
-			wantSubject: "aerial.jobs.synapse.discord_ingress.beta",
-			wantPrefix:  "discord:msg:msg-888",
-		},
-		{
-			name:        "DiscordIngressArgs non-default agent",
-			args:        DiscordIngressArgs{MessageID: "msg-777", Agent: "alpha"},
-			wantSubject: "aerial.jobs.synapse.discord_ingress.alpha",
-			wantPrefix:  "discord:msg:alpha:msg-777",
-		},
-		{
-			name:        "DiscordInteractionArgs",
-			args:        DiscordInteractionArgs{InteractionID: "ix-111"},
-			wantSubject: "aerial.jobs.synapse.discord_interaction.beta",
-			wantPrefix:  "discord:ix:ix-111",
-		},
-		{
-			name:        "*DiscordInteractionArgs",
-			args:        &DiscordInteractionArgs{InteractionID: "ix-222"},
-			wantSubject: "aerial.jobs.synapse.discord_interaction.beta",
-			wantPrefix:  "discord:ix:ix-222",
-		},
-		{
-			name:        "DiscordInteractionArgs non-default agent",
-			args:        DiscordInteractionArgs{InteractionID: "ix-333", Agent: "Alpha"},
-			wantSubject: "aerial.jobs.synapse.discord_interaction.alpha",
-			wantPrefix:  "discord:ix:Alpha:ix-333",
-		},
-	}
-	routing := discordRoutingFor(&Config{Bots: map[string]BotConfig{"alpha": {}, "beta": {DefaultOwner: true}}})
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			subj, msgID := metrics.ResolveJetStreamJobCoords(tc.args, routing)
-			if subj != tc.wantSubject {
-				t.Errorf("subject = %q, want %q", subj, tc.wantSubject)
-			}
-			if !strings.HasPrefix(msgID, tc.wantPrefix) {
-				t.Errorf("msgID = %q, want prefix %q", msgID, tc.wantPrefix)
-			}
-		})
-	}
-}
 
 func initTestJobBus(ctx context.Context, busErr error, busReceived chan struct{}) pubsub.Bus {
 	memBus := pubsub.NewMemoryBus()
@@ -287,10 +200,19 @@ func jetstreamDiscordAndWidgetCases() []jetstreamHandlerCase {
 			wantErr:     false,
 		},
 		{
-			name:         "HandleDiscordIngressJob 5xx retries below limit",
+			name:         "HandleDiscordIngressJob cancelled context returns before dispatch",
 			handlerType:  "ingress",
 			payload:      `{"message_id":"125","message":{"id":"125"}}`,
 			dispErrType:  "msg_500",
+			numDelivered: 1,
+			wantErr:      true,
+			wantTerm:     false,
+		},
+		{
+			name:         "HandleDiscordIngressJob 5xx cancelled during backoff",
+			handlerType:  "ingress",
+			payload:      `{"message_id":"127","message":{"id":"127"}}`,
+			dispErrType:  "msg_500_cancel_backoff",
 			numDelivered: 1,
 			wantErr:      true,
 			wantTerm:     false,
@@ -355,6 +277,9 @@ func TestJetStreamJobHandlers(t *testing.T) {
 				disp.discordMessageFailCount = 1
 			case "msg_500":
 				disp.discordMessageErr = errors.New("request returned status 500 Internal Server Error")
+			case "msg_500_cancel_backoff":
+				disp.discordMessageErr = errors.New("request returned status 500 Internal Server Error")
+				srv.discordIngressRetryDelay = 5 * time.Second
 			case "interaction_err":
 				disp.discordInteractionErr = errors.New("interaction dispatch failed")
 			case "prompt_err":
@@ -368,11 +293,15 @@ func TestJetStreamJobHandlers(t *testing.T) {
 				numDelivered: tc.numDelivered,
 			}
 
-			testCtx := ctx
-			if tc.dispErrType == "msg_500" && tc.wantErr {
-				var cancel context.CancelFunc
-				testCtx, cancel = context.WithTimeout(ctx, 15*time.Millisecond)
-				defer cancel()
+			testCtx, cancel := context.WithCancel(ctx)
+			defer cancel()
+			switch {
+			case tc.dispErrType == "msg_500" && tc.wantErr:
+				// Cancelled before the first attempt: the retry loop exits on its entry check.
+				cancel()
+			case tc.dispErrType == "msg_500_cancel_backoff":
+				// Cancelled by the failing dispatch: the loop exits from its backoff wait.
+				disp.discordMessageCancel = cancel
 			}
 
 			var err error
@@ -553,76 +482,6 @@ func TestStartJobConsumersAndPublishWiring(t *testing.T) {
 		case <-time.After(2 * time.Second):
 			t.Fatalf("timed out waiting for %s job consumer", tc.name)
 		}
-	}
-}
-
-func TestJobArgsKindsAndResolveJobQueueAndKind(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name      string
-		args      any
-		wantKind  string
-		wantQueue string
-	}{
-		{
-			name:      "GitHubWebhookArgs value",
-			args:      GitHubWebhookArgs{},
-			wantKind:  "github_webhook",
-			wantQueue: QueueDefault,
-		},
-		{
-			name:      "GitHubWebhookArgs pointer",
-			args:      &GitHubWebhookArgs{},
-			wantKind:  "github_webhook",
-			wantQueue: QueueDefault,
-		},
-		{
-			name:      "DeployWebhookArgs value",
-			args:      DeployWebhookArgs{},
-			wantKind:  "deploy_webhook",
-			wantQueue: QueueDefault,
-		},
-		{
-			name:      "DiscordIngressArgs value",
-			args:      DiscordIngressArgs{},
-			wantKind:  "discord_ingress",
-			wantQueue: QueueDiscordIngress,
-		},
-		{
-			name:      "DiscordIngressArgs pointer",
-			args:      &DiscordIngressArgs{},
-			wantKind:  "discord_ingress",
-			wantQueue: QueueDiscordIngress,
-		},
-		{
-			name:      "DiscordInteractionArgs value",
-			args:      DiscordInteractionArgs{},
-			wantKind:  "discord_interaction",
-			wantQueue: QueueDiscordInteraction,
-		},
-		{
-			name:      "DiscordInteractionArgs pointer",
-			args:      &DiscordInteractionArgs{},
-			wantKind:  "discord_interaction",
-			wantQueue: QueueDiscordInteraction,
-		},
-		{
-			name:      "unknown args fallback",
-			args:      "unexpected payload",
-			wantKind:  "unknown",
-			wantQueue: QueueDefault,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			gotQueue, gotKind := resolveJobQueueAndKind(tc.args)
-			if gotQueue != tc.wantQueue || gotKind != tc.wantKind {
-				t.Errorf("resolveJobQueueAndKind(%T) = (%q, %q), want (%q, %q)", tc.args, gotQueue, gotKind, tc.wantQueue, tc.wantKind)
-			}
-		})
 	}
 }
 

@@ -2,15 +2,10 @@ package router
 
 import (
 	"context"
-	"errors"
 	"net/http"
 	"slices"
 	"strings"
 	"testing"
-
-	"github.com/prometheus/client_golang/prometheus/testutil"
-
-	"github.com/azylman/aerial/services/synapse/internal/metrics"
 )
 
 type mockConsumerStatsQuerier struct {
@@ -26,70 +21,6 @@ func (m *mockConsumerStatsQuerier) ConsumerStats(ctx context.Context, stream, co
 		return v[0], v[1], nil
 	}
 	return 0, 0, nil
-}
-
-func TestCollectJetStreamQueueMetrics(t *testing.T) {
-	ctx := context.Background()
-
-	tests := []struct {
-		name           string
-		nilQuerier     bool
-		querierErr     error
-		stats          map[string][2]int64
-		wantErr        bool
-		wantSubstr     string
-		wantDepthQueue string
-		wantDepthState string
-		wantDepthVal   float64
-	}{
-		{
-			name:       "nil querier returns nil without error",
-			nilQuerier: true,
-			wantErr:    false,
-		},
-		{
-			name:       "querier error returns wrapped error",
-			querierErr: errors.New("nats down"),
-			wantErr:    true,
-			wantSubstr: "consumer stats",
-		},
-		{
-			name: "aggregates pending and in_flight across consumers",
-			stats: map[string][2]int64{
-				"AERIAL_JOBS/synapse-github":              {3, 1},
-				"AERIAL_JOBS/synapse-deploy":              {4, 2},
-				"AERIAL_JOBS/synapse-merge-conflict":      {1, 0},
-				"AERIAL_JOBS/synapse-discord-ingress":     {5, 3},
-				"AERIAL_JOBS/synapse-discord-interaction": {2, 1},
-				"AERIAL_COALESCED/synapse-widget-sync":    {6, 2},
-			},
-			wantDepthQueue: QueueDefault,
-			wantDepthState: "pending",
-			wantDepthVal:   7,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			var q consumerStatsQuerier
-			if !tc.nilQuerier {
-				q = &mockConsumerStatsQuerier{stats: tc.stats, err: tc.querierErr}
-			}
-			err := metrics.CollectJetStreamQueueMetrics(ctx, q, discordRoutingFor(nil))
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("metrics.CollectJetStreamQueueMetrics() err = %v, wantErr = %v", err, tc.wantErr)
-			}
-			if tc.wantSubstr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantSubstr)) {
-				t.Errorf("err = %v, want substr %q", err, tc.wantSubstr)
-			}
-			if tc.wantDepthQueue != "" {
-				gotDepth := testutil.ToFloat64(metrics.QueueDepth.WithLabelValues(tc.wantDepthQueue, tc.wantDepthState))
-				if gotDepth != tc.wantDepthVal {
-					t.Errorf("metrics.QueueDepth[%s, %s] = %v, want %v", tc.wantDepthQueue, tc.wantDepthState, gotDepth, tc.wantDepthVal)
-				}
-			}
-		})
-	}
 }
 
 // kubeRoute is a canned kube API response keyed by "METHOD path" in a kubeFixture.

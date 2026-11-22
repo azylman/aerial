@@ -30,14 +30,17 @@ type mockOutboundDispatcher struct {
 	discordMessageErr            error
 	discordMessageFailCount      int
 	discordMessageAttempts       int
-	discordInteractionErr        error
-	kustomizationsByImage        map[string][]fluxKustomizationRef
-	workloads                    []workloadRollout
-	workloadsErr                 error
-	configMaps                   []configMapChange
-	configMapsErr                error
-	repoKustomizations           map[string][]fluxKustomizationRef
-	repoDiscoverErr              error
+	// discordMessageCancel, when set, is called after each recorded
+	// DispatchDiscordMessage, cancelling the caller's context mid-retry.
+	discordMessageCancel  context.CancelFunc
+	discordInteractionErr error
+	kustomizationsByImage map[string][]fluxKustomizationRef
+	workloads             []workloadRollout
+	workloadsErr          error
+	configMaps            []configMapChange
+	configMapsErr         error
+	repoKustomizations    map[string][]fluxKustomizationRef
+	repoDiscoverErr       error
 }
 
 func (m *mockOutboundDispatcher) DiscoverImageKustomizations(ctx context.Context, imageNames []string) ([]fluxKustomizationRef, error) {
@@ -130,7 +133,11 @@ func (m *mockOutboundDispatcher) DispatchDiscordMessage(ctx context.Context, req
 		return nil
 	}
 	err := m.discordMessageErr
+	cancel := m.discordMessageCancel
 	m.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
 	return err
 }
 

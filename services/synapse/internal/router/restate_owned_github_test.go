@@ -132,6 +132,17 @@ func (h *ownedHarness) effectCount() int {
 	return n + len(h.disp.promptCalls) + len(h.disp.dispatchCalls) + len(h.disp.directMessageCalls) + len(h.disp.reconcileCalls)
 }
 
+// triggerEvents joins the event-trigger publishes as "source:event_type".
+func (h *ownedHarness) triggerEvents() string {
+	h.bus.mu.Lock()
+	defer h.bus.mu.Unlock()
+	got := make([]string, 0, len(h.bus.events))
+	for _, ev := range h.bus.events {
+		got = append(got, ev.Source+":"+ev.EventType)
+	}
+	return strings.Join(got, ",")
+}
+
 // assertEdgeOnly checks the exact Restate sends (each body containing its
 // substring) and that synapse performed no effect.
 func (h *ownedHarness) assertEdgeOnly(t *testing.T, wantPaths, wantBodies []string) {
@@ -212,7 +223,7 @@ func TestProcessGitHubEventRestateOwned(t *testing.T) {
 				ghBody = "{}"
 			}
 			h := newOwnedHarness(t, tc.cfg, &ownedIngress{sendCode: code, callCode: http.StatusOK, callBody: "{}"}, ghBody)
-			_, err := h.srv.ProcessGitHubEvent(ownedCtx(), tc.event, "d1", tc.body)
+			res, err := h.srv.ProcessGitHubEvent(ownedCtx(), tc.event, "d1", tc.body)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("ProcessGitHubEvent() err = %v, wantErr %v", err, tc.wantErr)
 			}
@@ -222,6 +233,12 @@ func TestProcessGitHubEventRestateOwned(t *testing.T) {
 				}
 			}
 			h.assertEdgeOnly(t, tc.wantPaths, tc.wantBodies)
+			if !tc.wantErr && res.PRNumber != tc.wantPRNumber {
+				t.Errorf("PRNumber = %d, want %d", res.PRNumber, tc.wantPRNumber)
+			}
+			if got := h.triggerEvents(); got != tc.wantBusEvent {
+				t.Errorf("trigger events = %q, want %q", got, tc.wantBusEvent)
+			}
 		})
 	}
 }
@@ -404,6 +421,11 @@ type restateOwnedGitHubCase struct {
 	wantErr    bool
 	wantPaths  []string
 	wantBodies []string
+	// wantPRNumber is the resolved PR of a successful event.
+	wantPRNumber int
+	// wantBusEvent is the exact "source:event_type" trigger list fired on
+	// the event bus ("" when no trigger fires).
+	wantBusEvent string
 }
 
 func restateOwnedGitHubCases() []restateOwnedGitHubCase {
@@ -414,7 +436,7 @@ func restateOwnedGitHubCases() []restateOwnedGitHubCase {
 func restateOwnedPullRequestCases() []restateOwnedGitHubCase {
 	return []restateOwnedGitHubCase{
 		{
-			name: "opened claims the body owner and carries the opened fact", event: ghEventPullRequest,
+			name: "opened claims the body owner and carries the opened fact", wantPRNumber: 42, event: ghEventPullRequest,
 			body:      prPayload("azylman/aerial", ghActionOpened, false, "feat", aerialBody("aerial", ownedThread), ""),
 			wantPaths: []string{ownedPRKey + "HandleSelfRegistered/send", ownedPRKey + "HandleOpened/send"},
 			wantBodies: []string{
@@ -423,18 +445,18 @@ func restateOwnedPullRequestCases() []restateOwnedGitHubCase {
 			},
 		},
 		{
-			name: "opened fact renders the target and title", event: ghEventPullRequest,
+			name: "opened fact renders the target and title", wantPRNumber: 42, event: ghEventPullRequest,
 			body:      prPayload("azylman/aerial", ghActionOpened, false, "feat", aerialBody("aerial", ownedThread), ""),
 			wantPaths: []string{ownedPRKey + "HandleSelfRegistered/send", ownedPRKey + "HandleOpened/send"}, wantBodies: []string{`"target_id":"` + ownedThread + `"`, `"event":"opened","repo":"azylman/aerial","pr_number":42,"branch":"feat","head_sha":"` + ownedHead + `","title":"Fix it","target_id":"` + ownedThread + `","status":"open"`},
 		},
 		{
-			name: "default-owned dependabot pr gets the system channel target", event: ghEventPullRequest, cfg: Config{DefaultOwner: true, SystemChannelID: ownedSystem},
+			name: "default-owned dependabot pr gets the system channel target", wantPRNumber: 42, event: ghEventPullRequest, cfg: Config{DefaultOwner: true, SystemChannelID: ownedSystem},
 			body:       prPayload("azylman/aerial", "reopened", false, "dependabot/go/x", "", ""),
 			wantPaths:  []string{ownedPRKey + "HandleSelfRegistered/send", ownedPRKey + "HandleReopened/send"},
 			wantBodies: []string{`"title":"Fix it","gate_generation":0,"reopen_epoch":0,"unmanaged":false,"build_id":"","target_id":"` + ownedSystem + `"}`, `"title":"Fix it","gate_generation":0,"reopen_epoch":0,"unmanaged":false,"build_id":""}`},
 		},
 		{
-			name: "default-owned dependabot opened registers with the system channel and title", event: ghEventPullRequest, cfg: Config{DefaultOwner: true, SystemChannelID: ownedSystem},
+			name: "default-owned dependabot opened registers with the system channel and title", wantPRNumber: 42, event: ghEventPullRequest, cfg: Config{DefaultOwner: true, SystemChannelID: ownedSystem},
 			body:      prPayload("azylman/aerial", ghActionOpened, false, "dependabot/go/x", "", ""),
 			wantPaths: []string{ownedPRKey + "HandleSelfRegistered/send", ownedPRKey + "HandleOpened/send"},
 			wantBodies: []string{
@@ -448,77 +470,77 @@ func restateOwnedPullRequestCases() []restateOwnedGitHubCase {
 			wantPaths: []string{ownedPRKey + "HandleSelfRegistered/send"},
 		},
 		{
-			name: "default-owned dependabot merge does not register", event: ghEventPullRequest, cfg: Config{DefaultOwner: true, SystemChannelID: ownedSystem},
+			name: "default-owned dependabot merge does not register", wantPRNumber: 42, wantBusEvent: "github:pr_merged", event: ghEventPullRequest, cfg: Config{DefaultOwner: true, SystemChannelID: ownedSystem},
 			body:      prPayload("azylman/aerial", ghActionClosed, true, "dependabot/go/x", "", ""),
 			wantPaths: []string{ownedPRKey + "HandleMerged/send"}, wantBodies: []string{`"title":"","gate_generation":0`},
 		},
 		{
-			name: "metadata merge registers before the merge", event: ghEventPullRequest,
+			name: "metadata merge registers before the merge", wantPRNumber: 42, wantBusEvent: "github:pr_merged", event: ghEventPullRequest,
 			body:      prPayload("azylman/aerial", ghActionClosed, true, "feat", aerialBody("aerial", ownedThread), ""),
 			wantPaths: []string{ownedPRKey + "HandleSelfRegistered/send", ownedPRKey + "HandleMerged/send"}, wantBodies: []string{`"target_id":"` + ownedThread + `"`, `"title":"","gate_generation":0`},
 		},
 		{
-			name: "metadata unmerged close neither registers nor fills the title", event: ghEventPullRequest,
+			name: "metadata unmerged close neither registers nor fills the title", wantPRNumber: 42, event: ghEventPullRequest,
 			body:      prPayload("azylman/aerial", ghActionClosed, false, "feat", aerialBody("aerial", ownedThread), ""),
 			wantPaths: []string{ownedPRKey + "HandleClosed/send"}, wantBodies: []string{`"title":"","gate_generation":0`},
 		},
 		{
-			name: "metadata labeled action still registers", event: ghEventPullRequest,
+			name: "metadata labeled action still registers", wantPRNumber: 42, event: ghEventPullRequest,
 			body:      prPayload("azylman/aerial", "labeled", false, "feat", aerialBody("aerial", ownedThread), ""),
 			wantPaths: []string{ownedPRKey + "HandleSelfRegistered/send"}, wantBodies: []string{`"target_id":"` + ownedThread + `"`},
 		},
 		{
-			name: "headless metadata without a system channel sends no target", event: ghEventPullRequest,
+			name: "headless metadata without a system channel sends no target", wantPRNumber: 42, event: ghEventPullRequest,
 			body:      prPayload("azylman/aerial", "reopened", false, "feat", aerialBody("aerial", "headless:abc"), ""),
 			wantPaths: []string{ownedPRKey + "HandleReopened/send"}, wantBodies: []string{`"pr_number":42,"agent":"aerial","head_sha"`},
 		},
 		{
-			name: "synchronize carries the compare-and-set head and fact", event: ghEventPullRequest,
+			name: "synchronize carries the compare-and-set head and fact", wantPRNumber: 42, event: ghEventPullRequest,
 			body:      prPayload("azylman/aerial", ghActionSynchronize, false, "feat", "", ""),
 			wantPaths: []string{ownedPRKey + "HandleSynchronized/send"}, wantBodies: []string{`"before_sha":"` + ownedBefore + `"`},
 		},
 		{
-			name: "merged close carries the merge sha and merged fact", event: ghEventPullRequest,
+			name: "merged close carries the merge sha and merged fact", wantPRNumber: 42, wantBusEvent: "github:pr_merged", event: ghEventPullRequest,
 			body:      prPayload("azylman/aerial", ghActionClosed, true, "feat", "", ""),
 			wantPaths: []string{ownedPRKey + "HandleMerged/send"}, wantBodies: []string{`"event":"merged","repo":"azylman/aerial","pr_number":42,"branch":"feat","head_sha":"` + ownedHead + `","merge_sha":"` + ownedMerge + `"`},
 		},
 		{
-			name: "unmerged close carries the closed fact", event: ghEventPullRequest,
+			name: "unmerged close carries the closed fact", wantPRNumber: 42, event: ghEventPullRequest,
 			body:      prPayload("azylman/aerial", ghActionClosed, false, "feat", "", ""),
 			wantPaths: []string{ownedPRKey + "HandleClosed/send"}, wantBodies: []string{`"event":"closed_unmerged"`},
 		},
 		{
-			name: "reopened without a head sends nothing", event: ghEventPullRequest,
+			name: "reopened without a head sends nothing", wantPRNumber: 42, event: ghEventPullRequest,
 			body: []byte(`{"action":"reopened","number":42,"pull_request":{"number":42,"head":{"ref":"feat","sha":""}},"repository":{"full_name":"azylman/aerial"}}`),
 		},
 		{
-			name: "foreign bot pr sends nothing", event: ghEventPullRequest, cfg: Config{Bots: map[string]BotConfig{"aerial": {}}},
+			name: "foreign bot pr sends nothing", wantPRNumber: 42, event: ghEventPullRequest, cfg: Config{Bots: map[string]BotConfig{"aerial": {}}},
 			body: prPayload("azylman/aerial", ghActionOpened, false, "feat", aerialBody("other-bot", ownedThread), ""),
 		},
 		{
-			name: "edited action sends nothing", event: ghEventPullRequest,
+			name: "edited action sends nothing", wantPRNumber: 42, event: ghEventPullRequest,
 			body: prPayload("azylman/aerial", "edited", false, "feat", "", ""),
 		},
 		{
-			name: "auto merge conflict sends the conflict fact", event: ghEventPullRequest,
+			name: "auto merge conflict sends the conflict fact", wantPRNumber: 42, event: ghEventPullRequest,
 			body:      prPayload("azylman/aerial", "auto_merge_disabled", false, "feat", "", "dirty"),
 			wantPaths: []string{ownedPRKey + "HandleConflict/send"}, wantBodies: []string{`"event":"conflict"`},
 		},
 		{
-			name: "collaborator auto merge conflict carries the rendered dm", event: ghEventPullRequest,
+			name: "collaborator auto merge conflict carries the rendered dm", wantPRNumber: 42, event: ghEventPullRequest,
 			cfg:       Config{CollaboratorCIAlerts: []CollaboratorCIAlertRule{{Repo: "azylman/aerial", ChannelID: "555555555555555555", Authors: map[string]string{"dependabot[bot]": "<@1>"}}}},
 			body:      prPayload("azylman/aerial", "auto_merge_disabled", false, "feat", "", "dirty"),
 			wantPaths: []string{ownedPRKey + "HandleCollaboratorAlert/send"}, wantBodies: []string{`"kind":"eri_direct_message","channel_id":"555555555555555555"`},
 		},
 		{
-			name: "collaborator failure sends the failure and the rendered dm", event: ghEventCheckRun,
+			name: "collaborator failure sends the failure and the rendered dm", wantPRNumber: 42, wantBusEvent: "github:ci_failed", event: ghEventCheckRun,
 			cfg:       Config{CollaboratorCIAlerts: []CollaboratorCIAlertRule{{Repo: "azylman/other-repo", ChannelID: "555555555555555555", Authors: map[string]string{"alice": "<@1>"}}}},
 			ghBody:    `{"number":42,"state":"open","title":"T","user":{"login":"alice"},"head":{"ref":"feat","sha":"` + ownedHead + `"}}`,
 			body:      checkRunPayload("lint", "completed", "failure", true),
 			wantPaths: []string{ownedOther + "HandleCheckFailed/send", ownedOtherR + "HandleAutoUpdate/send", ownedOther + "HandleCollaboratorAlert/send"}, wantBodies: []string{`"event":"ci_failed"`, `"auto_update":`, `"unmanaged":true`},
 		},
 		{
-			name: "auto merge without a conflict sends nothing", event: ghEventPullRequest,
+			name: "auto merge without a conflict sends nothing", wantPRNumber: 42, event: ghEventPullRequest,
 			body: prPayload("azylman/aerial", "auto_merge_disabled", false, "feat", "", "clean"),
 		},
 	}
@@ -529,64 +551,64 @@ func restateOwnedPullRequestCases() []restateOwnedGitHubCase {
 func restateOwnedCheckAndPushCases() []restateOwnedGitHubCase {
 	return []restateOwnedGitHubCase{
 		{
-			name: "check failure on a pr carries the ci_failed fact", event: ghEventCheckRun,
+			name: "check failure on a pr carries the ci_failed fact", wantPRNumber: 42, wantBusEvent: "github:ci_failed", event: ghEventCheckRun,
 			body:      checkRunPayload("lint", "completed", "failure", true),
 			wantPaths: []string{ownedOther + "HandleCheckFailed/send", ownedOtherR + "HandleAutoUpdate/send"}, wantBodies: []string{`"event":"ci_failed","repo":"azylman/other-repo","pr_number":42,"branch":"feat","head_sha":"` + ownedHead + `"`},
 		},
 		{
-			name: "check success records status, recovery and pass", event: ghEventCheckRun,
+			name: "check success records status, recovery and pass", wantPRNumber: 42, wantBusEvent: "github:ci_passed", event: ghEventCheckRun,
 			body:       checkRunPayload("lint", "completed", "success", true),
 			wantPaths:  []string{ownedOther + "HandleCheckStatus/send", ownedOther + "HandleCIRecovered/send", ownedOther + "HandleCheckPassed/send"},
 			wantBodies: []string{`"check_state":"passed"`, `"event":"synchronize"`, `"check_name":"lint"`},
 		},
 		{
-			name: "recovered check success carries the auto-update policy for PRObject", event: ghEventCheckRun, cfg: Config{AutoUpdatePRAuthors: []string{"dependabot[bot]"}},
+			name: "recovered check success carries the auto-update policy for PRObject", wantPRNumber: 42, wantBusEvent: "github:ci_passed", event: ghEventCheckRun, cfg: Config{AutoUpdatePRAuthors: []string{"dependabot[bot]"}},
 			body:       checkRunPayload("lint", "completed", "success", true),
 			wantPaths:  []string{ownedOther + "HandleCheckStatus/send", ownedOther + "HandleCIRecovered/send", ownedOther + "HandleCheckPassed/send"},
 			wantBodies: []string{`"check_state":"passed"`, `"auto_update":{"authors":["dependabot[bot]"]}`, `"check_name":"lint"`},
 		},
 		{
-			name: "gate success triggers the auto-update cascade directly", event: ghEventCheckRun,
+			name: "gate success triggers the auto-update cascade directly", wantPRNumber: 42, wantBusEvent: "github:ci_passed", event: ghEventCheckRun,
 			body:       checkRunPayload("CI Gate", "completed", "success", true),
 			wantPaths:  []string{ownedOther + "HandleCIRecovered/send", ownedOther + "HandleCheckPassed/send", ownedOtherR + "HandleAutoUpdate/send"},
 			wantBodies: []string{`"facts":[{"event":"synchronize"`, `"check_name":"CI Gate"`, `"pr_number":42,"head_sha":"` + ownedHead + `","check_name":"CI Gate"`},
 		},
 		{
-			name: "pr workflow success never triggers the auto-update cascade", event: ghEventWorkflowRun,
+			name: "pr workflow success never triggers the auto-update cascade", wantPRNumber: 42, wantBusEvent: "github:ci_passed", event: ghEventWorkflowRun,
 			body:       workflowRunPayload("feat", "success", true),
 			wantPaths:  []string{ownedOther + "HandleCIRecovered/send", ownedOther + "HandleCheckPassed/send"},
 			wantBodies: []string{`"event":"synchronize"`, `"check_name":"CI"`},
 		},
 		{
-			name: "pending check records only its status", event: ghEventCheckRun,
+			name: "pending check records only its status", wantPRNumber: 42, event: ghEventCheckRun,
 			body:      checkRunPayload("lint", "in_progress", "", true),
 			wantPaths: []string{ownedOther + "HandleCheckStatus/send"}, wantBodies: []string{`"event":"check_updated"`},
 		},
 		{
-			name: "silent check failure renders the failure prompt", event: ghEventCheckRun,
+			name: "silent check failure renders the failure prompt", wantPRNumber: 42, wantBusEvent: "github:ci_failed", event: ghEventCheckRun,
 			body:      checkRunPayloadTitled("lint", "completed", "failure", "", true),
 			wantPaths: []string{ownedOther + "HandleCheckFailed/send", ownedOtherR + "HandleAutoUpdate/send"}, wantBodies: []string{`"check_url":"https://ci/run","details":"`},
 		},
 		{
-			name: "silent roborev failure renders the review prompt", event: ghEventCheckRun, ghBody: "[]",
+			name: "silent roborev failure renders the review prompt", wantPRNumber: 42, wantBusEvent: "github:ci_failed", event: ghEventCheckRun, ghBody: "[]",
 			body:      checkRunPayloadTitled("roborev", "completed", "failure", "", true),
 			wantPaths: []string{ownedOther + "HandleCheckFailed/send", ownedOtherR + "HandleAutoUpdate/send"}, wantBodies: []string{`"check_name":"roborev","check_state":"failed"`},
 		},
 		{
-			name: "zero head check sends nothing", event: ghEventCheckRun,
+			name: "zero head check sends nothing", wantBusEvent: "github:ci_failed", event: ghEventCheckRun,
 			body: []byte(`{"action":"completed","check_run":{"name":"lint","head_sha":"0000000000000000000000000000000000000000","status":"completed","conclusion":"failure","pull_requests":[]},"repository":{"full_name":"azylman/other-repo"}}`),
 		},
 		{
-			name: "sha-only check failure rides the repo sha route", event: ghEventCheckRun,
+			name: "sha-only check failure rides the repo sha route", wantBusEvent: "github:ci_failed", event: ghEventCheckRun,
 			body:      checkRunPayload("lint", "completed", "failure", false),
 			wantPaths: []string{ownedOtherR + "HandleCheckRunBySHA/send"}, wantBodies: []string{`"sha":"` + ownedHead + `","handler":"HandleCheckFailed"`},
 		},
 		{
-			name: "gate aggregator failure sends nothing", event: ghEventCheckRun,
+			name: "gate aggregator failure sends nothing", wantPRNumber: 42, wantBusEvent: "github:ci_failed", event: ghEventCheckRun,
 			body: checkRunPayload("CI Gate", "completed", "failure", true),
 		},
 		{
-			name: "pr workflow failure carries the workflow fact", event: ghEventWorkflowRun,
+			name: "pr workflow failure carries the workflow fact", wantPRNumber: 42, wantBusEvent: "github:ci_failed", event: ghEventWorkflowRun,
 			body:      workflowRunPayload("feat", "failure", true),
 			wantPaths: []string{ownedOther + "HandleCheckFailed/send", ownedOtherR + "HandleAutoUpdate/send"}, wantBodies: []string{`Workflow \"CI\" concluded with failure`},
 		},
@@ -596,28 +618,28 @@ func restateOwnedCheckAndPushCases() []restateOwnedGitHubCase {
 			wantPaths: []string{ownedOther + "HandleSelfRegistered/send"},
 		},
 		{
-			name: "default-owned dependabot failure self-registers first", event: ghEventWorkflowRun, cfg: Config{DefaultOwner: true, SystemChannelID: ownedSystem},
+			name: "default-owned dependabot failure self-registers first", wantPRNumber: 42, wantBusEvent: "github:ci_failed", event: ghEventWorkflowRun, cfg: Config{DefaultOwner: true, SystemChannelID: ownedSystem},
 			body:       workflowRunPayload("dependabot/go/x", "failure", true),
 			wantPaths:  []string{ownedOther + "HandleSelfRegistered/send", ownedOther + "HandleCheckFailed/send", ownedOtherR + "HandleAutoUpdate/send"},
 			wantBodies: []string{`"branch":"dependabot/go/x","title":"","gate_generation":0,"reopen_epoch":0,"unmanaged":false,"build_id":"","target_id":"` + ownedSystem + `"}`, `Workflow \"CI\" concluded with failure`},
 		},
 		{
-			name: "sha-only workflow success rides the repo sha route", event: ghEventWorkflowRun,
+			name: "sha-only workflow success rides the repo sha route", wantBusEvent: "github:ci_passed", event: ghEventWorkflowRun,
 			body:      workflowRunPayload("feat", "success", false),
 			wantPaths: []string{ownedOtherR + "HandleWorkflowRunBySHA/send"}, wantBodies: []string{`"handler":"HandleCheckPassed"`},
 		},
 		{
-			name: "main workflow run on a non-default owner sends nothing", event: ghEventWorkflowRun,
+			name: "main workflow run on a non-default owner sends nothing", wantBusEvent: "github:ci_passed", event: ghEventWorkflowRun,
 			body: workflowRunPayload("main", "success", false),
 		},
 		{
-			name: "squash push records main and merges the parsed pr", event: "push", ghBody: "[]",
+			name: "squash push records main and merges the parsed pr", wantPRNumber: 42, event: "push", ghBody: "[]",
 			body:       pushPayload("refs/heads/main", "Fix it (#42)"),
 			wantPaths:  []string{ownedRepoK + "HandleMainPush/send", ownedPRKey + "HandleMerged/send", ownedRepoK + "HandleAutoUpdate/send"},
 			wantBodies: []string{`"main_sha":"` + ownedMerge + `"`, `"event":"merged","repo":"azylman/aerial","pr_number":42,"head_sha":"` + ownedMerge + `","merge_sha":"` + ownedMerge + `"`},
 		},
 		{
-			name: "commits api resolves an unparsed push", event: "push", ghBody: `[{"number":42,"state":"closed","head":{"ref":"feat","sha":"` + ownedHead + `"}}]`,
+			name: "commits api resolves an unparsed push", wantPRNumber: 42, event: "push", ghBody: `[{"number":42,"state":"closed","head":{"ref":"feat","sha":"` + ownedHead + `"}}]`,
 			body:       pushPayload("refs/heads/main", "Merge things"),
 			wantPaths:  []string{ownedRepoK + "HandleMainPush/send", ownedPRKey + "HandleMerged/send", ownedRepoK + "HandleAutoUpdate/send"},
 			wantBodies: []string{`"main_sha"`, `"branch":"feat"`},
@@ -635,7 +657,7 @@ func restateOwnedCheckAndPushCases() []restateOwnedGitHubCase {
 			wantBodies: []string{`"main_sha"`, `"handler":"HandleMerged"`, `"auto_update":{"default_owner":true}`, `"main_sha":"` + ownedMerge + `","generation":0,"pr_number":0,"head_sha":"","ref":"refs/heads/main"`},
 		},
 		{
-			name: "default owner squash push dispatches the git push for the pr", event: "push", ghBody: "[]", cfg: Config{DefaultOwner: true},
+			name: "default owner squash push dispatches the git push for the pr", wantPRNumber: 42, event: "push", ghBody: "[]", cfg: Config{DefaultOwner: true},
 			body:       pushPayload("refs/heads/main", "Fix it (#42)"),
 			wantPaths:  []string{ownedRepoK + "HandleMainPush/send", ownedPRKey + "HandleMerged/send", ownedRepoK + "HandleAutoUpdate/send", ownedRepoK + "HandleGitPush/send"},
 			wantBodies: []string{`"main_sha"`, `"pr_number":42`, `"auto_update":{"default_owner":true}`, `"pr_number":42,"head_sha":"","ref":"refs/heads/main"`},
@@ -650,6 +672,13 @@ func restateOwnedCheckAndPushCases() []restateOwnedGitHubCase {
 			body:      prPayload("azylman/aerial", ghActionClosed, false, "feat", "", ""),
 			wantPaths: []string{ownedPRKey + "HandleClosed/send"}, wantBodies: []string{`"pr_number":42`},
 		},
+		{
+			name: "merge whose send fails fires no trigger", event: ghEventPullRequest, sendCode: 503, wantErr: true,
+			body:      prPayload("azylman/aerial", ghActionClosed, true, "feat", "", ""),
+			wantPaths: []string{ownedPRKey + "HandleMerged/send"},
+		},
+		{name: "build-metadata transport check skips pr routing", event: ghEventCheckRun, body: checkRunPayload("build-metadata", "completed", "failure", true)},
+		{name: "build-metadata-result transport check skips pr routing", event: ghEventCheckRun, body: checkRunPayload("build-metadata-result", "completed", "cancelled", true)},
 		{name: "malformed pull_request fails", event: ghEventPullRequest, body: []byte(`{`), wantErr: true},
 		{name: "malformed check_run fails", event: ghEventCheckRun, body: []byte(`{`), wantErr: true},
 		{name: "malformed workflow_run fails", event: ghEventWorkflowRun, body: []byte(`{`), wantErr: true},
