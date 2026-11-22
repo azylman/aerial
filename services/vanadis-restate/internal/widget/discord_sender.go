@@ -136,7 +136,9 @@ type DiscordWidgetDeliverer struct {
 	channelMetaMu    sync.RWMutex
 	channelMetaCache map[string]cachedChannelMeta
 
-	channelLocks sync.Map
+	channelLocks       sync.Map
+	replacedMessageIDs sync.Map
+	buildMessageIDs    sync.Map
 }
 
 // normalizeRunnerAgent lowercases and trims a runner's AGENT_NAME, mapping "" to the default agent.
@@ -588,6 +590,66 @@ func isNilSender(s DiscordWidgetSender) bool {
 	return false
 }
 
+func (d *DiscordWidgetDeliverer) resolveLatestMessageID(buildID, msgID string) string {
+	if d == nil {
+		return msgID
+	}
+	curr := strings.TrimSpace(msgID)
+	if curr != "" {
+		visited := make(map[string]bool)
+		for {
+			val, ok := d.replacedMessageIDs.Load(curr)
+			if !ok {
+				break
+			}
+			next, ok := val.(string)
+			if !ok {
+				break
+			}
+			next = strings.TrimSpace(next)
+			if next == "" || next == curr || visited[next] {
+				break
+			}
+			visited[curr] = true
+			curr = next
+		}
+		if curr != strings.TrimSpace(msgID) {
+			return curr
+		}
+	}
+	cleanBuildID := strings.TrimSpace(buildID)
+	if cleanBuildID == "" {
+		return curr
+	}
+	val, ok := d.buildMessageIDs.Load(cleanBuildID)
+	if !ok {
+		return curr
+	}
+	latest, ok := val.(string)
+	if ok && latest != "" && curr == "" {
+		return latest
+	}
+	return curr
+}
+
+func (d *DiscordWidgetDeliverer) recordMessageIDAdvance(buildID, oldMsgID, newMsgID string) {
+	if d == nil {
+		return
+	}
+	cleanNew := strings.TrimSpace(newMsgID)
+	if cleanNew == "" {
+		return
+	}
+	cleanOld := strings.TrimSpace(oldMsgID)
+	if cleanOld != "" && cleanOld != cleanNew {
+		d.replacedMessageIDs.Store(cleanOld, cleanNew)
+	}
+	cleanBuildID := strings.TrimSpace(buildID)
+	if cleanBuildID != "" {
+		d.buildMessageIDs.Store(cleanBuildID, cleanNew)
+	}
+}
+
 // DeliverStatusWidget delivers or updates a status widget via Discord Components V2.
 func (d *DiscordWidgetDeliverer) DeliverStatusWidget(ctx context.Context, req ericlient.StatusWidgetRequest) (string, error) {
 	if d == nil {
@@ -612,7 +674,19 @@ func (d *DiscordWidgetDeliverer) DeliverStatusWidget(ctx context.Context, req er
 		defer chLock.Unlock()
 	}
 
-	return DeliverStatusWidget(sender, d.gitHubOwner, req, now, opts...)
+	origMsgID := strings.TrimSpace(req.MessageID)
+	if latestMsgID := d.resolveLatestMessageID(req.ID, origMsgID); latestMsgID != "" && latestMsgID != origMsgID {
+		req.MessageID = latestMsgID
+	}
+
+	newID, err := DeliverStatusWidget(sender, d.gitHubOwner, req, now, opts...)
+	if err == nil && newID != "" && (newID != origMsgID || newID != req.MessageID) {
+		d.recordMessageIDAdvance(req.ID, origMsgID, newID)
+		if req.MessageID != origMsgID {
+			d.recordMessageIDAdvance(req.ID, req.MessageID, newID)
+		}
+	}
+	return newID, err
 }
 
 // DeleteStatusWidget removes a status widget message with agent's own sender,
