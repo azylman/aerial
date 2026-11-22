@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"maps"
@@ -9,9 +10,12 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/azylman/aerial/pkg/ollama"
 )
 
 func int64Ptr(v int64) *int64 {
@@ -29,42 +33,12 @@ func TestResolveTaskStatus(t *testing.T) {
 		resolution string
 		want       string
 	}{
-		{
-			name:       "open when done is false with empty resolution",
-			done:       false,
-			resolution: "",
-			want:       "open",
-		},
-		{
-			name:       "open when done is false even if resolution is completed",
-			done:       false,
-			resolution: "completed",
-			want:       "open",
-		},
-		{
-			name:       "completed when done is true and resolution is empty",
-			done:       true,
-			resolution: "",
-			want:       "completed",
-		},
-		{
-			name:       "completed when done is true and resolution is completed",
-			done:       true,
-			resolution: "completed",
-			want:       "completed",
-		},
-		{
-			name:       "wont_do when done is true and resolution is wont_do",
-			done:       true,
-			resolution: "wont_do",
-			want:       "wont_do",
-		},
-		{
-			name:       "wont_do with surrounding whitespace",
-			done:       true,
-			resolution: "  wont_do  ",
-			want:       "wont_do",
-		},
+		{"open when done is false with empty resolution", false, "", "open"},
+		{"open when done is false even if resolution is completed", false, "completed", "open"},
+		{"completed when done is true and resolution is empty", true, "", "completed"},
+		{"completed when done is true and resolution is completed", true, "completed", "completed"},
+		{"wont_do when done is true and resolution is wont_do", true, "wont_do", "wont_do"},
+		{"wont_do with surrounding whitespace", true, "  wont_do  ", "wont_do"},
 	}
 
 	for _, tc := range tests {
@@ -321,45 +295,18 @@ func assertErrString(t *testing.T, err error, wantErr string) {
 	}
 }
 
-type readyTreeTestCase struct {
-	name           string
-	nodes          map[int64]TaskNode
-	scopedParentID *int64
-	wantIDs        []int64
-	wantNestedIDs  map[int64][]int64
-}
-
-func runReadyTreeCase(t *testing.T, tc readyTreeTestCase) {
-	t.Helper()
-	got := BuildReadyTree(tc.nodes, tc.scopedParentID)
-	gotIDs := make([]int64, 0, len(got))
-	for _, item := range got {
-		gotIDs = append(gotIDs, item.ID)
-	}
-	if len(tc.wantIDs) == 0 && len(gotIDs) == 0 {
-		return
-	}
-	if !reflect.DeepEqual(gotIDs, tc.wantIDs) {
-		t.Fatalf("BuildReadyTree top IDs = %v; want %v", gotIDs, tc.wantIDs)
-	}
-	assertReadyTreeNested(t, got, tc.wantNestedIDs)
-}
-
-func assertReadyTreeNested(t *testing.T, got []ReadyTask, wantNestedIDs map[int64][]int64) {
-	t.Helper()
-	for parentID, expectedNested := range wantNestedIDs {
-		for _, top := range got {
-			if top.ID == parentID {
-				var nestedIDs []int64
-				for _, sub := range top.ReadySubtasks {
-					nestedIDs = append(nestedIDs, sub.ID)
-				}
-				if !reflect.DeepEqual(nestedIDs, expectedNested) {
-					t.Fatalf("Nested subtasks for %d = %v; want %v", parentID, nestedIDs, expectedNested)
-				}
-			}
+// renderReadyTree flattens a ready tree to "id(sub sub(subsub)) id" so a row
+// asserts every level, including an empty tree.
+func renderReadyTree(tasks []ReadyTask) string {
+	parts := make([]string, 0, len(tasks))
+	for _, task := range tasks {
+		s := strconv.FormatInt(task.ID, 10)
+		if len(task.ReadySubtasks) > 0 {
+			s += "(" + renderReadyTree(task.ReadySubtasks) + ")"
 		}
+		parts = append(parts, s)
 	}
+	return strings.Join(parts, " ")
 }
 
 func TestBuildReadyTree(t *testing.T) {
@@ -367,7 +314,7 @@ func TestBuildReadyTree(t *testing.T) {
 
 	nodes := map[int64]TaskNode{
 		1:  {ID: 1, Title: "Top Ready 1", Status: "open", SubtaskIDs: []int64{2, 11, 3, 9999}},
-		2:  {ID: 2, Title: "Sub Ready 2", Status: "open", ParentID: int64Ptr(1)},
+		2:  {ID: 2, Title: "Sub Ready 2", Status: "open", ParentID: int64Ptr(1), SubtaskIDs: []int64{9}},
 		11: {ID: 11, Title: "Sub Ready 11", Status: "open", ParentID: int64Ptr(1)},
 		3:  {ID: 3, Title: "Sub Blocked 3", Status: "open", ParentID: int64Ptr(1), BlockedBy: []int64{4}},
 		4:  {ID: 4, Title: "Blocker Open 4", Status: "open"},
@@ -381,44 +328,22 @@ func TestBuildReadyTree(t *testing.T) {
 		13: {ID: 13, Title: "Top Blocked by WontDo 13", Status: "open", BlockedBy: []int64{12}},
 	}
 
-	// Update node 2 subtask IDs
-	node2 := nodes[2]
-	node2.SubtaskIDs = []int64{9}
-	nodes[2] = node2
-
-	tests := []readyTreeTestCase{
-		{
-			name:           "top level ready tree",
-			nodes:          nodes,
-			scopedParentID: nil,
-			wantIDs:        []int64{1, 4, 7, 8},
-			wantNestedIDs: map[int64][]int64{
-				1: {2, 11},
-				2: {9},
-			},
-		},
-		{
-			name:           "scoped parent 1 ready tree",
-			nodes:          nodes,
-			scopedParentID: int64Ptr(1),
-			wantIDs:        []int64{2, 11},
-			wantNestedIDs: map[int64][]int64{
-				2: {9},
-			},
-		},
-		{
-			name:           "scoped parent with no ready subtasks",
-			nodes:          nodes,
-			scopedParentID: int64Ptr(7),
-			wantIDs:        nil,
-			wantNestedIDs:  nil,
-		},
+	tests := []struct {
+		name           string
+		scopedParentID *int64
+		want           string
+	}{
+		{"top level ready tree", nil, "1(2(9) 11) 4 7 8"},
+		{"scoped parent 1 ready tree", int64Ptr(1), "2(9) 11"},
+		{"scoped parent with no ready subtasks", int64Ptr(7), ""},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			runReadyTreeCase(t, tc)
+			if got := renderReadyTree(BuildReadyTree(nodes, tc.scopedParentID)); got != tc.want {
+				t.Fatalf("BuildReadyTree = %q; want %q", got, tc.want)
+			}
 		})
 	}
 }
@@ -448,117 +373,28 @@ func TestValidateCloseGuard(t *testing.T) {
 
 	tests := []struct {
 		name       string
-		nodes      map[int64]TaskNode
 		id         int64
 		resolution string
 		wantErr    string
 	}{
-		{
-			name:       "wont_do allows close even with open blockers and subtasks",
-			nodes:      nodes,
-			id:         1,
-			resolution: "wont_do",
-			wantErr:    "",
-		},
-		{
-			name:       "wont_do rejected when target task blocks open task",
-			nodes:      nodes,
-			id:         9,
-			resolution: "wont_do",
-			wantErr:    "cannot close task 9 as wont_do: blocks open tasks: [10]",
-		},
-		{
-			name:       "wont_do rejected when open subtask in cascaded subtree blocks external open task",
-			nodes:      nodes,
-			id:         11,
-			resolution: "wont_do",
-			wantErr:    "cannot close task 11 as wont_do: blocks open tasks: [13]",
-		},
-		{
-			name:       "wont_do allowed when blocked tasks are closed or in same cascaded subtree",
-			nodes:      nodes,
-			id:         14,
-			resolution: "wont_do",
-			wantErr:    "",
-		},
-		{
-			name:       "wont_do on nonexistent task returns error",
-			nodes:      nodes,
-			id:         999,
-			resolution: "wont_do",
-			wantErr:    "task 999 not found in graph",
-		},
-		{
-			name:       "completed allowed when all blockers and subtasks are closed",
-			nodes:      nodes,
-			id:         4,
-			resolution: "completed",
-			wantErr:    "",
-		},
-		{
-			name:       "completed rejected when blocker is open",
-			nodes:      nodes,
-			id:         7,
-			resolution: "completed",
-			wantErr:    "cannot complete task 7: open blockers: [2], open subtasks: []",
-		},
-		{
-			name:       "completed rejected when subtask is open",
-			nodes:      nodes,
-			id:         8,
-			resolution: "completed",
-			wantErr:    "cannot complete task 8: open blockers: [], open subtasks: [3]",
-		},
-		{
-			name:       "completed rejected when both blocker and subtask are open",
-			nodes:      nodes,
-			id:         1,
-			resolution: "completed",
-			wantErr:    "cannot complete task 1: open blockers: [2], open subtasks: [3]",
-		},
-		{
-			name:       "task not found in graph returns error",
-			nodes:      nodes,
-			id:         999,
-			resolution: "completed",
-			wantErr:    "task 999 not found in graph",
-		},
-		{
-			name:       "invalid resolution string rejected",
-			nodes:      nodes,
-			id:         4,
-			resolution: "invalid_res",
-			wantErr:    `invalid resolution: "invalid_res"`,
-		},
+		{"wont_do allows close even with open blockers and subtasks", 1, "wont_do", ""},
+		{"wont_do rejected when target task blocks open task", 9, "wont_do", "cannot close task 9 as wont_do: blocks open tasks: [10]"},
+		{"wont_do rejected when cascaded subtask blocks external open task", 11, "wont_do", "cannot close task 11 as wont_do: blocks open tasks: [13]"},
+		{"wont_do allowed when blocked tasks are closed or in same cascaded subtree", 14, "wont_do", ""},
+		{"wont_do on nonexistent task returns error", 999, "wont_do", "task 999 not found in graph"},
+		{"completed allowed when all blockers and subtasks are closed", 4, "completed", ""},
+		{"completed rejected when blocker is open", 7, "completed", "cannot complete task 7: open blockers: [2], open subtasks: []"},
+		{"completed rejected when subtask is open", 8, "completed", "cannot complete task 8: open blockers: [], open subtasks: [3]"},
+		{"completed rejected when both are open", 1, "completed", "cannot complete task 1: open blockers: [2], open subtasks: [3]"},
+		{"task not found in graph returns error", 999, "completed", "task 999 not found in graph"},
+		{"invalid resolution string rejected", 4, "invalid_res", `invalid resolution: "invalid_res" (must be 'completed' or 'wont_do')`},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			err := ValidateCloseGuard(tc.nodes, tc.id, tc.resolution)
-			if tc.wantErr == "" && err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if tc.wantErr != "" {
-				if err == nil {
-					t.Fatalf("expected error containing %q, got nil", tc.wantErr)
-				}
-				if !strings.Contains(err.Error(), tc.wantErr) {
-					t.Fatalf("error %q does not contain %q", err.Error(), tc.wantErr)
-				}
-			}
+			assertErrString(t, ValidateCloseGuard(nodes, tc.id, tc.resolution), tc.wantErr)
 		})
-	}
-}
-
-func assertSubtreeIDs(t *testing.T, nodes map[int64]TaskNode, rootID int64, wantIDs []int64) {
-	t.Helper()
-	got := CollectOpenSubtreeIDs(nodes, rootID)
-	if len(wantIDs) == 0 && len(got) == 0 {
-		return
-	}
-	if !reflect.DeepEqual(got, wantIDs) {
-		t.Fatalf("CollectOpenSubtreeIDs(%d) = %v; want %v", rootID, got, wantIDs)
 	}
 }
 
@@ -576,47 +412,22 @@ func TestCollectOpenSubtreeIDs(t *testing.T) {
 	}
 
 	tests := []struct {
-		name    string
-		nodes   map[int64]TaskNode
-		rootID  int64
-		wantIDs []int64
+		name   string
+		rootID int64
+		want   []int64
 	}{
-		{
-			name:    "collect transitive open subtasks under root 1",
-			nodes:   nodes,
-			rootID:  1,
-			wantIDs: []int64{2, 4, 6},
-		},
-		{
-			name:    "leaf node has empty subtree",
-			nodes:   nodes,
-			rootID:  4,
-			wantIDs: nil,
-		},
-		{
-			name:    "nonexistent root ID returns empty slice",
-			nodes:   nodes,
-			rootID:  999,
-			wantIDs: nil,
-		},
+		{"collect transitive open subtasks under root 1", 1, []int64{2, 4, 6}},
+		{"leaf node has empty subtree", 4, []int64{}},
+		{"nonexistent root ID returns empty slice", 999, []int64{}},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			assertSubtreeIDs(t, tc.nodes, tc.rootID, tc.wantIDs)
+			if got := CollectOpenSubtreeIDs(nodes, tc.rootID); !slices.Equal(got, tc.want) {
+				t.Fatalf("CollectOpenSubtreeIDs(%d) = %v; want %v", tc.rootID, got, tc.want)
+			}
 		})
-	}
-}
-
-func assertUnblockedIDs(t *testing.T, before, after map[int64]TaskNode, closedIDs, wantIDs []int64) {
-	t.Helper()
-	got := ComputeUnblockedIDs(before, after, closedIDs)
-	if len(wantIDs) == 0 && len(got) == 0 {
-		return
-	}
-	if !reflect.DeepEqual(got, wantIDs) {
-		t.Fatalf("ComputeUnblockedIDs = %v; want %v", got, wantIDs)
 	}
 }
 
@@ -651,292 +462,130 @@ func TestComputeUnblockedIDs(t *testing.T) {
 
 	tests := []struct {
 		name      string
-		before    map[int64]TaskNode
 		after     map[int64]TaskNode
 		closedIDs []int64
-		wantIDs   []int64
+		want      []int64
 	}{
-		{
-			name:      "task 2 newly unblocked after task 1 completed",
-			before:    before,
-			after:     after,
-			closedIDs: []int64{1},
-			wantIDs:   []int64{2},
-		},
-		{
-			name:      "blocker transitions to wont_do leaves dependent blocked",
-			before:    before,
-			after:     afterWontDo,
-			closedIDs: []int64{1},
-			wantIDs:   nil,
-		},
-		{
-			name:      "no transitions when no dependencies change",
-			before:    before,
-			after:     before,
-			closedIDs: []int64{},
-			wantIDs:   nil,
-		},
+		{"task 2 newly unblocked after task 1 completed", after, []int64{1}, []int64{2}},
+		{"blocker transitions to wont_do leaves dependent blocked", afterWontDo, []int64{1}, []int64{}},
+		{"no transitions when no dependencies change", before, []int64{}, []int64{}},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			assertUnblockedIDs(t, tc.before, tc.after, tc.closedIDs, tc.wantIDs)
+			if got := ComputeUnblockedIDs(before, tc.after, tc.closedIDs); !slices.Equal(got, tc.want) {
+				t.Fatalf("ComputeUnblockedIDs = %v; want %v", got, tc.want)
+			}
 		})
 	}
 }
 
-type loadConfigTestCase struct {
-	name            string
-	path            string
-	envKey          string
-	envVal          string
-	wantPort        string
-	wantProjID      int64
-	wantVikunjaURL  string
-	wantUsername    string
-	wantPassword    string
-	wantDatabaseURL string
-	wantOllamaBase  string
-	wantOllamaModel string
-	wantEmptyURLs   bool
-	wantErr         bool
-}
+// loadConfigFileLayer is what testdata config.yaml sets in TestLoadConfig.
+var loadConfigFileLayer = Config{Port: "9090", VikunjaURL: "http://custom-vikunja:3456", DefaultProjectID: 42}
 
-func runLoadConfigCase(t *testing.T, tc loadConfigTestCase) {
-	t.Helper()
-	getenv := func(key string) string {
-		if key == tc.envKey {
-			return tc.envVal
-		}
-		return ""
+// cfgWith returns LoadConfig's built-in defaults with the non-zero fields of
+// each layer applied in order, the way the YAML file and env overrides stack.
+func cfgWith(layers ...Config) *Config {
+	cfg := &Config{
+		Port:            "8080",
+		VikunjaUsername: "aerial",
+		VikunjaPassword: "aerial-password",
+		Ollama:          ollama.Config{Model: "all-minilm", NumCtx: 512},
 	}
-
-	cfg, err := LoadConfig(tc.path, getenv)
-	if tc.wantErr {
-		if err == nil {
-			t.Fatalf("expected error, got nil")
-		}
-		return
+	for _, l := range layers {
+		cfg.Port = cmp.Or(l.Port, cfg.Port)
+		cfg.VikunjaURL = cmp.Or(l.VikunjaURL, cfg.VikunjaURL)
+		cfg.VikunjaUsername = cmp.Or(l.VikunjaUsername, cfg.VikunjaUsername)
+		cfg.VikunjaPassword = cmp.Or(l.VikunjaPassword, cfg.VikunjaPassword)
+		cfg.DefaultProjectID = cmp.Or(l.DefaultProjectID, cfg.DefaultProjectID)
+		cfg.DatabaseURL = cmp.Or(l.DatabaseURL, cfg.DatabaseURL)
+		cfg.Ollama.BaseURL = cmp.Or(l.Ollama.BaseURL, cfg.Ollama.BaseURL)
+		cfg.Ollama.Model = cmp.Or(l.Ollama.Model, cfg.Ollama.Model)
 	}
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	assertLoadedConfigFields(t, cfg, tc)
-}
-
-func assertLoadedConfigFields(t *testing.T, cfg *Config, tc loadConfigTestCase) {
-	t.Helper()
-	if cfg.Port != tc.wantPort {
-		t.Fatalf("Port = %q; want %q", cfg.Port, tc.wantPort)
-	}
-	if cfg.DefaultProjectID != tc.wantProjID {
-		t.Fatalf("DefaultProjectID = %d; want %d", cfg.DefaultProjectID, tc.wantProjID)
-	}
-	if tc.wantVikunjaURL != "" && cfg.VikunjaURL != tc.wantVikunjaURL {
-		t.Fatalf("VikunjaURL = %q; want %q", cfg.VikunjaURL, tc.wantVikunjaURL)
-	}
-	if tc.wantUsername != "" && cfg.VikunjaUsername != tc.wantUsername {
-		t.Fatalf("VikunjaUsername = %q; want %q", cfg.VikunjaUsername, tc.wantUsername)
-	}
-	if tc.wantPassword != "" && cfg.VikunjaPassword != tc.wantPassword {
-		t.Fatalf("VikunjaPassword = %q; want %q", cfg.VikunjaPassword, tc.wantPassword)
-	}
-	if tc.wantDatabaseURL != "" && cfg.DatabaseURL != tc.wantDatabaseURL {
-		t.Fatalf("DatabaseURL = %q; want %q", cfg.DatabaseURL, tc.wantDatabaseURL)
-	}
-	if tc.wantOllamaBase != "" && cfg.Ollama.BaseURL != tc.wantOllamaBase {
-		t.Fatalf("Ollama.BaseURL = %q; want %q", cfg.Ollama.BaseURL, tc.wantOllamaBase)
-	}
-	if tc.wantOllamaModel != "" && cfg.Ollama.Model != tc.wantOllamaModel {
-		t.Fatalf("Ollama.Model = %q; want %q", cfg.Ollama.Model, tc.wantOllamaModel)
-	}
-	if tc.wantEmptyURLs {
-		if cfg.VikunjaURL != "" {
-			t.Fatalf("VikunjaURL = %q; want empty", cfg.VikunjaURL)
-		}
-		if cfg.DatabaseURL != "" {
-			t.Fatalf("DatabaseURL = %q; want empty", cfg.DatabaseURL)
-		}
-		if cfg.Ollama.BaseURL != "" {
-			t.Fatalf("Ollama.BaseURL = %q; want empty", cfg.Ollama.BaseURL)
-		}
-	}
-}
-
-func loadConfigTestCases(validYAML, invalidYAML, emptyYAML, tempDir string) []loadConfigTestCase {
-	return []loadConfigTestCase{
-		{
-			name:          "defaults applied when path is empty",
-			path:          "",
-			wantPort:      "8080",
-			wantProjID:    0,
-			wantEmptyURLs: true,
-			wantErr:       false,
-		},
-		{
-			name:          "empty file returns defaults",
-			path:          emptyYAML,
-			wantPort:      "8080",
-			wantProjID:    0,
-			wantEmptyURLs: true,
-			wantErr:       false,
-		},
-		{
-			name:       "valid yaml loaded successfully",
-			path:       validYAML,
-			wantPort:   "9090",
-			wantProjID: 42,
-			wantErr:    false,
-		},
-		{
-			name:    "invalid yaml returns error",
-			path:    invalidYAML,
-			wantErr: true,
-		},
-		{
-			name:    "directory path returns error",
-			path:    tempDir,
-			wantErr: true,
-		},
-		{
-			name:    "stat error on file as directory returns error",
-			path:    filepath.Join(validYAML, "subfile.yaml"),
-			wantErr: true,
-		},
-		{
-			name:       "env PORT override",
-			path:       validYAML,
-			envKey:     "PORT",
-			envVal:     "7777",
-			wantPort:   "7777",
-			wantProjID: 42,
-			wantErr:    false,
-		},
-		{
-			name:       "env DEFAULT_PROJECT_ID override",
-			path:       validYAML,
-			envKey:     "DEFAULT_PROJECT_ID",
-			envVal:     "100",
-			wantPort:   "9090",
-			wantProjID: 100,
-			wantErr:    false,
-		},
-		{
-			name:           "env VIKUNJA_URL override",
-			path:           validYAML,
-			envKey:         "VIKUNJA_URL",
-			envVal:         "http://remote-vikunja:8080",
-			wantPort:       "9090",
-			wantProjID:     42,
-			wantVikunjaURL: "http://remote-vikunja:8080",
-			wantErr:        false,
-		},
-		{
-			name:         "env VIKUNJA_USERNAME override",
-			path:         validYAML,
-			envKey:       "VIKUNJA_USERNAME",
-			envVal:       "testadmin",
-			wantPort:     "9090",
-			wantProjID:   42,
-			wantUsername: "testadmin",
-			wantErr:      false,
-		},
-		{
-			name:         "env VIKUNJA_PASSWORD override",
-			path:         validYAML,
-			envKey:       "VIKUNJA_PASSWORD",
-			envVal:       "supersecret",
-			wantPort:     "9090",
-			wantProjID:   42,
-			wantPassword: "supersecret",
-			wantErr:      false,
-		},
-		{
-			name:            "env POSTGRES_URL override",
-			path:            validYAML,
-			envKey:          "POSTGRES_URL",
-			envVal:          "postgres://pguser:pgpass@pghost:5432/docket",
-			wantPort:        "9090",
-			wantProjID:      42,
-			wantDatabaseURL: "postgres://pguser:pgpass@pghost:5432/docket",
-			wantErr:         false,
-		},
-		{
-			name:            "env DATABASE_URL override",
-			path:            validYAML,
-			envKey:          "DATABASE_URL",
-			envVal:          "postgres://dbuser:dbpass@dbhost:5432/docket",
-			wantPort:        "9090",
-			wantProjID:      42,
-			wantDatabaseURL: "postgres://dbuser:dbpass@dbhost:5432/docket",
-			wantErr:         false,
-		},
-		{
-			name:            "env POSTGRES_PASSWORD override",
-			path:            validYAML,
-			envKey:          "POSTGRES_PASSWORD",
-			envVal:          "secretpass",
-			wantPort:        "9090",
-			wantProjID:      42,
-			wantDatabaseURL: "postgres://aerial:secretpass@postgres:5432/docket?sslmode=disable",
-			wantErr:         false,
-		},
-		{
-			name:           "env OLLAMA_BASE_URL override",
-			path:           validYAML,
-			envKey:         "OLLAMA_BASE_URL",
-			envVal:         "http://ollama-remote:11434",
-			wantPort:       "9090",
-			wantProjID:     42,
-			wantOllamaBase: "http://ollama-remote:11434",
-			wantErr:        false,
-		},
-		{
-			name:            "env OLLAMA_MODEL override",
-			path:            validYAML,
-			envKey:          "OLLAMA_MODEL",
-			envVal:          "nomic-embed-text",
-			wantPort:        "9090",
-			wantProjID:      42,
-			wantOllamaModel: "nomic-embed-text",
-			wantErr:         false,
-		},
-		{
-			name:          "nonexistent file returns defaults",
-			path:          filepath.Join(tempDir, "nonexistent.yaml"),
-			wantPort:      "8080",
-			wantProjID:    0,
-			wantEmptyURLs: true,
-			wantErr:       false,
-		},
-	}
+	return cfg
 }
 
 func TestLoadConfig(t *testing.T) {
 	t.Parallel()
 	tempDir := t.TempDir()
-	validYAML := filepath.Join(tempDir, "config.yaml")
-	if err := os.WriteFile(validYAML, []byte("port: \"9090\"\nvikunja_url: \"http://custom-vikunja:3456\"\ndefault_project_id: 42\n"), 0o600); err != nil {
-		t.Fatalf("failed to write config: %v", err)
+	files := map[string]string{
+		"config.yaml": "port: \"9090\"\nvikunja_url: \"http://custom-vikunja:3456\"\ndefault_project_id: 42\n",
+		"bad.yaml":    "port: [unclosed",
+		"empty.yaml":  "",
+	}
+	for name, body := range files {
+		if err := os.WriteFile(filepath.Join(tempDir, name), []byte(body), 0o600); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+	file := loadConfigFileLayer
+
+	// path is relative to tempDir ("" stays empty); env is one KEY=value pair.
+	tests := []struct {
+		name    string
+		path    string
+		env     string
+		want    *Config
+		wantErr string
+	}{
+		{"defaults applied when path is empty", "", "", cfgWith(), ""},
+		{"empty file returns defaults", "empty.yaml", "", cfgWith(), ""},
+		{"nonexistent file returns defaults", "nonexistent.yaml", "", cfgWith(), ""},
+		{"valid yaml loaded successfully", "config.yaml", "", cfgWith(file), ""},
+		{"invalid yaml returns error", "bad.yaml", "", nil, "failed to parse config"},
+		{"directory path returns error", ".", "", nil, "config path is a directory"},
+		{"stat error on file as directory returns error", "config.yaml/subfile.yaml", "", nil, "not a directory"},
+		{"env PORT override", "config.yaml", "PORT=7777", cfgWith(file, Config{Port: "7777"}), ""},
+		{"env DEFAULT_PROJECT_ID override", "config.yaml", "DEFAULT_PROJECT_ID=100", cfgWith(file, Config{DefaultProjectID: 100}), ""},
+		{"env DEFAULT_PROJECT_ID non-positive ignored", "config.yaml", "DEFAULT_PROJECT_ID=-1", cfgWith(file), ""},
+		{"env VIKUNJA_USERNAME override", "config.yaml", "VIKUNJA_USERNAME=testadmin", cfgWith(file, Config{VikunjaUsername: "testadmin"}), ""},
+		{"env VIKUNJA_PASSWORD override", "config.yaml", "VIKUNJA_PASSWORD=supersecret", cfgWith(file, Config{VikunjaPassword: "supersecret"}), ""},
+		{
+			name: "env VIKUNJA_URL override", path: "config.yaml", env: "VIKUNJA_URL=http://remote-vikunja:8080",
+			want: cfgWith(file, Config{VikunjaURL: "http://remote-vikunja:8080"}),
+		},
+		{
+			name: "env POSTGRES_URL override", path: "config.yaml", env: "POSTGRES_URL=postgres://pguser:pgpass@pghost:5432/docket",
+			want: cfgWith(file, Config{DatabaseURL: "postgres://pguser:pgpass@pghost:5432/docket"}),
+		},
+		{
+			name: "env DATABASE_URL override", path: "config.yaml", env: "DATABASE_URL=postgres://dbuser:dbpass@dbhost:5432/docket",
+			want: cfgWith(file, Config{DatabaseURL: "postgres://dbuser:dbpass@dbhost:5432/docket"}),
+		},
+		{
+			name: "env POSTGRES_PASSWORD override", path: "config.yaml", env: "POSTGRES_PASSWORD=secretpass",
+			want: cfgWith(file, Config{DatabaseURL: "postgres://aerial:secretpass@postgres:5432/docket?sslmode=disable"}),
+		},
+		{
+			name: "env OLLAMA_BASE_URL override", path: "config.yaml", env: "OLLAMA_BASE_URL=http://ollama-remote:11434",
+			want: cfgWith(file, Config{Ollama: ollama.Config{BaseURL: "http://ollama-remote:11434"}}),
+		},
+		{
+			name: "env OLLAMA_MODEL override", path: "config.yaml", env: "OLLAMA_MODEL=nomic-embed-text",
+			want: cfgWith(file, Config{Ollama: ollama.Config{Model: "nomic-embed-text"}}),
+		},
 	}
 
-	invalidYAML := filepath.Join(tempDir, "bad.yaml")
-	if err := os.WriteFile(invalidYAML, []byte("port: [unclosed"), 0o600); err != nil {
-		t.Fatalf("failed to write bad config: %v", err)
-	}
-
-	emptyYAML := filepath.Join(tempDir, "empty.yaml")
-	if err := os.WriteFile(emptyYAML, []byte(""), 0o600); err != nil {
-		t.Fatalf("failed to write empty config: %v", err)
-	}
-
-	tests := loadConfigTestCases(validYAML, invalidYAML, emptyYAML, tempDir)
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			runLoadConfigCase(t, tc)
+			path := tc.path
+			if path != "" {
+				path = filepath.Join(tempDir, path)
+			}
+			envKey, envVal, _ := strings.Cut(tc.env, "=")
+			getenv := func(key string) string {
+				if tc.env != "" && key == envKey {
+					return envVal
+				}
+				return ""
+			}
+			got, err := LoadConfig(path, getenv)
+			assertErrString(t, err, tc.wantErr)
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("LoadConfig = %+v; want %+v", got, tc.want)
+			}
 		})
 	}
 }
