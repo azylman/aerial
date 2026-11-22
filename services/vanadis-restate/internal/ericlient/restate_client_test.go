@@ -50,6 +50,13 @@ type mockDeliverer struct {
 	err         error
 	lastChannel string
 	lastContent string
+	// deleted records each DeleteStatusWidget as "<agent> <channel> <message>".
+	deleted []string
+}
+
+func (m *mockDeliverer) DeleteStatusWidget(_ context.Context, agent, channelID, messageID string) error {
+	m.deleted = append(m.deleted, agent+" "+channelID+" "+messageID)
+	return m.err
 }
 
 func (m *mockDeliverer) DeliverStatusWidget(_ context.Context, _ StatusWidgetRequest) (string, error) {
@@ -325,6 +332,54 @@ func TestRestateEriClient_Widget(t *testing.T) {
 	}
 }
 
+func TestRestateEriClient_DeleteWidget(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		auth        bool
+		noRestate   bool
+		deliverer   *mockDeliverer
+		agent       string
+		channel     string
+		message     string
+		ctxAgent    string
+		wantErr     string
+		wantDeleted []string
+	}{
+		{name: "direct deliverer deletes with the explicit agent", auth: true, deliverer: &mockDeliverer{}, agent: "Beta", channel: " ch-1 ", message: " m1 ", wantDeleted: []string{"beta ch-1 m1"}},
+		{name: "empty agent resolves from context", auth: true, deliverer: &mockDeliverer{}, ctxAgent: "alpha", channel: "ch-1", message: "m1", wantDeleted: []string{"alpha ch-1 m1"}},
+		{name: "deliverer error propagates", auth: true, deliverer: &mockDeliverer{err: errBoom}, channel: "ch-1", message: "m1", wantErr: "boom", wantDeleted: []string{"aerial ch-1 m1"}},
+		{name: "missing auth is a fallback no-op", deliverer: &mockDeliverer{}, channel: "ch-1", message: "m1"},
+		{name: "missing restate url is a fallback no-op", auth: true, noRestate: true, deliverer: &mockDeliverer{}, channel: "ch-1", message: "m1"},
+		{name: "no deliverer is a fallback no-op", auth: true, channel: "ch-1", message: "m1"},
+		{name: "blank message is a no-op", auth: true, deliverer: &mockDeliverer{}, channel: "ch-1", message: " "},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ingress, eri := restateClientFake(t, "/discord/widget", 0, `{}`)
+			restateURL, eriURL := restateClientURLs(ingress, eri, tc.noRestate, false, "")
+			var deliverer StatusWidgetDeliverer
+			if tc.deliverer != nil {
+				deliverer = tc.deliverer
+			}
+			client := NewRestateEriClient(restateURL, eriURL, "aerial", nil, deliverer)
+			client.SetDiscordAuth(tc.auth)
+			ctx := context.Background()
+			if tc.ctxAgent != "" {
+				ctx = WithAgent(ctx, tc.ctxAgent)
+			}
+			requireErrText(t, client.DeleteWidget(ctx, tc.agent, tc.channel, tc.message), tc.wantErr)
+			var deleted []string
+			if tc.deliverer != nil {
+				deleted = tc.deliverer.deleted
+			}
+			assert.Equal(t, tc.wantDeleted, deleted)
+			assert.Empty(t, restateClientCalls(ingress, eri))
+		})
+	}
+}
+
 func TestRestateEriClient_Message(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -391,6 +446,9 @@ func TestRestateEriClient_NilReceiver(t *testing.T) {
 	}
 	if err := nilClient.Message(ctx, "ch1", "m"); err == nil {
 		t.Error("expected error on nil client Message")
+	}
+	if err := nilClient.DeleteWidget(ctx, "a", "ch1", "m1"); err == nil {
+		t.Error("expected error on nil client DeleteWidget")
 	}
 	if err := nilClient.PromptAgent(ctx, "a", "th1", "p", "k"); err == nil {
 		t.Error("expected error on nil client PromptAgent")

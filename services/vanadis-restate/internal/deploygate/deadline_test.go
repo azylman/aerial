@@ -173,6 +173,8 @@ func (*fakeEriClient) Widget(context.Context, executor.StatusWidgetRequest) (str
 	return "", nil
 }
 
+func (*fakeEriClient) DeleteWidget(context.Context, string, string, string) error { return nil }
+
 func (*fakeEriClient) Message(context.Context, string, string) error { return nil }
 
 var deadlineNow = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)

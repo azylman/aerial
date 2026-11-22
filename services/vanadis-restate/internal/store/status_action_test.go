@@ -6,6 +6,7 @@ package store
 import (
 	"context"
 	"errors"
+	"maps"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
@@ -33,24 +34,22 @@ func outcomeOf(res *VanadisAdvancementResult) advanceOutcome {
 	return advanceOutcome{Matched: res.Matched, Advanced: res.Advanced, BuildCompleted: res.BuildCompleted, NextChunkIndex: res.NextChunkIndex, BuildStatus: res.BuildStatus, Chunks: len(res.Chunks)}
 }
 
-// buildStatusUpdateRows is shared by UpdateBuildStatus and
-// UpdateBuildStatusMessageID: same guards, same data contract.
-var buildStatusUpdateRows = []struct {
-	name      string
-	id        string
-	db        dbScript
-	wantErrIs error
-	wantErr   bool
-}{
-	{name: "nil db", id: "b1", db: nilDB, wantErr: true},
-	{name: "empty id", id: "", wantErr: true},
-	{name: "not found", id: "b1", db: dbScript{ExecTag: "UPDATE 0"}, wantErrIs: ErrBuildNotFound},
-	{name: "success", id: "b1", db: dbScript{ExecTag: "UPDATE 1"}},
-}
-
 func TestPostgresVanadisStore_UpdateBuildStatus(t *testing.T) {
 	t.Parallel()
-	for _, tc := range buildStatusUpdateRows {
+	tests := []struct {
+		name      string
+		id        string
+		db        dbScript
+		wantErrIs error
+		wantErr   bool
+	}{
+		{name: "nil db", id: "b1", db: nilDB, wantErr: true},
+		{name: "empty id", id: "", wantErr: true},
+		{name: "exec error", id: "b1", db: dbScript{ExecErr: errors.New("exec error")}, wantErr: true},
+		{name: "not found", id: "b1", db: dbScript{ExecTag: "UPDATE 0"}, wantErrIs: ErrBuildNotFound},
+		{name: "success", id: "b1", db: dbScript{ExecTag: "UPDATE 1"}},
+	}
+	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			st, _ := open(tc.db)
@@ -59,13 +58,43 @@ func TestPostgresVanadisStore_UpdateBuildStatus(t *testing.T) {
 	}
 }
 
-func TestPostgresVanadisStore_UpdateBuildStatusMessageID(t *testing.T) {
+func TestPostgresVanadisStore_CompareAndSwapBuildStatusMessageID(t *testing.T) {
 	t.Parallel()
-	for _, tc := range buildStatusUpdateRows {
+	tests := []struct {
+		name             string
+		stored           map[string]string
+		db               dbScript
+		id, oldID, newID string
+		wantSwapped      bool
+		wantErr          bool
+		wantStored       map[string]string
+	}{
+		{name: "match from empty", stored: map[string]string{"b1": ""}, id: "b1", oldID: "", newID: "m1", wantSwapped: true, wantStored: map[string]string{"b1": "m1"}},
+		{name: "match from previous id", stored: map[string]string{"b1": "m0"}, id: "b1", oldID: "m0", newID: "m1", wantSwapped: true, wantStored: map[string]string{"b1": "m1"}},
+		{name: "another writer stored a different id", stored: map[string]string{"b1": "m2"}, id: "b1", oldID: "m0", newID: "m1", wantStored: map[string]string{"b1": "m2"}},
+		{name: "unknown build", stored: map[string]string{"b1": "m0"}, id: "b9", oldID: "m0", newID: "m1", wantStored: map[string]string{"b1": "m0"}},
+		{name: "trims arguments", stored: map[string]string{"b1": "m0"}, id: " b1 ", oldID: " m0 ", newID: " m1 ", wantSwapped: true, wantStored: map[string]string{"b1": "m1"}},
+		{name: "nil db", db: nilDB, id: "b1", newID: "m1", wantErr: true},
+		{name: "empty build id", stored: map[string]string{}, id: " ", newID: "m1", wantErr: true, wantStored: map[string]string{}},
+		{name: "empty new id", stored: map[string]string{"b1": "m0"}, id: "b1", oldID: "m0", newID: " ", wantErr: true, wantStored: map[string]string{"b1": "m0"}},
+		{name: "exec error", db: dbScript{ExecErr: errors.New("exec error")}, id: "b1", newID: "m1", wantErr: true},
+	}
+	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			st, _ := open(tc.db)
-			assertStoreErr(t, st.UpdateBuildStatusMessageID(context.Background(), tc.id, "m1"), tc.wantErrIs, tc.wantErr)
+			script := tc.db
+			script.StatusMessageIDs = tc.stored
+			st, _ := open(script)
+			swapped, err := st.CompareAndSwapBuildStatusMessageID(context.Background(), tc.id, tc.oldID, tc.newID)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("CompareAndSwapBuildStatusMessageID err = %v, wantErr %v", err, tc.wantErr)
+			}
+			if swapped != tc.wantSwapped {
+				t.Errorf("swapped = %v, want %v", swapped, tc.wantSwapped)
+			}
+			if tc.wantStored != nil && !maps.Equal(tc.stored, tc.wantStored) {
+				t.Errorf("stored = %v, want %v", tc.stored, tc.wantStored)
+			}
 		})
 	}
 }

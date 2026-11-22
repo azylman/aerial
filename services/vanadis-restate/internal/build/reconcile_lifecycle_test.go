@@ -193,8 +193,8 @@ func (s *terminalRetrySpyStore) UpdateBuildStatus(_ context.Context, _ string, s
 	return nil
 }
 
-func (*terminalRetrySpyStore) UpdateBuildStatusMessageID(_ context.Context, _, _ string) error {
-	return nil
+func (*terminalRetrySpyStore) CompareAndSwapBuildStatusMessageID(context.Context, string, string, string) (bool, error) {
+	return true, nil
 }
 
 func TestDeploymentMutationPersistence(t *testing.T) {

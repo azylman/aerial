@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"maps"
 	"reflect"
 	"slices"
 	"sync"
@@ -77,25 +78,35 @@ func TestScriptQueryRow(t *testing.T) {
 
 func TestScriptDBExec(t *testing.T) {
 	t.Parallel()
+	const casSQL = "UPDATE vanadis_builds SET status_message_id = $1 WHERE id = $2"
 	tests := []struct {
 		name, query string
+		args        []any
 		script      Script
 		wantTag     string
 		wantErr     string
+		wantIDs     map[string]string
 	}{
 		{name: "default tag", query: "UPDATE x", wantTag: "UPDATE 1"},
 		{name: "scripted tag", query: "UPDATE x", script: Script{ExecTag: "INSERT 0 0"}, wantTag: "INSERT 0 0"},
 		{name: "matching failure", query: "INSERT INTO vanadis_chunks", script: Script{ExecErr: errBoom, FailExec: "vanadis_chunks"}, wantErr: "boom"},
 		{name: "other statement", query: "INSERT INTO vanadis_builds", script: Script{ExecErr: errBoom, FailExec: "vanadis_chunks"}, wantTag: "UPDATE 1"},
 		{name: "fail every statement", query: "UPDATE x", script: Script{ExecErr: errBoom}, wantErr: "boom"},
+		{name: "status message cas match", query: casSQL, args: []any{"m1", "b1", "m0"}, script: Script{StatusMessageIDs: map[string]string{"b1": "m0"}}, wantTag: "UPDATE 1", wantIDs: map[string]string{"b1": "m1"}},
+		{name: "status message cas mismatch", query: casSQL, args: []any{"m1", "b1", "m9"}, script: Script{StatusMessageIDs: map[string]string{"b1": "m0"}}, wantTag: "UPDATE 0", wantIDs: map[string]string{"b1": "m0"}},
+		{name: "status message cas unknown build", query: casSQL, args: []any{"m1", "b9", "m0"}, script: Script{StatusMessageIDs: map[string]string{"b1": "m0"}}, wantTag: "UPDATE 0", wantIDs: map[string]string{"b1": "m0"}},
+		{name: "status message cas short args", query: casSQL, args: []any{"m1", "b1"}, script: Script{StatusMessageIDs: map[string]string{"b1": "m0"}}, wantTag: "UPDATE 0", wantIDs: map[string]string{"b1": "m0"}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			db, _ := tc.script.DB()
-			tag, err := db.Exec(context.Background(), tc.query)
+			tag, err := db.Exec(context.Background(), tc.query, tc.args...)
 			if errText(err) != tc.wantErr || tag.String() != tc.wantTag {
 				t.Errorf("Exec = %q, %v; want %q, %q", tag, err, tc.wantTag, tc.wantErr)
+			}
+			if !maps.Equal(tc.script.StatusMessageIDs, tc.wantIDs) {
+				t.Errorf("StatusMessageIDs = %v, want %v", tc.script.StatusMessageIDs, tc.wantIDs)
 			}
 		})
 	}

@@ -85,6 +85,9 @@ type EriClient interface {
 	CancelDispatch(ctx context.Context, chunkID string) error
 	Prompt(ctx context.Context, threadID, prompt string) error
 	Widget(ctx context.Context, req StatusWidgetRequest) (string, error)
+	// DeleteWidget removes a status widget message posted by agent. A message
+	// that is already gone is a success.
+	DeleteWidget(ctx context.Context, agent, channelID, messageID string) error
 	Message(ctx context.Context, channelID, content string) error
 }
 
@@ -224,6 +227,12 @@ func (c *HTTPEriClient) Widget(ctx context.Context, req StatusWidgetRequest) (st
 		return "", fmt.Errorf("unmarshal eri widget response: %w", uErr)
 	}
 	return res.MessageID, nil
+}
+
+// DeleteWidget is a no-op: eri exposes no widget delete route, so a status
+// widget posted through the HTTP fallback stays in place.
+func (*HTTPEriClient) DeleteWidget(context.Context, string, string, string) error {
+	return nil
 }
 
 func (c *HTTPEriClient) Message(ctx context.Context, channelID, content string) error {

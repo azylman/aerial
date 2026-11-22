@@ -3,8 +3,10 @@ package executor
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -44,14 +46,53 @@ func (m *mockBusExecutor) Publish(_ context.Context, subject, _ string, _ any) e
 	return nil
 }
 
-type mockWidgetStore struct {
+// casWidgetStore is a CAS-correct in-memory status message id store for one
+// build: stored is the current status_message_id, writes counts swaps.
+type casWidgetStore struct {
 	store.VanadisStore
 
-	updateErr error
+	mu     sync.Mutex
+	stored string
+	casErr error
+	writes int
 }
 
-func (m *mockWidgetStore) UpdateBuildStatusMessageID(_ context.Context, _, _ string) error {
-	return m.updateErr
+func (m *casWidgetStore) CompareAndSwapBuildStatusMessageID(_ context.Context, _, oldID, newID string) (bool, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.casErr != nil {
+		return false, m.casErr
+	}
+	if m.stored != oldID {
+		return false, nil
+	}
+	m.stored = newID
+	m.writes++
+	return true, nil
+}
+
+// mintingEriClient is a concurrency-safe fake whose Widget posts a new card
+// with a unique id on every call and records deleted card ids.
+type mintingEriClient struct {
+	eritest.Client
+
+	mu      sync.Mutex
+	minted  int
+	deleted []string
+}
+
+func (m *mintingEriClient) Widget(context.Context, StatusWidgetRequest) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.minted++
+	return fmt.Sprintf("new-%d", m.minted), nil
+}
+
+func (m *mintingEriClient) DeleteWidget(_ context.Context, _, _, messageID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.deleted = append(m.deleted, messageID)
+	return nil
 }
 
 func TestNewExecutor(t *testing.T) {
@@ -247,35 +288,93 @@ func TestExecutorResolveCIFailureDetailsChecked(t *testing.T) {
 
 func TestExecutor_SyncBuildWidget(t *testing.T) {
 	t.Parallel()
-	eri := &eritest.Client{WidgetID: "widget-msg-456"}
-	exec := NewExecutor("", eri, nil, "", "example-owner", nil)
-	st := &mockWidgetStore{}
+	errCAS := errors.New("cas unavailable")
+	tests := []struct {
+		name        string
+		nilExec     bool
+		noStore     bool
+		eri         eritest.Client
+		known       string
+		stored      string
+		casErr      error
+		wantID      string
+		wantErr     string
+		wantStored  string
+		wantWrites  int
+		wantDeleted []string
+	}{
+		{name: "nil executor is a no-op", nilExec: true, known: "old", stored: "old", wantStored: "old"},
+		{name: "edit in place stores nothing", eri: eritest.Client{WidgetID: "old"}, known: "old", stored: "old", wantID: "old", wantStored: "old"},
+		{name: "first post stores the new card", eri: eritest.Client{WidgetID: "new"}, wantID: "new", wantStored: "new", wantWrites: 1},
+		{name: "sink win stores the new card", eri: eritest.Client{WidgetID: "new"}, known: "old", stored: "old", wantID: "new", wantStored: "new", wantWrites: 1},
+		{name: "sink loss deletes the new card", eri: eritest.Client{WidgetID: "new"}, known: "old", stored: "other", wantStored: "other", wantDeleted: []string{"new"}},
+		{name: "sink loss tolerates delete failure", eri: eritest.Client{WidgetID: "new", DeleteWidgetErr: errors.New("discord down")}, known: "old", stored: "other", wantStored: "other", wantDeleted: []string{"new"}},
+		{name: "cas error keeps the new card", eri: eritest.Client{WidgetID: "new"}, known: "old", stored: "old", casErr: errCAS, wantID: "new", wantStored: "old"},
+		{name: "no store returns the new card", noStore: true, eri: eritest.Client{WidgetID: "new"}, known: "old", wantID: "new"},
+		{name: "widget error writes and deletes nothing", eri: eritest.Client{WidgetErr: errors.New("eri widget failure")}, known: "old", stored: "old", wantErr: "sync widget to eri: eri widget failure", wantStored: "old"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			eri := tc.eri
+			exec := NewExecutor("", &eri, nil, "", "example-owner", nil)
+			if tc.nilExec {
+				exec = nil
+			}
+			st := &casWidgetStore{stored: tc.stored, casErr: tc.casErr}
+			var vs store.VanadisStore = st
+			if tc.noStore {
+				vs = nil
+			}
+			b := model.VanadisBuild{ID: "b1", Title: "Build 1", Status: "running", ThreadID: "th-1", StatusMessageID: tc.known}
+			chunks := []model.VanadisChunk{{ID: "c1", Title: "Chunk 1", Status: "running"}}
+			got, err := exec.SyncBuildWidget(context.Background(), vs, b, chunks, "Notice!")
+			if tc.wantErr == "" {
+				require.NoError(t, err)
+			} else {
+				require.EqualError(t, err, tc.wantErr)
+			}
+			assert.Equal(t, tc.wantID, got)
+			assert.Equal(t, tc.wantStored, st.stored)
+			assert.Equal(t, tc.wantWrites, st.writes)
+			assert.Equal(t, tc.wantDeleted, eri.DeletedWidgets)
+			if !tc.nilExec {
+				require.NotNil(t, eri.LastWidget)
+				assert.Equal(t, "Notice!", eri.LastWidget.Banner)
+			}
+		})
+	}
+}
 
-	b := model.VanadisBuild{ID: "b1", Title: "Build 1", Status: "running", ThreadID: "th-1"}
+// TestExecutor_SyncBuildWidgetConcurrentSinks races N syncs that all re-post
+// the card from the same stale id: exactly one new card is stored and every
+// other new card is deleted.
+func TestExecutor_SyncBuildWidgetConcurrentSinks(t *testing.T) {
+	t.Parallel()
+	const racers = 8
+	eri := &mintingEriClient{}
+	exec := NewExecutor("", eri, nil, "", "example-owner", nil)
+	st := &casWidgetStore{stored: "stale"}
+	b := model.VanadisBuild{ID: "b1", Title: "Build 1", Status: "running", ThreadID: "th-1", StatusMessageID: "stale"}
 	chunks := []model.VanadisChunk{{ID: "c1", Title: "Chunk 1", Status: "running"}}
 
-	msgID, err := exec.SyncBuildWidget(context.Background(), st, b, chunks, "Notice!")
-	if err != nil || msgID != "widget-msg-456" {
-		t.Fatalf("SyncBuildWidget msgID = %q err = %v", msgID, err)
+	var wg sync.WaitGroup
+	for range racers {
+		wg.Go(func() {
+			_, err := exec.SyncBuildWidget(context.Background(), st, b, chunks, "")
+			assert.NoError(t, err)
+		})
 	}
-	if eri.LastWidget == nil || eri.LastWidget.Banner != "Notice!" {
-		t.Errorf("expected banner 'Notice!', got %v", eri.LastWidget)
-	}
+	wg.Wait()
 
-	// nil executor or eri client
-	if id, err := (*Executor)(nil).SyncBuildWidget(context.Background(), nil, b, chunks, ""); id != "" || err != nil {
-		t.Error("expected empty string and nil error")
+	assert.Equal(t, 1, st.writes)
+	require.Len(t, eri.deleted, racers-1)
+	all := append([]string{st.stored}, eri.deleted...)
+	want := make([]string, 0, racers)
+	for i := 1; i <= racers; i++ {
+		want = append(want, fmt.Sprintf("new-%d", i))
 	}
-
-	// eri client error
-	execErr := NewExecutor("", &eritest.Client{WidgetErr: errors.New("eri widget failure")}, nil, "", "example-owner", nil)
-	if _, err := execErr.SyncBuildWidget(context.Background(), st, b, chunks, ""); err == nil {
-		t.Error("expected error on eri failure")
-	}
-
-	// update message id error branch
-	storeUpdateErr := &mockWidgetStore{updateErr: errors.New("update err")}
-	_, _ = exec.SyncBuildWidget(context.Background(), storeUpdateErr, b, chunks, "")
+	assert.ElementsMatch(t, want, all)
 }
 
 func TestDispatchSilentWakePrompt_OccurrenceDistinguishesFailures(t *testing.T) {

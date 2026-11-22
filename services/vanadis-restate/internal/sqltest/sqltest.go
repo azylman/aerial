@@ -42,6 +42,25 @@ type Script struct {
 	FailExec string
 	// ExecTag is the command tag every Exec returns (default "UPDATE 1").
 	ExecTag string
+	// StatusMessageIDs, when non-nil, is the stored status_message_id per
+	// build: a status_message_id UPDATE compare-and-swaps it ($1 new, $2 build
+	// id, $3 expected old) and returns "UPDATE 1" or "UPDATE 0". Not safe for
+	// concurrent use.
+	StatusMessageIDs map[string]string
+}
+
+// casStatusMessageID applies a status_message_id compare-and-swap to ids.
+func casStatusMessageID(ids map[string]string, args []any) pgconn.CommandTag {
+	if len(args) < 3 {
+		return pgconn.NewCommandTag("UPDATE 0")
+	}
+	newID, buildID, oldID := fmt.Sprint(args[0]), fmt.Sprint(args[1]), fmt.Sprint(args[2])
+	cur, ok := ids[buildID]
+	if !ok || cur != oldID {
+		return pgconn.NewCommandTag("UPDATE 0")
+	}
+	ids[buildID] = newID
+	return pgconn.NewCommandTag("UPDATE 1")
 }
 
 func (s Script) route(query string) pgx.Row {
@@ -107,9 +126,12 @@ func (s Script) DB() (*DB, *[]string) {
 		}
 		return &Rows{Items: s.Chunks, Builds: s.Builds, ScanErr: s.ScanErr, RowsErr: s.RowsErr}, nil
 	}
-	exec := func(_ context.Context, query string, _ ...any) (pgconn.CommandTag, error) {
+	exec := func(_ context.Context, query string, args ...any) (pgconn.CommandTag, error) {
 		if s.ExecErr != nil && strings.Contains(query, s.FailExec) {
 			return pgconn.CommandTag{}, s.ExecErr
+		}
+		if s.StatusMessageIDs != nil && strings.Contains(query, "SET status_message_id") {
+			return casStatusMessageID(s.StatusMessageIDs, args), nil
 		}
 		return pgconn.NewCommandTag(tag), nil
 	}
