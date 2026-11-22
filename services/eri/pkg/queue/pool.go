@@ -150,6 +150,7 @@ type WorkerPool struct {
 	mu                  sync.Mutex
 	threadChs           map[string]*threadWorkerState
 	activeTurns         map[string]*turnExecution
+	turns               *TurnRegistry // Restate TurnRunner attempts live on this pod, by turn ID
 	wg                  sync.WaitGroup
 	ctx                 context.Context
 	cancel              context.CancelFunc
@@ -533,6 +534,7 @@ func New(appCfg *config.Config, cfg WorkerPoolConfig) *WorkerPool {
 		}
 	}
 
+	p.turns = NewTurnRegistry(p.closeTurnExecution)
 	p.registerClassifierAlertHandlers()
 
 	return p
@@ -909,13 +911,34 @@ func (p *WorkerPool) CloseThreadProcesses(threadID, reason string) {
 		te.cancelTurn()
 	}
 
+	p.closeSessionDaemons(db.DiscordSessionID(threadID), reason)
+}
+
+// closeSessionDaemons terminates the StreamingDaemon processes leased under sessionKey across all pools.
+func (p *WorkerPool) closeSessionDaemons(sessionKey, reason string) {
+	if p == nil || sessionKey == "" {
+		return
+	}
 	for _, target := range append(p.StatefulProcessPools(), p.ProcessPool(), p.LowEffortProcessPool(), p.MediumEffortProcessPool()) {
 		if target != nil {
-			if d, ok := target.Get(db.DiscordSessionID(threadID)); ok && d != nil {
+			if d, ok := target.Get(sessionKey); ok && d != nil {
 				logInterruptWarning(reason, d.Close())
 			}
 		}
 	}
+}
+
+// closeTurnExecution interrupts one execution: it cancels its turn context and terminates the
+// daemon leased under its session key. TurnRegistry.Stop calls it for the stopped turn only.
+func (p *WorkerPool) closeTurnExecution(te *turnExecution, reason string) {
+	if te == nil {
+		return
+	}
+	te.cancelTurn()
+	te.activeSessionMu.Lock()
+	key := te.leaseKey()
+	te.activeSessionMu.Unlock()
+	p.closeSessionDaemons(key, reason)
 }
 
 // DrainThreadPendingMessages marks all pending or processing DB messages for targetThreadID as FAILED.
