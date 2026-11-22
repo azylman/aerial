@@ -1,9 +1,10 @@
-package main
+package config
 
 import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 
@@ -20,6 +21,49 @@ const DefaultPort = "4017"
 
 // DefaultStack is the stack this indexer writes when the config omits one.
 const DefaultStack = "aerial"
+
+// DefaultSummarizerBatchLimit caps sessions summarized per RunOnce sweep.
+const DefaultSummarizerBatchLimit = 10
+
+// DefaultSummarizerMaxSteps caps stored steps folded into one summary prompt.
+const DefaultSummarizerMaxSteps = 50
+
+// DefaultSummarizerIdleThreshold bounds how recently a session must have been updated to be considered active.
+const DefaultSummarizerIdleThreshold = 10 * time.Minute
+
+// DefaultSummarizerMinStepDelta is the minimum number of new steps required before re-summarizing an already-summarized session.
+const DefaultSummarizerMinStepDelta = 20
+
+// SummarizerConfig tunes the dark-by-default per-stack idle summarizer.
+// Enabled defaults to false; the indexer ships dark until the summaries
+// cutover chunk flips it on.
+type SummarizerConfig struct {
+	Enabled       bool          `yaml:"enabled"`
+	BatchLimit    int           `yaml:"batch_limit"`
+	MaxSteps      int           `yaml:"max_steps"`
+	IdleThreshold time.Duration `yaml:"idle_threshold"`
+	MinStepDelta  int           `yaml:"min_step_delta"`
+	EriLLMURL     string        `yaml:"eri_llm_url"`
+	SensesURL     string        `yaml:"senses_url"`
+	SensesModel   string        `yaml:"senses_model"`
+}
+
+// WithDefaults fills non-positive sweep bounds; Enabled stays as configured.
+func (c SummarizerConfig) WithDefaults() SummarizerConfig {
+	if c.BatchLimit <= 0 {
+		c.BatchLimit = DefaultSummarizerBatchLimit
+	}
+	if c.MaxSteps <= 0 {
+		c.MaxSteps = DefaultSummarizerMaxSteps
+	}
+	if c.IdleThreshold <= 0 {
+		c.IdleThreshold = DefaultSummarizerIdleThreshold
+	}
+	if c.MinStepDelta <= 0 {
+		c.MinStepDelta = DefaultSummarizerMinStepDelta
+	}
+	return c
+}
 
 // Config represents runtime configuration for the transcripts indexer.
 type Config struct {
@@ -94,7 +138,7 @@ func LoadConfigFile(path string, dbURL string) (*Config, error) {
 		return nil, fmt.Errorf("config: database connection string is required")
 	}
 	natsURL := strutil.FirstNonEmpty(os.Getenv("NATS_URL"), ycfg.NATSURL)
-	summarizer := ycfg.Summarizer.withDefaults()
+	summarizer := ycfg.Summarizer.WithDefaults()
 	if strings.TrimSpace(summarizer.EriLLMURL) == "" {
 		summarizer.EriLLMURL = strings.TrimSpace(ycfg.EriLLMURL)
 	}

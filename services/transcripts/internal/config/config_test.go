@@ -1,15 +1,16 @@
-package main
+package config
 
 import (
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
-// clearConfigEnv pins every env var LoadConfig/LoadConfigFile or the NATS bus
+// ClearConfigEnv pins every env var LoadConfig/LoadConfigFile or the NATS bus
 // reads, so the pod or CI environment cannot leak into config tests.
-func clearConfigEnv(t *testing.T) {
+func ClearConfigEnv(t *testing.T) {
 	t.Helper()
 	for _, key := range []string{
 		"DATABASE_URL", "POSTGRES_URL", "POSTGRES_HOST", "POSTGRES_PORT", "POSTGRES_USER", "POSTGRES_PASSWORD", "POSTGRES_DB",
@@ -146,7 +147,7 @@ func TestLoadConfigFile(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			clearConfigEnv(t)
+			ClearConfigEnv(t)
 			for k, v := range tc.env {
 				t.Setenv(k, v)
 			}
@@ -172,6 +173,74 @@ func TestLoadConfigFile(t *testing.T) {
 			}
 			if got := viewConfig(cfg); got != tc.want {
 				t.Errorf("LoadConfigFile() = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestLoadConfig(t *testing.T) {
+	ClearConfigEnv(t)
+	t.Setenv("DATABASE_URL", "postgres://env:pass@host:5432/db")
+	tmp := filepath.Join(t.TempDir(), "transcripts.yaml")
+	if err := os.WriteFile(tmp, []byte("port: '4017'\n"), 0o644); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	cfg, err := LoadConfig(tmp)
+	if err != nil {
+		t.Fatalf("LoadConfig() err = %v", err)
+	}
+	if cfg.Port != "4017" || cfg.DatabaseURL != "postgres://env:pass@host:5432/db" {
+		t.Fatalf("LoadConfig() unexpected cfg = %+v", cfg)
+	}
+}
+
+func TestSummarizerConfigWithDefaults(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name              string
+		input             SummarizerConfig
+		wantBatchLimit    int
+		wantMaxSteps      int
+		wantIdleThreshold time.Duration
+		wantMinStepDelta  int
+	}{
+		{
+			name:              "zero values fill defaults",
+			input:             SummarizerConfig{},
+			wantBatchLimit:    DefaultSummarizerBatchLimit,
+			wantMaxSteps:      DefaultSummarizerMaxSteps,
+			wantIdleThreshold: DefaultSummarizerIdleThreshold,
+			wantMinStepDelta:  DefaultSummarizerMinStepDelta,
+		},
+		{
+			name: "custom values preserved",
+			input: SummarizerConfig{
+				BatchLimit:    5,
+				MaxSteps:      100,
+				IdleThreshold: 30 * time.Minute,
+				MinStepDelta:  50,
+			},
+			wantBatchLimit:    5,
+			wantMaxSteps:      100,
+			wantIdleThreshold: 30 * time.Minute,
+			wantMinStepDelta:  50,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := tc.input.WithDefaults()
+			if got.BatchLimit != tc.wantBatchLimit {
+				t.Errorf("BatchLimit = %d, want %d", got.BatchLimit, tc.wantBatchLimit)
+			}
+			if got.MaxSteps != tc.wantMaxSteps {
+				t.Errorf("MaxSteps = %d, want %d", got.MaxSteps, tc.wantMaxSteps)
+			}
+			if got.IdleThreshold != tc.wantIdleThreshold {
+				t.Errorf("IdleThreshold = %v, want %v", got.IdleThreshold, tc.wantIdleThreshold)
+			}
+			if got.MinStepDelta != tc.wantMinStepDelta {
+				t.Errorf("MinStepDelta = %d, want %d", got.MinStepDelta, tc.wantMinStepDelta)
 			}
 		})
 	}
