@@ -94,209 +94,166 @@ func TestPublishJetStreamJob(t *testing.T) {
 	}
 }
 
-type jetstreamHandlerCase struct {
-	name         string
-	handlerType  string
-	payload      string
-	numDelivered uint64
-	dispErrType  string
-	wantErr      bool
-	wantTerm     bool
+// jetstreamJobRouter is a router whose dispatcher is disp, retrying Discord
+// ingress after retryDelay (1ms when zero).
+func jetstreamJobRouter(disp *mockOutboundDispatcher, retryDelay time.Duration) *RouterServer {
+	if retryDelay == 0 {
+		retryDelay = time.Millisecond
+	}
+	srv := &RouterServer{cfgSrc: fixedConfig(Config{SystemChannelID: "100000000000000001"}), discordIngressRetryDelay: retryDelay}
+	srv.SetDispatcher(disp)
+	return srv
 }
 
-func jetstreamWebhookAndDeployCases() []jetstreamHandlerCase {
-	return []jetstreamHandlerCase{
-		{
-			name:        "HandleGitHubJob malformed json",
-			handlerType: "github",
-			payload:     `{bad json`,
-			wantTerm:    true,
-		},
-		{
-			name:         "HandleGitHubJob error processing payload below limit",
-			handlerType:  "github",
-			payload:      `{"event":"push","delivery":"d-2","body":"e2JhZA=="}`,
-			numDelivered: 1,
-			wantErr:      true,
-			wantTerm:     false,
-		},
-		{
-			name:         "HandleGitHubJob error processing payload at limit terms",
-			handlerType:  "github",
-			payload:      `{"event":"push","delivery":"d-2","body":"e2JhZA=="}`,
-			numDelivered: 5,
-			wantErr:      false,
-			wantTerm:     true,
-		},
-		{
-			name:        "HandleDeployJob malformed json",
-			handlerType: "deploy",
-			payload:     `{bad json`,
-			wantTerm:    true,
-		},
-		{
-			name:         "HandleDeployJob error processing payload below limit",
-			handlerType:  "deploy",
-			payload:      `{"idempotency_key":"k-2","event":{"event":"deploy_failed","repo":"azylman/aerial","pr_number":0,"target_id":"100000000000000001"}}`,
-			dispErrType:  "prompt_err",
-			numDelivered: 1,
-			wantErr:      true,
-			wantTerm:     false,
-		},
-		{
-			name:         "HandleDeployJob error processing payload at limit terms",
-			handlerType:  "deploy",
-			payload:      `{"idempotency_key":"k-2","event":{"event":"deploy_failed","repo":"azylman/aerial","pr_number":0,"target_id":"100000000000000001"}}`,
-			dispErrType:  "prompt_err",
-			numDelivered: 5,
-			wantErr:      false,
-			wantTerm:     true,
-		},
+// jetstreamJobMsg is a fake JetStream message with the given delivery count (at least 1).
+func jetstreamJobMsg(payload string, delivered uint64) *pubsubtest.Message {
+	return &pubsubtest.Message{Payload: []byte(payload), Delivered: max(delivered, 1)}
+}
+
+func assertJetstreamJobOutcome(t *testing.T, err error, msg *pubsubtest.Message, wantErr, wantTerm bool) {
+	t.Helper()
+	if (err != nil) != wantErr {
+		t.Fatalf("handler err = %v, wantErr = %v", err, wantErr)
+	}
+	if msg.Termed() != wantTerm {
+		t.Errorf("msg.Term() called = %v, want %v", msg.Termed(), wantTerm)
 	}
 }
 
-func jetstreamDiscordAndWidgetCases() []jetstreamHandlerCase {
-	return []jetstreamHandlerCase{
-		{
-			name:        "HandleDiscordIngressJob malformed json",
-			handlerType: "ingress",
-			payload:     `{bad json`,
-			wantTerm:    true,
-		},
-		{
-			name:        "HandleDiscordIngressJob stale message terms",
-			handlerType: "ingress",
-			payload:     fmt.Sprintf(`{"message_id":"123","message":{"id":"123","timestamp":%q}}`, time.Now().Add(-35*time.Minute).Format(time.RFC3339)),
-			wantTerm:    true,
-		},
-		{
-			name:        "HandleDiscordIngressJob client 4xx terms",
-			handlerType: "ingress",
-			payload:     `{"message_id":"124","message":{"id":"124"}}`,
-			dispErrType: "msg_4xx",
-			wantTerm:    true,
-			wantErr:     false,
-		},
-		{
-			name:         "HandleDiscordIngressJob cancelled context returns before dispatch",
-			handlerType:  "ingress",
-			payload:      `{"message_id":"125","message":{"id":"125"}}`,
-			dispErrType:  "msg_500",
-			numDelivered: 1,
-			wantErr:      true,
-			wantTerm:     false,
-		},
-		{
-			name:         "HandleDiscordIngressJob 5xx cancelled during backoff",
-			handlerType:  "ingress",
-			payload:      `{"message_id":"127","message":{"id":"127"}}`,
-			dispErrType:  "msg_500_cancel_backoff",
-			numDelivered: 1,
-			wantErr:      true,
-			wantTerm:     false,
-		},
-		{
-			name:         "HandleDiscordIngressJob recovers after temporary error",
-			handlerType:  "ingress",
-			payload:      `{"message_id":"126","message":{"id":"126"}}`,
-			dispErrType:  "msg_recover",
-			numDelivered: 1,
-			wantErr:      false,
-			wantTerm:     false,
-		},
-		{
-			name:         "HandleDiscordIngressJob 5xx at limit terms",
-			handlerType:  "ingress",
-			payload:      `{"message_id":"125","message":{"id":"125"}}`,
-			dispErrType:  "msg_500",
-			numDelivered: 30,
-			wantErr:      false,
-			wantTerm:     true,
-		},
-		{
-			name:        "HandleDiscordInteractionJob malformed json",
-			handlerType: "interaction",
-			payload:     `{bad json`,
-			wantTerm:    true,
-		},
-		{
-			name:         "HandleDiscordInteractionJob dispatch error at limit terms",
-			handlerType:  "interaction",
-			payload:      `{"interaction_id":"ix-2","interaction":{}}`,
-			dispErrType:  "interaction_err",
-			numDelivered: 1,
-			wantErr:      false,
-			wantTerm:     true,
-		},
-	}
-}
+const (
+	jetstreamBadGitHubJob = `{"event":"push","delivery":"d-2","body":"e2JhZA=="}`
+	jetstreamBadDeployJob = `{"idempotency_key":"k-2","event":{"event":"deploy_failed","repo":"acme/aerial","pr_number":0,"target_id":"100000000000000001"}}`
+)
 
-func jetstreamJobHandlerCases() []jetstreamHandlerCase {
-	return append(jetstreamWebhookAndDeployCases(), jetstreamDiscordAndWidgetCases()...)
-}
-
-func TestJetStreamJobHandlers(t *testing.T) {
+func TestHandleGitHubJob(t *testing.T) {
 	t.Parallel()
-	ctx := context.Background()
-
-	for _, tc := range jetstreamJobHandlerCases() {
+	tests := []struct {
+		name      string
+		payload   string
+		delivered uint64
+		wantErr   bool
+		wantTerm  bool
+	}{
+		{name: "malformed json terms", payload: `{bad json`, wantTerm: true},
+		{name: "processing error below the delivery limit naks", payload: jetstreamBadGitHubJob, delivered: 1, wantErr: true},
+		{name: "processing error at the delivery limit terms", payload: jetstreamBadGitHubJob, delivered: 5, wantTerm: true},
+	}
+	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			srv := &RouterServer{
-				cfgSrc:                   fixedConfig(Config{SystemChannelID: "100000000000000001"}),
-				discordIngressRetryDelay: 1 * time.Millisecond,
-			}
-			disp := &mockOutboundDispatcher{}
-			switch tc.dispErrType {
-			case "msg_4xx":
-				disp.discordMessageErr = errors.New("request returned status 400 Bad Request")
-			case "msg_recover":
-				disp.discordMessageErr = errors.New("request returned status 500 Internal Server Error")
-				disp.discordMessageFailCount = 1
-			case "msg_500":
-				disp.discordMessageErr = errors.New("request returned status 500 Internal Server Error")
-			case "msg_500_cancel_backoff":
-				disp.discordMessageErr = errors.New("request returned status 500 Internal Server Error")
-				srv.discordIngressRetryDelay = 5 * time.Second
-			case "interaction_err":
-				disp.discordInteractionErr = errors.New("interaction dispatch failed")
-			case "prompt_err":
-				disp.promptErr = errors.New("prompt dispatch failed")
-				disp.dispatchErr = errors.New("dispatch background failed")
-			}
-			srv.SetDispatcher(disp)
+			msg := jetstreamJobMsg(tc.payload, tc.delivered)
+			err := jetstreamJobRouter(&mockOutboundDispatcher{}, 0).HandleGitHubJob(context.Background(), msg)
+			assertJetstreamJobOutcome(t, err, msg, tc.wantErr, tc.wantTerm)
+		})
+	}
+}
 
-			memMsg := &pubsubtest.Message{Payload: []byte(tc.payload), Delivered: max(tc.numDelivered, 1)}
+func TestHandleDeployJob(t *testing.T) {
+	t.Parallel()
+	errPrompt, errDispatch := errors.New("prompt dispatch failed"), errors.New("dispatch background failed")
+	tests := []struct {
+		name      string
+		payload   string
+		delivered uint64
+		disp      *mockOutboundDispatcher
+		wantErr   bool
+		wantTerm  bool
+	}{
+		{name: "malformed json terms", payload: `{bad json`, disp: &mockOutboundDispatcher{}, wantTerm: true},
+		{
+			name: "dispatch error below the delivery limit naks", payload: jetstreamBadDeployJob, delivered: 1,
+			disp: &mockOutboundDispatcher{promptErr: errPrompt, dispatchErr: errDispatch}, wantErr: true,
+		},
+		{
+			name: "dispatch error at the delivery limit terms", payload: jetstreamBadDeployJob, delivered: 5,
+			disp: &mockOutboundDispatcher{promptErr: errPrompt, dispatchErr: errDispatch}, wantTerm: true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			msg := jetstreamJobMsg(tc.payload, tc.delivered)
+			err := jetstreamJobRouter(tc.disp, 0).HandleDeployJob(context.Background(), msg)
+			assertJetstreamJobOutcome(t, err, msg, tc.wantErr, tc.wantTerm)
+		})
+	}
+}
 
-			testCtx, cancel := context.WithCancel(ctx)
+func TestHandleDiscordIngressJob(t *testing.T) {
+	t.Parallel()
+	err4xx := errors.New("request returned status 400 Bad Request")
+	err5xx := errors.New("request returned status 500 Internal Server Error")
+	stale := fmt.Sprintf(`{"message_id":"123","message":{"id":"123","timestamp":%q}}`, time.Now().Add(-35*time.Minute).Format(time.RFC3339))
+	tests := []struct {
+		name             string
+		payload          string
+		delivered        uint64
+		disp             *mockOutboundDispatcher
+		retryDelay       time.Duration
+		cancelled        bool // ctx is cancelled before the handler runs
+		cancelOnDispatch bool // the failing dispatch cancels ctx, so the backoff wait exits
+		wantErr          bool
+		wantTerm         bool
+	}{
+		{name: "malformed json terms", payload: `{bad json`, disp: &mockOutboundDispatcher{}, wantTerm: true},
+		{name: "stale message terms", payload: stale, disp: &mockOutboundDispatcher{}, wantTerm: true},
+		{name: "client 4xx terms", payload: `{"message_id":"124","message":{"id":"124"}}`, disp: &mockOutboundDispatcher{discordMessageErr: err4xx}, wantTerm: true},
+		{
+			name: "cancelled context returns before dispatch", payload: `{"message_id":"125","message":{"id":"125"}}`, delivered: 1,
+			disp: &mockOutboundDispatcher{discordMessageErr: err5xx}, cancelled: true, wantErr: true,
+		},
+		{
+			name: "5xx cancelled during backoff", payload: `{"message_id":"127","message":{"id":"127"}}`, delivered: 1,
+			disp: &mockOutboundDispatcher{discordMessageErr: err5xx}, retryDelay: 5 * time.Second, cancelOnDispatch: true, wantErr: true,
+		},
+		{
+			name: "recovers after a temporary error", payload: `{"message_id":"126","message":{"id":"126"}}`, delivered: 1,
+			disp: &mockOutboundDispatcher{discordMessageErr: err5xx, discordMessageFailCount: 1},
+		},
+		{
+			name: "5xx at the delivery limit terms", payload: `{"message_id":"125","message":{"id":"125"}}`, delivered: 30,
+			disp: &mockOutboundDispatcher{discordMessageErr: err5xx}, wantTerm: true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
-			switch {
-			case tc.dispErrType == "msg_500" && tc.wantErr:
-				// Cancelled before the first attempt: the retry loop exits on its entry check.
+			if tc.cancelled {
 				cancel()
-			case tc.dispErrType == "msg_500_cancel_backoff":
-				// Cancelled by the failing dispatch: the loop exits from its backoff wait.
-				disp.discordMessageCancel = cancel
 			}
+			if tc.cancelOnDispatch {
+				tc.disp.discordMessageCancel = cancel
+			}
+			msg := jetstreamJobMsg(tc.payload, tc.delivered)
+			err := jetstreamJobRouter(tc.disp, tc.retryDelay).HandleDiscordIngressJob(ctx, msg)
+			assertJetstreamJobOutcome(t, err, msg, tc.wantErr, tc.wantTerm)
+		})
+	}
+}
 
-			var err error
-			switch tc.handlerType {
-			case "github":
-				err = srv.HandleGitHubJob(testCtx, memMsg)
-			case "deploy":
-				err = srv.HandleDeployJob(testCtx, memMsg)
-			case "ingress":
-				err = srv.HandleDiscordIngressJob(testCtx, memMsg)
-			case "interaction":
-				err = srv.HandleDiscordInteractionJob(testCtx, memMsg)
-			}
-
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("handler err = %v, wantErr = %v", err, tc.wantErr)
-			}
-			if tc.wantTerm && !memMsg.Termed() {
-				t.Errorf("expected msg.Term() called")
-			}
+func TestHandleDiscordInteractionJob(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		payload  string
+		disp     *mockOutboundDispatcher
+		wantErr  bool
+		wantTerm bool
+	}{
+		{name: "malformed json terms", payload: `{bad json`, disp: &mockOutboundDispatcher{}, wantTerm: true},
+		{
+			name: "dispatch error at the single-delivery limit terms", payload: `{"interaction_id":"ix-2","interaction":{}}`,
+			disp: &mockOutboundDispatcher{discordInteractionErr: errors.New("interaction dispatch failed")}, wantTerm: true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			msg := jetstreamJobMsg(tc.payload, 1)
+			err := jetstreamJobRouter(tc.disp, 0).HandleDiscordInteractionJob(context.Background(), msg)
+			assertJetstreamJobOutcome(t, err, msg, tc.wantErr, tc.wantTerm)
 		})
 	}
 }
@@ -420,7 +377,7 @@ func TestStartJobConsumersAndPublishWiring(t *testing.T) {
 				IdempotencyKey: "wire-dep",
 				Event: DeployEvent{
 					Event:    "deploy_failed",
-					Repo:     "azylman/aerial",
+					Repo:     "acme/aerial",
 					TargetID: "100000000000000001",
 				},
 			},

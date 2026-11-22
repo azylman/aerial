@@ -143,27 +143,54 @@ func (f *fixedConfigSource) Current() *Config { return &f.cfg }
 
 func fixedConfig(cfg Config) ConfigSource { return &fixedConfigSource{cfg: cfg} }
 
-func TestRouterServer_AuthAccessors(t *testing.T) {
+func TestK8sAuthEnabled(t *testing.T) {
 	t.Parallel()
-	srv := &RouterServer{}
-	if srv.k8sAuthEnabled() {
-		t.Error("expected k8sAuthEnabled to be false for empty srv")
-	}
-	if srv.getAuthenticator() != nil {
-		t.Error("expected getAuthenticator to be nil")
-	}
 	authCfg := k8sauthtest.Config(t, &k8sauthtest.RoundTripper{})
-	srvLazy := &RouterServer{cfgSrc: fixedConfig(Config{K8sAuthEnabled: true, K8sAuthConfig: authCfg})}
-	if srvLazy.authenticator != nil {
-		t.Error("expected authenticator to be uninitialized initially")
+	tests := []struct {
+		name string
+		srv  *RouterServer
+		want bool
+	}{
+		{"no config source", &RouterServer{}, false},
+		{"config disables k8s auth", &RouterServer{cfgSrc: fixedConfig(Config{})}, false},
+		{"config enables k8s auth", &RouterServer{cfgSrc: fixedConfig(Config{K8sAuthEnabled: true, K8sAuthConfig: authCfg})}, true},
+		{"enabled authenticator without config", &RouterServer{authenticator: k8sauthtest.Authenticator(t, &k8sauthtest.RoundTripper{})}, true},
 	}
-	if !srvLazy.k8sAuthEnabled() {
-		t.Error("expected k8sAuthEnabled to be true with K8sAuthEnabled in config")
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := tc.srv.k8sAuthEnabled(); got != tc.want {
+				t.Errorf("k8sAuthEnabled() = %v, want %v", got, tc.want)
+			}
+		})
 	}
-	if srvLazy.getAuthenticator() == nil {
-		t.Error("expected getAuthenticator to lazily initialize authenticator")
+}
+
+// TestGetAuthenticator pins the lazy authenticator: built once from the
+// config when k8s auth is enabled, then returned unchanged.
+func TestGetAuthenticator(t *testing.T) {
+	t.Parallel()
+	authCfg := k8sauthtest.Config(t, &k8sauthtest.RoundTripper{})
+	tests := []struct {
+		name    string
+		srv     *RouterServer
+		wantNil bool
+	}{
+		{"no config source", &RouterServer{}, true},
+		{"config disables k8s auth", &RouterServer{cfgSrc: fixedConfig(Config{})}, true},
+		{"config enables k8s auth", &RouterServer{cfgSrc: fixedConfig(Config{K8sAuthEnabled: true, K8sAuthConfig: authCfg})}, false},
+		{"preset authenticator", &RouterServer{authenticator: k8sauthtest.Authenticator(t, &k8sauthtest.RoundTripper{})}, false},
 	}
-	if srvLazy.authenticator == nil {
-		t.Error("expected authenticator to be set after getAuthenticator")
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			first := tc.srv.getAuthenticator()
+			if (first == nil) != tc.wantNil {
+				t.Fatalf("getAuthenticator() = %v, want nil %v", first, tc.wantNil)
+			}
+			if second := tc.srv.getAuthenticator(); second != first {
+				t.Errorf("second getAuthenticator() = %p, want the cached %p", second, first)
+			}
+		})
 	}
 }
