@@ -12,37 +12,6 @@ import (
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 )
 
-func TestSymbolResolution(t *testing.T) {
-	t.Parallel()
-	tmpDir := t.TempDir()
-	repoDir := filepath.Join(tmpDir, "aerial")
-	if err := os.MkdirAll(repoDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	code := `package test
-
-func DoAwesomeThing() {
-	println("awesome")
-}
-
-type AwesomeStruct struct {
-	Field int
-}
-`
-	if err := os.WriteFile(filepath.Join(repoDir, "awesome.go"), []byte(code), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	spans, ok := ResolveSymbolSpans(tmpDir, "aerial", []string{"awesome.go"}, []string{"DoAwesomeThing", "AwesomeStruct"})
-	if !ok || len(spans) == 0 {
-		t.Fatalf("ResolveSymbolSpans failed, spans = %v, ok = %v", spans, ok)
-	}
-	if !strings.Contains(spans[0], "DoAwesomeThing") || !strings.Contains(spans[0], "AwesomeStruct") {
-		t.Errorf("spans missing symbols: %v", spans)
-	}
-}
-
 func TestFormatChunkPromptWithShareRoot(t *testing.T) {
 	t.Parallel()
 	b := model.VanadisBuild{
@@ -156,7 +125,7 @@ func TestRepoCheckoutDir_Cases(t *testing.T) {
 		{repo: ".", wantOK: false},
 		{repo: "..", wantOK: false},
 		{repo: "aerial", wantPath: "/share/aerial", wantOK: true},
-		{repo: "azylman/aerial", wantPath: "/share/aerial", wantOK: true},
+		{repo: "acme/aerial", wantPath: "/share/aerial", wantOK: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.repo, func(t *testing.T) {
@@ -222,69 +191,50 @@ func TestFindSymbolSpan_Cases(t *testing.T) {
 
 func TestResolveSymbolSpans(t *testing.T) {
 	t.Parallel()
-	tmpDir := t.TempDir()
-	repoDir := filepath.Join(tmpDir, "aerial")
+	shareRoot := t.TempDir()
+	repoDir := filepath.Join(shareRoot, "aerial")
 	if err := os.MkdirAll(repoDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	testFile := filepath.Join(repoDir, "test.go")
-	if err := os.WriteFile(testFile, []byte("package main\n\nfunc MyTargetFunc() {\n}\n"), 0o644); err != nil {
-		t.Fatal(err)
+	for name, content := range map[string]string{
+		"test.go":    "package main\n\nfunc MyTargetFunc() {\n}\n",
+		"awesome.go": "package test\n\nfunc DoAwesomeThing() {\n\tprintln(\"awesome\")\n}\n\ntype AwesomeStruct struct {\n\tField int\n}\n",
+	} {
+		if err := os.WriteFile(filepath.Join(repoDir, name), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	tests := []struct {
-		name          string
-		shareRoot     string
-		repo          string
-		files         []string
-		symbols       []string
-		wantResolved  bool
-		wantSpanCount int
+		name         string
+		repo         string
+		files        []string
+		symbols      []string
+		want         []string
+		wantResolved bool
 	}{
+		{name: "invalid repo path", repo: ".", files: []string{"test.go"}, symbols: []string{"MyTargetFunc"}},
+		{name: "nonexistent file", repo: "aerial", files: []string{"nonexistent.go"}, symbols: []string{"MyTargetFunc"}},
+		{name: "file exists symbol missing", repo: "aerial", files: []string{"test.go"}, symbols: []string{"MissingSymbol"}},
 		{
-			name:         "invalid repo path",
-			shareRoot:    tmpDir,
-			repo:         ".",
-			files:        []string{"test.go"},
-			symbols:      []string{"MyTargetFunc"},
-			wantResolved: false,
+			name: "success resolving symbol", repo: "aerial", files: []string{"./test.go"}, symbols: []string{"MyTargetFunc"},
+			want: []string{"- test.go: MyTargetFunc (L3-L4)"}, wantResolved: true,
 		},
 		{
-			name:         "nonexistent file",
-			shareRoot:    tmpDir,
-			repo:         "aerial",
-			files:        []string{"nonexistent.go"},
-			symbols:      []string{"MyTargetFunc"},
-			wantResolved: false,
+			name: "multiple symbols in one file", repo: "aerial", files: []string{"awesome.go"}, symbols: []string{"DoAwesomeThing", "AwesomeStruct"},
+			want: []string{"- awesome.go: DoAwesomeThing (L3-L5), AwesomeStruct (L7-L9)"}, wantResolved: true,
 		},
 		{
-			name:         "file exists symbol missing",
-			shareRoot:    tmpDir,
-			repo:         "aerial",
-			files:        []string{"test.go"},
-			symbols:      []string{"MissingSymbol"},
-			wantResolved: false,
-		},
-		{
-			name:          "success resolving symbol",
-			shareRoot:     tmpDir,
-			repo:          "aerial",
-			files:         []string{"test.go"},
-			symbols:       []string{"MyTargetFunc"},
-			wantResolved:  true,
-			wantSpanCount: 1,
+			name: "partial resolution keeps found spans", repo: "aerial", files: []string{"test.go", "awesome.go"}, symbols: []string{"MyTargetFunc"},
+			want: []string{"- test.go: MyTargetFunc (L3-L4)"},
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			spans, ok := ResolveSymbolSpans(tc.shareRoot, tc.repo, tc.files, tc.symbols)
-			if ok != tc.wantResolved {
-				t.Fatalf("ResolveSymbolSpans ok = %v, want %v", ok, tc.wantResolved)
-			}
-			if len(spans) != tc.wantSpanCount {
-				t.Errorf("spans count = %d, want %d", len(spans), tc.wantSpanCount)
-			}
+			spans, ok := ResolveSymbolSpans(shareRoot, tc.repo, tc.files, tc.symbols)
+			assert.Equal(t, tc.wantResolved, ok)
+			assert.Equal(t, tc.want, spans)
 		})
 	}
 }
@@ -299,50 +249,84 @@ func TestNormalizeSymbolName(t *testing.T) {
 	}
 }
 
-func TestFailurePromptDirectives(t *testing.T) {
+func TestFormatCIFailurePrompt(t *testing.T) {
 	t.Parallel()
-	ev := pubsub.PRLifecycleEvent{
-		Repo:      "azylman/aerial",
-		PRNumber:  123,
-		CheckName: "test-unit",
-		Branch:    "feat/test",
-		HeadSHA:   "abcdef1",
+	tests := []struct {
+		name         string
+		ev           pubsub.PRLifecycleEvent
+		details      string
+		wantContains []string
+		wantMissing  string
+	}{
+		{
+			name:    "ci check demands a fix or blocked line",
+			ev:      pubsub.PRLifecycleEvent{Repo: "acme/aerial", PRNumber: 123, CheckName: "test-unit", Branch: "feat/test", HeadSHA: "abcdef1"},
+			details: "extracted failure details",
+			wantContains: []string{
+				"PR #123", "extracted failure details", "[VANADIS CI REMEDIATION — MANDATORY]",
+				"must end in exactly one machine-visible outcome: (1) a fix pushed", "(2) a final line in the form REMEDIATION BLOCKED",
+				"Ending this turn with neither a commit nor that blocked final line is a failed remediation", "counts as no outcome",
+				"smallest boundary-crossing fix", "REMEDIATION BLOCKED: <reason and the decision needed>",
+			},
+			wantMissing: "critically evaluate each RoboRev finding",
+		},
+		{
+			name: "roborev check allows a recorded rebuttal",
+			ev: pubsub.PRLifecycleEvent{
+				Repo: "aerial", PRNumber: 101, CheckName: "roborev", HeadSHA: "abcdef1", Branch: "feat/test",
+				CheckURL: "https://github.com/acme/aerial/actions/runs/123/job/456789",
+			},
+			details: "details",
+			wantContains: []string{
+				"critically evaluate each RoboRev finding", "[VANADIS CI REMEDIATION — MANDATORY]",
+				"must end in exactly one machine-visible outcome: (1) a verified fix pushed", "(2) a technical rebuttal recorded via",
+				"(3) a final line in the form REMEDIATION BLOCKED",
+				"Ending this turn with no commit, no override, and no blocked final line is a failed remediation",
+				"REMEDIATION BLOCKED: <reason and the decision needed>",
+			},
+			wantMissing: "Ending this turn with neither a commit",
+		},
 	}
-	got := FormatCIFailurePrompt(ev, "extracted failure details")
-	if !strings.Contains(got, "PR #123") || !strings.Contains(got, "extracted failure details") {
-		t.Errorf("FormatCIFailurePrompt missing details: %s", got)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := FormatCIFailurePrompt(tc.ev, tc.details)
+			for _, want := range tc.wantContains {
+				assert.Contains(t, got, want)
+			}
+			assert.NotContains(t, got, tc.wantMissing)
+		})
 	}
-	for _, want := range []string{"[VANADIS CI REMEDIATION — MANDATORY]", "must end in exactly one machine-visible outcome: (1) a fix pushed", "(2) a final line in the form REMEDIATION BLOCKED", "Ending this turn with neither a commit nor that blocked final line is a failed remediation", "counts as no outcome", "smallest boundary-crossing fix", "REMEDIATION BLOCKED: <reason and the decision needed>"} {
-		if !strings.Contains(got, want) {
-			t.Errorf("FormatCIFailurePrompt missing %q: %s", want, got)
-		}
-	}
+}
 
-	conflictGot := FormatConflictPrompt(ev)
-	if !strings.Contains(conflictGot, "Merge conflict") || !strings.Contains(conflictGot, "PR #123") {
-		t.Errorf("FormatConflictPrompt missing details: %s", conflictGot)
+func TestFormatConflictPrompt(t *testing.T) {
+	t.Parallel()
+	const tail = ", merge origin/main to resolve conflicts, verify locally, and push to update the PR via " +
+		`'/share/aerial/scripts/aerial-pr.sh submit <scratch_dir> "<commit_msg>"' ` +
+		"(PR_DESCRIPTION.md is not required when updating an existing PR; never run bare 'git push')."
+	tests := []struct {
+		name string
+		ev   pubsub.PRLifecycleEvent
+		want string
+	}{
+		{
+			name: "qualified repo and branch",
+			ev:   pubsub.PRLifecycleEvent{Repo: "acme/aerial", PRNumber: 123, Branch: "refs/heads/feat/test", HeadSHA: "abcdef1"},
+			want: "Merge conflict detected on PR #123 on acme/aerial (branch: feat/test, head: abcdef1). " +
+				"Please check out the branch via '/share/aerial/scripts/aerial-pr.sh init aerial --branch feat/test'" + tail,
+		},
+		{
+			name: "missing repo and branch fall back to placeholders",
+			ev:   pubsub.PRLifecycleEvent{PRNumber: 101, HeadSHA: "abcdef1"},
+			want: "Merge conflict detected on PR #101 on  (branch: <branch>, head: abcdef1). " +
+				"Please check out the branch via '/share/aerial/scripts/aerial-pr.sh init aerial --branch <branch>'" + tail,
+		},
 	}
-
-	roborevEv := pubsub.PRLifecycleEvent{
-		Repo:      "aerial",
-		PRNumber:  101,
-		CheckName: "roborev",
-		HeadSHA:   "abcdef1",
-		Branch:    "feat/test",
-		CheckURL:  "https://github.com/azylman/aerial/actions/runs/123/job/456789",
-	}
-	roborevGot := FormatCIFailurePrompt(roborevEv, "details")
-	if !strings.Contains(roborevGot, "critically evaluate each RoboRev finding") {
-		t.Errorf("expected RoboRev directive, got %q", roborevGot)
-	}
-	for _, want := range []string{"[VANADIS CI REMEDIATION — MANDATORY]", "must end in exactly one machine-visible outcome: (1) a verified fix pushed", "(2) a technical rebuttal recorded via", "(3) a final line in the form REMEDIATION BLOCKED", "Ending this turn with no commit, no override, and no blocked final line is a failed remediation", "REMEDIATION BLOCKED: <reason and the decision needed>"} {
-		if !strings.Contains(roborevGot, want) {
-			t.Errorf("RoboRev prompt missing %q: %s", want, roborevGot)
-		}
-	}
-	roborevConflict := FormatConflictPrompt(roborevEv)
-	if !strings.Contains(roborevConflict, "Merge conflict detected on PR #101") {
-		t.Errorf("expected conflict prompt, got %q", roborevConflict)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tc.want, FormatConflictPrompt(tc.ev))
+		})
 	}
 }
 
