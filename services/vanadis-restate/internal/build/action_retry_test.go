@@ -16,6 +16,7 @@ import (
 	"github.com/azylman/aerial/pkg/eriwire"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/executor"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
+	"github.com/azylman/aerial/services/vanadis-restate/internal/sqltest"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
 )
 
@@ -104,7 +105,7 @@ func TestBuildRetryAction(t *testing.T) {
 			current := model.VanadisChunk{ID: "c1", BuildID: "b1", Mode: "action", Status: "failed"}
 			status := "failed"
 			lost := tc.lostCommit
-			st := retryFixtureStore(&mu, &current, &status, model.VanadisChunk{ID: "c0", Status: "completed"}, tc.failBuild, &lost)
+			st := store.New(sqltest.RetryFixtureDB(&mu, &current, &status, model.VanadisChunk{ID: "c0", Status: "completed"}, tc.failBuild, &lost), "example-owner")
 			authority := &retryAuthorityFixture{VanadisStore: st, current: &current, buildStatus: &status}
 			rt := &retryJournalRuntime{fakeObjectRuntime: newFakeObjectRuntime("b1"), journal: map[string]reconcileStepOutput{}, loseReset: tc.lostJournal, reconcileErr: tc.reconcileErr}
 			bo := NewBuildObject("", nil, func(restate.ObjectContext) objectRuntime { return rt }).WithAuthority(authority, nil)
@@ -197,13 +198,13 @@ func TestRetryActionDispatchRecovery(t *testing.T) {
 			current := model.VanadisChunk{ID: "c1", BuildID: "b1", Mode: "action", Status: "failed", Instructions: "verify"}
 			status := "failed"
 			lost := false
-			st := retryFixtureStore(&mu, &current, &status, model.VanadisChunk{ID: "c0", Status: "completed"}, false, &lost)
+			st := store.New(sqltest.RetryFixtureDB(&mu, &current, &status, model.VanadisChunk{ID: "c0", Status: "completed"}, false, &lost), "example-owner")
 			authority := &retryAuthorityFixture{VanadisStore: st, current: &current, buildStatus: &status}
 			f := &retryDispatchFixture{accepted: map[string]eriwire.BrainDispatchRequest{}}
 			ts := httptest.NewServer(f)
 			defer ts.Close()
 			rt := &retryJournalRuntime{fakeObjectRuntime: newFakeObjectRuntime("b1"), journal: map[string]reconcileStepOutput{}, loseReconcile: tc.loseJournal}
-			bo := NewBuildObject("", nil, func(restate.ObjectContext) objectRuntime { return rt }).WithAuthority(authority, executor.NewExecutor(t.TempDir(), executor.NewHTTPEriClient(ts.URL, ts.Client()), nil, "", "azylman", nil))
+			bo := NewBuildObject("", nil, func(restate.ObjectContext) objectRuntime { return rt }).WithAuthority(authority, executor.NewExecutor(t.TempDir(), executor.NewHTTPEriClient(ts.URL, ts.Client()), nil, "", "example-owner", nil))
 			req := store.RetryActionChunkRequest{BuildID: "b1", ChunkID: "c1", ExpectedDispatchID: "vanadis-c1-turn-0", Reason: "retry", ExpectedInstructions: tc.expected, ReplacementInstructions: tc.replacement}
 			got, err := bo.RetryActionChunk(nil, req)
 			if tc.loseJournal {

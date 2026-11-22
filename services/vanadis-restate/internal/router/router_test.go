@@ -2,8 +2,6 @@ package router
 
 import (
 	"context"
-	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -13,10 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	restate "github.com/restatedev/sdk-go"
 	"github.com/restatedev/sdk-go/x/mocks"
@@ -25,9 +21,9 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/azylman/aerial/pkg/pubsub"
-	"github.com/azylman/aerial/pkg/strutil"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/build"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
+	"github.com/azylman/aerial/services/vanadis-restate/internal/sqltest"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
 )
 
@@ -189,334 +185,14 @@ func TestBuildRouterService_InvokerWiring(t *testing.T) {
 }
 
 type (
-	bareStore struct{ store *store.Store }
-	dbScript  struct {
-		bare                        *bareStore
-		routes                      []sqlRoute
-		row, buildRow, countRow     pgx.Row
-		chunks                      []model.VanadisChunk
-		builds                      []model.VanadisBuild
-		beginErr, queryErr, scanErr error
-		rowsErr, execErr, commitErr error
-		rollbackErr                 error
-		failExec, execTag           string
-	}
+	dbScript = sqltest.Script
+	sqlRoute = sqltest.Route
 )
 
-type sqlRoute struct {
-	match string
-	row   pgx.Row
-}
-
-func (s dbScript) resolveQueryRow(query string, args []any, candidates *[]string) pgx.Row {
-	for _, arg := range args {
-		if cands, ok := arg.([]string); ok {
-			*candidates = cands
-			break
-		}
-	}
-	if strings.Contains(query, "RETURNING ci_fail_count") {
-		for _, r := range s.routes {
-			if strings.Contains(query, r.match) {
-				return r.row
-			}
-		}
-		if s.row != nil {
-			return s.row
-		}
-		if s.execTag == "UPDATE 0" {
-			return errRow(pgx.ErrNoRows)
-		}
-		return valuesRow(1)
-	}
-	for _, r := range s.routes {
-		if strings.Contains(query, r.match) {
-			return r.row
-		}
-	}
-	if strings.Contains(query, "COALESCE(pr_number, 0), stall_nudges FROM vanadis_chunks") && len(s.chunks) > 0 && !isActionRow(s.row) {
-		c := s.chunks[0]
-		return valuesRow(c.ID, c.BuildID, c.ChunkIndex, c.Mode, c.Title, c.Status, c.PRNumber, c.StallNudges)
-	}
-	if strings.HasPrefix(query, "SELECT id FROM vanadis_builds WHERE id = (SELECT build_id") {
-		return valuesRow("b1")
-	}
-	if s.countRow != nil && strings.Contains(query, "COUNT(*)") {
-		return s.countRow
-	}
-	if s.buildRow != nil && strings.Contains(query, "FROM vanadis_builds") {
-		return s.buildRow
-	}
-	return s.row
-}
-
-func (s dbScript) open() (*store.Store, *[]string) {
-	if s.bare != nil {
-		return s.bare.store, new([]string)
-	}
-	db, candidates := s.openRaw()
+func open(s dbScript) (*store.Store, *[]string) {
+	db, candidates := s.DB()
 	return store.New(db, "example-org"), candidates
 }
-
-func (s dbScript) openRaw() (mockDB, *[]string) {
-	candidates := new([]string)
-	tag := strutil.FirstNonEmpty(s.execTag, "UPDATE 1")
-	queryRow := func(_ context.Context, query string, args ...any) pgx.Row {
-		return s.resolveQueryRow(query, args, candidates)
-	}
-	query := func(context.Context, string, ...any) (pgx.Rows, error) {
-		if s.queryErr != nil {
-			return nil, s.queryErr
-		}
-		return &mockRows{items: s.chunks, builds: s.builds, scanErr: s.scanErr, rowsErr: s.rowsErr}, nil
-	}
-	exec := func(_ context.Context, query string, _ ...any) (pgconn.CommandTag, error) {
-		if s.execErr != nil && strings.Contains(query, s.failExec) {
-			return pgconn.CommandTag{}, s.execErr
-		}
-		return pgconn.NewCommandTag(tag), nil
-	}
-	tx := &mockTx{commitErr: s.commitErr, rollbackErr: s.rollbackErr, queryRowFn: queryRow, queryFn: query, execFn: exec}
-	return mockDB{
-		queryRowFn: queryRow,
-		queryFn:    query,
-		execFn:     exec,
-		beginFn: func(context.Context) (pgx.Tx, error) {
-			if s.beginErr != nil {
-				return nil, s.beginErr
-			}
-			return tx, nil
-		},
-	}, candidates
-}
-
-func errRow(err error) *mockRow { return &mockRow{err: err} }
-
-type genericMockRow struct {
-	scanFn func(dest ...any) error
-}
-
-func valuesRow(vals ...any) *genericMockRow {
-	return &genericMockRow{scanFn: func(dest ...any) error { return scanValues(dest, vals...) }}
-}
-
-func scanValues(dest []any, vals ...any) error {
-	if len(vals) > len(dest) {
-		return fmt.Errorf("scan: %d values for %d destinations", len(vals), len(dest))
-	}
-	for i, v := range vals {
-		if v == nil {
-			continue
-		}
-		ptr, val := reflect.ValueOf(dest[i]), reflect.ValueOf(v)
-		if ptr.Kind() != reflect.Pointer || ptr.IsNil() || ptr.Elem().Type() != val.Type() {
-			return fmt.Errorf("scan column %d: destination %T cannot hold %T", i, dest[i], v)
-		}
-		ptr.Elem().Set(val)
-	}
-	return nil
-}
-
-func (r *genericMockRow) Scan(dest ...any) error {
-	if r.scanFn != nil {
-		return r.scanFn(dest...)
-	}
-	return nil
-}
-
-type mockRow struct {
-	b   *model.VanadisBuild
-	err error
-}
-
-func fillBuildDest(b model.VanadisBuild, dest []any) error {
-	if len(dest) == 7 {
-		return scanValues(dest, b.ID, b.ThreadID, b.Tier, b.Title, b.Objective, b.Status, b.StatusMessageID)
-	}
-	if len(dest) != 12 {
-		return fmt.Errorf("scan build: %d destinations, want 12", len(dest))
-	}
-	agent := b.Agent
-	if agent == "" {
-		agent = "aerial"
-	}
-	return scanValues(dest, b.ID, agent, b.ThreadID, b.Tier, b.Title, b.Objective, b.SharedContext, b.Status, b.StatusMessageID, b.Quiet, b.CreatedAt, b.UpdatedAt)
-}
-
-func (r *mockRow) Scan(dest ...any) error {
-	if r.err != nil {
-		return r.err
-	}
-	if len(dest) == 1 && r.b != nil {
-		return scanValues(dest, r.b.Status)
-	}
-	if r.b != nil {
-		return fillBuildDest(*r.b, dest)
-	}
-	return nil
-}
-
-type mockRows struct {
-	pgx.Rows
-
-	items            []model.VanadisChunk
-	builds           []model.VanadisBuild
-	idx              int
-	scanErr, rowsErr error
-}
-
-func (*mockRows) Close()       {}
-func (r *mockRows) Err() error { return r.rowsErr }
-func (r *mockRows) Next() bool {
-	if len(r.builds) > 0 && len(r.items) == 0 {
-		r.idx++
-		return r.idx <= len(r.builds)
-	}
-	if r.idx < len(r.items) {
-		r.idx++
-		return true
-	}
-	return false
-}
-
-func (r *mockRows) scan12(dest []any) error {
-	if len(r.builds) > 0 && r.idx > 0 && r.idx <= len(r.builds) {
-		return fillBuildDest(r.builds[r.idx-1], dest)
-	}
-	if len(r.items) > 0 && r.idx > 0 && r.idx <= len(r.items) {
-		c := r.items[r.idx-1]
-		b := model.VanadisBuild{ID: c.BuildID, Title: c.Title}
-		return fillBuildDest(b, dest)
-	}
-	return nil
-}
-
-func (r *mockRows) scan10(dest []any) error {
-	if len(r.items) > 0 && r.idx > 0 && r.idx <= len(r.items) {
-		c := r.items[r.idx-1]
-		return scanValues(dest, c.ID, c.ChunkIndex, c.Mode, c.Repo, c.Title, c.Status, c.PRNumber, c.StartedAt, c.CompletedAt, c.UpdatedAt)
-	}
-	return nil
-}
-
-func (r *mockRows) scan18(dest []any) error {
-	if len(r.items) > 0 && r.idx > 0 && r.idx <= len(r.items) {
-		c := r.items[r.idx-1]
-		return scanValues(dest, c.ID, c.BuildID, c.ChunkIndex, c.Mode, c.Repo, c.Title, c.Instructions, c.TargetFiles, c.TargetSymbols, c.Effort, c.AcceptanceCriteria, c.Status, c.PRNumber, c.StallNudges, sql.NullTime{Time: c.StartedAt, Valid: !c.StartedAt.IsZero()}, sql.NullTime{Time: c.CompletedAt, Valid: !c.CompletedAt.IsZero()}, c.CreatedAt, c.UpdatedAt)
-	}
-	return nil
-}
-
-func (r *mockRows) scan25(dest []any) error {
-	if len(r.items) > 0 && r.idx > 0 && r.idx <= len(r.items) {
-		c := r.items[r.idx-1]
-		rawCIChecks := recoveryFixtureChecks(c)
-		rawRolloutState := []byte(`{"expected_jobs":["eri"]}`)
-		return scanValues(dest, c.ID, c.BuildID, c.ChunkIndex, c.Mode, c.Repo, c.Title, c.Instructions, c.TargetFiles, c.TargetSymbols, c.Effort, c.AcceptanceCriteria, c.Status, c.PRNumber, c.StallNudges, c.DependsOn, c.CIFailCount, rawCIChecks, rawRolloutState, c.Banner, c.MergeAwakeableID, c.DeployAwakeableID, sql.NullTime{Time: c.StartedAt, Valid: !c.StartedAt.IsZero()}, sql.NullTime{Time: c.CompletedAt, Valid: !c.CompletedAt.IsZero()}, c.CreatedAt, c.UpdatedAt)
-	}
-	return scanValues(dest, "c1", "b1", 0, "pr", "aerial", "c1", "inst", []string{}, []string{}, "medium", []string{}, "pending", 0, 0, []string{}, 0, []byte("{}"), []byte("{}"), "", "", "", sql.NullTime{}, sql.NullTime{}, time.Now(), time.Now())
-}
-
-func (r *mockRows) Scan(dest ...any) error {
-	if r.scanErr != nil {
-		return r.scanErr
-	}
-	switch len(dest) {
-	case 2, 3:
-		if len(r.items) > 0 && r.idx > 0 && r.idx <= len(r.items) {
-			return scanValues(dest, r.items[r.idx-1].BuildID, r.items[r.idx-1].ID)
-		}
-		return nil
-	case 12:
-		return r.scan12(dest)
-	case 10:
-		return r.scan10(dest)
-	case 18:
-		return r.scan18(dest)
-	case 25:
-		return r.scan25(dest)
-	default:
-		return nil
-	}
-}
-
-type mockTx struct {
-	pgx.Tx
-
-	execFn                 func(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error)
-	queryFn                func(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
-	queryRowFn             func(ctx context.Context, sql string, args ...any) pgx.Row
-	commitErr, rollbackErr error
-}
-
-func (t *mockTx) Exec(ctx context.Context, query string, args ...any) (pgconn.CommandTag, error) {
-	if t.execFn != nil {
-		return t.execFn(ctx, query, args...)
-	}
-	return pgconn.NewCommandTag("INSERT 0 1"), nil
-}
-
-func (t *mockTx) Query(ctx context.Context, query string, args ...any) (pgx.Rows, error) {
-	if t.queryFn != nil {
-		return t.queryFn(ctx, query, args...)
-	}
-	return &mockRows{}, nil
-}
-
-func (t *mockTx) QueryRow(ctx context.Context, query string, args ...any) pgx.Row {
-	if t.queryRowFn != nil {
-		return t.queryRowFn(ctx, query, args...)
-	}
-	return &mockRow{}
-}
-func (t *mockTx) Commit(_ context.Context) error   { return t.commitErr }
-func (t *mockTx) Rollback(_ context.Context) error { return t.rollbackErr }
-
-type mockDB struct {
-	execFn     func(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
-	queryFn    func(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
-	queryRowFn func(ctx context.Context, sql string, args ...any) pgx.Row
-	beginFn    func(ctx context.Context) (pgx.Tx, error)
-}
-
-func (db mockDB) Exec(ctx context.Context, s string, a ...any) (pgconn.CommandTag, error) {
-	if db.execFn != nil {
-		return db.execFn(ctx, s, a...)
-	}
-	return pgconn.NewCommandTag("UPDATE 1"), nil
-}
-
-func (db mockDB) Query(ctx context.Context, s string, a ...any) (pgx.Rows, error) {
-	if db.queryFn != nil {
-		return db.queryFn(ctx, s, a...)
-	}
-	return &mockRows{}, nil
-}
-
-func (db mockDB) QueryRow(ctx context.Context, s string, a ...any) pgx.Row {
-	if db.queryRowFn != nil {
-		return db.queryRowFn(ctx, s, a...)
-	}
-	return &mockRow{}
-}
-
-func (db mockDB) Begin(ctx context.Context) (pgx.Tx, error) {
-	if db.beginFn != nil {
-		return db.beginFn(ctx)
-	}
-	return &mockTx{}, nil
-}
-
-func recoveryFixtureChecks(c model.VanadisChunk) []byte {
-	if c.HeadSHA == "" && c.MergeSHA == "" {
-		return []byte(`{"lint":"passed"}`)
-	}
-	checks := map[string]string{"_head_sha": c.HeadSHA, "_merge_sha": c.MergeSHA}
-	raw, _ := json.Marshal(checks)
-	return raw
-}
-
-func isActionRow(row pgx.Row) bool { _, ok := row.(*genericMockRow); return ok }
 
 func routerTestMetricsMux() *http.ServeMux {
 	mux := http.NewServeMux()
@@ -595,7 +271,7 @@ func makeRouterMockContext(t *testing.T) restate.Context {
 // routeStore opens a scripted store for a route table row; a nil
 // store.VanadisStore row exercises the router's nil-store paths.
 func routeStore(db dbScript) store.VanadisStore {
-	st, _ := db.open()
+	st, _ := open(db)
 	return st
 }
 
@@ -621,41 +297,41 @@ func TestBuildRouterService_RoutePREvent(t *testing.T) {
 		{name: "typed nil store normalized to no-op", ev: pubsub.PRLifecycleEvent{Repo: "aerial", PRNumber: 101, Event: "opened"}, st: (*store.Store)(nil)},
 		{
 			name: "primary lookup matched", ev: pubsub.PRLifecycleEvent{Repo: "aerial", PRNumber: 101, Event: "synchronize"},
-			st: routeStore(dbScript{row: valuesRow("c1", "b-matched", 0, "medium", false)}), wantBuildID: "b-matched",
+			st: routeStore(dbScript{Row: sqltest.ValuesRow("c1", "b-matched", 0, "medium", false)}), wantBuildID: "b-matched",
 		},
 		{
 			name: "primary lookup error records metric", ev: pubsub.PRLifecycleEvent{Repo: "aerial", PRNumber: 101, Event: "synchronize"},
-			st: routeStore(dbScript{row: errRow(errors.New("db query error"))}), wantErr: true, wantMetric: 1,
+			st: routeStore(dbScript{Row: sqltest.ErrRow(errors.New("db query error"))}), wantErr: true, wantMetric: 1,
 		},
 		{
 			name: "branch-based fallback resolution", ev: pubsub.PRLifecycleEvent{Repo: "aerial", PRNumber: 102, Event: "opened", Branch: branchChunk},
-			st:          routeStore(dbScript{row: errRow(pgx.ErrNoRows), routes: []sqlRoute{{match: "FROM vanadis_chunks c WHERE c.id = $1", row: valuesRow("b-branch")}}}),
+			st:          routeStore(dbScript{Row: sqltest.ErrRow(pgx.ErrNoRows), Routes: []sqlRoute{{Match: "FROM vanadis_chunks c WHERE c.id = $1", Row: sqltest.ValuesRow("b-branch")}}}),
 			wantBuildID: "b-branch",
 		},
 		{
 			name: "thread and repo fallback resolution", ev: pubsub.PRLifecycleEvent{Repo: "aerial", PRNumber: 103, Event: "opened", Branch: branchTS, TargetID: "thread-123"},
-			st: routeStore(dbScript{row: errRow(pgx.ErrNoRows), chunks: threadChunks}), wantBuildID: "b-thread",
+			st: routeStore(dbScript{Row: sqltest.ErrRow(pgx.ErrNoRows), Chunks: threadChunks}), wantBuildID: "b-thread",
 		},
 		{
 			name: "dependabot guard exclusion", ev: pubsub.PRLifecycleEvent{Repo: "aerial", PRNumber: 104, Event: "opened", Branch: "refs/heads/dependabot/npm_and_yarn/foo", TargetID: "thread-123"},
-			st: routeStore(dbScript{row: errRow(pgx.ErrNoRows), chunks: threadChunks}),
+			st: routeStore(dbScript{Row: sqltest.ErrRow(pgx.ErrNoRows), Chunks: threadChunks}),
 		},
 		{
 			name: "quiet guard exclusion", ev: pubsub.PRLifecycleEvent{Repo: "aerial", PRNumber: 105, Event: "opened", Branch: "feat/something", TargetID: "thread-123", Quiet: true},
-			st: routeStore(dbScript{row: errRow(pgx.ErrNoRows), chunks: threadChunks}),
+			st: routeStore(dbScript{Row: sqltest.ErrRow(pgx.ErrNoRows), Chunks: threadChunks}),
 		},
 		{
 			name: "unmatched no-op routing", ev: pubsub.PRLifecycleEvent{Repo: "aerial", PRNumber: 106, Event: "opened", Branch: "feat/something"},
-			st: routeStore(dbScript{row: errRow(pgx.ErrNoRows)}),
+			st: routeStore(dbScript{Row: sqltest.ErrRow(pgx.ErrNoRows)}),
 		},
 		{
 			name: "branch-based lookup error propagates", ev: pubsub.PRLifecycleEvent{Repo: "aerial", PRNumber: 107, Event: "opened", Branch: branchChunk},
-			st:      routeStore(dbScript{row: errRow(pgx.ErrNoRows), routes: []sqlRoute{{match: "FROM vanadis_chunks c WHERE c.id = $1", row: errRow(errors.New("lookup err"))}}}),
+			st:      routeStore(dbScript{Row: sqltest.ErrRow(pgx.ErrNoRows), Routes: []sqlRoute{{Match: "FROM vanadis_chunks c WHERE c.id = $1", Row: sqltest.ErrRow(errors.New("lookup err"))}}}),
 			wantErr: true, wantMetric: 1,
 		},
 		{
 			name: "thread-based lookup error propagates", ev: pubsub.PRLifecycleEvent{Repo: "aerial", PRNumber: 108, Event: "opened", Branch: branchTS, TargetID: "thread-123"},
-			st: routeStore(dbScript{row: errRow(pgx.ErrNoRows), queryErr: errors.New("lookup err")}), wantErr: true, wantMetric: 1,
+			st: routeStore(dbScript{Row: sqltest.ErrRow(pgx.ErrNoRows), QueryErr: errors.New("lookup err")}), wantErr: true, wantMetric: 1,
 		},
 	}
 	for _, tc := range tests {
@@ -680,12 +356,12 @@ func TestBuildRouterService_RouteDispatchOutcome(t *testing.T) {
 		wantErr     bool
 		wantMetric  float64
 	}{
-		{name: "empty chunk id is a no-op", chunkID: "", st: routeStore(dbScript{row: valuesRow("b-dispatch")})},
-		{name: "matched chunk routes to default runner", chunkID: "c1", st: routeStore(dbScript{row: valuesRow("b-dispatch")}), wantBuildID: "b-dispatch"},
-		{name: "chunk not found is a no-op", chunkID: "c-unknown", st: routeStore(dbScript{row: errRow(store.ErrChunkNotFound)})},
-		{name: "no rows chunk not routed", chunkID: "c1", st: routeStore(dbScript{row: errRow(pgx.ErrNoRows)})},
+		{name: "empty chunk id is a no-op", chunkID: "", st: routeStore(dbScript{Row: sqltest.ValuesRow("b-dispatch")})},
+		{name: "matched chunk routes to default runner", chunkID: "c1", st: routeStore(dbScript{Row: sqltest.ValuesRow("b-dispatch")}), wantBuildID: "b-dispatch"},
+		{name: "chunk not found is a no-op", chunkID: "c-unknown", st: routeStore(dbScript{Row: sqltest.ErrRow(store.ErrChunkNotFound)})},
+		{name: "no rows chunk not routed", chunkID: "c1", st: routeStore(dbScript{Row: sqltest.ErrRow(pgx.ErrNoRows)})},
 		{name: "nil store is a no-op", chunkID: "c1"},
-		{name: "query error records metric", chunkID: "c1", st: routeStore(dbScript{row: errRow(errors.New("db query error"))}), wantErr: true, wantMetric: 1},
+		{name: "query error records metric", chunkID: "c1", st: routeStore(dbScript{Row: sqltest.ErrRow(errors.New("db query error"))}), wantErr: true, wantMetric: 1},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -702,9 +378,9 @@ func TestBuildRouterService_RouteDispatchOutcome(t *testing.T) {
 
 func TestBuildRouterService_RouteAttachPR(t *testing.T) {
 	prRow := func(buildID string) store.VanadisStore {
-		return routeStore(dbScript{row: valuesRow("c1", buildID, 0, "medium", false)})
+		return routeStore(dbScript{Row: sqltest.ValuesRow("c1", buildID, 0, "medium", false)})
 	}
-	unmatched := routeStore(dbScript{row: errRow(pgx.ErrNoRows)})
+	unmatched := routeStore(dbScript{Row: sqltest.ErrRow(pgx.ErrNoRows)})
 	tests := []struct {
 		name        string
 		routerAgent string
@@ -713,12 +389,12 @@ func TestBuildRouterService_RouteAttachPR(t *testing.T) {
 		wantBuildID string // empty: a freshly generated standalone build id
 		wantErr     bool
 	}{
-		{name: "validation failure", st: routeStore(dbScript{row: valuesRow("b-existing")}), req: store.AttachChunkPRRequest{}, wantErr: true},
-		{name: "chunk id resolves existing build", st: routeStore(dbScript{row: valuesRow("b-existing")}), req: store.AttachChunkPRRequest{ChunkID: "c1", PRNumber: 101, Repo: "aerial"}, wantBuildID: "b-existing"},
-		{name: "existing build ignores caller agent", st: routeStore(dbScript{row: valuesRow("b1")}), req: store.AttachChunkPRRequest{ChunkID: "c1", PRNumber: 7, Agent: "agent-alpha"}, wantBuildID: "b1"},
+		{name: "validation failure", st: routeStore(dbScript{Row: sqltest.ValuesRow("b-existing")}), req: store.AttachChunkPRRequest{}, wantErr: true},
+		{name: "chunk id resolves existing build", st: routeStore(dbScript{Row: sqltest.ValuesRow("b-existing")}), req: store.AttachChunkPRRequest{ChunkID: "c1", PRNumber: 101, Repo: "aerial"}, wantBuildID: "b-existing"},
+		{name: "existing build ignores caller agent", st: routeStore(dbScript{Row: sqltest.ValuesRow("b1")}), req: store.AttachChunkPRRequest{ChunkID: "c1", PRNumber: 7, Agent: "agent-alpha"}, wantBuildID: "b1"},
 		{name: "repo lookup resolves existing pr", st: prRow("b-repo"), req: store.AttachChunkPRRequest{PRNumber: 101, Repo: "aerial"}, wantBuildID: "b-repo"},
 		{name: "existing pr on default runner", routerAgent: "agent-beta", st: prRow("b2"), req: store.AttachChunkPRRequest{Repo: "aerial", PRNumber: 7}, wantBuildID: "b2"},
-		{name: "chunk not found starts standalone build", st: routeStore(dbScript{row: errRow(store.ErrChunkNotFound)}), req: store.AttachChunkPRRequest{PRNumber: 999, Repo: "aerial"}},
+		{name: "chunk not found starts standalone build", st: routeStore(dbScript{Row: sqltest.ErrRow(store.ErrChunkNotFound)}), req: store.AttachChunkPRRequest{PRNumber: 999, Repo: "aerial"}},
 		{name: "nil store starts standalone build", req: store.AttachChunkPRRequest{ChunkID: "c1", PRNumber: 101, Repo: "aerial"}},
 		{name: "new build without caller runs on default agent", st: unmatched, req: store.AttachChunkPRRequest{Repo: "aerial", PRNumber: 7}},
 		{name: "new build without caller ignores scoped router", routerAgent: "agent-beta", st: unmatched, req: store.AttachChunkPRRequest{Repo: "aerial", PRNumber: 7}},
@@ -746,7 +422,7 @@ func TestBuildRouterService_RouteAttachPR(t *testing.T) {
 }
 
 func TestBuildRouterService_RouteFailChunk(t *testing.T) {
-	found := routeStore(dbScript{row: valuesRow("b-fail")})
+	found := routeStore(dbScript{Row: sqltest.ValuesRow("b-fail")})
 	tests := []struct {
 		name           string
 		st             store.VanadisStore
@@ -757,9 +433,9 @@ func TestBuildRouterService_RouteFailChunk(t *testing.T) {
 		wantMetric     float64
 	}{
 		{name: "validation failure", st: found, req: model.FailChunkRequest{}, wantErr: true},
-		{name: "chunk not found", st: routeStore(dbScript{row: errRow(store.ErrChunkNotFound)}), req: model.FailChunkRequest{ChunkID: "c-missing", Reason: "boom"}, wantErr: true},
+		{name: "chunk not found", st: routeStore(dbScript{Row: sqltest.ErrRow(store.ErrChunkNotFound)}), req: model.FailChunkRequest{ChunkID: "c-missing", Reason: "boom"}, wantErr: true},
 		{name: "nil store is chunk not found", req: model.FailChunkRequest{ChunkID: "c1", Reason: "error"}, wantErr: true},
-		{name: "query error records metric", st: routeStore(dbScript{row: errRow(errors.New("db query error"))}), req: model.FailChunkRequest{ChunkID: "c1", Reason: "error"}, wantErr: true, wantMetric: 1},
+		{name: "query error records metric", st: routeStore(dbScript{Row: sqltest.ErrRow(errors.New("db query error"))}), req: model.FailChunkRequest{ChunkID: "c1", Reason: "error"}, wantErr: true, wantMetric: 1},
 		{name: "legacy request routes to default runner", st: found, req: model.FailChunkRequest{ChunkID: "c1", Reason: "boom"}, wantBuildID: "b-fail"},
 		{name: "current generation", st: found, req: model.FailChunkRequest{BuildID: "b-fail", ChunkID: "c1", Reason: "boom", DispatchID: "vanadis-c1-turn-1"}, wantBuildID: "b-fail", wantDispatchID: "vanadis-c1-turn-1"},
 		{name: "wrong owner", st: found, req: model.FailChunkRequest{BuildID: "other", ChunkID: "c1", Reason: "boom", DispatchID: "vanadis-c1-turn-1"}, wantErr: true},
@@ -791,15 +467,15 @@ func TestBuildRouterService_RouteBuildReconcile(t *testing.T) {
 		wantReason  string
 	}{
 		{name: "empty build id rejected", buildID: " ", wantErr: true},
-		{name: "default runner", buildID: "b1", db: dbScript{buildRow: &mockRow{b: &model.VanadisBuild{ID: "b1"}}}, wantBuildID: "b1", wantReason: "widget_sync"},
-		{name: "unknown build dropped", buildID: "b3", db: dbScript{buildRow: errRow(pgx.ErrNoRows)}},
-		{name: "storage error propagates", buildID: "b4", db: dbScript{buildRow: errRow(errors.New("db down"))}, wantErr: true},
+		{name: "default runner", buildID: "b1", db: dbScript{BuildRow: &sqltest.Row{Build: &model.VanadisBuild{ID: "b1"}}}, wantBuildID: "b1", wantReason: "widget_sync"},
+		{name: "unknown build dropped", buildID: "b3", db: dbScript{BuildRow: sqltest.ErrRow(pgx.ErrNoRows)}},
+		{name: "storage error propagates", buildID: "b4", db: dbScript{BuildRow: sqltest.ErrRow(errors.New("db down"))}, wantErr: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			inv := &mockInvoker{}
-			st, _ := tc.db.open()
+			st, _ := open(tc.db)
 			router := NewBuildRouterService(st, func(restate.Context) BuildObjectInvoker { return inv })
 			err := router.RouteBuildReconcile(makeRouterMockContext(t), tc.buildID)
 			if tc.wantErr {
