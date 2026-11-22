@@ -352,7 +352,7 @@ func TestDefaultDaemonSpawner_RetryAndTransientError(t *testing.T) {
 		ctx           context.Context
 		bin           string
 		retryDelays   []time.Duration
-		spawnOnceFn   func(ctx context.Context, bin string, args []string, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error)
+		spawnMode     string
 		expectSuccess bool
 		expectErrSub  string
 		assertCtxErr  bool
@@ -362,7 +362,7 @@ func TestDefaultDaemonSpawner_RetryAndTransientError(t *testing.T) {
 			ctx:           context.Background(),
 			bin:           missingWithOldBin,
 			retryDelays:   []time.Duration{time.Millisecond, time.Millisecond},
-			spawnOnceFn:   wrappedMissingSpawn,
+			spawnMode:     "missing",
 			expectSuccess: false,
 		},
 		{
@@ -370,7 +370,7 @@ func TestDefaultDaemonSpawner_RetryAndTransientError(t *testing.T) {
 			ctx:           context.Background(),
 			bin:           nonExecBin,
 			retryDelays:   []time.Duration{time.Millisecond, time.Millisecond},
-			spawnOnceFn:   wrappedNonExecSpawn,
+			spawnMode:     "non_exec",
 			expectSuccess: false,
 		},
 		{
@@ -378,7 +378,7 @@ func TestDefaultDaemonSpawner_RetryAndTransientError(t *testing.T) {
 			ctx:           context.Background(),
 			bin:           "dummy-binary",
 			retryDelays:   []time.Duration{time.Millisecond, 2 * time.Millisecond},
-			spawnOnceFn:   mockRecoverySpawn,
+			spawnMode:     "recovery",
 			expectSuccess: true,
 		},
 		{
@@ -386,7 +386,7 @@ func TestDefaultDaemonSpawner_RetryAndTransientError(t *testing.T) {
 			ctx:           cancelCtx,
 			bin:           missingWithOldBin,
 			retryDelays:   []time.Duration{500 * time.Millisecond},
-			spawnOnceFn:   mockCancelSpawn,
+			spawnMode:     "cancel",
 			expectSuccess: false,
 			expectErrSub:  "failed spawning daemon",
 			assertCtxErr:  true,
@@ -395,23 +395,28 @@ func TestDefaultDaemonSpawner_RetryAndTransientError(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			var spawnOnceFn func(ctx context.Context, bin string, args []string, cfg DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, ProcessHandle, error)
+			switch tc.spawnMode {
+			case "missing":
+				spawnOnceFn = wrappedMissingSpawn
+			case "non_exec":
+				spawnOnceFn = wrappedNonExecSpawn
+			case "recovery":
+				spawnOnceFn = mockRecoverySpawn
+			case "cancel":
+				spawnOnceFn = mockCancelSpawn
+			default:
+				t.Fatalf("unknown spawnMode %q", tc.spawnMode)
+			}
 			spawner := &DefaultDaemonSpawner{
 				RetryDelays: tc.retryDelays,
-				spawnOnceFn: tc.spawnOnceFn,
+				spawnOnceFn: spawnOnceFn,
 			}
 			stdin, stdout, stderr, handle, err := spawner.Spawn(tc.ctx, DaemonConfig{
 				AgyBin: tc.bin,
 			})
 			if !tc.expectSuccess {
-				if err == nil {
-					t.Fatalf("expected error, got nil")
-				}
-				if tc.expectErrSub != "" && !strings.Contains(err.Error(), tc.expectErrSub) {
-					t.Fatalf("expected error containing %q, got %v", tc.expectErrSub, err)
-				}
-				if tc.assertCtxErr && !errors.Is(err, context.Canceled) {
-					t.Fatalf("expected errors.Is(err, context.Canceled), got %v", err)
-				}
+				assertSpawnFailure(t, err, tc.expectErrSub, tc.assertCtxErr)
 				return
 			}
 
@@ -424,17 +429,35 @@ func TestDefaultDaemonSpawner_RetryAndTransientError(t *testing.T) {
 		})
 	}
 
-	if missingAttempts != 3 {
-		t.Errorf("expected missing binary to exhaust 3 attempts, got %d", missingAttempts)
+	assertSpawnerAttempts(t, missingAttempts, nonExecAttempts, recoveryAttempts, cancelAttempts)
+}
+
+func assertSpawnFailure(t *testing.T, err error, expectSub string, assertCtx bool) {
+	t.Helper()
+	if err == nil {
+		t.Fatalf("expected error, got nil")
 	}
-	if nonExecAttempts != 3 {
-		t.Errorf("expected non-exec binary to exhaust 3 attempts, got %d", nonExecAttempts)
+	if expectSub != "" && !strings.Contains(err.Error(), expectSub) {
+		t.Fatalf("expected error containing %q, got %v", expectSub, err)
 	}
-	if recoveryAttempts != 2 {
-		t.Errorf("expected recovering case to take exactly 2 attempts, got %d", recoveryAttempts)
+	if assertCtx && !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected errors.Is(err, context.Canceled), got %v", err)
 	}
-	if cancelAttempts != 1 {
-		t.Errorf("expected cancel case to attempt once before canceling wait, got %d", cancelAttempts)
+}
+
+func assertSpawnerAttempts(t *testing.T, missing, nonExec, recovery, cancel int) {
+	t.Helper()
+	if missing != 3 {
+		t.Errorf("expected missing binary to exhaust 3 attempts, got %d", missing)
+	}
+	if nonExec != 3 {
+		t.Errorf("expected non-exec binary to exhaust 3 attempts, got %d", nonExec)
+	}
+	if recovery != 2 {
+		t.Errorf("expected recovering case to take exactly 2 attempts, got %d", recovery)
+	}
+	if cancel != 1 {
+		t.Errorf("expected cancel case to attempt once before canceling wait, got %d", cancel)
 	}
 }
 
