@@ -4,8 +4,9 @@ package app
 // (prstate, cilog, executor REST) shares one githubauth.Transport whose
 // credential is picked per request by the github_credential setting in
 // DefaultServiceConfigPath (vanadis_restate.github_credential: app|pat,
-// default app). App secrets stay env; the choice is non-secret YAML read JIT
-// so an aerial-config PR moves traffic without a restart.
+// default app). The App private key stays env; the App IDs are non-secret
+// YAML (env fallback) read once at startup; the choice is non-secret YAML
+// read JIT so an aerial-config PR moves traffic without a restart.
 
 import (
 	"errors"
@@ -84,26 +85,58 @@ type serviceYAML struct {
 		GitHubCredential *string `yaml:"github_credential"`
 		// GitHubOwner qualifies bare repo names; read once at startup.
 		GitHubOwner string `yaml:"github_owner"`
+		// GitHubAppID and GitHubAppInstallationID are the GitHub App's
+		// numeric IDs (not secrets); read once at startup.
+		GitHubAppID             string `yaml:"github_app_id"`
+		GitHubAppInstallationID string `yaml:"github_app_installation_id"`
 	} `yaml:"vanadis_restate"`
 }
 
-// ReadGitHubOwner reads vanadis_restate.github_owner from the service config
-// at path. A read or parse failure, or an unset or blank owner, is an error:
-// there is no code default, so vanadis-restate refuses to start without it.
-func ReadGitHubOwner(path string, readFile func(string) ([]byte, error)) (string, error) {
+// ServiceSettings are the startup values read from the service config.
+type ServiceSettings struct {
+	GitHubOwner             string
+	GitHubAppID             string
+	GitHubAppInstallationID string
+}
+
+// ReadServiceSettings reads the vanadis_restate startup settings from the
+// service config at path. A read or parse failure, or an unset or blank
+// github_owner, is an error: there is no code default, so vanadis-restate
+// refuses to start without it. The App IDs are optional (empty keeps the env
+// fallback in WithServiceSettings).
+func ReadServiceSettings(path string, readFile func(string) ([]byte, error)) (ServiceSettings, error) {
 	data, err := readFile(path)
 	if err != nil {
-		return "", fmt.Errorf("read github_owner config %s: %w", path, err)
+		return ServiceSettings{}, fmt.Errorf("read service config %s: %w", path, err)
 	}
 	var cfg serviceYAML
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
-		return "", fmt.Errorf("parse github_owner config %s: %w", path, err)
+		return ServiceSettings{}, fmt.Errorf("parse service config %s: %w", path, err)
 	}
 	owner := strings.Trim(strings.TrimSpace(cfg.VanadisRestate.GitHubOwner), "/")
 	if owner == "" {
-		return "", fmt.Errorf("vanadis_restate.github_owner is not set in %s", path)
+		return ServiceSettings{}, fmt.Errorf("vanadis_restate.github_owner is not set in %s", path)
 	}
-	return owner, nil
+	return ServiceSettings{
+		GitHubOwner:             owner,
+		GitHubAppID:             strings.TrimSpace(cfg.VanadisRestate.GitHubAppID),
+		GitHubAppInstallationID: strings.TrimSpace(cfg.VanadisRestate.GitHubAppInstallationID),
+	}, nil
+}
+
+// WithServiceSettings returns c with the service config applied: the owner
+// always, and each App ID only when the YAML value is non-empty, so an unset
+// key keeps the GITHUB_APP_ID / GITHUB_APP_INSTALLATION_ID env value
+// LoadConfig read (transitional fallback).
+func (c Config) WithServiceSettings(s ServiceSettings) Config {
+	c.GitHubOwner = s.GitHubOwner
+	if s.GitHubAppID != "" {
+		c.GitHubAppID = s.GitHubAppID
+	}
+	if s.GitHubAppInstallationID != "" {
+		c.GitHubAppInstallationID = s.GitHubAppInstallationID
+	}
+	return c
 }
 
 // parseGitHubCredential resolves the github_credential choice from one read
@@ -178,7 +211,7 @@ func (c *credentialSetting) Current() string {
 	return next
 }
 
-// gitHubAuthValues are the secret inputs read once at startup.
+// gitHubAuthValues are the GitHub credential inputs fixed at startup.
 type gitHubAuthValues struct {
 	AppID          string
 	InstallationID string

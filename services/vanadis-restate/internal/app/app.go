@@ -53,8 +53,11 @@ type Config struct {
 	NATSURL           string
 	GitHubToken       string
 	// GitHubAppID, GitHubAppInstallationID and GitHubAppPrivateKey are the
-	// GitHub App secrets (env); all empty keeps every GitHub REST call on
-	// GitHubToken exactly as before.
+	// GitHub App inputs; all empty keeps every GitHub REST call on
+	// GitHubToken exactly as before. The private key is env; the IDs are
+	// read from ServiceConfigPath (vanadis_restate.github_app_id /
+	// github_app_installation_id) at startup, falling back to the
+	// GITHUB_APP_ID / GITHUB_APP_INSTALLATION_ID env when unset.
 	GitHubAppID             string
 	GitHubAppInstallationID string
 	GitHubAppPrivateKey     string
@@ -64,7 +67,7 @@ type Config struct {
 	ServiceConfigPath string
 	// GitHubOwner qualifies bare repo names for every GitHub and PR lookup;
 	// main reads it once at startup from ServiceConfigPath
-	// (vanadis_restate.github_owner). Empty fails RunApp.
+	// (vanadis_restate.github_owner, via ReadServiceSettings). Empty fails RunApp.
 	GitHubOwner  string
 	DiscordToken string
 	ShareRoot    string

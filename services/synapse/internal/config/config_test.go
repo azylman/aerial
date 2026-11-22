@@ -15,6 +15,7 @@ var synapseConfigKeysToClear = []string{
 	"HARO_URL", "HANGAR_URL", "NATS_URL",
 	"SYSTEM_CHANNEL_ID", "AUTO_UPDATE_PR_AUTHORS",
 	"WEBHOOK_FORWARD_URLS", "SYNAPSE_DEFAULT_OWNER", "DEFAULT_OWNER", "AERIAL_DEFAULT_OWNER",
+	"GITHUB_APP_ID", "GITHUB_APP_INSTALLATION_ID",
 }
 
 func TestLoadConfig_EnvAndFallbacks(t *testing.T) {
@@ -148,6 +149,9 @@ type loadConfigCase struct {
 	wantStrictErr          bool
 	wantGHCredential       string
 	wantGitHubOwner        string
+	// wantAppID and wantInstallationID are always compared (empty included).
+	wantAppID          string
+	wantInstallationID string
 }
 
 // withRestateURL prefixes a non-empty YAML fixture with the restate_url every
@@ -223,6 +227,9 @@ func assertLoadedConfigFields(t *testing.T, tc loadConfigCase, cfg Config) {
 		if check.want != "" && check.got != check.want {
 			t.Errorf("%s = %q, want %q", check.field, check.got, check.want)
 		}
+	}
+	if cfg.GitHubAppID != tc.wantAppID || cfg.GitHubAppInstallationID != tc.wantInstallationID {
+		t.Errorf("GitHub App IDs = (%q, %q), want (%q, %q)", cfg.GitHubAppID, cfg.GitHubAppInstallationID, tc.wantAppID, tc.wantInstallationID)
 	}
 	if tc.wantDefaultOwner != cfg.DefaultOwner && (tc.wantDefaultOwner || tc.localYAML != "") {
 		t.Errorf("DefaultOwner = %v, want %v", cfg.DefaultOwner, tc.wantDefaultOwner)
@@ -442,6 +449,31 @@ func loadConfigYAMLAdvancedCases() []loadConfigCase {
 			},
 		},
 		{
+			name:               "github app ids from yaml win over env",
+			localYAML:          "github_app_id: 1111\ngithub_app_installation_id: \" 2222 \"\n",
+			env:                map[string]string{"GITHUB_APP_ID": "9991", "GITHUB_APP_INSTALLATION_ID": "9992"},
+			wantAppID:          "1111",
+			wantInstallationID: "2222",
+		},
+		{
+			name:               "empty yaml github app ids fall back to env",
+			localYAML:          "github_app_id: \" \"\n",
+			env:                map[string]string{"GITHUB_APP_ID": " 9991 ", "GITHUB_APP_INSTALLATION_ID": "9992"},
+			wantAppID:          "9991",
+			wantInstallationID: "9992",
+		},
+		{
+			name:      "github app ids unset in yaml and env stay empty",
+			localYAML: "port: \"4020\"\n",
+		},
+		{
+			name:               "non-integer yaml github app id passes through verbatim",
+			localYAML:          "github_app_id: not-a-number\n",
+			env:                map[string]string{"GITHUB_APP_ID": "9991", "GITHUB_APP_INSTALLATION_ID": "9992"},
+			wantAppID:          "not-a-number",
+			wantInstallationID: "9992",
+		},
+		{
 			name:       "collaborator_ci_alerts loaded from aerial config fallback",
 			localYAML:  "port: \"4020\"\n",
 			aerialYAML: "collaborator_ci_alerts:\n  - repo: \"acme/aerial\"\n    channel_id: \"987654321098765432\"\n    authors:\n      Collaborator: \"<@333444>\"\n",
@@ -513,6 +545,8 @@ func TestRestartRequired(t *testing.T) {
 		{name: "kube token requires restart", next: withField(base, Config{KubeToken: "kube2"}), want: true},
 		{name: "nats url requires restart", next: withField(base, Config{NATSURL: "nats://nats2:4222"}), want: true},
 		{name: "github owner requires restart", next: withField(base, Config{GitHubOwner: "acme"}), want: true},
+		{name: "github app id requires restart", next: withField(base, Config{GitHubAppID: "1111"}), want: true},
+		{name: "github app installation id requires restart", next: withField(base, Config{GitHubAppInstallationID: "2222"}), want: true},
 		{name: "k8s auth enabled requires restart", next: withField(base, Config{K8sAuthEnabled: true}), want: true},
 		{name: "bots count mismatch requires restart", next: withField(base, Config{Bots: map[string]BotConfig{"aerial": base.Bots["aerial"], "agent-alpha": {DefaultOwner: true}}}), want: true},
 		{name: "bots value mismatch requires restart", next: withField(base, Config{Bots: map[string]BotConfig{"aerial": {DiscordToken: "different"}}}), want: true},

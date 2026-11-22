@@ -127,6 +127,7 @@ func TestNewGitHubTokenSource(t *testing.T) {
 		{name: "pat with App env uses PAT", credential: "pat", env: appEnv, wantValue: "pat-secret", wantSource: "pat", wantAppG: 0},
 		{name: "app without App env stays on PAT", credential: "app", wantValue: "pat-secret", wantSource: "pat", wantAppG: 1},
 		{name: "partial App env stays on PAT", credential: "app", env: gitHubAppEnv{AppID: "7"}, wantValue: "pat-secret", wantSource: "pat", wantAppG: 1},
+		{name: "non-integer App ID falls back to PAT", credential: "app", env: gitHubAppEnv{AppID: "not-a-number", InstallationID: "42", PrivateKeyPEM: keyPEM}, wantValue: "pat-secret", wantSource: "pat", wantAppG: 1},
 		{name: "app with unreachable mint falls back to PAT", credential: "app", env: gitHubAppEnv{AppID: "7", InstallationID: "99", PrivateKeyPEM: keyPEM}, wantValue: "pat-secret", wantSource: "pat", wantAppG: 1},
 	}
 	for _, tc := range tests {
