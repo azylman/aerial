@@ -16,6 +16,7 @@ import (
 
 	"github.com/azylman/aerial/services/prospera/internal/audio"
 	"github.com/azylman/aerial/services/prospera/internal/config"
+	"github.com/azylman/aerial/services/prospera/internal/fakes"
 	"github.com/azylman/aerial/services/prospera/internal/gemini"
 	"github.com/azylman/aerial/services/prospera/internal/model"
 	"github.com/azylman/aerial/services/prospera/internal/store"
@@ -41,47 +42,6 @@ func (m *mockConsultClient) ConsultMemory(ctx context.Context, query string) (st
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.memoryResp, m.memoryErr
-}
-
-type mockTwilioClient struct {
-	mu             sync.Mutex
-	hungUpCallSIDs []string
-	createdCalls   []twilio.CreateCallRequest
-	smsList        []string
-	hangupErr      error
-}
-
-func (m *mockTwilioClient) CreateCall(ctx context.Context, req twilio.CreateCallRequest) (string, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.createdCalls = append(m.createdCalls, req)
-	return "CA_mock_123", nil
-}
-
-func (m *mockTwilioClient) HangupCall(ctx context.Context, providerCallSID string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.hungUpCallSIDs = append(m.hungUpCallSIDs, providerCallSID)
-	return m.hangupErr
-}
-
-func (*mockTwilioClient) IsCallActive(ctx context.Context, providerCallSID string) (bool, error) {
-	return true, nil
-}
-
-func (m *mockTwilioClient) SendSMS(ctx context.Context, to, from, body string) (string, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.smsList = append(m.smsList, to+":"+body)
-	return "SM_mock_123", nil
-}
-
-func (*mockTwilioClient) EnsurePhoneNumber(ctx context.Context, areaCode, webhookBaseURL string) (string, error) {
-	return "+15105550100", nil
-}
-
-func (*mockTwilioClient) DownloadRecording(ctx context.Context, recordingURL string) ([]byte, string, error) {
-	return []byte("test"), "audio/wav", nil
 }
 
 // newBridgeTestSession adapts a manager session request to the concrete bridge implementation.
@@ -162,7 +122,7 @@ func TestMediaStreamBridge_Lifecycle(t *testing.T) {
 		GeminiVoiceName:     "Kore",
 	}
 
-	twilioClient := &mockTwilioClient{}
+	twilioClient := &fakes.FakeTwilio{}
 	consultClient := &mockConsultClient{
 		calendarResp: "Dentist appointment at 2pm",
 		memoryResp:   "Home address: 123 Example St",
@@ -170,7 +130,7 @@ func TestMediaStreamBridge_Lifecycle(t *testing.T) {
 	tokenMgr := twilio.NewStreamTokenManager(time.Now, nil)
 
 	bridgeFactory, bridgeRan := newSignalingBridgeFactory()
-	sessionMgr := NewCallSessionManager(staticManagerConfig{cfg: cfg}, nil, twilioClient, consultClient, tokenMgr,
+	sessionMgr := NewCallSessionManager(fakes.StaticConfig{Cfg: cfg}, nil, twilioClient, consultClient, tokenMgr,
 		WithPacerInterval(1*time.Millisecond),
 		WithGeminiDialer(func(ctx context.Context, modelName string) (*websocket.Conn, error) {
 			dialer := websocket.DefaultDialer
@@ -483,7 +443,7 @@ func TestMediaStream_TransparentReconnect(t *testing.T) {
 	}
 
 	tokenMgr := twilio.NewStreamTokenManager(time.Now, nil)
-	sessionMgr := NewCallSessionManager(staticManagerConfig{cfg: cfg}, nil, nil, nil, tokenMgr,
+	sessionMgr := NewCallSessionManager(fakes.StaticConfig{Cfg: cfg}, nil, nil, nil, tokenMgr,
 		WithPacerInterval(1*time.Millisecond),
 		WithGeminiDialer(func(ctx context.Context, modelName string) (*websocket.Conn, error) {
 			dialer := websocket.DefaultDialer
@@ -583,7 +543,7 @@ func TestMediaStream_BargeInAndVoicemail(t *testing.T) {
 
 	bargeStore := testutil.SetUpTestStore(t)
 	bridgeFactory, bridgeRan := newSignalingBridgeFactory()
-	sessionMgr := NewCallSessionManager(staticManagerConfig{cfg: &config.Config{}}, bargeStore, nil, consultClient, tokenMgr,
+	sessionMgr := NewCallSessionManager(fakes.StaticConfig{Cfg: &config.Config{}}, bargeStore, nil, consultClient, tokenMgr,
 		WithPacerInterval(1*time.Millisecond),
 		WithGeminiDialer(func(ctx context.Context, modelName string) (*websocket.Conn, error) {
 			dialer := websocket.DefaultDialer
@@ -780,7 +740,7 @@ func runMediaWebSocketModeCase(t *testing.T, tc mediaWebSocketModeTestCase) {
 	geminiWSURL := "ws" + strings.TrimPrefix(geminiServer.URL, "http")
 	tokenMgr := twilio.NewStreamTokenManager(time.Now, nil)
 	bridgeFactory, bridgeRan := newSignalingBridgeFactory()
-	sessionMgr := NewCallSessionManager(staticManagerConfig{cfg: &config.Config{}}, st, nil, nil, tokenMgr,
+	sessionMgr := NewCallSessionManager(fakes.StaticConfig{Cfg: &config.Config{}}, st, nil, nil, tokenMgr,
 		WithPacerInterval(1*time.Millisecond),
 		WithGeminiDialer(func(ctx context.Context, modelName string) (*websocket.Conn, error) {
 			dialer := websocket.DefaultDialer

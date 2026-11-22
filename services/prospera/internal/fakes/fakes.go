@@ -1,13 +1,20 @@
 // Package fakes holds prospera's shared test doubles: an in-memory store, a
-// recording twilio client, a static config source and tracing helpers. It is
+// recording twilio client, a static config source, a Twilio webhook signer and
+// tracing helpers. It is
 // imported only by _test.go files.
 package fakes
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha1" //nolint:gosec // G505: Twilio signs X-Twilio-Signature with HMAC-SHA1; the protocol fixes the hash
+	"encoding/base64"
 	"errors"
 	"net/http"
+	"net/url"
 	"slices"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -38,6 +45,27 @@ func SeedFailTransitions(store *FakeStore, toStatuses []string) {
 	for _, toStatus := range toStatuses {
 		store.FailTrans[toStatus] = true
 	}
+}
+
+// TwilioSignature returns the X-Twilio-Signature for a POST to fullURL with form:
+// base64(HMAC-SHA1(authToken, fullURL + each key in sorted order followed by each of its values)).
+func TwilioSignature(authToken, fullURL string, form url.Values) string {
+	keys := make([]string, 0, len(form))
+	for k := range form {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var sb strings.Builder
+	sb.WriteString(fullURL)
+	for _, k := range keys {
+		for _, v := range form[k] {
+			sb.WriteString(k)
+			sb.WriteString(v)
+		}
+	}
+	mac := hmac.New(sha1.New, []byte(authToken))
+	mac.Write([]byte(sb.String()))
+	return base64.StdEncoding.EncodeToString(mac.Sum(nil))
 }
 
 // InstallTestTracing installs an SDK tracer provider and the W3C trace-context
