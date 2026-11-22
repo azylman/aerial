@@ -252,14 +252,46 @@ func TestProjectionUpsertQuery(t *testing.T) {
 		wantArgs []any
 	}{
 		{
-			name:     "full snapshot",
-			snap:     ProjectionSnapshot{Repo: "aerial", PRNumber: 101, Agent: "agent-beta", Branch: " feat ", HeadSHA: "h1", MergeSHA: "m1", TargetID: snowA, Title: "T", Status: "merged", Metadata: ProjectionMetadata{Jobs: []string{"eri", "coven"}, DeploySuccessPending: true}},
-			wantArgs: []any{"azylman/aerial", 101, "agent-beta", "feat", "h1", "m1", snowA, "T", "merged", `{"deploy_success_pending":true,"jobs":["coven","eri"]}`, ownedKeysLiteral},
+			name: "full snapshot",
+			snap: ProjectionSnapshot{Repo: "aerial", PRNumber: 101, Agent: "agent-beta", Branch: " feat ", HeadSHA: "h1", MergeSHA: "m1", TargetID: snowA, Title: "T", Status: "merged", Metadata: ProjectionMetadata{Jobs: []string{"eri", "coven"}, DeploySuccessPending: true}},
+			wantArgs: append([]any{
+				"azylman/aerial", 101, "agent-beta", "feat", "h1", "m1", snowA, "T", "merged", `{"deploy_success_pending":true,"jobs":["coven","eri"]}`, ownedKeysLiteral,
+				"", "", 0, false, true, "", "",
+			}, make([]any, 18)...),
 		},
 		{
 			name:     "blank agent and empty metadata",
 			snap:     ProjectionSnapshot{Repo: "azylman/aerial", PRNumber: 5, Status: "open"},
-			wantArgs: []any{"azylman/aerial", 5, "aerial", "", "", "", "", "", "open", `{}`, ownedKeysLiteral},
+			wantArgs: append([]any{"azylman/aerial", 5, "aerial", "", "", "", "", "", "open", `{}`, ownedKeysLiteral, "", "", 0, false, false, "", ""}, make([]any, 18)...),
+		},
+		{
+			name: "typed scalars and a pre-final build snapshot",
+			snap: ProjectionSnapshot{Repo: "aerial", PRNumber: 6, Agent: "miorine", Status: "ci_failed", Metadata: ProjectionMetadata{
+				VanadisChunkID: "c1", BotID: "miorine", CIFailCount: 3, DeployFailedPublished: true, Banner: "b", WidgetState: "w",
+				BuildMetadata: &BuildMetadata{Version: 1, Kind: "pre", Repository: "azylman/aerial", WorkflowPath: "ci.yml", RunID: 9, RunNumber: 8, RunAttempt: 2, Event: "pull_request", SourceSHA: "s1", ExecutionSHA: "e1"},
+			}},
+			wantArgs: []any{
+				"azylman/aerial", 6, "miorine", "", "", "", "", "", "ci_failed",
+				`{"bot_id":"miorine","banner":"b","build_metadata":{"version":1,"kind":"pre","repository":"azylman/aerial","workflow_path":"ci.yml","run_id":9,"run_number":8,"run_attempt":2,"event":"pull_request","source_sha":"s1","execution_sha":"e1","pr_number":null,"selected":null},"ci_fail_count":3,"deploy_failed_published":true,"vanadis_chunk_id":"c1","widget_state":"w"}`,
+				ownedKeysLiteral, "c1", "miorine", 3, true, false, "b", "w",
+				1, "pre", "azylman/aerial", "ci.yml", int64(9), int64(8), 2, "pull_request", "s1", "e1", (*int)(nil),
+				(*string)(nil), (*string)(nil), (*string)(nil), (*bool)(nil), (*int)(nil), []string(nil), (*string)(nil),
+			},
+		},
+		{
+			name: "final build snapshot projects omitempty fields",
+			snap: ProjectionSnapshot{Repo: "aerial", PRNumber: 7, Status: "open", Metadata: ProjectionMetadata{
+				BuildMetadata: &BuildMetadata{Version: 1, Kind: "final", PRNumber: new(7), Service: "eri", ImageName: "aerial-eri", State: "pushed", Pushed: true, SourceAttempt: 1, ImageRefs: []string{"ghcr.io/x:1"}, Digest: "sha256:d"},
+			}},
+			wantArgs: []any{
+				"azylman/aerial", 7, "aerial", "", "", "", "", "", "open",
+				`{"build_metadata":{"version":1,"kind":"final","repository":"","workflow_path":"","run_id":0,"run_number":0,"run_attempt":0,"event":"","source_sha":"","execution_sha":"","pr_number":7,"selected":null,"service":"eri","image_name":"aerial-eri","state":"pushed","pushed":true,"source_attempt":1,"image_refs":["ghcr.io/x:1"],"digest":"sha256:d"}}`,
+				ownedKeysLiteral, "", "", 0, false, false, "", "",
+				1, "final", "", "", int64(0), int64(0), 0, "", "", "", new(7),
+				new("eri"), new("aerial-eri"), new("pushed"), new(true), new(1),
+				[]string{"ghcr.io/x:1"},
+				new("sha256:d"),
+			},
 		},
 	}
 	for _, tc := range tests {
@@ -276,75 +308,86 @@ func TestProjectionUpsertQuery(t *testing.T) {
 	}
 }
 
-// fakeRow is a hermetic pgx.Row that scans fixed string/byte values.
-type fakeRow struct {
-	vals []any
-	err  error
+// fakeProjectionTx is the hermetic pgx.Tx: Exec records each statement's
+// args and fails on the failAt-th call (1-based); Commit and Rollback record
+// how the transaction ended. Unused pgx.Tx methods panic via the nil embed.
+type fakeProjectionTx struct {
+	pgx.Tx
+
+	db *fakeProjectionDB
 }
 
-func (r fakeRow) Scan(dest ...any) error {
-	if r.err != nil {
-		return r.err
+func (t *fakeProjectionTx) Exec(_ context.Context, _ string, args ...any) (pgconn.CommandTag, error) {
+	t.db.mu.Lock()
+	defer t.db.mu.Unlock()
+	t.db.execs = append(t.db.execs, args)
+	if len(t.db.execs) == t.db.failAt {
+		return pgconn.CommandTag{}, errFakeProjection
 	}
-	for i, d := range dest {
-		switch p := d.(type) {
-		case *string:
-			v, _ := r.vals[i].(string)
-			*p = v
-		case *[]byte:
-			v, _ := r.vals[i].([]byte)
-			*p = v
-		}
+	return pgconn.NewCommandTag("INSERT 0 1"), nil
+}
+
+func (t *fakeProjectionTx) Commit(context.Context) error {
+	t.db.mu.Lock()
+	defer t.db.mu.Unlock()
+	if t.db.ended != "" {
+		return pgx.ErrTxClosed
 	}
+	t.db.ended = "commit"
 	return nil
 }
 
-// fakeProjectionDB is the hermetic ProjectionDB: Exec records the call and
-// returns execErr; QueryRow returns row.
+func (t *fakeProjectionTx) Rollback(context.Context) error {
+	t.db.mu.Lock()
+	defer t.db.mu.Unlock()
+	if t.db.ended != "" {
+		return pgx.ErrTxClosed
+	}
+	t.db.ended = "rollback"
+	return nil
+}
+
+// fakeProjectionDB is the hermetic ProjectionDB: Begin fails with beginErr
+// or opens a fakeProjectionTx that records into this struct.
 type fakeProjectionDB struct {
-	mu      sync.Mutex
-	execErr error
-	row     fakeRow
-	execs   int
-	args    []any
+	mu       sync.Mutex
+	beginErr error
+	failAt   int
+	execs    [][]any
+	ended    string
 }
 
-func (f *fakeProjectionDB) Exec(_ context.Context, _ string, args ...any) (pgconn.CommandTag, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.execs++
-	f.args = args
-	return pgconn.NewCommandTag("INSERT 0 1"), f.execErr
+func (f *fakeProjectionDB) Begin(context.Context) (pgx.Tx, error) {
+	if f.beginErr != nil {
+		return nil, f.beginErr
+	}
+	return &fakeProjectionTx{db: f}, nil
 }
 
-func (f *fakeProjectionDB) QueryRow(_ context.Context, _ string, args ...any) pgx.Row {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.args = args
-	return f.row
-}
-
-// TestPgProjectionStoreUpsert pins the production writer: one Exec per
-// projection with the upsert args, errors wrapped, nil database refused.
+// TestPgProjectionStoreUpsert pins the production writer: every projection
+// statement runs in one transaction that commits on success and rolls back
+// on the first failure, errors wrapped, nil database refused.
 func TestPgProjectionStoreUpsert(t *testing.T) {
 	t.Parallel()
 	snap := ProjectionSnapshot{Repo: "aerial", PRNumber: 101, Status: "open"}
 	tests := []struct {
 		name      string
 		nilDB     bool
-		execErr   error
+		beginErr  error
+		failAt    int
 		wantErr   string
 		wantExecs int
-		wantRepo  any
+		wantEnded string
 	}{
-		{name: "writes one row", wantExecs: 1, wantRepo: "azylman/aerial"},
-		{name: "exec failure wraps", execErr: errFakeProjection, wantErr: "upsert pr_registry projection aerial#101: fake projection store error", wantExecs: 1, wantRepo: "azylman/aerial"},
+		{name: "writes row and child tables then commits", wantExecs: 10, wantEnded: "commit"},
+		{name: "child failure rolls back the row", failAt: 4, wantErr: "upsert pr_registry projection aerial#101: fake projection store error", wantExecs: 4, wantEnded: "rollback"},
+		{name: "begin failure wraps", beginErr: errFakeProjection, wantErr: "upsert pr_registry projection aerial#101: fake projection store error"},
 		{name: "nil database refused", nilDB: true, wantErr: "projection database is nil"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			db := &fakeProjectionDB{execErr: tc.execErr}
+			db := &fakeProjectionDB{beginErr: tc.beginErr, failAt: tc.failAt}
 			store := NewPgProjectionStore(db)
 			if tc.nilDB {
 				store = NewPgProjectionStore(nil)
@@ -353,11 +396,11 @@ func TestPgProjectionStoreUpsert(t *testing.T) {
 			if gotErr := errString(err); gotErr != tc.wantErr {
 				t.Fatalf("err = %q, want %q", gotErr, tc.wantErr)
 			}
-			if db.execs != tc.wantExecs {
-				t.Fatalf("execs = %d, want %d", db.execs, tc.wantExecs)
+			if len(db.execs) != tc.wantExecs || db.ended != tc.wantEnded {
+				t.Fatalf("execs = %d ended = %q, want %d %q", len(db.execs), db.ended, tc.wantExecs, tc.wantEnded)
 			}
-			if tc.wantExecs > 0 && db.args[0] != tc.wantRepo {
-				t.Fatalf("repo arg = %v, want %v", db.args[0], tc.wantRepo)
+			if tc.wantExecs > 0 && db.execs[0][0] != "azylman/aerial" {
+				t.Fatalf("repo arg = %v, want azylman/aerial", db.execs[0][0])
 			}
 		})
 	}
@@ -368,4 +411,84 @@ func errString(err error) string {
 		return ""
 	}
 	return err.Error()
+}
+
+// TestProjectionStatements pins the child-table sync of one projection: the
+// row upsert first, then delete+upsert per child table with hand-derived
+// keys (sorted unions for jobs and kustomizations, 1-based first positions
+// for build entries, row head for checks, unparseable requested_at as
+// empty), and one upsert per build result. Empty sets bind empty arrays.
+func TestProjectionStatements(t *testing.T) {
+	t.Parallel()
+	full := ProjectionSnapshot{Repo: "aerial", PRNumber: 9, Status: "deploying", Metadata: ProjectionMetadata{
+		CIChecks:               map[string]string{"test": "passed", "lint": "failed"},
+		Jobs:                   []string{"eri"},
+		StartedJobs:            []string{"eri", "coven"},
+		DeployedJobs:           []string{"coven"},
+		JobStates:              map[string]string{"haro": "verifying_health"},
+		KustomizationRequests:  map[string]KustomizationRequest{"core": {Namespace: "flux-system", RequestedAt: "2026-11-21T22:56:58.123456789Z"}, "apps": {Namespace: "flux-system", RequestedAt: "t0"}},
+		DeployedKustomizations: []string{"infra"},
+		BuildMetadata: &BuildMetadata{
+			Kind:     "final",
+			Selected: []BuildSelection{{Service: "eri", ImageName: "aerial-eri"}, {Service: "coven", ImageName: "aerial-coven"}, {Service: "eri", ImageName: "aerial-eri"}},
+			Results: []BuildResult{
+				{Service: "eri", ImageName: "aerial-eri", State: "pushed", Pushed: true, SourceAttempt: 1, ImageRefs: []string{"r1", "r2"}, Digest: "d1"},
+				{Service: "coven", ImageName: "aerial-coven", State: "skipped"},
+				{Service: "eri", ImageName: "aerial-eri", State: "failed"},
+			},
+		},
+	}}
+	tests := []struct {
+		name string
+		snap ProjectionSnapshot
+		want [][]any
+	}{
+		{
+			name: "empty metadata clears every child table",
+			snap: ProjectionSnapshot{Repo: "aerial", PRNumber: 5, Status: "open"},
+			want: [][]any{
+				{"azylman/aerial", 5, []string{}},
+				{"azylman/aerial", 5, []string{}, []string{}},
+				{"azylman/aerial", 5, []string{}},
+				{"azylman/aerial", 5, []string{}, []bool{}, []bool{}, []bool{}, []string{}},
+				{"azylman/aerial", 5, []string{}},
+				{"azylman/aerial", 5, []string{}, []string{}, []string{}, []bool{}},
+				{"azylman/aerial", 5, []string{}, []string{}},
+				{"azylman/aerial", 5, []string{}, []string{}, []int{}},
+				{"azylman/aerial", 5, []string{}, []string{}},
+			},
+		},
+		{
+			name: "full metadata syncs every child table",
+			snap: full,
+			want: [][]any{
+				{"azylman/aerial", 9, []string{"lint", "test"}},
+				{"azylman/aerial", 9, []string{"lint", "test"}, []string{"failed", "passed"}},
+				{"azylman/aerial", 9, []string{"coven", "eri", "haro"}},
+				{"azylman/aerial", 9, []string{"coven", "eri", "haro"}, []bool{false, true, false}, []bool{true, true, false}, []bool{true, false, false}, []string{"", "", "verifying_health"}},
+				{"azylman/aerial", 9, []string{"apps", "core", "infra"}},
+				{"azylman/aerial", 9, []string{"apps", "core", "infra"}, []string{"flux-system", "flux-system", ""}, []string{"", "2026-11-21T22:56:58.123456789Z", ""}, []bool{false, false, true}},
+				{"azylman/aerial", 9, []string{"eri", "coven"}, []string{"aerial-eri", "aerial-coven"}},
+				{"azylman/aerial", 9, []string{"eri", "coven"}, []string{"aerial-eri", "aerial-coven"}, []int{1, 2}},
+				{"azylman/aerial", 9, []string{"eri", "coven"}, []string{"aerial-eri", "aerial-coven"}},
+				{"azylman/aerial", 9, "eri", "aerial-eri", 1, "pushed", true, 1, []string{"r1", "r2"}, "d1"},
+				{"azylman/aerial", 9, "coven", "aerial-coven", 2, "skipped", false, 0, []string{}, ""},
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			stmts := ProjectionStatements(tc.snap)
+			_, upsertArgs := ProjectionUpsertQuery(tc.snap)
+			if len(stmts) != len(tc.want)+1 || !reflect.DeepEqual(stmts[0].Args, upsertArgs) {
+				t.Fatalf("got %d statements, want row upsert plus %d", len(stmts), len(tc.want))
+			}
+			for i, want := range tc.want {
+				if stmts[i+1].SQL == "" || !reflect.DeepEqual(stmts[i+1].Args, want) {
+					t.Fatalf("statement %d args =\n%#v\nwant\n%#v", i+1, stmts[i+1].Args, want)
+				}
+			}
+		})
+	}
 }
