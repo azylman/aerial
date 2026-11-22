@@ -332,6 +332,10 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
+  annotations:
+    prometheus.io/job: eri
+    prometheus.io/port: "4028"
+    prometheus.io/scrape: "true"
   labels:
     app.kubernetes.io/name: eri-restate
   name: eri-restate-health
@@ -2745,6 +2749,10 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
+  annotations:
+    prometheus.io/job: vanadis-restate
+    prometheus.io/port: "4026"
+    prometheus.io/scrape: "true"
   labels:
     app.kubernetes.io/name: vanadis-restate
   name: vanadis-restate-health
