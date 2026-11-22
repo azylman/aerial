@@ -166,19 +166,20 @@ func init() {}
 `
 
 type testRunCase struct {
-	name              string
-	files             map[string]string
-	baselineJSON      string
-	configJSON        string
-	readOnlyBase      bool
-	customArgs        []string
-	targetArgs        []string
-	relTargets        []string
-	wantBaselineFiles map[string]int
-	wantFileContains  map[string]string
-	wantCode          int
-	wantOut           string
-	wantErr           string
+	name                  string
+	files                 map[string]string
+	baselineJSON          string
+	configJSON            string
+	readOnlyBase          bool
+	customArgs            []string
+	targetArgs            []string
+	relTargets            []string
+	wantBaselineFiles     map[string]int
+	wantBaselineRootFiles map[string]int
+	wantFileContains      map[string]string
+	wantCode              int
+	wantOut               string
+	wantErr               string
 }
 
 func TestRun(t *testing.T) {
@@ -416,10 +417,19 @@ type SmallB struct {
 			wantOut:  "Checked 1 Go file(s)",
 		},
 		{
-			name: "identical functions in different packages do not trigger clone violation",
+			name: "identical functions in different packages trigger cross-package clone violation",
 			files: map[string]string{
 				"pkg1/a.go": "package pkg1\n\n" + buildCloneFuncSource("CloneA"),
 				"pkg2/b.go": "package pkg2\n\n" + buildCloneFuncSource("CloneA"),
+			},
+			wantCode: 1,
+			wantErr:  "near-miss AST clone similarity 1.00 exceeds 0.80 ceiling",
+		},
+		{
+			name: "identical main functions in different packages do not trigger cross-package clone violation",
+			files: map[string]string{
+				"pkg1/main.go": "package main\n\n" + buildCloneFuncSource("main"),
+				"pkg2/main.go": "package main\n\n" + buildCloneFuncSource("main"),
 			},
 			wantCode: 0,
 			wantOut:  "Checked 2 Go file(s)",
@@ -429,6 +439,62 @@ type SmallB struct {
 
 func testRunTargetCases() []testRunCase {
 	return []testRunCase{
+		{
+			name: "root package exceeding file limit fails check without baseline",
+			files: map[string]string{
+				"services/svc/main.go": "package main\n", "services/svc/main_test.go": "package main\n",
+				"services/svc/goleak_test.go": "package main\n", "services/svc/extra.go": "package main\n",
+				"services/svc/internal/pkg/pkg.go": "package pkg\n", "pkg/util/util.go": "package util\n",
+			},
+			wantCode: 1,
+			wantErr:  "services/svc: root package has 4 Go files, exceeds limit 3 (ceiling 3: main.go, main_test.go, goleak_test.go); move domain logic and tests into internal/* subpackages",
+		},
+		{
+			name: "grandfathered root package file count passes check with baseline",
+			files: map[string]string{
+				"services/svc/main.go": "package main\n", "services/svc/main_test.go": "package main\n",
+				"services/svc/goleak_test.go": "package main\n", "services/svc/extra.go": "package main\n",
+			},
+			baselineJSON: `{"root_files":{"services/svc":4}}`,
+			wantCode:     0,
+			wantOut:      "Checked 4 Go file(s)",
+		},
+		{
+			name: "update mode records root package file count outliers into baseline",
+			files: map[string]string{
+				"services/mysvc/main.go": "package main\n", "services/mysvc/main_test.go": "package main\n",
+				"services/mysvc/goleak_test.go": "package main\n", "services/mysvc/extra.go": "package main\n",
+				"mcp/mysrv/server.go": "package main\n",
+			},
+			customArgs:            []string{"-update"},
+			wantBaselineRootFiles: map[string]int{"services/mysvc": 4},
+			wantCode:              0,
+			wantOut:               "wrote baseline",
+		},
+		{
+			name: "banned grab-bag filenames rejected in check mode",
+			files: map[string]string{
+				"pkg/helpers.go": "package pkg\n", "pkg/helpers_test.go": "package pkg\n",
+				"pkg/pure.go": "package pkg\n", "pkg/pure_test.go": "package pkg\n",
+				"pkg/utils.go": "package pkg\n", "pkg/utils_test.go": "package pkg\n",
+				"pkg/common.go": "package pkg\n", "pkg/common_test.go": "package pkg\n",
+				"pkg/types.go": "package pkg\n", "pkg/types_test.go": "package pkg\n",
+				"pkg/frozen.go": "package pkg\n", "pkg/frozen_test.go": "package pkg\n",
+				"pkg/foo_part1_test.go": "package pkg\n", "pkg/part_test.go": "package pkg\n",
+			},
+			wantCode: 1,
+			wantErr:  "filename uses banned horizontal split or grab-bag name; name files after their domain concern or move into an internal/* subpackage",
+		},
+		{
+			name: "arbitrary func field in test table slice rejected in check mode",
+			files: map[string]string{
+				"pkg/ok.go": "package pkg\n",
+				"pkg/table_test.go": "package pkg\nimport \"testing\"\nfunc TestTable(t *testing.T) {\n" +
+					"\ttests := []struct{\n\t\tname string\n\t\tonErr func(error)\n\t}{{name: \"case1\"}}\n\t_ = tests\n}\n",
+			},
+			wantCode: 1,
+			wantErr:  `test struct field "onErr" uses a banned closure func type; use declarative expectation fields instead`,
+		},
 		{
 			name: "test file hygiene violations reported in check mode",
 			files: map[string]string{
@@ -545,6 +611,7 @@ func runTestRunCase(t *testing.T, tc testRunCase) {
 		t.Errorf("stderr %q does not contain %q", stderr.String(), tc.wantErr)
 	}
 	verifyBaselineFiles(t, basePath, tc.wantBaselineFiles)
+	verifyBaselineRootFiles(t, basePath, tc.wantBaselineRootFiles)
 	verifyFileContains(t, dir, tc.wantFileContains)
 }
 
@@ -606,6 +673,25 @@ func verifyBaselineFiles(t *testing.T, basePath string, wantBaselineFiles map[st
 	for k, wantLines := range wantBaselineFiles {
 		if gotLines := base.Files[k].Lines; gotLines != wantLines {
 			t.Errorf("baseline file %q lines = %d, want %d", k, gotLines, wantLines)
+		}
+	}
+}
+
+func verifyBaselineRootFiles(t *testing.T, basePath string, wantBaselineRootFiles map[string]int) {
+	t.Helper()
+	if wantBaselineRootFiles == nil {
+		return
+	}
+	base, err := loadBaseline(basePath)
+	if err != nil {
+		t.Fatalf("load written baseline: %v", err)
+	}
+	if len(base.RootFiles) != len(wantBaselineRootFiles) {
+		t.Errorf("baseline root files count = %d, want %d: %v", len(base.RootFiles), len(wantBaselineRootFiles), base.RootFiles)
+	}
+	for k, wantCount := range wantBaselineRootFiles {
+		if gotCount := base.RootFiles[k]; gotCount != wantCount {
+			t.Errorf("baseline root_files[%q] = %d, want %d", k, gotCount, wantCount)
 		}
 	}
 }
@@ -700,7 +786,8 @@ func TestAnalyzeTestFile(t *testing.T) {
 }
 
 func analyzeTestCases() []analyzeTestCase {
-	return append(analyzeTestCasesBase(), analyzeTestCasesPorts()...)
+	all := append(analyzeTestCasesBase(), analyzeTestCasesPorts()...)
+	return append(all, analyzeTestCasesTables()...)
 }
 
 func analyzeTestCasesPorts() []analyzeTestCase {
@@ -826,44 +913,6 @@ func TestBannedCalls(req *http.Request) {
 				"type Case struct {\n\t" + "check" + " " + "func()\n}\n",
 		},
 		{
-			name: "split test names and closure fields detected",
-			content: `package pkg
-
-//nolint:gocyclo
-func TestA_Extra() {}
-func TestB_MoreCases() {}
-func TestC_Additional() {}
-func TestD_Uncovered() {}
-func TestE_EdgeCases() {}
-func TestF_CornerCases() {}
-func TestG_Branches() {}
-func TestH_AllBranches() {}
-func TestI_Chunk1_Cases() {}
-func TestJ_CoverageGaps() {}
-` + buildClosureFieldsSource(),
-			wantViolations: []string{
-				"//nolint:gocyclo is prohibited",
-				"test function TestA_Extra uses banned split/catch-all suffix",
-				"test function TestB_MoreCases uses banned split/catch-all suffix",
-				"test function TestC_Additional uses banned split/catch-all suffix",
-				"test function TestD_Uncovered uses banned split/catch-all suffix",
-				"test function TestE_EdgeCases uses banned split/catch-all suffix",
-				"test function TestF_CornerCases uses banned split/catch-all suffix",
-				"test function TestG_Branches uses banned split/catch-all suffix",
-				"test function TestH_AllBranches uses banned split/catch-all suffix",
-				"test function TestI_Chunk1_Cases uses banned split/catch-all suffix",
-				"test function TestJ_CoverageGaps uses banned split/catch-all suffix",
-				`test struct field "run" uses a banned closure func type`,
-				`test struct field "check" uses a banned closure func type`,
-				`test struct field "extraCheck" uses a banned closure func type`,
-				`test struct field "setup" uses a banned closure func type`,
-				`test struct field "validate" uses a banned closure func type`,
-				`test struct field "validator" uses a banned closure func type`,
-				`test struct field "verify" uses a banned closure func type`,
-				`test struct field "lookup" uses a banned closure func type`,
-			},
-		},
-		{
 			name:        "nonexistent file returns error",
 			nonexistent: true,
 			wantErr:     true,
@@ -903,6 +952,69 @@ func TestJ_CoverageGaps() {}
 			content: "package pkg\n",
 			wantViolations: []string{
 				"pkg/foo_additional_test.go: test filename uses banned catch-all suffix",
+			},
+		},
+	}
+}
+
+func analyzeTestCasesTables() []analyzeTestCase {
+	return []analyzeTestCase{
+		{
+			name: "split test names and closure fields detected",
+			content: `package pkg
+
+//nolint:gocyclo
+func TestA_Extra() {}
+func TestB_MoreCases() {}
+func TestC_Additional() {}
+func TestD_Uncovered() {}
+func TestE_EdgeCases() {}
+func TestF_CornerCases() {}
+func TestG_Branches() {}
+func TestH_AllBranches() {}
+func TestI_Chunk1_Cases() {}
+func TestJ_CoverageGaps() {}
+` + buildClosureFieldsSource(),
+			wantViolations: []string{
+				"//nolint:gocyclo is prohibited",
+				"test function TestA_Extra uses banned split/catch-all suffix",
+				"test function TestB_MoreCases uses banned split/catch-all suffix",
+				"test function TestC_Additional uses banned split/catch-all suffix",
+				"test function TestD_Uncovered uses banned split/catch-all suffix",
+				"test function TestE_EdgeCases uses banned split/catch-all suffix",
+				"test function TestF_CornerCases uses banned split/catch-all suffix",
+				"test function TestG_Branches uses banned split/catch-all suffix",
+				"test function TestH_AllBranches uses banned split/catch-all suffix",
+				"test function TestI_Chunk1_Cases uses banned split/catch-all suffix",
+				"test function TestJ_CoverageGaps uses banned split/catch-all suffix",
+				`test struct field "run" uses a banned closure func type`,
+				`test struct field "check" uses a banned closure func type`,
+				`test struct field "extraCheck" uses a banned closure func type`,
+				`test struct field "setup" uses a banned closure func type`,
+				`test struct field "validate" uses a banned closure func type`,
+				`test struct field "validator" uses a banned closure func type`,
+				`test struct field "verify" uses a banned closure func type`,
+				`test struct field "lookup" uses a banned closure func type`,
+			},
+		},
+		{
+			name: "arbitrary func field in slice of struct test table is detected",
+			content: `package pkg
+
+import "testing"
+
+func TestTableWithFunc(t *testing.T) {
+	tests := []struct {
+		name string
+		hook func()
+	}{
+		{name: "a"},
+	}
+	_ = tests
+}
+`,
+			wantViolations: []string{
+				`test struct field "hook" uses a banned closure func type; use declarative expectation fields instead`,
 			},
 		},
 	}
