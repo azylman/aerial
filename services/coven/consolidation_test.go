@@ -2,25 +2,106 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"math"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"go.opentelemetry.io/otel/trace"
-	_ "modernc.org/sqlite"
 )
 
+// sabotageNullFactText lets a fact row carry a NULL fact_text so scanning it
+// into a Go string fails (GetAllFactsWithEmbeddings scan error).
+const sabotageNullFactText = `ALTER TABLE facts ALTER COLUMN fact_text DROP NOT NULL; UPDATE facts SET fact_text = NULL`
+
+// queryStrings returns the single text column of every row of query.
+func queryStrings(t testing.TB, db DBTX, query string, args ...any) []string {
+	t.Helper()
+	rows, err := db.QueryContext(context.Background(), query, args...)
+	if err != nil {
+		t.Fatalf("query %q: %v", query, err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var s string
+		if err := rows.Scan(&s); err != nil {
+			t.Fatalf("scan %q: %v", query, err)
+		}
+		out = append(out, s)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("rows %q: %v", query, err)
+	}
+	return out
+}
+
+// factRows renders every stored fact as "text:reinforce_count" in id order.
+func factRows(t testing.TB, db DBTX) []string {
+	t.Helper()
+	return queryStrings(t, db, `SELECT fact_text || ':' || reinforce_count FROM facts ORDER BY id`)
+}
+
+// watermarkRow returns the stored last_extracted_rowid for (default stack, thread), 0 when absent.
+func watermarkRow(t testing.TB, db DBTX, thread string) string {
+	t.Helper()
+	got := queryStrings(t, db, `SELECT COALESCE(MAX(last_extracted_rowid), 0)::text FROM extraction_watermarks WHERE agent = $1 AND thread_id = $2`, DefaultStack, thread)
+	return got[0]
+}
+
+// seedFacts inserts facts through the production InsertFact, fact i using embs[i].
+func seedFacts(t testing.TB, store *SQLStore, texts []string, embs [][]float32) {
+	t.Helper()
+	for i, text := range texts {
+		if _, err := store.InsertFact(context.Background(), text, embs[i]); err != nil {
+			t.Fatalf("seed fact %q: %v", text, err)
+		}
+	}
+}
+
+// newIndexerServer starts a fake transcripts indexer answering every
+// trajectory read with status and the given retrieved facts and tool calls.
+func newIndexerServer(t testing.TB, status int, retrieved, toolCalls []string) *IndexerClient {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(status)
+		_ = json.NewEncoder(w).Encode(TrajectoryContext{RetrievedFacts: retrieved, ToolCalls: toolCalls})
+	}))
+	t.Cleanup(srv.Close)
+	return NewIndexerClient(srv.URL, DefaultStack, srv.Client())
+}
+
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// sequenceOllamaClient returns a different one-hot embedding (dims 0, 1, 2, ...) per call.
 type sequenceOllamaClient struct {
 	mu    sync.Mutex
 	calls int
+	err   error
 }
 
 func (s *sequenceOllamaClient) GenerateEmbedding(ctx context.Context, text string, isQuery bool, maxRetries int) ([]float32, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.err != nil {
+		return nil, s.err
+	}
 	emb := make([]float32, ExpectedEmbeddingDim)
 	emb[s.calls%ExpectedEmbeddingDim] = 1.0
 	s.calls++
@@ -28,168 +109,67 @@ func (s *sequenceOllamaClient) GenerateEmbedding(ctx context.Context, text strin
 }
 
 type processThreadFactsContextCase struct {
-	name                string
-	nilStore            bool
-	storeFailOp         string
-	unextractedErr      bool
-	emptyTurns          bool
-	withSummary         bool
-	withPriorTurns      bool
-	llmErr              error
-	parseErr            bool
-	manyCandidates      bool
-	wantCandidateCapped bool
-	withTrajectory      bool
-	withReinforceIDs    bool
-	wantReinforcedID    int64
-	ollamaErr           error
-	wantWatermark       bool
-	wantErr             bool
-	parentTraceID       string
-	parentSpanID        string
+	name          string
+	nilStore      bool
+	sabotage      string
+	turns         []testTurn
+	watermark     int64
+	summary       string
+	facts         []string
+	indexerStatus int
+	retrieved     []string
+	toolCalls     []string
+	llmResp       string
+	llmErr        string
+	ollamaErr     string
+	parentTraceID string
+	parentSpanID  string
+	wantPrompt    []string
+	wantFacts     []string
+	wantWatermark string
+	wantErr       bool
 }
 
 func processThreadFactsContextCases() []processThreadFactsContextCase {
+	const thread = "th-test"
+	newTurn := []testTurn{adminTurn(thread, 10, "He likes matcha tea", "Understood")}
+	matchaFact := []string{"Bob likes matcha tea in the afternoon:1"}
 	return []processThreadFactsContextCase{
 		{
 			name:          "LinksToTriggerWhenIncomingContextValid",
+			turns:         newTurn,
 			parentTraceID: "0af7651916cd43dd8448eb211c80319c",
 			parentSpanID:  "b7ad6b7169203331",
-			wantWatermark: true,
+			wantPrompt:    []string{"\nNEW UNEXTRACTED TURNS:\nUser: He likes matcha tea\nAssistant: Understood\n"},
+			wantFacts:     matchaFact,
+			wantWatermark: "10",
+		},
+		{name: "NilStoreError", nilStore: true, turns: newTurn, wantWatermark: "0", wantErr: true},
+		{name: "UnextractedTurnsError", sabotage: sabotageTurnReads, turns: newTurn, wantWatermark: "0", wantErr: true},
+		{
+			name:          "EmptyTurnsMarksWatermarkAtMaxRow",
+			turns:         []testTurn{{thread: thread, rowID: 7, content: "hi", response: "hello", status: "COMPLETED"}},
+			wantWatermark: "7",
 		},
 		{
-			name:     "NilStoreError",
-			nilStore: true,
-			wantErr:  true,
+			name:      "PriorSummaryAndTurnsInjected",
+			turns:     []testTurn{adminTurn(thread, 5, "My name is Bob", "Hello Bob"), newTurn[0]},
+			watermark: 6,
+			summary:   "User name is Bob",
+			wantPrompt: []string{
+				"PRIOR THREAD SUMMARY:\nUser name is Bob\n",
+				"PRIOR TURNS (FOR COREFERENCE RESOLUTION ONLY - DO NOT EXTRACT FACTS FROM PRIOR TURNS):\nUser: My name is Bob\nAssistant: Hello Bob\n\nNEW UNEXTRACTED TURNS:\nUser: He likes matcha tea\nAssistant: Understood\n",
+			},
+			wantFacts:     matchaFact,
+			wantWatermark: "10",
 		},
+		{name: "ContextQueryErrorFails", sabotage: sabotageSessions, turns: newTurn, wantWatermark: "0", wantErr: true},
+		{name: "LLMErrorFails", turns: newTurn, llmErr: "llm error", wantWatermark: "0", wantErr: true},
+		{name: "ParseErrorFails", turns: newTurn, llmResp: "invalid json response", wantWatermark: "0", wantErr: true},
 		{
-			name:           "UnextractedTurnsError",
-			unextractedErr: true,
-			wantErr:        true,
-		},
-		{
-			name:       "EmptyTurnsMarksWatermark",
-			emptyTurns: true,
-			wantErr:    false,
-		},
-		{
-			name:           "PriorSummaryAndTurnsInjected",
-			withSummary:    true,
-			withPriorTurns: true,
-			wantWatermark:  true,
-			wantErr:        false,
-		},
-		{
-			name:          "ContextQueryErrorFails",
-			storeFailOp:   "GetThreadContextBeforeWatermark",
-			wantWatermark: false,
-			wantErr:       true,
-		},
-		{
-			name:    "LLMErrorFails",
-			llmErr:  errors.New("llm error"),
-			wantErr: true,
-		},
-		{
-			name:     "ParseErrorFails",
-			parseErr: true,
-			wantErr:  true,
-		},
-		{
-			name:                "ManyCandidatesCappedAt5",
-			manyCandidates:      true,
-			wantCandidateCapped: true,
-			wantWatermark:       true,
-			wantErr:             false,
-		},
-		{
-			name:           "TrajectoryRetrievedFactsAndToolCallsInjected",
-			withTrajectory: true,
-			wantWatermark:  true,
-			wantErr:        false,
-		},
-		{
-			name:             "TrajectoryReinforcesFactIDs",
-			withReinforceIDs: true,
-			wantReinforcedID: 42,
-			wantWatermark:    true,
-			wantErr:          false,
-		},
-		{
-			name:             "TrajectoryReinforceStoreErrorFails",
-			withReinforceIDs: true,
-			storeFailOp:      "ReinforceFact",
-			wantWatermark:    false,
-			wantErr:          true,
-		},
-		{
-			name:          "TrajectoryQueryErrorFails",
-			storeFailOp:   "GetThreadTrajectoryContext",
-			wantWatermark: false,
-			wantErr:       true,
-		},
-		{
-			name:          "CandidateFactInsertStoreErrorFails",
-			storeFailOp:   "InsertFact",
-			wantWatermark: false,
-			wantErr:       true,
-		},
-		{
-			name:          "CandidateFactEmbeddingErrorFails",
-			ollamaErr:     errors.New("embed fail"),
-			wantWatermark: false,
-			wantErr:       true,
-		},
-	}
-}
-
-func setupProcessThreadFactsStore(tc processThreadFactsContextCase, baseEmb []float32) (Store, *TestMemStore) {
-	if tc.nilStore {
-		return nil, nil
-	}
-	mem := newTestMemStore()
-	threadID := "th-test"
-	if tc.unextractedErr {
-		mem.SetFail("GetUnextractedAdminTurns", errors.New("db error"))
-	} else if !tc.emptyTurns {
-		mem.unextractedTurns[threadID] = []Message{
-			{RowID: 10, ThreadID: threadID, Content: "He likes matcha tea", ResponseText: "Understood", Status: "COMPLETED", IsAdmin: true},
-		}
-	}
-	if tc.withSummary {
-		mem.threadSummaries[threadID] = "User name is Bob"
-	}
-	if tc.withPriorTurns {
-		mem.threadPriorTurns[threadID] = []Message{
-			{RowID: 5, ThreadID: threadID, Content: "My name is Bob", ResponseText: "Hello Bob", Status: "COMPLETED", IsAdmin: true},
-		}
-	}
-	if tc.withTrajectory {
-		mem.threadRetrievedFacts[threadID] = []string{"- [id:42] User likes matcha"}
-		mem.threadToolCalls[threadID] = []string{`memory_search("matcha")`}
-	}
-	if tc.withReinforceIDs {
-		mem.facts[42] = &Fact{ID: 42, FactText: "User likes matcha", ReinforceCount: 1}
-		mem.embeddings[42] = baseEmb
-	}
-	if tc.storeFailOp != "" {
-		mem.SetFail(tc.storeFailOp, errors.New("simulated store failure"))
-	}
-	return mem, mem
-}
-
-func buildProcessThreadFactsLLM(tc processThreadFactsContextCase, capturedPrompt *string, llmSpanID *trace.SpanID) LLMClientFunc {
-	return func(c context.Context, prompt string) (string, error) {
-		*capturedPrompt = prompt
-		*llmSpanID = trace.SpanContextFromContext(c).SpanID()
-		if tc.llmErr != nil {
-			return "", tc.llmErr
-		}
-		if tc.parseErr {
-			return "invalid json response", nil
-		}
-		if tc.manyCandidates {
-			return `{"facts":[
+			name:  "ManyCandidatesCappedAt5",
+			turns: newTurn,
+			llmResp: `{"facts":[
 				{"fact_text":"Candidate fact text number 1"},
 				{"fact_text":"Candidate fact text number 2"},
 				{"fact_text":"Candidate fact text number 3"},
@@ -197,12 +177,44 @@ func buildProcessThreadFactsLLM(tc processThreadFactsContextCase, capturedPrompt
 				{"fact_text":"Candidate fact text number 5"},
 				{"fact_text":"Candidate fact text number 6"},
 				{"fact_text":"Candidate fact text number 7"}
-			]}`, nil
-		}
-		if tc.withReinforceIDs {
-			return `{"facts":[],"reinforced_ids":[42,42,-1,0]}`, nil
-		}
-		return `{"facts":[{"fact_text":"Bob likes matcha tea in the afternoon"}]}`, nil
+			]}`,
+			wantFacts: []string{
+				"Candidate fact text number 1:1", "Candidate fact text number 2:1", "Candidate fact text number 3:1",
+				"Candidate fact text number 4:1", "Candidate fact text number 5:1",
+			},
+			wantWatermark: "10",
+		},
+		{
+			name:          "TrajectoryRetrievedFactsAndToolCallsInjected",
+			turns:         newTurn,
+			indexerStatus: http.StatusOK,
+			retrieved:     []string{"- [id:42] User likes matcha"},
+			toolCalls:     []string{`memory_search("matcha")`},
+			wantPrompt:    []string{"RETRIEVED MEMORY IN TURN:\n- [id:42] User likes matcha\n", "TOOL CALLS IN TURN:\nmemory_search(\"matcha\")\n"},
+			wantFacts:     matchaFact,
+			wantWatermark: "10",
+		},
+		{
+			name:          "TrajectoryReinforcesFactIDs",
+			turns:         newTurn,
+			facts:         []string{"User likes matcha"},
+			llmResp:       `{"facts":[],"reinforced_ids":[1,1,-1,0]}`,
+			wantFacts:     []string{"User likes matcha:2"},
+			wantWatermark: "10",
+		},
+		{
+			name:          "TrajectoryReinforceStoreErrorFails",
+			sabotage:      sabotageReinforceFact,
+			turns:         newTurn,
+			facts:         []string{"User likes matcha"},
+			llmResp:       `{"facts":[],"reinforced_ids":[1]}`,
+			wantFacts:     []string{"User likes matcha:1"},
+			wantWatermark: "0",
+			wantErr:       true,
+		},
+		{name: "TrajectoryQueryErrorFails", turns: newTurn, indexerStatus: http.StatusInternalServerError, wantWatermark: "0", wantErr: true},
+		{name: "CandidateFactInsertStoreErrorFails", sabotage: sabotageInsertFact, turns: newTurn, wantWatermark: "0", wantErr: true},
+		{name: "CandidateFactEmbeddingErrorFails", turns: newTurn, ollamaErr: "embed fail", wantWatermark: "0", wantErr: true},
 	}
 }
 
@@ -216,7 +228,11 @@ func assertProcessThreadFactsPrompt(t *testing.T, tc processThreadFactsContextCa
 	if name != "coven.extract" || !root || attrs["aerial.coven.batch_size"] == "" {
 		t.Errorf("LLM call span = %q root=%v attrs=%v, want root coven.extract with aerial.coven.batch_size", name, root, attrs)
 	}
-	assertPromptContent(t, tc, capturedPrompt)
+	for _, want := range tc.wantPrompt {
+		if !strings.Contains(capturedPrompt, want) {
+			t.Errorf("captured prompt missing %q:\n%s", want, capturedPrompt)
+		}
+	}
 }
 
 func assertExtractLinks(t *testing.T, tc processThreadFactsContextCase, id trace.SpanID) {
@@ -237,64 +253,46 @@ func assertExtractLinks(t *testing.T, tc processThreadFactsContextCase, id trace
 	}
 }
 
-func assertPromptContent(t *testing.T, tc processThreadFactsContextCase, prompt string) {
+func runProcessThreadFactsContextCase(t *testing.T, tc processThreadFactsContextCase) {
 	t.Helper()
-	if tc.withSummary && !strings.Contains(prompt, "PRIOR THREAD SUMMARY:\nUser name is Bob") {
-		t.Errorf("captured prompt missing summary: %s", prompt)
+	const thread = "th-test"
+	db := newTestDB(t)
+	sqlStore := NewSQLStore(db)
+	seedTurns(t, db, tc.turns...)
+	if tc.watermark > 0 {
+		seedWatermark(t, db, DefaultStack, thread, tc.watermark, nil)
 	}
-	if tc.withPriorTurns && !strings.Contains(prompt, "PRIOR TURNS (FOR COREFERENCE RESOLUTION ONLY") {
-		t.Errorf("captured prompt missing prior turns: %s", prompt)
+	if tc.summary != "" {
+		seedSession(t, db, DefaultStack, thread, tc.summary)
 	}
-	if tc.withTrajectory {
-		if !strings.Contains(prompt, "RETRIEVED MEMORY IN TURN:\n- [id:42] User likes matcha") {
-			t.Errorf("captured prompt missing retrieved memory: %s", prompt)
-		}
-		if !strings.Contains(prompt, "TOOL CALLS IN TURN:\nmemory_search(\"matcha\")") {
-			t.Errorf("captured prompt missing tool calls: %s", prompt)
-		}
+	seedFacts(t, sqlStore, tc.facts, [][]float32{testEmbeddingAt(100, 1)})
+	if tc.indexerStatus != 0 {
+		sqlStore.SetIndexerClient(newIndexerServer(t, tc.indexerStatus, tc.retrieved, tc.toolCalls))
 	}
-}
+	execSQL(t, db, tc.sabotage)
 
-func assertProcessThreadFactsStore(t *testing.T, tc processThreadFactsContextCase, mem *TestMemStore) {
-	t.Helper()
-	if mem == nil {
-		return
+	var store Store = sqlStore
+	if tc.nilStore {
+		store = nil
 	}
-	if tc.wantReinforcedID > 0 {
-		if f, ok := mem.facts[tc.wantReinforcedID]; !ok || f.ReinforceCount != 2 {
-			t.Errorf("fact %d reinforce count = %v, want 2", tc.wantReinforcedID, f)
-		}
-	}
-	if tc.wantCandidateCapped && len(mem.facts) != 5 {
-		t.Errorf("len(mem.facts) = %d, want 5 (capped)", len(mem.facts))
-	}
-	assertProcessThreadFactsWatermark(t, tc.wantWatermark, mem)
-}
-
-func assertProcessThreadFactsWatermark(t *testing.T, wantWatermark bool, mem *TestMemStore) {
-	t.Helper()
-	wm, ok := mem.watermarks["th-test"]
-	if wantWatermark && wm != 10 {
-		t.Errorf("watermark = %d, want 10", wm)
-	} else if !wantWatermark && ok && wm != 0 {
-		t.Errorf("watermark unexpectedly advanced to %d, want not advanced", wm)
-	}
-}
-
-func runProcessThreadFactsContextCase(t *testing.T, tc processThreadFactsContextCase, baseEmb []float32) {
-	t.Helper()
-	store, mem := setupProcessThreadFactsStore(tc, baseEmb)
-
-	var client OllamaClient
-	if tc.manyCandidates {
-		client = &sequenceOllamaClient{}
-	} else {
-		client = &MockOllamaClient{embedding: baseEmb, err: tc.ollamaErr}
+	client := &sequenceOllamaClient{}
+	if tc.ollamaErr != "" {
+		client.err = errors.New(tc.ollamaErr)
 	}
 
 	var capturedPrompt string
 	var llmSpanID trace.SpanID
-	llm := buildProcessThreadFactsLLM(tc, &capturedPrompt, &llmSpanID)
+	llm := func(c context.Context, prompt string) (string, error) {
+		capturedPrompt = prompt
+		llmSpanID = trace.SpanContextFromContext(c).SpanID()
+		if tc.llmErr != "" {
+			return "", errors.New(tc.llmErr)
+		}
+		if tc.llmResp != "" {
+			return tc.llmResp, nil
+		}
+		return `{"facts":[{"fact_text":"Bob likes matcha tea in the afternoon"}]}`, nil
+	}
 
 	ctx := context.Background()
 	if tc.parentTraceID != "" {
@@ -302,23 +300,25 @@ func runProcessThreadFactsContextCase(t *testing.T, tc processThreadFactsContext
 		sid, _ := trace.SpanIDFromHex(tc.parentSpanID)
 		ctx = trace.ContextWithSpanContext(ctx, trace.NewSpanContext(trace.SpanContextConfig{TraceID: tid, SpanID: sid, TraceFlags: trace.FlagsSampled}))
 	}
-	err := processThreadFacts(ctx, store, client, llm, "th-test")
+	err := processThreadFacts(ctx, store, client, llm, thread)
 	if (err != nil) != tc.wantErr {
 		t.Fatalf("processThreadFacts() err = %v, wantErr = %v", err, tc.wantErr)
 	}
 	assertProcessThreadFactsPrompt(t, tc, capturedPrompt, llmSpanID)
-	assertProcessThreadFactsStore(t, tc, mem)
+	if got := factRows(t, db); !equalStrings(got, tc.wantFacts) {
+		t.Errorf("facts = %q, want %q", got, tc.wantFacts)
+	}
+	if got := watermarkRow(t, db, thread); got != tc.wantWatermark {
+		t.Errorf("watermark = %s, want %s", got, tc.wantWatermark)
+	}
 }
 
 func TestProcessThreadFacts_ContextAndCoreference(t *testing.T) {
-	dim := ExpectedEmbeddingDim
-	baseEmb := make([]float32, dim)
-	baseEmb[0] = 1.0
-
-	tests := processThreadFactsContextCases()
-	for _, tc := range tests {
+	t.Parallel()
+	for _, tc := range processThreadFactsContextCases() {
 		t.Run(tc.name, func(t *testing.T) {
-			runProcessThreadFactsContextCase(t, tc, baseEmb)
+			t.Parallel()
+			runProcessThreadFactsContextCase(t, tc)
 		})
 	}
 }
@@ -347,6 +347,7 @@ func TestWorker_Start(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			w := NewWorker(WorkerConfig{
+				Store:        newTestStore(t),
 				InitialDelay: tc.initialDelay,
 				TickInterval: 10 * time.Millisecond,
 			})
@@ -367,68 +368,62 @@ func TestWorker_ExtractThread_NilWorkerReturnsError(t *testing.T) {
 }
 
 func TestSQLStore_GetAllFactsWithEmbeddings(t *testing.T) {
-	dbMem := setupTestDBMem(t)
-	ctx := context.Background()
+	t.Parallel()
+	const fixTimes = `UPDATE facts SET created_at = '2026-01-01T00:00:00Z', last_reinforced_at = '2026-01-02T00:00:00Z' WHERE id = 1;
+UPDATE facts SET created_at = '2026-01-03T00:00:00Z', last_reinforced_at = '2026-01-04T00:00:00Z', reinforce_count = 3 WHERE id = 2`
 
 	tests := []struct {
-		name      string
-		nilDB     bool
-		queryErr  error
-		rowSQL    string
-		wantErr   bool
-		wantCount int
+		name    string
+		nilDB   bool
+		facts   []string
+		sql     string
+		wantErr bool
+		want    []string
 	}{
+		{name: "NilDBError", nilDB: true, wantErr: true},
+		{name: "QueryError", sql: sabotageFacts, wantErr: true},
+		{name: "RowScanError", facts: []string{"Morning run"}, sql: sabotageNullFactText, wantErr: true},
+		{name: "SuccessEmpty"},
 		{
-			name:    "NilDBError",
-			nilDB:   true,
-			wantErr: true,
-		},
-		{
-			name:     "QueryError",
-			queryErr: errors.New("query error"),
-			wantErr:  true,
-		},
-		{
-			name:    "RowScanError",
-			rowSQL:  "SELECT 'invalid' AS id",
-			wantErr: true,
-		},
-		{
-			name:      "SuccessEmpty",
-			wantCount: 0,
-			wantErr:   false,
-		},
-		{
-			name:      "SuccessRow",
-			rowSQL:    "SELECT 1, 'Morning run', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 1, '[0.1,0.2]'",
-			wantCount: 1,
-			wantErr:   false,
+			name:  "RowsInIDOrderWithEmbeddings",
+			facts: []string{"Morning run", "Evening swim"},
+			sql:   fixTimes,
+			want: []string{
+				"1|Morning run|2026-01-01T00:00:00Z|2026-01-02T00:00:00Z|1|0.5,0|384",
+				"2|Evening swim|2026-01-03T00:00:00Z|2026-01-04T00:00:00Z|3|0,0.5|384",
+			},
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			var store *SQLStore
-			if tc.nilDB {
-				store = &SQLStore{}
-			} else {
-				store = NewSQLStore(queryMockDBTX{
-					dbMem:    dbMem,
-					queryErr: tc.queryErr,
-					rowSQL:   tc.rowSQL,
-				})
+			t.Parallel()
+			store := &SQLStore{}
+			if !tc.nilDB {
+				store = newTestStore(t)
+				seedFacts(t, store, tc.facts, [][]float32{testEmbeddingAt(0, 0.5), testEmbeddingAt(1, 0.5)})
+				execSQL(t, store.DB(), tc.sql)
 			}
-			facts, err := store.GetAllFactsWithEmbeddings(ctx)
+			facts, err := store.GetAllFactsWithEmbeddings(context.Background())
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("GetAllFactsWithEmbeddings() err = %v, wantErr = %v", err, tc.wantErr)
 			}
-			if tc.wantCount > 0 && len(facts) != tc.wantCount {
-				t.Errorf("len(facts) = %d, want %d", len(facts), tc.wantCount)
+			got := make([]string, 0, len(facts))
+			for _, f := range facts {
+				got = append(got, fmt.Sprintf("%d|%s|%s|%s|%d|%g,%g|%d", f.Fact.ID, f.Fact.FactText,
+					f.Fact.CreatedAt.UTC().Format(time.RFC3339), f.Fact.LastReinforcedAt.UTC().Format(time.RFC3339),
+					f.Fact.ReinforceCount, f.Embedding[0], f.Embedding[1], len(f.Embedding)))
+			}
+			if !equalStrings(got, tc.want) {
+				t.Errorf("GetAllFactsWithEmbeddings() = %q, want %q", got, tc.want)
 			}
 		})
 	}
 }
 
+// makePairwiseSimilarVectors returns n unit vectors whose pairwise cosine
+// similarity is targetSim. Every vector keeps a non-zero component (pgvector
+// cosine distance is NaN for zero vectors), so they are safe to store.
 func makePairwiseSimilarVectors(n int, targetSim float64) [][]float32 {
 	// Component 0 has sqrt(targetSim), each vector has sqrt(1 - targetSim) at component i+1
 	s := float32(math.Sqrt(targetSim))
@@ -439,6 +434,9 @@ func makePairwiseSimilarVectors(n int, targetSim float64) [][]float32 {
 		v[0] = s
 		if i+1 < ExpectedEmbeddingDim {
 			v[i+1] = rem
+		}
+		if v[0] == 0 && (i+1 >= ExpectedEmbeddingDim || rem == 0) {
+			v[0] = 1
 		}
 		vecs[i] = v
 	}
@@ -667,13 +665,13 @@ func TestFindConsolidationCliques(t *testing.T) {
 
 type consolidateFactClustersCase struct {
 	name                string
-	ctx                 context.Context
+	cancelDuringLLM     bool
 	nilStore            bool
 	nilOllama           bool
 	nilLLM              bool
-	storeFail           string
 	lockMutex           bool
-	addFacts            bool
+	sabotage            string
+	facts               []string
 	seedWatermark       int64
 	seedReinforceCounts []int
 	llmResp             string
@@ -681,287 +679,129 @@ type consolidateFactClustersCase struct {
 	ollamaErr           error
 	wantErr             bool
 	wantCount           int
-	wantRemaining       int
-	wantReinforcedCount int
-	wantWatermark       int64
+	wantFacts           []string
+	wantWatermark       string
 }
 
-func consolidateFactClustersBasicCases(ctx context.Context, validJSON string) []consolidateFactClustersCase {
+var consolidationSourceFacts = []string{"Fact A", "Fact B", "Fact C"}
+
+func consolidateFactClustersBasicCases(validJSON string) []consolidateFactClustersCase {
+	untouched := []string{"Fact A:1", "Fact B:1", "Fact C:1"}
+	merged := []string{"User prefers dark mode everywhere:1"}
 	return []consolidateFactClustersCase{
-		{
-			name:     "NilStoreError",
-			ctx:      ctx,
-			nilStore: true,
-			wantErr:  true,
-		},
-		{
-			name:      "NilOllamaError",
-			ctx:       ctx,
-			nilOllama: true,
-			wantErr:   true,
-		},
-		{
-			name:    "NilLLMError",
-			ctx:     ctx,
-			nilLLM:  true,
-			wantErr: true,
-		},
-		{
-			name:      "LockContentionSkipped",
-			ctx:       ctx,
-			lockMutex: true,
-			wantErr:   false,
-			wantCount: 0,
-		},
-		{
-			name:      "StoreGetAllFactsError",
-			ctx:       ctx,
-			storeFail: "GetAllFactsWithEmbeddings",
-			wantErr:   true,
-		},
-		{
-			name:      "NoFactsInStore",
-			ctx:       ctx,
-			addFacts:  false,
-			wantErr:   false,
-			wantCount: 0,
-		},
-		{
-			name:          "LLMErrorContinuesWithoutDeletion",
-			ctx:           ctx,
-			addFacts:      true,
-			llmErr:        errors.New("llm down"),
-			wantErr:       false,
-			wantCount:     0,
-			wantRemaining: 3,
-		},
-		{
-			name:          "ParseErrorContinuesWithoutDeletion",
-			ctx:           ctx,
-			addFacts:      true,
-			llmResp:       "not-valid-json",
-			wantErr:       false,
-			wantCount:     0,
-			wantRemaining: 3,
-		},
-		{
-			name:          "OllamaEmbeddingErrorContinuesWithoutDeletion",
-			ctx:           ctx,
-			addFacts:      true,
-			llmResp:       validJSON,
-			ollamaErr:     errors.New("ollama embed down"),
-			wantErr:       false,
-			wantCount:     0,
-			wantRemaining: 3,
-		},
-		{
-			name:          "StoreInsertFactErrorContinuesWithoutDeletion",
-			ctx:           ctx,
-			addFacts:      true,
-			llmResp:       validJSON,
-			storeFail:     "InsertFact",
-			wantErr:       false,
-			wantCount:     0,
-			wantRemaining: 3,
-		},
-		{
-			name:          "SuccessConsolidation",
-			ctx:           ctx,
-			addFacts:      true,
-			llmResp:       validJSON,
-			wantErr:       false,
-			wantCount:     2,
-			wantRemaining: 1, // 3 merged via 2 pairwise passes into 1
-		},
+		{name: "NilStoreError", nilStore: true, facts: consolidationSourceFacts, wantErr: true, wantFacts: untouched, wantWatermark: "0"},
+		{name: "NilOllamaError", nilOllama: true, wantErr: true, wantWatermark: "0"},
+		{name: "NilLLMError", nilLLM: true, wantErr: true, wantWatermark: "0"},
+		{name: "LockContentionSkipped", lockMutex: true, facts: consolidationSourceFacts, llmResp: validJSON, wantFacts: untouched, wantWatermark: "0"},
+		{name: "StoreGetAllFactsError", sabotage: sabotageFacts, wantErr: true, wantWatermark: "0"},
+		{name: "NoFactsInStore", wantWatermark: "0"},
+		{name: "LLMErrorContinuesWithoutDeletion", facts: consolidationSourceFacts, llmErr: errors.New("llm down"), wantFacts: untouched, wantWatermark: "0"},
+		{name: "ParseErrorContinuesWithoutDeletion", facts: consolidationSourceFacts, llmResp: "not-valid-json", wantFacts: untouched, wantWatermark: "0"},
+		{name: "OllamaEmbeddingErrorContinuesWithoutDeletion", facts: consolidationSourceFacts, llmResp: validJSON, ollamaErr: errors.New("ollama embed down"), wantFacts: untouched, wantWatermark: "0"},
+		{name: "StoreInsertFactErrorContinuesWithoutDeletion", sabotage: sabotageInsertFact, facts: consolidationSourceFacts, llmResp: validJSON, wantFacts: untouched, wantWatermark: "0"},
+		// 3 facts merge via 2 pairwise passes into 1: {1,2} -> 4, then {3,4} -> 5.
+		{name: "SuccessConsolidation", facts: consolidationSourceFacts, llmResp: validJSON, wantCount: 2, wantFacts: merged, wantWatermark: "5"},
 		{
 			name:          "CandidateFactsWithEmptyTextSkippedAndValidMerged",
-			ctx:           ctx,
-			addFacts:      true,
+			facts:         consolidationSourceFacts,
 			llmResp:       `{"facts":[{"fact_text":"","category":"","importance_score":0},{"fact_text":"Valid synthesized fact 1"}]}`,
-			wantErr:       false,
 			wantCount:     2,
-			wantRemaining: 1,
+			wantFacts:     []string{"Valid synthesized fact 1:1"},
+			wantWatermark: "5",
 		},
 	}
 }
 
-func consolidateFactClustersAdvancedCases(ctx, canceledCtx context.Context, validJSON string) []consolidateFactClustersCase {
+func consolidateFactClustersAdvancedCases(validJSON string) []consolidateFactClustersCase {
+	untouched := []string{"Fact A:1", "Fact B:1", "Fact C:1"}
+	merged := []string{"User prefers dark mode everywhere:1"}
 	return []consolidateFactClustersCase{
 		{
 			name:          "TwoCandidateFactsForPairAbortsMergeWithoutDeletion",
-			ctx:           ctx,
-			addFacts:      true,
+			facts:         consolidationSourceFacts,
 			llmResp:       `{"facts":[{"fact_text":"Valid synthesized fact 1"},{"fact_text":"Valid synthesized fact 2"},{"fact_text":"Extra third fact capped"}]}`,
-			wantErr:       false,
-			wantCount:     0,
-			wantRemaining: 3,
+			wantFacts:     untouched,
+			wantWatermark: "3",
 		},
+		{name: "AllEmptyCandidateFactsSkippedWithoutDeletion", facts: consolidationSourceFacts, llmResp: `{"facts":[{"fact_text":"   "}]}`, wantFacts: untouched, wantWatermark: "3"},
+		{name: "EmptyFactsArraySkippedWithoutDeletion", facts: consolidationSourceFacts, llmResp: `{"facts":[]}`, wantFacts: untouched, wantWatermark: "3"},
 		{
-			name:          "AllEmptyCandidateFactsSkippedWithoutDeletion",
-			ctx:           ctx,
-			addFacts:      true,
-			llmResp:       `{"facts":[{"fact_text":"   "}]}`,
-			wantErr:       false,
-			wantCount:     0,
-			wantRemaining: 3,
-		},
-		{
-			name:          "EmptyFactsArraySkippedWithoutDeletion",
-			ctx:           ctx,
-			addFacts:      true,
-			llmResp:       `{"facts":[]}`,
-			wantErr:       false,
-			wantCount:     0,
-			wantRemaining: 3,
-		},
-		{
+			// 3 not deleted + 1 inserted in pass 0 before break; failure keeps the watermark.
 			name:          "StoreDeleteFactErrorLoggedGracefully",
-			ctx:           ctx,
-			addFacts:      true,
+			sabotage:      sabotageDeleteFact,
+			facts:         consolidationSourceFacts,
 			llmResp:       validJSON,
-			storeFail:     "DeleteFact",
-			wantErr:       false,
 			wantCount:     1,
-			wantRemaining: 4, // 3 not deleted + 1 inserted in pass 0 before break
+			wantFacts:     []string{"Fact A:1", "Fact B:1", "Fact C:1", "User prefers dark mode everywhere:1"},
+			wantWatermark: "0",
 		},
 		{
-			name:     "ContextCanceled",
-			ctx:      canceledCtx,
-			addFacts: true,
-			llmResp:  validJSON,
-			wantErr:  true,
+			// Pass 0 has cliques {1,2} and {3,4}; the context dies during the
+			// first synthesis, so its insert fails and the second clique aborts.
+			name:            "ContextCanceledDuringSynthesis",
+			cancelDuringLLM: true,
+			facts:           []string{"Fact A", "Fact B", "Fact C", "Fact D"},
+			llmResp:         validJSON,
+			wantErr:         true,
+			wantFacts:       []string{"Fact A:1", "Fact B:1", "Fact C:1", "Fact D:1"},
+			wantWatermark:   "0",
 		},
 		{
 			name:                "ConsolidationInheritsMaxReinforcement",
-			ctx:                 ctx,
-			addFacts:            true,
+			facts:               consolidationSourceFacts,
 			seedReinforceCounts: []int{1, 4, 2},
 			llmResp:             validJSON,
-			wantErr:             false,
 			wantCount:           2,
-			wantRemaining:       1,
-			wantReinforcedCount: 4,
+			wantFacts:           []string{"User prefers dark mode everywhere:4"},
+			wantWatermark:       "5",
 		},
 		{
 			name:                "ConsolidationClampsReinforceAt10",
-			ctx:                 ctx,
-			addFacts:            true,
+			facts:               consolidationSourceFacts,
 			seedReinforceCounts: []int{15, 12, 11},
 			llmResp:             validJSON,
-			wantErr:             false,
 			wantCount:           2,
-			wantRemaining:       1,
-			wantReinforcedCount: 10,
+			wantFacts:           []string{"User prefers dark mode everywhere:10"},
+			wantWatermark:       "5",
 		},
 		{
 			name:                "ConsolidationReinforceStoreErrorLoggedGracefully",
-			ctx:                 ctx,
-			addFacts:            true,
+			sabotage:            sabotageReinforceFact,
+			facts:               consolidationSourceFacts,
 			seedReinforceCounts: []int{1, 4, 2},
-			storeFail:           "ReinforceFact",
 			llmResp:             validJSON,
-			wantErr:             false,
 			wantCount:           2,
-			wantRemaining:       1,
-			wantWatermark:       5,
+			wantFacts:           merged,
+			wantWatermark:       "5",
 		},
-		{
-			name:          "WatermarkSkipsAlreadyEvaluatedOldCliques",
-			ctx:           ctx,
-			addFacts:      true,
-			seedWatermark: 3,
-			llmResp:       validJSON,
-			wantErr:       false,
-			wantCount:     0,
-			wantRemaining: 3,
-			wantWatermark: 3,
-		},
-		{
-			name:          "WatermarkEvaluatesCliqueWithNewFact",
-			ctx:           ctx,
-			addFacts:      true,
-			seedWatermark: 2,
-			llmResp:       validJSON,
-			wantErr:       false,
-			wantCount:     2,
-			wantRemaining: 1,
-			wantWatermark: 5,
-		},
-		{
-			name:          "WatermarkReadErrorFallsBackToFullEvaluation",
-			ctx:           ctx,
-			addFacts:      true,
-			storeFail:     "GetConversationFactWatermark",
-			llmResp:       validJSON,
-			wantErr:       false,
-			wantCount:     2,
-			wantRemaining: 1,
-			wantWatermark: 5,
-		},
-		{
-			name:          "WatermarkUpdateErrorLoggedGracefully",
-			ctx:           ctx,
-			addFacts:      true,
-			storeFail:     "UpdateConversationFactWatermark",
-			llmResp:       validJSON,
-			wantErr:       false,
-			wantCount:     2,
-			wantRemaining: 1,
-		},
+		{name: "WatermarkSkipsAlreadyEvaluatedOldCliques", facts: consolidationSourceFacts, seedWatermark: 3, llmResp: validJSON, wantFacts: untouched, wantWatermark: "3"},
+		{name: "WatermarkEvaluatesCliqueWithNewFact", facts: consolidationSourceFacts, seedWatermark: 2, llmResp: validJSON, wantCount: 2, wantFacts: merged, wantWatermark: "5"},
+		// The watermark table is gone, so its row is not asserted.
+		{name: "WatermarkReadErrorFallsBackToFullEvaluation", sabotage: sabotageWatermarks, facts: consolidationSourceFacts, llmResp: validJSON, wantCount: 2, wantFacts: merged},
+		{name: "WatermarkUpdateErrorLoggedGracefully", sabotage: sabotageWatermarkWrite, facts: consolidationSourceFacts, llmResp: validJSON, wantCount: 2, wantFacts: merged, wantWatermark: "0"},
 	}
 }
 
-func consolidateFactClustersCases(ctx, canceledCtx context.Context, validJSON string) []consolidateFactClustersCase {
-	return append(consolidateFactClustersBasicCases(ctx, validJSON), consolidateFactClustersAdvancedCases(ctx, canceledCtx, validJSON)...)
-}
-
-func setupConsolidateFactStore(tc consolidateFactClustersCase, vecs [][]float32) *TestMemStore {
-	mem := newTestMemStore()
-	if tc.addFacts {
-		ctx := context.Background()
-		_, _ = mem.InsertFact(ctx, "Fact A", vecs[0])
-		_, _ = mem.InsertFact(ctx, "Fact B", vecs[1])
-		_, _ = mem.InsertFact(ctx, "Fact C", vecs[2])
+func seedConsolidateFactStore(t *testing.T, tc consolidateFactClustersCase, vecs [][]float32) (*SQLStore, DBTX) {
+	t.Helper()
+	store := newTestStore(t)
+	db := store.DB()
+	seedFacts(t, store, tc.facts, vecs)
+	for i, rc := range tc.seedReinforceCounts {
+		execSQL(t, db, `UPDATE facts SET reinforce_count = $1 WHERE id = $2`, rc, i+1)
 	}
 	if tc.seedWatermark > 0 {
-		mem.watermarks[DreamingWatermarkThreadID] = tc.seedWatermark
+		seedWatermark(t, db, DefaultStack, DreamingWatermarkThreadID, tc.seedWatermark, nil)
 	}
-	if len(tc.seedReinforceCounts) == 3 && len(mem.facts) >= 3 {
-		mem.facts[1].ReinforceCount = tc.seedReinforceCounts[0]
-		mem.facts[2].ReinforceCount = tc.seedReinforceCounts[1]
-		mem.facts[3].ReinforceCount = tc.seedReinforceCounts[2]
-	}
-	if tc.storeFail != "" {
-		mem.SetFail(tc.storeFail, errors.New("store failed"))
-	}
-	return mem
-}
-
-func assertConsolidateFactResults(t *testing.T, tc consolidateFactClustersCase, mem *TestMemStore, count int) {
-	t.Helper()
-	if count != tc.wantCount {
-		t.Errorf("count = %d, want %d", count, tc.wantCount)
-	}
-	if tc.wantRemaining > 0 && len(mem.facts) != tc.wantRemaining {
-		t.Errorf("len(mem.facts) = %d, want %d", len(mem.facts), tc.wantRemaining)
-	}
-	if tc.wantReinforcedCount > 0 {
-		for _, f := range mem.facts {
-			if f.ReinforceCount != tc.wantReinforcedCount {
-				t.Errorf("consolidated fact reinforce_count = %d, want %d", f.ReinforceCount, tc.wantReinforcedCount)
-			}
-		}
-	}
-	if tc.wantWatermark > 0 && mem.watermarks[DreamingWatermarkThreadID] != tc.wantWatermark {
-		t.Errorf("dreaming watermark = %d, want %d", mem.watermarks[DreamingWatermarkThreadID], tc.wantWatermark)
-	}
+	execSQL(t, db, tc.sabotage)
+	return store, db
 }
 
 func runConsolidateFactClustersCase(t *testing.T, tc consolidateFactClustersCase, vecs [][]float32) {
 	t.Helper()
-	mem := setupConsolidateFactStore(tc, vecs)
+	sqlStore, db := seedConsolidateFactStore(t, tc, vecs)
 
-	var store Store = mem
+	var store Store = sqlStore
 	if tc.nilStore {
 		store = nil
 	}
@@ -969,9 +809,14 @@ func runConsolidateFactClustersCase(t *testing.T, tc consolidateFactClustersCase
 	if tc.nilOllama {
 		client = nil
 	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	var llm LLMClientFunc
 	if !tc.nilLLM {
 		llm = func(c context.Context, p string) (string, error) {
+			if tc.cancelDuringLLM {
+				cancel()
+			}
 			if tc.llmErr != nil {
 				return "", tc.llmErr
 			}
@@ -984,21 +829,32 @@ func runConsolidateFactClustersCase(t *testing.T, tc consolidateFactClustersCase
 		defer extractionMutex.Unlock()
 	}
 
-	count, err := ConsolidateFactClusters(tc.ctx, store, client, llm)
+	count, err := ConsolidateFactClusters(ctx, store, client, llm)
 	if (err != nil) != tc.wantErr {
 		t.Fatalf("ConsolidateFactClusters() err = %v, wantErr = %v", err, tc.wantErr)
 	}
-	assertConsolidateFactResults(t, tc, mem, count)
+	if count != tc.wantCount {
+		t.Errorf("count = %d, want %d", count, tc.wantCount)
+	}
+	if tc.sabotage != sabotageFacts {
+		if got := factRows(t, db); !equalStrings(got, tc.wantFacts) {
+			t.Errorf("facts = %q, want %q", got, tc.wantFacts)
+		}
+	}
+	if tc.sabotage != sabotageWatermarks {
+		if got := watermarkRow(t, db, DreamingWatermarkThreadID); got != tc.wantWatermark {
+			t.Errorf("dreaming watermark = %s, want %s", got, tc.wantWatermark)
+		}
+	}
 }
 
+// TestConsolidateFactClusters is serial: ConsolidateFactClusters single-flights
+// on the package-global extractionMutex.
 func TestConsolidateFactClusters(t *testing.T) {
-	ctx := context.Background()
 	vecs := makePairwiseSimilarVectors(4, 0.78)
 	validJSON := `{"facts":[{"category":"pref","fact_text":"User prefers dark mode everywhere","importance_score":0.85}]}`
-	canceledCtx, cancel := context.WithCancel(context.Background())
-	cancel()
 
-	tests := consolidateFactClustersCases(ctx, canceledCtx, validJSON)
+	tests := append(consolidateFactClustersBasicCases(validJSON), consolidateFactClustersAdvancedCases(validJSON)...)
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			runConsolidateFactClustersCase(t, tc, vecs)
@@ -1007,83 +863,83 @@ func TestConsolidateFactClusters(t *testing.T) {
 }
 
 func TestToolHandler_MemoryStore_AdmissionGate(t *testing.T) {
-	ctx := context.Background()
+	t.Parallel()
 
 	tests := []struct {
 		name       string
 		args       MemoryStoreArgs
 		wantErr    bool
 		wantAction string
+		wantFacts  []string
 	}{
-		{
-			name:    "TooShortFactRejected",
-			args:    MemoryStoreArgs{FactText: "short"},
-			wantErr: true,
-		},
-		{
-			name:    "EphemeralTelemetryRejected",
-			args:    MemoryStoreArgs{FactText: "PR #100 was merged with auto-merge armed"},
-			wantErr: true,
-		},
+		{name: "TooShortFactRejected", args: MemoryStoreArgs{FactText: "short"}, wantErr: true},
+		{name: "EphemeralTelemetryRejected", args: MemoryStoreArgs{FactText: "PR #100 was merged with auto-merge armed"}, wantErr: true},
 		{
 			name:       "DurableTelemetryAdmitted",
 			args:       MemoryStoreArgs{FactText: "Auto-merge armed must always remain active for all PRs"},
-			wantErr:    false,
 			wantAction: "inserted",
+			wantFacts:  []string{"Auto-merge armed must always remain active for all PRs:1"},
 		},
-		{
-			name:    "SupersedesBypassesAdmissionGate",
-			args:    MemoryStoreArgs{FactText: "short", SupersedesID: 999},
-			wantErr: true, // Fails because ID 999 doesn't exist, NOT admission gate
-		},
+		// Fails because ID 999 doesn't exist, NOT the admission gate.
+		{name: "SupersedesBypassesAdmissionGate", args: MemoryStoreArgs{FactText: "short", SupersedesID: 999}, wantErr: true},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			mem := newTestMemStore()
-			h := NewToolHandler(&Config{}, mem, &MockOllamaClient{embedding: testEmbedding(1.0)})
-			out, err := h.MemoryStore(ctx, tc.args)
+			t.Parallel()
+			store := newTestStore(t)
+			h := NewToolHandler(&Config{}, store, &MockOllamaClient{embedding: testEmbedding(1.0)})
+			out, err := h.MemoryStore(context.Background(), tc.args)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("MemoryStore() err = %v, wantErr = %v", err, tc.wantErr)
 			}
-			if tc.wantAction != "" && out.Action != tc.wantAction {
-				t.Errorf("out.Action = %s, want %s", out.Action, tc.wantAction)
+			if out.Action != tc.wantAction {
+				t.Errorf("out.Action = %q, want %q", out.Action, tc.wantAction)
+			}
+			if got := factRows(t, store.DB()); !equalStrings(got, tc.wantFacts) {
+				t.Errorf("facts = %q, want %q", got, tc.wantFacts)
 			}
 		})
 	}
 }
 
+// TestWorker_RunDaily_Dreaming is serial: dreaming single-flights on the
+// package-global extractionMutex.
 func TestWorker_RunDaily_Dreaming(t *testing.T) {
-	ctx := context.Background()
 	vecs := makePairwiseSimilarVectors(3, 0.78)
+	untouched := []string{"Fact 1:1", "Fact 2:1", "Fact 3:1"}
+	merged := []string{"Consolidated fact:1"}
 
 	tests := []struct {
 		name            string
 		nilStore        bool
 		nilOllama       bool
 		nilLLM          bool
+		sabotage        string
 		llmErr          error
 		lastDreamingAgo time.Duration
-		wantRemaining   int
+		wantFacts       []string
 	}{
-		{name: "DailyDecayAndDreamingSuccess", wantRemaining: 1},
-		{name: "RecentDreamingWatermarkSkipsDuplicateRun", lastDreamingAgo: 2 * time.Hour, wantRemaining: 3},
-		{name: "ExpiredDreamingWatermarkRunsDreaming", lastDreamingAgo: 25 * time.Hour, wantRemaining: 1},
-		{name: "DailyDecayWithDreamingErrorHandled", llmErr: errors.New("dreaming llm error")},
-		{name: "NilOllamaSkipsDreaming", nilOllama: true},
-		{name: "NilLLMSkipsDreaming", nilLLM: true},
-		{name: "NilStoreSkipsDaily", nilStore: true, wantRemaining: 3},
+		{name: "DailyDecayAndDreamingSuccess", wantFacts: merged},
+		{name: "RecentDreamingWatermarkSkipsDuplicateRun", lastDreamingAgo: 2 * time.Hour, wantFacts: untouched},
+		{name: "ExpiredDreamingWatermarkRunsDreaming", lastDreamingAgo: 25 * time.Hour, wantFacts: merged},
+		{name: "WatermarkReadErrorRunsDreaming", sabotage: sabotageWatermarks, wantFacts: merged},
+		{name: "DailyDecayWithDreamingErrorHandled", llmErr: errors.New("dreaming llm error"), wantFacts: untouched},
+		{name: "NilOllamaSkipsDreaming", nilOllama: true, wantFacts: untouched},
+		{name: "NilLLMSkipsDreaming", nilLLM: true, wantFacts: untouched},
+		{name: "NilStoreSkipsDaily", nilStore: true, wantFacts: untouched},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			mem := newTestMemStore()
-			_, _ = mem.InsertFact(ctx, "Fact 1", vecs[0])
-			_, _ = mem.InsertFact(ctx, "Fact 2", vecs[1])
-			_, _ = mem.InsertFact(ctx, "Fact 3", vecs[2])
+			sqlStore := newTestStore(t)
+			db := sqlStore.DB()
+			seedFacts(t, sqlStore, []string{"Fact 1", "Fact 2", "Fact 3"}, vecs)
 			if tc.lastDreamingAgo > 0 {
-				mem.watermarkTimes[DreamingWatermarkThreadID] = time.Now().UTC().Add(-tc.lastDreamingAgo)
+				at := time.Now().UTC().Add(-tc.lastDreamingAgo)
+				seedWatermark(t, db, DefaultStack, DreamingWatermarkThreadID, 0, &at)
 			}
+			execSQL(t, db, tc.sabotage)
 
 			var ollama OllamaClient = &MockOllamaClient{embedding: vecs[0]}
 			if tc.nilOllama {
@@ -1098,7 +954,7 @@ func TestWorker_RunDaily_Dreaming(t *testing.T) {
 			if tc.nilLLM {
 				llm = nil
 			}
-			var store Store = mem
+			var store Store = sqlStore
 			if tc.nilStore {
 				store = nil
 			}
@@ -1110,10 +966,10 @@ func TestWorker_RunDaily_Dreaming(t *testing.T) {
 			})
 
 			// Tick 60 is daily decay + dreaming
-			w.Tick(ctx, 60)
+			w.Tick(context.Background(), 60)
 
-			if tc.wantRemaining > 0 && len(mem.facts) != tc.wantRemaining {
-				t.Errorf("len(mem.facts) = %d, want %d", len(mem.facts), tc.wantRemaining)
+			if got := factRows(t, db); !equalStrings(got, tc.wantFacts) {
+				t.Errorf("facts = %q, want %q", got, tc.wantFacts)
 			}
 		})
 	}
