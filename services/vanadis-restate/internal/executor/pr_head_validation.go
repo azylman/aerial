@@ -58,7 +58,7 @@ func (e *Executor) fetchGitHubPullRequest(ctx context.Context, repo string, numb
 	var pr gitHubPullRequest
 	if err := githubapi.GetJSON(ctx, e.HTTPClient, req, 2<<20, &pr); err != nil {
 		var se *githubapi.StatusError
-		if errors.As(err, &se) && !se.RateLimited && se.StatusCode >= 400 && se.StatusCode < 500 {
+		if errors.As(err, &se) && !se.RateLimited && (se.StatusCode == http.StatusNotFound || se.StatusCode == http.StatusGone) {
 			return nil, "", "", store.ErrPRTransitionSkipped
 		}
 		return nil, "", "", err
@@ -76,7 +76,7 @@ func (e *Executor) RateLimitDelay(now time.Time) time.Duration {
 }
 
 // ValidatePRHead checks GitHub's current PR rather than trusting webhook delivery
-// order. API errors remain retryable; a superseded event is safely skipped.
+// order. API errors remain retryable; non-existent PRs (404/410) or superseded events are safely skipped.
 func (e *Executor) ValidatePRHead(ctx context.Context, repo string, number int, head string) error {
 	pr, _, _, err := e.fetchGitHubPullRequest(ctx, repo, number)
 	if err != nil {

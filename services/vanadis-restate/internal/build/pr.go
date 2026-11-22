@@ -370,7 +370,7 @@ func retryableGitHubDelay(err error, exec *executor.Executor, now time.Time) (ti
 	switch {
 	case isRL || execRL > 0:
 	case isStatusErr && se.StatusCode >= 500:
-	case strings.Contains(err.Error(), "github api request failed") || strings.Contains(err.Error(), "github api error ("):
+	case !isStatusErr && (errors.Is(err, context.DeadlineExceeded) || strings.Contains(err.Error(), "github api request failed")):
 	default:
 		return 0, false
 	}

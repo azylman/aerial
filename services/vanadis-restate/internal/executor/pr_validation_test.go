@@ -78,7 +78,9 @@ func TestFetchGitHubPullRequest(t *testing.T) {
 		{name: "empty repo", repo: "", number: 12, wantErr: true},
 		{name: "zero pr number", repo: "owner/repo", number: 0, wantErr: true},
 		{name: "404 skips transition", repo: "owner/repo", number: 12, status: 404, body: `{"message":"Not Found"}`, wantErr: true, wantSkipped: true},
-		{name: "plain 403 skips transition", repo: "owner/repo", number: 12, status: 403, body: `{"message":"Forbidden"}`, wantErr: true, wantSkipped: true},
+		{name: "410 gone skips transition", repo: "owner/repo", number: 12, status: 410, body: `{"message":"Gone"}`, wantErr: true, wantSkipped: true},
+		{name: "plain 403 returns error without skip", repo: "owner/repo", number: 12, status: 403, body: `{"message":"Forbidden"}`, wantErr: true},
+		{name: "plain 401 returns error without skip", repo: "owner/repo", number: 12, status: 401, body: `{"message":"Unauthorized"}`, wantErr: true},
 		{name: "rate limited 403 returns error without skip", repo: "owner/repo", number: 12, status: 403, headerKey: "X-Ratelimit-Remaining", headerVal: "0", body: `{"message":"rate limit"}`, wantErr: true},
 		{name: "rate limited 429 returns error without skip", repo: "owner/repo", number: 12, status: 429, headerKey: "Retry-After", headerVal: "60", body: `{"message":"too many requests"}`, wantErr: true},
 		{name: "server 500 error returns error without skip", repo: "owner/repo", number: 12, status: 500, body: `{}`, wantErr: true},
@@ -120,6 +122,18 @@ func TestFetchGitHubPullRequest(t *testing.T) {
 	}
 }
 
+type stubRateLimitTransport struct {
+	resetAt time.Time
+}
+
+func (*stubRateLimitTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, nil
+}
+
+func (s *stubRateLimitTransport) RateLimitResetAt() time.Time {
+	return s.resetAt
+}
+
 func TestExecutor_RateLimitDelay(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 11, 21, 12, 0, 0, 0, time.UTC)
@@ -138,6 +152,18 @@ func TestExecutor_RateLimitDelay(t *testing.T) {
 		{
 			name:      "nil http client",
 			exec:      &Executor{},
+			now:       now,
+			wantDelay: 0,
+		},
+		{
+			name:      "active rate limit delay",
+			exec:      &Executor{HTTPClient: &http.Client{Transport: &stubRateLimitTransport{resetAt: now.Add(5 * time.Minute)}}},
+			now:       now,
+			wantDelay: 5 * time.Minute,
+		},
+		{
+			name:      "past rate limit delay clamps to zero",
+			exec:      &Executor{HTTPClient: &http.Client{Transport: &stubRateLimitTransport{resetAt: now.Add(-5 * time.Minute)}}},
 			now:       now,
 			wantDelay: 0,
 		},

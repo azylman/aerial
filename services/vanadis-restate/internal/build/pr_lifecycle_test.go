@@ -362,6 +362,12 @@ func TestBuildObject_OnPREvent_RemediationDeferralAndRetry(t *testing.T) {
 			firstDispatchErr: &githubapi.StatusError{StatusCode: 500, Message: "github api returned status 500"},
 			wantErr:          false,
 		},
+		{
+			name:             "conflict github api non-retryable 403 error fails OnPREvent without deferral",
+			ev:               pubsub.PRLifecycleEvent{Event: "conflict", HeadSHA: "abcdef1234", Repo: "aerial", PRNumber: 42},
+			firstDispatchErr: &githubapi.StatusError{StatusCode: 403, Message: "github api forbidden (status 403)"},
+			wantErr:          true,
+		},
 	}
 
 	for _, tc := range tests {
