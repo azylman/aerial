@@ -1,0 +1,76 @@
+package store
+
+import (
+	"context"
+	"errors"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/azylman/aerial/pkg/ollama"
+	"github.com/azylman/aerial/pkg/tracing"
+	"github.com/azylman/aerial/services/coven/internal/config"
+)
+
+// OllamaClient provides embedding generation capabilities.
+type OllamaClient interface {
+	GenerateEmbedding(ctx context.Context, text string, isQuery bool, maxRetries int) ([]float32, error)
+}
+
+// Client is the concrete implementation of OllamaClient communicating with Ollama over HTTP.
+type Client struct {
+	*ollama.Client
+
+	baseURL     string
+	model       string
+	queryPrefix string
+	numCtx      int
+}
+
+// NewOllamaClient creates a new Client configured from OllamaConfig.
+func NewOllamaClient(cfg *config.OllamaConfig) *Client {
+	var baseURL, model, queryPrefix string
+	var numCtx int
+	if cfg != nil {
+		baseURL = strings.TrimRight(strings.TrimSpace(cfg.BaseURL), "/")
+		model = strings.TrimSpace(cfg.Model)
+		queryPrefix = cfg.QueryPrefix
+		numCtx = cfg.NumCtx
+	}
+	if model == "" {
+		model = config.DefaultOllamaModel
+	}
+	if numCtx <= 0 {
+		numCtx = config.DefaultOllamaNumCtx
+	}
+	httpClient := tracing.Client(&http.Client{
+		Timeout: 3 * time.Second,
+	})
+	retryDelay := 50 * time.Millisecond
+	c := &Client{
+		baseURL:     baseURL,
+		model:       model,
+		queryPrefix: queryPrefix,
+		numCtx:      numCtx,
+	}
+	c.Client = ollama.NewDynamicClient(func() ollama.Config {
+		return ollama.Config{
+			BaseURL:     c.baseURL,
+			Model:       c.model,
+			QueryPrefix: c.queryPrefix,
+			NumCtx:      c.numCtx,
+		}
+	})
+	c.SetHTTPClient(httpClient)
+	c.SetRetryDelay(retryDelay)
+	return c
+}
+
+// GenerateEmbedding generates an embedding vector for the provided text.
+// If isQuery is true and queryPrefix is configured, prepends the query prefix to the prompt.
+func (c *Client) GenerateEmbedding(ctx context.Context, text string, isQuery bool, maxRetries int) ([]float32, error) {
+	if strings.TrimSpace(c.baseURL) == "" {
+		return nil, errors.New("ollama base URL is not configured")
+	}
+	return c.Client.GenerateEmbedding(ctx, text, isQuery, maxRetries)
+}
