@@ -186,6 +186,7 @@ func TestPostgresVanadisStore_CompleteActionChunk(t *testing.T) {
 func TestPostgresVanadisStore_FailChunk(t *testing.T) {
 	t.Parallel()
 	running := sqltest.FailRow("running", "running")
+	prOpened := sqltest.FailRow("pr_opened", "running", 1, 42)
 	tests := []struct {
 		name       string
 		chunkID    string
@@ -215,6 +216,12 @@ func TestPostgresVanadisStore_FailChunk(t *testing.T) {
 		{name: "stale identity", chunkID: "c1", dispatchID: "stale", db: dbScript{Row: running}},
 		{name: "fails running chunk and keeps build running", chunkID: "c1", db: dbScript{Row: running}, wantFailed: true},
 		{name: "fails running chunk of failed build", chunkID: "c1", db: dbScript{Row: sqltest.FailRow("running", "failed")}, wantFailed: true, wantBuild: "failed"},
+		{name: "pr closed without merging", chunkID: "c1", db: dbScript{Row: prOpened}, wantFailed: true},
+		{name: "pr-attached current action", chunkID: "c1", dispatchID: "vanadis-c1-turn-1", db: dbScript{Row: prOpened}, wantFailed: true},
+		{name: "pr-attached stale action", chunkID: "c1", dispatchID: "vanadis-c1-turn-0", db: dbScript{Row: prOpened}},
+		{name: "pr-attached ci remediation", chunkID: "c1", dispatchID: "vanadis-c1-cifail-1-abcdef0", db: dbScript{Row: prOpened}, wantFailed: true},
+		{name: "pr-attached conflict remediation", chunkID: "c1", dispatchID: "vanadis-conflict-c1", db: dbScript{Row: prOpened}, wantFailed: true},
+		{name: "deploy failed fences delayed action", chunkID: "c1", dispatchID: "vanadis-c1-turn-1", db: dbScript{Row: sqltest.FailRow("deploy_failed", "running", 1, 42)}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

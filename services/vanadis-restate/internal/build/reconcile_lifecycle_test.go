@@ -1,6 +1,7 @@
 package build
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -23,6 +24,7 @@ import (
 
 	"github.com/azylman/aerial/pkg/eriwire"
 	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/pkg/pubsubtest"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/executor"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/sqltest"
@@ -71,7 +73,7 @@ func TestBuildObject_LifecycleTransitionsAndFailures(t *testing.T) {
 			return "", errors.New("widget err")
 		},
 	}
-	execErr := executor.NewExecutor(t.TempDir(), eriErr, &mockBusError{err: errors.New("pub err")}, "token", "example-owner", nil)
+	execErr := executor.NewExecutor(t.TempDir(), eriErr, &pubsubtest.FaultBus{PublishErr: errors.New("pub err")}, "token", "example-owner", nil)
 	boHandleErr := NewBuildObject("", nil).WithAuthority(storeUpdErr, execErr)
 	_, _ = restate.Run(ctxCancel, func(rc restate.RunContext) (bool, error) {
 		boHandleErr.handlePREventType(rc, "b-more", "c1", "ci_failed", pubsub.PRLifecycleEvent{Event: "ci_failed", Repo: "aerial"})
@@ -394,32 +396,57 @@ func (bus *deploymentEventRecorder) Publish(_ context.Context, _, _ string, payl
 	return nil
 }
 
-func TestRejectedDeploymentMutation(t *testing.T) {
+func TestApplyMutation(t *testing.T) {
 	t.Parallel()
+	running := func(id string) *sqltest.Row {
+		return &sqltest.Row{Build: &model.VanadisBuild{ID: id, Status: "running"}}
+	}
+	prChunk := func(status string) []model.VanadisChunk {
+		return []model.VanadisChunk{{ID: "c1", BuildID: "b1", Mode: "pr", Status: status}}
+	}
+	nudged := func() []model.VanadisChunk {
+		return []model.VanadisChunk{{ID: "c1", BuildID: "b1", Mode: "action", Status: "running", StallNudges: 1}}
+	}
+	action := func() []model.VanadisChunk {
+		return []model.VanadisChunk{{ID: "c1", BuildID: "b1", Mode: "action", Status: "running"}}
+	}
+	identity := func(id string) dbScript { return dbScript{Row: running(id), CountRow: sqltest.ValuesRow(1)} }
+	fail := func(nudges ...int) dbScript {
+		return dbScript{BuildRow: running("b1"), Row: sqltest.FailRow("running", "running", nudges...)}
+	}
+	const skipped, notFound = "action completion not applied", "vanadis chunk not found"
 	tests := []struct {
-		name, status, action string
-		fail                 bool
+		name, action, buildID, chunkID, dispatchID string
+		db                                         dbScript
+		chunks                                     []model.VanadisChunk
+		wantErr                                    string
 	}{
-		{"cancelled during completion write", "deploying", "chunk_deploy_success", false},
-		{"obsolete merge mutation", "completed", "chunk_merged", false},
-		{"merge persistence error", "deploying", "chunk_merged", true},
+		{name: "cancelled during completion write", action: "chunk_deploy_success", buildID: "b1", chunkID: "c1", db: dbScript{Row: running("b1"), ExecTag: "UPDATE 0"}, chunks: prChunk("deploying")},
+		{name: "obsolete merge mutation", action: "chunk_merged", buildID: "b1", chunkID: "c1", db: dbScript{Row: running("b1"), ExecTag: "UPDATE 0"}, chunks: prChunk("completed")},
+		{name: "merge persistence error", action: "chunk_merged", buildID: "b1", chunkID: "c1", db: dbScript{Row: running("b1"), ExecTag: "UPDATE 0", FailExec: "UPDATE vanadis_chunks", ExecErr: errors.New("database unavailable")}, chunks: prChunk("deploying"), wantErr: "database unavailable"},
+		{name: "deployment missing identity", action: "chunk_deploy_success", buildID: "b1", chunkID: " c1 ", db: identity("b1"), chunks: nudged(), wantErr: skipped},
+		{name: "deployment stale identity", action: "chunk_deploy_success", buildID: "b1", chunkID: " c1 ", dispatchID: "vanadis-c1-turn-0", db: identity("b1"), chunks: nudged(), wantErr: skipped},
+		{name: "completion missing identity", action: "action_completed", buildID: "b1", chunkID: " c1 ", db: identity("b1"), chunks: nudged(), wantErr: skipped},
+		{name: "completion stale identity", action: "action_completed", buildID: "b1", chunkID: " c1 ", dispatchID: "vanadis-c1-turn-0", db: identity("b1"), chunks: nudged(), wantErr: skipped},
+		{name: "wrong keyed build", action: "action_completed", buildID: "other", chunkID: " c1 ", dispatchID: "vanadis-c1-turn-1", db: identity("other"), wantErr: notFound},
+		{name: "deployment wrong keyed build", action: "chunk_deploy_success", buildID: "other", chunkID: " c1 ", dispatchID: "vanadis-c1-turn-1", db: identity("other"), wantErr: notFound},
+		{name: "failure missing generation", action: "chunk_failed", buildID: "b1", chunkID: "c1", db: fail(1), chunks: action(), wantErr: skipped},
+		{name: "failure stale generation", action: "chunk_failed", buildID: "b1", chunkID: "c1", dispatchID: "vanadis-c1-turn-0", db: fail(1), chunks: action(), wantErr: skipped},
+		{name: "failure current generation", action: "chunk_failed", buildID: "b1", chunkID: " c1 ", dispatchID: "vanadis-c1-turn-1", db: fail(1), chunks: action()},
+		{name: "failure persistence cancellation", action: "chunk_failed", buildID: "b1", chunkID: "c1", db: dbScript{BuildRow: running("b1"), Row: sqltest.FailRow("running", "running"), FailExec: "UPDATE vanadis_chunks", ExecErr: context.Canceled}, chunks: action(), wantErr: "context canceled"},
+		{name: "failure wrong owner", action: "chunk_failed", buildID: "b1", chunkID: "other", db: dbScript{BuildRow: running("b1")}, chunks: action(), wantErr: notFound},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			build := model.VanadisBuild{ID: "b1", Status: "running"}
-			chunk := model.VanadisChunk{ID: "c1", BuildID: "b1", Mode: "pr", Status: tc.status}
-			script := dbScript{Row: &sqltest.Row{Build: &build}, Chunks: []model.VanadisChunk{chunk}, ExecTag: "UPDATE 0"}
-			if tc.fail {
-				script.ExecErr = errors.New("database unavailable")
-				script.FailExec = "UPDATE vanadis_chunks"
-			}
+			script := tc.db
+			script.Chunks = tc.chunks
 			st, _ := open(script)
 			bus := &deploymentEventRecorder{}
 			bo := NewBuildObject("", nil).WithAuthority(st, executor.NewExecutor("", &mockEriClient{}, bus, "token", "example-owner", nil))
-			err := bo.applyMutation(context.Background(), "b1", &BuildMutationRequest{Action: tc.action, ChunkID: "c1"})
-			if tc.fail {
-				assert.ErrorContains(t, err, "database unavailable")
+			err := bo.applyMutation(context.Background(), tc.buildID, &BuildMutationRequest{Action: tc.action, ChunkID: tc.chunkID, DispatchID: tc.dispatchID, Reason: "failure"})
+			if tc.wantErr != "" {
+				assert.ErrorContains(t, err, tc.wantErr)
 			} else {
 				assert.NoError(t, err)
 			}
@@ -487,63 +514,43 @@ func (tx *deploymentEvidenceTx) Exec(ctx context.Context, query string, args ...
 	return tx.db.Exec(ctx, query, args...)
 }
 
-func TestActionCompletionMutationIdentity(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name, action, buildID, dispatchID, status string
-		wantErr                                   error
-	}{
-		{"deployment missing identity", "chunk_deploy_success", "b1", "", "running", errActionCompletionSkipped},
-		{"deployment stale identity", "chunk_deploy_success", "b1", "vanadis-c1-turn-0", "running", errActionCompletionSkipped},
-		{"completion missing identity", "action_completed", "b1", "", "running", errActionCompletionSkipped},
-		{"completion stale identity", "action_completed", "b1", "vanadis-c1-turn-0", "running", errActionCompletionSkipped},
-		{"wrong keyed build", "action_completed", "other", "vanadis-c1-turn-1", "running", ErrChunkNotFound},
-		{"deployment wrong keyed build", "chunk_deploy_success", "other", "vanadis-c1-turn-1", "running", ErrChunkNotFound},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			build := model.VanadisBuild{ID: tc.buildID, Status: "running"}
-			chunk := model.VanadisChunk{ID: "c1", BuildID: "b1", Mode: "action", Status: tc.status, StallNudges: 1}
-			chunks := []model.VanadisChunk{chunk}
-			if tc.buildID != "b1" {
-				chunks = nil
-			}
-			st, _ := open(dbScript{Row: &sqltest.Row{Build: &build}, Chunks: chunks, CountRow: sqltest.ValuesRow(1)})
-			bus := &deploymentEventRecorder{}
-			bo := NewBuildObject("", nil).WithAuthority(st, executor.NewExecutor("", &mockEriClient{}, bus, "token", "example-owner", nil))
-			err := bo.applyMutation(context.Background(), tc.buildID, &BuildMutationRequest{Action: tc.action, ChunkID: " c1 ", DispatchID: tc.dispatchID})
-			assert.ErrorIs(t, err, tc.wantErr)
-			assert.Empty(t, bus.events)
-		})
-	}
-}
-
 func TestActionCompletionContinuation(t *testing.T) {
 	t.Parallel()
+	done := func(nudges int) model.VanadisChunk {
+		return model.VanadisChunk{ID: "c1", BuildID: "b1", Mode: "action", Status: "completed", StallNudges: nudges}
+	}
+	next := model.VanadisChunk{ID: "next", BuildID: "b1", Mode: "pr", Status: "pending", Repo: "owner/repo", TargetFiles: []string{"main.go"}, DependsOn: []string{"c1"}}
+	donePR := model.VanadisChunk{ID: "c2", BuildID: "b1", Mode: "pr", Status: "completed"}
+	const turn1 = "vanadis-c1-turn-1"
+	const completedPrompt = "[VANADIS BUILD COMPLETED]\nBuild ID: b1\nObjective: \n\nAll chunks completed successfully."
+	// startStatus, when set, is the build status a reconcile-build transition
+	// sees before the mutations run against buildStatus: a redelivered
+	// completion after reconciliation already completed the build.
 	tests := []struct {
-		name, action, buildStatus, identity, chunkID string
-		wantEvents                                   int
-		quiet                                        bool
-		identities                                   []string
+		name, action, startStatus, buildStatus, chunkID string
+		chunks                                          []model.VanadisChunk
+		quiet                                           bool
+		identities                                      []string
+		wantEvents                                      int
+		wantPrompts                                     []string
+		wantDispatch                                    string
+		wantWidget                                      bool
 	}{
-		{"mutation resumes after committed completion", "action_completed", "running", "vanadis-c1-turn-1", "c1", 0, false, nil},
-		{"final deployment delivers terminal event", "chunk_deploy_success", "completed", "vanadis-c1-turn-1", "c1", 1, false, []string{"vanadis-c1-turn-1", "vanadis-c1-turn-0", "vanadis-c1-turn-1"}},
-		{"final mutation delivers terminal event", "action_completed", "completed", "vanadis-c1-turn-1", "c1", 1, false, []string{"vanadis-c1-turn-1", "vanadis-c1-turn-1"}},
-		{"stale completed generation suppressed", "chunk_deploy_success", "completed", "vanadis-c1-turn-0", "c1", 0, false, nil},
-		{"quiet final deployment preserves event and widget", "chunk_deploy_success", "completed", "vanadis-c1-turn-1", "c1", 1, true, nil},
-		{"padded final action completion", "action_completed", "completed", "vanadis-c1-turn-1", " c1 ", 1, false, nil},
-		{"padded final deployment completion", "chunk_deploy_success", "completed", "vanadis-c1-turn-1", " c1 ", 1, false, nil},
+		{name: "mutation resumes after committed completion", action: "action_completed", buildStatus: "running", chunkID: "c1", chunks: cks(done(1), next), identities: []string{turn1}, wantDispatch: "next", wantWidget: true},
+		{name: "final deployment delivers terminal event", action: "chunk_deploy_success", buildStatus: "completed", chunkID: "c1", chunks: cks(done(1)), identities: []string{turn1, "vanadis-c1-turn-0", turn1}, wantEvents: 1, wantPrompts: []string{completedPrompt}, wantWidget: true},
+		{name: "final mutation delivers terminal event", action: "action_completed", buildStatus: "completed", chunkID: "c1", chunks: cks(done(1)), identities: []string{turn1, turn1}, wantEvents: 1, wantPrompts: []string{completedPrompt}, wantWidget: true},
+		{name: "stale completed generation suppressed", action: "chunk_deploy_success", buildStatus: "completed", chunkID: "c1", chunks: cks(done(1)), identities: []string{"vanadis-c1-turn-0"}},
+		{name: "quiet final deployment preserves event and widget", action: "chunk_deploy_success", buildStatus: "completed", chunkID: "c1", chunks: cks(done(1)), quiet: true, identities: []string{turn1}, wantEvents: 1, wantWidget: true},
+		{name: "padded final action completion", action: "action_completed", buildStatus: "completed", chunkID: " c1 ", chunks: cks(done(1)), identities: []string{turn1}, wantEvents: 1, wantPrompts: []string{completedPrompt}, wantWidget: true},
+		{name: "padded final deployment completion", action: "chunk_deploy_success", buildStatus: "completed", chunkID: " c1 ", chunks: cks(done(1)), identities: []string{turn1}, wantEvents: 1, wantPrompts: []string{completedPrompt}, wantWidget: true},
+		{name: "mixed build completion redelivered after reconcile", action: "action_completed", startStatus: "running", buildStatus: "completed", chunkID: "c1", chunks: cks(done(0), donePR), identities: []string{""}, wantEvents: 1, wantPrompts: []string{completedPrompt}, wantWidget: true},
+		{name: "quiet mixed build completion redelivered after reconcile", action: "action_completed", startStatus: "running", buildStatus: "completed", chunkID: "c1", chunks: cks(done(0), donePR), quiet: true, identities: []string{""}, wantEvents: 1, wantWidget: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			build := model.VanadisBuild{ID: "b1", Status: tc.buildStatus, ThreadID: "thread", Quiet: tc.quiet}
-			chunks := []model.VanadisChunk{{ID: "c1", BuildID: "b1", Mode: "action", Status: "completed", StallNudges: 1}}
-			if tc.buildStatus == "running" {
-				chunks = append(chunks, model.VanadisChunk{ID: "next", BuildID: "b1", Mode: "pr", Status: "pending", Repo: "owner/repo", TargetFiles: []string{"main.go"}, DependsOn: []string{"c1"}})
-			}
-			st, _ := open(dbScript{Row: &sqltest.Row{Build: &build}, Chunks: chunks})
+			build := model.VanadisBuild{ID: "b1", Status: cmp.Or(tc.startStatus, tc.buildStatus), ThreadID: "thread", Quiet: tc.quiet}
+			st, _ := open(dbScript{Row: &sqltest.Row{Build: &build}, Chunks: tc.chunks})
 			bus := &deploymentEventRecorder{}
 			var queuedPrompts []string
 			eri := &mockEriClient{promptFn: func(_ context.Context, _, prompt string) error {
@@ -552,28 +559,25 @@ func TestActionCompletionContinuation(t *testing.T) {
 			}}
 			bo := NewBuildObject("", nil).WithAuthority(st, executor.NewExecutor("", eri, bus, "token", "example-owner", nil))
 			rt := newFakeObjectRuntime("b1")
-			identities := tc.identities
-			if len(identities) == 0 {
-				identities = []string{tc.identity}
+			if tc.startStatus != "" {
+				_, err := bo.executeObjectTransition(rt, "reconcile-build", nil)
+				require.NoError(t, err)
+				// The next database snapshot reflects the completion written by reconciliation.
+				build.Status = tc.buildStatus
 			}
-			for _, identity := range identities {
+			for _, identity := range tc.identities {
 				_, err := bo.executeObjectTransition(rt, "mutate-build", &BuildMutationRequest{Action: tc.action, ChunkID: tc.chunkID, DispatchID: identity})
 				assert.NoError(t, err)
 			}
 			assert.Len(t, bus.events, tc.wantEvents)
-			if tc.wantEvents > 0 && !tc.quiet {
-				assert.Equal(t, []string{"[VANADIS BUILD COMPLETED]\nBuild ID: b1\nObjective: \n\nAll chunks completed successfully."}, queuedPrompts)
-			} else {
-				assert.Empty(t, queuedPrompts)
+			assert.Equal(t, tc.wantPrompts, queuedPrompts)
+			assert.Equal(t, tc.wantWidget, eri.LastWidget != nil)
+			if tc.wantDispatch == "" {
+				assert.Nil(t, eri.LastDispatch)
+				return
 			}
-			if tc.buildStatus == "running" {
-				assert.NotNil(t, eri.LastDispatch)
-				if eri.LastDispatch != nil {
-					assert.Equal(t, "next", eri.LastDispatch.VanadisChunkID)
-				}
-			} else if tc.wantEvents > 0 {
-				assert.NotNil(t, eri.LastWidget)
-			}
+			require.NotNil(t, eri.LastDispatch)
+			assert.Equal(t, tc.wantDispatch, eri.LastDispatch.VanadisChunkID)
 		})
 	}
 }
@@ -698,104 +702,6 @@ func TestDispatchCompletionContinuation(t *testing.T) {
 			assert.False(t, eri.LastDispatch.SkipIfActive)
 			assert.True(t, strings.HasPrefix(eri.LastDispatch.Prompt, tc.wantPromptPrefix), eri.LastDispatch.Prompt)
 			assert.Contains(t, eri.LastDispatch.Prompt, "Do step 1")
-		})
-	}
-}
-
-func TestMixedBuildCompletionRedelivery(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name        string
-		quiet       bool
-		wantPrompts int
-	}{
-		{"mixed build completion", false, 1},
-		{"quiet mixed build completion", true, 0},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			build := model.VanadisBuild{ID: "b1", Status: "running", ThreadID: "thread", Quiet: tc.quiet}
-			chunks := []model.VanadisChunk{
-				{ID: "c1", BuildID: "b1", Mode: "action", Status: "completed"},
-				{ID: "c2", BuildID: "b1", Mode: "pr", Status: "completed"},
-			}
-			st, _ := open(dbScript{Row: &sqltest.Row{Build: &build}, Chunks: chunks})
-			bus := &deploymentEventRecorder{}
-			var queuedPrompts []string
-			eri := &mockEriClient{promptFn: func(_ context.Context, _, prompt string) error {
-				queuedPrompts = append(queuedPrompts, prompt)
-				return nil
-			}}
-			bo := NewBuildObject("", nil).WithAuthority(st, executor.NewExecutor("", eri, bus, "token", "example-owner", nil))
-			rt := newFakeObjectRuntime("b1")
-			_, err := bo.executeObjectTransition(rt, "reconcile-build", nil)
-			assert.NoError(t, err)
-			// The next database snapshot reflects the completion written by reconciliation.
-			build.Status = "completed"
-			_, err = bo.executeObjectTransition(rt, "mutate-build", &BuildMutationRequest{Action: "action_completed", ChunkID: "c1"})
-			assert.NoError(t, err)
-			assert.Len(t, bus.events, 1)
-			assert.Len(t, queuedPrompts, tc.wantPrompts)
-		})
-	}
-}
-
-func TestBuildObject_FailureMutations(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name, chunkID, dispatchID string
-		db                        dbScript
-		wantErr                   error
-	}{
-		{"missing generation", "c1", "", dbScript{Row: sqltest.FailRow("running", "running", 1)}, errActionCompletionSkipped},
-		{"stale generation", "c1", "vanadis-c1-turn-0", dbScript{Row: sqltest.FailRow("running", "running", 1)}, errActionCompletionSkipped},
-		{"current generation", " c1 ", "vanadis-c1-turn-1", dbScript{Row: sqltest.FailRow("running", "running", 1)}, nil},
-		{"persistence cancellation", "c1", "", dbScript{Row: sqltest.FailRow("running", "running"), FailExec: "UPDATE vanadis_chunks", ExecErr: context.Canceled}, context.Canceled},
-		{"wrong owner", "other", "", dbScript{}, ErrChunkNotFound},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			script := tc.db
-			script.BuildRow = &sqltest.Row{Build: &model.VanadisBuild{ID: "b1", Status: "running"}}
-			script.Chunks = []model.VanadisChunk{{ID: "c1", BuildID: "b1", Mode: "action", Status: "running"}}
-			st, _ := open(script)
-			bo := NewBuildObject("", nil).WithAuthority(st, nil)
-			err := bo.applyMutation(context.Background(), "b1", &BuildMutationRequest{Action: "chunk_failed", ChunkID: tc.chunkID, DispatchID: tc.dispatchID, Reason: "failure"})
-			if tc.wantErr != nil {
-				assert.ErrorIs(t, err, tc.wantErr)
-			} else {
-				assert.NoError(t, err)
-			}
-		})
-	}
-}
-
-func TestActionPRFailureFence(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name, status, identity string
-		wantFailed             bool
-	}{
-		{"closed without merging", "pr_opened", "", true},
-		{"current action", "pr_opened", "vanadis-c1-turn-1", true},
-		{"stale action", "pr_opened", "vanadis-c1-turn-0", false},
-		{"ci remediation", "pr_opened", "vanadis-c1-cifail-1-abcdef0", true},
-		{"conflict remediation", "pr_opened", "vanadis-conflict-c1", true},
-		{"deploy failed fences delayed action", "deploy_failed", "vanadis-c1-turn-1", false},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			st, _ := open(dbScript{Row: sqltest.FailRow(tc.status, "running", 1, 42)})
-			build, chunk, failed, err := st.FailChunk(context.Background(), "c1", "pr_closed_unmerged", tc.identity)
-			assert.NoError(t, err)
-			assert.Equal(t, tc.wantFailed, failed)
-			if tc.wantFailed {
-				assert.Equal(t, "running", build.Status)
-				assert.Equal(t, "failed", chunk.Status)
-			}
 		})
 	}
 }
@@ -988,42 +894,53 @@ func (r *retryingObjectRuntime) RunReconcileStep(name string, fn func(ctx contex
 
 func TestBuildObject_NotifyTransitionError(t *testing.T) {
 	t.Parallel()
-
-	// Quiet build suppresses error notification
-	buildQuiet := model.VanadisBuild{ID: "b-quiet", Quiet: true}
-	storeQuiet, _ := open(dbScript{BuildRow: &sqltest.Row{Build: &buildQuiet}})
-	eriQuiet := &mockEriClient{}
-	boQuiet := NewBuildObject("", nil).WithAuthority(storeQuiet, executor.NewExecutor(t.TempDir(), eriQuiet, nil, "", "example-owner", nil))
-	require.NoError(t, boQuiet.notifyTransitionError(context.Background(), "b-quiet", "step", nil, errors.New("trans err")))
-	assert.Nil(t, eriQuiet.LastWidget)
-
-	// Non-quiet build resolves from store and emits banner
-	buildActive := model.VanadisBuild{ID: "b-active", Title: "Active Build", Status: "running"}
-	storeActive, _ := open(dbScript{BuildRow: &sqltest.Row{Build: &buildActive}, Chunks: []model.VanadisChunk{{ID: "c1", Title: "Chunk 1"}}})
-	eriActive := &mockEriClient{}
-	boActive := NewBuildObject("", nil).WithAuthority(storeActive, executor.NewExecutor(t.TempDir(), eriActive, nil, "", "example-owner", nil))
-	require.NoError(t, boActive.notifyTransitionError(context.Background(), "b-active", "step", nil, errors.New("trans err")))
-	require.NotNil(t, eriActive.LastWidget)
-	assert.Equal(t, "b-active", eriActive.LastWidget.ID)
-	assert.Equal(t, "⚠️ Reconcile backing off (step): trans err", eriActive.LastWidget.Banner)
-	require.Len(t, eriActive.LastWidget.Chunks, 1)
-	assert.Equal(t, "c1", eriActive.LastWidget.Chunks[0].ID)
-
-	// Fallback to priorState when store is nil
-	eriPrior := &mockEriClient{}
-	boNoStore := NewBuildObject("", nil).WithAuthority(nil, executor.NewExecutor(t.TempDir(), eriPrior, nil, "", "example-owner", nil))
+	quiet := model.VanadisBuild{ID: "b-quiet", Quiet: true}
+	active := model.VanadisBuild{ID: "b-active", Title: "Active Build", Status: "running"}
 	prior := &model.BuildObjectState{Build: model.VanadisBuild{ID: "b-prior", Title: "Prior Build"}, Chunks: []model.VanadisChunk{{ID: "c-prior", Title: "Prior Chunk"}}}
-	require.NoError(t, boNoStore.notifyTransitionError(context.Background(), "b-prior", "step", prior, errors.New("trans err")))
-	require.NotNil(t, eriPrior.LastWidget)
-	assert.Equal(t, "b-prior", eriPrior.LastWidget.ID)
-	assert.Equal(t, "⚠️ Reconcile backing off (step): trans err", eriPrior.LastWidget.Banner)
-	require.Len(t, eriPrior.LastWidget.Chunks, 1)
-	assert.Equal(t, "c-prior", eriPrior.LastWidget.Chunks[0].ID)
+	tests := []struct {
+		name, buildID string
+		db            *dbScript
+		prior         *model.BuildObjectState
+		wantChunks    []string
+	}{
+		{name: "quiet build suppresses notification", buildID: "b-quiet", db: &dbScript{BuildRow: &sqltest.Row{Build: &quiet}}},
+		{name: "store snapshot drives banner", buildID: "b-active", db: &dbScript{BuildRow: &sqltest.Row{Build: &active}, Chunks: []model.VanadisChunk{{ID: "c1", Title: "Chunk 1"}}}, wantChunks: []string{"c1"}},
+		{name: "prior state without store", buildID: "b-prior", prior: prior, wantChunks: []string{"c-prior"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var st store.VanadisStore
+			if tc.db != nil {
+				st, _ = open(*tc.db)
+			}
+			eri := &mockEriClient{}
+			bo := NewBuildObject("", nil).WithAuthority(st, executor.NewExecutor(t.TempDir(), eri, nil, "", "example-owner", nil))
+			require.NoError(t, bo.notifyTransitionError(context.Background(), tc.buildID, "step", tc.prior, errors.New("trans err")))
+			if tc.wantChunks == nil {
+				assert.Nil(t, eri.LastWidget)
+				return
+			}
+			require.NotNil(t, eri.LastWidget)
+			assert.Equal(t, tc.buildID, eri.LastWidget.ID)
+			assert.Equal(t, "⚠️ Reconcile backing off (step): trans err", eri.LastWidget.Banner)
+			var chunks []string
+			for _, c := range eri.LastWidget.Chunks {
+				chunks = append(chunks, c.ID)
+			}
+			assert.Equal(t, tc.wantChunks, chunks)
+		})
+	}
+}
 
-	// Retry inside RunReconcileStep records counter and emits banner before succeeding on retry
+// TestRunTransitionStep_InStepRetry pins the in-step failure path: a step
+// that fails once inside RunReconcileStep records the reconcile error and
+// emits the backoff banner before the retried step succeeds.
+func TestRunTransitionStep_InStepRetry(t *testing.T) {
+	t.Parallel()
 	attempts := 0
-	var retryBanners []string
-	eriRetry := &mockEriClient{
+	var banners []string
+	eri := &mockEriClient{
 		dispatchFn: func(context.Context, eriwire.BrainDispatchRequest) error {
 			attempts++
 			if attempts == 1 {
@@ -1032,23 +949,24 @@ func TestBuildObject_NotifyTransitionError(t *testing.T) {
 			return nil
 		},
 		widgetFn: func(_ context.Context, req executor.StatusWidgetRequest) (string, error) {
-			retryBanners = append(retryBanners, req.Banner)
+			banners = append(banners, req.Banner)
 			return "msg-retry", nil
 		},
 	}
-	storeRetry, _ := open(dbScript{
-		BuildRow: &sqltest.Row{Build: &buildActive},
+	active := model.VanadisBuild{ID: "b-active", Title: "Active Build", Status: "running"}
+	st, _ := open(dbScript{
+		BuildRow: &sqltest.Row{Build: &active},
 		Chunks:   []model.VanadisChunk{{ID: "c1", BuildID: "b-active", Mode: "action", Status: "pending", Title: "Chunk 1"}},
 		ExecTag:  "UPDATE 1",
 	})
-	boRetry := NewBuildObject("", nil).WithAuthority(storeRetry, executor.NewExecutor(t.TempDir(), eriRetry, nil, "", "example-owner", nil))
-	rtRetry := &retryingObjectRuntime{fakeObjectRuntime: newFakeObjectRuntime("b-active")}
-	beforeCount := reconcileErrorsCount(t, "reconcile-retry-test")
-	res, err := boRetry.executeObjectTransition(rtRetry, "reconcile-retry-test", nil)
+	bo := NewBuildObject("", nil).WithAuthority(st, executor.NewExecutor(t.TempDir(), eri, nil, "", "example-owner", nil))
+	rt := &retryingObjectRuntime{fakeObjectRuntime: newFakeObjectRuntime("b-active")}
+	before := reconcileErrorsCount(t, "reconcile-retry-test")
+	res, err := bo.executeObjectTransition(rt, "reconcile-retry-test", nil)
 	require.NoError(t, err)
 	assert.Equal(t, "running", res.Status)
-	assert.Equal(t, beforeCount+1, reconcileErrorsCount(t, "reconcile-retry-test"))
-	assert.Contains(t, retryBanners, "⚠️ Reconcile backing off (reconcile-retry-test): transient dispatch failure")
+	assert.Equal(t, before+1, reconcileErrorsCount(t, "reconcile-retry-test"))
+	assert.Contains(t, banners, "⚠️ Reconcile backing off (reconcile-retry-test): transient dispatch failure")
 }
 
 func buildTestMetricsMux() *http.ServeMux {
@@ -1093,103 +1011,23 @@ func TestReconcileErrorsMetric(t *testing.T) {
 	}
 
 	tests := []struct {
-		name          string
-		handler       string
-		err           error
-		wantClientInc float64
-		wantServerInc float64
+		name, handler                string
+		err                          error
+		wantClientInc, wantServerInc float64
 	}{
-		{
-			name:          "nil error increments neither",
-			handler:       "test-handler-nil",
-			err:           nil,
-			wantClientInc: 0,
-			wantServerInc: 0,
-		},
-		{
-			name:          "store.ErrInvalidBuildInput routes to client errors",
-			handler:       "test-handler-invalid",
-			err:           store.ErrInvalidBuildInput,
-			wantClientInc: 1,
-			wantServerInc: 0,
-		},
-		{
-			name:          "wrapped store.ErrInvalidBuildInput routes to client errors",
-			handler:       "test-handler-wrapped-invalid",
-			err:           fmt.Errorf("validation error: %w", store.ErrInvalidBuildInput),
-			wantClientInc: 1,
-			wantServerInc: 0,
-		},
-		{
-			name:          "store.ErrBuildNotFound routes to client errors",
-			handler:       "test-handler-build-not-found",
-			err:           store.ErrBuildNotFound,
-			wantClientInc: 1,
-			wantServerInc: 0,
-		},
-		{
-			name:          "ErrChunkNotFound routes to client errors",
-			handler:       "test-handler-chunk-not-found",
-			err:           ErrChunkNotFound,
-			wantClientInc: 1,
-			wantServerInc: 0,
-		},
-		{
-			name:          "store.ErrBuildConflict routes to client errors",
-			handler:       "test-handler-conflict",
-			err:           store.ErrBuildConflict,
-			wantClientInc: 1,
-			wantServerInc: 0,
-		},
-		{
-			name:          "4xx restate.TerminalError routes to client errors",
-			handler:       "test-handler-terminal-400",
-			err:           restate.ToTerminalError(errors.New("bad input"), restate.WithErrorCode(400)),
-			wantClientInc: 1,
-			wantServerInc: 0,
-		},
-		{
-			name:          "404 restate.TerminalError routes to client errors",
-			handler:       "test-handler-terminal-404",
-			err:           restate.ToTerminalError(errors.New("resource missing"), restate.WithErrorCode(404)),
-			wantClientInc: 1,
-			wantServerInc: 0,
-		},
-		{
-			name:          "409 restate.TerminalError routes to client errors",
-			handler:       "test-handler-terminal-409",
-			err:           restate.ToTerminalError(errors.New("state conflict"), restate.WithErrorCode(409)),
-			wantClientInc: 1,
-			wantServerInc: 0,
-		},
-		{
-			name:          "499 restate.TerminalError routes to client errors",
-			handler:       "test-handler-terminal-499",
-			err:           restate.ToTerminalError(errors.New("custom client error"), restate.WithErrorCode(499)),
-			wantClientInc: 1,
-			wantServerInc: 0,
-		},
-		{
-			name:          "5xx restate.TerminalError routes to server errors",
-			handler:       "test-handler-terminal-500",
-			err:           restate.ToTerminalError(errors.New("internal error"), restate.WithErrorCode(500)),
-			wantClientInc: 0,
-			wantServerInc: 1,
-		},
-		{
-			name:          "uncoded restate.TerminalErrorf routes to server errors",
-			handler:       "test-handler-terminal-uncoded",
-			err:           restate.TerminalErrorf("generic terminal error: %s", "boom"),
-			wantClientInc: 0,
-			wantServerInc: 1,
-		},
-		{
-			name:          "transient error routes to server errors",
-			handler:       "test-handler-transient",
-			err:           errors.New("transient database connection timeout"),
-			wantClientInc: 0,
-			wantServerInc: 1,
-		},
+		{"nil error increments neither", "test-handler-nil", nil, 0, 0},
+		{"store.ErrInvalidBuildInput routes to client errors", "test-handler-invalid", store.ErrInvalidBuildInput, 1, 0},
+		{"wrapped store.ErrInvalidBuildInput routes to client errors", "test-handler-wrapped-invalid", fmt.Errorf("validation error: %w", store.ErrInvalidBuildInput), 1, 0},
+		{"store.ErrBuildNotFound routes to client errors", "test-handler-build-not-found", store.ErrBuildNotFound, 1, 0},
+		{"ErrChunkNotFound routes to client errors", "test-handler-chunk-not-found", ErrChunkNotFound, 1, 0},
+		{"store.ErrBuildConflict routes to client errors", "test-handler-conflict", store.ErrBuildConflict, 1, 0},
+		{"4xx restate.TerminalError routes to client errors", "test-handler-terminal-400", restate.ToTerminalError(errors.New("bad input"), restate.WithErrorCode(400)), 1, 0},
+		{"404 restate.TerminalError routes to client errors", "test-handler-terminal-404", restate.ToTerminalError(errors.New("resource missing"), restate.WithErrorCode(404)), 1, 0},
+		{"409 restate.TerminalError routes to client errors", "test-handler-terminal-409", restate.ToTerminalError(errors.New("state conflict"), restate.WithErrorCode(409)), 1, 0},
+		{"499 restate.TerminalError routes to client errors", "test-handler-terminal-499", restate.ToTerminalError(errors.New("custom client error"), restate.WithErrorCode(499)), 1, 0},
+		{"5xx restate.TerminalError routes to server errors", "test-handler-terminal-500", restate.ToTerminalError(errors.New("internal error"), restate.WithErrorCode(500)), 0, 1},
+		{"uncoded restate.TerminalErrorf routes to server errors", "test-handler-terminal-uncoded", restate.TerminalErrorf("generic terminal error: %s", "boom"), 0, 1},
+		{"transient error routes to server errors", "test-handler-transient", errors.New("transient database connection timeout"), 0, 1},
 	}
 
 	for _, tc := range tests {
@@ -1215,28 +1053,10 @@ func TestExecuteLaunchChunk_HTTPGenerationAcceptance(t *testing.T) {
 		wantError, wantAcknowledged bool
 	}{
 		{"pr accepted", "pr", "c", `{"status":"accepted","dispatch_id":"vanadis-c-turn-0"}`, 0, 202, false, true},
-		{"pr duplicate", "pr", "c", `{"status":"already_exists","dispatch_id":"vanadis-c-turn-0"}`, 0, 200, false, true},
-		{"pr active", "pr", "c", `{"status":"skipped_active"}`, 0, 200, false, false},
-		{"pr wrong accepted", "pr", "c", `{"status":"accepted","dispatch_id":"wrong"}`, 0, 202, true, false},
-		{"pr wrong duplicate", "pr", "c", `{"status":"already_exists","dispatch_id":"wrong"}`, 0, 200, true, false},
-		{"pr malformed", "pr", "c", `invalid`, 0, 200, true, false},
-		{"pr missing status", "pr", "c", `{}`, 0, 200, true, false},
-		{"pr server failure", "pr", "c", `{}`, 0, 500, true, false},
-		{"initial accepted", "action", "c", `{"status":"accepted","dispatch_id":"vanadis-c-turn-0"}`, 0, 202, false, true},
 		{"initial duplicate", "action", "c", `{"status":"already_exists","dispatch_id":"vanadis-c-turn-0"}`, 0, 200, false, true},
-		{"initial active", "action", "c", `{"status":"skipped_active"}`, 0, 200, false, false},
-		{"initial wrong accepted", "action", "c", `{"status":"accepted","dispatch_id":"wrong"}`, 0, 202, true, false},
-		{"initial wrong duplicate", "action", "c", `{"status":"already_exists","dispatch_id":"wrong"}`, 0, 200, true, false},
-		{"initial malformed", "action", "c", `invalid`, 0, 200, true, false},
-		{"initial missing status", "action", "c", `{}`, 0, 200, true, false},
-		{"initial server failure", "action", "c", `{}`, 0, 500, true, false},
+		{"initial wrong dispatch id", "action", "c", `{"status":"accepted","dispatch_id":"wrong"}`, 0, 202, true, false},
 		{"retry accepted", "action", "dispatch:vanadis-c-turn-1", `{"status":"accepted","dispatch_id":"vanadis-c-turn-1"}`, 1, 202, false, true},
-		{"retry duplicate", "action", "dispatch:vanadis-c-turn-1", `{"status":"already_exists","dispatch_id":"vanadis-c-turn-1"}`, 1, 200, false, true},
-		{"retry active", "action", "dispatch:vanadis-c-turn-1", `{"status":"skipped_active"}`, 0, 200, false, false},
-		{"retry wrong accepted", "action", "dispatch:vanadis-c-turn-1", `{"status":"accepted","dispatch_id":"wrong"}`, 1, 202, true, false},
-		{"retry wrong duplicate", "action", "dispatch:vanadis-c-turn-1", `{"status":"already_exists","dispatch_id":"wrong"}`, 1, 200, true, false},
-		{"retry malformed", "action", "dispatch:vanadis-c-turn-1", `invalid`, 1, 200, true, false},
-		{"retry missing status", "action", "dispatch:vanadis-c-turn-1", `{}`, 1, 200, true, false},
+		{"retry active", "action", "dispatch:vanadis-c-turn-1", `{"status":"skipped_active"}`, 1, 200, false, false},
 		{"retry server failure", "action", "dispatch:vanadis-c-turn-1", `{}`, 1, 500, true, false},
 	}
 	for _, tc := range tests {

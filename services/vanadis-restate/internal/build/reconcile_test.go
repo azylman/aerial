@@ -15,6 +15,7 @@ import (
 
 	"github.com/azylman/aerial/pkg/eriwire"
 	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/pkg/pubsubtest"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/deploygate"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/eritest"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/executor"
@@ -581,7 +582,7 @@ func TestBuildObject_ReconcileErrorBranches(t *testing.T) {
 	bMerge := model.VanadisBuild{ID: "b-merge", Status: "running", ThreadID: "th-1"}
 	cMerge := model.VanadisChunk{ID: "c1", BuildID: "b-merge", Status: "open", Mode: "pr", Repo: "aerial"}
 	stMerge, _ := open(dbScript{BuildRow: &sqltest.Row{Build: &bMerge}, Chunks: []model.VanadisChunk{cMerge}, ExecTag: "UPDATE 1"})
-	busErr := &mockBusError{err: errors.New("pub fail")}
+	busErr := &pubsubtest.FaultBus{PublishErr: errors.New("pub fail")}
 	boMerge := NewBuildObject("", nil).WithAuthority(stMerge, executor.NewExecutor(t.TempDir(), &mockEriClient{}, busErr, "token", "example-owner", nil))
 	assert.NoError(t, boMerge.applyMutation(context.Background(), "b-merge", &BuildMutationRequest{Action: "chunk_merged", ChunkID: "c1"}))
 
