@@ -661,7 +661,8 @@ func isHTTPClientBurst(burst []db.Message) bool {
 	return len(burst) > 0
 }
 
-func (te *turnExecution) resolveTurnPolicy() bool {
+// resolveChannelPolicy resolves the effective channel and its policy onto te without writing rows.
+func (te *turnExecution) resolveChannelPolicy() {
 	te.effectiveID, te.effectiveName, te.isThread, te.threadName = ResolveChannelAndThread(te.pool.getDiscordSession(), te.threadID)
 	if te.effectiveName == "" && len(te.burst) > 0 && te.burst[0].ChannelID != "" {
 		effID, effName, isTh, thName := ResolveChannelAndThread(te.pool.getDiscordSession(), te.burst[0].ChannelID)
@@ -677,7 +678,10 @@ func (te *turnExecution) resolveTurnPolicy() bool {
 	} else {
 		te.policy = config.ActiveConfig().ResolveChannelPolicy(te.effectiveID, te.effectiveName)
 	}
+}
 
+func (te *turnExecution) resolveTurnPolicy() bool {
+	te.resolveChannelPolicy()
 	if !isHTTPClientBurst(te.burst) && te.policy.IsIgnored() {
 		te.logf("[WorkerPool] Channel %s policy is ignored (mode=%s). Marking %d message(s) completed without execution.", te.threadID, te.policy.Mode, len(te.burst))
 		metrics.RecordTurnCompleted("ignored", te.triggerType, "none", time.Since(te.execStart))
