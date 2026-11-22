@@ -520,12 +520,7 @@ func TestFetchK8sClusterState(t *testing.T) {
 	tokenFile := filepath.Join(tempDir, "token")
 	_ = os.WriteFile(tokenFile, []byte("mock-k8s-bearer-token"), 0o600)
 
-	caCertPEM := pem.EncodeToMemory(&pem.Block{
-		Type:  "CERTIFICATE",
-		Bytes: mockTLSServer.Certificate().Raw,
-	})
-	caFile := filepath.Join(tempDir, "ca.crt")
-	_ = os.WriteFile(caFile, caCertPEM, 0o644)
+	caFile := writeTestCA(t, mockTLSServer)
 
 	tests := []fetchK8sClusterStateTestCase{
 		{
@@ -554,6 +549,7 @@ func TestFetchK8sClusterState(t *testing.T) {
 			wantName:     "eri-tls",
 			wantStatus:   "healthy",
 		},
+		{name: "tls server without ca fails verification", tokenPath: tokenFile, overrideAddr: mockTLSServer.URL, wantErr: true, wantErrSubstr: "certificate"},
 		{
 			name:          "empty kube api server",
 			overrideAddr:  "   ",
@@ -584,6 +580,17 @@ func TestFetchK8sClusterState(t *testing.T) {
 			runFetchK8sClusterStateCase(t, tc, tempDir, mockServer.URL, mockTLSServer.URL, &authHeaderReceived)
 		})
 	}
+}
+
+// writeTestCA writes srv's self-signed certificate as a PEM CA bundle and returns its path.
+func writeTestCA(t *testing.T, srv *httptest.Server) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "ca.crt")
+	pemBytes := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: srv.Certificate().Raw})
+	if err := os.WriteFile(path, pemBytes, 0o600); err != nil {
+		t.Fatalf("write CA: %v", err)
+	}
+	return path
 }
 
 func runFetchK8sClusterStateCase(t *testing.T, tc fetchK8sClusterStateTestCase, tempDir, mockServerURL, mockTLSServerURL string, authHeaderReceived *atomic.Value) {
@@ -633,58 +640,5 @@ func runFetchK8sClusterStateCase(t *testing.T, tc fetchK8sClusterStateTestCase, 
 		if val != tc.wantAuth {
 			t.Errorf("expected Authorization header %q, got %q", tc.wantAuth, val)
 		}
-	}
-}
-
-func TestBuildK8sHTTPClient_TableDriven(t *testing.T) {
-	tempDir := t.TempDir()
-	mockTLSServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
-	defer mockTLSServer.Close()
-	validPEM := pem.EncodeToMemory(&pem.Block{
-		Type:  "CERTIFICATE",
-		Bytes: mockTLSServer.Certificate().Raw,
-	})
-	validFile := filepath.Join(tempDir, "valid.crt")
-	if err := os.WriteFile(validFile, validPEM, 0o644); err != nil {
-		t.Fatalf("failed to write valid cert: %v", err)
-	}
-
-	tests := []struct {
-		name       string
-		caPath     string
-		wantRootCA bool
-	}{
-		{
-			name:       "attaches root ca when ca file valid",
-			caPath:     validFile,
-			wantRootCA: true,
-		},
-		{
-			name:       "leaves root ca nil when ca file missing",
-			caPath:     filepath.Join(tempDir, "missing.crt"),
-			wantRootCA: false,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			origCA := kubeCAPath
-			defer func() { kubeCAPath = origCA }()
-			kubeCAPath = tc.caPath
-
-			client := buildK8sHTTPClient()
-			if client.Timeout != 3*time.Second {
-				t.Errorf("timeout = %v, want 3s", client.Timeout)
-			}
-			// The mock API server's self-signed cert verifies only when the CA was attached.
-			resp, err := client.Get(mockTLSServer.URL)
-			if resp != nil {
-				_ = resp.Body.Close()
-			}
-			if hasRootCA := err == nil; hasRootCA != tc.wantRootCA {
-				t.Errorf("TLS handshake ok = %v (err %v), want %v", hasRootCA, err, tc.wantRootCA)
-			}
-			client.CloseIdleConnections()
-		})
 	}
 }

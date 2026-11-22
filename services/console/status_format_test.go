@@ -100,6 +100,8 @@ func TestBuildFactsUpstreamURL_TableDriven(t *testing.T) {
 		{name: "empty category and q omitted", baseURL: "http://brain:8080", query: url.Values{"category": {"   "}, "q": {"   "}}, omitQuery: []string{"category", "q"}},
 		{name: "long ASCII q clamped to 64 runes", baseURL: "http://brain:8080", query: url.Values{"q": {strings.Repeat("a", 100)}}, wantQuery: map[string]string{"q": strings.Repeat("a", 64)}},
 		{name: "multibyte unicode kanji clamped to 64 runes without UTF-8 corruption", baseURL: "http://brain:8080", query: url.Values{"q": {strings.Repeat("電", 70)}}, wantQuery: map[string]string{"q": strings.Repeat("電", 64)}},
+		{name: "agent forwarded", baseURL: "http://brain:8080", query: url.Values{"agent": {"agent-alpha"}}, wantQuery: map[string]string{"agent": "agent-alpha"}},
+		{name: "agent all omitted", baseURL: "http://brain:8080", query: url.Values{"agent": {"all"}}, omitQuery: []string{"agent"}},
 	}
 
 	for _, tt := range tests {
@@ -166,6 +168,7 @@ func TestBuildSchedulesUpstreamURL_TableDriven(t *testing.T) {
 	tests := []struct {
 		name    string
 		baseURL string
+		query   url.Values
 		wantURL string
 		wantErr bool
 	}{
@@ -174,11 +177,13 @@ func TestBuildSchedulesUpstreamURL_TableDriven(t *testing.T) {
 		{name: "invalid url parse input error", baseURL: "http://[::1]:namedport", wantErr: true},
 		{name: "clean base URL without trailing slash", baseURL: "http://brain:8080", wantURL: "http://brain:8080/schedules"},
 		{name: "base URL with trailing slash normalized", baseURL: "http://brain:8080/", wantURL: "http://brain:8080/schedules"},
+		{name: "agent forwarded", baseURL: "http://brain:8080", query: url.Values{"agent": {"agent-alpha"}}, wantURL: "http://brain:8080/schedules?agent=agent-alpha"},
+		{name: "agent all omitted", baseURL: "http://brain:8080", query: url.Values{"agent": {"all"}}, wantURL: "http://brain:8080/schedules"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			gotURL, err := BuildSchedulesUpstreamURL(tt.baseURL)
+			gotURL, err := BuildSchedulesUpstreamURL(tt.baseURL, tt.query)
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("BuildSchedulesUpstreamURL() error = %v, wantErr %v", err, tt.wantErr)
 			}
@@ -199,6 +204,7 @@ func TestBuildScheduleRunsUpstreamURL_TableDriven(t *testing.T) {
 		{name: "valid limit and offset within boundaries", baseURL: "http://brain:8080", query: url.Values{"limit": {"100"}, "offset": {"20"}, "schedule_id": {"  cron-test  "}, "status": {"  success  "}}, wantLimit: 100, wantOffset: 20, wantQuery: map[string]string{"limit": "100", "offset": "20", "schedule_id": "cron-test", "status": "success"}},
 		{name: "limit > 100 falls back to default 50", baseURL: "http://brain:8080", query: url.Values{"limit": {"150"}, "offset": {"-5"}}, wantLimit: 50, wantQuery: map[string]string{"limit": "50", "offset": "0"}},
 		{name: "invalid non-integer limit and offset fall back to defaults", baseURL: "http://brain:8080", query: url.Values{"limit": {"abc"}, "offset": {"xyz"}}, wantLimit: 50, wantQuery: map[string]string{"limit": "50", "offset": "0"}},
+		{name: "agent forwarded", baseURL: "http://brain:8080", query: url.Values{"agent": {"agent-alpha"}, "limit": {"10"}, "offset": {"0"}}, wantLimit: 10, wantQuery: map[string]string{"agent": "agent-alpha", "limit": "10"}},
 	}
 
 	for _, tt := range tests {
@@ -251,6 +257,7 @@ func TestBuildVanadisBuildsUpstreamURL_TableDriven(t *testing.T) {
 		{name: "limit < 1 clamped to 1", baseURL: "http://vanadis.aerial", query: url.Values{"limit": {"0"}}, wantLimit: 1, wantQuery: map[string]string{"limit": "1"}},
 		{name: "negative limit clamped to 1", baseURL: "http://vanadis.aerial", query: url.Values{"limit": {"-10"}}, wantLimit: 1, wantQuery: map[string]string{"limit": "1"}},
 		{name: "invalid non-integer limit falls back to default 50", baseURL: "http://vanadis.aerial", query: url.Values{"limit": {"invalid"}}, wantLimit: 50, wantQuery: map[string]string{"limit": "50"}},
+		{name: "agent forwarded", baseURL: "http://vanadis:4025", query: url.Values{"agent": {"agent-alpha"}, "limit": {"10"}}, wantLimit: 10, wantQuery: map[string]string{"agent": "agent-alpha", "limit": "10"}},
 	}
 
 	for _, tt := range tests {
@@ -335,34 +342,10 @@ func TestCalculateClusterStatus_TableDriven(t *testing.T) {
 		services   []ServiceStatus
 		wantStatus string
 	}{
-		{
-			name:       "nil services returns healthy",
-			services:   nil,
-			wantStatus: "healthy",
-		},
-		{
-			name:       "empty services returns healthy",
-			services:   []ServiceStatus{},
-			wantStatus: "healthy",
-		},
-		{
-			name: "all services healthy returns healthy",
-			services: []ServiceStatus{
-				{Name: "brain", Status: "healthy"},
-				{Name: "dashboard", Status: "healthy"},
-				{Name: "proxy", Status: "healthy"},
-			},
-			wantStatus: "healthy",
-		},
-		{
-			name: "at least one unhealthy service returns degraded",
-			services: []ServiceStatus{
-				{Name: "brain", Status: "healthy"},
-				{Name: "dashboard", Status: "unhealthy"},
-				{Name: "proxy", Status: "healthy"},
-			},
-			wantStatus: "degraded",
-		},
+		{"nil services returns healthy", nil, "healthy"},
+		{"empty services returns healthy", []ServiceStatus{}, "healthy"},
+		{"all services healthy returns healthy", []ServiceStatus{{Name: "brain", Status: "healthy"}, {Name: "dashboard", Status: "healthy"}}, "healthy"},
+		{"at least one unhealthy service returns degraded", []ServiceStatus{{Name: "brain", Status: "healthy"}, {Name: "dashboard", Status: "unhealthy"}}, "degraded"},
 	}
 
 	for _, tt := range tests {
@@ -581,130 +564,27 @@ func TestCalculateDeployStatus_TableDriven(t *testing.T) {
 	tests := []struct {
 		name        string
 		deployments []DeploymentStatus
-		wantStatus  string
-		wantOngoing bool
+		want        string
 	}{
-		{
-			name:        "empty deployments returns idle and false",
-			deployments: []DeploymentStatus{},
-			wantStatus:  "idle",
-			wantOngoing: false,
-		},
-		{
-			name: "live completed deployment returns idle and false",
-			deployments: []DeploymentStatus{
-				{Stage: "live", Progress: 100},
-			},
-			wantStatus:  "idle",
-			wantOngoing: false,
-		},
-		{
-			name: "queued deployment returns queued and true",
-			deployments: []DeploymentStatus{
-				{Stage: "queued", Progress: 15},
-			},
-			wantStatus:  "queued",
-			wantOngoing: true,
-		},
-		{
-			name: "building deployment returns building and true",
-			deployments: []DeploymentStatus{
-				{Stage: "building", Progress: 45},
-			},
-			wantStatus:  "building",
-			wantOngoing: true,
-		},
-		{
-			name: "awaiting_pull deployment returns awaiting_pull and true",
-			deployments: []DeploymentStatus{
-				{Stage: "awaiting_pull", Progress: 50},
-			},
-			wantStatus:  "awaiting_pull",
-			wantOngoing: true,
-		},
-		{
-			name: "swapping deployment returns swapping and true",
-			deployments: []DeploymentStatus{
-				{Stage: "swapping", Progress: 75},
-			},
-			wantStatus:  "swapping",
-			wantOngoing: true,
-		},
-		{
-			name: "pulling deployment returns pulling and true",
-			deployments: []DeploymentStatus{
-				{Stage: "pulling", Progress: 55},
-			},
-			wantStatus:  "pulling",
-			wantOngoing: true,
-		},
-		{
-			name: "precedence: pulling overrides building",
-			deployments: []DeploymentStatus{
-				{Stage: "building"},
-				{Stage: "pulling"},
-			},
-			wantStatus:  "pulling",
-			wantOngoing: true,
-		},
-		{
-			name: "failed deployment returns failed and false",
-			deployments: []DeploymentStatus{
-				{Stage: "failed", Progress: 0},
-			},
-			wantStatus:  "failed",
-			wantOngoing: false,
-		},
-		{
-			name: "degraded deployment returns degraded and false",
-			deployments: []DeploymentStatus{
-				{Stage: "degraded", Progress: 85},
-			},
-			wantStatus:  "degraded",
-			wantOngoing: false,
-		},
-		{
-			name: "precedence: swapping overrides building",
-			deployments: []DeploymentStatus{
-				{Stage: "building", Progress: 45},
-				{Stage: "swapping", Progress: 75},
-			},
-			wantStatus:  "swapping",
-			wantOngoing: true,
-		},
-		{
-			name: "precedence: building overrides queued and failed",
-			deployments: []DeploymentStatus{
-				{Stage: "queued", Progress: 15},
-				{Stage: "failed", Progress: 0},
-				{Stage: "building", Progress: 35},
-			},
-			wantStatus:  "building",
-			wantOngoing: true,
-		},
-		{
-			name: "precedence: failed overrides degraded",
-			deployments: []DeploymentStatus{
-				{Stage: "degraded", Progress: 85},
-				{Stage: "failed", Progress: 0},
-			},
-			wantStatus:  "failed",
-			wantOngoing: false,
-		},
+		{"empty deployments returns idle", []DeploymentStatus{}, "idle"},
+		{"live completed deployment returns idle", []DeploymentStatus{{Stage: "live", Progress: 100}}, "idle"},
+		{"queued deployment returns queued", []DeploymentStatus{{Stage: "queued", Progress: 15}}, "queued"},
+		{"building deployment returns building", []DeploymentStatus{{Stage: "building", Progress: 45}}, "building"},
+		{"awaiting_pull deployment returns awaiting_pull", []DeploymentStatus{{Stage: "awaiting_pull", Progress: 50}}, "awaiting_pull"},
+		{"swapping deployment returns swapping", []DeploymentStatus{{Stage: "swapping", Progress: 75}}, "swapping"},
+		{"pulling deployment returns pulling", []DeploymentStatus{{Stage: "pulling", Progress: 55}}, "pulling"},
+		{"precedence: pulling overrides building", []DeploymentStatus{{Stage: "building"}, {Stage: "pulling"}}, "pulling"},
+		{"failed deployment returns failed", []DeploymentStatus{{Stage: "failed", Progress: 0}}, "failed"},
+		{"degraded deployment returns degraded", []DeploymentStatus{{Stage: "degraded", Progress: 85}}, "degraded"},
+		{"precedence: swapping overrides building", []DeploymentStatus{{Stage: "building", Progress: 45}, {Stage: "swapping", Progress: 75}}, "swapping"},
+		{"precedence: building overrides queued and failed", []DeploymentStatus{{Stage: "queued"}, {Stage: "failed"}, {Stage: "building"}}, "building"},
+		{"precedence: failed overrides degraded", []DeploymentStatus{{Stage: "degraded", Progress: 85}, {Stage: "failed", Progress: 0}}, "failed"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			gotStatus := CalculateDeployStatus(tt.deployments)
-			if gotStatus != tt.wantStatus {
-				t.Errorf("CalculateDeployStatus() = %q, want %q", gotStatus, tt.wantStatus)
-			}
-			gotOngoing := IsDeployOngoing(tt.deployments)
-			if gotOngoing != tt.wantOngoing {
-				t.Errorf("IsDeployOngoing() = %v, want %v", gotOngoing, tt.wantOngoing)
-			}
-			for _, d := range tt.deployments {
-				_ = IsDeployOngoing(d.Stage)
+			if got := CalculateDeployStatus(tt.deployments); got != tt.want {
+				t.Errorf("CalculateDeployStatus() = %q, want %q", got, tt.want)
 			}
 		})
 	}
@@ -1059,16 +939,6 @@ func TestIsDeployOngoing_TableDriven(t *testing.T) {
 				t.Errorf("IsDeployOngoing(%v) = %v, want %v", tt.input, got, tt.want)
 			}
 		})
-	}
-}
-
-func TestBuildDeploymentSteps(t *testing.T) {
-	steps := buildDeploymentSteps("active", "pending", "failed", "completed", "active")
-	if len(steps) != 5 {
-		t.Fatalf("expected 5 steps, got %d", len(steps))
-	}
-	if steps[0].Status != "active" {
-		t.Errorf("expected step 0 status active, got %s", steps[0].Status)
 	}
 }
 

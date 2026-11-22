@@ -506,7 +506,7 @@ func applyCIRunToDeployment(
 
 	dep.Stage = stage
 	dep.Progress = progress
-	dep.Steps = buildDeploymentSteps("completed", ciStatus, syncStatus, step4Status, step5Status)
+	dep.Steps = buildDeploymentSteps(ciStatus, syncStatus, step4Status, step5Status)
 	dep.MatrixJobs = ciChips
 }
 
@@ -660,7 +660,7 @@ func applyGroupDegradedState(dep *DeploymentStatus) {
 	dep.Stage = statusDegraded
 	dep.Progress = 85
 	if len(dep.Steps) < 5 {
-		dep.Steps = buildDeploymentSteps("completed", "completed", "completed", "completed", "failed")
+		dep.Steps = buildDeploymentSteps("completed", "completed", "completed", "failed")
 	} else {
 		dep.Steps[3].Status = statusCompleted
 		dep.Steps[4].Status = statusFailed
@@ -678,7 +678,7 @@ func applyGroupSwappingState(dep *DeploymentStatus, healthyCount, totalCount int
 	}
 	swapStatus := statusActive
 	if len(dep.Steps) < 5 {
-		dep.Steps = buildDeploymentSteps("completed", "completed", "completed", swapStatus, "active")
+		dep.Steps = buildDeploymentSteps("completed", "completed", swapStatus, "active")
 	} else {
 		dep.Steps[1].Status = statusCompleted
 		dep.Steps[2].Status = statusCompleted
@@ -692,7 +692,7 @@ func applyGroupLiveGraceState(dep *DeploymentStatus, groupContainers []DockerCon
 		dep.Stage = stageLive
 		dep.Progress = 100
 		if len(dep.Steps) < 5 {
-			dep.Steps = buildDeploymentSteps("completed", "completed", "completed", "completed", "completed")
+			dep.Steps = buildDeploymentSteps("completed", "completed", "completed", "completed")
 		} else {
 			for i := range dep.Steps {
 				dep.Steps[i].Status = statusCompleted

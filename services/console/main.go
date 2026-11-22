@@ -210,8 +210,6 @@ func (c *cachedDiscoveredAgents) set(agents []string, now time.Time) {
 
 var discoveredAgentsCache = &cachedDiscoveredAgents{ttl: 30 * time.Second}
 
-var configuredAgentsDiscoveryFn func(ctx context.Context) ([]string, error)
-
 func fetchAgentsFromEndpoint(ctx context.Context, client *http.Client, endpointURL string, extract func(body io.Reader) []string) []string {
 	if strings.TrimSpace(endpointURL) == "" {
 		return nil
@@ -423,11 +421,6 @@ func fetchUpstreamDiscoveredAgents(ctx context.Context, haroURL, vanadisURL stri
 
 func discoverConfiguredAgents(ctx context.Context, allTasks []ActiveTaskStatus, haroURL, vanadisURL string, now time.Time) []string {
 	var discovered []string
-	if configuredAgentsDiscoveryFn != nil {
-		if ags, err := configuredAgentsDiscoveryFn(ctx); err == nil && len(ags) > 0 {
-			discovered = append(discovered, ags...)
-		}
-	}
 	for _, t := range allTasks {
 		if t.Agent != "" {
 			discovered = append(discovered, t.Agent)
