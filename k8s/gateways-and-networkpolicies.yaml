@@ -639,6 +639,29 @@ metadata:
 spec:
   ingress:
     - from:
+        - namespaceSelector:
+            matchExpressions:
+              - key: kubernetes.io/metadata.name
+                operator: In
+                values:
+                  - restate-green
+                  - restate
+        - podSelector:
+            matchExpressions:
+              - key: app
+                operator: In
+                values:
+                  - restate-operator
+        - podSelector:
+            matchExpressions:
+              - key: app.kubernetes.io/name
+                operator: In
+                values:
+                  - restate-operator
+      ports:
+        - port: 9080
+          protocol: TCP
+    - from:
         - podSelector:
             matchExpressions:
               - key: app.kubernetes.io/name
@@ -665,6 +688,29 @@ metadata:
   namespace: default
 spec:
   ingress:
+    - from:
+        - namespaceSelector:
+            matchExpressions:
+              - key: kubernetes.io/metadata.name
+                operator: In
+                values:
+                  - restate-green
+                  - restate
+        - podSelector:
+            matchExpressions:
+              - key: app
+                operator: In
+                values:
+                  - restate-operator
+        - podSelector:
+            matchExpressions:
+              - key: app.kubernetes.io/name
+                operator: In
+                values:
+                  - restate-operator
+      ports:
+        - port: 9080
+          protocol: TCP
     - from:
         - podSelector:
             matchExpressions:
@@ -788,6 +834,8 @@ spec:
                   - vanadis-nats
                   - vanadis-restate
                   - haro
+                  - prospera
+                  - coven
                   - synapse
                   - eri
                   - console
