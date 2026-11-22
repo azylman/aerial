@@ -2761,6 +2761,12 @@ spec:
               value: k8s.pod.name=$(POD_NAME),k8s.namespace.name=$(POD_NAMESPACE),k8s.node.name=$(NODE_NAME),service.version=${TAG_AERIAL_PROSPERA:=latest}
             - name: CONFIG_PATH
               value: /share/aerial-config/services/prospera/prospera.yaml
+            - name: RESTATE_PORT
+              value: "9080"
+            - name: RESTATE_INGRESS_URL
+              value: http://restate.aerial:8080
+            - name: RESTATE_ADMIN_URL
+              value: http://restate.aerial:9070
             - name: NATS_AERIAL_PASSWORD
               valueFrom:
                 secretKeyRef:
@@ -2783,6 +2789,9 @@ spec:
           ports:
             - containerPort: 8080
               name: http
+              protocol: TCP
+            - containerPort: 9080
+              name: restate
               protocol: TCP
           readinessProbe:
             failureThreshold: 3
@@ -2874,6 +2883,11 @@ spec:
       port: 80
       protocol: TCP
       targetPort: 8080
+    - appProtocol: kubernetes.io/h2c
+      name: restate
+      port: 9080
+      protocol: TCP
+      targetPort: 9080
   selector:
     app.kubernetes.io/name: prospera
   type: ClusterIP

@@ -1082,6 +1082,12 @@ spec:
               value: /share/aerial-config/services/coven/coven.yaml
             - name: K8S_AUTH_ENABLED
               value: "true"
+            - name: RESTATE_PORT
+              value: "9080"
+            - name: RESTATE_INGRESS_URL
+              value: http://restate.aerial:8080
+            - name: RESTATE_ADMIN_URL
+              value: http://restate.aerial:9070
             - name: NATS_AERIAL_PASSWORD
               valueFrom:
                 secretKeyRef:
@@ -1103,6 +1109,9 @@ spec:
           ports:
             - containerPort: 4008
               name: http
+              protocol: TCP
+            - containerPort: 9080
+              name: restate
               protocol: TCP
           resources:
             limits:
@@ -1211,6 +1220,11 @@ spec:
       port: 80
       protocol: TCP
       targetPort: 4008
+    - appProtocol: kubernetes.io/h2c
+      name: restate
+      port: 9080
+      protocol: TCP
+      targetPort: 9080
   selector:
     app.kubernetes.io/name: coven
   type: ClusterIP
@@ -1656,6 +1670,12 @@ spec:
               value: http://eri.aerial
             - name: VANADIS_URL
               value: http://vanadis.aerial
+            - name: RESTATE_PORT
+              value: "9080"
+            - name: RESTATE_INGRESS_URL
+              value: http://restate.aerial:8080
+            - name: RESTATE_ADMIN_URL
+              value: http://restate.aerial:9070
             - name: NATS_AERIAL_PASSWORD
               valueFrom:
                 secretKeyRef:
@@ -1674,6 +1694,9 @@ spec:
           ports:
             - containerPort: 4005
               name: http
+              protocol: TCP
+            - containerPort: 9080
+              name: restate
               protocol: TCP
           resources:
             limits:
@@ -1788,6 +1811,11 @@ spec:
       port: 80
       protocol: TCP
       targetPort: 4005
+    - appProtocol: kubernetes.io/h2c
+      name: restate
+      port: 9080
+      protocol: TCP
+      targetPort: 9080
   selector:
     app.kubernetes.io/name: haro
   type: ClusterIP
