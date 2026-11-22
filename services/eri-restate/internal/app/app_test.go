@@ -97,12 +97,11 @@ func TestEriRestateDefinitions(t *testing.T) {
 		return map[string]map[string]string{
 			"ThreadSession" + suffix + " VIRTUAL_OBJECT": {
 				"Enqueue": "SHARED", "Append": "EXCLUSIVE", "OnTurnDone": "EXCLUSIVE", "Kick": "EXCLUSIVE",
-				"CancelTurn": "SHARED", "ClearPending": "EXCLUSIVE", "Status": "SHARED", "AdoptPending": "SHARED",
-				"RunTurn": "EXCLUSIVE",
+				"CancelTurn": "SHARED", "ClearPending": "EXCLUSIVE", "Status": "SHARED",
 			},
 			"DispatchSession" + suffix + " VIRTUAL_OBJECT": {
 				"Enqueue": "SHARED", "Append": "EXCLUSIVE", "OnTurnDone": "EXCLUSIVE", "Cancel": "SHARED",
-				"ClearPending": "EXCLUSIVE", "Status": "SHARED", "AdoptPending": "SHARED", "RunTurn": "EXCLUSIVE",
+				"ClearPending": "EXCLUSIVE", "Status": "SHARED",
 			},
 			"VoiceSession" + suffix + " VIRTUAL_OBJECT": {"Ask": "EXCLUSIVE"},
 			"SessionManager" + suffix + " SERVICE":      {"CancelDispatch": "-"},
@@ -183,8 +182,8 @@ func TestDiscoveryManifestTimeoutsAndH2C(t *testing.T) {
 	wantHourMs := time.Hour.Milliseconds()
 
 	wantTimeouts := map[string]timeouts{
-		"ThreadSession":   {inactivity: wantTurnHoldMs, abort: wantTurnHoldMs},
-		"DispatchSession": {inactivity: wantTurnHoldMs, abort: wantTurnHoldMs},
+		"ThreadSession":   {inactivity: wantHourMs, abort: wantHourMs},
+		"DispatchSession": {inactivity: wantHourMs, abort: wantHourMs},
 		"VoiceSession":    {inactivity: wantHourMs, abort: wantHourMs},
 		"SessionManager":  {inactivity: wantHourMs, abort: wantHourMs},
 		"TurnRunner":      {inactivity: wantTurnHoldMs, abort: wantTurnHoldMs},
