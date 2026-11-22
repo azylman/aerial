@@ -106,8 +106,10 @@ func normalizeFact(st *PRState, f pubsub.PRLifecycleEvent) (pubsub.PRLifecycleEv
 }
 
 // FactEffectKey keys one fact on its head SHA, falling back to its merge SHA
-// and then the stored head, plus its job and check names. The synapse
-// restateclient FactMatchKey renders the same generation-free form.
+// and then the stored head, plus its job and check names (scoping
+// check_updated facts by check_state when job_name is empty so pending and
+// passed transitions for the same check do not deduplicate each other). The
+// synapse restateclient FactMatchKey renders the same generation-free form.
 func FactEffectKey(st *PRState, f pubsub.PRLifecycleEvent) EffectKey {
 	head := usableHeadSHA(f.HeadSHA)
 	if head == "" {
@@ -116,7 +118,11 @@ func FactEffectKey(st *PRState, f pubsub.PRLifecycleEvent) EffectKey {
 	if head == "" && st != nil {
 		head = usableHeadSHA(st.HeadSHA)
 	}
-	return st.EffectKeyFor(FactEffectKind(f.Event), head, f.JobName, f.CheckName)
+	job := f.JobName
+	if strings.TrimSpace(job) == "" && strings.EqualFold(strings.TrimSpace(f.Event), "check_updated") {
+		job = strings.ToLower(strings.TrimSpace(f.CheckState))
+	}
+	return st.EffectKeyFor(FactEffectKind(f.Event), head, job, f.CheckName)
 }
 
 // PlanFacts returns the facts that have not fired in the current gate
