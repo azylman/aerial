@@ -120,7 +120,7 @@ func selectAffected(root string, cat []image, changed []string, forceAll bool) r
 		}
 	}
 	all := len(res.Reasons) > 0
-	res.Images = imageGate(cat, g, imgAffected, imgChanged, all)
+	res.Images = imageGate(cat, g, imgAffected, func(img image) []string { return inputChanges(r, img, imgChanged) }, all)
 	mods := moduleDirs(r, root)
 	res.Test = moduleGate(mods, g, affected, changed, all || slices.Contains(changed, coverageFile))
 	res.Lint = moduleGate(mods, g, affected, changed, all || slices.Contains(changed, lintConfig))
@@ -191,7 +191,18 @@ func (g *graph) addUnresolved(imports []string) {
 	}
 }
 
-// roots expands catalog go_roots: a module dir means every package of that
+// mainPackages keeps the binaries of a module: only they start a build closure,
+// so a package no binary imports never selects an image. A module without a
+// main package (a library root) keeps every package.
+func mainPackages(pkgs []*goPackage) []*goPackage {
+	mains := slices.DeleteFunc(slices.Clone(pkgs), func(p *goPackage) bool { return !p.isMain })
+	if len(mains) == 0 {
+		return pkgs
+	}
+	return mains
+}
+
+// roots expands catalog go_roots: a module dir means every main package of that
 // module, anything else must be a package dir. The first root's module is
 // the main module whose replace directives resolve imports.
 func (r *repo) roots(dirs []string) (*module, []*goPackage, error) {
@@ -200,7 +211,7 @@ func (r *repo) roots(dirs []string) (*module, []*goPackage, error) {
 	for _, d := range dirs {
 		var pkgs []*goPackage
 		if m := r.byDir[d]; m != nil {
-			pkgs = r.modulePackages(m)
+			pkgs = mainPackages(r.modulePackages(m))
 		} else if p := r.pkgs[d]; p != nil {
 			pkgs = []*goPackage{p}
 		} else {
@@ -214,7 +225,7 @@ func (r *repo) roots(dirs []string) (*module, []*goPackage, error) {
 	return main, out, nil
 }
 
-// affectedPackages maps changed files to package dirs. A non-test file affects
+// affectedPackages maps changed files to package dirs. A non-test, non-Go file affects
 // every enclosing package dir in its module (//go:embed reaches into
 // subdirectories, testdata and assets live below their package). A go.mod or
 // go.sum affects every package of its module. _test.go files never reach a
@@ -238,6 +249,10 @@ func affectedPackages(r *repo, changed []string) (map[string]bool, []string) {
 		if strings.HasSuffix(f, "_test.go") {
 			continue
 		}
+		if p := r.pkgs[path.Dir(f)]; p != nil && strings.HasSuffix(f, ".go") {
+			affected[p.dir] = true // Go source is never //go:embed payload for an enclosing package
+			continue
+		}
 		markEnclosing(r, f, affected)
 	}
 	return affected, reasons
@@ -258,14 +273,35 @@ func markEnclosing(r *repo, file string, affected map[string]bool) {
 	}
 }
 
-func imageGate(cat []image, g *graph, affected map[string]bool, changed []string, all bool) gate {
+func imageGate(cat []image, g *graph, affected map[string]bool, changedFor func(image) []string, all bool) gate {
 	out := gate{All: all, Selected: []string{}}
 	for _, img := range cat {
-		if all || matchesInputs(img.Select.Inputs, changed) || (g != nil && intersects(g.images[img.Service], affected)) {
+		if all || matchesInputs(img.Select.Inputs, changedFor(img)) || (g != nil && intersects(g.images[img.Service], affected)) {
 			out.Selected = append(out.Selected, img.Service)
 		}
 	}
 	return out
+}
+
+// inputChanges drops the Go files of packages inside the image's Go root
+// modules: the import graph decides whether those reach the binary, so a helper
+// package no binary imports must not select the image through a dir/** input.
+func inputChanges(r *repo, img image, changed []string) []string {
+	if r == nil || len(img.Select.GoRoots) == 0 {
+		return changed
+	}
+	_, roots, err := r.roots(img.Select.GoRoots)
+	if err != nil {
+		return changed
+	}
+	mods := map[*module]bool{}
+	for _, p := range roots {
+		mods[p.mod] = true
+	}
+	return slices.DeleteFunc(slices.Clone(changed), func(f string) bool {
+		p := r.pkgs[path.Dir(f)]
+		return strings.HasSuffix(f, ".go") && p != nil && mods[p.mod]
+	})
 }
 
 func moduleGate(mods []string, g *graph, affected map[string]bool, changed []string, all bool) gate {
