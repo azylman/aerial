@@ -1,1 +1,11 @@
-{}
+{
+  "root_files": {
+    "mcp/docket-mcp": 9,
+    "mcp/kernel-mcp": 7,
+    "services/console": 19,
+    "services/coven": 32,
+    "services/coverage-ingest": 5,
+    "services/eri": 20,
+    "services/transcripts": 16
+  }
+}
