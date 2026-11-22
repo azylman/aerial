@@ -399,6 +399,9 @@ func TestBuildStatusWidgetChunk(t *testing.T) {
 	}{
 		{"PRChunkKeepsRepo", model.VanadisChunk{ID: "c1", Mode: "pr", Repo: "aerial-config", Status: "pending"}, "pr", "aerial-config"},
 		{"PRChunkWithoutRepoDefaultsToAerial", model.VanadisChunk{ID: "c2", Mode: "pr", Status: "pending"}, "pr", "aerial"},
+		{"ActionChunkWithPRKeepsRepo", model.VanadisChunk{ID: "c4", Mode: "action", Repo: "aerial", PRNumber: 2431, Status: "running"}, "action", "aerial"},
+		{"ActionChunkWithPRKeepsOtherRepo", model.VanadisChunk{ID: "c5", Mode: "action", Repo: "aerial-config", PRNumber: 7, Status: "running"}, "action", "aerial-config"},
+		{"ActionChunkWithPRNoRepoDefaults", model.VanadisChunk{ID: "c6", Mode: "action", PRNumber: 7, Status: "running"}, "action", "aerial"},
 		{"ActionChunkHasNoRepo", model.VanadisChunk{ID: "c3", Mode: "action", Status: "pending"}, "action", ""},
 	}
 	for _, tc := range tests {
