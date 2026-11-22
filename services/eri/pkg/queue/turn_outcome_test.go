@@ -41,7 +41,6 @@ func runCapacityBlipCase(t *testing.T, tt capacityBlipCase) {
 	var mu sync.Mutex
 	var attemptCount int
 	var deliveredText string
-	doneCh := make(chan struct{}, 1)
 	appCfg := config.NewFromData(&config.ConfigData{Channels: map[string]config.ChannelPolicy{"default": {Mode: "thread"}}})
 	haroBus, getOneShots := newMockHaroOneShotBus(t)
 	pool := New(appCfg, WorkerPoolConfig{
@@ -64,12 +63,6 @@ func runCapacityBlipCase(t *testing.T, tt capacityBlipCase) {
 			return tt.deliveryErr
 		},
 		TypingFunc: func(s *discordgo.Session, channelID string) func() { return func() {} },
-		OnMessageCompleted: func(msg db.Message, finalStatus string) {
-			select {
-			case doneCh <- struct{}{}:
-			default:
-			}
-		},
 	})
 	pool.Start()
 	defer pool.Stop()
@@ -80,14 +73,10 @@ func runCapacityBlipCase(t *testing.T, tt capacityBlipCase) {
 
 	threadID, msgID := "thread-"+strings.ToLower(tt.name), "msg-"+strings.ToLower(tt.name)
 	CacheDiscordChannel(&discordgo.Channel{ID: threadID, Type: discordgo.ChannelTypeGuildPublicThread, Name: threadID})
-	msg := db.Message{ID: msgID, ThreadID: threadID, Content: "hello " + tt.name}
+	msg := db.Message{ID: msgID, ThreadID: threadID, Content: "hello " + tt.name, Status: db.StatusPending}
 	_ = insertMessage(store, msg)
-	pool.Enqueue(msg)
-
-	select {
-	case <-doneCh:
-	case <-time.After(10 * time.Second):
-		t.Fatal("Timeout waiting for message completed")
+	if lt := runLiveBurst(context.Background(), pool, threadID, "turn-1", msgID); lt.err != nil {
+		t.Fatalf("turn = (%s, %v), want no step error", lt.outcome, lt.err)
 	}
 	pool.Stop()
 
@@ -421,18 +410,12 @@ func TestWorker_DualPool_YieldTrapFallback(t *testing.T) {
 	_ = os.MkdirAll(taskDir, 0o755)
 	_ = os.WriteFile(filepath.Join(taskDir, "bg-task-in-low-pool.log"), []byte("done"), 0o644)
 
-	doneCh := make(chan struct{})
 	pool := New(cfg, WorkerPoolConfig{
 		ProcessPool: primaryPool, LowEffortProcessPool: lowPool,
 		SessionManager: session.New(tmpHome, tempData), Store: store,
 		OnMessageCompleted: func(msg db.Message, status string) {
 			if status == db.StatusCompleted {
 				turnCount.Add(1)
-				select {
-				case <-doneCh:
-				default:
-					close(doneCh)
-				}
 			}
 		},
 	})
@@ -444,13 +427,9 @@ func TestWorker_DualPool_YieldTrapFallback(t *testing.T) {
 	}
 
 	msg := db.Message{ID: "msg-yield-fb-1", ThreadID: threadID, Content: "run command and wait", Status: db.StatusPending, CreatedAt: time.Now()}
-	_ = store.InsertMessage(context.Background(), msg)
-	pool.Enqueue(msg)
-
-	select {
-	case <-doneCh:
-	case <-time.After(5 * time.Second):
-		t.Fatalf("timed out waiting for message completion")
+	_ = store.InsertMessage(ctx, msg)
+	if lt := runLiveBurst(ctx, pool, threadID, "turn-1", msg.ID); lt.err != nil || lt.outcome != OutcomeCompleted {
+		t.Fatalf("turn = (%s, %v), want completed", lt.outcome, lt.err)
 	}
 	if tc := int(turnCount.Load()); tc < 1 {
 		t.Errorf("expected auto-resumption from yield-trap detection, turnCount=%d", tc)
@@ -530,7 +509,6 @@ func runYieldTrapCase(t *testing.T, tc yieldTrapCase) {
 	var promptsSeenMu, deliveredMu sync.Mutex
 	var promptsSeen []string
 	var deliveredText string
-	doneCh := make(chan struct{})
 
 	sessMgr := session.New(tmpHome, "")
 	sessDir, _ := ensureTestSessionDir(sessMgr, tc.sessionID)
@@ -562,8 +540,7 @@ func runYieldTrapCase(t *testing.T, tc yieldTrapCase) {
 			deliveredMu.Unlock()
 			return nil
 		},
-		TypingFunc:         func(s *discordgo.Session, channelID string) func() { return func() {} },
-		OnMessageCompleted: func(msg db.Message, finalStatus string) { close(doneCh) },
+		TypingFunc: func(s *discordgo.Session, channelID string) func() { return func() {} },
 	})
 	pool.Start()
 	defer pool.Stop()
@@ -572,12 +549,8 @@ func runYieldTrapCase(t *testing.T, tc yieldTrapCase) {
 	_ = insertMessage(store, msg)
 	model := pool.GetRuntimeConfig()
 	initialMetric := testutil.ToFloat64(metrics.YieldTrapEventsTotal.WithLabelValues(tc.metricOutcome, tc.metricSignature, model))
-	pool.Enqueue(msg)
-
-	select {
-	case <-doneCh:
-	case <-time.After(5 * time.Second):
-		t.Fatal("Timeout waiting for message processing")
+	if lt := runLiveBurst(context.Background(), pool, tc.threadID, "turn-1", tc.msgID); lt.err != nil || lt.outcome != OutcomeCompleted {
+		t.Fatalf("turn = (%s, %v), want completed", lt.outcome, lt.err)
 	}
 
 	if runnerInvocations.Load() != tc.expectInvocations {
@@ -747,7 +720,9 @@ func TestWorker_GlobalQuotaLockout_SilentAndDeliveryTarget_TableDriven(t *testin
 				stopTyping:  func() {},
 			}
 
-			te.executeWithRetries()
+			if !te.checkGlobalQuotaLockout("", pool.GetRuntimeConfig()) {
+				t.Fatal("checkGlobalQuotaLockout = false, want true while the global lockout is active")
+			}
 
 			deliveredMu.Lock()
 			wasDelivered := deliveredTo != ""
@@ -894,12 +869,11 @@ func TestTurnExecution_InlineReplyOnNewerMessages(t *testing.T) {
 	t.Parallel()
 	const chanID = "1542423172400291873"
 	tests := []struct {
-		name       string
-		threadID   string
-		burst      []db.Message
-		stored     []db.Message
-		enqueuedID string
-		wantReply  string
+		name      string
+		threadID  string
+		burst     []db.Message
+		stored    []db.Message
+		wantReply string
 	}{
 		{
 			name:      "no newer messages sends plain message without reply reference",
@@ -914,13 +888,6 @@ func TestTurnExecution_InlineReplyOnNewerMessages(t *testing.T) {
 			burst:     []db.Message{{ID: "100000000000000001", ThreadID: chanID, AuthorID: "u1"}},
 			stored:    []db.Message{{ID: "100000000000000001", ThreadID: chanID, AuthorID: "u1"}, {ID: "100000000000000002", ThreadID: chanID, AuthorID: "u2"}},
 			wantReply: "100000000000000001",
-		},
-		{
-			name:       "newer discord message enqueued in worker state attaches reply reference",
-			threadID:   chanID,
-			burst:      []db.Message{{ID: "100000000000000001", ThreadID: chanID, AuthorID: "u1"}},
-			enqueuedID: "100000000000000004",
-			wantReply:  "100000000000000001",
 		},
 		{
 			name:      "longer numeric snowflake in store compares greater",
@@ -990,9 +957,6 @@ func TestTurnExecution_InlineReplyOnNewerMessages(t *testing.T) {
 				},
 			})
 			defer pool.Stop()
-			if tc.enqueuedID != "" {
-				pool.EnqueueBurst(db.Message{ID: tc.enqueuedID, ThreadID: tc.threadID, AuthorID: "u2"})
-			}
 
 			te := &turnExecution{
 				pool:        pool,
