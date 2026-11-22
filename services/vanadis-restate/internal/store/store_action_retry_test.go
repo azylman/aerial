@@ -51,7 +51,7 @@ func TestPostgresVanadisStore_RetryActionChunk(t *testing.T) {
 		{name: "missing identity", buildStatus: "failed", chunk: model.VanadisChunk{ID: "c1", BuildID: "b1", Mode: "action", Status: "failed"}, wantErr: true},
 		{name: "stale identity", buildStatus: "failed", chunk: model.VanadisChunk{ID: "c1", BuildID: "b1", Mode: "action", Status: "failed", StallNudges: 2}, expected: "vanadis-c1-turn-0", wantErr: true},
 		{name: "cancelled parent", buildStatus: "cancelled", chunk: model.VanadisChunk{ID: "c1", BuildID: "b1", Mode: "action", Status: "failed"}, expected: "vanadis-c1-turn-0", wantErr: true},
-		{name: "pr action", buildStatus: "failed", chunk: model.VanadisChunk{ID: "c1", BuildID: "b1", Mode: "action", Status: "failed", PRNumber: 12}, expected: "vanadis-c1-turn-0", wantErr: true},
+		{name: "pr action", buildStatus: "failed", chunk: model.VanadisChunk{ID: "c1", BuildID: "b1", Mode: "action", Status: "failed", PRNumber: 12}, expected: "vanadis-c1-turn-0"},
 		{name: "pr mode", buildStatus: "failed", chunk: model.VanadisChunk{ID: "c1", BuildID: "b1", Mode: "pr", Status: "failed"}, expected: "vanadis-c1-turn-0", wantErr: true},
 		{name: "cancelled selected", buildStatus: "failed", chunk: model.VanadisChunk{ID: "c1", BuildID: "b1", Mode: "action", Status: "cancelled"}, expected: "vanadis-c1-turn-0", wantErr: true},
 		{name: "failed sibling", buildStatus: "failed", chunk: model.VanadisChunk{ID: "c1", BuildID: "b1", Mode: "action", Status: "failed"}, siblings: []model.VanadisChunk{{ID: "c2", Status: "failed"}}, expected: "vanadis-c1-turn-0", wantErr: true},
@@ -211,7 +211,7 @@ func validRetryResult(result *RetryActionChunkResult) bool {
 func retryFixtureExec(query string, local *model.VanadisChunk, parent *string, failBuild bool, args ...any) (pgconn.CommandTag, error) {
 	switch {
 	case strings.Contains(query, "UPDATE vanadis_chunks"):
-		for _, fragment := range []string{"status = 'pending'", "stall_nudges = stall_nudges + 1", "started_at = NULL", "completed_at = NULL", "ci_fail_count = 0", "ci_checks = '{}'::jsonb", "rollout_state = '{}'::jsonb", "banner = ''", "merge_awakeable_id = ''", "deploy_awakeable_id = ''"} {
+		for _, fragment := range []string{"status = 'pending'", "stall_nudges = stall_nudges + 1", "repo = ''", "pr_number = NULL", "started_at = NULL", "completed_at = NULL", "ci_fail_count = 0", "ci_checks = '{}'::jsonb", "rollout_state = '{}'::jsonb", "banner = ''", "merge_awakeable_id = ''", "deploy_awakeable_id = ''"} {
 			if !strings.Contains(query, fragment) {
 				return pgconn.CommandTag{}, fmt.Errorf("missing reset %s", fragment)
 			}
@@ -223,6 +223,8 @@ func retryFixtureExec(query string, local *model.VanadisChunk, parent *string, f
 		}
 		local.Status = "pending"
 		local.StallNudges++
+		local.Repo = ""
+		local.PRNumber = 0
 	case strings.Contains(query, "UPDATE vanadis_builds SET status = 'running'"):
 		if failBuild {
 			return pgconn.CommandTag{}, errors.New("build write failed")

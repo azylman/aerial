@@ -49,16 +49,38 @@ type runnerGuardResult struct {
 // guardRunner refuses, with a terminal 409 and no side effects, to act on a
 // build whose runner_agent belongs to a different Build service. Unknown
 // builds pass through so handlers keep their existing not-found behavior.
-func (b *BuildObject) guardRunner(ctx restate.ObjectContext, handlerLabel string) error {
+func (b *BuildObject) guardRunner(ctx restate.ObjectSharedContext, handlerLabel string) error {
 	if b == nil || b.store == nil {
 		return nil
 	}
-	rt := b.getRuntime(ctx)
-	buildID := strings.TrimSpace(rt.Key())
+	if b.runtimeFactory != nil {
+		oc, ok := ctx.(restate.ObjectContext)
+		if !ok {
+			oc = nil
+		}
+		rt := b.runtimeFactory(oc)
+		buildID := strings.TrimSpace(rt.Key())
+		if buildID == "" {
+			return nil
+		}
+		res, err := rt.RunRunnerGuard(func(rc context.Context) (runnerGuardResult, error) {
+			res, err := b.lookupRunner(rc, buildID)
+			if err != nil {
+				RecordReconcileError(handlerLabel, err)
+			}
+			return res, ToTerminalErr(err)
+		})
+		if err != nil {
+			return err
+		}
+		return b.checkRunner(handlerLabel, buildID, res)
+	}
+
+	buildID := strings.TrimSpace(restate.Key(ctx))
 	if buildID == "" {
 		return nil
 	}
-	res, err := rt.RunRunnerGuard(func(rc context.Context) (runnerGuardResult, error) {
+	res, err := RunJournaled(ctx, handlerLabel, labelRunnerGuard, func(rc restate.RunContext) (runnerGuardResult, error) {
 		res, err := b.lookupRunner(rc, buildID)
 		if err != nil {
 			RecordReconcileError(handlerLabel, err)

@@ -32,7 +32,7 @@ func (b *BuildObject) syncActiveStepWidget(ctx context.Context, build model.Vana
 }
 
 // UpdateActiveStep updates the running chunk's live active step description and refreshes the Discord widget.
-func (b *BuildObject) UpdateActiveStep(ctx restate.ObjectContext, req UpdateActiveStepRequest) (AckResponse, error) {
+func (b *BuildObject) UpdateActiveStep(ctx restate.ObjectSharedContext, req UpdateActiveStepRequest) (AckResponse, error) {
 	chunkID := strings.TrimSpace(req.ChunkID)
 	if chunkID == "" {
 		err := fmt.Errorf("%w: chunk_id cannot be empty", store.ErrInvalidBuildInput)
