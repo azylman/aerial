@@ -405,3 +405,9 @@ func ValuePattern(values []string) string {
 func OTTLStringBody(pattern string) string {
 	return strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(pattern)
 }
+
+// SensitiveTokenCount returns the number of entries (values plus their encoded
+// variants) in the registered sensitive token pool; zero means none are loaded.
+func SensitiveTokenCount() int {
+	return len(getSensitiveTokens())
+}

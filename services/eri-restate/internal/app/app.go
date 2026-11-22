@@ -33,6 +33,7 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/classifier"
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
+	"github.com/azylman/aerial/services/eri/pkg/egressscan"
 	"github.com/azylman/aerial/services/eri/pkg/env"
 	"github.com/azylman/aerial/services/eri/pkg/githubproxy"
 	"github.com/azylman/aerial/services/eri/pkg/llmcall"
@@ -403,6 +404,9 @@ func SetupHealthMux(opts HealthMuxOptions) *http.ServeMux {
 	// Agent turns in this pod push and call the GitHub API through this proxy;
 	// it is loopback-only so the PAT-injecting routes never face the pod network.
 	githubproxy.Register(mux, opts.Config)
+	// The in-pod hook-guard posts blocklisted MCP tool arguments here, where the
+	// registered secret values are loaded; loopback-only like the proxy.
+	egressscan.Register(mux, opts.Config)
 
 	return mux
 }
