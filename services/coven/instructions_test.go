@@ -10,7 +10,7 @@ import (
 )
 
 func TestServerInstructions(t *testing.T) {
-	handler := NewToolHandler(&Config{}, newTestMemStore(), &MockOllamaClient{embedding: testEmbedding(1.0)})
+	handler := NewToolHandler(&Config{}, newTestStore(t), &MockOllamaClient{embedding: testEmbedding(1.0)})
 	ts := httptest.NewServer(NewServer(handler).Routes())
 	defer ts.Close()
 

@@ -4,343 +4,335 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"strings"
-	"sync"
 	"testing"
-
-	_ "modernc.org/sqlite"
+	"time"
 )
 
-type lockFakeDB struct {
-	mu           sync.Mutex
-	queries      []string
-	args         [][]any
-	dbMem        *sql.DB
-	xactAcquired bool
-	failOn       string
-	failErr      error
-}
-
-func newLockFakeDB(t *testing.T) *lockFakeDB {
+// pinLockConns pins n real connections on one private test database, so
+// advisory locks taken on one are contended by the others.
+func pinLockConns(t *testing.T, n int) []*sql.Conn {
 	t.Helper()
-	db, err := sql.Open("sqlite", ":memory:")
-	if err != nil {
-		t.Fatalf("open sqlite: %v", err)
+	db := newTestDB(t)
+	conns := make([]*sql.Conn, 0, n)
+	for range n {
+		conn, err := db.Conn(context.Background())
+		if err != nil {
+			t.Fatalf("pin conn: %v", err)
+		}
+		t.Cleanup(func() { _ = conn.Close() })
+		conns = append(conns, conn)
 	}
-	t.Cleanup(func() { _ = db.Close() })
-	return &lockFakeDB{dbMem: db, xactAcquired: true}
+	return conns
 }
 
-func lockStageOf(query string) string {
-	switch {
-	case query == "BEGIN":
-		return "BEGIN"
-	case query == "COMMIT":
-		return "COMMIT"
-	case query == "ROLLBACK":
-		return "ROLLBACK"
-	case strings.Contains(query, "pg_try_advisory_xact_lock("):
-		return "XACTLOCK"
-	case strings.Contains(query, "pg_advisory_unlock("):
-		return "UNLOCK"
-	case strings.Contains(query, "pg_advisory_lock("):
-		return "LOCK"
-	default:
-		return "OTHER"
+// advisoryKeyFree reports whether another session holds key: it tries the
+// session lock on conn and immediately frees it again when taken.
+func advisoryKeyFree(t *testing.T, conn *sql.Conn, key string) bool {
+	t.Helper()
+	ctx := context.Background()
+	var got bool
+	if err := conn.QueryRowContext(ctx, `SELECT pg_try_advisory_lock(hashtext($1))`, key).Scan(&got); err != nil {
+		t.Fatalf("try lock %q: %v", key, err)
 	}
-}
-
-func (f *lockFakeDB) ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.queries = append(f.queries, query)
-	f.args = append(f.args, args)
-	if err := ctx.Err(); err != nil {
-		return nil, err
+	if got {
+		execSQL(t, conn, `SELECT pg_advisory_unlock(hashtext($1))`, key)
 	}
-	if f.failOn != "" && lockStageOf(query) == f.failOn {
-		return nil, f.failErr
-	}
-	return testCustomResult{rows: 1}, nil
+	return got
 }
 
-func (f *lockFakeDB) QueryContext(_ context.Context, query string, _ ...any) (*sql.Rows, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.queries = append(f.queries, query)
-	return nil, errors.New("lockFakeDB: QueryContext is unused by lock helpers")
-}
-
-func (f *lockFakeDB) QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row {
-	f.mu.Lock()
-	f.queries = append(f.queries, query)
-	f.args = append(f.args, args)
-	acquired := f.xactAcquired
-	failLock := f.failOn == "XACTLOCK"
-	f.mu.Unlock()
-	if failLock {
-		return f.dbMem.QueryRowContext(ctx, "SELECT syntax error")
-	}
-	if acquired {
-		return f.dbMem.QueryRowContext(ctx, "SELECT true")
-	}
-	return f.dbMem.QueryRowContext(ctx, "SELECT false")
-}
-
-func (f *lockFakeDB) recorded() []string {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return append([]string(nil), f.queries...)
-}
-
-func (f *lockFakeDB) recordedArgs() [][]any {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return append([][]any(nil), f.args...)
-}
-
-func lockQueriesContain(queries []string, substr string) bool {
-	for _, q := range queries {
-		if strings.Contains(q, substr) {
-			return true
+// waitForAdvisoryWaiter blocks until pg_locks shows an ungranted advisory
+// lock request (a session parked inside pg_advisory_lock).
+func waitForAdvisoryWaiter(t *testing.T, observer *sql.Conn) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	for {
+		var waiting int
+		if err := observer.QueryRowContext(ctx, `SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND NOT granted`).Scan(&waiting); err != nil {
+			t.Fatalf("no advisory waiter appeared: %v", err)
+		}
+		if waiting > 0 {
+			return
 		}
 	}
-	return false
 }
 
 func TestThreadLocker_Lock(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name             string
 		threadID         string
-		agent            string
+		agent            []string
 		nilDB            bool
 		cancelBeforeLock bool
+		closeConn        bool
 		wantLockErr      bool
-		wantRelease      bool
-		wantLockKey      string
+		wantHeld         []string
+		wantFree         []string
 	}{
-		{
-			name:        "valid thread acquires with release",
-			threadID:    "th-1",
-			wantRelease: true,
-			wantLockKey: "th-1",
-		},
-		{
-			name:        "empty thread refuses lock",
-			threadID:    "   ",
-			wantLockErr: true,
-		},
-		{
-			name:        "nil db refuses lock",
-			threadID:    "th-1",
-			nilDB:       true,
-			wantLockErr: true,
-		},
-		{
-			name:             "canceled lock context fails fast",
-			threadID:         "th-1",
-			cancelBeforeLock: true,
-			wantLockErr:      true,
-		},
-		{
-			name:        "scoped agent acquires lock with scoped key",
-			threadID:    "th-1",
-			agent:       "agent-alpha",
-			wantRelease: true,
-			wantLockKey: "agent-alpha/th-1",
-		},
+		{name: "valid thread acquires with release", threadID: "th-1", wantHeld: []string{"th-1"}, wantFree: []string{"agent-alpha/th-1"}},
+		{name: "thread id is trimmed", threadID: "  th-1 ", wantHeld: []string{"th-1"}},
+		{name: "empty thread refuses lock", threadID: "   ", wantLockErr: true},
+		{name: "nil db refuses lock", threadID: "th-1", nilDB: true, wantLockErr: true, wantFree: []string{"th-1"}},
+		{name: "canceled lock context fails fast", threadID: "th-1", cancelBeforeLock: true, wantLockErr: true, wantFree: []string{"th-1"}},
+		{name: "closed conn fails to acquire", threadID: "th-1", closeConn: true, wantLockErr: true, wantFree: []string{"th-1"}},
+		{name: "scoped agent locks scoped key only", threadID: "th-1", agent: []string{"agent-alpha"}, wantHeld: []string{"agent-alpha/th-1"}, wantFree: []string{"th-1"}},
+		{name: "blank agent falls back to bare thread", threadID: "th-1", agent: []string{"  "}, wantHeld: []string{"th-1"}, wantFree: []string{"agent-alpha/th-1"}},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			fake := newLockFakeDB(t)
-			locker := NewThreadLocker(fake)
+			t.Parallel()
+			conns := pinLockConns(t, 2)
+			holder, other := conns[0], conns[1]
+			locker := NewThreadLocker(holder)
 			if tc.nilDB {
 				locker = NewThreadLocker(nil)
 			}
-
+			if tc.closeConn {
+				_ = holder.Close()
+			}
 			lockCtx, cancelLock := context.WithCancel(context.Background())
 			defer cancelLock()
 			if tc.cancelBeforeLock {
 				cancelLock()
 			}
-			var release func() error
-			var err error
-			if tc.agent != "" {
-				release, err = locker.Lock(lockCtx, tc.threadID, tc.agent)
-			} else {
-				release, err = locker.Lock(lockCtx, tc.threadID)
+
+			release, err := locker.Lock(lockCtx, tc.threadID, tc.agent...)
+			if (err != nil) != tc.wantLockErr || (release == nil) != tc.wantLockErr {
+				t.Fatalf("Lock() = (release non-nil %v, %v), wantLockErr %v", release != nil, err, tc.wantLockErr)
 			}
-			if (err != nil) != tc.wantLockErr {
-				t.Fatalf("Lock() err = %v, wantLockErr = %v", err, tc.wantLockErr)
+			assertAdvisoryKeys(t, other, tc.wantHeld, tc.wantFree)
+			if release == nil {
+				return
 			}
-			if (release != nil) != tc.wantRelease {
-				t.Errorf("Lock() release non-nil = %v, want %v", release != nil, tc.wantRelease)
+			if err := release(); err != nil {
+				t.Fatalf("release() = %v", err)
 			}
-			if tc.wantLockKey != "" {
-				args := fake.recordedArgs()
-				if len(args) == 0 || len(args[0]) == 0 || args[0][0] != tc.wantLockKey {
-					t.Errorf("locked key = %v, want %q", args, tc.wantLockKey)
-				}
-			}
+			assertAdvisoryKeys(t, other, nil, tc.wantHeld)
 		})
+	}
+}
+
+// assertAdvisoryKeys checks from another session that every held key is
+// taken (both for a session try-lock and for withFactWriteLock, which share
+// one key space) and every free key can be taken.
+func assertAdvisoryKeys(t *testing.T, other *sql.Conn, held, free []string) {
+	t.Helper()
+	for _, key := range held {
+		if advisoryKeyFree(t, other, key) {
+			t.Errorf("key %q free on another session, want held", key)
+		}
+		if err := withFactWriteLock(context.Background(), other, key, func(context.Context) error { return nil }); !errors.Is(err, ErrAdvisoryLockBusy) {
+			t.Errorf("withFactWriteLock(%q) on another session = %v, want ErrAdvisoryLockBusy", key, err)
+		}
+	}
+	for _, key := range free {
+		if !advisoryKeyFree(t, other, key) {
+			t.Errorf("key %q held, want free", key)
+		}
 	}
 }
 
 func TestThreadLocker_Release(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name               string
 		cancelBeforeUnlock bool
-		failOn             string
-		wantUnlockCalled   bool
+		closeBeforeUnlock  bool
 		wantReleaseErr     bool
 	}{
-		{
-			name:             "release frees the session lock",
-			wantUnlockCalled: true,
-		},
-		{
-			name:               "ctx-expired unlock still releases via WithoutCancel",
-			cancelBeforeUnlock: true,
-			wantUnlockCalled:   true,
-		},
-		{
-			name:             "unlock error surfaces for conn destroy",
-			failOn:           "UNLOCK",
-			wantUnlockCalled: true,
-			wantReleaseErr:   true,
-		},
+		{name: "release wakes the blocked locker"},
+		{name: "ctx-expired unlock still releases via WithoutCancel", cancelBeforeUnlock: true},
+		{name: "unlock error on closed conn surfaces and lock stays held", closeBeforeUnlock: true, wantReleaseErr: true},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			fake := newLockFakeDB(t)
-			fake.failOn = tc.failOn
-			if tc.failOn != "" {
-				fake.failErr = errors.New("unlock exploded")
-			}
-			locker := NewThreadLocker(fake)
+			t.Parallel()
+			conns := pinLockConns(t, 3)
+			holder, waiterConn, observer := conns[0], conns[1], conns[2]
 
 			lockCtx, cancelLock := context.WithCancel(context.Background())
 			defer cancelLock()
-			release, err := locker.Lock(lockCtx, "th-1")
+			release, err := NewThreadLocker(holder).Lock(lockCtx, "th-1")
 			if err != nil {
-				t.Fatalf("Lock() err = %v", err)
+				t.Fatalf("Lock() = %v", err)
 			}
+
+			// A second session parks inside pg_advisory_lock until the holder unlocks.
+			waitCtx, cancelWait := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancelWait()
+			waiter := make(chan error, 1)
+			go func() {
+				rel, lockErr := NewThreadLocker(waiterConn).Lock(waitCtx, "th-1")
+				if lockErr == nil {
+					lockErr = rel()
+				}
+				waiter <- lockErr
+			}()
+			waitForAdvisoryWaiter(t, observer)
+
 			if tc.cancelBeforeUnlock {
 				cancelLock()
 			}
+			if tc.closeBeforeUnlock {
+				_ = holder.Close()
+			}
 			err = release()
 			if (err != nil) != tc.wantReleaseErr {
-				t.Errorf("release() err = %v, wantReleaseErr = %v", err, tc.wantReleaseErr)
+				t.Fatalf("release() = %v, wantReleaseErr %v", err, tc.wantReleaseErr)
 			}
-			if got := lockQueriesContain(fake.recorded(), "pg_advisory_unlock("); got != tc.wantUnlockCalled {
-				t.Errorf("unlock called = %v, want %v (queries=%v)", got, tc.wantUnlockCalled, fake.recorded())
+			if tc.wantReleaseErr {
+				// The pooled backend still holds the session lock: the waiter stays
+				// blocked until its own context gives up.
+				cancelWait()
+				if waitErr := <-waiter; waitErr == nil {
+					t.Fatalf("waiter acquired the lock after a failed release")
+				}
+				return
+			}
+			if waitErr := <-waiter; waitErr != nil {
+				t.Fatalf("waiter Lock/release after holder released = %v", waitErr)
+			}
+			if !advisoryKeyFree(t, observer, "th-1") {
+				t.Errorf("key still held after both sessions released")
 			}
 		})
 	}
 }
 
+// locksProbeTable has a deferred unique constraint so a duplicate insert only
+// fails at COMMIT.
+const locksProbeTable = `CREATE TABLE lock_probe (v int UNIQUE DEFERRABLE INITIALLY DEFERRED)`
+
+// locksSabotageXactLock shadows hashtext on one connection (search_path puts
+// public before pg_catalog), so the xact-lock query fails after BEGIN.
+const locksSabotageXactLock = `CREATE FUNCTION public.hashtext(text) RETURNS integer LANGUAGE plpgsql AS $$BEGIN RAISE EXCEPTION 'sabotaged'; END$$; SET search_path = public, pg_catalog`
+
 func TestWithFactWriteLock(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
-		name         string
-		lockKey      string
-		xactAcquired bool
-		failOn       string
-		fnErr        bool
-		wantErr      bool
-		wantBusy     bool
-		wantQueries  []string
+		name      string
+		nilDB     bool
+		lockKey   string
+		heldKey   string // held by another session inside its own open withFactWriteLock
+		connSetup string
+		cancelCtx bool
+		closeConn bool
+		fnSQL     string
+		fnErr     error
+		wantErr   bool
+		wantIs    error
+		wantProbe int
 	}{
-		{
-			name:         "happy path begins locks and commits",
-			lockKey:      "th-1",
-			xactAcquired: true,
-			wantQueries:  []string{"BEGIN", "pg_try_advisory_xact_lock(", "COMMIT"},
-		},
-		{
-			name:         "empty key refuses without queries",
-			lockKey:      "  ",
-			xactAcquired: true,
-			wantErr:      true,
-			wantQueries:  []string{},
-		},
-		{
-			name:         "busy lock rolls back with sentinel",
-			lockKey:      "th-1",
-			xactAcquired: false,
-			wantErr:      true,
-			wantBusy:     true,
-			wantQueries:  []string{"BEGIN", "pg_try_advisory_xact_lock(", "ROLLBACK"},
-		},
-		{
-			name:         "fn error rolls back",
-			lockKey:      "th-1",
-			xactAcquired: true,
-			fnErr:        true,
-			wantErr:      true,
-			wantQueries:  []string{"BEGIN", "pg_try_advisory_xact_lock(", "ROLLBACK"},
-		},
-		{
-			name:         "begin error aborts",
-			lockKey:      "th-1",
-			xactAcquired: true,
-			failOn:       "BEGIN",
-			wantErr:      true,
-			wantQueries:  []string{"BEGIN"},
-		},
-		{
-			name:         "commit error rolls back",
-			lockKey:      "th-1",
-			xactAcquired: true,
-			failOn:       "COMMIT",
-			wantErr:      true,
-			wantQueries:  []string{"BEGIN", "pg_try_advisory_xact_lock(", "COMMIT", "ROLLBACK"},
-		},
-		{
-			name:         "lock query error rolls back",
-			lockKey:      "th-1",
-			xactAcquired: true,
-			failOn:       "XACTLOCK",
-			wantErr:      true,
-			wantQueries:  []string{"BEGIN", "pg_try_advisory_xact_lock(", "ROLLBACK"},
-		},
+		{name: "success commits the write", lockKey: "th-1", fnSQL: `INSERT INTO lock_probe VALUES (1)`, wantProbe: 1},
+		{name: "nil db refuses", nilDB: true, lockKey: "th-1", fnSQL: `INSERT INTO lock_probe VALUES (1)`, wantErr: true},
+		{name: "empty key refuses without running fn", lockKey: "  ", fnSQL: `INSERT INTO lock_probe VALUES (1)`, wantErr: true},
+		{name: "fn error rolls back the write", lockKey: "th-1", fnSQL: `INSERT INTO lock_probe VALUES (1)`, fnErr: errLocksFn, wantIs: errLocksFn},
+		{name: "busy key held by another xact lock", lockKey: "th-1", heldKey: "th-1", fnSQL: `INSERT INTO lock_probe VALUES (1)`, wantIs: ErrAdvisoryLockBusy},
+		{name: "scoped key busy for same agent", lockKey: ScopedThreadKey("agent-alpha", " th-1 "), heldKey: "agent-alpha/th-1", fnSQL: `INSERT INTO lock_probe VALUES (1)`, wantIs: ErrAdvisoryLockBusy},
+		{name: "scoped and unscoped keys do not contend", lockKey: "th-1", heldKey: ScopedThreadKey("agent-alpha", "th-1"), fnSQL: `INSERT INTO lock_probe VALUES (1)`, wantProbe: 1},
+		{name: "cancelled ctx fails begin", lockKey: "th-1", cancelCtx: true, fnSQL: `INSERT INTO lock_probe VALUES (1)`, wantErr: true},
+		{name: "closed conn fails begin", lockKey: "th-1", closeConn: true, fnSQL: `INSERT INTO lock_probe VALUES (1)`, wantErr: true},
+		{name: "lock query error rolls back", lockKey: "th-1", connSetup: locksSabotageXactLock, fnSQL: `INSERT INTO lock_probe VALUES (1)`, wantErr: true},
+		{name: "commit error rolls back", lockKey: "th-1", fnSQL: `INSERT INTO lock_probe VALUES (2), (2)`, wantErr: true},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			fake := newLockFakeDB(t)
-			fake.xactAcquired = tc.xactAcquired
-			fake.failOn = tc.failOn
-			if tc.failOn != "" {
-				fake.failErr = errors.New("injected failure")
+			t.Parallel()
+			conns := pinLockConns(t, 3)
+			conn, holderConn, observer := conns[0], conns[1], conns[2]
+			execSQL(t, observer, locksProbeTable)
+			execSQL(t, conn, tc.connSetup)
+
+			releaseHolder := startFactWriteHolder(t, holderConn, tc.heldKey)
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if tc.cancelCtx {
+				cancel()
 			}
-			fnErr := errors.New("fn exploded")
-			wantFnErr := tc.fnErr
-			err := withFactWriteLock(context.Background(), fake, tc.lockKey, func(_ context.Context) error {
-				if wantFnErr {
-					return fnErr
-				}
-				return nil
-			})
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("withFactWriteLock() err = %v, wantErr = %v", err, tc.wantErr)
+			if tc.closeConn {
+				_ = conn.Close()
 			}
-			if tc.wantBusy && !errors.Is(err, ErrAdvisoryLockBusy) {
-				t.Errorf("withFactWriteLock() err = %v, want ErrAdvisoryLockBusy", err)
+			var db DBTX = conn
+			if tc.nilDB {
+				db = nil
 			}
-			if tc.fnErr && !errors.Is(err, fnErr) {
-				t.Errorf("withFactWriteLock() err = %v, want fn error", err)
+			fn := probeWriter(conn, tc.fnSQL, tc.fnErr)
+			assertSQLStoreErr(t, withFactWriteLock(ctx, db, tc.lockKey, fn), tc.wantErr, tc.wantIs)
+			assertLockProbe(t, observer, tc.wantProbe)
+			if !tc.closeConn && !tc.cancelCtx {
+				// A cancelled call or Close retires the *sql.Conn; otherwise the
+				// same session must see no dangling uncommitted write.
+				assertLockProbe(t, conn, tc.wantProbe)
 			}
-			got := fake.recorded()
-			if len(got) != len(tc.wantQueries) {
-				t.Fatalf("queries = %v, want %d queries %v", got, len(tc.wantQueries), tc.wantQueries)
+			releaseHolder()
+			if tc.heldKey == "" || tc.wantIs == nil {
+				return
 			}
-			for i, want := range tc.wantQueries {
-				if !strings.Contains(got[i], want) {
-					t.Errorf("queries[%d] = %q, want substring %q", i, got[i], want)
-				}
+			// Once the holder commits, the same key is free and the write lands.
+			if err := withFactWriteLock(context.Background(), conn, tc.lockKey, fn); err != nil {
+				t.Fatalf("retry after holder released = %v", err)
 			}
+			assertLockProbe(t, observer, 1)
 		})
+	}
+}
+
+// startFactWriteHolder parks another session inside an open withFactWriteLock
+// for key and returns the func that lets it commit; an empty key holds nothing.
+func startFactWriteHolder(t *testing.T, conn *sql.Conn, key string) func() {
+	t.Helper()
+	if key == "" {
+		return func() {}
+	}
+	holding := make(chan struct{})
+	release := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		done <- withFactWriteLock(context.Background(), conn, key, func(context.Context) error {
+			close(holding)
+			<-release
+			return nil
+		})
+	}()
+	select {
+	case <-holding:
+	case err := <-done:
+		t.Fatalf("holder withFactWriteLock = %v", err)
+	}
+	return func() {
+		close(release)
+		if err := <-done; err != nil {
+			t.Errorf("holder withFactWriteLock = %v", err)
+		}
+	}
+}
+
+// errLocksFn is the error a probe writer returns after its write.
+var errLocksFn = errors.New("fn exploded")
+
+// probeWriter returns a withFactWriteLock fn that runs query on conn and then
+// returns fnErr.
+func probeWriter(conn *sql.Conn, query string, fnErr error) func(context.Context) error {
+	return func(ctx context.Context) error {
+		if _, err := conn.ExecContext(ctx, query); err != nil {
+			return err
+		}
+		return fnErr
+	}
+}
+
+func assertLockProbe(t *testing.T, conn *sql.Conn, want int) {
+	t.Helper()
+	var n int
+	if err := conn.QueryRowContext(context.Background(), `SELECT count(*) FROM lock_probe`).Scan(&n); err != nil {
+		t.Fatalf("count lock_probe: %v", err)
+	}
+	if n != want {
+		t.Errorf("lock_probe rows = %d, want %d", n, want)
 	}
 }

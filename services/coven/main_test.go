@@ -2,7 +2,10 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"errors"
+	"maps"
+	"slices"
 	"testing"
 	"time"
 
@@ -105,38 +108,93 @@ func TestCoven_RetrySubscribeCovenTurns(t *testing.T) {
 }
 
 type handleCovenExtractJobTestCase struct {
-	name         string
-	msgData      string
-	delivered    uint64
-	role         string
-	failErr      error
-	wantErr      bool
-	wantTerm     bool
-	wantMinNak   time.Duration
-	wantExactNak time.Duration
-	wantWater    int64
+	name           string
+	msgData        string
+	delivered      uint64
+	role           string
+	sabotage       string
+	heldXactLock   string
+	wantErr        bool
+	wantErrIs      error
+	wantTerm       bool
+	wantMinNak     time.Duration
+	wantExactNak   time.Duration
+	wantWatermarks map[string]int64
+	wantFacts      []toolFactRow
+}
+
+// extractJobLLM extracts one admissible fact from every turn batch.
+func extractJobLLM(context.Context, string) (string, error) {
+	return `{"facts":[{"fact_text":"User always drinks oolong tea"}]}`, nil
+}
+
+// extractJobWatermarks reads extraction watermarks for thread th-ext-1 keyed by agent.
+func extractJobWatermarks(t *testing.T, db DBTX) map[string]int64 {
+	t.Helper()
+	rows, err := db.QueryContext(context.Background(), `SELECT agent, last_extracted_rowid FROM extraction_watermarks WHERE thread_id = 'th-ext-1'`)
+	if err != nil {
+		t.Fatalf("query watermarks: %v", err)
+	}
+	defer rows.Close()
+	got := map[string]int64{}
+	for rows.Next() {
+		var agent string
+		var rowID int64
+		if err := rows.Scan(&agent, &rowID); err != nil {
+			t.Fatalf("scan watermark: %v", err)
+		}
+		got[agent] = rowID
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("read watermarks: %v", err)
+	}
+	return got
+}
+
+// holdXactAdvisoryLock takes pg_advisory_xact_lock(hashtext(key)) inside an
+// open transaction on a second connection until the test ends.
+func holdXactAdvisoryLock(t *testing.T, db *sql.DB, key string) {
+	t.Helper()
+	if key == "" {
+		return
+	}
+	conn, err := db.Conn(context.Background())
+	if err != nil {
+		t.Fatalf("pin lock holder conn: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
+		_ = conn.Close()
+	})
+	execSQL(t, conn, "BEGIN")
+	execSQL(t, conn, `SELECT pg_advisory_xact_lock(hashtext($1))`, key)
 }
 
 func runHandleCovenExtractJobCase(t *testing.T, tc handleCovenExtractJobTestCase) {
 	t.Helper()
 	ctx := context.Background()
-	memStore := newTestMemStore()
-	memStore.activeThreads = []string{"th-ext-1"}
-	memStore.unextractedTurns["th-ext-1"] = []Message{{RowID: 35, Content: "test message", ResponseText: "resp"}}
-	if tc.failErr != nil {
-		memStore.SetFail("GetUnextractedAdminTurns", tc.failErr)
-	}
+	db := newTestDB(t)
+	// One extractable admin turn per agent: aerial row 35, agent-alpha row 36.
+	seedTurns(t, db,
+		adminTurn("th-ext-1", 35, "test message", "resp"),
+		testTurn{agent: "agent-alpha", thread: "th-ext-1", rowID: 36, content: "alpha message", response: "alpha resp", admin: true},
+	)
+	execSQL(t, db, tc.sabotage)
+	holdXactAdvisoryLock(t, db, tc.heldXactLock)
 	worker := NewWorker(WorkerConfig{
 		Role:      tc.role,
-		Store:     memStore,
-		Ollama:    &MockOllamaClient{embedding: make([]float32, ExpectedEmbeddingDim)},
-		LLMClient: func(context.Context, string) (string, error) { return `{"facts":[]}`, nil },
+		Store:     NewSQLStore(db),
+		Ollama:    &MockOllamaClient{embedding: testEmbedding(1.0)},
+		LLMClient: extractJobLLM,
 	})
 	msg := &pubsubtest.Message{Payload: []byte(tc.msgData), Delivered: tc.delivered}
 
 	err := handleCovenExtractJob(ctx, msg, worker)
 	if (err != nil) != tc.wantErr {
 		t.Fatalf("handleCovenExtractJob() err = %v, wantErr = %v", err, tc.wantErr)
+	}
+	if tc.wantErrIs != nil && !errors.Is(err, tc.wantErrIs) {
+		t.Errorf("err = %v, want %v", err, tc.wantErrIs)
 	}
 	if msg.Termed() != tc.wantTerm {
 		t.Errorf("termed = %v, want %v", msg.Termed(), tc.wantTerm)
@@ -151,27 +209,33 @@ func runHandleCovenExtractJobCase(t *testing.T, tc handleCovenExtractJobTestCase
 	if tc.wantExactNak > 0 && nakDelay != tc.wantExactNak {
 		t.Errorf("nakDelay = %v, want %v", nakDelay, tc.wantExactNak)
 	}
-	if wm, _, _ := memStore.GetConversationFactWatermark(ctx, "th-ext-1"); wm != tc.wantWater {
-		t.Errorf("watermark = %d, want %d", wm, tc.wantWater)
+	if got := extractJobWatermarks(t, db); !maps.Equal(got, tc.wantWatermarks) {
+		t.Errorf("watermarks = %v, want %v", got, tc.wantWatermarks)
+	}
+	if got := toolFactRows(t, db); !slices.Equal(got, tc.wantFacts) {
+		t.Errorf("facts = %+v, want %+v", got, tc.wantFacts)
 	}
 }
 
 func TestHandleCovenExtractJob_Scenarios(t *testing.T) {
-	queryFailed := errors.New("query failed")
+	t.Parallel()
+	none := map[string]int64{}
+	aerialFact := []toolFactRow{{id: 1, text: "User always drinks oolong tea", reinforceCount: 1, sourceAgent: "aerial"}}
 	tests := []handleCovenExtractJobTestCase{
-		{name: "UnmarshalErrorTermsMessageAndReturnsNil", msgData: "bad-json", delivered: 1, wantTerm: true},
-		{name: "EmptyThreadIDTermsMessageAndReturnsNil", msgData: `{"thread_id":"   "}`, delivered: 1, wantTerm: true},
-		{name: "MismatchedAgentSkipsExtraction", msgData: `{"thread_id":"th-ext-1","agent":"agent-alpha"}`, delivered: 1},
-		{name: "RoleAllAcceptsAnyValidAgent", msgData: `{"thread_id":"th-ext-1","agent":"agent-alpha"}`, delivered: 1, role: "all", wantWater: 35},
-		{name: "WorkerSuccessAdvancesWatermark", msgData: `{"thread_id":"th-ext-1"}`, delivered: 1, wantWater: 35},
-		{name: "WorkerErrorAttempt1NaksWithBackoff", msgData: `{"thread_id":"th-ext-1"}`, delivered: 1, failErr: queryFailed, wantErr: true, wantMinNak: 1 * time.Second},
-		{name: "WorkerErrorAttempt4NaksWithBackoff", msgData: `{"thread_id":"th-ext-1"}`, delivered: 4, failErr: queryFailed, wantErr: true, wantMinNak: 8 * time.Second},
-		{name: "WorkerErrorAttempt5NaksWithBackoff", msgData: `{"thread_id":"th-ext-1"}`, delivered: 5, failErr: queryFailed, wantErr: true, wantMinNak: 16 * time.Second},
-		{name: "WorkerLockBusyNaksWithFixed5Seconds", msgData: `{"thread_id":"th-ext-1"}`, delivered: 5, failErr: ErrAdvisoryLockBusy, wantErr: true, wantExactNak: 5 * time.Second},
+		{name: "UnmarshalErrorTermsMessageAndReturnsNil", msgData: "bad-json", delivered: 1, wantTerm: true, wantWatermarks: none},
+		{name: "EmptyThreadIDTermsMessageAndReturnsNil", msgData: `{"thread_id":"   "}`, delivered: 1, wantTerm: true, wantWatermarks: none},
+		{name: "MismatchedAgentSkipsExtraction", msgData: `{"thread_id":"th-ext-1","agent":"agent-alpha"}`, delivered: 1, wantWatermarks: none},
+		{name: "RoleAllAcceptsAnyValidAgent", msgData: `{"thread_id":"th-ext-1","agent":"agent-alpha"}`, delivered: 1, role: "all", wantWatermarks: map[string]int64{"agent-alpha": 36}, wantFacts: []toolFactRow{{id: 1, text: "User always drinks oolong tea", reinforceCount: 1, sourceAgent: "agent-alpha"}}},
+		{name: "WorkerSuccessAdvancesWatermark", msgData: `{"thread_id":"th-ext-1"}`, delivered: 1, wantWatermarks: map[string]int64{"aerial": 35}, wantFacts: aerialFact},
+		{name: "WorkerErrorAttempt1NaksWithBackoff", msgData: `{"thread_id":"th-ext-1"}`, delivered: 1, sabotage: sabotageTurnReads, wantErr: true, wantMinNak: 1 * time.Second, wantWatermarks: none},
+		{name: "WorkerErrorAttempt4NaksWithBackoff", msgData: `{"thread_id":"th-ext-1"}`, delivered: 4, sabotage: sabotageTurnReads, wantErr: true, wantMinNak: 8 * time.Second, wantWatermarks: none},
+		{name: "WorkerErrorAttempt5NaksWithBackoff", msgData: `{"thread_id":"th-ext-1"}`, delivered: 5, sabotage: sabotageTurnReads, wantErr: true, wantMinNak: 16 * time.Second, wantWatermarks: none},
+		{name: "WorkerLockBusyNaksWithFixed5Seconds", msgData: `{"thread_id":"th-ext-1"}`, delivered: 5, heldXactLock: "coven:facts", wantErr: true, wantErrIs: ErrAdvisoryLockBusy, wantExactNak: 5 * time.Second, wantWatermarks: none},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			runHandleCovenExtractJobCase(t, tc)
 		})
 	}
@@ -180,20 +244,17 @@ func TestHandleCovenExtractJob_Scenarios(t *testing.T) {
 func TestCoven_TranscriptsIndexedToCoalescedExtractIntegration(t *testing.T) {
 	ctx := context.Background()
 
-	memStore := newTestMemStore()
-	memStore.activeThreads = []string{"th-e2e-1"}
-	memStore.unextractedTurns["th-e2e-1"] = []Message{
-		{RowID: 88, Content: "I prefer matcha", ResponseText: "Noted"},
-	}
+	db := newTestDB(t)
+	seedTurns(t, db, adminTurn("th-e2e-1", 88, "I prefer matcha", "Noted"))
+	store := NewSQLStore(db)
 
-	validEmb := make([]float32, ExpectedEmbeddingDim)
-	client := &MockOllamaClient{embedding: validEmb}
+	client := &MockOllamaClient{embedding: testEmbedding(1.0)}
 	llm := func(ctx context.Context, prompt string) (string, error) {
 		return `{"facts":[]}`, nil
 	}
 
 	worker := NewWorker(WorkerConfig{
-		Store:     memStore,
+		Store:     store,
 		Ollama:    client,
 		LLMClient: llm,
 	})
@@ -229,7 +290,7 @@ func TestCoven_TranscriptsIndexedToCoalescedExtractIntegration(t *testing.T) {
 		}
 	}
 
-	wm, _, err := memStore.GetConversationFactWatermark(ctx, "th-e2e-1")
+	wm, _, err := store.GetConversationFactWatermark(ctx, "th-e2e-1")
 	if err != nil {
 		t.Fatalf("GetConversationFactWatermark: %v", err)
 	}
