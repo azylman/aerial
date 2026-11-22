@@ -18,6 +18,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
+	"github.com/azylman/aerial/pkg/agent"
 	"github.com/azylman/aerial/pkg/buildplan"
 	"github.com/azylman/aerial/pkg/discordutil"
 	"github.com/azylman/aerial/pkg/httpkit"
@@ -324,7 +325,7 @@ func (s *VanadisServer) handleCreateBuild(w http.ResponseWriter, r *http.Request
 	req.Agent = targetAgent
 
 	var created VanadisBuild
-	if err := s.callRestateIngress(r.Context(), s.restateObjectPath(targetAgent, buildID, "Create"), req, &created); err != nil {
+	if err := s.callRestateIngress(r.Context(), s.restateObjectPath(agent.Default, buildID, "Create"), req, &created); err != nil {
 		writeStoreErr(r.Context(), w, err)
 		return
 	}

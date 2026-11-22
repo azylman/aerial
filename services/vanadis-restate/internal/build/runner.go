@@ -95,10 +95,11 @@ func (b *BuildObject) checkRunner(handlerLabel, buildID string, res runnerGuardR
 }
 
 // checkCreateOwner refuses, with a terminal 400, to create a build whose
-// owner agent belongs to a different Build service. An empty owner counts as
-// the default agent, so a sibling runner never accepts an unowned build.
+// owner agent belongs to a different Build service. The canonical default
+// runner accepts builds for any owner; legacy sibling runners only accept
+// builds owned by their own agent.
 func (b *BuildObject) checkCreateOwner(agent string) error {
-	if RunsBuild(b.runnerAgent(), agent) {
+	if RunsBuild(b.runnerAgent(), "") || RunsBuild(b.runnerAgent(), agent) {
 		return nil
 	}
 	err := fmt.Errorf("%w: build owned by %q belongs on %s, not %s", store.ErrInvalidBuildInput, strings.TrimSpace(agent), buildplan.BuildServiceName(store.NormalizeRunnerAgent(agent)), b.ServiceName())

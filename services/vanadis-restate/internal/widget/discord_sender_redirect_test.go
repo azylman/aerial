@@ -200,7 +200,7 @@ channels:
 	t0 := time.Date(2026, 11, 19, 12, 0, 0, 0, time.UTC)
 
 	// First call: reads file and resolves target channel
-	res1 := d.redirectChannelIfNoBuildUpdates("chan-test", t0)
+	res1 := d.redirectChannelIfNoBuildUpdates("", "chan-test", t0)
 	assert.Equal(t, "999888777666555444", res1)
 	assert.Equal(t, 1, resolveCount)
 
@@ -209,26 +209,26 @@ channels:
 
 	// Second call at t0 + 10s (before 1m TTL): does not hit disk or resolver
 	t1 := t0.Add(10 * time.Second)
-	res2 := d.redirectChannelIfNoBuildUpdates("chan-test", t1)
+	res2 := d.redirectChannelIfNoBuildUpdates("", "chan-test", t1)
 	assert.Equal(t, "999888777666555444", res2)
 	assert.Equal(t, 1, resolveCount)
 
 	// Repeated uncached thread policy lookup is cached in channelMetaCache
-	resUnmatched1 := d.redirectChannelIfNoBuildUpdates("uncached-thread-999", t1)
+	resUnmatched1 := d.redirectChannelIfNoBuildUpdates("", "uncached-thread-999", t1)
 	assert.Equal(t, "uncached-thread-999", resUnmatched1)
 	_, metaCached := d.getCachedChannelMeta("uncached-thread-999", t1)
 	assert.True(t, metaCached)
-	resUnmatched2 := d.redirectChannelIfNoBuildUpdates("uncached-thread-999", t1)
+	resUnmatched2 := d.redirectChannelIfNoBuildUpdates("", "uncached-thread-999", t1)
 	assert.Equal(t, "uncached-thread-999", resUnmatched2)
 
 	// Direct resolveChannelID caching check
-	r1 := d.resolveChannelID("sys-chan-target", "fallback", t1)
+	r1 := d.resolveChannelID("", "sys-chan-target", "fallback", t1)
 	assert.Equal(t, "999888777666555444", r1)
 	assert.Equal(t, 1, resolveCount)
 
 	// After resolution cache expires at t0 + 6m: resolver called again
 	t2 := t0.Add(6 * time.Minute)
-	r2 := d.resolveChannelID("sys-chan-target", "fallback", t2)
+	r2 := d.resolveChannelID("", "sys-chan-target", "fallback", t2)
 	assert.Equal(t, "999888777666555444", r2)
 	assert.Equal(t, 2, resolveCount)
 }
@@ -288,9 +288,9 @@ func TestSessionStateChannelResolution(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			noBuild := d.checkNoBuildUpdates(tc.channelID, tc.channels)
+			noBuild := d.checkNoBuildUpdates("", tc.channelID, tc.channels)
 			assert.True(t, noBuild)
-			resolved := d.resolveChannelID(tc.targetSysChan, tc.channelID)
+			resolved := d.resolveChannelID("", tc.targetSysChan, tc.channelID)
 			assert.Equal(t, tc.expectChannel, resolved)
 		})
 	}

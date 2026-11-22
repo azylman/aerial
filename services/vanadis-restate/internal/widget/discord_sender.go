@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -111,6 +112,11 @@ type cachedChannelMeta struct {
 	expiresAt time.Time
 }
 
+type cachedConfigEntry struct {
+	cfg    *rawConfigFile
+	readAt time.Time
+}
+
 // DiscordWidgetDeliverer delivers Components V2 status widgets directly to Discord REST.
 type DiscordWidgetDeliverer struct {
 	session               *discordgo.Session
@@ -121,10 +127,8 @@ type DiscordWidgetDeliverer struct {
 	channelPolicyResolver func(channelID string) (noBuildUpdates bool, systemChannel string)
 	channelResolver       func(nameOrID string) (string, error)
 
-	configMu         sync.RWMutex
-	cachedConfig     *rawConfigFile
-	cachedConfigPath string
-	configReadAt     time.Time
+	configMu      sync.RWMutex
+	cachedConfigs map[string]cachedConfigEntry
 
 	resolvedMu       sync.RWMutex
 	resolvedChannels map[string]cachedResolvedChannel
@@ -205,10 +209,48 @@ func NewDiscordWidgetDeliverer(agentName, token, gitHubOwner string, environ []s
 		session:          defaultSess,
 		agentSenders:     agentSenders,
 		configPath:       cfgPath,
+		cachedConfigs:    make(map[string]cachedConfigEntry),
 		gitHubOwner:      gitHubOwner,
 		resolvedChannels: make(map[string]cachedResolvedChannel),
 		channelMetaCache: make(map[string]cachedChannelMeta),
 	}, nil
+}
+
+// configPathForAgent resolves the config path for the requested agent:
+// empty or default agent ("aerial") returns d.configPath; other agents probe
+// services/<agent>/config.yaml next to configPath, falling back to d.configPath.
+func (d *DiscordWidgetDeliverer) configPathForAgent(agent string) string {
+	if d == nil || d.configPath == "" {
+		return ""
+	}
+	cleanAgent := normalizeRunnerAgent(agent)
+	if cleanAgent == defaultAgent {
+		return d.configPath
+	}
+	agentCfgPath := filepath.Join(filepath.Dir(d.configPath), "services", cleanAgent, "config.yaml")
+	info, err := os.Stat(agentCfgPath)
+	if err == nil && !info.IsDir() && info.Size() > 0 {
+		return agentCfgPath
+	}
+	return d.configPath
+}
+
+// sessionForAgent returns the *discordgo.Session for the requested agent from
+// agentSenders if present, falling back to d.session.
+func (d *DiscordWidgetDeliverer) sessionForAgent(agent string) *discordgo.Session {
+	if d == nil {
+		return nil
+	}
+	clean := normalizeRunnerAgent(agent)
+	d.configMu.RLock()
+	s, ok := d.agentSenders[clean]
+	d.configMu.RUnlock()
+	if ok && !isNilSender(s) {
+		if sess, ok := s.(*discordgo.Session); ok && sess != nil {
+			return sess
+		}
+	}
+	return d.session
 }
 
 // ErrNoSenderForAgent means no Discord sender is configured for the requested agent. Delivery never
@@ -321,22 +363,23 @@ func (d *DiscordWidgetDeliverer) setCachedChannelMeta(channelID string, ch *disc
 	}
 }
 
-func (d *DiscordWidgetDeliverer) lookupSessionChannel(channelID string) *discordgo.Channel {
-	if d.session == nil {
+func (d *DiscordWidgetDeliverer) lookupSessionChannel(agent, channelID string) *discordgo.Channel {
+	sess := d.sessionForAgent(agent)
+	if sess == nil {
 		return nil
 	}
-	if d.session.State != nil {
-		if ch, err := d.session.State.Channel(channelID); err == nil && ch != nil {
+	if sess.State != nil {
+		if ch, err := sess.State.Channel(channelID); err == nil && ch != nil {
 			return ch
 		}
 	}
-	if ch, err := d.session.Channel(channelID); err == nil && ch != nil {
+	if ch, err := sess.Channel(channelID); err == nil && ch != nil {
 		return ch
 	}
 	return nil
 }
 
-func (d *DiscordWidgetDeliverer) findChannel(channelID string, now ...time.Time) *discordgo.Channel {
+func (d *DiscordWidgetDeliverer) findChannel(agent, channelID string, now ...time.Time) *discordgo.Channel {
 	currentTime := d.now()
 	if len(now) > 0 && !now[0].IsZero() {
 		currentTime = now[0]
@@ -344,16 +387,16 @@ func (d *DiscordWidgetDeliverer) findChannel(channelID string, now ...time.Time)
 	if cachedCh, ok := d.getCachedChannelMeta(channelID, currentTime); ok {
 		return cachedCh
 	}
-	ch := d.lookupSessionChannel(channelID)
+	ch := d.lookupSessionChannel(agent, channelID)
 	d.setCachedChannelMeta(channelID, ch, currentTime)
 	return ch
 }
 
-func (d *DiscordWidgetDeliverer) checkNoBuildUpdates(channelID string, channels map[string]channelConfigData, now ...time.Time) bool {
+func (d *DiscordWidgetDeliverer) checkNoBuildUpdates(agent, channelID string, channels map[string]channelConfigData, now ...time.Time) bool {
 	if matchChannelPolicy(channelID, channels) {
 		return true
 	}
-	ch := d.findChannel(channelID, now...)
+	ch := d.findChannel(agent, channelID, now...)
 	if ch == nil {
 		return false
 	}
@@ -366,7 +409,7 @@ func (d *DiscordWidgetDeliverer) checkNoBuildUpdates(channelID string, channels 
 	if matchChannelPolicy(ch.ParentID, channels) {
 		return true
 	}
-	parentCh := d.findChannel(ch.ParentID, now...)
+	parentCh := d.findChannel(agent, ch.ParentID, now...)
 	if parentCh != nil && (matchChannelPolicy(parentCh.Name, channels) || matchChannelPolicy(parentCh.ID, channels)) {
 		return true
 	}
@@ -405,7 +448,7 @@ func (d *DiscordWidgetDeliverer) setCachedChannelID(target, id string, now time.
 	}
 }
 
-func (d *DiscordWidgetDeliverer) resolveChannelID(targetNameOrID, fallback string, now ...time.Time) string {
+func (d *DiscordWidgetDeliverer) resolveChannelID(agent, targetNameOrID, fallback string, now ...time.Time) string {
 	target := strings.TrimSpace(targetNameOrID)
 	target = strings.TrimPrefix(target, "#")
 	if target == "" {
@@ -418,29 +461,31 @@ func (d *DiscordWidgetDeliverer) resolveChannelID(targetNameOrID, fallback strin
 	if len(now) > 0 && !now[0].IsZero() {
 		currentTime = now[0]
 	}
-	if cachedID, ok := d.getCachedChannelID(target, currentTime); ok {
+	cacheKey := normalizeRunnerAgent(agent) + ":" + target
+	if cachedID, ok := d.getCachedChannelID(cacheKey, currentTime); ok {
 		return cachedID
 	}
 	if d.channelResolver != nil {
 		if id, err := d.channelResolver(target); err == nil && discordutil.IsSnowflake(strings.TrimSpace(id)) {
-			d.setCachedChannelID(target, id, currentTime)
+			d.setCachedChannelID(cacheKey, id, currentTime)
 			return id
 		}
 		return fallback
 	}
-	if id := d.resolveGuildChannelID(target); id != "" {
-		d.setCachedChannelID(target, id, currentTime)
+	if id := d.resolveGuildChannelID(agent, target); id != "" {
+		d.setCachedChannelID(cacheKey, id, currentTime)
 		return id
 	}
 	return fallback
 }
 
-func (d *DiscordWidgetDeliverer) resolveGuildChannelID(target string) string {
-	if d.session == nil {
+func (d *DiscordWidgetDeliverer) resolveGuildChannelID(agent, target string) string {
+	sess := d.sessionForAgent(agent)
+	if sess == nil {
 		return ""
 	}
-	if d.session.State != nil {
-		for _, g := range d.session.State.Guilds {
+	if sess.State != nil {
+		for _, g := range sess.State.Guilds {
 			for _, ch := range g.Channels {
 				if strings.EqualFold(ch.Name, target) {
 					return ch.ID
@@ -448,12 +493,12 @@ func (d *DiscordWidgetDeliverer) resolveGuildChannelID(target string) string {
 			}
 		}
 	}
-	userGuilds, err := d.session.UserGuilds(100, "", "", false)
+	userGuilds, err := sess.UserGuilds(100, "", "", false)
 	if err != nil {
 		return ""
 	}
 	for _, g := range userGuilds {
-		channels, err := d.session.GuildChannels(g.ID)
+		channels, err := sess.GuildChannels(g.ID)
 		if err != nil {
 			continue
 		}
@@ -466,17 +511,20 @@ func (d *DiscordWidgetDeliverer) resolveGuildChannelID(target string) string {
 	return ""
 }
 
-func (d *DiscordWidgetDeliverer) loadConfigFile(now time.Time) *rawConfigFile {
+func (d *DiscordWidgetDeliverer) loadConfigFile(cfgPath string, now time.Time) *rawConfigFile {
 	d.configMu.Lock()
 	defer d.configMu.Unlock()
 
-	cfgPath := d.configPath
 	if cfgPath == "" {
 		return nil
 	}
 
-	if d.cachedConfig != nil && now.Sub(d.configReadAt) < configCacheTTL && d.cachedConfigPath == cfgPath {
-		return d.cachedConfig
+	if d.cachedConfigs == nil {
+		d.cachedConfigs = make(map[string]cachedConfigEntry)
+	}
+
+	if entry, ok := d.cachedConfigs[cfgPath]; ok && now.Sub(entry.readAt) < configCacheTTL && entry.cfg != nil {
+		return entry.cfg
 	}
 
 	data, err := os.ReadFile(cfgPath)
@@ -489,13 +537,14 @@ func (d *DiscordWidgetDeliverer) loadConfigFile(now time.Time) *rawConfigFile {
 		return nil
 	}
 
-	d.cachedConfig = &cfg
-	d.cachedConfigPath = cfgPath
-	d.configReadAt = now
-	return d.cachedConfig
+	d.cachedConfigs[cfgPath] = cachedConfigEntry{
+		cfg:    &cfg,
+		readAt: now,
+	}
+	return &cfg
 }
 
-func (d *DiscordWidgetDeliverer) redirectChannelIfNoBuildUpdates(channelID string, now ...time.Time) string {
+func (d *DiscordWidgetDeliverer) redirectChannelIfNoBuildUpdates(agent, channelID string, now ...time.Time) string {
 	if strings.TrimSpace(channelID) == "" {
 		return channelID
 	}
@@ -508,10 +557,11 @@ func (d *DiscordWidgetDeliverer) redirectChannelIfNoBuildUpdates(channelID strin
 		if !noBuild || sysChan == "" {
 			return channelID
 		}
-		return d.resolveChannelID(sysChan, channelID, currentTime)
+		return d.resolveChannelID(agent, sysChan, channelID, currentTime)
 	}
 
-	cfg := d.loadConfigFile(currentTime)
+	cfgPath := d.configPathForAgent(agent)
+	cfg := d.loadConfigFile(cfgPath, currentTime)
 	if cfg == nil {
 		return channelID
 	}
@@ -521,11 +571,11 @@ func (d *DiscordWidgetDeliverer) redirectChannelIfNoBuildUpdates(channelID strin
 		return channelID
 	}
 
-	if !d.checkNoBuildUpdates(channelID, cfg.Channels, currentTime) {
+	if !d.checkNoBuildUpdates(agent, channelID, cfg.Channels, currentTime) {
 		return channelID
 	}
 
-	return d.resolveChannelID(systemChannel, channelID, currentTime)
+	return d.resolveChannelID(agent, systemChannel, channelID, currentTime)
 }
 
 func isNilSender(s DiscordWidgetSender) bool {
@@ -549,7 +599,7 @@ func (d *DiscordWidgetDeliverer) DeliverStatusWidget(ctx context.Context, req er
 	}
 
 	now := d.now()
-	req.ChannelID = d.redirectChannelIfNoBuildUpdates(req.ChannelID, now)
+	req.ChannelID = d.redirectChannelIfNoBuildUpdates(req.Agent, req.ChannelID, now)
 
 	var opts []discordgo.RequestOption
 	if ctx != nil {
@@ -582,7 +632,7 @@ func (d *DiscordWidgetDeliverer) DeliverDirectMessageWithAgent(ctx context.Conte
 	}
 
 	now := d.now()
-	targetChannelID := d.resolveChannelID(d.redirectChannelIfNoBuildUpdates(cleanChannelID, now), cleanChannelID, now)
+	targetChannelID := d.resolveChannelID(agent, d.redirectChannelIfNoBuildUpdates(agent, cleanChannelID, now), cleanChannelID, now)
 
 	var opts []discordgo.RequestOption
 	if ctx != nil {
