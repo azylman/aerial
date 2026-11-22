@@ -25,11 +25,12 @@ import (
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace"
 	"go.opentelemetry.io/otel/trace/noop"
-	"go.uber.org/goleak"
+
+	"github.com/azylman/aerial/pkg/hermetictest"
 )
 
 func TestMain(m *testing.M) {
-	goleak.VerifyTestMain(m)
+	hermetictest.Main(m)
 }
 
 const (
@@ -40,8 +41,7 @@ const (
 
 func newRecorder(t *testing.T) (*tracetest.SpanRecorder, trace.TracerProvider) {
 	t.Helper()
-	sr := tracetest.NewSpanRecorder()
-	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(sr))
+	tp, sr := hermetictest.NewRecorder()
 	t.Cleanup(func() { _ = tp.Shutdown(context.Background()) })
 	return sr, tp
 }
