@@ -20,3 +20,6 @@ func WithTwilioHTTPClient(client *http.Client) TwilioOption {
 		c.httpClient = client
 	}
 }
+
+// ReadBodySnippet exposes readBodySnippet to the external test package.
+var ReadBodySnippet = readBodySnippet

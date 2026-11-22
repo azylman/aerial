@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"slices"
 	"testing"
@@ -228,6 +229,28 @@ func TestFakes(t *testing.T) {
 			got := fakesScript(tc.store, tc.twilio, tc.failTo)
 			if !slices.Equal(got, tc.want) {
 				t.Errorf("script log mismatch\n got: %q\nwant: %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestTwilioSignature(t *testing.T) {
+	t.Parallel()
+	const hook = "https://example.com/twilio/voice"
+	tests := []struct {
+		name string
+		form url.Values
+		want string
+	}{
+		{"empty form signs url only", nil, "SFP0X3QJ6D9JMwhi4ysYEBK+lYc="},
+		{"keys sorted", url.Values{"From": {"+15105550100"}, "CallSid": {"CA1"}}, "uw0rWi6HmuFpXh6Trr4McXJi6UM="},
+		{"every value of a key in order", url.Values{"Media": {"b", "a"}}, "xfOJPvR1N8WDxfW/Oi8bbN/X9bc="},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := TwilioSignature("token-a", hook, tc.form); got != tc.want {
+				t.Errorf("TwilioSignature() = %q, want %q", got, tc.want)
 			}
 		})
 	}
