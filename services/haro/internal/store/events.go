@@ -222,7 +222,7 @@ func BuildEventTriggerFilterArgs(source string, targets []string, eventType stri
 	return strings.Join(placeholders, ", "), args, true
 }
 
-func claimEventTriggersSQLite(ctx context.Context, database *sql.DB, placeholders string, args []any) ([]model.EventTrigger, error) {
+func claimEventTriggersTx(ctx context.Context, database *sql.DB, placeholders string, args []any) ([]model.EventTrigger, error) {
 	tx, txErr := database.BeginTx(ctx, nil)
 	if txErr != nil {
 		return nil, txErr
@@ -233,8 +233,16 @@ func claimEventTriggersSQLite(ctx context.Context, database *sql.DB, placeholder
 		}
 	}()
 
-	selectQuery := fmt.Sprintf(`SELECT id, agent, channel_id, source, target, event_type, prompt, COALESCE(NULLIF(effort, ''), 'medium'), created_at, persistent FROM event_triggers WHERE source = $1 AND event_type = $2 AND target IN (%s) AND (persistent = FALSE OR (updated_at IS NULL OR updated_at < datetime('now', '-5 seconds'))) ORDER BY created_at ASC`, placeholders)
-	rows, qErr := tx.QueryContext(ctx, selectQuery, args...)
+	now := time.Now().UTC()
+	cutoff := now.Add(-5 * time.Second)
+	cutoffPlaceholder := fmt.Sprintf("$%d", len(args)+1)
+	nowPlaceholder := fmt.Sprintf("$%d", len(args)+2)
+	argsWithCutoff := make([]any, len(args), len(args)+2)
+	copy(argsWithCutoff, args)
+	argsWithCutoff = append(argsWithCutoff, cutoff, now)
+
+	selectQuery := fmt.Sprintf(`SELECT id, agent, channel_id, source, target, event_type, prompt, COALESCE(NULLIF(effort, ''), 'medium') AS effort, created_at, persistent FROM event_triggers WHERE source = $1 AND event_type = $2 AND target IN (%s) AND (persistent = FALSE OR (updated_at IS NULL OR updated_at < %s)) ORDER BY created_at ASC`, placeholders, cutoffPlaceholder)
+	rows, qErr := tx.QueryContext(ctx, selectQuery, argsWithCutoff[:len(args)+1]...)
 	if qErr != nil {
 		return nil, qErr
 	}
@@ -248,8 +256,8 @@ func claimEventTriggersSQLite(ctx context.Context, database *sql.DB, placeholder
 		return nil, dErr
 	}
 
-	updateQuery := fmt.Sprintf(`UPDATE event_triggers SET updated_at = CURRENT_TIMESTAMP WHERE source = $1 AND event_type = $2 AND target IN (%s) AND persistent = TRUE AND (updated_at IS NULL OR updated_at < datetime('now', '-5 seconds'))`, placeholders)
-	if _, uErr := tx.ExecContext(ctx, updateQuery, args...); uErr != nil {
+	updateQuery := fmt.Sprintf(`UPDATE event_triggers SET updated_at = %s WHERE source = $1 AND event_type = $2 AND target IN (%s) AND persistent = TRUE AND (updated_at IS NULL OR updated_at < %s)`, nowPlaceholder, placeholders, cutoffPlaceholder)
+	if _, uErr := tx.ExecContext(ctx, updateQuery, argsWithCutoff...); uErr != nil {
 		return nil, uErr
 	}
 
@@ -257,6 +265,14 @@ func claimEventTriggersSQLite(ctx context.Context, database *sql.DB, placeholder
 		return nil, err
 	}
 	return triggers, nil
+}
+
+func buildClaimEventTriggersPostgresQuery(placeholders string) string {
+	return fmt.Sprintf(`WITH deleted AS (
+		DELETE FROM event_triggers WHERE source = $1 AND event_type = $2 AND target IN (%s) AND persistent = FALSE RETURNING id, agent, channel_id, source, target, event_type, prompt, COALESCE(NULLIF(effort, ''), 'medium') AS effort, created_at, persistent
+	), updated_persistent AS (
+		UPDATE event_triggers SET updated_at = CURRENT_TIMESTAMP WHERE source = $1 AND event_type = $2 AND target IN (%s) AND persistent = TRUE AND (updated_at IS NULL OR updated_at < CURRENT_TIMESTAMP - INTERVAL '5 seconds') RETURNING id, agent, channel_id, source, target, event_type, prompt, COALESCE(NULLIF(effort, ''), 'medium') AS effort, created_at, persistent
+	) SELECT id, agent, channel_id, source, target, event_type, prompt, effort, created_at, persistent FROM deleted UNION ALL SELECT id, agent, channel_id, source, target, event_type, prompt, effort, created_at, persistent FROM updated_persistent ORDER BY created_at ASC`, placeholders, placeholders)
 }
 
 // ClaimEventTriggers atomically deletes and returns matching event triggers from event_triggers.
@@ -271,14 +287,10 @@ func ClaimEventTriggers(ctx context.Context, database *sql.DB, source string, ta
 	}
 
 	if isSQLiteDBFn(database) {
-		return claimEventTriggersSQLite(ctx, database, placeholders, args)
+		return claimEventTriggersTx(ctx, database, placeholders, args)
 	}
 
-	rawQuery := fmt.Sprintf(`WITH deleted AS (
-		DELETE FROM event_triggers WHERE source = $1 AND event_type = $2 AND target IN (%s) AND persistent = FALSE RETURNING id, agent, channel_id, source, target, event_type, prompt, COALESCE(NULLIF(effort, ''), 'medium') AS effort, created_at, persistent
-	), updated_persistent AS (
-		UPDATE event_triggers SET updated_at = CURRENT_TIMESTAMP WHERE source = $1 AND event_type = $2 AND target IN (%s) AND persistent = TRUE AND (updated_at IS NULL OR updated_at < CURRENT_TIMESTAMP - INTERVAL '5 seconds') RETURNING id, agent, channel_id, source, target, event_type, prompt, COALESCE(NULLIF(effort, ''), 'medium') AS effort, created_at, persistent
-	) SELECT id, agent, channel_id, source, target, event_type, prompt, effort, created_at, persistent FROM deleted UNION ALL SELECT id, agent, channel_id, source, target, event_type, prompt, effort, created_at, persistent FROM updated_persistent ORDER BY created_at ASC`, placeholders, placeholders)
+	rawQuery := buildClaimEventTriggersPostgresQuery(placeholders)
 	rows, err := database.QueryContext(ctx, rawQuery, args...)
 	if err != nil {
 		return nil, err
@@ -286,7 +298,7 @@ func ClaimEventTriggers(ctx context.Context, database *sql.DB, source string, ta
 	return scanEventTriggerRows(rows)
 }
 
-// GetEventTrigger fetches an event trigger by id.
+// GetEventTrigger fetches an event trigger by id, including its updated_at cooldown timestamp when present.
 func GetEventTrigger(ctx context.Context, database *sql.DB, id string) (*model.EventTrigger, error) {
 	ctx, err := normCtxAndDB(ctx, database)
 	if err != nil {
@@ -296,20 +308,93 @@ func GetEventTrigger(ctx context.Context, database *sql.DB, id string) (*model.E
 	if id == "" {
 		return nil, fmt.Errorf("id cannot be empty")
 	}
-	query := `SELECT id, agent, channel_id, source, target, event_type, prompt, COALESCE(NULLIF(effort, ''), 'medium'), created_at, persistent FROM event_triggers WHERE id = $1`
-	var t model.EventTrigger
-	err = database.QueryRowContext(ctx, query, id).Scan(&t.ID, &t.Agent, &t.ChannelID, &t.Source, &t.Target, &t.EventType, &t.Prompt, &t.Effort, &t.CreatedAt, &t.Persistent)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
+	const query = `SELECT id, agent, channel_id, source, target, event_type, prompt, COALESCE(NULLIF(effort, ''), 'medium'), created_at, updated_at, persistent FROM event_triggers WHERE id = $1`
+	var trig model.EventTrigger
+	var updatedAt sql.NullTime
+	if scanErr := database.QueryRowContext(ctx, query, id).Scan(&trig.ID, &trig.Agent, &trig.ChannelID, &trig.Source, &trig.Target, &trig.EventType, &trig.Prompt, &trig.Effort, &trig.CreatedAt, &updatedAt, &trig.Persistent); scanErr != nil {
+		if errors.Is(scanErr, sql.ErrNoRows) {
 			return nil, fmt.Errorf("event watch %q not found: %w", id, sql.ErrNoRows)
 		}
-		return nil, err
+		return nil, scanErr
 	}
-	t.Agent = model.NormalizeAgent(t.Agent)
-	return &t, nil
+	if updatedAt.Valid {
+		ts := updatedAt.Time.UTC()
+		trig.UpdatedAt = &ts
+	}
+	trig.Agent = model.NormalizeAgent(trig.Agent)
+	return &trig, nil
 }
 
 // DeleteEventTrigger removes an event trigger by id.
 func DeleteEventTrigger(ctx context.Context, database *sql.DB, id string) (bool, error) {
 	return deleteByID(ctx, database, "DELETE FROM event_triggers WHERE id = $1", "id cannot be empty", "failed to delete event trigger", id)
+}
+
+// QueryMatchingEventTriggers queries matching event triggers without claiming or deleting them.
+// It is intentionally read-only so that a transient dispatch error in HaroEventWatch.Fire Step 1
+// does not mutate or delete the trigger before eri accepts the turn. Duplicate deliveries of the
+// same event are deduplicated via a per-(trigger_id, event_id) Restate Idempotency-Key, and
+// concurrent distinct events matching the same persistent trigger within the 5-second cooldown
+// window are strictly serialized by the HaroEventWatch Virtual Object key (trigger_id), where
+// Step 1 re-verifies trig.UpdatedAt against the 5-second cooldown after Step 2 of the prior
+// invocation calls ConsumeEventTrigger.
+func QueryMatchingEventTriggers(ctx context.Context, database *sql.DB, source string, targets []string, eventType string) ([]model.EventTrigger, error) {
+	ctx, err := normCtxAndDB(ctx, database)
+	if err != nil {
+		return nil, err
+	}
+	placeholders, args, ok := BuildEventTriggerFilterArgs(source, targets, eventType)
+	if !ok {
+		return nil, nil
+	}
+
+	cutoffPlaceholder := fmt.Sprintf("$%d", len(args)+1)
+	args = append(args, time.Now().UTC().Add(-5*time.Second))
+	selectQuery := fmt.Sprintf(`SELECT id, agent, channel_id, source, target, event_type, prompt, COALESCE(NULLIF(effort, ''), 'medium') AS effort, created_at, persistent FROM event_triggers WHERE source = $1 AND event_type = $2 AND target IN (%s) AND (persistent = FALSE OR (updated_at IS NULL OR updated_at < %s)) ORDER BY created_at ASC`, placeholders, cutoffPlaceholder)
+
+	rows, qErr := database.QueryContext(ctx, selectQuery, args...)
+	if qErr != nil {
+		return nil, qErr
+	}
+	return scanEventTriggerRows(rows)
+}
+
+// ConsumeEventTrigger deletes a non-persistent trigger or updates updated_at on a persistent trigger.
+// It is executed in Step 2 of HaroEventWatch.Fire (serialized per trigger_id) after Step 1 dispatch succeeds.
+// When now is provided, updated_at is set to the provided timestamp to maintain a consistent clock source;
+// otherwise it defaults to time.Now().UTC().
+func ConsumeEventTrigger(ctx context.Context, database *sql.DB, id string, now ...time.Time) (bool, error) {
+	ctx, err := normCtxAndDB(ctx, database)
+	if err != nil {
+		return false, err
+	}
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return false, errors.New("id cannot be empty")
+	}
+
+	res, dErr := database.ExecContext(ctx, "DELETE FROM event_triggers WHERE id = $1 AND persistent = FALSE", id)
+	if dErr != nil {
+		return false, dErr
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	if rows > 0 {
+		return true, nil
+	}
+	ts := time.Now().UTC()
+	if len(now) > 0 && !now[0].IsZero() {
+		ts = now[0].UTC()
+	}
+	uRes, uErr := database.ExecContext(ctx, "UPDATE event_triggers SET updated_at = $1 WHERE id = $2 AND persistent = TRUE", ts, id)
+	if uErr != nil {
+		return false, uErr
+	}
+	rows, err = uRes.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return rows > 0, nil
 }

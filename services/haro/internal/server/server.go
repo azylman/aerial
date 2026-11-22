@@ -197,7 +197,7 @@ func (s *Server) registerScheduleCreationTools() {
 			return nil, nil, err
 		}
 		args.Agent = resolved
-		res, err := tools.HandleScheduleHeartbeat(ctx, s.handler.DB, s.handler.Timezone, args.ToMap())
+		res, err := tools.HandleScheduleHeartbeat(ctx, s.handler.DB, s.handler.Timezone, args.ToMap(), s.handler.RestateIngressURL())
 		if err == nil {
 			s.InvalidateSchedulesCache()
 		}
@@ -243,7 +243,7 @@ func (s *Server) registerScheduleUpdateTools() {
 				return nil, nil, err
 			}
 		}
-		res, err := tools.HandleUpdateHeartbeat(ctx, s.handler.DB, args.ToMap())
+		res, err := tools.HandleUpdateHeartbeat(ctx, s.handler.DB, args.ToMap(), s.handler.RestateIngressURL())
 		if err == nil {
 			s.InvalidateSchedulesCache()
 		}
