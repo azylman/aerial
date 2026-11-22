@@ -194,27 +194,16 @@ func TestRestateEriClient_DispatchAccepted(t *testing.T) {
 		name      string
 		noRestate bool
 		req       eriwire.BrainDispatchRequest
-		attempt   string
 		path      string
 		body      string
 		wantErr   string
 		wantCalls []string
 	}{
 		{name: "accepted with dispatch id", req: d1, path: path, body: accepted, wantCalls: []string{"restate " + path + " key=d1"}},
-		{name: "launch attempt scopes idempotency key", req: d1, attempt: "inv-7", path: path, body: accepted, wantCalls: []string{"restate " + path + " key=d1:inv-7"}},
-		{name: "blank launch attempt keeps dispatch key", req: d1, attempt: "  ", path: path, body: accepted, wantCalls: []string{"restate " + path + " key=d1"}},
-		{
-			name: "launch attempt without dispatch id sends no key", req: eriwire.BrainDispatchRequest{Source: "test"}, attempt: "inv-7", path: "/DispatchSession/dispatch-/Enqueue",
-			body: `{"status":"accepted"}`, wantErr: `restate did not accept dispatch "" (status "accepted", identity "")`, wantCalls: []string{"restate /DispatchSession/dispatch-/Enqueue key="},
-		},
 		{name: "already exists with message id", req: d1, path: path, body: `{"status":"already_exists","message_id":"d1"}`, wantCalls: []string{"restate " + path + " key=d1"}},
 		{
 			name: "skipped active maps to dispatch active", req: d1, path: path, body: `{"status":"skipped_active"}`, wantErr: eriwire.ErrDispatchActive.Error(),
 			wantCalls: []string{"restate " + path + " key=d1"},
-		},
-		{
-			name: "skipped active re-send under new attempt uses fresh key", req: d1, attempt: "inv-8", path: path, body: `{"status":"skipped_active"}`,
-			wantErr: eriwire.ErrDispatchActive.Error(), wantCalls: []string{"restate " + path + " key=d1:inv-8"},
 		},
 		{
 			name: "mismatched identity errors", req: d1, path: path, body: `{"status":"accepted","dispatch_id":"other"}`,
@@ -228,7 +217,7 @@ func TestRestateEriClient_DispatchAccepted(t *testing.T) {
 			t.Parallel()
 			ingress, eri := restateClientFake(t, tc.path, 0, tc.body)
 			restateURL, eriURL := restateClientURLs(ingress, eri, tc.noRestate, false, "")
-			err := NewRestateEriClient(restateURL, eriURL, "aerial", nil).DispatchAccepted(WithDispatchAttempt(context.Background(), tc.attempt), tc.req)
+			err := NewRestateEriClient(restateURL, eriURL, "aerial", nil).DispatchAccepted(context.Background(), tc.req)
 			requireErrText(t, err, tc.wantErr)
 			assert.Equal(t, tc.wantCalls, restateClientCalls(ingress, eri))
 		})

@@ -15,9 +15,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	restate "github.com/restatedev/sdk-go"
-	"github.com/restatedev/sdk-go/x/mocks"
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
 	"github.com/azylman/aerial/pkg/eriwire"
@@ -692,90 +690,17 @@ func TestBuildObject_GenerationRecoveryOrdering(t *testing.T) {
 			if tc.nudges > 0 {
 				launched["retry"] = true
 			}
-			_, _, err := bo.launchEligibleChunks(context.Background(), model.VanadisBuild{ID: "b"}, chunks, launched)
+			_, err := bo.launchEligibleChunks(context.Background(), model.VanadisBuild{ID: "b"}, chunks, launched)
 			assert.NoError(t, err)
 			assert.Equal(t, tc.wantDispatched, dispatched)
 			if len(tc.wantDispatched) > 0 {
 				// Repeated reconciliation after acceptance must leave the generation acknowledged
 				// and keep the 6-chunk cap intact against pending siblings.
 				dispatched = nil
-				_, _, err = bo.launchEligibleChunks(context.Background(), model.VanadisBuild{ID: "b"}, chunks, launched)
+				_, err = bo.launchEligibleChunks(context.Background(), model.VanadisBuild{ID: "b"}, chunks, launched)
 				assert.NoError(t, err)
 				assert.Empty(t, dispatched)
 			}
-		})
-	}
-}
-
-func TestBuildObject_DeferredLaunchReleasesInvocation(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name, mode, id, key, first string
-		nudges                     int
-		deferred                   bool
-	}{
-		{"retry active", "action", "vanadis-retry-turn-1", "dispatch:vanadis-retry-turn-1", "active", 1, true},
-		{"initial active", "action", "vanadis-retry-turn-0", "retry", "active", 0, true},
-		{"pr active", "pr", "vanadis-retry-turn-0", "retry", "active", 0, true},
-		{"lost acceptance", "action", "vanadis-retry-turn-0", "retry", "lost", 0, false},
-		{"server failure", "action", "vanadis-retry-turn-1", "dispatch:vanadis-retry-turn-1", "failure", 1, false},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			var ready atomic.Bool
-			srv, ids := launchRecoveryServer(t, tc.id, tc.first, &ready)
-			defer srv.Close()
-			st := lifecycleStore(t, model.VanadisBuild{ID: "b", Status: "running"}, "", model.VanadisChunk{ID: "retry", Mode: tc.mode, Status: "running", StallNudges: tc.nudges}, model.VanadisChunk{ID: "dependent", Mode: "action", Status: "pending", DependsOn: []string{"retry"}})
-			bo := NewBuildObject("", nil).WithAuthority(st, executor.NewExecutor(t.TempDir(), executor.NewHTTPEriClient(srv.URL, srv.Client()), nil, "", "example-owner", nil))
-			rt := newFakeObjectRuntime("b")
-			_, err := bo.executeObjectTransition(rt, "reconcile-build", nil)
-			assert.Equal(t, !tc.deferred, err != nil)
-			assert.Equal(t, tc.deferred, rt.reconcileScheduled)
-			assert.False(t, rt.launched[tc.key])
-			ready.Store(true)
-			_, err = bo.executeObjectTransition(rt, "reconcile-build", nil)
-			assert.NoError(t, err)
-			assert.True(t, rt.launched[tc.key])
-			_, err = bo.executeObjectTransition(rt, "reconcile-build", nil)
-			assert.NoError(t, err)
-			assert.False(t, rt.launched["dependent"])
-			var got []string
-			for len(ids) > 0 {
-				got = append(got, <-ids)
-			}
-			assert.Equal(t, []string{tc.id, tc.id}, got)
-			mc := mocks.NewMockContext(t)
-			mc.EXPECT().Key().Return("b")
-			mc.EXPECT().Run(mock.Anything, mock.Anything, mock.Anything).RunAndReturn(runMockRunContext)
-			bo.runtimeFactory = func(restate.ObjectContext) objectRuntime { return rt }
-			cancelled, err := bo.Cancel(restate.WithMockContext(mc), CancelBuildRequest{})
-			assert.NoError(t, err)
-			assert.Equal(t, "cancelled", cancelled.Status)
-			assert.Equal(t, "cancelled", lifecycleBuildStatus(t, st, "b"))
-		})
-	}
-}
-
-func TestClassifyLaunchErrors(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name                    string
-		failures                []error
-		wantError, wantDeferred bool
-	}{
-		{"no failures", nil, false, false},
-		{"active dispatch", []error{eriwire.ErrDispatchActive}, true, true},
-		{"several active dispatches", []error{eriwire.ErrDispatchActive, eriwire.ErrDispatchActive}, true, true},
-		{"transport failure", []error{errors.New("unavailable")}, true, false},
-		{"mixed failures", []error{eriwire.ErrDispatchActive, errors.New("unavailable")}, true, false},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			err := classifyLaunchErrors(tc.failures)
-			assert.Equal(t, tc.wantError, err != nil)
-			assert.Equal(t, tc.wantDeferred, errors.Is(err, eriwire.ErrDispatchActive))
 		})
 	}
 }
@@ -957,7 +882,7 @@ func TestExecuteLaunchChunk_HTTPGenerationAcceptance(t *testing.T) {
 		{"initial duplicate", "action", "c", `{"status":"already_exists","dispatch_id":"vanadis-c-turn-0"}`, 0, 200, false, true},
 		{"initial wrong dispatch id", "action", "c", `{"status":"accepted","dispatch_id":"wrong"}`, 0, 202, true, false},
 		{"retry accepted", "action", "dispatch:vanadis-c-turn-1", `{"status":"accepted","dispatch_id":"vanadis-c-turn-1"}`, 1, 202, false, true},
-		{"retry active", "action", "dispatch:vanadis-c-turn-1", `{"status":"skipped_active"}`, 1, 200, false, false},
+		{"retry active", "action", "dispatch:vanadis-c-turn-1", `{"status":"skipped_active"}`, 1, 200, true, false},
 		{"retry server failure", "action", "dispatch:vanadis-c-turn-1", `{}`, 1, 500, true, false},
 	}
 	for _, tc := range tests {
@@ -1010,7 +935,7 @@ func TestBuildObject_HTTPRecoverySiblingProgress(t *testing.T) {
 	}
 	bo := NewBuildObject("", nil).WithAuthority(&mockStoreForLaunch{}, executor.NewExecutor(t.TempDir(), executor.NewHTTPEriClient(srv.URL, srv.Client()), nil, "", "example-owner", nil))
 	launched := map[string]bool{}
-	_, _, err := bo.launchEligibleChunks(context.Background(), build, chunks, launched)
+	_, err := bo.launchEligibleChunks(context.Background(), build, chunks, launched)
 	assert.ErrorIs(t, err, eriwire.ErrDispatchActive)
 	assert.False(t, launched["dispatch:vanadis-retry-turn-1"])
 	assert.True(t, launched["sibling"])

@@ -6,11 +6,6 @@ package build
 
 import (
 	"context"
-	"encoding/json"
-	"net/http"
-	"net/http/httptest"
-	"sync/atomic"
-	"testing"
 
 	"github.com/azylman/aerial/pkg/eriwire"
 	"github.com/azylman/aerial/pkg/pubsub"
@@ -100,46 +95,6 @@ func (m *mockStoreForLaunch) ReserveChunkForLaunch(ctx context.Context, chunkID 
 func (m *mockBusExecutor) Publish(ctx context.Context, subject, msgID string, data any) error {
 	m.lastSubj = subject
 	return nil
-}
-
-func launchRecoveryServer(t *testing.T, id, first string, ready *atomic.Bool) (*httptest.Server, chan string) {
-	t.Helper()
-	ids := make(chan string, 8)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/dispatch" {
-			_, _ = w.Write([]byte(`{}`))
-			return
-		}
-		var req eriwire.BrainDispatchRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			t.Error(err)
-			w.WriteHeader(http.StatusBadRequest)
-			return
-		}
-		select {
-		case ids <- req.ID:
-		default:
-			t.Error("unexpected repeated dispatch")
-		}
-		if req.ID == id && !ready.Load() {
-			switch first {
-			case "active":
-				_, _ = w.Write([]byte(`{"status":"skipped_active"}`))
-			case "lost":
-				w.Header().Set("Content-Length", "100")
-				_, _ = w.Write([]byte(`{"status":"accepted"`))
-			default:
-				w.WriteHeader(http.StatusServiceUnavailable)
-			}
-			return
-		}
-		status := "accepted"
-		if first == "lost" {
-			status = "already_exists"
-		}
-		_ = json.NewEncoder(w).Encode(map[string]string{"status": status, "dispatch_id": req.ID})
-	}))
-	return srv, ids
 }
 
 type unattachedPREventSpyStore struct {

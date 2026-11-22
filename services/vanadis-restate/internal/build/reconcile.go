@@ -14,7 +14,6 @@ import (
 	restate "github.com/restatedev/sdk-go"
 
 	"github.com/azylman/aerial/pkg/buildplan"
-	"github.com/azylman/aerial/pkg/eriwire"
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/pkg/strutil"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/ericlient"
@@ -31,7 +30,7 @@ func (b *BuildObject) Reconcile(ctx restate.ObjectContext, req ReconcileBuildReq
 		return ReconcileBuildResult{}, err
 	}
 	rt := b.getRuntime(ctx)
-	res, err := b.executeObjectTransitionTick(rt, labelReconcileBuild, nil, req.DeferralSeq)
+	res, err := b.executeObjectTransition(rt, labelReconcileBuild, nil)
 	if err != nil || strings.TrimSpace(req.Reason) != ReconcileReasonWidgetSync || res.Status != statusFailed || b.executor == nil {
 		return res, err
 	}
@@ -76,7 +75,7 @@ func mergePriorLaunched(priorState *model.BuildObjectState, priorLaunched map[st
 	return priorLaunched
 }
 
-func (b *BuildObject) runTransitionStep(rt objectRuntime, stepName, buildID string, mutation *BuildMutationRequest, priorState *model.BuildObjectState, priorLaunched map[string]bool, attempt transitionAttempt) (reconcileStepOutput, error) {
+func (b *BuildObject) runTransitionStep(rt objectRuntime, stepName, buildID string, mutation *BuildMutationRequest, priorState *model.BuildObjectState, priorLaunched map[string]bool) (reconcileStepOutput, error) {
 	if b == nil || b.store == nil {
 		err := restate.TerminalErrorf("store not configured")
 		RecordReconcileError(stepName, err)
@@ -84,7 +83,7 @@ func (b *BuildObject) runTransitionStep(rt objectRuntime, stepName, buildID stri
 	}
 	notifiedInStep := false
 	stepOut, err := rt.RunReconcileStep(stepName, func(stepCtx context.Context) (reconcileStepOutput, error) {
-		ctx, crossBuild := withCrossBuildReconciles(withTransitionAttempt(stepCtx, attempt))
+		ctx, crossBuild := withCrossBuildReconciles(stepCtx)
 		out, stepErr := b.executeAuthoritativeTransition(ctx, buildID, mutation, priorState, priorLaunched, terminalNotificationRecorded(priorState))
 		if stepErr == nil {
 			out.ReconcileTargets = crossBuild.list()
@@ -111,12 +110,6 @@ func (b *BuildObject) runTransitionStep(rt objectRuntime, stepName, buildID stri
 }
 
 func (b *BuildObject) executeObjectTransition(rt objectRuntime, stepName string, mutation *BuildMutationRequest) (ReconcileBuildResult, error) {
-	return b.executeObjectTransitionTick(rt, stepName, mutation, 0)
-}
-
-// executeObjectTransitionTick runs one transition; deferralSeq identifies the
-// delayed deferral Reconcile delivering it, zero for every other transition.
-func (b *BuildObject) executeObjectTransitionTick(rt objectRuntime, stepName string, mutation *BuildMutationRequest, deferralSeq int) (ReconcileBuildResult, error) {
 	buildID := strings.TrimSpace(rt.Key())
 	if buildID == "" {
 		err := restate.ToTerminalError(fmt.Errorf("%w: build_id cannot be empty", store.ErrInvalidBuildInput), restate.WithErrorCode(http.StatusBadRequest))
@@ -137,10 +130,7 @@ func (b *BuildObject) executeObjectTransitionTick(rt objectRuntime, stepName str
 	}
 
 	priorLaunched = mergePriorLaunched(priorState, priorLaunched)
-	// The invocation ID is read outside the journaled step: replays of this
-	// invocation reuse it, while every new invocation gets a fresh launch key.
-	attempt := transitionAttempt{InvocationID: rt.InvocationID(), DeferralSeq: deferralSeq}
-	stepOut, err := b.runTransitionStep(rt, stepName, buildID, mutation, priorState, priorLaunched, attempt)
+	stepOut, err := b.runTransitionStep(rt, stepName, buildID, mutation, priorState, priorLaunched)
 	if err != nil {
 		return ReconcileBuildResult{BuildID: buildID, Status: statusFailed, Error: err.Error()}, err
 	}
@@ -163,11 +153,6 @@ func (b *BuildObject) executeObjectTransitionTick(rt objectRuntime, stepName str
 		}
 	}
 
-	if delay, seq, ok := scheduledDeferralReconcile(stepOut, priorDeferralSeq(priorState)); ok {
-		rt.ScheduleDeferredReconcile(delay, seq)
-	} else if b.shouldScheduleReconcile(stepOut) {
-		rt.ScheduleReconcile()
-	}
 	return ReconcileBuildResult{
 		BuildID:        buildID,
 		Status:         stepOut.BuildStatus,
@@ -248,14 +233,12 @@ func isLaunchCandidate(chunk model.VanadisChunk, chunks []model.VanadisChunk, la
 	return true, res || unlaunched
 }
 
-// launchEligibleChunks dispatches ready chunks. It returns the launched chunk
-// IDs and the launch keys eri deferred with skipped_active; a deferred chunk
-// keeps its pre-launch status.
+// launchEligibleChunks dispatches ready chunks. It returns the launched chunk IDs.
 // maxActiveChunks caps how many chunks of one build run at once.
 const maxActiveChunks = 6
 
-func (b *BuildObject) launchEligibleChunks(ctx context.Context, build model.VanadisBuild, chunks []model.VanadisChunk, launchedMap map[string]bool) ([]string, []string, error) {
-	var launchedChunks, deferredKeys []string
+func (b *BuildObject) launchEligibleChunks(ctx context.Context, build model.VanadisBuild, chunks []model.VanadisChunk, launchedMap map[string]bool) ([]string, error) {
+	var launchedChunks []string
 	var launchErrors []error
 	activeCount := countActiveChunks(chunks)
 
@@ -272,9 +255,6 @@ func (b *BuildObject) launchEligibleChunks(ctx context.Context, build model.Vana
 			activeCount++
 		}
 		if err := b.executor.ExecuteLaunchChunk(ctx, b.store, build, chunks, idx, ""); err != nil {
-			if errors.Is(err, eriwire.ErrDispatchActive) {
-				deferredKeys = append(deferredKeys, key)
-			}
 			launchErrors = append(launchErrors, err)
 			continue
 		}
@@ -285,45 +265,7 @@ func (b *BuildObject) launchEligibleChunks(ctx context.Context, build model.Vana
 		launchedMap[key] = true
 		launchedChunks = append(launchedChunks, chunk.ID)
 	}
-	return launchedChunks, deferredKeys, classifyLaunchErrors(launchErrors)
-}
-
-// Only active-session deferrals may complete the journaled step successfully.
-// Any real failure still triggers durable invocation retry, including mixed failures.
-func classifyLaunchErrors(errs []error) error {
-	var failures []error
-	for _, err := range errs {
-		if !errors.Is(err, eriwire.ErrDispatchActive) {
-			failures = append(failures, err)
-		}
-	}
-	if len(failures) > 0 {
-		return errors.Join(failures...)
-	}
-	if len(errs) > 0 {
-		return eriwire.ErrDispatchActive
-	}
-	return nil
-}
-
-func (b *BuildObject) shouldScheduleReconcile(out reconcileStepOutput) bool {
-	return b.store != nil && out.Error == eriwire.ErrDispatchActive.Error() && out.BuildStatus == statusRunning && !hasDispatchDeferrals(out)
-}
-
-func hasDispatchDeferrals(out reconcileStepOutput) bool {
-	return out.State != nil && len(out.State.DispatchDeferrals) > 0
-}
-
-// scheduledDeferralReconcile derives the delayed deferral Reconcile from the
-// journaled step output alone. A step that advanced DeferralReconcileSeq owns
-// the build's single chain; an unchanged seq means another tick is pending.
-// Outputs journaled before the lease carry no deferrals and keep the legacy
-// 1s ScheduleReconcile, so in-flight invocations replay the same commands.
-func scheduledDeferralReconcile(out reconcileStepOutput, priorSeq int) (time.Duration, int, bool) {
-	if out.BuildStatus != statusRunning || !hasDispatchDeferrals(out) || out.State.DeferralReconcileSeq == priorSeq {
-		return 0, 0, false
-	}
-	return deferralDelay(out.State.DispatchDeferrals), out.State.DeferralReconcileSeq, true
+	return launchedChunks, errors.Join(launchErrors...)
 }
 
 func (b *BuildObject) notifyBuildTerminal(ctx context.Context, build *model.VanadisBuild, chunks []model.VanadisChunk, status, reason, promptHeader, promptMsg string) error {
@@ -627,17 +569,18 @@ func (b *BuildObject) haltedTransitionOutput(ctx context.Context, build *model.V
 		}
 	}
 	launchedMap := cloneLaunchedMap(priorLaunched)
+	st := compactStateForStorage(model.BuildObjectState{
+		Build:            *build,
+		Chunks:           chunks,
+		Launched:         launchedMap,
+		TerminalNotified: terminalNotified,
+		FailureNotified:  notified,
+		FailureIsolation: isolated,
+	})
 	return reconcileStepOutput{
 		BuildStatus: build.Status,
 		LaunchedMap: launchedMap,
-		State: &model.BuildObjectState{
-			Build:            *build,
-			Chunks:           chunks,
-			Launched:         launchedMap,
-			TerminalNotified: terminalNotified,
-			FailureNotified:  notified,
-			FailureIsolation: isolated,
-		},
+		State:       &st,
 	}, nil
 }
 
@@ -698,17 +641,9 @@ func (b *BuildObject) executeAuthoritativeTransition(ctx context.Context, buildI
 	}
 
 	launchedMap := cloneLaunchedMap(priorLaunched)
-	launchedChunks, deferredKeys, err := b.launchEligibleChunks(ctx, *build, chunks, launchedMap)
-	if err != nil && !errors.Is(err, eriwire.ErrDispatchActive) {
+	launchedChunks, err := b.launchEligibleChunks(ctx, *build, chunks, launchedMap)
+	if err != nil {
 		return reconcileStepOutput{}, err
-	}
-	deferrals, expired := advanceDispatchDeferrals(priorDispatchDeferrals(priorState), deferredKeys, time.Now().UTC())
-	if build, chunks, err = b.expireNeverAcceptedLaunches(ctx, buildID, build, chunks, expired); err != nil {
-		return reconcileStepOutput{}, err
-	}
-	recoveryReason := ""
-	if len(deferrals) > 0 {
-		recoveryReason = eriwire.ErrDispatchActive.Error()
 	}
 	skipSync := len(launchedChunks) == 0 && widgetStateEqual(priorState, *build, chunks)
 	finalStatus, err := b.evaluateBuildTerminalStatus(ctx, build, chunks, notified, skipSync)
@@ -716,171 +651,49 @@ func (b *BuildObject) executeAuthoritativeTransition(ctx context.Context, buildI
 		return reconcileStepOutput{}, err
 	}
 	build.Status = finalStatus
-	if finalStatus != statusRunning {
-		deferrals = nil
-	}
-	seq := planDeferralSeq(priorDeferralSeq(priorState), transitionAttemptFrom(ctx).DeferralSeq, deferrals)
 
+	st := compactStateForStorage(model.BuildObjectState{
+		Build:            *build,
+		Chunks:           chunks,
+		Launched:         launchedMap,
+		TerminalNotified: finalStatus == statusCompleted || finalStatus == statusFailed,
+		FailureNotified:  notified,
+		FailureIsolation: true,
+	})
 	return reconcileStepOutput{
 		BuildStatus:    finalStatus,
-		Error:          recoveryReason,
 		LaunchedChunks: launchedChunks,
 		LaunchedMap:    launchedMap,
-		State: &model.BuildObjectState{
-			Build:                *build,
-			Chunks:               chunks,
-			Launched:             launchedMap,
-			TerminalNotified:     finalStatus == statusCompleted || finalStatus == statusFailed,
-			DispatchDeferrals:    deferrals,
-			DeferralReconcileSeq: seq,
-			FailureNotified:      notified,
-			FailureIsolation:     true,
-		},
+		State:          &st,
 	}, nil
 }
 
-const (
-	// dispatchDeferralLease bounds continuous skipped_active deferral of one launch.
-	dispatchDeferralLease = 10 * time.Minute
-	deferralBaseDelay     = time.Second
-	deferralMaxDelay      = time.Minute
-	// ReasonDispatchNeverAccepted fails a launch eri kept deferring; the failed
-	// chunk wakes the thread and retry_action_chunk resumes it.
-	ReasonDispatchNeverAccepted = "RESUMABLE: dispatch never accepted by eri (skipped_active for 10m)"
-)
-
-// transitionAttempt identifies the invocation running a transition step.
-type transitionAttempt struct {
-	InvocationID string
-	DeferralSeq  int
-}
-
-type transitionAttemptKey struct{}
-
-// withTransitionAttempt scopes chunk launch idempotency to this invocation.
-func withTransitionAttempt(ctx context.Context, attempt transitionAttempt) context.Context {
-	return context.WithValue(ericlient.WithDispatchAttempt(ctx, attempt.InvocationID), transitionAttemptKey{}, attempt)
-}
-
-func transitionAttemptFrom(ctx context.Context) transitionAttempt {
-	if attempt, ok := ctx.Value(transitionAttemptKey{}).(transitionAttempt); ok {
-		return attempt
-	}
-	return transitionAttempt{}
-}
-
-func priorDispatchDeferrals(prior *model.BuildObjectState) map[string]model.DispatchDeferral {
-	if prior == nil {
-		return nil
-	}
-	return prior.DispatchDeferrals
-}
-
-func priorDeferralSeq(prior *model.BuildObjectState) int {
-	if prior == nil {
-		return 0
-	}
-	return prior.DeferralReconcileSeq
-}
-
-// advanceDispatchDeferrals keeps only launches deferred again in this
-// transition (acceptance or no attempt ends continuity) and returns the keys
-// whose deferral has lasted the full lease.
-func advanceDispatchDeferrals(prior map[string]model.DispatchDeferral, deferredKeys []string, now time.Time) (map[string]model.DispatchDeferral, []string) {
-	var next map[string]model.DispatchDeferral
-	var expired []string
-	for _, key := range deferredKeys {
-		entry, ok := prior[key]
-		if !ok || entry.FirstDeferredAt.IsZero() {
-			entry = model.DispatchDeferral{FirstDeferredAt: now}
+func compactStateForStorage(state model.BuildObjectState) model.BuildObjectState {
+	state.Build.SharedContext = ""
+	if state.Chunks != nil {
+		chunks := make([]model.VanadisChunk, len(state.Chunks))
+		for i, c := range state.Chunks {
+			c.Instructions = ""
+			c.TargetFiles = nil
+			c.TargetSymbols = nil
+			c.AcceptanceCriteria = nil
+			chunks[i] = c
 		}
-		entry.Count++
-		if now.Sub(entry.FirstDeferredAt) >= dispatchDeferralLease {
-			expired = append(expired, key)
-			continue
-		}
-		if next == nil {
-			next = make(map[string]model.DispatchDeferral, len(deferredKeys))
-		}
-		next[key] = entry
+		state.Chunks = chunks
 	}
-	return next, expired
+	return state
 }
 
-// deferralDelay doubles from 1s per deferral of the freshest entry, capped at 60s.
-func deferralDelay(deferrals map[string]model.DispatchDeferral) time.Duration {
-	minCount := 0
-	for _, entry := range deferrals {
-		if minCount == 0 || entry.Count < minCount {
-			minCount = entry.Count
-		}
-	}
-	delay := deferralBaseDelay
-	for i := 1; i < minCount && delay < deferralMaxDelay; i++ {
-		delay *= 2
-	}
-	return min(delay, deferralMaxDelay)
-}
-
-// planDeferralSeq keeps one delayed Reconcile chain per build. Only the
-// pending chain's own tick, or a transition while none is pending, advances
-// the seq (scheduling the next tick); otherwise the pending seq is kept.
-// Without deferrals no tick is pending.
-func planDeferralSeq(priorSeq, tickSeq int, deferrals map[string]model.DispatchDeferral) int {
-	if len(deferrals) == 0 {
-		return 0
-	}
-	if priorSeq != 0 && tickSeq != priorSeq {
-		return priorSeq
-	}
-	return priorSeq + 1
-}
-
-// skippedCompletionOutput keeps state, including any pending deferral chain,
-// when a stale completion mutation was skipped without launching anything.
+// skippedCompletionOutput keeps state when a stale completion mutation was skipped without launching anything.
 func (b *BuildObject) skippedCompletionOutput(ctx context.Context, buildID string, priorState *model.BuildObjectState, priorLaunched map[string]bool) (reconcileStepOutput, error) {
 	build, chunks, err := b.store.GetBuild(ctx, buildID)
 	if err != nil {
 		return reconcileStepOutput{}, err
 	}
-	skipped := &model.BuildObjectState{Build: *build, Chunks: chunks, Launched: priorLaunched}
+	skipped := model.BuildObjectState{Build: *build, Chunks: chunks, Launched: priorLaunched}
 	if priorState != nil {
-		skipped.DispatchDeferrals, skipped.DeferralReconcileSeq = priorState.DispatchDeferrals, priorState.DeferralReconcileSeq
 		skipped.FailureNotified, skipped.FailureIsolation = priorState.FailureNotified, priorState.FailureIsolation
 	}
-	return reconcileStepOutput{BuildStatus: build.Status, State: skipped}, nil
-}
-
-// expireNeverAcceptedLaunches fails expired launches and re-reads the build.
-func (b *BuildObject) expireNeverAcceptedLaunches(ctx context.Context, buildID string, build *model.VanadisBuild, chunks []model.VanadisChunk, expired []string) (*model.VanadisBuild, []model.VanadisChunk, error) {
-	if len(expired) == 0 {
-		return build, chunks, nil
-	}
-	if err := b.failNeverAcceptedLaunches(ctx, buildID, chunks, expired); err != nil {
-		return nil, nil, err
-	}
-	return b.store.GetBuild(ctx, buildID)
-}
-
-// failNeverAcceptedLaunches fails chunks whose launch eri deferred for the
-// whole lease. A pending action chunk is reserved first so its failure is
-// accepted as the current generation and retry_action_chunk can resume it.
-func (b *BuildObject) failNeverAcceptedLaunches(ctx context.Context, buildID string, chunks []model.VanadisChunk, expired []string) error {
-	for _, key := range expired {
-		for _, chunk := range chunks {
-			if actionLaunchKey(chunk) != key {
-				continue
-			}
-			if s := strings.ToLower(strings.TrimSpace(chunk.Status)); s == statusPending || s == statusQueued {
-				if err := b.store.ReserveChunkForLaunch(ctx, chunk.ID); err != nil && !errors.Is(err, store.ErrChunkNotFound) {
-					return err
-				}
-			}
-			err := b.failMutation(ctx, buildID, &BuildMutationRequest{Action: mutationChunkFailed, ChunkID: chunk.ID, DispatchID: model.ActionDispatchID(chunk), Reason: ReasonDispatchNeverAccepted})
-			if err != nil && !errors.Is(err, errActionCompletionSkipped) {
-				return err
-			}
-		}
-	}
-	return nil
+	st := compactStateForStorage(skipped)
+	return reconcileStepOutput{BuildStatus: build.Status, State: &st}, nil
 }
