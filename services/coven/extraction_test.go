@@ -2,88 +2,160 @@ package main
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
-	_ "modernc.org/sqlite"
+	"github.com/pgvector/pgvector-go"
 )
 
+// sabotageSessionJoin fails only the conversation_id join fallback of the
+// session summary lookup; the direct sessions query keeps working.
+const sabotageSessionJoin = `ALTER TABLE messages DROP COLUMN conversation_id`
+
+// extractSession is one sessions row seeded for thread context lookups.
+type extractSession struct {
+	agent, id, summary string
+}
+
+type threadContextBeforeWatermarkTestCase struct {
+	name        string
+	nilDB       bool
+	threadID    string
+	priorLimit  int
+	agent       string
+	watermark   int64
+	sessions    []extractSession
+	turns       []testTurn
+	sabotage    string
+	errSubstr   string
+	wantSummary string
+	wantRowIDs  []int64
+}
+
 func TestSQLStore_GetThreadContextBeforeWatermark(t *testing.T) {
-	dbMem := setupTestDBMem(t)
+	t.Parallel()
+	const beta = "agent-beta"
+	betaTurn := func(rowID int64, content, response string) testTurn {
+		return testTurn{agent: beta, thread: "t-1", rowID: rowID, content: content, response: response, status: "COMPLETED", admin: true}
+	}
 
 	tests := []threadContextBeforeWatermarkTestCase{
+		{name: "NilDBError", nilDB: true, threadID: "t-1", errSubstr: "database connection is not initialized"},
+		{name: "EmptyThreadID", threadID: "   "},
+		{name: "WatermarkQueryError", threadID: "t-1", sabotage: sabotageWatermarks, errSubstr: "extraction_watermarks"},
+		{name: "SessionQueryError", threadID: "t-1", sabotage: sabotageSessions, errSubstr: "failed to query session summary"},
+		{name: "JoinedSessionQueryError", threadID: "t-1", sabotage: sabotageSessionJoin, errSubstr: "failed to query joined session summary"},
 		{
-			name:     "NilDBError",
-			nilDB:    true,
-			threadID: "t-1",
-			wantErr:  true,
+			name: "TurnsQueryError", threadID: "t-1", watermark: 15,
+			sessions: []extractSession{{DefaultStack, "t-1", "summary text"}},
+			sabotage: sabotageTurnReads, errSubstr: "response_text",
 		},
 		{
-			name:     "EmptyThreadID",
-			threadID: "   ",
-			wantErr:  false,
+			// No watermark yet: the summary is returned but no prior turns.
+			name: "NoWatermarkReturnsSummaryOnly", threadID: "t-1", agent: "agent-alpha",
+			sessions:    []extractSession{{"agent-alpha", "t-1", "summary text"}},
+			turns:       []testTurn{{agent: "agent-alpha", thread: "t-1", rowID: 8, content: "p", response: "r", admin: true}},
+			wantSummary: "summary text",
 		},
 		{
-			name:     "DBWatermarkError",
-			threadID: "t-1",
-			queryErr: errors.New("db disconnect"),
-			wantErr:  true,
+			// Direct session match; prior turns are this agent's completed
+			// admin turns before the watermark, newest two, oldest first.
+			name: "DirectSessionChronologicalPriorTurns", threadID: "t-1", agent: "  " + beta + "  ", priorLimit: -1, watermark: 20,
+			sessions: []extractSession{{beta, "t-1", "Session summary here"}, {DefaultStack, "t-1", "other agent summary"}},
+			turns: []testTurn{
+				betaTurn(4, "oldest prompt", "oldest response"),
+				betaTurn(8, "first prompt", "first response"),
+				{agent: beta, thread: "t-1", rowID: 10, content: "not admin", response: "r", status: "COMPLETED"},
+				betaTurn(12, "second prompt", "second response"),
+				{agent: beta, thread: "t-1", rowID: 14, content: "failed", response: "r", status: "FAILED", admin: true},
+				{agent: DefaultStack, thread: "t-1", rowID: 15, content: "other agent", response: "r", status: "COMPLETED", admin: true},
+				betaTurn(25, "after watermark", "r"),
+			},
+			wantSummary: "Session summary here",
+			wantRowIDs:  []int64{8, 12},
 		},
 		{
-			name:         "LastExtractedRowIDZero",
-			threadID:     "t-1",
-			agent:        "agent-alpha",
-			watermarkSQL: "SELECT 0, NULL",
-			summarySQL:   "SELECT 'summary text'",
-			wantSummary:  "summary text",
+			// 'discord-' prefixed session; non-extractable turns (tool-only
+			// "[" response, empty response) are skipped, not counted.
+			name: "DiscordPrefixSessionSkipsNonExtractable", threadID: "t-3", priorLimit: 2, watermark: 20,
+			sessions: []extractSession{{DefaultStack, "discord-t-3", "Discord summary"}},
+			turns: []testTurn{
+				adminTurn("t-3", 3, "p3", "r3"),
+				adminTurn("t-3", 5, "p5", "r5"),
+				adminTurn("t-3", 7, "p7", "r7"),
+				adminTurn("t-3", 9, "p9", "[tool output]"),
+				adminTurn("t-3", 11, "p11", ""),
+			},
+			wantSummary: "Discord summary",
+			wantRowIDs:  []int64{5, 7},
 		},
 		{
-			name:         "DBQueryErrorOnTurns",
-			threadID:     "t-1",
-			watermarkSQL: "SELECT 15, NULL",
-			summarySQL:   "SELECT 'summary text'",
-			queryErr:     errors.New("db disconnect"),
-			wantErr:      true,
-		},
-		{
-			name:          "SuccessChronologicalOrder",
-			threadID:      "t-1",
-			agent:         "agent-beta",
-			watermarkSQL:  "SELECT 20, NULL",
-			summarySQL:    "SELECT 'Session summary here'",
-			rowsSQL:       "SELECT 'm2', 12, 't-1', 'second prompt', 'second response', 'COMPLETED', 1, '2026-01-01 00:00:00', '2026-01-01 00:00:00' UNION ALL SELECT 'm1', 8, 't-1', 'first prompt', 'first response', 'COMPLETED', 1, '2026-01-01 00:00:00', '2026-01-01 00:00:00'",
-			priorLimit:    -1,
-			wantSummary:   "Session summary here",
-			wantTurnCount: 2,
-		},
-		{
-			name:          "SuccessChronologicalOrder_JoinFallbackSummary",
-			threadID:      "t-2",
-			agent:         "agent-alpha",
-			watermarkSQL:  "SELECT 20, NULL",
-			summarySQL:    "SELECT ''",
-			joinSQL:       "SELECT 'Fallback summary'",
-			rowsSQL:       "SELECT 'm1', 8, 't-2', 'first prompt', 'first response', 'COMPLETED', 1, '2026-01-01 00:00:00', '2026-01-01 00:00:00'",
-			priorLimit:    -1,
-			wantSummary:   "Fallback summary",
-			wantTurnCount: 1,
+			name: "JoinFallbackSummaryViaConversationID", threadID: "t-2", agent: "agent-alpha", priorLimit: -1, watermark: 20,
+			sessions:    []extractSession{{"agent-alpha", "conv-9", "Fallback summary"}},
+			turns:       []testTurn{{agent: "agent-alpha", thread: "t-2", rowID: 8, content: "first prompt", response: "first response", status: "COMPLETED", admin: true, convID: "conv-9"}},
+			wantSummary: "Fallback summary",
+			wantRowIDs:  []int64{8},
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			runGetThreadContextBeforeWatermarkCase(t, tc, dbMem)
+			t.Parallel()
+			runGetThreadContextBeforeWatermarkCase(t, tc)
 		})
 	}
 }
 
+func runGetThreadContextBeforeWatermarkCase(t *testing.T, tc threadContextBeforeWatermarkTestCase) {
+	t.Helper()
+	ctx := context.Background()
+	store := &SQLStore{}
+	if !tc.nilDB {
+		db := newTestDB(t)
+		agent := strings.TrimSpace(tc.agent)
+		if agent == "" {
+			agent = DefaultStack
+		}
+		if tc.watermark > 0 {
+			seedWatermark(t, db, agent, tc.threadID, tc.watermark, nil)
+		}
+		for _, s := range tc.sessions {
+			seedSession(t, db, s.agent, s.id, s.summary)
+		}
+		seedTurns(t, db, tc.turns...)
+		execSQL(t, db, tc.sabotage)
+		store = NewSQLStore(db)
+	}
+
+	summary, turns, err := store.GetThreadContextBeforeWatermark(ctx, tc.threadID, tc.priorLimit, tc.agent)
+	if tc.errSubstr != "" {
+		if err == nil || !strings.Contains(err.Error(), tc.errSubstr) {
+			t.Fatalf("GetThreadContextBeforeWatermark() err = %v, want substring %q", err, tc.errSubstr)
+		}
+		return
+	}
+	if err != nil {
+		t.Fatalf("GetThreadContextBeforeWatermark() err = %v", err)
+	}
+	if summary != tc.wantSummary {
+		t.Errorf("summary = %q, want %q", summary, tc.wantSummary)
+	}
+	var rowIDs []int64
+	for _, m := range turns {
+		rowIDs = append(rowIDs, m.RowID)
+	}
+	if !slices.Equal(rowIDs, tc.wantRowIDs) {
+		t.Errorf("prior turn row ids = %v, want %v", rowIDs, tc.wantRowIDs)
+	}
+}
+
 func TestSQLStore_GetThreadTrajectoryContext(t *testing.T) {
-	dbMem := setupTestDBMem(t)
+	t.Parallel()
 
 	tests := []struct {
 		name       string
@@ -125,6 +197,7 @@ func TestSQLStore_GetThreadTrajectoryContext(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			var gotAgent string
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				gotAgent = r.URL.Query().Get("agent")
@@ -133,9 +206,9 @@ func TestSQLStore_GetThreadTrajectoryContext(t *testing.T) {
 			}))
 			defer srv.Close()
 
-			store := NewSQLStore(dbMem)
-			if tc.nilDB {
-				store = &SQLStore{}
+			store := &SQLStore{}
+			if !tc.nilDB {
+				store = newTestStore(t)
 			}
 			if !tc.noIndexer {
 				store.SetIndexerClient(NewIndexerClient(srv.URL, "aerial", srv.Client()))
@@ -415,133 +488,13 @@ func TestBuildCandidateReconcilePrompt(t *testing.T) {
 	}
 }
 
-func TestReconcileCandidateFact_Tiers(t *testing.T) {
-	dim := ExpectedEmbeddingDim
-	baseEmb := make([]float32, dim)
-	baseEmb[0] = 1.0
-
-	highSimEmb := make([]float32, dim)
-	copy(highSimEmb, baseEmb)
-
-	tier3Emb := make([]float32, dim)
-	tier3Emb[0] = 0.75
-	tier3Emb[1] = 0.6614378
-
-	valid := ExtractedFactItem{FactText: "Valid candidate fact text"}
-	update10 := `{"facts":[{"action":"UPDATE","supersedes_id":10,"fact_text":"Updated text here"}]}`
-	delete10 := `{"facts":[{"action":"DELETE","delete_id":10}]}`
-
-	tests := []reconcileCandidateFactTierTestCase{
-		{name: "NilStoreSafe", nilStore: true, item: valid, wantErr: true},
-		{name: "NilClientSafe", nilClient: true, item: valid, wantErr: true, want: reconcileUnchanged},
-		{name: "UnadmittedTooShort", item: ExtractedFactItem{FactText: "short"}, want: reconcileUnchanged},
-		{name: "UnadmittedNoopAction", item: ExtractedFactItem{Action: "NOOP", FactText: "User discussed the weather today in detail"}, want: reconcileUnchanged},
-		{name: "UnadmittedDeleteAction", item: ExtractedFactItem{Action: "DELETE", FactText: "Obsolete fact text should not be inserted or reinforced"}, want: reconcileUnchanged},
-		{name: "EmbeddingErrorLogged", item: valid, ollamaErr: errors.New("embed fail"), wantErr: true, want: reconcileUnchanged},
-		{name: "FindNearestErrorLogged", item: valid, storeFailOp: "FindNearestScoredFacts", wantErr: true, want: reconcileUnchanged},
-		{name: "Tier1_NoNeighbors_Insert", item: valid, want: reconcileInserted},
-		{name: "Tier1_InsertErrorLogged", item: valid, storeFailOp: "InsertFact", wantErr: true, want: reconcileUnchanged},
-		{name: "Tier2_HighSimReinforce", item: valid, neighborEmb: highSimEmb, want: reconcileReinforced},
-		{name: "Tier2_ReinforceErrorLogged", item: valid, neighborEmb: highSimEmb, storeFailOp: "ReinforceFact", wantErr: true, want: reconcileUnchanged},
-		{name: "Tier3_NilLLM_FallbackInsert", item: valid, neighborEmb: tier3Emb, nilLLM: true, want: reconcileInserted},
-		{name: "Tier3_LLMError_FallbackInsert", item: valid, neighborEmb: tier3Emb, llmErr: errors.New("timeout"), want: reconcileInserted},
-		{name: "Tier3_ParseError_FallbackInsert", item: valid, neighborEmb: tier3Emb, llmResp: "invalid json", want: reconcileInserted},
-		{name: "Tier3_EmptyFacts_FallbackInsert", item: valid, neighborEmb: tier3Emb, llmResp: `{"facts":[]}`, want: reconcileInserted},
-		{name: "Tier3_ValidUpdate", item: valid, neighborEmb: tier3Emb, llmResp: update10, want: reconcileUpdated},
-		{name: "Tier3_UnwhitelistedUpdate_FallbackInsert", item: valid, neighborEmb: tier3Emb, llmResp: `{"facts":[{"action":"UPDATE","supersedes_id":999,"fact_text":"Updated text here"}]}`, want: reconcileInserted},
-		{name: "Tier3_UpdateStoreErrorLogged", item: valid, neighborEmb: tier3Emb, llmResp: update10, storeFailOp: "UpdateFact", wantErr: true, want: reconcileUnchanged},
-		{name: "Tier3_ValidDelete", item: valid, neighborEmb: tier3Emb, llmResp: delete10, want: reconcileDeleted},
-		{name: "Tier3_UnwhitelistedDelete_NOOP", item: valid, neighborEmb: tier3Emb, llmResp: `{"facts":[{"action":"DELETE","delete_id":999}]}`, want: reconcileUnchanged},
-		{name: "Tier3_DeleteStoreErrorLogged", item: valid, neighborEmb: tier3Emb, llmResp: delete10, storeFailOp: "DeleteFact", wantErr: true, want: reconcileUnchanged},
-		{name: "Tier3_NOOP", item: valid, neighborEmb: tier3Emb, llmResp: `{"facts":[{"action":"NOOP"}]}`, want: reconcileReinforced},
-		{name: "Tier3_NOOP_ExplicitSupersedesID", item: valid, neighborEmb: tier3Emb, llmResp: `{"facts":[{"action":"NOOP","supersedes_id":10}]}`, want: reconcileReinforced},
-		{name: "Tier3_NOOP_ReinforceErrorLogged", item: valid, neighborEmb: tier3Emb, llmResp: `{"facts":[{"action":"NOOP"}]}`, storeFailOp: "ReinforceFact", wantErr: true, want: reconcileUnchanged},
-		{name: "Tier3_ADD", item: valid, neighborEmb: tier3Emb, llmResp: `{"facts":[{"action":"ADD"}]}`, want: reconcileInserted},
-		{name: "Tier3_DefaultUnknownAction", item: valid, neighborEmb: tier3Emb, llmResp: `{"facts":[{"action":"OTHER"}]}`, want: reconcileInserted},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			runReconcileCandidateFactTierCase(t, tc, baseEmb)
-		})
-	}
-}
-
-type threadContextBeforeWatermarkTestCase struct {
-	name          string
-	nilDB         bool
-	threadID      string
-	priorLimit    int
-	agent         string
-	queryErr      error
-	watermarkSQL  string
-	summarySQL    string
-	joinSQL       string
-	rowsSQL       string
-	wantErr       bool
-	wantSummary   string
-	wantTurnCount int
-}
-
-func runGetThreadContextBeforeWatermarkCase(t *testing.T, tc threadContextBeforeWatermarkTestCase, dbMem *sql.DB) {
-	t.Helper()
-	ctx := context.Background()
-	var store *SQLStore
-
-	if tc.nilDB {
-		store = &SQLStore{}
-	} else {
-		store = NewSQLStore(queryMockDBTX{
-			dbMem:        dbMem,
-			queryErr:     tc.queryErr,
-			watermarkSQL: tc.watermarkSQL,
-			summarySQL:   tc.summarySQL,
-			joinSQL:      tc.joinSQL,
-			rowsSQL:      tc.rowsSQL,
-		})
-	}
-
-	var summary string
-	var turns []Message
-	var err error
-	if tc.agent != "" {
-		summary, turns, err = store.GetThreadContextBeforeWatermark(ctx, tc.threadID, tc.priorLimit, tc.agent)
-	} else {
-		summary, turns, err = store.GetThreadContextBeforeWatermark(ctx, tc.threadID, tc.priorLimit)
-	}
-	if (err != nil) != tc.wantErr {
-		t.Fatalf("GetThreadContextBeforeWatermark() err = %v, wantErr = %v", err, tc.wantErr)
-	}
-	if tc.wantErr {
-		return
-	}
-	if summary != tc.wantSummary {
-		t.Errorf("summary = %q, want %q", summary, tc.wantSummary)
-	}
-	if len(turns) != tc.wantTurnCount {
-		t.Errorf("len(turns) = %d, want %d", len(turns), tc.wantTurnCount)
-	}
-	if len(turns) == 2 && turns[0].RowID > turns[1].RowID {
-		t.Errorf("turns not chronological: row_id[0]=%d, row_id[1]=%d", turns[0].RowID, turns[1].RowID)
-	}
-}
+// sabotageFactEmbedding fails FindNearestScoredFacts (and every other
+// embedding read/write) while id, fact_text and reinforce_count stay readable.
+const sabotageFactEmbedding = `ALTER TABLE facts DROP COLUMN embedding`
 
 // reconcileNeighborID is the ID of the seeded neighbor fact whenever a
 // reconcile tier case provides neighborEmb.
 const reconcileNeighborID int64 = 10
-
-// reconcileOutcome is the single store effect a reconcile tier case expects.
-// The zero value asserts nothing beyond the call not panicking.
-type reconcileOutcome int
-
-const (
-	reconcileUnasserted reconcileOutcome = iota
-	reconcileUnchanged
-	reconcileInserted
-	reconcileReinforced
-	reconcileUpdated
-	reconcileDeleted
-)
 
 type reconcileCandidateFactTierTestCase struct {
 	name        string
@@ -549,37 +502,85 @@ type reconcileCandidateFactTierTestCase struct {
 	nilClient   bool
 	item        ExtractedFactItem
 	ollamaErr   error
-	storeFailOp string
+	sabotage    string
 	neighborEmb []float32
 	llmResp     string
 	llmErr      error
 	nilLLM      bool
 	wantErr     bool
-	want        reconcileOutcome
+	wantFacts   []extractFactRow
 }
 
-func runReconcileCandidateFactTierCase(t *testing.T, tc reconcileCandidateFactTierTestCase, baseEmb []float32) {
+func TestReconcileCandidateFact_Tiers(t *testing.T) {
+	t.Parallel()
+	// The candidate embeds at 0°: a 0° neighbor has similarity 1 (tier 2,
+	// > 0.88) and a 41.41° neighbor cos(41.41°) = 0.75 (tier 3, 0.60..0.88).
+	highSimEmb := angleEmbedding(0)
+	tier3Emb := angleEmbedding(41.41)
+
+	valid := ExtractedFactItem{FactText: "Valid candidate fact text"}
+	update10 := `{"facts":[{"action":"UPDATE","supersedes_id":10,"fact_text":"Updated text here"}]}`
+	delete10 := `{"facts":[{"action":"DELETE","delete_id":10}]}`
+	neighbor := extractFactRow{reconcileNeighborID, "Existing neighbor text", 1}
+	reinforced := extractFactRow{reconcileNeighborID, "Existing neighbor text", 2}
+	inserted := extractFactRow{1, "Valid candidate fact text", 1}
+	insertedBeside := []extractFactRow{inserted, neighbor}
+	untouched := []extractFactRow{neighbor}
+
+	tests := []reconcileCandidateFactTierTestCase{
+		{name: "NilStoreSafe", nilStore: true, item: valid, wantErr: true},
+		{name: "NilClientSafe", nilClient: true, item: valid, wantErr: true},
+		{name: "UnadmittedTooShort", item: ExtractedFactItem{FactText: "short"}},
+		{name: "UnadmittedNoopAction", item: ExtractedFactItem{Action: "NOOP", FactText: "User discussed the weather today in detail"}},
+		{name: "UnadmittedDeleteAction", item: ExtractedFactItem{Action: "DELETE", FactText: "Obsolete fact text should not be inserted or reinforced"}},
+		{name: "EmbeddingErrorLogged", item: valid, ollamaErr: errors.New("embed fail"), wantErr: true},
+		{name: "FindNearestErrorLogged", item: valid, sabotage: sabotageFactEmbedding, wantErr: true},
+		{name: "Tier1_NoNeighbors_Insert", item: valid, wantFacts: []extractFactRow{inserted}},
+		{name: "Tier1_InsertErrorLogged", item: valid, sabotage: sabotageInsertFact, wantErr: true},
+		{name: "Tier2_HighSimReinforce", item: valid, neighborEmb: highSimEmb, wantFacts: []extractFactRow{reinforced}},
+		{name: "Tier2_ReinforceErrorLogged", item: valid, neighborEmb: highSimEmb, sabotage: sabotageReinforceFact, wantErr: true, wantFacts: untouched},
+		{name: "Tier3_NilLLM_FallbackInsert", item: valid, neighborEmb: tier3Emb, nilLLM: true, wantFacts: insertedBeside},
+		{name: "Tier3_LLMError_FallbackInsert", item: valid, neighborEmb: tier3Emb, llmErr: errors.New("timeout"), wantFacts: insertedBeside},
+		{name: "Tier3_ParseError_FallbackInsert", item: valid, neighborEmb: tier3Emb, llmResp: "invalid json", wantFacts: insertedBeside},
+		{name: "Tier3_EmptyFacts_FallbackInsert", item: valid, neighborEmb: tier3Emb, llmResp: `{"facts":[]}`, wantFacts: insertedBeside},
+		{name: "Tier3_ValidUpdate", item: valid, neighborEmb: tier3Emb, llmResp: update10, wantFacts: []extractFactRow{{reconcileNeighborID, "Updated text here", 2}}},
+		{name: "Tier3_UnwhitelistedUpdate_FallbackInsert", item: valid, neighborEmb: tier3Emb, llmResp: `{"facts":[{"action":"UPDATE","supersedes_id":999,"fact_text":"Updated text here"}]}`, wantFacts: insertedBeside},
+		{name: "Tier3_UpdateStoreErrorLogged", item: valid, neighborEmb: tier3Emb, llmResp: update10, sabotage: sabotageUpdateFact, wantErr: true, wantFacts: untouched},
+		{name: "Tier3_ValidDelete", item: valid, neighborEmb: tier3Emb, llmResp: delete10},
+		{name: "Tier3_UnwhitelistedDelete_NOOP", item: valid, neighborEmb: tier3Emb, llmResp: `{"facts":[{"action":"DELETE","delete_id":999}]}`, wantFacts: untouched},
+		{name: "Tier3_DeleteStoreErrorLogged", item: valid, neighborEmb: tier3Emb, llmResp: delete10, sabotage: sabotageDeleteFact, wantErr: true, wantFacts: untouched},
+		{name: "Tier3_NOOP", item: valid, neighborEmb: tier3Emb, llmResp: `{"facts":[{"action":"NOOP"}]}`, wantFacts: []extractFactRow{reinforced}},
+		{name: "Tier3_NOOP_ExplicitSupersedesID", item: valid, neighborEmb: tier3Emb, llmResp: `{"facts":[{"action":"NOOP","supersedes_id":10}]}`, wantFacts: []extractFactRow{reinforced}},
+		{name: "Tier3_NOOP_ReinforceErrorLogged", item: valid, neighborEmb: tier3Emb, llmResp: `{"facts":[{"action":"NOOP"}]}`, sabotage: sabotageReinforceFact, wantErr: true, wantFacts: untouched},
+		{name: "Tier3_ADD", item: valid, neighborEmb: tier3Emb, llmResp: `{"facts":[{"action":"ADD"}]}`, wantFacts: insertedBeside},
+		{name: "Tier3_DefaultUnknownAction", item: valid, neighborEmb: tier3Emb, llmResp: `{"facts":[{"action":"OTHER"}]}`, wantFacts: insertedBeside},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			runReconcileCandidateFactTierCase(t, tc)
+		})
+	}
+}
+
+func runReconcileCandidateFactTierCase(t *testing.T, tc reconcileCandidateFactTierTestCase) {
 	t.Helper()
 	ctx := context.Background()
-	var store Store
-	var mem *TestMemStore
-	if !tc.nilStore {
-		mem = newTestMemStore()
-		if len(tc.neighborEmb) > 0 {
-			mem.facts[reconcileNeighborID] = &Fact{ID: reconcileNeighborID, FactText: "Existing neighbor text", ReinforceCount: 1}
-			mem.embeddings[reconcileNeighborID] = tc.neighborEmb
-		}
-		if tc.storeFailOp != "" {
-			mem.SetFail(tc.storeFailOp, errors.New("simulated store failure"))
-		}
-		store = mem
+	db := newTestDB(t)
+	if len(tc.neighborEmb) > 0 {
+		execSQL(t, db, `INSERT INTO facts (id, fact_text, embedding) VALUES ($1, 'Existing neighbor text', $2)`, reconcileNeighborID, pgvector.NewVector(tc.neighborEmb))
 	}
+	execSQL(t, db, tc.sabotage)
 
+	var store Store
+	if !tc.nilStore {
+		store = NewSQLStore(db)
+	}
 	var client OllamaClient
 	if !tc.nilClient {
-		client = &MockOllamaClient{embedding: baseEmb, err: tc.ollamaErr}
+		client = &MockOllamaClient{embedding: angleEmbedding(0), err: tc.ollamaErr}
 	}
-
 	var llm LLMClientFunc
 	if !tc.nilLLM {
 		llm = func(ctx context.Context, prompt string) (string, error) {
@@ -594,52 +595,13 @@ func runReconcileCandidateFactTierCase(t *testing.T, tc reconcileCandidateFactTi
 	if (err != nil) != tc.wantErr {
 		t.Fatalf("reconcileCandidateFact() err = %v, wantErr = %v", err, tc.wantErr)
 	}
-
-	if mem == nil {
-		return
-	}
-	assertReconcileOutcome(t, mem, len(tc.neighborEmb) > 0, tc.want)
-}
-
-func assertReconcileOutcome(t *testing.T, mem *TestMemStore, hasNeighbor bool, want reconcileOutcome) {
-	t.Helper()
-	seeded := 0
-	if hasNeighbor {
-		seeded = 1
-	}
-	neighbor := mem.facts[reconcileNeighborID]
-	switch want {
-	case reconcileUnchanged:
-		if len(mem.facts) != seeded {
-			t.Errorf("store has %d facts, want %d (unchanged)", len(mem.facts), seeded)
-		}
-		if hasNeighbor && (neighbor == nil || neighbor.FactText != "Existing neighbor text" || neighbor.ReinforceCount != 1) {
-			t.Errorf("expected neighbor %d to be untouched, got %+v", reconcileNeighborID, neighbor)
-		}
-	case reconcileInserted:
-		// A fallback insert adds a new fact alongside any seeded neighbor.
-		if len(mem.facts) != seeded+1 {
-			t.Errorf("store has %d facts, want %d after insert", len(mem.facts), seeded+1)
-		}
-	case reconcileReinforced:
-		if neighbor.ReinforceCount < 2 {
-			t.Errorf("expected neighbor %d to be reinforced, got count %d", reconcileNeighborID, neighbor.ReinforceCount)
-		}
-	case reconcileUpdated:
-		if neighbor.FactText != "Updated text here" {
-			t.Errorf("expected neighbor %d to be updated with new text, got %q", reconcileNeighborID, neighbor.FactText)
-		}
-	case reconcileDeleted:
-		if neighbor != nil {
-			t.Errorf("expected neighbor %d to be deleted from store, but it remains", reconcileNeighborID)
-		}
-	case reconcileUnasserted:
+	if got := readExtractFacts(t, db); !slices.Equal(got, tc.wantFacts) {
+		t.Errorf("facts = %+v, want %+v", got, tc.wantFacts)
 	}
 }
 
 type extractThreadFactsTestCase struct {
 	name      string
-	ctx       context.Context
 	threadID  string
 	agent     string
 	nilStore  bool
@@ -650,74 +612,36 @@ type extractThreadFactsTestCase struct {
 
 func TestExtractThreadFacts(t *testing.T) {
 	t.Parallel()
-	ctx := context.Background()
-	validEmb := make([]float32, ExpectedEmbeddingDim)
 
 	tests := []extractThreadFactsTestCase{
-		{
-			name:     "NilStoreFails",
-			ctx:      ctx,
-			threadID: "th-1",
-			nilStore: true,
-			wantErr:  true,
-		},
-		{
-			name:     "NilLLMFails",
-			ctx:      ctx,
-			threadID: "th-1",
-			nilLLM:   true,
-			wantErr:  true,
-		},
-		{
-			name:     "EmptyThreadIDFails",
-			ctx:      ctx,
-			threadID: "",
-			wantErr:  true,
-		},
-		{
-			name:     "WhitespaceThreadIDFails",
-			ctx:      ctx,
-			threadID: "   ",
-			wantErr:  true,
-		},
-		{
-			name:     "ValidArgumentsSuccess",
-			ctx:      ctx,
-			threadID: "th-valid",
-			wantErr:  false,
-		},
-		{
-			name:      "ValidArgumentsWithAgentPropagation",
-			ctx:       ctx,
-			threadID:  "th-valid-agent",
-			agent:     "agent-alpha",
-			wantAgent: "agent-alpha",
-			wantErr:   false,
-		},
+		{name: "NilStoreFails", threadID: "th-1", nilStore: true, wantErr: true},
+		{name: "NilLLMFails", threadID: "th-1", nilLLM: true, wantErr: true},
+		{name: "EmptyThreadIDFails", threadID: "", wantErr: true},
+		{name: "WhitespaceThreadIDFails", threadID: "   ", wantErr: true},
+		{name: "ValidArgumentsSuccess", threadID: "th-valid", wantAgent: DefaultStack},
+		{name: "ValidArgumentsWithAgentPropagation", threadID: "th-valid-agent", agent: "agent-alpha", wantAgent: "agent-alpha"},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			runExtractThreadFactsCase(t, tc, validEmb)
+			runExtractThreadFactsCase(t, tc)
 		})
 	}
 }
 
-func runExtractThreadFactsCase(t *testing.T, tc extractThreadFactsTestCase, validEmb []float32) {
+func runExtractThreadFactsCase(t *testing.T, tc extractThreadFactsTestCase) {
 	t.Helper()
-	var store Store
-	var mem *TestMemStore
-	if !tc.nilStore {
-		mem = newTestMemStore()
-		if tc.threadID != "" {
-			mem.maxRowIDs[tc.threadID] = 10
-		}
-		store = mem
+	db := newTestDB(t)
+	// The thread's only message is a non-admin turn at row 10, so a valid
+	// extraction finds nothing to extract and advances the agent's watermark to 10.
+	if tc.wantAgent != "" {
+		seedTurns(t, db, testTurn{agent: tc.wantAgent, thread: tc.threadID, rowID: 10, content: "hello", response: "hi"})
 	}
-
-	client := &MockOllamaClient{embedding: validEmb}
-
+	var store Store
+	if !tc.nilStore {
+		store = NewSQLStore(db)
+	}
 	var llm LLMClientFunc
 	if !tc.nilLLM {
 		llm = func(c context.Context, prompt string) (string, error) {
@@ -727,16 +651,16 @@ func runExtractThreadFactsCase(t *testing.T, tc extractThreadFactsTestCase, vali
 
 	var err error
 	if tc.agent != "" {
-		err = ExtractThreadFacts(tc.ctx, store, client, llm, tc.threadID, tc.agent)
+		err = ExtractThreadFacts(context.Background(), store, &MockOllamaClient{embedding: angleEmbedding(0)}, llm, tc.threadID, tc.agent)
 	} else {
-		err = ExtractThreadFacts(tc.ctx, store, client, llm, tc.threadID)
+		err = ExtractThreadFacts(context.Background(), store, &MockOllamaClient{embedding: angleEmbedding(0)}, llm, tc.threadID)
 	}
 	if (err != nil) != tc.wantErr {
 		t.Fatalf("ExtractThreadFacts() err = %v, wantErr = %v", err, tc.wantErr)
 	}
-	if !tc.wantErr && tc.wantAgent != "" && mem != nil {
-		if mem.lastUpdatedWatermarkAgent != tc.wantAgent {
-			t.Errorf("watermark agent = %q, want %q", mem.lastUpdatedWatermarkAgent, tc.wantAgent)
+	if tc.wantAgent != "" {
+		if wm := readExtractWatermark(t, db, tc.wantAgent, tc.threadID); wm != 10 {
+			t.Errorf("watermark for agent %q = %d, want 10", tc.wantAgent, wm)
 		}
 	}
 }

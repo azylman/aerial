@@ -249,7 +249,7 @@ func EscapeSQLLike(s string) string {
 	return strings.ReplaceAll(s, "_", "\\_")
 }
 
-// FactTime scans timestamps cleanly across drivers.
+// FactTime scans a nullable TIMESTAMPTZ column as a UTC time.
 type FactTime struct {
 	Time  time.Time
 	Valid bool
@@ -257,35 +257,15 @@ type FactTime struct {
 
 func (ft *FactTime) Scan(src any) error {
 	*ft = FactTime{}
-	if src == nil {
-		return nil
-	}
 	switch v := src.(type) {
-	case *time.Time:
-		if v == nil {
-			*ft = FactTime{}
-			return nil
-		}
-		ft.Time, ft.Valid = v.UTC(), true
+	case nil:
 		return nil
 	case time.Time:
 		ft.Time, ft.Valid = v.UTC(), true
 		return nil
-	case string:
-		if strings.TrimSpace(v) == "" {
-			*ft = FactTime{}
-			return nil
-		}
-		layouts := []string{time.RFC3339Nano, time.RFC3339, "2006-01-02 15:04:05.999999999-07:00", "2006-01-02 15:04:05-07", "2006-01-02 15:04:05"}
-		for _, l := range layouts {
-			if parsed, err := time.Parse(l, v); err == nil {
-				ft.Time, ft.Valid = parsed.UTC(), true
-				return nil
-			}
-		}
-		return fmt.Errorf("cannot parse %q into FactTime", v)
+	default:
+		return fmt.Errorf("cannot scan %T into FactTime", src)
 	}
-	return nil
 }
 
 // InsertFact persists a new fact into the database.

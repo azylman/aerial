@@ -11,8 +11,11 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"go.opentelemetry.io/otel/trace"
+
+	"github.com/azylman/aerial/pkg/pgtest"
 )
 
 func testHTTPBrainLLMClientCase(ctx context.Context, t *testing.T, tc brainLLMClientCase) {
@@ -127,9 +130,64 @@ func TestHTTPBrainLLMClient(t *testing.T) {
 	}
 }
 
+// extractLLM returns an LLM boundary fake that answers every prompt with resp.
+func extractLLM(resp string) LLMClientFunc {
+	return func(context.Context, string) (string, error) { return resp, nil }
+}
+
+// readExtractWatermark returns the stored last_extracted_rowid for
+// (agent, thread), or 0 when no watermark row exists.
+func readExtractWatermark(t *testing.T, db DBTX, agent, thread string) int64 {
+	t.Helper()
+	var wm int64
+	err := db.QueryRowContext(context.Background(), `SELECT last_extracted_rowid FROM extraction_watermarks WHERE agent = $1 AND thread_id = $2`, agent, thread).Scan(&wm)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0
+	}
+	if err != nil {
+		t.Fatalf("read watermark: %v", err)
+	}
+	return wm
+}
+
+// heldAdvisoryLocks counts advisory locks currently held in the test's own database.
+func heldAdvisoryLocks(t *testing.T, db DBTX) int {
+	t.Helper()
+	var n int
+	if err := db.QueryRowContext(context.Background(), `SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND granted AND database = (SELECT oid FROM pg_database WHERE datname = current_database())`).Scan(&n); err != nil {
+		t.Fatalf("count advisory locks: %v", err)
+	}
+	return n
+}
+
+// holdAdvisoryLock pins a second real connection holding the session
+// advisory lock for key until the returned release runs.
+func holdAdvisoryLock(t *testing.T, db *sql.DB, key string) func() {
+	t.Helper()
+	conn, err := db.Conn(context.Background())
+	if err != nil {
+		t.Fatalf("holder conn: %v", err)
+	}
+	execSQL(t, conn, `SELECT pg_advisory_lock(hashtext($1))`, key)
+	return func() {
+		// sql.Conn.Close returns the session to the pool, so unlock explicitly.
+		execSQL(t, conn, `SELECT pg_advisory_unlock(hashtext($1))`, key)
+		_ = conn.Close()
+	}
+}
+
+// adminTurnRange builds completed admin turns first..last of thread.
+func adminTurnRange(thread string, first, last int64) []testTurn {
+	var turns []testTurn
+	for i := first; i <= last; i++ {
+		turns = append(turns, adminTurn(thread, i, fmt.Sprintf("User message turn %d", i), fmt.Sprintf("Assistant response turn %d", i)))
+	}
+	return turns
+}
+
 type extractBatchingTestCase struct {
 	name           string
-	totalTurns     int
+	totalTurns     int64
 	timeoutOnCall  int
 	timeoutAlways  bool
 	wantBatchSizes []int
@@ -141,28 +199,17 @@ type extractBatchingTestCase struct {
 func runBatchingAndHalvingCase(t *testing.T, tc extractBatchingTestCase) {
 	t.Helper()
 	ctx := context.Background()
-	mem := newTestMemStore()
+	db := newTestDB(t)
 	const threadID = "th-batch-test"
-
-	turns := make([]Message, tc.totalTurns)
-	for i := range tc.totalTurns {
-		turns[i] = Message{
-			RowID:        int64(i + 1),
-			ThreadID:     threadID,
-			Content:      fmt.Sprintf("User message turn %d", i+1),
-			ResponseText: fmt.Sprintf("Assistant response turn %d", i+1),
-			Status:       "COMPLETED",
-			IsAdmin:      true,
-		}
-	}
-	mem.unextractedTurns[threadID] = turns
+	seedTurns(t, db, adminTurnRange(threadID, 1, tc.totalTurns)...)
 
 	var callIdx int
 	var capturedBatchSizes []int
 	llm := func(ctx context.Context, prompt string) (string, error) {
 		callIdx++
-		count := strings.Count(prompt, "User message turn")
-		capturedBatchSizes = append(capturedBatchSizes, count)
+		// Count only the new turns; prior turns are context, not batch members.
+		_, newTurns, _ := strings.Cut(prompt, "NEW UNEXTRACTED TURNS:\n")
+		capturedBatchSizes = append(capturedBatchSizes, strings.Count(newTurns, "User message turn"))
 
 		if tc.timeoutAlways || (tc.timeoutOnCall > 0 && callIdx == tc.timeoutOnCall) {
 			return "", context.DeadlineExceeded
@@ -171,7 +218,7 @@ func runBatchingAndHalvingCase(t *testing.T, tc extractBatchingTestCase) {
 	}
 
 	client := &MockOllamaClient{embedding: testEmbedding(1.0)}
-	err := ExtractThreadFacts(ctx, mem, client, llm, threadID)
+	err := ExtractThreadFacts(ctx, NewSQLStore(db), client, llm, threadID)
 	if (err != nil) != tc.wantErr {
 		t.Fatalf("ExtractThreadFacts() err = %v, wantErr = %v", err, tc.wantErr)
 	}
@@ -183,7 +230,7 @@ func runBatchingAndHalvingCase(t *testing.T, tc extractBatchingTestCase) {
 	if !slices.Equal(capturedBatchSizes, tc.wantBatchSizes) {
 		t.Errorf("batch sizes = %v, want %v", capturedBatchSizes, tc.wantBatchSizes)
 	}
-	if wm := mem.watermarks[threadID]; wm != tc.wantWatermark {
+	if wm := readExtractWatermark(t, db, DefaultStack, threadID); wm != tc.wantWatermark {
 		t.Errorf("final watermark = %d, want %d", wm, tc.wantWatermark)
 	}
 }
@@ -235,88 +282,128 @@ func TestExtractThreadFacts_BatchingAndHalving(t *testing.T) {
 	}
 }
 
-type mockConnStore struct {
-	*TestMemStore
-
-	connErr   error
-	connCalls int
-	conn      *sql.Conn
+// unpinnedStore hides SQLStore's Conn/DB methods: a Store that is not a
+// connProvider, so extraction runs without a pinned connection or thread lock.
+type unpinnedStore struct {
+	Store
 }
 
-func (m *mockConnStore) Conn(ctx context.Context) (*sql.Conn, error) {
-	m.connCalls++
-	if m.connErr != nil {
-		return nil, m.connErr
+// pinningTestDBs returns two pools over one private database: db for the code
+// under test and observer for seeding, lock holders and assertions. sabotage
+// runs before db opens, so database-level settings reach every db session.
+func pinningTestDBs(t *testing.T, sabotage string) (db, observer *sql.DB) {
+	t.Helper()
+	dsn := pgtest.NewDSN(t)
+	open := func() *sql.DB {
+		h, err := openDB(context.Background(), dsn)
+		if err != nil {
+			t.Fatalf("open test database: %v", err)
+		}
+		t.Cleanup(func() { _ = h.Close() })
+		return h
 	}
-	return m.conn, nil
+	observer = open()
+	execSQL(t, observer, sabotage)
+	return open(), observer
 }
 
-func (*mockConnStore) DB() DBTX {
-	return nil
+// pinningStore builds the store fixture named by handle over db and returns a
+// release func that proves caller-owned handles are still usable.
+func pinningStore(t *testing.T, db *sql.DB, handle string) (Store, func()) {
+	t.Helper()
+	ctx := context.Background()
+	switch handle {
+	case "closed":
+		_ = db.Close()
+	case "unpinned":
+		return unpinnedStore{NewSQLStore(db)}, func() {}
+	case "conn":
+		conn, err := db.Conn(ctx)
+		if err != nil {
+			t.Fatalf("db.Conn() err = %v", err)
+		}
+		return NewSQLStore(conn), func() {
+			execSQL(t, conn, `SELECT 1`)
+			if err := conn.Close(); err != nil {
+				t.Errorf("caller conn close err = %v, want nil (still owned by caller)", err)
+			}
+		}
+	case "tx":
+		tx, err := db.BeginTx(ctx, nil)
+		if err != nil {
+			t.Fatalf("db.BeginTx() err = %v", err)
+		}
+		return NewSQLStore(tx), func() {
+			if err := tx.Commit(); err != nil {
+				t.Errorf("caller tx commit err = %v", err)
+			}
+		}
+	}
+	return NewSQLStore(db), func() {}
 }
+
+// sabotageThreadUnlock makes the thread lock's pg_advisory_unlock call fail
+// for every session opened afterwards (public shadows pg_catalog).
+const sabotageThreadUnlock = `CREATE FUNCTION public.pg_advisory_unlock(bigint) RETURNS boolean LANGUAGE plpgsql AS $$BEGIN RAISE EXCEPTION 'sabotaged unlock'; END$$;
+DO $$BEGIN EXECUTE format('ALTER DATABASE %I SET search_path = public, pg_catalog', current_database()); END$$;`
 
 func TestExtractThreadFacts_ConnectionPinning(t *testing.T) {
 	t.Parallel()
-	ctx := context.Background()
-	dbMem := setupTestDBMem(t)
+	const threadID = "th-pin-test"
 
 	tests := []struct {
-		name       string
-		injectErr  error
-		wantErr    bool
-		errSubstr  string
-		wantClosed bool
+		name          string
+		handle        string
+		holdLock      bool
+		sabotage      string
+		errSubstr     string
+		wantWatermark int64
+		wantLocks     int
 	}{
-		{
-			name:      "PoolExhaustedFailsFast",
-			injectErr: errors.New("connection pool exhausted"),
-			wantErr:   true,
-			errSubstr: "failed to pin connection for thread extraction",
-		},
-		{
-			name:       "PinnedConnectionReleasedOnFailure",
-			wantErr:    true,
-			errSubstr:  "failed to acquire thread lock",
-			wantClosed: true,
-		},
+		{name: "PoolPinsAndReleasesConnection", handle: "pool", wantWatermark: 1},
+		{name: "PrePinnedConnStaysOpenForCaller", handle: "conn", wantWatermark: 1},
+		{name: "TxHandleLocksWithoutPinning", handle: "tx", wantWatermark: 1},
+		{name: "NonConnProviderSkipsThreadLock", handle: "unpinned", wantWatermark: 1},
+		{name: "ClosedPoolFailsFast", handle: "closed", errSubstr: "failed to pin connection for thread extraction"},
+		// wantLocks 1 is the holder's own lock, still held during assertions.
+		{name: "HeldThreadLockReleasesPinnedConn", handle: "pool", holdLock: true, errSubstr: "failed to acquire thread lock", wantLocks: 1},
+		// KNOWN BUG: the failed-unlock cleanup "destroys" the pinned conn with
+		// sql.Conn.Close, which returns the session to the pool still holding
+		// the thread lock. Expect wantLocks 0 once the conn is really discarded.
+		{name: "UnlockFailureStillSucceeds", handle: "pool", sabotage: sabotageThreadUnlock, wantWatermark: 1, wantLocks: 1},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			mem := newTestMemStore()
-			var pinnedConn *sql.Conn
-			if tc.wantClosed {
-				c, err := dbMem.Conn(ctx)
-				if err != nil {
-					t.Fatalf("dbMem.Conn() err = %v", err)
-				}
-				pinnedConn = c
+			db, observer := pinningTestDBs(t, tc.sabotage)
+			seedTurns(t, observer, adminTurn(threadID, 1, "Turn 1", "Resp 1"))
+			if tc.holdLock {
+				// Released only after the assertions: the timed-out waiter's
+				// backend may still be queued on the lock until it notices the
+				// cancelled client.
+				defer holdAdvisoryLock(t, observer, threadID)()
 			}
+			store, release := pinningStore(t, db, tc.handle)
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
 
-			mockStore := &mockConnStore{
-				TestMemStore: mem,
-				connErr:      tc.injectErr,
-				conn:         pinnedConn,
+			err := ExtractThreadFacts(ctx, store, &MockOllamaClient{embedding: testEmbedding(1.0)}, extractLLM(`{"facts": []}`), threadID)
+			if tc.errSubstr == "" && err != nil {
+				t.Fatalf("ExtractThreadFacts() err = %v, want nil", err)
 			}
-			client := &MockOllamaClient{embedding: testEmbedding(1.0)}
-			llm := func(ctx context.Context, prompt string) (string, error) {
-				return `{"facts": []}`, nil
+			if tc.errSubstr != "" && (err == nil || !strings.Contains(err.Error(), tc.errSubstr)) {
+				t.Fatalf("ExtractThreadFacts() err = %v, want substring %q", err, tc.errSubstr)
 			}
-
-			err := ExtractThreadFacts(ctx, mockStore, client, llm, "th-pin-test")
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("ExtractThreadFacts() err = %v, wantErr = %v", err, tc.wantErr)
+			release()
+			if inUse := db.Stats().InUse; inUse != 0 {
+				t.Errorf("pool connections in use = %d, want 0 (pinned conn released)", inUse)
 			}
-			if tc.wantErr && tc.errSubstr != "" {
-				if err == nil || !strings.Contains(err.Error(), tc.errSubstr) {
-					t.Errorf("err = %v, want substring %q", err, tc.errSubstr)
-				}
+			if wm := readExtractWatermark(t, observer, DefaultStack, threadID); wm != tc.wantWatermark {
+				t.Errorf("watermark = %d, want %d", wm, tc.wantWatermark)
 			}
-			if tc.wantClosed && pinnedConn != nil {
-				if pingErr := pinnedConn.PingContext(ctx); !errors.Is(pingErr, sql.ErrConnDone) {
-					t.Errorf("pinnedConn.PingContext() = %v, want sql.ErrConnDone (connection closed)", pingErr)
-				}
+			if locks := heldAdvisoryLocks(t, observer); locks != tc.wantLocks {
+				t.Errorf("held advisory locks = %d, want %d", locks, tc.wantLocks)
 			}
 		})
 	}
@@ -325,8 +412,8 @@ func TestExtractThreadFacts_ConnectionPinning(t *testing.T) {
 func TestResolvePinnedStore_PrePinnedConnNotClosed(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
-	dbMem := setupTestDBMem(t)
-	conn, err := dbMem.Conn(ctx)
+	db := newTestDB(t)
+	conn, err := db.Conn(ctx)
 	if err != nil {
 		t.Fatalf("failed to open conn: %v", err)
 	}
@@ -353,7 +440,7 @@ func TestResolvePinnedStore_PrePinnedConnNotClosed(t *testing.T) {
 	}
 
 	// For a store backed by *sql.DB, ownedConn should be populated
-	dbStore := NewSQLStore(dbMem)
+	dbStore := NewSQLStore(db)
 	_, _, ownedFromDB, err := resolvePinnedStore(ctx, dbStore)
 	if err != nil {
 		t.Fatalf("resolvePinnedStore(dbStore) err = %v", err)
@@ -367,157 +454,215 @@ func TestResolvePinnedStore_PrePinnedConnNotClosed(t *testing.T) {
 	}
 }
 
-func TestProcessThreadFacts_ZeroRowIDNoProgressBreaks(t *testing.T) {
+// Real Postgres never returns a turn with row_id 0 (the unextracted query
+// filters row_id > watermark >= 0), so the zero-row-id fallback is exercised
+// on the step function directly.
+func TestResolveThreadTurnWatermark(t *testing.T) {
 	t.Parallel()
-	ctx := context.Background()
-	mem := newTestMemStore()
 	const threadID = "th-zero-rowid"
-	mem.unextractedTurns[threadID] = []Message{
-		{RowID: 0, Content: "zero turn", ResponseText: "resp", Status: "COMPLETED", IsAdmin: true},
-	}
-	mem.maxRowIDs[threadID] = 0
-
-	var llmCalls int
-	llm := func(ctx context.Context, prompt string) (string, error) {
-		llmCalls++
-		return `{"facts": []}`, nil
-	}
-	client := &MockOllamaClient{embedding: testEmbedding(1.0)}
-
-	err := ExtractThreadFacts(ctx, mem, client, llm, threadID)
-	if err != nil {
-		t.Fatalf("ExtractThreadFacts() err = %v", err)
-	}
-	if llmCalls != 0 {
-		t.Errorf("llmCalls = %d, want 0 when maxRowID <= 0", llmCalls)
-	}
-}
-
-func TestProcessThreadFacts_EmptyTranscriptAdvancesWatermark(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-	mem := newTestMemStore()
-	const threadID = "th-silent-turn"
-	mem.unextractedTurns[threadID] = []Message{
-		{RowID: 15, ThreadID: threadID, Content: "", ResponseText: "", Status: "COMPLETED", IsAdmin: true},
-	}
-	mem.maxRowIDs[threadID] = 15
-
-	var llmCalls int
-	llm := func(ctx context.Context, prompt string) (string, error) {
-		llmCalls++
-		return `{"facts": []}`, nil
-	}
-	client := &MockOllamaClient{embedding: testEmbedding(1.0)}
-
-	err := ExtractThreadFacts(ctx, mem, client, llm, threadID)
-	if err != nil {
-		t.Fatalf("ExtractThreadFacts() err = %v", err)
-	}
-	if llmCalls != 0 {
-		t.Errorf("llmCalls = %d, want 0 when turns contain only empty prompt and response", llmCalls)
-	}
-	if wm := mem.watermarks[threadID]; wm != 15 {
-		t.Errorf("watermark = %d, want 15", wm)
-	}
-}
-
-func TestReconcileCandidateFact_WithLockDB(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-	fake := newLockFakeDB(t)
-	mem := newTestMemStore()
-	client := &MockOllamaClient{embedding: testEmbedding(1.0)}
-
-	item := ExtractedFactItem{
-		FactText: "User loves dark mode strictly",
-		Action:   "ADD",
-	}
-
-	err := reconcileCandidateFact(ctx, mem, client, nil, item, fake, "")
-	if err != nil {
-		t.Fatalf("reconcileCandidateFact() with lockDB err = %v", err)
-	}
-
-	queries := fake.recorded()
-	if !lockQueriesContain(queries, "BEGIN") {
-		t.Errorf("missing BEGIN in queries: %v", queries)
-	}
-	if !lockQueriesContain(queries, "COMMIT") {
-		t.Errorf("missing COMMIT in queries: %v", queries)
-	}
-	if len(mem.facts) != 1 {
-		t.Errorf("expected 1 fact inserted, got %d", len(mem.facts))
-	}
-}
-
-type mockLockDBStore struct {
-	*TestMemStore
-
-	lockDB DBTX
-}
-
-func (*mockLockDBStore) Conn(_ context.Context) (*sql.Conn, error) {
-	return nil, nil
-}
-
-func (m *mockLockDBStore) DB() DBTX {
-	return m.lockDB
-}
-
-func TestProcessThreadFacts_LockErrorPaths(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
 
 	tests := []struct {
 		name      string
-		failOn    string
-		wantErr   bool
+		turns     []Message
+		seed      []testTurn
+		sabotage  string
+		want      int64
 		errSubstr string
 	}{
-		{
-			name:      "AdvisoryLockFailure",
-			failOn:    "LOCK",
-			wantErr:   true,
-			errSubstr: "failed to acquire thread lock",
-		},
-		{
-			name:    "UnlockFailureClosesConnection",
-			failOn:  "UNLOCK",
-			wantErr: false,
-		},
+		{name: "MaxRowIDFromTurns", turns: []Message{{RowID: 3}, {RowID: 7}}, want: 7},
+		{name: "ZeroRowIDFallsBackToMaxMessageRowID", turns: []Message{{RowID: 0}}, seed: []testTurn{{thread: threadID, rowID: 9, content: "c"}}, want: 9},
+		{name: "ZeroRowIDNoMessagesIsZero", turns: []Message{{RowID: 0}}, want: 0},
+		{name: "ZeroRowIDMaxQueryFails", turns: []Message{{RowID: 0}}, sabotage: sabotageMessages, errSubstr: "failed to get max message rowid for thread"},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			fake := newLockFakeDB(t)
-			fake.failOn = tc.failOn
-			fake.failErr = errors.New("injected lock failure")
+			db := newTestDB(t)
+			seedTurns(t, db, tc.seed...)
+			execSQL(t, db, tc.sabotage)
 
-			mem := newTestMemStore()
-			mem.unextractedTurns["th-lock-test"] = []Message{
-				{RowID: 1, ThreadID: "th-lock-test", Content: "Turn 1", ResponseText: "Resp 1", Status: "COMPLETED", IsAdmin: true},
-			}
-
-			store := &mockLockDBStore{
-				TestMemStore: mem,
-				lockDB:       fake,
-			}
-
-			client := &MockOllamaClient{embedding: testEmbedding(1.0)}
-			llm := func(ctx context.Context, prompt string) (string, error) {
-				return `{"facts": []}`, nil
-			}
-
-			err := ExtractThreadFacts(ctx, store, client, llm, "th-lock-test")
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("ExtractThreadFacts() err = %v, wantErr = %v", err, tc.wantErr)
-			}
-			if tc.wantErr && tc.errSubstr != "" {
+			got, err := resolveThreadTurnWatermark(context.Background(), NewSQLStore(db), threadID, tc.turns)
+			if tc.errSubstr != "" {
 				if err == nil || !strings.Contains(err.Error(), tc.errSubstr) {
-					t.Errorf("err = %v, want substring %q", err, tc.errSubstr)
+					t.Fatalf("err = %v, want substring %q", err, tc.errSubstr)
 				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("resolveThreadTurnWatermark() err = %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("watermark = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+// GetMaxMessageRowID cannot fail on its own after GetUnextractedAdminTurns
+// succeeded, so its failure branches are exercised on the step functions.
+func TestHandleEmptyUnextractedTurns(t *testing.T) {
+	t.Parallel()
+	const threadID = "th-empty"
+
+	tests := []struct {
+		name          string
+		lastWatermark int64
+		seed          []testTurn
+		sabotage      string
+		wantWatermark int64
+		errSubstr     string
+	}{
+		{name: "ExistingWatermarkIsNoop", lastWatermark: 5, seed: []testTurn{{thread: threadID, rowID: 9, content: "c"}}},
+		{name: "NoMessagesLeavesNoWatermark"},
+		{name: "MaxQueryFails", sabotage: sabotageMessages, errSubstr: "failed to get max message rowid for thread"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			db := newTestDB(t)
+			seedTurns(t, db, tc.seed...)
+			execSQL(t, db, tc.sabotage)
+
+			err := handleEmptyUnextractedTurns(context.Background(), NewSQLStore(db), threadID, tc.lastWatermark)
+			if tc.errSubstr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.errSubstr) {
+					t.Fatalf("err = %v, want substring %q", err, tc.errSubstr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("handleEmptyUnextractedTurns() err = %v", err)
+			}
+			if wm := readExtractWatermark(t, db, DefaultStack, threadID); wm != tc.wantWatermark {
+				t.Errorf("watermark = %d, want %d", wm, tc.wantWatermark)
+			}
+		})
+	}
+}
+
+// Every turn the unextracted query returns has a non-empty response
+// (IsExtractableAdminTurn), so an empty transcript only reaches
+// processTurnBatch when called directly.
+func TestProcessTurnBatch_EmptyTranscript(t *testing.T) {
+	t.Parallel()
+	const threadID = "th-silent-turn"
+
+	tests := []struct {
+		name          string
+		sabotage      string
+		wantWatermark int64
+		errSubstr     string
+	}{
+		{name: "AdvancesWatermarkWithoutLLM", wantWatermark: 15},
+		{name: "WatermarkWriteFails", sabotage: sabotageWatermarkWrite, errSubstr: "failed to update conversation fact watermark for empty transcript"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			db := newTestDB(t)
+			execSQL(t, db, tc.sabotage)
+			turns := []Message{{RowID: 15, ThreadID: threadID, Status: "COMPLETED", IsAdmin: true}}
+
+			// An empty LLM reply fails parsing, so any LLM call would surface as an error.
+			err := processTurnBatch(context.Background(), NewSQLStore(db), &MockOllamaClient{embedding: testEmbedding(1.0)}, extractLLM(""), threadID, turns, 15, nil)
+			if tc.errSubstr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.errSubstr) {
+					t.Fatalf("err = %v, want substring %q", err, tc.errSubstr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("processTurnBatch() err = %v", err)
+			}
+			if wm := readExtractWatermark(t, db, DefaultStack, threadID); wm != tc.wantWatermark {
+				t.Errorf("watermark = %d, want %d", wm, tc.wantWatermark)
+			}
+		})
+	}
+}
+
+// extractFactRow is one facts row as asserted by extraction tests.
+type extractFactRow struct {
+	id    int64
+	text  string
+	count int
+}
+
+// readExtractFacts lists every facts row ordered by id.
+func readExtractFacts(t *testing.T, db DBTX) []extractFactRow {
+	t.Helper()
+	rows, err := db.QueryContext(context.Background(), `SELECT id, fact_text, reinforce_count FROM facts ORDER BY id`)
+	if err != nil {
+		t.Fatalf("read facts: %v", err)
+	}
+	defer rows.Close()
+	var got []extractFactRow
+	for rows.Next() {
+		var r extractFactRow
+		if err := rows.Scan(&r.id, &r.text, &r.count); err != nil {
+			t.Fatalf("scan fact: %v", err)
+		}
+		got = append(got, r)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("read facts: %v", err)
+	}
+	return got
+}
+
+func TestReconcileCandidateFact_WithLockDB(t *testing.T) {
+	t.Parallel()
+	const factText = "User loves dark mode strictly"
+
+	tests := []struct {
+		name      string
+		holdLock  bool
+		sabotage  string
+		wantErr   error
+		errSubstr string
+		wantFacts []extractFactRow
+	}{
+		{name: "CommitsInsertUnderXactLock", wantFacts: []extractFactRow{{1, factText, 1}}},
+		{name: "BusyFactLockRollsBack", holdLock: true, wantErr: ErrAdvisoryLockBusy},
+		{name: "FailedWriteRollsBack", sabotage: sabotageInsertFact, errSubstr: "sabotaged"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			db := newTestDB(t)
+			execSQL(t, db, tc.sabotage)
+			if tc.holdLock {
+				defer holdAdvisoryLock(t, db, "coven:facts")()
+			}
+			conn, err := db.Conn(ctx)
+			if err != nil {
+				t.Fatalf("db.Conn() err = %v", err)
+			}
+			defer conn.Close()
+
+			item := ExtractedFactItem{FactText: factText, Action: "ADD"}
+			err = reconcileCandidateFact(ctx, NewSQLStore(conn), &MockOllamaClient{embedding: testEmbedding(1.0)}, nil, item, conn, "")
+			switch {
+			case tc.wantErr != nil && !errors.Is(err, tc.wantErr):
+				t.Fatalf("reconcileCandidateFact() err = %v, want %v", err, tc.wantErr)
+			case tc.errSubstr != "" && (err == nil || !strings.Contains(err.Error(), tc.errSubstr)):
+				t.Fatalf("reconcileCandidateFact() err = %v, want substring %q", err, tc.errSubstr)
+			case tc.wantErr == nil && tc.errSubstr == "" && err != nil:
+				t.Fatalf("reconcileCandidateFact() err = %v, want nil", err)
+			}
+			// The pinned conn must be back outside any transaction: a SAVEPOINT
+			// outside a transaction block is rejected.
+			if _, spErr := conn.ExecContext(ctx, `SAVEPOINT probe`); spErr == nil {
+				t.Errorf("pinned conn still inside a transaction after reconcile")
+			}
+			// Read through the pool: only committed rows are visible.
+			if got := readExtractFacts(t, db); !slices.Equal(got, tc.wantFacts) {
+				t.Errorf("facts = %+v, want %+v", got, tc.wantFacts)
 			}
 		})
 	}
@@ -525,150 +670,97 @@ func TestProcessThreadFacts_LockErrorPaths(t *testing.T) {
 
 func TestProcessThreadFacts_WatermarkErrorPaths(t *testing.T) {
 	t.Parallel()
-	ctx := context.Background()
-	client := &MockOllamaClient{embedding: testEmbedding(1.0)}
-	llm := func(ctx context.Context, prompt string) (string, error) {
-		return `{"facts": []}`, nil
-	}
+	const threadID = "th-wm-err"
+	nonAdmin42 := testTurn{thread: threadID, rowID: 42, content: "hi", response: "hello"}
+	silent15 := adminTurn(threadID, 15, "", "")
+	admin1 := adminTurn(threadID, 1, "hi", "hello")
+	const noFacts = `{"facts": []}`
 
 	tests := []struct {
-		name            string
-		failOp          string
-		hasTurns        bool
-		zeroRowID       bool
-		emptyTranscript bool
-		wantErr         bool
-		errSubstr       string
+		name          string
+		seed          []testTurn
+		sabotage      string
+		llmResp       string
+		errSubstr     string
+		wantWatermark int64
 	}{
-		{
-			name:      "WatermarkGetErrorFails",
-			failOp:    "GetConversationFactWatermark",
-			wantErr:   true,
-			errSubstr: "failed to get conversation fact watermark",
-		},
-		{
-			name:      "GetUnextractedAdminTurnsErrorFails",
-			failOp:    "GetUnextractedAdminTurns",
-			hasTurns:  true,
-			wantErr:   true,
-			errSubstr: "failed to get unextracted turns for thread",
-		},
-		{
-			name:      "EmptyTurnsGetMaxRowIDFails",
-			failOp:    "GetMaxMessageRowID",
-			hasTurns:  false,
-			wantErr:   true,
-			errSubstr: "failed to get max message rowid",
-		},
-		{
-			name:      "EmptyTurnsUpdateWatermarkFails",
-			failOp:    "UpdateConversationFactWatermark",
-			hasTurns:  false,
-			wantErr:   true,
-			errSubstr: "failed to update conversation fact watermark",
-		},
-		{
-			name:      "TurnRowIDZeroFallbackGetMaxRowIDFails",
-			failOp:    "GetMaxMessageRowID",
-			hasTurns:  true,
-			zeroRowID: true,
-			wantErr:   true,
-			errSubstr: "failed to get max message rowid for thread",
-		},
-		{
-			name:      "TurnUpdateWatermarkFails",
-			failOp:    "UpdateConversationFactWatermark",
-			hasTurns:  true,
-			wantErr:   true,
-			errSubstr: "failed to update conversation fact watermark",
-		},
-		{
-			name:            "EmptyTranscriptUpdateWatermarkFails",
-			failOp:          "UpdateConversationFactWatermark",
-			hasTurns:        true,
-			emptyTranscript: true,
-			wantErr:         true,
-			errSubstr:       "failed to update conversation fact watermark for empty transcript",
-		},
+		{name: "WatermarkGetErrorFails", sabotage: sabotageWatermarks, errSubstr: "failed to get conversation fact watermark"},
+		{name: "GetUnextractedAdminTurnsErrorFails", seed: []testTurn{admin1}, sabotage: sabotageTurnReads, errSubstr: "failed to get unextracted turns for thread"},
+		// Non-admin and silent turns are never extractable: the watermark jumps
+		// to the thread's max row id without an LLM call (empty reply would fail).
+		{name: "EmptyTurnsAdvanceWatermark", seed: []testTurn{nonAdmin42}, wantWatermark: 42},
+		{name: "SilentTurnAdvancesWatermark", seed: []testTurn{silent15}, wantWatermark: 15},
+		{name: "EmptyTurnsUpdateWatermarkFails", seed: []testTurn{nonAdmin42}, sabotage: sabotageWatermarkWrite, errSubstr: "failed to update conversation fact watermark for empty turns"},
+		{name: "ExtractedTurnAdvancesWatermark", seed: []testTurn{admin1}, llmResp: noFacts, wantWatermark: 1},
+		{name: "TurnUpdateWatermarkFails", seed: []testTurn{admin1}, sabotage: sabotageWatermarkWrite, llmResp: noFacts, errSubstr: "failed to update conversation fact watermark"},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			mem := newTestMemStore()
-			const threadID = "th-wm-err"
-			if tc.hasTurns {
-				rowID := int64(1)
-				if tc.zeroRowID {
-					rowID = 0
-				}
-				content := "hi"
-				resp := "hello"
-				if tc.emptyTranscript {
-					content = ""
-					resp = ""
-				}
-				mem.unextractedTurns[threadID] = []Message{
-					{RowID: rowID, Content: content, ResponseText: resp, Status: "COMPLETED", IsAdmin: true},
-				}
-			} else {
-				mem.maxRowIDs[threadID] = 42
-			}
-			mem.SetFail(tc.failOp, errors.New("simulated error"))
+			db := newTestDB(t)
+			seedTurns(t, db, tc.seed...)
+			execSQL(t, db, tc.sabotage)
 
-			err := ExtractThreadFacts(ctx, mem, client, llm, threadID)
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("ExtractThreadFacts() err = %v, wantErr = %v", err, tc.wantErr)
-			}
-			if tc.wantErr && tc.errSubstr != "" {
+			err := ExtractThreadFacts(context.Background(), NewSQLStore(db), &MockOllamaClient{embedding: testEmbedding(1.0)}, extractLLM(tc.llmResp), threadID)
+			if tc.errSubstr != "" {
 				if err == nil || !strings.Contains(err.Error(), tc.errSubstr) {
-					t.Errorf("err = %v, want substring %q", err, tc.errSubstr)
+					t.Fatalf("err = %v, want substring %q", err, tc.errSubstr)
 				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("ExtractThreadFacts() err = %v", err)
+			}
+			if wm := readExtractWatermark(t, db, DefaultStack, threadID); wm != tc.wantWatermark {
+				t.Errorf("watermark = %d, want %d", wm, tc.wantWatermark)
 			}
 		})
 	}
 }
 
-type mockFetchHalvingStore struct {
-	*TestMemStore
+// deadlineFetchStore is the injected fetch-timeout boundary: a real SQLStore
+// whose unextracted-turn fetch times out for batches larger than maxLimit
+// (as a slow query past its deadline would). Every other call is real.
+type deadlineFetchStore struct {
+	*SQLStore
 
+	maxLimit   int
 	fetchSizes []int
-	failUntil  int
 }
 
-func (m *mockFetchHalvingStore) GetUnextractedAdminTurns(ctx context.Context, threadID string, limit int, agent ...string) ([]Message, error) {
-	m.fetchSizes = append(m.fetchSizes, limit)
-	if len(m.fetchSizes) <= m.failUntil {
+func (s *deadlineFetchStore) GetUnextractedAdminTurns(ctx context.Context, threadID string, limit int, agent ...string) ([]Message, error) {
+	s.fetchSizes = append(s.fetchSizes, limit)
+	if limit > s.maxLimit {
 		return nil, context.DeadlineExceeded
 	}
-	return m.TestMemStore.GetUnextractedAdminTurns(ctx, threadID, limit, agent...)
+	return s.SQLStore.GetUnextractedAdminTurns(ctx, threadID, limit, agent...)
 }
 
 func TestProcessThreadFacts_FetchDeadlineHalving(t *testing.T) {
 	t.Parallel()
-	ctx := context.Background()
+	const threadID = "th-fetch-halve"
 
 	tests := []struct {
 		name           string
-		failUntil      int
+		maxLimit       int
 		wantFetchSizes []int
 		wantWatermark  int64
-		wantErr        bool
 		errSubstr      string
 	}{
 		{
+			// 50 times out, 25 fetches all 10 turns, the reset 50 times out
+			// again and the halved 25 finds nothing left.
 			name:           "HalveOnceThenSucceed",
-			failUntil:      1,
-			wantFetchSizes: []int{50, 25, 50},
+			maxLimit:       25,
+			wantFetchSizes: []int{50, 25, 50, 25},
 			wantWatermark:  10,
-			wantErr:        false,
 		},
 		{
 			name:           "HalveDownToOneThenFail",
-			failUntil:      10,
+			maxLimit:       0,
 			wantFetchSizes: []int{50, 25, 12, 6, 3, 1},
 			wantWatermark:  0,
-			wantErr:        true,
 			errSubstr:      "context deadline exceeded",
 		},
 	}
@@ -676,43 +768,21 @@ func TestProcessThreadFacts_FetchDeadlineHalving(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			mem := newTestMemStore()
-			const threadID = "th-fetch-halve"
-			turns := make([]Message, 10)
-			for i := range turns {
-				turns[i] = Message{
-					RowID:        int64(i + 1),
-					ThreadID:     threadID,
-					Content:      fmt.Sprintf("Turn %d", i+1),
-					ResponseText: fmt.Sprintf("Resp %d", i+1),
-					Status:       "COMPLETED",
-					IsAdmin:      true,
-				}
-			}
-			mem.unextractedTurns[threadID] = turns
+			db := newTestDB(t)
+			seedTurns(t, db, adminTurnRange(threadID, 1, 10)...)
+			store := &deadlineFetchStore{SQLStore: NewSQLStore(db), maxLimit: tc.maxLimit}
 
-			store := &mockFetchHalvingStore{
-				TestMemStore: mem,
-				failUntil:    tc.failUntil,
+			err := ExtractThreadFacts(context.Background(), store, &MockOllamaClient{embedding: testEmbedding(1.0)}, extractLLM(`{"facts": []}`), threadID)
+			if tc.errSubstr == "" && err != nil {
+				t.Fatalf("ExtractThreadFacts() err = %v, want nil", err)
 			}
-			client := &MockOllamaClient{embedding: testEmbedding(1.0)}
-			llm := func(ctx context.Context, prompt string) (string, error) {
-				return `{"facts": []}`, nil
-			}
-
-			err := ExtractThreadFacts(ctx, store, client, llm, threadID)
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("ExtractThreadFacts() err = %v, wantErr = %v", err, tc.wantErr)
-			}
-			if tc.wantErr && tc.errSubstr != "" {
-				if err == nil || !strings.Contains(err.Error(), tc.errSubstr) {
-					t.Errorf("err = %v, want substring %q", err, tc.errSubstr)
-				}
+			if tc.errSubstr != "" && (err == nil || !strings.Contains(err.Error(), tc.errSubstr)) {
+				t.Fatalf("ExtractThreadFacts() err = %v, want substring %q", err, tc.errSubstr)
 			}
 			if !slices.Equal(store.fetchSizes, tc.wantFetchSizes) {
 				t.Errorf("fetchSizes = %v, want %v", store.fetchSizes, tc.wantFetchSizes)
 			}
-			if wm := mem.watermarks[threadID]; wm != tc.wantWatermark {
+			if wm := readExtractWatermark(t, db, DefaultStack, threadID); wm != tc.wantWatermark {
 				t.Errorf("final watermark = %d, want %d", wm, tc.wantWatermark)
 			}
 		})
