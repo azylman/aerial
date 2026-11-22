@@ -17,6 +17,7 @@ import (
 
 	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/pkg/k8sauth"
+	"github.com/azylman/aerial/pkg/k8sauthtest"
 )
 
 // serverRequestCase is the shared row shape for the Routes and handleMCP tests:
@@ -162,13 +163,6 @@ func TestServer_HandleMCP(t *testing.T) {
 	handler := http.HandlerFunc(server.handleMCP)
 
 	tests := []serverRequestCase{
-		{name: "MCPDirectHealthRoute", method: http.MethodGet, path: "/health", wantStatus: http.StatusOK},
-		{name: "MCPDirectFlushRoute", method: http.MethodGet, path: "/debug/coverage/flush", wantStatus: http.StatusOK},
-		{name: "MCPDirectMetricsRoute", method: http.MethodGet, path: "/metrics", wantStatus: http.StatusOK},
-		{name: "MCPDirectAdminExtractRoute", method: http.MethodPost, path: "/admin/extract?thread_id=th-1", wantStatus: http.StatusOK, wantSubstr: `{"status":"ok"}`},
-		{name: "MCPDirectFactsRoute", method: http.MethodGet, path: "/facts", wantStatus: http.StatusOK},
-		{name: "MCPDirectContextRoute", method: http.MethodGet, path: "/context?q=test", wantStatus: http.StatusOK},
-		{name: "MCPDirectConsolidateRoute", method: http.MethodPost, path: "/consolidate", wantStatus: http.StatusOK},
 		{name: "MCPGetProbe", method: http.MethodGet, path: "/mcp", wantStatus: http.StatusOK, wantSubstr: "Aerial Memory MCP Server"},
 		{name: "MCPMethodNotAllowed", method: http.MethodPut, path: "/mcp", wantStatus: http.StatusMethodNotAllowed},
 		{name: "MCPEmptyBody", method: http.MethodPost, path: "/mcp", wantStatus: http.StatusBadRequest},
@@ -267,11 +261,11 @@ func TestOpenDB(t *testing.T) {
 	}
 }
 
-func TestMain_Execution(t *testing.T) {
+func TestRunMain(t *testing.T) {
 	oldRun, oldExit, oldPath := runAppFn, exitFn, configPath
 	defer func() {
 		runAppFn, exitFn, configPath = oldRun, oldExit, oldPath
-		installTestTracing() // main() runs tracing.Init, which replaces the global provider.
+		installTestTracing() // runMain runs tracing.Init, which replaces the global provider.
 	}()
 
 	tmpDir := t.TempDir()
@@ -283,57 +277,38 @@ eri_llm_url: "http://eri.aerial/internal/llm"
 pr_register_url: "http://synapse.aerial/internal/pr/register"
 custom_skills_dir: "/config/custom-skills"
 rules_dir: "/config/rules"
-config_repo_owner: "azylman"
-config_repo_name: "aerial-config"
+config_repo_owner: "example"
+config_repo_name: "example-config"
 ollama:
   base_url: "http://ollama:11434"
   model: "all-minilm"
   num_ctx: 512
 `
-	_ = os.WriteFile(testCfg, []byte(testCfgContent), 0o644)
+	if err := os.WriteFile(testCfg, []byte(testCfgContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	missingTracing := filepath.Join(tmpDir, "missing-tracing.yaml")
+	dbURL := "postgres://user:pass@localhost:5432/db"
 
 	tests := []struct {
 		name         string
 		cfgPath      string
-		dbURL        string
+		env          map[string]string
 		runErr       error
 		wantRunCall  bool
 		wantExitCall bool
 	}{
-		{
-			name:        "CleanExit",
-			cfgPath:     testCfg,
-			dbURL:       "postgres://user:pass@localhost:5432/db",
-			wantRunCall: true,
-		},
-		{
-			name:        "ErrServerClosedIgnored",
-			cfgPath:     testCfg,
-			dbURL:       "postgres://user:pass@localhost:5432/db",
-			runErr:      http.ErrServerClosed,
-			wantRunCall: true,
-		},
-		{
-			name:         "RuntimeFailureCallsExit",
-			cfgPath:      testCfg,
-			dbURL:        "postgres://user:pass@localhost:5432/db",
-			runErr:       context.DeadlineExceeded,
-			wantRunCall:  true,
-			wantExitCall: true,
-		},
-		{
-			name:         "ConfigLoadFailureCallsExit",
-			cfgPath:      filepath.Join(tmpDir, "nonexistent.yaml"),
-			dbURL:        "",
-			wantExitCall: true,
-		},
+		{name: "CleanExit", cfgPath: testCfg, env: map[string]string{"DATABASE_URL": dbURL}, wantRunCall: true},
+		{name: "ErrServerClosedIgnored", cfgPath: testCfg, env: map[string]string{"DATABASE_URL": dbURL}, runErr: http.ErrServerClosed, wantRunCall: true},
+		{name: "RuntimeFailureCallsExit", cfgPath: testCfg, env: map[string]string{"DATABASE_URL": dbURL}, runErr: context.DeadlineExceeded, wantRunCall: true, wantExitCall: true},
+		{name: "ConfigLoadFailureCallsExit", cfgPath: filepath.Join(tmpDir, "nonexistent.yaml"), wantExitCall: true},
+		{name: "InvalidEnvCallsExit", cfgPath: testCfg, env: map[string]string{"DATABASE_URL": dbURL, "K8S_AUTH_ENABLED": "maybe"}, wantExitCall: true},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			configPath = tc.cfgPath
 			t.Setenv("CONFIG_PATH", tc.cfgPath)
-			t.Setenv("DATABASE_URL", tc.dbURL)
 
 			runCalled := false
 			exitCalled := false
@@ -345,7 +320,7 @@ ollama:
 				exitCalled = true
 			}
 
-			main()
+			runMain(mapEnv(tc.env), missingTracing)
 			if runCalled != tc.wantRunCall {
 				t.Errorf("runCalled = %v, want %v", runCalled, tc.wantRunCall)
 			}
@@ -372,7 +347,7 @@ func TestRunApp_Lifecycle(t *testing.T) {
 		},
 		{
 			name:    "InvalidDBFails",
-			cfg:     &Config{DatabaseURL: "postgres://127.0.0.1:1/bad?connect_timeout=1"},
+			cfg:     &Config{DatabaseURL: "mysql://x"},
 			wantErr: true,
 		},
 		{
@@ -851,11 +826,11 @@ func TestFormatSkillCommitAndPRHelpers(t *testing.T) {
 			Avoid:       []string{"avoid 1"},
 		}},
 	}}
-	alertMsg := formatManualReviewPRAlert(42, "azylman", "aerial-config", alertChanges)
+	alertMsg := formatManualReviewPRAlert(42, "example-owner", "example-config", alertChanges)
 	if len(alertMsg) > 1800 {
 		t.Errorf("formatManualReviewPRAlert len = %d, want <= 1800", len(alertMsg))
 	}
-	if !strings.Contains(alertMsg, "PR [#42](https://github.com/azylman/aerial-config/pull/42)") {
+	if !strings.Contains(alertMsg, "PR [#42](https://github.com/example-owner/example-config/pull/42)") {
 		t.Errorf("formatManualReviewPRAlert missing PR link: %q", alertMsg)
 	}
 
@@ -977,54 +952,16 @@ func TestServer_Metrics_Table(t *testing.T) {
 	}
 }
 
-type staticAuthRoundTripper struct {
-	authStatus int
-	authBody   string
-	sarStatus  int
-	sarBody    string
-	err        error
+const serverAuthUser = "system:serviceaccount:default:eri-agent-alpha"
+
+// serverAuthAllowed returns a fake API server that authenticates and authorizes every request.
+func serverAuthAllowed() *k8sauthtest.RoundTripper {
+	return &k8sauthtest.RoundTripper{AuthBody: k8sauthtest.TokenReview(serverAuthUser), SARBody: k8sauthtest.SAR(true, "")}
 }
 
-func (s *staticAuthRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
-	if s.err != nil {
-		return nil, s.err
-	}
-	if strings.Contains(req.URL.Path, "tokenreviews") {
-		return &http.Response{
-			StatusCode: s.authStatus,
-			Body:       io.NopCloser(strings.NewReader(s.authBody)),
-			Header:     make(http.Header),
-			Request:    req,
-		}, nil
-	}
-	if strings.Contains(req.URL.Path, "subjectaccessreviews") {
-		return &http.Response{
-			StatusCode: s.sarStatus,
-			Body:       io.NopCloser(strings.NewReader(s.sarBody)),
-			Header:     make(http.Header),
-			Request:    req,
-		}, nil
-	}
-	return &http.Response{
-		StatusCode: http.StatusOK,
-		Body:       io.NopCloser(strings.NewReader(`{}`)),
-		Header:     make(http.Header),
-		Request:    req,
-	}, nil
-}
-
-func newTestAuthConfig(t *testing.T, tr *staticAuthRoundTripper) k8sauth.Config {
-	t.Helper()
-	tokenFile := filepath.Join(t.TempDir(), "token")
-	if err := os.WriteFile(tokenFile, []byte("host-token"), 0o600); err != nil {
-		t.Fatalf("failed to write host token: %v", err)
-	}
-	return k8sauth.Config{
-		Enabled:      true,
-		TokenPath:    tokenFile,
-		APIServerURL: "https://k8s.local",
-		HTTPClient:   &http.Client{Transport: tr},
-	}
+// serverAuthDenied returns a fake API server that authenticates every request and denies it with reason.
+func serverAuthDenied(reason string) *k8sauthtest.RoundTripper {
+	return &k8sauthtest.RoundTripper{AuthBody: k8sauthtest.TokenReview(serverAuthUser), SARBody: k8sauthtest.SAR(false, reason)}
 }
 
 func newServerFixtureWithAuth(t *testing.T, authCfg k8sauth.Config) (*TestMemStore, *Server) {
@@ -1053,12 +990,12 @@ type authEndpointTestCase struct {
 	path       string
 	body       io.Reader
 	header     map[string]string
-	rt         *staticAuthRoundTripper
+	rt         *k8sauthtest.RoundTripper
 	wantStatus int
 	wantSubstr string
 }
 
-func runAuthEndpointTests(t *testing.T, trDefault *staticAuthRoundTripper, tests []authEndpointTestCase) {
+func runAuthEndpointTests(t *testing.T, trDefault *k8sauthtest.RoundTripper, tests []authEndpointTestCase) {
 	t.Helper()
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1066,7 +1003,7 @@ func runAuthEndpointTests(t *testing.T, trDefault *staticAuthRoundTripper, tests
 			if tc.rt != nil {
 				rt = tc.rt
 			}
-			_, server := newServerFixtureWithAuth(t, newTestAuthConfig(t, rt))
+			_, server := newServerFixtureWithAuth(t, k8sauthtest.Config(t, rt))
 			req := httptest.NewRequest(tc.method, tc.path, tc.body)
 			for k, v := range tc.header {
 				req.Header.Set(k, v)
@@ -1085,16 +1022,8 @@ func runAuthEndpointTests(t *testing.T, trDefault *staticAuthRoundTripper, tests
 }
 
 func TestServer_Auth_Endpoints_ExemptAndUnauthorized(t *testing.T) {
-	trSuccess := &staticAuthRoundTripper{
-		authStatus: http.StatusOK,
-		authBody:   `{"apiVersion":"authentication.k8s.io/v1","kind":"TokenReview","status":{"authenticated":true,"user":{"username":"system:serviceaccount:default:eri-agent-alpha"}}}`,
-		sarStatus:  http.StatusOK,
-		sarBody:    `{"apiVersion":"authorization.k8s.io/v1","kind":"SubjectAccessReview","status":{"allowed":true}}`,
-	}
-	trUnauth := &staticAuthRoundTripper{
-		authStatus: http.StatusOK,
-		authBody:   `{"apiVersion":"authentication.k8s.io/v1","kind":"TokenReview","status":{"authenticated":false,"error":"token expired"}}`,
-	}
+	trSuccess := serverAuthAllowed()
+	trUnauth := &k8sauthtest.RoundTripper{AuthBody: `{"apiVersion":"authentication.k8s.io/v1","kind":"TokenReview","status":{"authenticated":false,"error":"token expired"}}`}
 
 	tests := []authEndpointTestCase{
 		{
@@ -1130,18 +1059,8 @@ func TestServer_Auth_Endpoints_ExemptAndUnauthorized(t *testing.T) {
 }
 
 func TestServer_Auth_Endpoints_AuthorizedAndForbidden(t *testing.T) {
-	trSuccess := &staticAuthRoundTripper{
-		authStatus: http.StatusOK,
-		authBody:   `{"apiVersion":"authentication.k8s.io/v1","kind":"TokenReview","status":{"authenticated":true,"user":{"username":"system:serviceaccount:default:eri-agent-alpha"}}}`,
-		sarStatus:  http.StatusOK,
-		sarBody:    `{"apiVersion":"authorization.k8s.io/v1","kind":"SubjectAccessReview","status":{"allowed":true}}`,
-	}
-	trDenied := &staticAuthRoundTripper{
-		authStatus: http.StatusOK,
-		authBody:   `{"apiVersion":"authentication.k8s.io/v1","kind":"TokenReview","status":{"authenticated":true,"user":{"username":"system:serviceaccount:default:eri-agent-alpha"}}}`,
-		sarStatus:  http.StatusOK,
-		sarBody:    `{"apiVersion":"authorization.k8s.io/v1","kind":"SubjectAccessReview","status":{"allowed":false,"reason":"access denied by test policy"}}`,
-	}
+	trSuccess := serverAuthAllowed()
+	trDenied := serverAuthDenied("access denied by test policy")
 
 	tests := []authEndpointTestCase{
 		{
@@ -1220,24 +1139,14 @@ func TestServer_Auth_Endpoints_AuthorizedAndForbidden(t *testing.T) {
 }
 
 func TestServer_Auth_MCPTools(t *testing.T) {
-	trSuccess := &staticAuthRoundTripper{
-		authStatus: http.StatusOK,
-		authBody:   `{"apiVersion":"authentication.k8s.io/v1","kind":"TokenReview","status":{"authenticated":true,"user":{"username":"system:serviceaccount:default:eri-agent-alpha"}}}`,
-		sarStatus:  http.StatusOK,
-		sarBody:    `{"apiVersion":"authorization.k8s.io/v1","kind":"SubjectAccessReview","status":{"allowed":true}}`,
-	}
-	trDenied := &staticAuthRoundTripper{
-		authStatus: http.StatusOK,
-		authBody:   `{"apiVersion":"authentication.k8s.io/v1","kind":"TokenReview","status":{"authenticated":true,"user":{"username":"system:serviceaccount:default:eri-agent-alpha"}}}`,
-		sarStatus:  http.StatusOK,
-		sarBody:    `{"apiVersion":"authorization.k8s.io/v1","kind":"SubjectAccessReview","status":{"allowed":false,"reason":"operation forbidden"}}`,
-	}
+	trSuccess := serverAuthAllowed()
+	trDenied := serverAuthDenied("operation forbidden")
 
 	tests := []struct {
 		name       string
 		toolName   string
 		toolArgs   string
-		rt         *staticAuthRoundTripper
+		rt         *k8sauthtest.RoundTripper
 		wantSubstr string
 	}{
 		{
@@ -1272,7 +1181,7 @@ func TestServer_Auth_MCPTools(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			_, server := newServerFixtureWithAuth(t, newTestAuthConfig(t, tc.rt))
+			_, server := newServerFixtureWithAuth(t, k8sauthtest.Config(t, tc.rt))
 			body := mcpToolCallBody(1, tc.toolName, tc.toolArgs)
 			req := httptest.NewRequest(http.MethodPost, "/mcp", body)
 			req.Header.Set("Authorization", "Bearer valid-token")

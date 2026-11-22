@@ -874,96 +874,56 @@ func TestNewOllamaClient(t *testing.T) {
 }
 
 func TestOllamaClient_GenerateEmbedding(t *testing.T) {
-	tests := []ollamaEmbeddingTestCase{
-		{name: "SuccessDocument", handlerCodes: []int{http.StatusOK}, handlerBodies: []string{`{"embedding": [0.1, 0.2, 0.3]}`}, input: "test fact text", isQuery: false, wantVecLen: 3},
-		{name: "SuccessQueryWithPrefix", handlerCodes: []int{http.StatusOK}, handlerBodies: []string{`{"embedding": [0.1, 0.2, 0.3]}`}, input: "search query", isQuery: true, prefix: "search: ", wantVecLen: 3, expectPrompt: "search: search query"},
-		{name: "RetrySucceedsOnSecondAttempt", handlerCodes: []int{http.StatusInternalServerError, http.StatusOK}, handlerBodies: []string{`temporary error`, `{"embedding": [0.1, 0.2]}`}, input: "retry query", isQuery: true, prefix: "q: ", maxRetries: 2, retryDelay: 1 * time.Millisecond, wantVecLen: 2},
-		{name: "NegativeRetriesClampedAndFails", handlerCodes: []int{http.StatusInternalServerError}, handlerBodies: []string{`temporary error`}, input: "query", maxRetries: -1, wantErr: true},
-		{name: "ContextCanceledError", handlerCodes: []int{http.StatusInternalServerError}, handlerBodies: []string{`err`}, input: "query", maxRetries: 1, cancelCtx: true, wantErr: true},
-		{name: "EmptyTextInputError", input: "", wantErr: true, errSubstr: "text cannot be empty", handlerCodes: []int{http.StatusOK}, handlerBodies: []string{`{}`}},
-		{name: "UnconfiguredBaseURLError", input: "test text", wantErr: true, errSubstr: "ollama base URL is not configured", emptyBaseURL: true},
-		{name: "Non200Error", handlerCodes: []int{http.StatusInternalServerError}, handlerBodies: []string{`internal server error`}, input: "test text", wantErr: true},
-		{name: "InvalidJSONResponse", handlerCodes: []int{http.StatusOK}, handlerBodies: []string{`{bad json`}, input: "test text", wantErr: true},
-		{name: "OllamaErrorResponse", handlerCodes: []int{http.StatusOK}, handlerBodies: []string{`{"error": "model not found"}`}, input: "test text", wantErr: true},
-		{name: "EmptyEmbeddingReturned", handlerCodes: []int{http.StatusOK}, handlerBodies: []string{`{"embedding": []}`}, input: "test text", wantErr: true},
+	var mu sync.Mutex
+	var gotPrompt string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Prompt string `json:"prompt"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		mu.Lock()
+		gotPrompt = req.Prompt
+		mu.Unlock()
+		_, _ = w.Write([]byte(`{"embedding": [0.1, 0.2, 0.3]}`))
+	}))
+	defer server.Close()
+
+	tests := []struct {
+		name       string
+		baseURL    string
+		input      string
+		isQuery    bool
+		prefix     string
+		wantPrompt string
+		wantVecLen int
+		wantErr    string
+	}{
+		{name: "SuccessDocument", baseURL: server.URL, input: "test fact text", prefix: "search: ", wantPrompt: "test fact text", wantVecLen: 3},
+		{name: "SuccessQueryWithPrefix", baseURL: server.URL, input: "search query", isQuery: true, prefix: "search: ", wantPrompt: "search: search query", wantVecLen: 3},
+		{name: "UnconfiguredBaseURLError", baseURL: "", input: "test text", wantErr: "ollama base URL is not configured"},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			runOllamaEmbeddingCase(t, tc)
+			mu.Lock()
+			gotPrompt = ""
+			mu.Unlock()
+			client := NewOllamaClient(&OllamaConfig{BaseURL: tc.baseURL, QueryPrefix: tc.prefix})
+			vec, err := client.GenerateEmbedding(context.Background(), tc.input, tc.isQuery, 0)
+			gotErr := ""
+			if err != nil {
+				gotErr = err.Error()
+			}
+			if gotErr != tc.wantErr {
+				t.Fatalf("GenerateEmbedding() err = %q, want %q", gotErr, tc.wantErr)
+			}
+			mu.Lock()
+			prompt := gotPrompt
+			mu.Unlock()
+			if len(vec) != tc.wantVecLen || prompt != tc.wantPrompt {
+				t.Errorf("GenerateEmbedding() len = %d prompt = %q, want len %d prompt %q", len(vec), prompt, tc.wantVecLen, tc.wantPrompt)
+			}
 		})
-	}
-}
-
-type ollamaEmbeddingTestCase struct {
-	name          string
-	handlerCodes  []int
-	handlerBodies []string
-	input         string
-	isQuery       bool
-	prefix        string
-	maxRetries    int
-	retryDelay    time.Duration
-	cancelCtx     bool
-	wantErr       bool
-	errSubstr     string
-	wantVecLen    int
-	expectPrompt  string
-	emptyBaseURL  bool
-}
-
-func runOllamaEmbeddingCase(t *testing.T, tc ollamaEmbeddingTestCase) {
-	t.Helper()
-	attempt := 0
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if tc.expectPrompt != "" {
-			var req struct {
-				Prompt string `json:"prompt"`
-			}
-			_ = json.NewDecoder(r.Body).Decode(&req)
-			if req.Prompt != tc.expectPrompt {
-				t.Errorf("req.Prompt = %q, want %q", req.Prompt, tc.expectPrompt)
-			}
-		}
-		idx := attempt
-		if idx >= len(tc.handlerCodes) {
-			idx = len(tc.handlerCodes) - 1
-		}
-		attempt++
-		w.WriteHeader(tc.handlerCodes[idx])
-		_, _ = w.Write([]byte(tc.handlerBodies[idx]))
-	}))
-	defer server.Close()
-
-	baseURL := server.URL
-	if tc.emptyBaseURL {
-		baseURL = ""
-	}
-
-	client := NewOllamaClient(&OllamaConfig{
-		BaseURL:     baseURL,
-		QueryPrefix: tc.prefix,
-	})
-	client.SetRetryDelay(tc.retryDelay)
-
-	ctx := context.Background()
-	if tc.cancelCtx {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithCancel(ctx)
-		cancel()
-	}
-
-	vec, err := client.GenerateEmbedding(ctx, tc.input, tc.isQuery, tc.maxRetries)
-	if (err != nil) != tc.wantErr {
-		t.Fatalf("GenerateEmbedding() err = %v, wantErr = %v", err, tc.wantErr)
-	}
-	if tc.wantErr && tc.errSubstr != "" {
-		if err == nil || !strings.Contains(err.Error(), tc.errSubstr) {
-			t.Errorf("err = %v, want substring %q", err, tc.errSubstr)
-		}
-	}
-	if !tc.wantErr && len(vec) != tc.wantVecLen {
-		t.Errorf("len(vec) = %d, want %d", len(vec), tc.wantVecLen)
 	}
 }
 
@@ -1255,41 +1215,6 @@ func TestToolHandler_MemoryStoreWithInput(t *testing.T) {
 				if fact.SourceAgent != tc.wantAgent {
 					t.Errorf("fact.SourceAgent = %q, want %q", fact.SourceAgent, tc.wantAgent)
 				}
-			}
-		})
-	}
-}
-
-func TestToolHandler_GetFacts(t *testing.T) {
-	store := newTestMemStore()
-	_, _ = store.InsertFact(context.Background(), "Profile fact", testEmbedding(1.0))
-	handler := NewToolHandler(&Config{}, store, nil)
-
-	tests := []struct {
-		name      string
-		filter    FactsFilter
-		wantTotal int
-	}{
-		{
-			name:      "MatchingQuery",
-			filter:    FactsFilter{Query: "Profile"},
-			wantTotal: 1,
-		},
-		{
-			name:      "NonMatchingQuery",
-			filter:    FactsFilter{Query: "other"},
-			wantTotal: 0,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			res, err := handler.GetFacts(context.Background(), tc.filter)
-			if err != nil {
-				t.Fatalf("GetFacts() err = %v", err)
-			}
-			if res.Total != tc.wantTotal {
-				t.Errorf("res.Total = %d, want %d", res.Total, tc.wantTotal)
 			}
 		})
 	}

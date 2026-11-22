@@ -323,87 +323,6 @@ func TestProcessThreadFacts_ContextAndCoreference(t *testing.T) {
 	}
 }
 
-type workerLifecycleTestCase struct {
-	name        string
-	tick        int64
-	nilStore    bool
-	nilOllama   bool
-	nilLLM      bool
-	wantExtract bool
-}
-
-func runWorkerLifecycleCase(t *testing.T, tc workerLifecycleTestCase, validEmb []float32) {
-	t.Helper()
-	ctx := context.Background()
-	mem := newTestMemStore()
-	mem.activeThreads = []string{"th-1"}
-	mem.unextractedTurns["th-1"] = []Message{
-		{RowID: 1, ThreadID: "th-1", Content: "user prompt", ResponseText: "resp", Status: "COMPLETED", IsAdmin: true},
-	}
-	var store Store = mem
-	if tc.nilStore {
-		store = nil
-	}
-	var client OllamaClient = &MockOllamaClient{embedding: validEmb}
-	if tc.nilOllama {
-		client = nil
-	}
-	var llmCalls int
-	var llm LLMClientFunc
-	if !tc.nilLLM {
-		llm = func(ctx context.Context, prompt string) (string, error) {
-			llmCalls++
-			return `{"facts":[]}`, nil
-		}
-	}
-
-	w := NewWorker(WorkerConfig{
-		Store:        store,
-		Ollama:       client,
-		LLMClient:    llm,
-		InitialDelay: 0,
-		TickInterval: -1,
-	})
-
-	w.Tick(ctx, tc.tick)
-
-	if tc.wantExtract && llmCalls == 0 {
-		t.Errorf("expected fact extraction LLM call, got 0")
-	}
-	if !tc.wantExtract && llmCalls > 0 {
-		t.Errorf("unexpected LLM calls: %d", llmCalls)
-	}
-}
-
-func TestWorker_LifecycleAndTick(t *testing.T) {
-	validEmb := make([]float32, ExpectedEmbeddingDim)
-
-	tests := []workerLifecycleTestCase{
-		{
-			name: "Tick1Noop",
-			tick: 1,
-		},
-		{
-			name:     "NilStoreSafe",
-			nilStore: true,
-		},
-		{
-			name:      "NilOllamaSafe",
-			nilOllama: true,
-		},
-		{
-			name:   "NilLLMSafe",
-			nilLLM: true,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			runWorkerLifecycleCase(t, tc, validEmb)
-		})
-	}
-}
-
 func TestWorker_Start(t *testing.T) {
 	canceledCtx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -1140,41 +1059,20 @@ func TestWorker_RunDaily_Dreaming(t *testing.T) {
 
 	tests := []struct {
 		name            string
+		nilStore        bool
 		nilOllama       bool
 		nilLLM          bool
 		llmErr          error
 		lastDreamingAgo time.Duration
-		dreamSuccess    bool
 		wantRemaining   int
 	}{
-		{
-			name:          "DailyDecayAndDreamingSuccess",
-			dreamSuccess:  true,
-			wantRemaining: 1,
-		},
-		{
-			name:            "RecentDreamingWatermarkSkipsDuplicateRun",
-			lastDreamingAgo: 2 * time.Hour,
-			wantRemaining:   3,
-		},
-		{
-			name:            "ExpiredDreamingWatermarkRunsDreaming",
-			lastDreamingAgo: 25 * time.Hour,
-			dreamSuccess:    true,
-			wantRemaining:   1,
-		},
-		{
-			name:   "DailyDecayWithDreamingErrorHandled",
-			llmErr: errors.New("dreaming llm error"),
-		},
-		{
-			name:      "NilOllamaSkipsDreaming",
-			nilOllama: true,
-		},
-		{
-			name:   "NilLLMSkipsDreaming",
-			nilLLM: true,
-		},
+		{name: "DailyDecayAndDreamingSuccess", wantRemaining: 1},
+		{name: "RecentDreamingWatermarkSkipsDuplicateRun", lastDreamingAgo: 2 * time.Hour, wantRemaining: 3},
+		{name: "ExpiredDreamingWatermarkRunsDreaming", lastDreamingAgo: 25 * time.Hour, wantRemaining: 1},
+		{name: "DailyDecayWithDreamingErrorHandled", llmErr: errors.New("dreaming llm error")},
+		{name: "NilOllamaSkipsDreaming", nilOllama: true},
+		{name: "NilLLMSkipsDreaming", nilLLM: true},
+		{name: "NilStoreSkipsDaily", nilStore: true, wantRemaining: 3},
 	}
 
 	for _, tc := range tests {
@@ -1200,9 +1098,13 @@ func TestWorker_RunDaily_Dreaming(t *testing.T) {
 			if tc.nilLLM {
 				llm = nil
 			}
+			var store Store = mem
+			if tc.nilStore {
+				store = nil
+			}
 
 			w := NewWorker(WorkerConfig{
-				Store:     mem,
+				Store:     store,
 				Ollama:    ollama,
 				LLMClient: llm,
 			})

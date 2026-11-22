@@ -964,16 +964,14 @@ invalid yaml without name or closing
 type planSkillConsolidationCase struct {
 	name              string
 	pending           []ProceduralCandidate
-	diskSkills        []DiskSkill
 	wantBatches       int
 	wantActions       []string
 	wantDomains       []string
 	wantCandCount     []int
 	wantRequireReview []bool
-	wantSkipped       []int64
 }
 
-func planSkillConsolidationCases(diskSkills []DiskSkill) []planSkillConsolidationCase {
+func planSkillConsolidationCases() []planSkillConsolidationCase {
 	return []planSkillConsolidationCase{
 		{
 			name: "BlockedCoreSkillsRoutedWithRequireReview",
@@ -982,13 +980,11 @@ func planSkillConsolidationCases(diskSkills []DiskSkill) []planSkillConsolidatio
 				testProcCand(2, "writing-plans", "trigger 2", nil, testEmbeddingAt(2, 1.0)),
 				testProcCand(3, "incident-triage", "trigger 3", nil, testEmbeddingAt(2, 1.0)),
 			},
-			diskSkills:        diskSkills,
 			wantBatches:       2,
 			wantActions:       []string{"EDIT", "CREATE"},
 			wantDomains:       []string{"discord", "discord"},
 			wantCandCount:     []int{1, 2},
 			wantRequireReview: []bool{true, true},
-			wantSkipped:       nil,
 		},
 		{
 			name: "CaseA_LoadedSkillMatchTwoCandidates",
@@ -996,7 +992,6 @@ func planSkillConsolidationCases(diskSkills []DiskSkill) []planSkillConsolidatio
 				testProcCand(10, "ha-ops", "trigger 1", nil, nil),
 				testProcCand(11, "ha-ops", "trigger 2", nil, nil),
 			},
-			diskSkills:        diskSkills,
 			wantBatches:       1,
 			wantActions:       []string{"EDIT"},
 			wantDomains:       []string{"discord"},
@@ -1008,7 +1003,6 @@ func planSkillConsolidationCases(diskSkills []DiskSkill) []planSkillConsolidatio
 			pending: []ProceduralCandidate{
 				testProcCand(20, "ha-ops", "trigger with avoid", []string{"do not do this"}, nil),
 			},
-			diskSkills:        diskSkills,
 			wantBatches:       1,
 			wantActions:       []string{"EDIT"},
 			wantDomains:       []string{"discord"},
@@ -1020,7 +1014,6 @@ func planSkillConsolidationCases(diskSkills []DiskSkill) []planSkillConsolidatio
 			pending: []ProceduralCandidate{
 				testProcCand(30, "ha-ops", "single candidate no avoid", nil, nil),
 			},
-			diskSkills:  diskSkills,
 			wantBatches: 0,
 		},
 		{
@@ -1028,7 +1021,6 @@ func planSkillConsolidationCases(diskSkills []DiskSkill) []planSkillConsolidatio
 			pending: []ProceduralCandidate{
 				testProcCand(40, "", "routing miss trigger", nil, testEmbedding2D(0.80, 0.60)),
 			},
-			diskSkills:        diskSkills,
 			wantBatches:       1,
 			wantActions:       []string{"EDIT"},
 			wantDomains:       []string{"discord"},
@@ -1040,7 +1032,6 @@ func planSkillConsolidationCases(diskSkills []DiskSkill) []planSkillConsolidatio
 			pending: []ProceduralCandidate{
 				testProcCand(45, "unknown-skill", "routing miss trigger 2", nil, testEmbedding2D(0.60, 0.80)),
 			},
-			diskSkills:        diskSkills,
 			wantBatches:       1,
 			wantActions:       []string{"EDIT"},
 			wantDomains:       []string{"common"},
@@ -1053,7 +1044,6 @@ func planSkillConsolidationCases(diskSkills []DiskSkill) []planSkillConsolidatio
 				testProcCand(50, "", "novel workflow step 1", nil, testEmbeddingAt(2, 1.0)),
 				testProcCand(51, "", "novel workflow step 2", nil, testEmbeddingAt(2, 1.0)),
 			},
-			diskSkills:        diskSkills,
 			wantBatches:       1,
 			wantActions:       []string{"CREATE"},
 			wantDomains:       []string{"discord"},
@@ -1068,13 +1058,11 @@ func planSkillConsolidationCases(diskSkills []DiskSkill) []planSkillConsolidatio
 				{ID: 57, Domain: "discord", Trigger: "find flag", Steps: []string{"pass -maxdepth 3"}, Embedding: testEmbeddingAt(2, 1.0)},
 				{ID: 58, Domain: "discord", Trigger: "find limit", Steps: []string{"pass -maxdepth 4"}, Embedding: testEmbeddingAt(2, 1.0)},
 			},
-			diskSkills:  diskSkills,
 			wantBatches: 0,
 		},
 		{
 			name:              "CaseD_ShortCandidatesFiveRepeatsEmitAlertBatch",
 			pending:           makeProceduralCandidateBatch(71, 5),
-			diskSkills:        diskSkills,
 			wantBatches:       1,
 			wantActions:       []string{"ALERT"},
 			wantDomains:       []string{"discord"},
@@ -1087,7 +1075,6 @@ func planSkillConsolidationCases(diskSkills []DiskSkill) []planSkillConsolidatio
 				testProcCand(60, "", "cand a", nil, testEmbeddingAt(2, 1.0)),
 				testProcCand(61, "", "cand b", nil, testEmbeddingAt(3, 1.0)),
 			},
-			diskSkills:  diskSkills,
 			wantBatches: 0,
 		},
 		{
@@ -1100,13 +1087,11 @@ func planSkillConsolidationCases(diskSkills []DiskSkill) []planSkillConsolidatio
 				testProcCand(5, "self-improvement", "case c 1", nil, testEmbeddingAt(4, 1.0)),
 				testProcCand(6, "", "case c 2", nil, testEmbeddingAt(4, 1.0)),
 			},
-			diskSkills:        diskSkills,
 			wantBatches:       3,
 			wantActions:       []string{"EDIT", "EDIT", "CREATE"},
 			wantDomains:       []string{"discord", "common", "discord"},
 			wantCandCount:     []int{2, 1, 2},
 			wantRequireReview: []bool{false, false, true},
-			wantSkipped:       nil,
 		},
 	}
 }
@@ -1132,23 +1117,13 @@ func assertPlanSkillBatches(t *testing.T, batches []SkillConsolidationBatch, tc 
 	}
 }
 
-func assertPlanSkillSkipped(t *testing.T, skipped []int64, wantSkipped []int64) {
+func runPlanSkillConsolidationCase(t *testing.T, tc planSkillConsolidationCase, diskSkills []DiskSkill) {
 	t.Helper()
-	if len(skipped) != len(wantSkipped) {
-		t.Fatalf("skipped len = %d, want %d", len(skipped), len(wantSkipped))
-	}
-	for i, wantID := range wantSkipped {
-		if skipped[i] != wantID {
-			t.Errorf("skipped[%d] = %d, want %d", i, skipped[i], wantID)
-		}
-	}
-}
-
-func runPlanSkillConsolidationCase(t *testing.T, tc planSkillConsolidationCase) {
-	t.Helper()
-	batches, skipped := PlanSkillConsolidation(tc.pending, tc.diskSkills)
+	batches, skipped := PlanSkillConsolidation(tc.pending, diskSkills)
 	assertPlanSkillBatches(t, batches, tc)
-	assertPlanSkillSkipped(t, skipped, tc.wantSkipped)
+	if len(skipped) != 0 {
+		t.Errorf("skipped = %v, want none", skipped)
+	}
 }
 
 func TestPlanSkillConsolidation(t *testing.T) {
@@ -1156,10 +1131,10 @@ func TestPlanSkillConsolidation(t *testing.T) {
 	skillB := testDiskSkill("deploy-flow", "common", "custom-skills/common/deploy-flow/SKILL.md", "content", testEmbedding2D(0.0, 1.0))
 	diskSkills := []DiskSkill{skillA, skillB}
 
-	tests := planSkillConsolidationCases(diskSkills)
+	tests := planSkillConsolidationCases()
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			runPlanSkillConsolidationCase(t, tc)
+			runPlanSkillConsolidationCase(t, tc, diskSkills)
 		})
 	}
 }
