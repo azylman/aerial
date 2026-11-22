@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -144,6 +145,29 @@ func TestRunApp_Lifecycle(t *testing.T) {
 	}
 }
 
+func TestRunApp_TickerFailurePropagated(t *testing.T) {
+	origOpenDBFn := openDBFn
+	openDBFn = func(ctx context.Context, cfg *config.Config) (*sql.DB, error) {
+		return testutil.OpenSQLiteTestDB(cfg.DatabaseURL) //nolint:contextcheck // test sqlite opener takes no ctx (frozen testutil seam); wrapper must match the openDBFn signature.
+	}
+	defer func() { openDBFn = origOpenDBFn }()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	tempDB := filepath.Join(t.TempDir(), "runapp_ticker_err.db")
+	port := freeLoopbackPort(t)
+
+	err := RunApp(ctx, &config.Config{
+		Port:        port,
+		DatabaseURL: tempDB,
+		EriURL:      "http://127.0.0.1:59484",
+		RestatePort: "invalid-port-name",
+	})
+	if err == nil {
+		t.Fatal("expected RunApp to return error when Restate server cannot start, got nil")
+	}
+}
+
 // freeLoopbackPort returns a port the kernel just handed out on 127.0.0.1:0;
 // RunApp binds ":"+Port itself, so the test cannot pass a listener in.
 func freeLoopbackPort(t *testing.T) string {
@@ -208,6 +232,70 @@ func TestHaro_EventsConsumerIntegration(t *testing.T) {
 	awaitBusHandled(t, wrapped.Handled, "event delivery")
 
 	verifyTriggerState(ctx, t, db, ev, false)
+}
+
+func TestHaro_EventsConsumerIntegration_RestateIngress(t *testing.T) {
+	db := setupTestDB(t.Context(), t)
+	ctx := context.Background()
+
+	_ = store.InsertEventTrigger(ctx, db, model.EventTrigger{
+		ID:        "trig-restate-1",
+		ChannelID: "100000000000000001",
+		Source:    "flux",
+		Target:    "aerial",
+		EventType: "sync_success",
+		Prompt:    "Deploy succeeded",
+		Effort:    "low",
+	})
+
+	var capturedPath string
+	var capturedKey string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedPath = r.URL.Path
+		capturedKey = r.Header.Get("Idempotency-Key")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	mockDisp := &mockDispatcher{response: dispatch.PromptDispatchResponse{Status: "ok", MessageID: "msg-ext-int"}}
+	s := server.NewServer(tools.NewToolHandler(&config.Config{DatabaseURL: ":memory:"}, db), mockDisp)
+
+	memBus := pubsub.NewMemoryBus()
+	defer memBus.Close()
+
+	if err := pubsub.EnsureCoreStreams(ctx, memBus); err != nil {
+		t.Fatalf("EnsureCoreStreams: %v", err)
+	}
+
+	wrapped := &pubsubtest.FaultBus{Bus: memBus, Handled: make(chan error, 1)}
+	bus := initHaroJetStreamWithFactory(ctx, s, db, "nats://mock", func(_ context.Context, _ string) (pubsub.Bus, error) {
+		return wrapped, nil
+	}, srv.URL)
+	if bus == nil {
+		t.Fatal("expected non-nil bus")
+	}
+
+	ev := pubsub.ExternalEvent{
+		EventID:       "ev-restate-1",
+		Source:        "flux",
+		EventType:     "sync_success",
+		Targets:       []string{"aerial"},
+		ContextHeader: "Deployment update",
+	}
+	if err := memBus.Publish(ctx, "aerial.events.flux.sync_success", "ev-1", ev); err != nil {
+		t.Fatalf("Publish: %v", err)
+	}
+
+	awaitBusHandled(t, wrapped.Handled, "event delivery")
+
+	wantPath := "/HaroEventWatch/trig-restate-1/Fire"
+	if capturedPath != wantPath {
+		t.Errorf("capturedPath = %q, want %q", capturedPath, wantPath)
+	}
+	wantKey := "haro:event:trig-restate-1:ev-restate-1"
+	if capturedKey != wantKey {
+		t.Errorf("capturedKey = %q, want %q", capturedKey, wantKey)
+	}
 }
 
 // awaitBusHandled waits for one handler result reported by a pubsubtest.FaultBus

@@ -3,6 +3,8 @@ package tools
 import (
 	"context"
 	"database/sql"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -547,5 +549,103 @@ func TestToolHandler_CancelSchedule(t *testing.T) {
 				t.Fatalf("CancelSchedule %s = %+v, err: %v", tc.id, out, err)
 			}
 		})
+	}
+}
+
+func TestToolHandler_RestateArmingAndCancelling(t *testing.T) {
+	t.Parallel()
+	db := openToolsTestDB(t)
+	ctx := context.Background()
+
+	var capturedPaths []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedPaths = append(capturedPaths, r.URL.Path)
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer srv.Close()
+
+	cfg := &config.Config{
+		DatabaseURL:       ":memory:",
+		Timezone:          "UTC",
+		RestateIngressURL: srv.URL,
+	}
+	h := NewToolHandler(cfg, db)
+	h.httpClient = srv.Client()
+
+	// 1. ScheduleRecurring arms
+	recOut, err := h.ScheduleRecurring(ctx, ScheduleRecurringArgs{
+		ChannelID:      "100000000000000001",
+		CronExpression: "0 * * * *",
+		Prompt:         "Prompt recurring",
+	})
+	if err != nil || recOut.ScheduleID == "" {
+		t.Fatalf("ScheduleRecurring error: %v", err)
+	}
+
+	// 2. ScheduleOnce arms
+	onceOut, err := h.ScheduleOnce(ctx, ScheduleOnceArgs{
+		ThreadID: "100000000000000001",
+		Prompt:   "Prompt once",
+		RunAt:    "15m",
+	})
+	if err != nil || onceOut.ScheduleID == "" {
+		t.Fatalf("ScheduleOnce error: %v", err)
+	}
+
+	// 3. UpdateCronSchedule (enabled) arms
+	newExpr := "*/10 * * * *"
+	upOut, err := h.UpdateCronSchedule(ctx, UpdateCronScheduleArgs{
+		ScheduleID:     recOut.ScheduleID,
+		CronExpression: &newExpr,
+	})
+	if err != nil || upOut.Status != "success" {
+		t.Fatalf("UpdateCronSchedule error: %v", err)
+	}
+
+	// 4. UpdateCronSchedule on disabled schedule cancels
+	_ = store.InsertCronSchedule(ctx, db, model.CronSchedule{
+		ID:        "c-disabled-1",
+		TargetID:  "100000000000000001",
+		CronExpr:  "0 * * * *",
+		Prompt:    "Disabled prompt",
+		NextRunAt: time.Now().UTC().Add(time.Hour),
+		Enabled:   false,
+	})
+	upDisOut, err := h.UpdateCronSchedule(ctx, UpdateCronScheduleArgs{
+		ScheduleID:     "c-disabled-1",
+		CronExpression: &newExpr,
+	})
+	if err != nil || upDisOut.Status != "success" {
+		t.Fatalf("UpdateCronSchedule disabled error: %v", err)
+	}
+
+	// 5. CancelSchedule cancels
+	canOut, err := h.CancelSchedule(ctx, CancelScheduleArgs{ScheduleID: recOut.ScheduleID})
+	if err != nil || canOut.Status != "success" {
+		t.Fatalf("CancelSchedule error: %v", err)
+	}
+
+	wantRecArm := "/HaroSchedule/" + recOut.ScheduleID + "/Arm/send"
+	wantOnceArm := "/HaroSchedule/" + onceOut.ScheduleID + "/Arm/send"
+	wantDisabledCancel := "/HaroSchedule/c-disabled-1/Cancel/send"
+	wantRecCancel := "/HaroSchedule/" + recOut.ScheduleID + "/Cancel/send"
+
+	if len(capturedPaths) != 5 {
+		t.Fatalf("captured %d requests, want 5", len(capturedPaths))
+	}
+	if capturedPaths[0] != wantRecArm {
+		t.Errorf("req 0 path = %q, want %q", capturedPaths[0], wantRecArm)
+	}
+	if capturedPaths[1] != wantOnceArm {
+		t.Errorf("req 1 path = %q, want %q", capturedPaths[1], wantOnceArm)
+	}
+	if capturedPaths[2] != wantRecArm {
+		t.Errorf("req 2 path = %q, want %q", capturedPaths[2], wantRecArm)
+	}
+	if capturedPaths[3] != wantDisabledCancel {
+		t.Errorf("req 3 path = %q, want %q", capturedPaths[3], wantDisabledCancel)
+	}
+	if capturedPaths[4] != wantRecCancel {
+		t.Errorf("req 4 path = %q, want %q", capturedPaths[4], wantRecCancel)
 	}
 }

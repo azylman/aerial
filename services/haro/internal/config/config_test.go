@@ -119,75 +119,99 @@ func TestLoadConfig_URLResolution(t *testing.T) {
 	_ = os.WriteFile(pathWithRestate, []byte("port: '4005'\ntimezone: 'UTC'\neri_url: 'http://yaml.eri:8088/'\nvanadis_url: 'http://yaml.vanadis:4025/'\nrestate_url: 'http://yaml.restate:8080/'\nagent_name: 'agent-alpha'\n"), 0o644)
 
 	tests := []struct {
-		name           string
-		path           string
-		envEri         string
-		envVanadis     string
-		envRestate     string
-		envAgent       string
-		envDB          string
-		wantErr        bool
-		wantEriURL     string
-		wantVanadisURL string
-		wantRestateURL string
-		wantAgentName  string
+		name             string
+		path             string
+		envEri           string
+		envVanadis       string
+		envRestate       string
+		envRestatePort   string
+		envRestateAdmin  string
+		envRestateAdv    string
+		envAgent         string
+		envDB            string
+		wantErr          bool
+		wantEriURL       string
+		wantVanadisURL   string
+		wantRestateURL   string
+		wantRestatePort  string
+		wantRestateAdmin string
+		wantRestateAdv   string
+		wantAgentName    string
 	}{
 		{
-			name:           "env eri url takes precedence over yaml",
-			path:           pathWithBoth,
-			envEri:         "http://eri.aerial:9001/",
-			envVanadis:     "",
-			envDB:          "postgres://localhost/db",
-			wantEriURL:     "http://eri.aerial:9001",
-			wantVanadisURL: "http://yaml.vanadis:4025",
-			wantRestateURL: "",
-			wantAgentName:  "aerial",
+			name:             "env eri url takes precedence over yaml",
+			path:             pathWithBoth,
+			envEri:           "http://eri.aerial:9001/",
+			envVanadis:       "",
+			envDB:            "postgres://localhost/db",
+			wantEriURL:       "http://eri.aerial:9001",
+			wantVanadisURL:   "http://yaml.vanadis:4025",
+			wantRestateURL:   "http://restate.aerial:8080",
+			wantRestatePort:  "9080",
+			wantRestateAdmin: "http://restate.aerial:9070",
+			wantRestateAdv:   "http://haro.default.svc.cluster.local:9080",
+			wantAgentName:    "aerial",
 		},
 		{
-			name:           "env vanadis url takes precedence over yaml",
-			path:           pathWithBoth,
-			envEri:         "",
-			envVanadis:     "http://env.vanadis:4025/",
-			envDB:          "postgres://localhost/db",
-			wantEriURL:     "http://yaml.eri:8088",
-			wantVanadisURL: "http://env.vanadis:4025",
-			wantRestateURL: "",
-			wantAgentName:  "aerial",
+			name:             "env vanadis url takes precedence over yaml",
+			path:             pathWithBoth,
+			envEri:           "",
+			envVanadis:       "http://env.vanadis:4025/",
+			envDB:            "postgres://localhost/db",
+			wantEriURL:       "http://yaml.eri:8088",
+			wantVanadisURL:   "http://env.vanadis:4025",
+			wantRestateURL:   "http://restate.aerial:8080",
+			wantRestatePort:  "9080",
+			wantRestateAdmin: "http://restate.aerial:9070",
+			wantRestateAdv:   "http://haro.default.svc.cluster.local:9080",
+			wantAgentName:    "aerial",
 		},
 		{
-			name:           "yaml urls used when env empty",
-			path:           pathWithBoth,
-			envEri:         "",
-			envVanadis:     "",
-			envDB:          "postgres://localhost/db",
-			wantEriURL:     "http://yaml.eri:8088",
-			wantVanadisURL: "http://yaml.vanadis:4025",
-			wantRestateURL: "",
-			wantAgentName:  "aerial",
+			name:             "yaml urls used when env empty",
+			path:             pathWithBoth,
+			envEri:           "",
+			envVanadis:       "",
+			envDB:            "postgres://localhost/db",
+			wantEriURL:       "http://yaml.eri:8088",
+			wantVanadisURL:   "http://yaml.vanadis:4025",
+			wantRestateURL:   "http://restate.aerial:8080",
+			wantRestatePort:  "9080",
+			wantRestateAdmin: "http://restate.aerial:9070",
+			wantRestateAdv:   "http://haro.default.svc.cluster.local:9080",
+			wantAgentName:    "aerial",
 		},
 		{
-			name:           "restate url and agent name loaded from yaml",
-			path:           pathWithRestate,
-			envEri:         "",
-			envVanadis:     "",
-			envDB:          "postgres://localhost/db",
-			wantEriURL:     "http://yaml.eri:8088",
-			wantVanadisURL: "http://yaml.vanadis:4025",
-			wantRestateURL: "http://yaml.restate:8080",
-			wantAgentName:  "agent-alpha",
+			name:             "restate url and agent name loaded from yaml",
+			path:             pathWithRestate,
+			envEri:           "",
+			envVanadis:       "",
+			envDB:            "postgres://localhost/db",
+			wantEriURL:       "http://yaml.eri:8088",
+			wantVanadisURL:   "http://yaml.vanadis:4025",
+			wantRestateURL:   "http://yaml.restate:8080",
+			wantRestatePort:  "9080",
+			wantRestateAdmin: "http://restate.aerial:9070",
+			wantRestateAdv:   "http://haro.default.svc.cluster.local:9080",
+			wantAgentName:    "agent-alpha",
 		},
 		{
-			name:           "env restate url and agent name take precedence over yaml",
-			path:           pathWithRestate,
-			envEri:         "",
-			envVanadis:     "",
-			envRestate:     "http://env.restate:8080/",
-			envAgent:       "agent-beta",
-			envDB:          "postgres://localhost/db",
-			wantEriURL:     "http://yaml.eri:8088",
-			wantVanadisURL: "http://yaml.vanadis:4025",
-			wantRestateURL: "http://env.restate:8080",
-			wantAgentName:  "agent-beta",
+			name:             "env restate url and agent name take precedence over yaml",
+			path:             pathWithRestate,
+			envEri:           "",
+			envVanadis:       "",
+			envRestate:       "http://env.restate:8080/",
+			envRestatePort:   "9099",
+			envRestateAdmin:  "http://admin.restate:9070/",
+			envRestateAdv:    "http://adv.restate:9080/",
+			envAgent:         "agent-beta",
+			envDB:            "postgres://localhost/db",
+			wantEriURL:       "http://yaml.eri:8088",
+			wantVanadisURL:   "http://yaml.vanadis:4025",
+			wantRestateURL:   "http://env.restate:8080",
+			wantRestatePort:  "9099",
+			wantRestateAdmin: "http://admin.restate:9070",
+			wantRestateAdv:   "http://adv.restate:9080",
+			wantAgentName:    "agent-beta",
 		},
 		{
 			name:       "missing eri url returns error",
@@ -212,6 +236,9 @@ func TestLoadConfig_URLResolution(t *testing.T) {
 			t.Setenv("ERI_URL", tc.envEri)
 			t.Setenv("VANADIS_URL", tc.envVanadis)
 			t.Setenv("RESTATE_INGRESS_URL", tc.envRestate)
+			t.Setenv("RESTATE_PORT", tc.envRestatePort)
+			t.Setenv("RESTATE_ADMIN_URL", tc.envRestateAdmin)
+			t.Setenv("RESTATE_ADVERTISE_URL", tc.envRestateAdv)
 			t.Setenv("AGENT_NAME", tc.envAgent)
 			t.Setenv("DATABASE_URL", tc.envDB)
 			t.Setenv("POSTGRES_URL", "")
@@ -225,9 +252,9 @@ func TestLoadConfig_URLResolution(t *testing.T) {
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("LoadConfig() err = %v, wantErr = %v", err, tc.wantErr)
 			}
-			if !tc.wantErr && (cfg.EriURL != tc.wantEriURL || cfg.VanadisURL != tc.wantVanadisURL || cfg.RestateURL != tc.wantRestateURL || cfg.AgentName != tc.wantAgentName) {
-				t.Errorf("cfg.EriURL = %q (want %q), cfg.VanadisURL = %q (want %q), cfg.RestateURL = %q (want %q), cfg.AgentName = %q (want %q)",
-					cfg.EriURL, tc.wantEriURL, cfg.VanadisURL, tc.wantVanadisURL, cfg.RestateURL, tc.wantRestateURL, cfg.AgentName, tc.wantAgentName)
+			if !tc.wantErr && (cfg.EriURL != tc.wantEriURL || cfg.VanadisURL != tc.wantVanadisURL || cfg.RestateURL != tc.wantRestateURL || cfg.RestatePort != tc.wantRestatePort || cfg.RestateAdminURL != tc.wantRestateAdmin || cfg.RestateAdvertiseURL != tc.wantRestateAdv || cfg.AgentName != tc.wantAgentName) {
+				t.Errorf("cfg.EriURL = %q (want %q), cfg.VanadisURL = %q (want %q), cfg.RestateURL = %q (want %q), cfg.RestatePort = %q (want %q), cfg.RestateAdminURL = %q (want %q), cfg.RestateAdvertiseURL = %q (want %q), cfg.AgentName = %q (want %q)",
+					cfg.EriURL, tc.wantEriURL, cfg.VanadisURL, tc.wantVanadisURL, cfg.RestateURL, tc.wantRestateURL, cfg.RestatePort, tc.wantRestatePort, cfg.RestateAdminURL, tc.wantRestateAdmin, cfg.RestateAdvertiseURL, tc.wantRestateAdv, cfg.AgentName, tc.wantAgentName)
 			}
 		})
 	}

@@ -36,11 +36,11 @@ var (
 	}
 )
 
-func initHaroJetStream(ctx context.Context, srv *server.Server, database *sql.DB, natsURL string) pubsub.Bus {
-	return initHaroJetStreamWithFactory(ctx, srv, database, natsURL, newBusFn)
+func initHaroJetStream(ctx context.Context, srv *server.Server, database *sql.DB, natsURL string, restateIngressURL ...string) pubsub.Bus {
+	return initHaroJetStreamWithFactory(ctx, srv, database, natsURL, newBusFn, restateIngressURL...)
 }
 
-func initHaroJetStreamWithFactory(ctx context.Context, srv *server.Server, database *sql.DB, natsURL string, factory func(ctx context.Context, url string) (pubsub.Bus, error)) pubsub.Bus {
+func initHaroJetStreamWithFactory(ctx context.Context, srv *server.Server, database *sql.DB, natsURL string, factory func(ctx context.Context, url string) (pubsub.Bus, error), restateIngressURL ...string) pubsub.Bus {
 	natsURL = strings.TrimSpace(natsURL)
 	if natsURL == "" {
 		return nil
@@ -67,6 +67,10 @@ func initHaroJetStreamWithFactory(ctx context.Context, srv *server.Server, datab
 	} else {
 		log.Println("[Haro] Subscribed haro-oneshot queue consumer to " + pubsub.SubjectHaroOneShotJob)
 	}
+	var ingressURL string
+	if len(restateIngressURL) > 0 {
+		ingressURL = strings.TrimSpace(restateIngressURL[0])
+	}
 	if srv != nil {
 		if _, err := b.Subscribe(ctx, "aerial.events.>", "haro-events", func(msgCtx context.Context, msg pubsub.Message) error {
 			var ev pubsub.ExternalEvent
@@ -74,11 +78,17 @@ func initHaroJetStreamWithFactory(ctx context.Context, srv *server.Server, datab
 				log.Printf("[Haro] warning: failed to unmarshal external event: %v", unmarshalErr)
 				return nil
 			}
-			if err := srv.HandleExternalEvent(msgCtx, ev); err != nil {
+			var handleErr error
+			if ingressURL != "" {
+				handleErr = ticker.HandleExternalEvent(msgCtx, database, ingressURL, ev)
+			} else {
+				handleErr = srv.HandleExternalEvent(msgCtx, ev)
+			}
+			if handleErr != nil {
 				if msg.NumDelivered() < 5 {
-					return err
+					return handleErr
 				}
-				log.Printf("[Haro] dropping external event %s after %d delivery attempts: %v", ev.EventID, msg.NumDelivered(), err)
+				log.Printf("[Haro] dropping external event %s after %d delivery attempts: %v", ev.EventID, msg.NumDelivered(), handleErr)
 				return nil
 			}
 			return nil
@@ -111,6 +121,8 @@ func RunApp(ctx context.Context, cfg *config.Config) error {
 	}
 	defer httpkit.CloseWarn(database, "database on shutdown")
 
+	errChan := make(chan error, 2)
+
 	// Invariant: ticker goroutine must be bound to a child context and strictly
 	// awaited on all exit paths before closing the database to prevent goroutine leaks
 	// and use-after-close on database shutdown.
@@ -119,7 +131,10 @@ func RunApp(ctx context.Context, cfg *config.Config) error {
 	var tickerWg sync.WaitGroup
 	tickerWg.Go(func() {
 		t := ticker.NewTicker(database, dispatcher, 30*time.Second)
-		t.Start(tickerCtx)
+		t.SetRestateConfig(cfg.RestatePort, cfg.RestateIngressURL, cfg.RestateAdminURL, cfg.RestateAdvertiseURL)
+		if tErr := t.Start(tickerCtx); tErr != nil && !errors.Is(tErr, context.Canceled) {
+			errChan <- tErr
+		}
 	})
 	defer func() {
 		tickerCancel()
@@ -129,7 +144,7 @@ func RunApp(ctx context.Context, cfg *config.Config) error {
 	toolHandler := tools.NewToolHandler(cfg, database)
 	srv := server.NewServer(toolHandler, dispatcher)
 
-	bus := initHaroJetStream(ctx, srv, database, cfg.NATSURL)
+	bus := initHaroJetStream(ctx, srv, database, cfg.NATSURL, cfg.RestateIngressURL)
 	defer func() {
 		if bus != nil {
 			if closeErr := bus.Close(); closeErr != nil {
@@ -144,19 +159,17 @@ func RunApp(ctx context.Context, cfg *config.Config) error {
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
-	errChan := make(chan error, 1)
 	go func() {
 		log.Printf("Scheduler MCP Server listening on port %s (db: %s)", port, pgutil.RedactDSN(cfg.DatabaseURL))
 		if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errChan <- err
 		}
-		close(errChan)
 	}()
 
+	var runErr error
 	select {
 	case <-ctx.Done():
-	case err := <-errChan:
-		return err
+	case runErr = <-errChan:
 	}
 
 	log.Println("Shutting down Scheduler MCP server gracefully...")
@@ -165,10 +178,12 @@ func RunApp(ctx context.Context, cfg *config.Config) error {
 
 	if err := httpServer.Shutdown(shutdownCtx); err != nil {
 		log.Printf("HTTP server shutdown error: %v", err)
-		return err
+		if runErr == nil {
+			return err
+		}
 	}
 	log.Println("Scheduler MCP server stopped cleanly")
-	return nil
+	return runErr
 }
 
 var (

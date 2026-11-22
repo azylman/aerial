@@ -10,7 +10,7 @@ import (
 	"github.com/azylman/aerial/services/haro/internal/model"
 )
 
-func verifyScheduleRun(ctx context.Context, t *testing.T, db *sql.DB, id, wantEffort string, wantEcho bool) {
+func verifyScheduleRun(ctx context.Context, t *testing.T, db *sql.DB, id, wantEffort, wantStatus string, wantEcho bool) {
 	t.Helper()
 	got, err := GetScheduleRun(ctx, db, id)
 	if err != nil {
@@ -18,6 +18,9 @@ func verifyScheduleRun(ctx context.Context, t *testing.T, db *sql.DB, id, wantEf
 	}
 	if got.Effort != wantEffort {
 		t.Errorf("Effort = %q, want %q", got.Effort, wantEffort)
+	}
+	if got.Status != wantStatus {
+		t.Errorf("Status = %q, want %q", got.Status, wantStatus)
 	}
 	if got.StartedAt.IsZero() {
 		t.Error("StartedAt is zero, want defaulted")
@@ -31,16 +34,19 @@ func TestCreateScheduleRun(t *testing.T) {
 	now := time.Date(2026, 3, 4, 5, 6, 7, 0, time.UTC)
 	tests := []struct {
 		name       string
+		seedRow    model.ScheduleRun
 		row        model.ScheduleRun
 		nilDB      bool
 		wantErr    string
 		wantEffort string
+		wantStatus string
 		wantEcho   bool
 	}{
-		{"full row round trips", model.ScheduleRun{ID: "r-1", ScheduleID: "c-1", ScheduleType: "cron", MessageID: "m", TargetID: "t", ThreadID: "th", Title: "title", Prompt: "p", Status: "completed", StartedAt: now, DurationMs: 42, Error: "", Effort: "HIGH", Model: "m1"}, false, "", "high", true},
-		{"defaults applied", model.ScheduleRun{ID: "r-2", ScheduleID: "c-1", ScheduleType: "cron", Status: "failed", Effort: "bogus"}, false, "", "medium", false},
-		{"empty id errors", model.ScheduleRun{}, false, "run id cannot be empty", "", false},
-		{"nil db errors", model.ScheduleRun{ID: "r-3"}, true, "database is nil", "", false},
+		{"full row round trips", model.ScheduleRun{}, model.ScheduleRun{ID: "r-1", ScheduleID: "c-1", ScheduleType: "cron", MessageID: "m", TargetID: "t", ThreadID: "th", Title: "title", Prompt: "p", Status: "completed", StartedAt: now, DurationMs: 42, Error: "", Effort: "HIGH", Model: "m1"}, false, "", "high", "completed", true},
+		{"idempotent retry updates row", model.ScheduleRun{ID: "r-dup", ScheduleID: "c-1", ScheduleType: "cron", Status: "running", StartedAt: now}, model.ScheduleRun{ID: "r-dup", ScheduleID: "c-1", ScheduleType: "cron", MessageID: "m", TargetID: "t", ThreadID: "th", Title: "title", Prompt: "p", Status: "completed", StartedAt: now, DurationMs: 42, Error: "", Effort: "HIGH", Model: "m1"}, false, "", "high", "completed", true},
+		{"defaults applied", model.ScheduleRun{}, model.ScheduleRun{ID: "r-2", ScheduleID: "c-1", ScheduleType: "cron", Status: "failed", Effort: "bogus"}, false, "", "medium", "failed", false},
+		{"empty id errors", model.ScheduleRun{}, model.ScheduleRun{}, false, "run id cannot be empty", "", "", false},
+		{"nil db errors", model.ScheduleRun{}, model.ScheduleRun{ID: "r-3"}, true, "database is nil", "", "", false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -49,6 +55,11 @@ func TestCreateScheduleRun(t *testing.T) {
 			database := db
 			if tc.nilDB {
 				database = nil
+			}
+			if tc.seedRow.ID != "" && database != nil {
+				if err := CreateScheduleRun(ctx, database, tc.seedRow); err != nil {
+					t.Fatalf("seed CreateScheduleRun err = %v", err)
+				}
 			}
 			if err := CreateScheduleRun(ctx, database, tc.row); err != nil {
 				if tc.wantErr == "" {
@@ -62,7 +73,7 @@ func TestCreateScheduleRun(t *testing.T) {
 			if tc.wantErr != "" {
 				t.Fatalf("CreateScheduleRun err = nil, want %q", tc.wantErr)
 			}
-			verifyScheduleRun(ctx, t, db, tc.row.ID, tc.wantEffort, tc.wantEcho)
+			verifyScheduleRun(ctx, t, db, tc.row.ID, tc.wantEffort, tc.wantStatus, tc.wantEcho)
 		})
 	}
 }
