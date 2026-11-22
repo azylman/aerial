@@ -28,7 +28,7 @@ Whenever a change requires **≥ 2 PRs**—whether across multiple repositories 
   - Advancement: a merged PR chunk starts the next chunk on merge only when that next chunk is a `"pr"` chunk; if the next chunk is an `"action"` chunk, or the merged PR was the build's last chunk, Vanadis waits for the PR to deploy before advancing or completing the build.
 - **Verdict-Driven Action Chunk Lifecycle & Completion**:
   - An action chunk completes only when its worker calls `complete_chunk(chunk_id, dispatch_id, summary)` with a summary of the PASS evidence. A turn that ends without a verdict, or that hits eri's restart cap, is resumed automatically (up to 12 times) with a checkpoint prompt, then failed as a resumable chunk failure that wakes the thread; only its dependents wait.
-  - Turns stop at about 1h, so write chunk instructions that time-box each wait to 45 min per turn and keep resumable evidence files so a resumed turn continues from checkpoints instead of restarting.
+  - Turns stop at `turn_timeout_minutes` (default 2h), but still write chunk instructions that time-box each wait to 45 min per turn and keep resumable evidence files so a resumed turn continues from checkpoints instead of restarting.
   - A repair PR's deploy returns the chunk to running; it never completes the chunk.
   - In Completed Chunks Ledgers, completed action chunks render as:
     `- [Chunk X/Y] <Title> (action, completed)`

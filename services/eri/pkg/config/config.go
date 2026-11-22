@@ -366,6 +366,35 @@ type ConfigData struct {
 	// TurnQueue is only cross-checked by eri-restate against its pod annotation, which alone
 	// selects the bound handler set ("" or "legacy" -> legacy, "coordinator" -> coordinator).
 	TurnQueue string `yaml:"turn_queue,omitempty" json:"turn_queue,omitempty"`
+	// TurnTimeoutMinutes caps one turn attempt; 0 (unset) resolves to DefaultTurnTimeoutMinutes.
+	// Read it through TurnTimeout, never directly.
+	TurnTimeoutMinutes int `yaml:"turn_timeout_minutes,omitempty" json:"turn_timeout_minutes,omitempty"`
+}
+
+// Turn attempt cap bounds for ConfigData.TurnTimeoutMinutes. Restate service timeouts that can
+// bound a running turn derive from MaxTurnTimeoutMinutes, because service options are fixed at
+// registration and cannot follow the live value.
+const (
+	DefaultTurnTimeoutMinutes = 120
+	MaxTurnTimeoutMinutes     = 240
+)
+
+// ParseTurnTimeoutMinutes validates a turn_timeout_minutes value: 0 means unset, negative or
+// above MaxTurnTimeoutMinutes is rejected.
+func ParseTurnTimeoutMinutes(v int) error {
+	if v < 0 || v > MaxTurnTimeoutMinutes {
+		return fmt.Errorf("invalid turn_timeout_minutes %d: want 0 (default %d) to %d", v, DefaultTurnTimeoutMinutes, MaxTurnTimeoutMinutes)
+	}
+	return nil
+}
+
+// TurnTimeout returns the per-attempt turn cap in minutes, resolving unset to
+// DefaultTurnTimeoutMinutes. A nil receiver also resolves to the default.
+func (c *ConfigData) TurnTimeout() int {
+	if c == nil || c.TurnTimeoutMinutes <= 0 {
+		return DefaultTurnTimeoutMinutes
+	}
+	return min(c.TurnTimeoutMinutes, MaxTurnTimeoutMinutes)
 }
 
 // Turn queue modes selected by eri-restate's pod annotation and cross-checked against
@@ -590,6 +619,7 @@ func (c *ConfigData) UnmarshalYAML(value *yaml.Node) error {
 		PushScan                  PushScanConfig           `yaml:"push_scan"`
 		EgressScan                EgressScanConfig         `yaml:"egress_scan"`
 		TurnQueue                 string                   `yaml:"turn_queue"`
+		TurnTimeoutMinutes        int                      `yaml:"turn_timeout_minutes"`
 	}
 
 	var raw rawConfigHelper
@@ -630,6 +660,10 @@ func (c *ConfigData) UnmarshalYAML(value *yaml.Node) error {
 		return err
 	}
 	c.TurnQueue = strings.TrimSpace(raw.TurnQueue)
+	if err := ParseTurnTimeoutMinutes(raw.TurnTimeoutMinutes); err != nil {
+		return err
+	}
+	c.TurnTimeoutMinutes = raw.TurnTimeoutMinutes
 	c.APIKey = raw.APIKey
 	c.HarnessAPIKey = raw.HarnessAPIKey
 	c.SystemPrompt = raw.SystemPrompt
