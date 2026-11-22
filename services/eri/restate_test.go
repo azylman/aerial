@@ -11,7 +11,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bwmarrin/discordgo"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -727,77 +726,6 @@ func TestHandleCancelDispatch_RestateCutover(t *testing.T) {
 	}
 }
 
-func TestHandleInternalDiscordInteraction_RestateCutover(t *testing.T) {
-	tests := []struct {
-		name        string
-		body        string
-		statusCode  int
-		serverResp  string
-		wantCode    int
-		wantPathSub string
-		wantSubstr  string
-	}{
-		{
-			name:        "interrupt application command",
-			body:        `{"id":"int-1","type":2,"channel_id":"123456789012345678","user":{"id":"admin-1","username":"alice"},"data":{"name":"interrupt"}}`,
-			statusCode:  http.StatusOK,
-			serverResp:  `{"status":"ok"}`,
-			wantCode:    http.StatusOK,
-			wantPathSub: "/ThreadSession/123456789012345678/CancelTurn",
-			wantSubstr:  `"status":"ok"`,
-		},
-		{
-			name:        "stop_turn message component",
-			body:        `{"id":"int-3","type":3,"channel_id":"123456789012345678","user":{"id":"admin-1","username":"alice"},"data":{"custom_id":"stop_turn:msg-1"}}`,
-			statusCode:  http.StatusOK,
-			serverResp:  `{"status":"ok"}`,
-			wantCode:    http.StatusOK,
-			wantPathSub: "/ThreadSession/123456789012345678/CancelTurn",
-			wantSubstr:  `"status":"ok"`,
-		},
-		{
-			name:        "interrupt failure propagates 500",
-			body:        `{"id":"int-4","type":2,"channel_id":"123456789012345678","user":{"id":"admin-1","username":"alice"},"data":{"name":"interrupt"}}`,
-			statusCode:  http.StatusInternalServerError,
-			serverResp:  `{"error":"restate down"}`,
-			wantCode:    http.StatusInternalServerError,
-			wantPathSub: "/ThreadSession/123456789012345678/CancelTurn",
-			wantSubstr:  "Restate control interaction failed",
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			var mu sync.Mutex
-			lastPath := ""
-
-			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				mu.Lock()
-				lastPath = r.URL.EscapedPath()
-				mu.Unlock()
-				w.WriteHeader(tc.statusCode)
-				_, _ = w.Write([]byte(tc.serverResp))
-			}))
-			defer ts.Close()
-
-			client := NewRestateIngressClient(ts.URL, "aerial", ts.Client())
-			orig := activeRestateIngressClient.Swap(client)
-			defer activeRestateIngressClient.Store(orig)
-
-			handler := handleInternalDiscordInteraction(nil, nil)
-			req := httptest.NewRequest(http.MethodPost, "/internal/discord/interaction", strings.NewReader(tc.body))
-			rec := httptest.NewRecorder()
-			handler(rec, req)
-
-			assert.Equal(t, tc.wantCode, rec.Code)
-			assert.Contains(t, rec.Body.String(), tc.wantSubstr)
-			mu.Lock()
-			defer mu.Unlock()
-			assert.Contains(t, lastPath, tc.wantPathSub)
-		})
-	}
-}
-
 func TestHandleVoiceAsk_RestateCutover(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -958,49 +886,6 @@ func TestHandleVoiceAskSSE_RestateNoBusWithPool(t *testing.T) {
 			assert.Contains(t, body, tc.wantEvent)
 			assert.Contains(t, body, tc.wantSubstr)
 			assert.Contains(t, body, "event: done")
-		})
-	}
-}
-
-func TestHandleInteractionViaRestate_NilAndUnhandledInteractions(t *testing.T) {
-	tests := []struct {
-		name        string
-		nilClient   bool
-		serverError bool
-		interaction *discordgo.Interaction
-	}{
-		{name: "nil client", nilClient: true, interaction: &discordgo.Interaction{ChannelID: "123"}},
-		{name: "nil interaction", nilClient: false, interaction: nil},
-		{name: "empty channel id", nilClient: false, interaction: &discordgo.Interaction{ChannelID: " "}},
-		{name: "unhandled command name", nilClient: false, interaction: &discordgo.Interaction{ChannelID: "123", Type: discordgo.InteractionApplicationCommand, Data: discordgo.ApplicationCommandInteractionData{Name: "unknown"}}},
-		{name: "unhandled component custom id", nilClient: false, interaction: &discordgo.Interaction{ChannelID: "123", Type: discordgo.InteractionMessageComponent, Data: discordgo.MessageComponentInteractionData{CustomID: "ignore_me"}}},
-		{name: "interrupt command with server error", nilClient: false, serverError: true, interaction: &discordgo.Interaction{ChannelID: "123", Type: discordgo.InteractionApplicationCommand, Data: discordgo.ApplicationCommandInteractionData{Name: "interrupt"}}},
-		{name: "stop_turn component with server error", nilClient: false, serverError: true, interaction: &discordgo.Interaction{ChannelID: "123", Type: discordgo.InteractionMessageComponent, Data: discordgo.MessageComponentInteractionData{CustomID: "stop_turn:msg-1"}}},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			var client *RestateIngressClient
-			if !tc.nilClient {
-				if tc.serverError {
-					ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-						w.WriteHeader(http.StatusInternalServerError)
-						_, _ = w.Write([]byte(`{"error":"server error"}`))
-					}))
-					defer ts.Close()
-					client = NewRestateIngressClient(ts.URL, "aerial", ts.Client())
-				} else {
-					client = NewRestateIngressClient("http://localhost:8080", "aerial")
-				}
-			}
-			handled, err := handleInteractionViaRestate(context.Background(), client, tc.interaction)
-			if tc.serverError {
-				assert.True(t, handled)
-				assert.Error(t, err)
-			} else {
-				assert.False(t, handled)
-				assert.NoError(t, err)
-			}
 		})
 	}
 }

@@ -954,17 +954,6 @@ func handleInternalDiscordInteraction(store db.Store, pool *queue.WorkerPool) ht
 		}
 
 		ic := &discordgo.InteractionCreate{Interaction: &interaction}
-		if client := resolveRestateClient(); client != nil {
-			handled, restateErr := handleInteractionViaRestate(r.Context(), client, &interaction)
-			if restateErr != nil {
-				writeErr(w, http.StatusInternalServerError, "Restate control interaction failed: "+restateErr.Error())
-				return
-			}
-			if handled {
-				httpkit.WriteJSON(w, http.StatusOK, map[string]string{jsonKeyStatus: "ok"})
-				return
-			}
-		}
 
 		router := activeInteractionRouter.Load()
 		if router == nil {
