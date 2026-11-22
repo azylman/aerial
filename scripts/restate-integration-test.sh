@@ -18,6 +18,7 @@ SHA256_AARCH64="192ccc91466b59b02a5e30130eb277778fc7ee586d64588480c5971b618e358c
 # Packages (relative to services/eri) that carry restateintegration tests.
 PACKAGES=(
     ./pkg/restatetest/...
+    ./pkg/queue/...
 )
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
