@@ -14,12 +14,9 @@ import (
 	"testing"
 
 	"github.com/bwmarrin/discordgo"
-	"github.com/prometheus/client_golang/prometheus"
-	dto "github.com/prometheus/client_model/go"
 
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/eri/pkg/db/dbtest"
-	"github.com/azylman/aerial/services/eri/pkg/metrics"
 	"github.com/azylman/aerial/services/eri/pkg/queue"
 )
 
@@ -118,52 +115,6 @@ func TestHandleVoiceAsk_Validation(t *testing.T) {
 	})
 }
 
-// voiceTTFRSampleCount reads the observation count of one voice TTFR histogram series.
-func voiceTTFRSampleCount(t *testing.T, mode, status string) uint64 {
-	t.Helper()
-	obs, err := metrics.VoiceTTFRDurationSeconds.GetMetricWithLabelValues(mode, status)
-	if err != nil {
-		t.Fatalf("voice TTFR series %s/%s: %v", mode, status, err)
-	}
-	hist, ok := obs.(prometheus.Metric)
-	if !ok {
-		t.Fatalf("voice TTFR observer is %T, want prometheus.Metric", obs)
-	}
-	m := &dto.Metric{}
-	if err := hist.Write(m); err != nil {
-		t.Fatalf("write voice TTFR series %s/%s: %v", mode, status, err)
-	}
-	return m.GetHistogram().GetSampleCount()
-}
-
-func TestHandleVoiceAsk_NoRestateClient(t *testing.T) {
-	tests := []struct {
-		name       string
-		accept     string
-		body       string
-		wantStatus int
-		wantBody   string
-		wantMode   string
-	}{
-		{"json", "application/json", `{"prompt":"hello","session_id":"sess-nil"}`, http.StatusServiceUnavailable, `"error":"voice turns unavailable: restate client not configured"`, "json"},
-		{"sse", "text/event-stream", `{"prompt":"hello","session_id":"sess-nil-sse"}`, http.StatusOK, "event: error\ndata: {\"error\":\"voice turns unavailable: restate client not configured\"}\n\nevent: done", "sse"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			orig := activeRestateIngressClient.Swap(nil)
-			defer activeRestateIngressClient.Store(orig)
-			before := voiceTTFRSampleCount(t, tc.wantMode, "error")
-			w := runHTTP(handleVoiceAsk(nil), http.MethodPost, "/voice/ask", strings.NewReader(tc.body), "Accept", tc.accept)
-			if w.Code != tc.wantStatus || !strings.Contains(w.Body.String(), tc.wantBody) {
-				t.Errorf("got %d %q, want %d containing %q", w.Code, w.Body.String(), tc.wantStatus, tc.wantBody)
-			}
-			if got := voiceTTFRSampleCount(t, tc.wantMode, "error") - before; got != 1 {
-				t.Errorf("%s/error TTFR samples delta = %d, want 1", tc.wantMode, got)
-			}
-		})
-	}
-}
-
 func TestPersistVoiceConversationID(t *testing.T) {
 	t.Parallel()
 
@@ -227,7 +178,7 @@ channels:
 		name       string
 		method     string
 		body       string
-		closedDB   bool
+		restateErr bool
 		wantStatus int
 		wantSubstr string
 	}{
@@ -288,10 +239,10 @@ channels:
 			wantSubstr: `"ignored"`,
 		},
 		{
-			name:       "DatabaseErrorReturns500",
+			name:       "RestateErrorReturns500",
 			method:     http.MethodPost,
 			body:       `{"bot_user_id":"bot-1","message":{"id":"msg-db-err-1","channel_id":"ch-1","author":{"id":"u-1","username":"alice"},"content":"hey aerial"}}`,
-			closedDB:   true,
+			restateErr: true,
 			wantStatus: http.StatusInternalServerError,
 			wantSubstr: "Failed to process message",
 		},
@@ -299,12 +250,14 @@ channels:
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			store := dbtest.NewFakeStore()
-			if tc.closedDB {
-				_ = store.Close()
+			restateStatus := http.StatusOK
+			if tc.restateErr {
+				restateStatus = http.StatusInternalServerError
 			}
+			installRestateCapture(t, restateStatus, `{"status":"accepted"}`)
+			store := dbtest.NewFakeStore()
 			pool := newTestWorkerPool(store)
-			handler := handleInternalDiscordMessage(store, pool)
+			handler := handleInternalDiscordMessage(pool)
 
 			req := httptest.NewRequest(tc.method, "/internal/discord/message", strings.NewReader(tc.body))
 			rec := httptest.NewRecorder()

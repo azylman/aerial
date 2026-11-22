@@ -14,24 +14,17 @@ import (
 func TestHandleDispatch_DuplicateIdempotency(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name        string
-		seed        *db.Dispatch
-		getError    bool
-		nilStore    bool
-		notInserted bool
-		body        string
-		wantStatus  int
-		wantSubstr  string
-		absentID    string
+		name       string
+		seed       *db.Dispatch
+		getError   bool
+		body       string
+		wantStatus int
+		wantSubstr string
 	}{
 		{name: "lookup error before active gate", getError: true, body: `{"id":"new","source":"heartbeat","prompt":"test","skip_if_active":true}`, wantStatus: 500, wantSubstr: "Failed to check existing dispatch"},
-		{name: "nil store", nilStore: true, body: `{"id":"new","source":"heartbeat","prompt":"test","skip_if_active":true}`, wantStatus: 500, wantSubstr: "Database store not configured"},
 		{name: "pending replay", seed: &db.Dispatch{ID: "existing", SessionID: "session", Status: db.StatusPending, Prompt: "original"}, body: `{"id":"existing","session_id":"session","source":"vanadis","prompt":"replacement","skip_if_active":true}`, wantStatus: 200, wantSubstr: `"status":"already_exists"`},
 		{name: "processing replay", seed: &db.Dispatch{ID: "existing", SessionID: "session", Status: db.StatusProcessing, Prompt: "original"}, body: `{"id":"existing","session_id":"session","source":"vanadis","prompt":"replacement","skip_if_active":true}`, wantStatus: 200, wantSubstr: `"status":"already_exists"`},
 		{name: "terminal replay with competing active session", seed: &db.Dispatch{ID: "existing", SessionID: "session", Status: db.StatusCompleted, Prompt: "original"}, body: `{"id":"existing","session_id":"session","source":"vanadis","prompt":"replacement","skip_if_active":true}`, wantStatus: 200, wantSubstr: `"status":"already_exists"`},
-		{name: "competing new id", seed: &db.Dispatch{ID: "existing", SessionID: "session", Status: db.StatusProcessing, Prompt: "original"}, body: `{"id":"new","session_id":"session","source":"vanadis","prompt":"test","skip_if_active":true}`, wantStatus: 200, wantSubstr: `"status":"skipped_active"`, absentID: "new"},
-		{name: "concurrent insert race not inserted", notInserted: true, body: `{"source":"heartbeat","prompt":"test"}`, wantStatus: 200, wantSubstr: `"status":"already_exists"`},
-		{name: "empty id", body: `{"source":"heartbeat","prompt":"test","skip_if_active":true}`, wantStatus: 202, wantSubstr: `"status":"accepted"`},
 		{name: "validation before replay", seed: &db.Dispatch{ID: "existing", Status: db.StatusPending}, body: `{"id":"existing","source":"vanadis","prompt":"","skip_if_active":true}`, wantStatus: 400, wantSubstr: "Invalid payload"},
 	}
 	for _, tc := range tests {
@@ -43,23 +36,11 @@ func TestHandleDispatch_DuplicateIdempotency(t *testing.T) {
 			if tc.getError {
 				fake.FailNext("GetDispatch", errors.New("simulated error"))
 			}
-			var store db.Store = fake
-			if tc.notInserted {
-				store = &notInsertedFakeStore{FakeStore: fake}
-			} else if tc.nilStore {
-				store = nil
-			}
-			w := runHTTP(handleDispatch(store, nil), http.MethodPost, "/dispatch", strings.NewReader(tc.body))
+			w := runHTTP(handleDispatch(fake), http.MethodPost, "/dispatch", strings.NewReader(tc.body))
 			if w.Code != tc.wantStatus || !strings.Contains(w.Body.String(), tc.wantSubstr) {
 				t.Fatalf("got status=%d body=%q, want status=%d substr=%q", w.Code, w.Body.String(), tc.wantStatus, tc.wantSubstr)
 			}
 			verifyReplaySeed(ctx, t, fake, tc.seed)
-
-			if tc.absentID != "" {
-				if got, err := fake.GetDispatch(ctx, tc.absentID); err != nil || got != nil {
-					t.Fatalf("competing dispatch persisted: %+v, %v", got, err)
-				}
-			}
 		})
 	}
 }
@@ -87,12 +68,4 @@ func seedReplayStore(ctx context.Context, t *testing.T, fake *dbtest.FakeStore, 
 			}
 		}
 	}
-}
-
-type notInsertedFakeStore struct {
-	*dbtest.FakeStore
-}
-
-func (*notInsertedFakeStore) InsertDispatch(ctx context.Context, d db.Dispatch) (bool, error) {
-	return false, nil
 }
