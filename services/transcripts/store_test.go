@@ -3,8 +3,9 @@ package main
 import (
 	"context"
 	"database/sql"
-	"path/filepath"
+	"fmt"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -40,9 +41,14 @@ CREATE TABLE transcript_steps (
     PRIMARY KEY (agent, session_id, step_index)
 );`
 
+var testStoreSeq atomic.Int64
+
 func newTestStore(t *testing.T, stack string) *Store {
 	t.Helper()
-	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "transcripts.db"))
+	// A unique shared-cache in-memory database per fixture: same schema and
+	// queries as a file DB without the per-fixture fsync cost.
+	dsn := fmt.Sprintf("file:transcripts-%d?mode=memory&cache=shared", testStoreSeq.Add(1))
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		t.Fatalf("open sqlite fixture: %v", err)
 	}
@@ -488,18 +494,6 @@ func TestApplyBatchExecFailures(t *testing.T) {
 				t.Errorf("ApplyBatch() err = %v, want substring %q", err, tc.wantSub)
 			}
 		})
-	}
-}
-
-func TestApplyBatchClosedDB(t *testing.T) {
-	t.Parallel()
-	store := newTestStore(t, "aerial")
-	if err := store.db.Close(); err != nil {
-		t.Fatalf("close: %v", err)
-	}
-	epoch := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
-	if _, err := store.ApplyBatch(context.Background(), testBatch("s", epoch, 0, 0, false, false)); err == nil {
-		t.Errorf("expected begin tx error on closed db")
 	}
 }
 

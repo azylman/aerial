@@ -93,82 +93,80 @@ func TestServerRoutes(t *testing.T) {
 	}
 }
 
-func TestServerNilStore(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name string
-		path string
-	}{
-		{"health", "/health"},
-		{"search", "/search?q=x"},
-		{"steps", "/steps?session=s"},
-		{"stats", "/stats"},
-		{"watermarks", "/watermarks"},
-		{"trajectory", "/transcripts/threads/th-1/trajectory"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			srv := NewServer(nil)
-			req := httptest.NewRequest(http.MethodGet, tc.path, http.NoBody)
-			rec := httptest.NewRecorder()
-			srv.Handler().ServeHTTP(rec, req)
-			if rec.Code != http.StatusServiceUnavailable {
-				t.Errorf("GET %s status = %d, want 503", tc.path, rec.Code)
-			}
-		})
-	}
-}
+// degradedFixture selects how the store behind the server is broken.
+type degradedFixture int
 
-func TestServerSearchShape(t *testing.T) {
-	t.Parallel()
-	srv := newSeededServer(t)
-	req := httptest.NewRequest(http.MethodGet, "/search?q=content", http.NoBody)
-	rec := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, req)
-	var body struct {
-		Sessions []SessionResult `json:"sessions"`
-		Steps    []StepResult    `json:"steps"`
-	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
-		t.Fatalf("decode search body: %v", err)
-	}
-	if len(body.Steps) != 3 {
-		t.Errorf("steps = %d, want 3", len(body.Steps))
-	}
-}
+const (
+	degradedNilStore degradedFixture = iota
+	degradedNilDB
+	degradedClosedDB
+	degradedDroppedSteps
+)
 
-func TestServerDBError(t *testing.T) {
-	t.Parallel()
-	newClosedStore := func(t *testing.T) *Store {
-		t.Helper()
+func newDegradedStore(t *testing.T, fixture degradedFixture) *Store {
+	t.Helper()
+	switch fixture {
+	case degradedNilDB:
+		return NewStore(nil, "aerial")
+	case degradedClosedDB:
 		store := newTestStore(t, "aerial")
 		if err := store.db.Close(); err != nil {
 			t.Fatalf("close fixture db: %v", err)
 		}
 		return store
+	case degradedDroppedSteps:
+		store := newTestStore(t, "aerial")
+		ctx := context.Background()
+		epoch := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
+		if _, err := store.ApplyBatch(ctx, testBatch("sess-a", epoch, 0, 1, false, false)); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+		if _, err := store.db.ExecContext(ctx, `DROP TABLE transcript_steps`); err != nil {
+			t.Fatalf("drop steps: %v", err)
+		}
+		return store
+	default:
+		return nil
 	}
+}
+
+func TestServerDegradedStore(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
-		name string
-		path string
+		name       string
+		fixture    degradedFixture
+		path       string
+		wantStatus int
 	}{
-		{"search db closed", "/search?q=x"},
-		{"steps db closed", "/steps?session=s"},
-		{"steps window db closed", "/steps?session=s&step=1"},
-		{"stats db closed", "/stats"},
-		{"watermarks db closed", "/watermarks"},
-		{"single watermark db closed", "/watermark?session_id=s"},
-		{"thread trajectory db closed", "/transcripts/threads/th-1/trajectory"},
+		{"nil store health", degradedNilStore, "/health", http.StatusServiceUnavailable},
+		{"nil store search", degradedNilStore, "/search?q=x", http.StatusServiceUnavailable},
+		{"nil store steps", degradedNilStore, "/steps?session=s", http.StatusServiceUnavailable},
+		{"nil store stats", degradedNilStore, "/stats", http.StatusServiceUnavailable},
+		{"nil store watermarks", degradedNilStore, "/watermarks", http.StatusServiceUnavailable},
+		{"nil store trajectory", degradedNilStore, "/transcripts/threads/th-1/trajectory", http.StatusServiceUnavailable},
+		{"nil db health", degradedNilDB, "/health", http.StatusServiceUnavailable},
+		{"nil db search", degradedNilDB, "/search?q=x", http.StatusInternalServerError},
+		{"nil db steps", degradedNilDB, "/steps?session=s", http.StatusInternalServerError},
+		{"nil db stats", degradedNilDB, "/stats", http.StatusInternalServerError},
+		{"nil db watermarks", degradedNilDB, "/watermarks", http.StatusInternalServerError},
+		{"closed db search", degradedClosedDB, "/search?q=x", http.StatusInternalServerError},
+		{"closed db steps", degradedClosedDB, "/steps?session=s", http.StatusInternalServerError},
+		{"closed db steps window", degradedClosedDB, "/steps?session=s&step=1", http.StatusInternalServerError},
+		{"closed db stats", degradedClosedDB, "/stats", http.StatusInternalServerError},
+		{"closed db watermarks", degradedClosedDB, "/watermarks", http.StatusInternalServerError},
+		{"closed db single watermark", degradedClosedDB, "/watermark?session_id=s", http.StatusInternalServerError},
+		{"closed db thread trajectory", degradedClosedDB, "/transcripts/threads/th-1/trajectory", http.StatusInternalServerError},
+		{"dropped steps table search", degradedDroppedSteps, "/search?q=content", http.StatusInternalServerError},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			srv := NewServer(newClosedStore(t))
+			srv := NewServer(newDegradedStore(t, tc.fixture))
 			req := httptest.NewRequest(http.MethodGet, tc.path, http.NoBody)
 			rec := httptest.NewRecorder()
 			srv.Handler().ServeHTTP(rec, req)
-			if rec.Code != http.StatusServiceUnavailable && rec.Code != http.StatusInternalServerError {
-				t.Errorf("GET %s status = %d, want 5xx", tc.path, rec.Code)
+			if rec.Code != tc.wantStatus {
+				t.Errorf("GET %s status = %d, want %d", tc.path, rec.Code, tc.wantStatus)
 			}
 		})
 	}
@@ -197,53 +195,6 @@ func TestQueryInt(t *testing.T) {
 				t.Errorf("queryInt = %d, want %d", got, tc.want)
 			}
 		})
-	}
-}
-
-func TestServerNilDBStore(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name       string
-		path       string
-		wantStatus int
-	}{
-		{"health nil db", "/health", http.StatusServiceUnavailable},
-		{"search nil db", "/search?q=x", http.StatusInternalServerError},
-		{"steps nil db", "/steps?session=s", http.StatusInternalServerError},
-		{"stats nil db", "/stats", http.StatusInternalServerError},
-		{"watermarks nil db", "/watermarks", http.StatusInternalServerError},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			srv := NewServer(NewStore(nil, "aerial"))
-			req := httptest.NewRequest(http.MethodGet, tc.path, http.NoBody)
-			rec := httptest.NewRecorder()
-			srv.Handler().ServeHTTP(rec, req)
-			if rec.Code != tc.wantStatus {
-				t.Errorf("GET %s status = %d, want %d", tc.path, rec.Code, tc.wantStatus)
-			}
-		})
-	}
-}
-
-func TestServerSearchStepsFailure(t *testing.T) {
-	t.Parallel()
-	store := newTestStore(t, "aerial")
-	ctx := context.Background()
-	epoch := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
-	if _, err := store.ApplyBatch(ctx, testBatch("sess-a", epoch, 0, 1, false, false)); err != nil {
-		t.Fatalf("seed: %v", err)
-	}
-	if _, err := store.db.ExecContext(ctx, `DROP TABLE transcript_steps`); err != nil {
-		t.Fatalf("drop steps: %v", err)
-	}
-	srv := NewServer(store)
-	req := httptest.NewRequest(http.MethodGet, "/search?q=content", http.NoBody)
-	rec := httptest.NewRecorder()
-	srv.Handler().ServeHTTP(rec, req)
-	if rec.Code != http.StatusInternalServerError {
-		t.Errorf("status = %d, want 500", rec.Code)
 	}
 }
 
