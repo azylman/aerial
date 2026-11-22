@@ -70,6 +70,8 @@ type Payload struct {
 	ToolName       string          `json:"tool_name,omitempty"`
 	ToolInput      json.RawMessage `json:"tool_input,omitempty"`
 	Cwd            string          `json:"cwd,omitempty"`
+	// Namespace is the Codex function_call namespace (mcp__<server> for direct MCP calls).
+	Namespace string `json:"namespace,omitempty"`
 }
 
 // IsClaude reports whether this payload originated from Claude Code hooks.
@@ -130,6 +132,9 @@ type ToolArgs struct {
 	Action            string          `json:"Action"`
 	WaitMsBeforeAsync json.RawMessage `json:"WaitMsBeforeAsync"`
 	IsDaemon          json.RawMessage `json:"IsDaemon"`
+	// Namespace carries the payload-level Codex function_call namespace; it is never read
+	// from tool arguments (MCP arguments such as Kubernetes calls carry their own "namespace").
+	Namespace string `json:"-"`
 }
 
 // NormalizedAction returns the lowercased, unquoted Action parameter.
