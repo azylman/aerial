@@ -98,7 +98,7 @@ func TestFactsHandler_TableDriven(t *testing.T) {
 	mockBrain := newFactsMockBrain(&capturedQuery)
 	defer mockBrain.Close()
 
-	offlineURL := "http://127.0.0.1:54321"
+	offlineURL := downServerURL(t)
 
 	tests := []factsHandlerTestCase{
 		{
@@ -560,7 +560,7 @@ func TestSchedulesAndRunsHandlers_TableDriven(t *testing.T) {
 	mockHaro := newSchedulesMockHaro()
 	defer mockHaro.Close()
 
-	offlineURL := "http://127.0.0.1:54321"
+	offlineURL := downServerURL(t)
 	tests := schedulesAndRunsTestCases(mockBrain.URL, mockHaro.URL, offlineURL)
 
 	for _, tt := range tests {
@@ -1000,7 +1000,7 @@ func TestVanadisBuildsHandlers(t *testing.T) {
 	mockVanadis := newVanadisMockServer(t)
 	defer mockVanadis.Close()
 
-	offlineURL := "http://127.0.0.1:54321"
+	offlineURL := downServerURL(t)
 	tests := vanadisBuildsTestCases(mockVanadis.URL, offlineURL)
 
 	for _, tt := range tests {
