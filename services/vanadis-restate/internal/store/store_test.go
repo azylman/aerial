@@ -2,19 +2,14 @@ package store
 
 import (
 	"context"
-	"database/sql"
-	"errors"
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
-
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
-	"github.com/azylman/aerial/services/vanadis-restate/internal/sqltest"
 )
 
 func TestRepoMatchCandidates(t *testing.T) {
@@ -68,44 +63,47 @@ func TestCapChunkEffort(t *testing.T) {
 	}
 }
 
-type stubScanRow struct {
-	vals []any
-	err  error
-}
-
-func (r stubScanRow) Scan(dest ...any) error {
-	if r.err != nil {
-		return r.err
-	}
-	if len(r.vals) > len(dest) {
-		return errors.New("stub row holds more values than destinations")
-	}
-	for i, v := range r.vals {
-		if v == nil {
-			continue
-		}
-		ptr, val := reflect.ValueOf(dest[i]), reflect.ValueOf(v)
-		if ptr.Kind() != reflect.Pointer || ptr.IsNil() || ptr.Elem().Type() != val.Type() {
-			return errors.New("stub row value type mismatch")
-		}
-		ptr.Elem().Set(val)
-	}
-	return nil
-}
+// cgBuildSelect reads builds with the production column list.
+const cgBuildSelect = `SELECT ` + BuildColumns + ` FROM vanadis_builds WHERE id = $1`
 
 func TestScanBuild(t *testing.T) {
 	t.Parallel()
-	now := time.Now().UTC()
-	row := stubScanRow{vals: []any{"b1", "aerial", "thread-1", 2, "Title", "Objective", "ctx", "running", "msg-1", true, now, now}}
-	got, err := ScanBuild(row)
-	if err != nil {
-		t.Fatalf("ScanBuild unexpected error: %v", err)
+	stored := model.VanadisBuild{ID: "b1", Agent: "aerial", ThreadID: "thread-1", Tier: 2, Title: "Title", Objective: "Objective", SharedContext: "ctx", Status: "running", StatusMessageID: "msg-1", Quiet: true}
+	tests := []struct {
+		name    string
+		id      string
+		nilRow  bool
+		want    model.VanadisBuild
+		wantErr bool
+	}{
+		{name: "stored row decodes", id: "b1", want: model.VanadisBuild{ID: "b1", Agent: "aerial", ThreadID: "thread-1", Tier: 2, Title: "Title", Objective: "Objective", SharedContext: "ctx", Status: "running", StatusMessageID: "msg-1", Quiet: true}},
+		{name: "missing row propagates scan error", id: "b9", wantErr: true},
+		{name: "nil scanner", nilRow: true, wantErr: true},
 	}
-	if got.ID != "b1" || got.Agent != "aerial" || got.ThreadID != "thread-1" || got.Tier != 2 || !got.Quiet {
-		t.Errorf("ScanBuild decoded %+v", got)
-	}
-	if _, err := ScanBuild(stubScanRow{err: errors.New("scan boom")}); err == nil {
-		t.Error("ScanBuild expected propagated scan error, got nil")
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			_, pool := openStore(t)
+			seedBuild(t, pool, stored)
+			var row rowScanner
+			if !tc.nilRow {
+				row = pool.QueryRow(context.Background(), cgBuildSelect, tc.id)
+			}
+			got, err := ScanBuild(row)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("ScanBuild err = %v, wantErr %v", err, tc.wantErr)
+			}
+			if tc.wantErr {
+				return
+			}
+			if got.CreatedAt.IsZero() || got.UpdatedAt.IsZero() {
+				t.Errorf("ScanBuild timestamps = %v/%v, want stored defaults", got.CreatedAt, got.UpdatedAt)
+			}
+			got.CreatedAt, got.UpdatedAt = time.Time{}, time.Time{}
+			if got != tc.want {
+				t.Errorf("ScanBuild = %+v, want %+v", got, tc.want)
+			}
+		})
 	}
 }
 
@@ -146,59 +144,23 @@ func TestApplyRawChunkCIChecks(t *testing.T) {
 	}
 }
 
-type stubChunkRows struct {
-	pgx.Rows
+// cgChunkSelect reads every chunk with the production column list.
+const cgChunkSelect = `SELECT id, build_id, chunk_index, mode, repo, title, instructions, target_files, target_symbols, COALESCE(effort, 'medium'), acceptance_criteria, status, COALESCE(pr_number, 0), COALESCE(stall_nudges, 0), depends_on, ci_fail_count, ci_checks, rollout_state, banner, merge_awakeable_id, deploy_awakeable_id, started_at, completed_at, created_at, updated_at FROM vanadis_chunks ORDER BY chunk_index ASC`
 
-	chunks  []model.VanadisChunk
-	checks  []string
-	states  []string
-	idx     int
-	scanErr error
-	rowsErr error
-}
-
-func (*stubChunkRows) Close() {}
-
-func (r *stubChunkRows) Err() error { return r.rowsErr }
-
-func (r *stubChunkRows) Next() bool {
-	r.idx++
-	return r.idx <= len(r.chunks)
-}
-
-func (r *stubChunkRows) Scan(dest ...any) error {
-	if r.scanErr != nil {
-		return r.scanErr
-	}
-	c := r.chunks[r.idx-1]
-	checks, state := []byte("{}"), []byte("{}")
-	if r.idx-1 < len(r.checks) {
-		checks = []byte(r.checks[r.idx-1])
-	}
-	if r.idx-1 < len(r.states) {
-		state = []byte(r.states[r.idx-1])
-	}
-	vals := []any{c.ID, c.BuildID, c.ChunkIndex, c.Mode, c.Repo, c.Title, c.Instructions, c.TargetFiles, c.TargetSymbols, c.Effort, c.AcceptanceCriteria, c.Status, c.PRNumber, c.StallNudges, c.DependsOn, c.CIFailCount, checks, state, c.Banner, c.MergeAwakeableID, c.DeployAwakeableID, sql.NullTime{Time: c.StartedAt, Valid: !c.StartedAt.IsZero()}, sql.NullTime{Time: c.CompletedAt, Valid: !c.CompletedAt.IsZero()}, c.CreatedAt, c.UpdatedAt}
-	if len(vals) != len(dest) {
-		return errors.New("stub chunk row arity mismatch")
-	}
-	for i, v := range vals {
-		ptr, val := reflect.ValueOf(dest[i]), reflect.ValueOf(v)
-		if ptr.Kind() != reflect.Pointer || ptr.IsNil() || ptr.Elem().Type() != val.Type() {
-			return errors.New("stub chunk row value type mismatch")
-		}
-		ptr.Elem().Set(val)
-	}
-	return nil
-}
+// cgStampChunksSQL pins the row timestamps the database defaults.
+const cgStampChunksSQL = `UPDATE vanadis_chunks SET created_at = '2026-05-01 12:00:00+00', updated_at = '2026-05-01 12:00:00+00'`
 
 func TestScanChunks(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
-	withTimes := model.VanadisChunk{ID: "c1", BuildID: "b1", ChunkIndex: 0, Mode: "pr", Repo: "aerial", Title: "T1", Instructions: "I1", Effort: "high", Status: "pending", StartedAt: now, CompletedAt: now, CreatedAt: now, UpdatedAt: now}
-	bare := model.VanadisChunk{ID: "c2", BuildID: "b1", ChunkIndex: 1, Mode: "pr", Repo: "aerial", Title: "T2", Instructions: "I2", Status: "pending", CreatedAt: now, UpdatedAt: now}
+	withTimes := model.VanadisChunk{
+		ID: "c1", BuildID: "b1", ChunkIndex: 0, Mode: "pr", Repo: "aerial", Title: "T1", Instructions: "I1", Effort: "high", Status: "pending", StartedAt: now, CompletedAt: now,
+		HeadSHA: "h", CIChecks: map[string]string{"lint": "passed"}, RolloutState: &pubsub.PRRolloutState{ExpectedJobs: []string{"eri"}},
+	}
+	bare := model.VanadisChunk{ID: "c2", BuildID: "b1", ChunkIndex: 1, Mode: "pr", Repo: "aerial", Title: "T2", Instructions: "I2", Status: "pending"}
+	boom := model.VanadisChunk{ID: "c1", BuildID: "b1", Banner: "boom"}
 	empty := []string{}
-	// Effort is capped to medium, nil slices decode as empty non-nil, the
+	// Effort is capped to medium, empty arrays decode as empty non-nil, the
 	// checks/rollout JSON is decoded and a NULL started_at stays zero.
 	decodedTimes := model.VanadisChunk{
 		ID: "c1", BuildID: "b1", Mode: "pr", Repo: "aerial", Title: "T1", Instructions: "I1", Effort: "medium", Status: "pending",
@@ -211,35 +173,54 @@ func TestScanChunks(t *testing.T) {
 		TargetFiles: empty, TargetSymbols: empty, AcceptanceCriteria: empty, DependsOn: empty, CreatedAt: now, UpdatedAt: now,
 	}
 	tests := []struct {
-		name    string
-		rows    stubChunkRows
-		want    []model.VanadisChunk
-		wantErr string
+		name     string
+		chunks   []model.VanadisChunk
+		sabotage string
+		want     []model.VanadisChunk
+		wantErr  string
 	}{
 		{
-			name: "mixed rows decode",
-			rows: stubChunkRows{
-				chunks: []model.VanadisChunk{withTimes, bare},
-				checks: []string{`{"_head_sha":"h","lint":"passed"}`, "null"},
-				states: []string{`{"expected_jobs":["eri"]}`, "{}"},
-			},
-			want: []model.VanadisChunk{decodedTimes, decodedBare},
+			name:     "mixed rows decode",
+			chunks:   []model.VanadisChunk{withTimes, bare},
+			sabotage: cgStampChunksSQL + `; UPDATE vanadis_chunks SET ci_checks = 'null' WHERE id = 'c2'`,
+			want:     []model.VanadisChunk{decodedTimes, decodedBare},
 		},
-		{name: "scan error", rows: stubChunkRows{chunks: []model.VanadisChunk{withTimes}, scanErr: errors.New("scan boom")}, wantErr: "failed to scan vanadis chunk: scan boom"},
-		{name: "rows error", rows: stubChunkRows{chunks: []model.VanadisChunk{withTimes}, rowsErr: errors.New("rows boom")}, wantErr: "error iterating vanadis chunks: rows boom"},
+		{name: "scan error", chunks: []model.VanadisChunk{withTimes}, sabotage: breakChunkScanSQL, wantErr: "failed to scan vanadis chunk: "},
+		{name: "rows error", chunks: []model.VanadisChunk{boom}, sabotage: failChunkRowsSQL, wantErr: "error iterating vanadis chunks: "},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got, err := ScanChunks(&tc.rows)
-			if gotErr := errString(err); gotErr != tc.wantErr {
-				t.Fatalf("ScanChunks err = %q, want %q", gotErr, tc.wantErr)
+			_, pool := openStore(t)
+			seed(t, pool, []model.VanadisBuild{{ID: "b1", ThreadID: "t1"}}, tc.chunks)
+			mustExec(t, pool, tc.sabotage)
+			rows, err := pool.Query(context.Background(), cgChunkSelect)
+			if err != nil {
+				t.Fatalf("query chunks: %v", err)
+			}
+			defer rows.Close()
+			got, err := ScanChunks(rows)
+			gotErr := errString(err)
+			if (tc.wantErr == "") != (gotErr == "") || !strings.HasPrefix(gotErr, tc.wantErr) {
+				t.Fatalf("ScanChunks err = %q, want prefix %q", gotErr, tc.wantErr)
+			}
+			for i := range got {
+				got[i].StartedAt, got[i].CompletedAt = cgUTC(got[i].StartedAt), cgUTC(got[i].CompletedAt)
+				got[i].CreatedAt, got[i].UpdatedAt = cgUTC(got[i].CreatedAt), cgUTC(got[i].UpdatedAt)
 			}
 			if !reflect.DeepEqual(got, tc.want) {
 				t.Errorf("ScanChunks = %#v\nwant %#v", got, tc.want)
 			}
 		})
 	}
+}
+
+// cgUTC normalizes a decoded timestamp to UTC, keeping the zero time zero.
+func cgUTC(ts time.Time) time.Time {
+	if ts.IsZero() {
+		return time.Time{}
+	}
+	return ts.UTC()
 }
 
 func errString(err error) string {
@@ -385,77 +366,67 @@ func TestCrossBuildDeploymentSweepIDs(t *testing.T) {
 	}
 }
 
-func sweepMockStore(queryErr, execErr bool, execTag, failChunk string, candidates []model.VanadisChunk, updates *int) *Store {
-	return New(sqltest.DB{
-		ExecFn: func(_ context.Context, _ string, args ...any) (pgconn.CommandTag, error) {
-			*updates++
-			if execErr {
-				return pgconn.CommandTag{}, errors.New("database unavailable")
-			}
-			if failChunk != "" && len(args) > 1 && args[1] == failChunk {
-				return pgconn.CommandTag{}, errors.New("database unavailable")
-			}
-			return pgconn.NewCommandTag(execTag), nil
-		},
-		QueryFn: func(_ context.Context, _ string, _ ...any) (pgx.Rows, error) {
-			if queryErr {
-				return nil, errors.New("database unavailable")
-			}
-			return &sqltest.Rows{Items: candidates}, nil
-		},
-	}, "example-org")
-}
+// cgFailF2UpdateSQL fails only chunk f2's update.
+const cgFailF2UpdateSQL = failFunctionSQL + ` CREATE TRIGGER pgtest_fail_f2 BEFORE UPDATE ON vanadis_chunks FOR EACH ROW WHEN (OLD.id = 'f2') EXECUTE FUNCTION pgtest_fail();`
+
+// cgSkipChunkUpdateSQL makes every chunk update affect zero rows, as a
+// concurrent terminal transition would.
+const cgSkipChunkUpdateSQL = `CREATE FUNCTION pgtest_skip() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NULL; END $$;
+CREATE TRIGGER pgtest_skip BEFORE UPDATE ON vanadis_chunks FOR EACH ROW EXECUTE FUNCTION pgtest_skip();`
 
 func TestSweepEarlierDeploymentsAcrossBuilds(t *testing.T) {
 	t.Parallel()
 	base := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
 	deploying := xbuildChunk("deploying", "b1", 2, "pr", "aerial", "deploying", 7, base.Add(time.Hour), []string{"eri"}, nil)
+	noID := deploying
+	noID.ID = " "
+	noRepo := deploying
+	noRepo.Repo = ""
 	cand := func(id, buildID string, idx int, status string, pr int) model.VanadisChunk {
-		return xbuildChunk(id, buildID, idx, "pr", "aerial", status, pr, base, nil, nil)
+		return xbuildChunk(id, buildID, idx, "pr", "aerial", status, pr, base, []string{"eri"}, nil)
 	}
 	f1 := cand("f1", "b2", 0, "merged", 5)
+	boom := f1
+	boom.Banner = "boom"
 	sweptF1 := []SweptChunk{{ChunkID: "f1", BuildID: "b2"}}
 	tests := []struct {
 		name          string
 		nilDB         bool
+		deploying     model.VanadisChunk
 		candidates    []model.VanadisChunk
-		queryErr      bool
-		execErr       bool
-		execTag       string
-		failChunk     string
+		sabotage      string
 		want          []SweptChunk
 		wantRecovered []SweptChunk
 		wantErr       bool
-		wantUpdates   int
+		wantStatuses  map[string]string
 	}{
-		{name: "sweeps eligible candidate and returns ids", candidates: mutateChunks(f1), execTag: "UPDATE 1", want: sweptF1, wantUpdates: 1},
-		{name: "nil database errors", nilDB: true, wantErr: true},
-		{name: "query error aborts", candidates: mutateChunks(f1), queryErr: true, wantErr: true},
-		{name: "update error aborts", candidates: mutateChunks(f1), execErr: true, wantErr: true, wantUpdates: 1},
-		{name: "skipped transition is harmless", candidates: mutateChunks(f1), execTag: "UPDATE 0", wantUpdates: 1},
+		{name: "sweeps eligible candidate and returns ids", deploying: deploying, candidates: mutateChunks(f1), want: sweptF1, wantStatuses: map[string]string{"f1": "completed"}},
+		{name: "nil database errors", nilDB: true, deploying: deploying, wantErr: true},
+		{name: "blank deploying id is a no-op", deploying: noID, candidates: mutateChunks(f1), wantStatuses: map[string]string{"f1": "merged"}},
+		{name: "blank deploying repo is a no-op", deploying: noRepo, candidates: mutateChunks(f1), wantStatuses: map[string]string{"f1": "merged"}},
+		{name: "query error aborts", deploying: deploying, candidates: mutateChunks(f1), sabotage: cgBreakChunkPrepareSQL, wantErr: true},
+		{name: "scan error aborts", deploying: deploying, candidates: mutateChunks(f1), sabotage: breakChunkScanSQL, wantErr: true},
+		{name: "rows error aborts", deploying: deploying, candidates: mutateChunks(boom), sabotage: failChunkRowsSQL, wantErr: true},
+		{name: "update error aborts", deploying: deploying, candidates: mutateChunks(f1), sabotage: failStatement("vanadis_chunks", "UPDATE"), wantErr: true, wantStatuses: map[string]string{"f1": "merged"}},
+		{name: "skipped transition is harmless", deploying: deploying, candidates: mutateChunks(f1), sabotage: cgSkipChunkUpdateSQL, wantStatuses: map[string]string{"f1": "merged"}},
 		{
-			name: "recovers already completed eligible chunk", candidates: mutateChunks(f1, cand("r1", "b3", 1, "completed", 5)), execTag: "UPDATE 1",
-			want: sweptF1, wantRecovered: []SweptChunk{{ChunkID: "r1", BuildID: "b3"}}, wantUpdates: 1,
+			name: "recovers already completed eligible chunk", deploying: deploying, candidates: mutateChunks(f1, cand("r1", "b3", 1, "completed", 5)),
+			want: sweptF1, wantRecovered: []SweptChunk{{ChunkID: "r1", BuildID: "b3"}}, wantStatuses: map[string]string{"f1": "completed", "r1": "completed"},
 		},
 		{
-			name: "failing candidate keeps earlier successes alongside error", candidates: mutateChunks(f1, cand("f2", "b2", 1, "merged", 6)), execTag: "UPDATE 1",
-			failChunk: "f2", want: sweptF1, wantErr: true, wantUpdates: 2,
+			name: "failing candidate keeps earlier successes alongside error", deploying: deploying, candidates: mutateChunks(f1, cand("f2", "b2", 1, "merged", 6)),
+			sabotage: cgFailF2UpdateSQL, want: sweptF1, wantErr: true, wantStatuses: map[string]string{"f1": "completed", "f2": "merged"},
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			var updates int
-			var st *Store
-			if tc.nilDB {
-				st = &Store{}
-			} else {
-				st = sweepMockStore(tc.queryErr, tc.execErr, tc.execTag, tc.failChunk, tc.candidates, &updates)
-			}
-			got, recovered, err := st.SweepEarlierDeploymentsAcrossBuilds(context.Background(), deploying)
+			st, pool := cgStore(t, false, tc.nilDB)
+			seed(t, pool, []model.VanadisBuild{{ID: "b2", ThreadID: "t2"}, {ID: "b3", ThreadID: "t3"}}, tc.candidates)
+			mustExec(t, pool, tc.sabotage)
+			got, recovered, err := st.SweepEarlierDeploymentsAcrossBuilds(context.Background(), tc.deploying)
 			if (err != nil) != tc.wantErr {
-				t.Errorf("SweepEarlierDeploymentsAcrossBuilds err = %v, wantErr %v", err, tc.wantErr)
-				return
+				t.Fatalf("SweepEarlierDeploymentsAcrossBuilds err = %v, wantErr %v", err, tc.wantErr)
 			}
 			if !slices.Equal(got, tc.want) {
 				t.Errorf("SweepEarlierDeploymentsAcrossBuilds = %v, want %v", got, tc.want)
@@ -463,8 +434,10 @@ func TestSweepEarlierDeploymentsAcrossBuilds(t *testing.T) {
 			if !slices.Equal(recovered, tc.wantRecovered) {
 				t.Errorf("SweepEarlierDeploymentsAcrossBuilds recovered = %v, want %v", recovered, tc.wantRecovered)
 			}
-			if updates != tc.wantUpdates {
-				t.Errorf("SweepEarlierDeploymentsAcrossBuilds updates = %d, want %d", updates, tc.wantUpdates)
+			for id, want := range tc.wantStatuses {
+				if got := loadChunk(t, pool, id).Status; got != want {
+					t.Errorf("chunk %s status = %q, want %q", id, got, want)
+				}
 			}
 		})
 	}
