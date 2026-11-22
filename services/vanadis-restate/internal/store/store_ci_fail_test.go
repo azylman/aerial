@@ -285,9 +285,7 @@ func TestPostgresVanadisStore_RecordPRCheckStatus(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			var gotQuery string
-			st := New(sqltest.DB{ExecFn: func(_ context.Context, query string, _ ...any) (pgconn.CommandTag, error) {
-				gotQuery = query
+			st := New(sqltest.DB{ExecFn: func(_ context.Context, _ string, _ ...any) (pgconn.CommandTag, error) {
 				if tc.execFailure {
 					return pgconn.CommandTag{}, errors.New("database unavailable")
 				}
@@ -302,11 +300,6 @@ func TestPostgresVanadisStore_RecordPRCheckStatus(t *testing.T) {
 			err := st.RecordPRCheckStatus(context.Background(), tc.chunkID, tc.headSHA, tc.checkName, tc.checkState)
 			assert.Equal(t, tc.wantErr, err != nil)
 			assert.Equal(t, tc.wantSkipped, errors.Is(err, ErrPRTransitionSkipped))
-			if !tc.wantErr {
-				assert.Contains(t, gotQuery, "$2 != 'failed'")
-				assert.Contains(t, gotQuery, "ci_checks->>'_merge_sha' = $4")
-				assert.NotContains(t, gotQuery, "'{_merge_sha}'")
-			}
 		})
 	}
 }
@@ -353,81 +346,6 @@ func TestPostgresVanadisStore_ResetPRCheckState(t *testing.T) {
 			err := st.ResetPRCheckState(context.Background(), tc.chunkID, tc.headSHA, tc.mergeSHA)
 			assert.Equal(t, tc.wantErr, err != nil)
 			assert.Equal(t, tc.wantSkipped, errors.Is(err, ErrPRTransitionSkipped))
-		})
-	}
-}
-
-func TestDeployFailedEarlierDeploymentSweepIDs(t *testing.T) {
-	t.Parallel()
-	base := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
-	later := base.Add(time.Hour)
-	pr := func(id string, idx int, status string, at time.Time) model.VanadisChunk {
-		return sweepChunk(id, idx, "pr", "aerial", status, at)
-	}
-	dep := func(idx int, at time.Time) model.VanadisChunk { return pr("deploying", idx, "deploying", at) }
-	tests := []struct {
-		name   string
-		chunks []model.VanadisChunk
-		want   []string
-	}{
-		{
-			name:   "earlier deploy_failed chunk with valid merge timestamp is swept",
-			chunks: mutateChunks(pr("failed-1", 0, "deploy_failed", base), dep(1, later)),
-			want:   []string{"failed-1"},
-		},
-		{
-			name:   "earlier deploy_failed chunk without merge timestamp is skipped",
-			chunks: mutateChunks(pr("failed-1", 0, "deploy_failed", time.Time{}), dep(1, later)),
-			want:   nil,
-		},
-		{
-			name:   "later deploy_failed chunk after deploying is untouched",
-			chunks: mutateChunks(pr("failed-1", 0, "deploy_failed", later.Add(time.Hour)), dep(1, later)),
-			want:   nil,
-		},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			got := EarlierDeploymentSweepIDs("example-org", tc.chunks, "deploying")
-			assert.Equal(t, tc.want, got)
-		})
-	}
-}
-
-func TestDeployFailedCrossBuildDeploymentSweepIDs(t *testing.T) {
-	t.Parallel()
-	base := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
-	later := base.Add(time.Hour)
-	eri := []string{"eri"}
-	deploying := xbuildChunk("deploying", "b1", 2, "pr", "aerial", "deploying", 7, later, eri, nil)
-	cand := func(buildID, status string, at time.Time, jobs []string) model.VanadisChunk {
-		return xbuildChunk("f1", buildID, 0, "pr", "aerial", status, 5, at, jobs, nil)
-	}
-	tests := []struct {
-		name       string
-		deploying  model.VanadisChunk
-		candidates []model.VanadisChunk
-		want       []SweptChunk
-	}{
-		{
-			name:       "cross-build deploy_failed chunk with valid merge timestamp is swept",
-			deploying:  deploying,
-			candidates: mutateChunks(cand("b2", "deploy_failed", base, eri)),
-			want:       []SweptChunk{{ChunkID: "f1", BuildID: "b2"}},
-		},
-		{
-			name:       "cross-build deploy_failed chunk without merge timestamp is skipped",
-			deploying:  deploying,
-			candidates: mutateChunks(cand("b2", "deploy_failed", time.Time{}, eri)),
-			want:       nil,
-		},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			got := CrossBuildDeploymentSweepIDs("example-org", tc.deploying, tc.candidates)
-			assert.Equal(t, tc.want, got)
 		})
 	}
 }

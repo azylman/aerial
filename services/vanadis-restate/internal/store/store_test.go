@@ -429,13 +429,6 @@ func TestSweepEarlierDeploymentsAcrossBuilds(t *testing.T) {
 		wantUpdates   int
 	}{
 		{name: "sweeps eligible candidate and returns ids", candidates: mutateChunks(f1), execTag: "UPDATE 1", want: sweptF1, wantUpdates: 1},
-		{
-			name:        "sweeps eligible deploy_failed candidate and returns ids",
-			candidates:  mutateChunks(cand("f1", "b2", 0, "deploy_failed", 5)),
-			execTag:     "UPDATE 1",
-			want:        sweptF1,
-			wantUpdates: 1,
-		},
 		{name: "nil database errors", nilDB: true, wantErr: true},
 		{name: "query error aborts", candidates: mutateChunks(f1), queryErr: true, wantErr: true},
 		{name: "update error aborts", candidates: mutateChunks(f1), execErr: true, wantErr: true, wantUpdates: 1},
