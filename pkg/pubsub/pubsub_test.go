@@ -36,7 +36,7 @@ const (
 var testSpans = newSpanSink()
 
 func TestMain(m *testing.M) {
-	otel.SetTracerProvider(sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(testSpans)))
+	otel.SetTracerProvider(sdktrace.NewTracerProvider(sdktrace.WithSampler(sdktrace.AlwaysSample()), sdktrace.WithSpanProcessor(testSpans)))
 	otel.SetTextMapPropagator(propagation.TraceContext{})
 	os.Exit(m.Run())
 }
@@ -46,6 +46,8 @@ type spanSink struct {
 	mu    sync.Mutex
 	cond  *sync.Cond
 	ended []sdktrace.ReadOnlySpan
+	// expired is set when an await deadline passes so waiters stop blocking.
+	expired bool
 }
 
 func newSpanSink() *spanSink {
@@ -67,6 +69,13 @@ func (s *spanSink) OnEnd(span sdktrace.ReadOnlySpan) {
 
 // await blocks until at least n spans whose messaging.destination.name is subject have ended.
 func (s *spanSink) await(subject string, n int) []sdktrace.ReadOnlySpan {
+	deadline := time.AfterFunc(10*time.Second, func() {
+		s.mu.Lock()
+		s.expired = true
+		s.mu.Unlock()
+		s.cond.Broadcast()
+	})
+	defer deadline.Stop()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for {
@@ -78,7 +87,7 @@ func (s *spanSink) await(subject string, n int) []sdktrace.ReadOnlySpan {
 				}
 			}
 		}
-		if len(got) >= n {
+		if len(got) >= n || s.expired {
 			return got
 		}
 		s.cond.Wait()
@@ -567,8 +576,13 @@ func TestCoalescedStream_SupersededSequence(t *testing.T) {
 	msg1Received := make(chan struct{})
 	allowMsg1Finish := make(chan struct{})
 	doneMsg1 := make(chan struct{})
+	handledMsg2 := make(chan struct{})
+	var calls atomic.Int32
 
 	_, err := bus.ConsumeQueue(context.Background(), "aerial.coalesced.device.1", "device-workers", func(ctx context.Context, msg Message) error {
+		if calls.Add(1) == 2 {
+			defer close(handledMsg2)
+		}
 		if firstMsg == nil {
 			firstMsg = msg
 			close(msg1Received)
@@ -591,6 +605,11 @@ func TestCoalescedStream_SupersededSequence(t *testing.T) {
 	// Publish message 2 to the exact same subject to supersede message 1
 	if err = bus.Publish(context.Background(), "aerial.coalesced.device.1", "state-v2", []byte("v2")); err != nil {
 		t.Fatalf("Publish 2 failed: %v", err)
+	}
+	select {
+	case <-handledMsg2:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for superseding message to be handled")
 	}
 
 	// Now message 1 has been superseded
