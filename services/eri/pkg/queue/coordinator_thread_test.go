@@ -1,0 +1,567 @@
+package queue
+
+import (
+	"context"
+	"testing"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/azylman/aerial/pkg/eriwire"
+	"github.com/azylman/aerial/services/eri/pkg/db"
+)
+
+const (
+	tcKey = "th-1"
+	tcInv = "inv-1"
+)
+
+var (
+	tcThreadSvc = ThreadSessionServiceName("aerial")
+	tcRunnerSvc = TurnRunnerServiceName("aerial")
+	tcTurn      = turnIDFor(tcKey, tcInv)
+	// tcDerivedMsgID is uuid.NewSHA1(URL, "aerial:thread:msg:th-1:inv-1").
+	tcDerivedMsgID = uuid.NewSHA1(uuid.NameSpaceURL, []byte("aerial:thread:msg:"+tcKey+":"+tcInv)).String()
+)
+
+// fakeThreadResolver redirects to redirect (when set) and resolves to final (when set).
+type fakeThreadResolver struct {
+	redirect string
+	final    string
+}
+
+func (f fakeThreadResolver) RedirectBuildPrompt(channelID, _ string) string {
+	if f.redirect != "" {
+		return f.redirect
+	}
+	return channelID
+}
+
+func (f fakeThreadResolver) ResolveTargetThread(channelID, _, _ string, _ time.Time) string {
+	if f.final != "" {
+		return f.final
+	}
+	return channelID
+}
+
+func st(pending []string, active *ActiveTurn) coordinatorState {
+	return coordinatorState{pending: pending, active: active}
+}
+
+func runBurst(ids ...string) sentCall {
+	return sentCall{Service: tcRunnerSvc, Method: HandlerRunBurst, Input: BurstTurnRequest{ThreadID: tcKey, TurnID: tcTurn, MessageIDs: ids}}
+}
+
+func startedTurn(ids ...string) *ActiveTurn {
+	return &ActiveTurn{TurnID: tcTurn, ItemIDs: ids, RunnerInvocationID: harnessRunnerInvocation}
+}
+
+func threadSend(key, method string, input any, delay time.Duration) sentCall {
+	return sentCall{Service: tcThreadSvc, Key: key, Method: method, Input: input, Delay: delay}
+}
+
+func TestThreadCoordinator_Enqueue(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		key        string
+		state      coordinatorState
+		resolver   fakeThreadResolver
+		req        ThreadEnqueueRequest
+		failInsert error
+		wantResp   ThreadEnqueueResponse
+		wantSends  []sentCall
+		wantRows   map[string]rowWant
+		wantNoRow  string
+		wantCode   int
+	}{
+		{
+			name:      "PromptAccepted",
+			key:       tcKey,
+			req:       ThreadEnqueueRequest{Prompt: "hello", MessageID: "m1"},
+			wantResp:  ThreadEnqueueResponse{Status: eriwire.StatusAccepted, ThreadID: tcKey, MessageID: "m1"},
+			wantSends: []sentCall{threadSend(tcKey, HandlerAppend, AppendRequest{IDs: []string{"m1"}}, 0)},
+			wantRows:  map[string]rowWant{"m1": {status: db.StatusPending}},
+		},
+		{
+			name:      "DiscordMessageAccepted",
+			key:       tcKey,
+			req:       ThreadEnqueueRequest{Message: &db.Message{ID: "m2", ThreadID: tcKey, Content: "hi"}},
+			wantResp:  ThreadEnqueueResponse{Status: eriwire.StatusAccepted, ThreadID: tcKey, MessageID: "m2"},
+			wantSends: []sentCall{threadSend(tcKey, HandlerAppend, AppendRequest{IDs: []string{"m2"}}, 0)},
+			wantRows:  map[string]rowWant{"m2": {status: db.StatusPending}},
+		},
+		{
+			name:      "MessageWithoutIDsDerivesIDOnKey",
+			key:       tcKey,
+			req:       ThreadEnqueueRequest{Message: &db.Message{Content: "bare"}},
+			wantResp:  ThreadEnqueueResponse{Status: eriwire.StatusAccepted, ThreadID: tcKey, MessageID: tcDerivedMsgID},
+			wantSends: []sentCall{threadSend(tcKey, HandlerAppend, AppendRequest{IDs: []string{tcDerivedMsgID}}, 0)},
+			wantRows:  map[string]rowWant{tcDerivedMsgID: {status: db.StatusPending}},
+		},
+		{
+			name:      "RedirectAppendsToFinalThread",
+			key:       tcKey,
+			resolver:  fakeThreadResolver{final: "th-final"},
+			req:       ThreadEnqueueRequest{Prompt: "build done", MessageID: "m3"},
+			wantResp:  ThreadEnqueueResponse{Status: eriwire.StatusAccepted, ThreadID: "th-final", MessageID: "m3"},
+			wantSends: []sentCall{threadSend("th-final", HandlerAppend, AppendRequest{IDs: []string{"m3"}}, 0)},
+			wantRows:  map[string]rowWant{"m3": {status: db.StatusPending}},
+		},
+		{
+			name:      "SkipIfActiveBusySameKey",
+			key:       tcKey,
+			state:     st(nil, &ActiveTurn{TurnID: "t0", ItemIDs: []string{"x"}}),
+			req:       ThreadEnqueueRequest{Prompt: "ping", MessageID: "m4", SkipIfActive: true},
+			wantResp:  ThreadEnqueueResponse{Status: eriwire.StatusSkippedActive, ThreadID: tcKey},
+			wantNoRow: "m4",
+		},
+		{
+			name:      "SkipIfActiveIdleAccepted",
+			key:       tcKey,
+			req:       ThreadEnqueueRequest{Prompt: "ping", MessageID: "m5", SkipIfActive: true},
+			wantResp:  ThreadEnqueueResponse{Status: eriwire.StatusAccepted, ThreadID: tcKey, MessageID: "m5"},
+			wantSends: []sentCall{threadSend(tcKey, HandlerAppend, AppendRequest{IDs: []string{"m5"}, SkipIfActive: true}, 0)},
+			wantRows:  map[string]rowWant{"m5": {status: db.StatusPending}},
+		},
+		{
+			name:      "SkipIfActiveRedirectedDefersToAppend",
+			key:       tcKey,
+			state:     st([]string{"x"}, nil),
+			resolver:  fakeThreadResolver{redirect: "th-sys"},
+			req:       ThreadEnqueueRequest{Prompt: "deploy done", MessageID: "m6", SkipIfActive: true},
+			wantResp:  ThreadEnqueueResponse{Status: eriwire.StatusAccepted, ThreadID: "th-sys", MessageID: "m6"},
+			wantSends: []sentCall{threadSend("th-sys", HandlerAppend, AppendRequest{IDs: []string{"m6"}, SkipIfActive: true}, 0)},
+			wantRows:  map[string]rowWant{"m6": {status: db.StatusPending}},
+		},
+		{
+			name:     "MissingThreadRejected",
+			key:      "",
+			req:      ThreadEnqueueRequest{Prompt: "orphan"},
+			wantCode: 400,
+		},
+		{
+			name:       "RecordStepCancelSurfacesAsConflict",
+			key:        tcKey,
+			req:        ThreadEnqueueRequest{Prompt: "hello", MessageID: "m7"},
+			failInsert: errRestateCancel,
+			wantCode:   CodeQueueConflict,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			store := seedStore(t, nil, nil)
+			if tc.failInsert != nil {
+				store.FailNext("InsertMessage", tc.failInsert)
+			}
+			h := newCoordHarness(t, tc.key, tcInv, tc.state)
+			resp, err := NewThreadCoordinator(store, tc.resolver, "aerial").Enqueue(h.sharedCtx(), tc.req)
+			if assertCoordinatorErr(t, err, tc.wantCode) {
+				return
+			}
+			assert.Equal(t, tc.wantResp, resp)
+			assert.Equal(t, tc.wantSends, h.sends)
+			assertMessageRows(t, store, tc.wantRows)
+			if tc.wantNoRow != "" {
+				m, _ := store.GetMessage(context.Background(), tc.wantNoRow)
+				assert.Nil(t, m)
+			}
+		})
+	}
+}
+
+func TestThreadCoordinator_Append(t *testing.T) {
+	t.Parallel()
+	waiting := &ActiveTurn{TurnID: "t0", ItemIDs: []string{"a"}, RunnerInvocationID: "inv-0", Waiting: true}
+	tests := []struct {
+		name        string
+		state       coordinatorState
+		rows        []db.Message
+		req         AppendRequest
+		wantState   coordinatorState
+		wantSends   []sentCall
+		wantRows    map[string]rowWant
+		wantCleared bool
+		failSkip    error
+		wantCode    int
+	}{
+		{
+			name:     "SkipStepCancelSurfacesAsConflict",
+			state:    st(nil, &ActiveTurn{TurnID: "t0", ItemIDs: []string{"a"}}),
+			rows:     []db.Message{msgRow("s3", tcKey, db.StatusPending)},
+			req:      AppendRequest{IDs: []string{"s3"}, SkipIfActive: true},
+			failSkip: errRestateCancel,
+			wantCode: CodeQueueConflict,
+		},
+		{
+			name:      "IdleStartsBurst",
+			req:       AppendRequest{IDs: []string{"a", "b"}},
+			wantState: st(nil, startedTurn("a", "b")),
+			wantSends: []sentCall{runBurst("a", "b")},
+		},
+		{
+			name:      "BurstCapFive",
+			req:       AppendRequest{IDs: []string{"a", "b", "c", "d", "e", "f", "g"}},
+			wantState: st([]string{"f", "g"}, startedTurn("a", "b", "c", "d", "e")),
+			wantSends: []sentCall{runBurst("a", "b", "c", "d", "e")},
+		},
+		{
+			name:      "ActiveOnlyAppends",
+			state:     st([]string{"b"}, &ActiveTurn{TurnID: "t0", ItemIDs: []string{"a"}}),
+			req:       AppendRequest{IDs: []string{"c"}},
+			wantState: st([]string{"b", "c"}, &ActiveTurn{TurnID: "t0", ItemIDs: []string{"a"}}),
+		},
+		{
+			name:      "WaitingOnlyAppends",
+			state:     st([]string{"a"}, waiting),
+			req:       AppendRequest{IDs: []string{"c"}},
+			wantState: st([]string{"a", "c"}, waiting),
+		},
+		{
+			name:      "DedupsPendingAndActive",
+			state:     st([]string{"b"}, &ActiveTurn{TurnID: "t0", ItemIDs: []string{"a"}}),
+			req:       AppendRequest{IDs: []string{"a", "b", "b"}},
+			wantState: st([]string{"b"}, &ActiveTurn{TurnID: "t0", ItemIDs: []string{"a"}}),
+		},
+		{
+			name:      "SkipIfActiveBusyRecordsSkipped",
+			state:     st(nil, &ActiveTurn{TurnID: "t0", ItemIDs: []string{"a"}}),
+			rows:      []db.Message{msgRow("s1", tcKey, db.StatusPending)},
+			req:       AppendRequest{IDs: []string{"s1"}, SkipIfActive: true},
+			wantState: st(nil, &ActiveTurn{TurnID: "t0", ItemIDs: []string{"a"}}),
+			wantRows:  map[string]rowWant{"s1": {status: db.StatusCompleted, errText: skippedActiveTurnReason}},
+		},
+		{
+			name:      "SkipIfActiveNeverSkipsHeldID",
+			state:     st([]string{"s1"}, &ActiveTurn{TurnID: "t0", ItemIDs: []string{"a"}}),
+			rows:      []db.Message{msgRow("s1", tcKey, db.StatusPending)},
+			req:       AppendRequest{IDs: []string{"s1"}, SkipIfActive: true},
+			wantState: st([]string{"s1"}, &ActiveTurn{TurnID: "t0", ItemIDs: []string{"a"}}),
+			wantRows:  map[string]rowWant{"s1": {status: db.StatusPending}},
+		},
+		{
+			name:      "SkipIfActiveIdleStarts",
+			rows:      []db.Message{msgRow("s2", tcKey, db.StatusPending)},
+			req:       AppendRequest{IDs: []string{"s2"}, SkipIfActive: true},
+			wantState: st(nil, startedTurn("s2")),
+			wantSends: []sentCall{runBurst("s2")},
+			wantRows:  map[string]rowWant{"s2": {status: db.StatusPending}},
+		},
+		{
+			name:        "NothingNewWhenIdleClearsAll",
+			req:         AppendRequest{IDs: []string{" "}},
+			wantCleared: true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			store := seedStore(t, tc.rows, nil)
+			if tc.failSkip != nil {
+				store.FailNext("UpdateMessageStatus", tc.failSkip)
+			}
+			h := newCoordHarness(t, tcKey, tcInv, tc.state)
+			if assertCoordinatorErr(t, NewThreadCoordinator(store, nil, "aerial").Append(h.objectCtx(), tc.req), tc.wantCode) {
+				return
+			}
+			assert.Equal(t, tc.wantState, h.snapshot(t))
+			assert.Equal(t, tc.wantSends, h.sends)
+			assert.Equal(t, tc.wantCleared, h.clearAlls > 0)
+			assertMessageRows(t, store, tc.wantRows)
+		})
+	}
+}
+
+func TestThreadCoordinator_OnTurnDone(t *testing.T) {
+	t.Parallel()
+	running := &ActiveTurn{TurnID: "t0", ItemIDs: []string{"a", "b"}, RunnerInvocationID: "inv-0"}
+	tests := []struct {
+		name        string
+		state       coordinatorState
+		req         TurnDoneRequest
+		wantState   coordinatorState
+		wantSends   []sentCall
+		wantCleared bool
+	}{
+		{
+			name:      "StaleTurnFenced",
+			state:     st([]string{"c"}, running),
+			req:       TurnDoneRequest{TurnID: "t-old", Outcome: OutcomeCompleted},
+			wantState: st([]string{"c"}, running),
+		},
+		{
+			name:      "NoActiveFenced",
+			state:     st([]string{"c"}, nil),
+			req:       TurnDoneRequest{TurnID: "t0", Outcome: OutcomeCompleted},
+			wantState: st([]string{"c"}, nil),
+		},
+		{
+			name:      "CompletedStartsNext",
+			state:     st([]string{"c"}, running),
+			req:       TurnDoneRequest{TurnID: "t0", Outcome: OutcomeCompleted},
+			wantState: st(nil, startedTurn("c")),
+			wantSends: []sentCall{runBurst("c")},
+		},
+		{
+			name:      "TimeoutClearsActiveAndStartsNext",
+			state:     st([]string{"c", "d"}, running),
+			req:       TurnDoneRequest{TurnID: "t0", Outcome: OutcomeTimeout},
+			wantState: st(nil, startedTurn("c", "d")),
+			wantSends: []sentCall{runBurst("c", "d")},
+		},
+		{
+			name:        "FailedWithNothingPendingClearsAll",
+			state:       st(nil, running),
+			req:         TurnDoneRequest{TurnID: "t0", Outcome: OutcomeFailed},
+			wantCleared: true,
+		},
+		{
+			name:  "RescheduleWaitsAndKicksLater",
+			state: st([]string{"c"}, running),
+			req:   TurnDoneRequest{TurnID: "t0", Outcome: OutcomeReschedule, RescheduleDelayMs: 1500},
+			wantState: st([]string{"a", "b", "c"},
+				&ActiveTurn{TurnID: "t0", ItemIDs: []string{"a", "b"}, RunnerInvocationID: "inv-0", Waiting: true}),
+			wantSends: []sentCall{threadSend(tcKey, HandlerKick, KickRequest{TurnID: "t0"}, 1500*time.Millisecond)},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			h := newCoordHarness(t, tcKey, tcInv, tc.state)
+			require.NoError(t, NewThreadCoordinator(seedStore(t, nil, nil), nil, "aerial").OnTurnDone(h.objectCtx(), tc.req))
+			assert.Equal(t, tc.wantState, h.snapshot(t))
+			assert.Equal(t, tc.wantSends, h.sends)
+			assert.Equal(t, tc.wantCleared, h.clearAlls > 0)
+		})
+	}
+}
+
+func TestThreadCoordinator_Kick(t *testing.T) {
+	t.Parallel()
+	waiting := &ActiveTurn{TurnID: "t0", ItemIDs: []string{"a"}, RunnerInvocationID: "inv-0", Waiting: true}
+	running := &ActiveTurn{TurnID: "t0", ItemIDs: []string{"a"}, RunnerInvocationID: "inv-0"}
+	tests := []struct {
+		name      string
+		state     coordinatorState
+		req       KickRequest
+		wantState coordinatorState
+		wantSends []sentCall
+	}{
+		{name: "MismatchNoop", state: st([]string{"a"}, waiting), req: KickRequest{TurnID: "t-other"}, wantState: st([]string{"a"}, waiting)},
+		{name: "NotWaitingNoop", state: st([]string{"b"}, running), req: KickRequest{TurnID: "t0"}, wantState: st([]string{"b"}, running)},
+		{name: "WaitingRestarts", state: st([]string{"a", "b"}, waiting), req: KickRequest{TurnID: "t0"}, wantState: st(nil, startedTurn("a", "b")), wantSends: []sentCall{runBurst("a", "b")}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			h := newCoordHarness(t, tcKey, tcInv, tc.state)
+			require.NoError(t, NewThreadCoordinator(seedStore(t, nil, nil), nil, "aerial").Kick(h.objectCtx(), tc.req))
+			assert.Equal(t, tc.wantState, h.snapshot(t))
+			assert.Equal(t, tc.wantSends, h.sends)
+		})
+	}
+}
+
+func TestThreadCoordinator_CancelTurn(t *testing.T) {
+	t.Parallel()
+	t1 := &ActiveTurn{TurnID: "t1", ItemIDs: []string{"a"}, RunnerInvocationID: "inv-r1"}
+	tests := []struct {
+		name      string
+		state     coordinatorState
+		rows      []db.Message
+		req       CancelTurnRequest
+		failStep  error
+		wantResp  CancelTurnResponse
+		wantSends []sentCall
+		wantRows  map[string]rowWant
+		wantCode  int
+	}{
+		{
+			name:      "UnstartedRunnerFailsPendingActiveIDs",
+			state:     st([]string{"b"}, t1),
+			rows:      []db.Message{msgRow("a", tcKey, db.StatusPending), msgRow("b", tcKey, db.StatusPending)},
+			wantResp:  CancelTurnResponse{Status: "ok", CancelledCount: 2, CancelledActiveTurn: true},
+			wantSends: []sentCall{threadSend(tcKey, HandlerClearPending, ClearPendingRequest{IDs: []string{"b"}, CancelActive: true, TurnID: "t1"}, 0)},
+			wantRows:  map[string]rowWant{"a": {status: db.StatusFailed, errText: cancelledByOperatorReason}, "b": {status: db.StatusFailed, errText: cancelledByOperatorReason}},
+		},
+		{
+			name:      "SnapshotRaceLeavesClaimedRows",
+			state:     st([]string{"b"}, t1),
+			rows:      []db.Message{msgRow("a", tcKey, db.StatusCompleted), msgRow("b", tcKey, db.StatusProcessing)},
+			req:       CancelTurnRequest{Reason: "stop"},
+			wantResp:  CancelTurnResponse{Status: "ok", CancelledCount: 0, CancelledActiveTurn: true},
+			wantSends: []sentCall{threadSend(tcKey, HandlerClearPending, ClearPendingRequest{IDs: []string{"b"}, CancelActive: true, TurnID: "t1"}, 0)},
+			wantRows:  map[string]rowWant{"a": {status: db.StatusCompleted}, "b": {status: db.StatusProcessing}},
+		},
+		{
+			name:     "IdleNoop",
+			wantResp: CancelTurnResponse{Status: "ok"},
+		},
+		{
+			name:     "StepCancelSurfacesAsConflict",
+			state:    st([]string{"b"}, nil),
+			rows:     []db.Message{msgRow("b", tcKey, db.StatusPending)},
+			failStep: errRestateCancel,
+			wantCode: CodeQueueConflict,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			store := seedStore(t, tc.rows, nil)
+			if tc.failStep != nil {
+				store.FailNext("FailMessagesIfPending", tc.failStep)
+			}
+			h := newCoordHarness(t, tcKey, tcInv, tc.state)
+			resp, err := NewThreadCoordinator(store, nil, "aerial").CancelTurn(h.sharedCtx(), tc.req)
+			if assertCoordinatorErr(t, err, tc.wantCode) {
+				return
+			}
+			assert.Equal(t, tc.wantResp, resp)
+			assert.Equal(t, tc.wantSends, h.sends)
+			assert.Empty(t, h.cancels, "the shared handler never cancels invocations")
+			assertMessageRows(t, store, tc.wantRows)
+		})
+	}
+}
+
+func TestThreadCoordinator_ClearPending(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		state       coordinatorState
+		req         ClearPendingRequest
+		wantState   coordinatorState
+		wantSends   []sentCall
+		wantCancels []string
+		wantCleared bool
+	}{
+		{
+			name:        "CancelsRunnerThatNeverReported",
+			state:       st(nil, &ActiveTurn{TurnID: "t1", ItemIDs: []string{"a"}, RunnerInvocationID: "inv-r1"}),
+			req:         ClearPendingRequest{CancelActive: true, TurnID: "t1"},
+			wantCancels: []string{"inv-r1"},
+			wantCleared: true,
+		},
+		{
+			name:        "SnapshotRaceCancelsT2FromBacklog",
+			state:       st([]string{"c"}, &ActiveTurn{TurnID: "t2", ItemIDs: []string{"b"}, RunnerInvocationID: "inv-r2"}),
+			req:         ClearPendingRequest{IDs: []string{"b"}, CancelActive: true, TurnID: "t1"},
+			wantState:   st(nil, startedTurn("c")),
+			wantSends:   []sentCall{runBurst("c")},
+			wantCancels: []string{"inv-r2"},
+		},
+		{
+			name:      "T2WithPostSnapshotIDKeepsRunning",
+			state:     st([]string{"b"}, &ActiveTurn{TurnID: "t2", ItemIDs: []string{"b", "new"}, RunnerInvocationID: "inv-r2"}),
+			req:       ClearPendingRequest{IDs: []string{"b"}, CancelActive: true, TurnID: "t1"},
+			wantState: st(nil, &ActiveTurn{TurnID: "t2", ItemIDs: []string{"b", "new"}, RunnerInvocationID: "inv-r2"}),
+		},
+		{
+			name:        "WaitingTurnClearedWithoutCancel",
+			state:       st([]string{"a", "z"}, &ActiveTurn{TurnID: "t1", ItemIDs: []string{"a"}, RunnerInvocationID: "inv-r1", Waiting: true}),
+			req:         ClearPendingRequest{IDs: []string{"a"}, CancelActive: true, TurnID: "t1"},
+			wantState:   st(nil, startedTurn("z")),
+			wantSends:   []sentCall{runBurst("z")},
+			wantCancels: nil,
+		},
+		{
+			name:      "EmptyBodyStartsIdleBacklog",
+			state:     st([]string{"a"}, nil),
+			req:       ClearPendingRequest{},
+			wantState: st(nil, startedTurn("a")),
+			wantSends: []sentCall{runBurst("a")},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			h := newCoordHarness(t, tcKey, tcInv, tc.state)
+			require.NoError(t, NewThreadCoordinator(nil, nil, "aerial").ClearPending(h.objectCtx(), tc.req))
+			assert.Equal(t, tc.wantState, h.snapshot(t))
+			assert.Equal(t, tc.wantSends, h.sends)
+			assert.Equal(t, tc.wantCancels, h.cancels)
+			assert.Equal(t, tc.wantCleared, h.clearAlls > 0)
+		})
+	}
+}
+
+func TestThreadCoordinator_AdoptPending(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		rows      []db.Message
+		failList  error
+		wantSends []sentCall
+		wantCode  int
+	}{
+		{name: "ListStepCancelSurfacesAsConflict", failList: errRestateCancel, wantCode: CodeQueueConflict},
+		{
+			name:      "AppendsPendingRows",
+			rows:      []db.Message{msgRow("a", tcKey, db.StatusPending), msgRow("b", tcKey, db.StatusProcessing), msgRow("c", "th-other", db.StatusPending)},
+			wantSends: []sentCall{threadSend(tcKey, HandlerAppend, AppendRequest{IDs: []string{"a"}}, 0)},
+		},
+		{name: "NothingPendingNoSend"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			store := seedStore(t, tc.rows, nil)
+			if tc.failList != nil {
+				store.FailNext("ListPendingMessageIDsForThread", tc.failList)
+			}
+			h := newCoordHarness(t, tcKey, tcInv, coordinatorState{})
+			if assertCoordinatorErr(t, NewThreadCoordinator(store, nil, "aerial").AdoptPending(h.sharedCtx(), AdoptPendingRequest{}), tc.wantCode) {
+				return
+			}
+			assert.Equal(t, tc.wantSends, h.sends)
+		})
+	}
+}
+
+func TestThreadCoordinator_RunTurn(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		state     coordinatorState
+		wantSends []sentCall
+	}{
+		{name: "IdleShimSendsAdoptPending", wantSends: []sentCall{threadSend(tcKey, HandlerAdoptPending, AdoptPendingRequest{}, 0)}},
+		{name: "BusyShimSendsAdoptPending", state: st([]string{"a"}, &ActiveTurn{TurnID: "t0"}), wantSends: []sentCall{threadSend(tcKey, HandlerAdoptPending, AdoptPendingRequest{}, 0)}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			h := newCoordHarness(t, tcKey, tcInv, tc.state)
+			res, err := NewThreadCoordinator(nil, nil, "aerial").RunTurn(h.objectCtx(), ThreadTurnRequest{})
+			require.NoError(t, err)
+			assert.Equal(t, ThreadTurnResult{Status: "completed"}, res)
+			assert.Equal(t, tc.wantSends, h.sends)
+			assert.Equal(t, tc.state, h.snapshot(t), "the shim touches no state")
+		})
+	}
+}
+
+func TestThreadCoordinator_Status(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		state coordinatorState
+		want  CoordinatorStatus
+	}{
+		{name: "Idle", want: CoordinatorStatus{}},
+		{name: "Busy", state: st([]string{"b"}, &ActiveTurn{TurnID: "t0", ItemIDs: []string{"a"}}), want: CoordinatorStatus{Pending: []string{"b"}, Active: &ActiveTurn{TurnID: "t0", ItemIDs: []string{"a"}}}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			h := newCoordHarness(t, tcKey, tcInv, tc.state)
+			got, err := NewThreadCoordinator(nil, nil, "aerial").Status(h.sharedCtx())
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}
