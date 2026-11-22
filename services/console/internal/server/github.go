@@ -1,4 +1,4 @@
-package main
+package server
 
 import (
 	"context"
@@ -14,51 +14,6 @@ import (
 
 	"github.com/azylman/aerial/pkg/githubapi"
 )
-
-type GitHubRun struct {
-	ID      int64  `json:"id"`
-	Name    string `json:"name"`
-	RepoObj *struct {
-		FullName string `json:"full_name"`
-	} `json:"repository,omitempty"`
-	Repository string `json:"-"`
-	HeadSHA    string `json:"head_sha"`
-	HeadBranch string `json:"head_branch"`
-	Event      string `json:"event,omitempty"`
-	HeadCommit *struct {
-		Message   string    `json:"message"`
-		Timestamp time.Time `json:"timestamp"`
-	} `json:"head_commit,omitempty"`
-	Status     string    `json:"status"`     // "queued", "in_progress", "completed"
-	Conclusion string    `json:"conclusion"` // "success", "failure", "cancelled"
-	CreatedAt  time.Time `json:"created_at"`
-	UpdatedAt  time.Time `json:"updated_at"`
-	HTMLURL    string    `json:"html_url"`
-	// MergedFromBranch is the head branch of the pull request a push-to-main
-	// run merged, resolved by the poller so the run shares its PR's card.
-	MergedFromBranch string `json:"-"`
-}
-
-type GitHubJob struct {
-	ID          int64     `json:"id"`
-	RunID       int64     `json:"run_id"`
-	Name        string    `json:"name"`
-	Status      string    `json:"status"`     // "queued", "in_progress", "completed"
-	Conclusion  string    `json:"conclusion"` // "success", "failure", "skipped"
-	StartedAt   time.Time `json:"started_at"`
-	CompletedAt time.Time `json:"completed_at"`
-	HTMLURL     string    `json:"html_url"`
-}
-
-type GitHubRunsResponse struct {
-	TotalCount   int         `json:"total_count"`
-	WorkflowRuns []GitHubRun `json:"workflow_runs"`
-}
-
-type GitHubJobsResponse struct {
-	TotalCount int         `json:"total_count"`
-	Jobs       []GitHubJob `json:"jobs"`
-}
 
 type GitHubPoller struct {
 	repo         string
@@ -307,29 +262,6 @@ func isRecentOrActiveRun(r GitHubRun) bool {
 
 func isMainPushRun(r GitHubRun) bool {
 	return r.Event == "push" && (r.HeadBranch == "main" || r.HeadBranch == "master")
-}
-
-// mergedPullRequest is the subset of GET /repos/{repo}/commits/{sha}/pulls we read.
-type mergedPullRequest struct {
-	MergedAt *time.Time `json:"merged_at"`
-	Head     struct {
-		Ref string `json:"ref"`
-	} `json:"head"`
-}
-
-// parseMergedPullHeadRef returns the head branch of the first merged pull
-// request in a commits/{sha}/pulls response, or "" when none was merged.
-func parseMergedPullHeadRef(body []byte) (string, error) {
-	var pulls []mergedPullRequest
-	if err := json.Unmarshal(body, &pulls); err != nil {
-		return "", fmt.Errorf("decode commit pulls: %w", err)
-	}
-	for _, pr := range pulls {
-		if pr.MergedAt != nil && pr.Head.Ref != "" {
-			return pr.Head.Ref, nil
-		}
-	}
-	return "", nil
 }
 
 // fetchMergedFromBranch looks up which pull request a main commit merged.
