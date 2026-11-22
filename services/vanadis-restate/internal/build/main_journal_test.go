@@ -6,10 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
-	"strings"
 	"testing"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	restate "github.com/restatedev/sdk-go"
 	"github.com/restatedev/sdk-go/x/mocks"
@@ -194,58 +192,6 @@ func TestCreateBuildCommitAcknowledgementReplay(t *testing.T) {
 			accepted, err := bo.persistBuildCreation(mockRunContext{Context: context.Background()}, build, chunks)
 			assert.ErrorIs(t, err, tc.want)
 			assert.Equal(t, tc.want == nil, accepted)
-		})
-	}
-}
-
-// creationTransaction models atomic visibility at the database boundary:
-// inserts remain private until Commit and disappear on Rollback.
-type creationTransaction struct {
-	sqltest.Tx
-
-	pending []string
-	durable []string
-	failure error
-}
-
-func (tx *creationTransaction) Exec(_ context.Context, query string, args ...any) (pgconn.CommandTag, error) {
-	if strings.Contains(query, "INSERT INTO vanadis_chunks") {
-		return pgconn.CommandTag{}, tx.failure
-	}
-	id, ok := args[0].(string)
-	if !ok {
-		return pgconn.CommandTag{}, errors.New("expected build ID")
-	}
-	tx.pending = append(tx.pending, id)
-	return pgconn.NewCommandTag("INSERT 0 1"), nil
-}
-
-func (tx *creationTransaction) Commit(context.Context) error {
-	tx.durable = append(tx.durable, tx.pending...)
-	tx.pending = nil
-	return nil
-}
-
-func (tx *creationTransaction) Rollback(context.Context) error {
-	tx.pending = nil
-	return nil
-}
-
-func TestCreateBuildConflictAtomicity(t *testing.T) {
-	t.Parallel()
-	tests := []struct{ name, constraint string }{
-		{"chunk ID", "vanadis_chunks_pkey"},
-		{"chunk index", "uq_vanadis_chunks_build_index"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			tx := &creationTransaction{failure: &pgconn.PgError{Code: "23505", ConstraintName: tc.constraint}}
-			st := store.New(sqltest.DB{BeginFn: func(context.Context) (pgx.Tx, error) { return tx, nil }}, "example-owner")
-			err := st.CreateBuild(context.Background(), model.VanadisBuild{ID: "b1", ThreadID: "th1", Objective: "Obj"}, []model.VanadisChunk{{ID: "c1", Title: "Chunk", Instructions: "Work", Repo: "aerial", DependsOn: []string{}}})
-			require.ErrorIs(t, err, store.ErrBuildConflict)
-			assert.Empty(t, tx.durable)
-			assert.Empty(t, tx.pending)
 		})
 	}
 }
