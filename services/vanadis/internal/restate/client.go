@@ -112,7 +112,7 @@ func (c *Client) CallIngressKeyed(ctx context.Context, path, idempotencyKey stri
 
 	// Leave five seconds within the server write budget to return an actionable response.
 	parent := ctx
-	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	bodyBytes, err := restateingress.Post(ctx, c.httpClient, ingressURL+path, idempotencyKey, body, 2<<20)
 	if httpErr, ok := errors.AsType[*restateingress.HTTPError](err); ok {
