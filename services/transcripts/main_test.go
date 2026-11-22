@@ -71,27 +71,27 @@ func TestInitTranscriptsJetStream(t *testing.T) {
 	store := newTestStore(t, "aerial")
 	ingester := NewIngester(store, nil)
 	tests := []struct {
-		name     string
-		natsURL  string
-		ingester *Ingester
-		factory  func(ctx context.Context, url string) (pubsub.Bus, error)
-		wantNil  bool
+		name              string
+		natsURL           string
+		ingester          *Ingester
+		bus               pubsub.Bus
+		factoryErr        error
+		useDefaultFactory bool
+		wantNil           bool
 	}{
-		{"empty url yields nil", "", ingester, nil, true},
-		{"nil ingester yields nil", "nats://nats:4222", nil, nil, true},
-		{"factory error yields nil", "nats://nats:4222", ingester, func(_ context.Context, _ string) (pubsub.Bus, error) {
-			return nil, errors.New("dial failed")
-		}, true},
-		{"memory bus subscribes", "nats://nats:4222", ingester, func(_ context.Context, _ string) (pubsub.Bus, error) {
-			return pubsub.NewMemoryBus(), nil
-		}, false},
+		{name: "empty url yields nil", natsURL: "", ingester: ingester, useDefaultFactory: true, wantNil: true},
+		{name: "nil ingester yields nil", natsURL: "nats://nats:4222", ingester: nil, useDefaultFactory: true, wantNil: true},
+		{name: "factory error yields nil", natsURL: "nats://nats:4222", ingester: ingester, factoryErr: errors.New("dial failed"), wantNil: true},
+		{name: "memory bus subscribes", natsURL: "nats://nats:4222", ingester: ingester, bus: pubsub.NewMemoryBus(), wantNil: false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			factory := tc.factory
-			if factory == nil {
-				factory = newBusFn
+			factory := newBusFn
+			if !tc.useDefaultFactory {
+				factory = func(ctx context.Context, url string) (pubsub.Bus, error) {
+					return tc.bus, tc.factoryErr
+				}
 			}
 			bus := initTranscriptsJetStreamWithFactory(context.Background(), tc.ingester, tc.natsURL, factory)
 			if (bus == nil) != tc.wantNil {
@@ -228,19 +228,18 @@ func TestInitTranscriptsJetStreamFailures(t *testing.T) {
 	store := newTestStore(t, "aerial")
 	ingester := NewIngester(store, nil)
 	tests := []struct {
-		name    string
-		factory func(ctx context.Context, url string) (pubsub.Bus, error)
+		name string
+		bus  pubsub.Bus
 	}{
-		{"ensure streams failure still returns bus", func(_ context.Context, _ string) (pubsub.Bus, error) {
-			return ensureFailBus{Bus: pubsub.NewMemoryBus()}, nil
-		}},
-		{"subscribe failure still returns bus", func(_ context.Context, _ string) (pubsub.Bus, error) {
-			return consumeFailBus{Bus: pubsub.NewMemoryBus()}, nil
-		}},
+		{"ensure streams failure still returns bus", ensureFailBus{Bus: pubsub.NewMemoryBus()}},
+		{"subscribe failure still returns bus", consumeFailBus{Bus: pubsub.NewMemoryBus()}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			bus := initTranscriptsJetStreamWithFactory(context.Background(), ingester, "nats://nats:4222", tc.factory)
+			factory := func(context.Context, string) (pubsub.Bus, error) {
+				return tc.bus, nil
+			}
+			bus := initTranscriptsJetStreamWithFactory(context.Background(), ingester, "nats://nats:4222", factory)
 			if bus == nil {
 				t.Fatalf("expected non-nil bus")
 			}
