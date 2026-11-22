@@ -11,8 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	restate "github.com/restatedev/sdk-go"
 	"github.com/restatedev/sdk-go/x/mocks"
@@ -23,7 +23,6 @@ import (
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/build"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
-	"github.com/azylman/aerial/services/vanadis-restate/internal/sqltest"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
 )
 
@@ -184,16 +183,6 @@ func TestBuildRouterService_InvokerWiring(t *testing.T) {
 	}
 }
 
-type (
-	dbScript = sqltest.Script
-	sqlRoute = sqltest.Route
-)
-
-func open(s dbScript) (*store.Store, *[]string) {
-	db, candidates := s.DB()
-	return store.New(db, "example-org"), candidates
-}
-
 func routerTestMetricsMux() *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.Handler())
@@ -268,76 +257,83 @@ func makeRouterMockContext(t *testing.T) restate.Context {
 	return restate.WithMockContext(mc)
 }
 
-// routeStore opens a scripted store for a route table row; a nil
-// store.VanadisStore row exercises the router's nil-store paths.
-func routeStore(db dbScript) store.VanadisStore {
-	st, _ := open(db)
-	return st
-}
-
 // The route tables run serially: wantMetric asserts the exact
 // vanadis_restate_reconcile_errors_total delta for the handler, which
-// parallel tests hitting the same handler would race.
+// parallel tests hitting the same handler would race. A nil db row exercises
+// the router's nil-store paths.
 
 func TestBuildRouterService_RoutePREvent(t *testing.T) {
 	branchChunk := "feat/aerial-pr-vanadis-chunk-1-router-a1b2c3"
 	branchTS := "feat/aerial-pr-20261116-123456"
-	threadChunks := []model.VanadisChunk{{BuildID: "b-thread", ID: "c1"}}
+	started := time.Date(2026, 11, 16, 12, 0, 0, 0, time.UTC)
+	thread := &dbFixture{
+		builds: []model.VanadisBuild{{ID: "b-thread", ThreadID: "thread-123"}},
+		chunks: []model.VanadisChunk{{BuildID: "b-thread", ID: "c1", Status: "running", StartedAt: started}},
+	}
 	tests := []struct {
 		name        string
 		ev          pubsub.PRLifecycleEvent
-		st          store.VanadisStore
+		db          *dbFixture
 		wantBuildID string
 		wantErr     bool
 		wantMetric  float64
 	}{
-		{name: "empty repo", ev: pubsub.PRLifecycleEvent{Repo: "", PRNumber: 101}, st: routeStore(dbScript{}), wantErr: true},
-		{name: "zero pr number", ev: pubsub.PRLifecycleEvent{Repo: "aerial", PRNumber: 0}, st: routeStore(dbScript{}), wantErr: true},
+		{name: "empty repo", ev: pubsub.PRLifecycleEvent{Repo: "", PRNumber: 101}, db: &dbFixture{}, wantErr: true},
+		{name: "zero pr number", ev: pubsub.PRLifecycleEvent{Repo: "aerial", PRNumber: 0}, db: &dbFixture{}, wantErr: true},
 		{name: "nil store is a no-op", ev: pubsub.PRLifecycleEvent{Repo: "aerial", PRNumber: 101, Event: "opened"}},
-		{name: "typed nil store normalized to no-op", ev: pubsub.PRLifecycleEvent{Repo: "aerial", PRNumber: 101, Event: "opened"}, st: (*store.Store)(nil)},
+		{name: "typed nil store normalized to no-op", ev: pubsub.PRLifecycleEvent{Repo: "aerial", PRNumber: 101, Event: "opened"}, db: &dbFixture{typedNil: true}},
 		{
 			name: "primary lookup matched", ev: pubsub.PRLifecycleEvent{Repo: "aerial", PRNumber: 101, Event: "synchronize"},
-			st: routeStore(dbScript{Row: sqltest.ValuesRow("c1", "b-matched", 0, "medium", false)}), wantBuildID: "b-matched",
+			db: &dbFixture{
+				builds: []model.VanadisBuild{{ID: "b-matched"}},
+				chunks: []model.VanadisChunk{{BuildID: "b-matched", ID: "c1", PRNumber: 101}},
+			},
+			wantBuildID: "b-matched",
 		},
 		{
 			name: "primary lookup error records metric", ev: pubsub.PRLifecycleEvent{Repo: "aerial", PRNumber: 101, Event: "synchronize"},
-			st: routeStore(dbScript{Row: sqltest.ErrRow(errors.New("db query error"))}), wantErr: true, wantMetric: 1,
+			db: &dbFixture{closed: true}, wantErr: true, wantMetric: 1,
 		},
 		{
 			name: "branch-based fallback resolution", ev: pubsub.PRLifecycleEvent{Repo: "aerial", PRNumber: 102, Event: "opened", Branch: branchChunk},
-			st:          routeStore(dbScript{Row: sqltest.ErrRow(pgx.ErrNoRows), Routes: []sqlRoute{{Match: "FROM vanadis_chunks c WHERE c.id = $1", Row: sqltest.ValuesRow("b-branch")}}}),
+			db: &dbFixture{
+				builds: []model.VanadisBuild{{ID: "b-branch"}},
+				chunks: []model.VanadisChunk{{BuildID: "b-branch", ID: "chunk-1-router"}},
+			},
 			wantBuildID: "b-branch",
 		},
 		{
 			name: "thread and repo fallback resolution", ev: pubsub.PRLifecycleEvent{Repo: "aerial", PRNumber: 103, Event: "opened", Branch: branchTS, TargetID: "thread-123"},
-			st: routeStore(dbScript{Row: sqltest.ErrRow(pgx.ErrNoRows), Chunks: threadChunks}), wantBuildID: "b-thread",
+			db: thread, wantBuildID: "b-thread",
 		},
 		{
 			name: "dependabot guard exclusion", ev: pubsub.PRLifecycleEvent{Repo: "aerial", PRNumber: 104, Event: "opened", Branch: "refs/heads/dependabot/npm_and_yarn/foo", TargetID: "thread-123"},
-			st: routeStore(dbScript{Row: sqltest.ErrRow(pgx.ErrNoRows), Chunks: threadChunks}),
+			db: thread,
 		},
 		{
 			name: "quiet guard exclusion", ev: pubsub.PRLifecycleEvent{Repo: "aerial", PRNumber: 105, Event: "opened", Branch: "feat/something", TargetID: "thread-123", Quiet: true},
-			st: routeStore(dbScript{Row: sqltest.ErrRow(pgx.ErrNoRows), Chunks: threadChunks}),
+			db: thread,
 		},
 		{
 			name: "unmatched no-op routing", ev: pubsub.PRLifecycleEvent{Repo: "aerial", PRNumber: 106, Event: "opened", Branch: "feat/something"},
-			st: routeStore(dbScript{Row: sqltest.ErrRow(pgx.ErrNoRows)}),
+			db: &dbFixture{},
 		},
 		{
+			// An integer chunk id cannot compare against the branch chunk id,
+			// while the PR lookup (no matching rows) still succeeds.
 			name: "branch-based lookup error propagates", ev: pubsub.PRLifecycleEvent{Repo: "aerial", PRNumber: 107, Event: "opened", Branch: branchChunk},
-			st:      routeStore(dbScript{Row: sqltest.ErrRow(pgx.ErrNoRows), Routes: []sqlRoute{{Match: "FROM vanadis_chunks c WHERE c.id = $1", Row: sqltest.ErrRow(errors.New("lookup err"))}}}),
+			db:      &dbFixture{sabotage: `ALTER TABLE vanadis_chunks ALTER COLUMN id TYPE integer USING 0`},
 			wantErr: true, wantMetric: 1,
 		},
 		{
 			name: "thread-based lookup error propagates", ev: pubsub.PRLifecycleEvent{Repo: "aerial", PRNumber: 108, Event: "opened", Branch: branchTS, TargetID: "thread-123"},
-			st: routeStore(dbScript{Row: sqltest.ErrRow(pgx.ErrNoRows), QueryErr: errors.New("lookup err")}), wantErr: true, wantMetric: 1,
+			db: &dbFixture{sabotage: `ALTER TABLE vanadis_builds DROP COLUMN thread_id`}, wantErr: true, wantMetric: 1,
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			inv := &mockInvoker{}
-			router := NewBuildRouterService(tc.st, func(restate.Context) BuildObjectInvoker { return inv })
+			router := NewBuildRouterService(openFixture(t, tc.db), func(restate.Context) BuildObjectInvoker { return inv })
 			before := routerReconcileErrorsCount(t, "RoutePREvent")
 			err := router.RoutePREvent(makeRouterMockContext(t), tc.ev)
 			assert.Equal(t, tc.wantErr, err != nil, "err = %v", err)
@@ -348,25 +344,29 @@ func TestBuildRouterService_RoutePREvent(t *testing.T) {
 }
 
 func TestBuildRouterService_RouteDispatchOutcome(t *testing.T) {
+	dispatch := &dbFixture{
+		builds: []model.VanadisBuild{{ID: "b-dispatch"}},
+		chunks: []model.VanadisChunk{{BuildID: "b-dispatch", ID: "c1"}},
+	}
 	tests := []struct {
 		name        string
 		chunkID     string
-		st          store.VanadisStore
+		db          *dbFixture
 		wantBuildID string
 		wantErr     bool
 		wantMetric  float64
 	}{
-		{name: "empty chunk id is a no-op", chunkID: "", st: routeStore(dbScript{Row: sqltest.ValuesRow("b-dispatch")})},
-		{name: "matched chunk routes to default runner", chunkID: "c1", st: routeStore(dbScript{Row: sqltest.ValuesRow("b-dispatch")}), wantBuildID: "b-dispatch"},
-		{name: "chunk not found is a no-op", chunkID: "c-unknown", st: routeStore(dbScript{Row: sqltest.ErrRow(store.ErrChunkNotFound)})},
-		{name: "no rows chunk not routed", chunkID: "c1", st: routeStore(dbScript{Row: sqltest.ErrRow(pgx.ErrNoRows)})},
+		{name: "empty chunk id is a no-op", chunkID: "", db: dispatch},
+		{name: "matched chunk routes to default runner", chunkID: "c1", db: dispatch, wantBuildID: "b-dispatch"},
+		{name: "chunk not found is a no-op", chunkID: "c-unknown", db: dispatch},
+		{name: "no rows chunk not routed", chunkID: "c1", db: &dbFixture{}},
 		{name: "nil store is a no-op", chunkID: "c1"},
-		{name: "query error records metric", chunkID: "c1", st: routeStore(dbScript{Row: sqltest.ErrRow(errors.New("db query error"))}), wantErr: true, wantMetric: 1},
+		{name: "query error records metric", chunkID: "c1", db: &dbFixture{closed: true}, wantErr: true, wantMetric: 1},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			inv := &mockInvoker{}
-			router := NewBuildRouterService(tc.st, func(restate.Context) BuildObjectInvoker { return inv })
+			router := NewBuildRouterService(openFixture(t, tc.db), func(restate.Context) BuildObjectInvoker { return inv })
 			before := routerReconcileErrorsCount(t, "RouteDispatchOutcome")
 			err := router.RouteDispatchOutcome(makeRouterMockContext(t), pubsub.DispatchOutcomeEvent{VanadisChunkID: tc.chunkID})
 			assert.Equal(t, tc.wantErr, err != nil, "err = %v", err)
@@ -377,34 +377,46 @@ func TestBuildRouterService_RouteDispatchOutcome(t *testing.T) {
 }
 
 func TestBuildRouterService_RouteAttachPR(t *testing.T) {
-	prRow := func(buildID string) store.VanadisStore {
-		return routeStore(dbScript{Row: sqltest.ValuesRow("c1", buildID, 0, "medium", false)})
+	chunkIn := func(buildID string) *dbFixture {
+		return &dbFixture{
+			builds: []model.VanadisBuild{{ID: buildID}},
+			chunks: []model.VanadisChunk{{BuildID: buildID, ID: "c1"}},
+		}
 	}
-	unmatched := routeStore(dbScript{Row: sqltest.ErrRow(pgx.ErrNoRows)})
+	prIn := func(buildID string, pr int) *dbFixture {
+		return &dbFixture{
+			builds: []model.VanadisBuild{{ID: buildID}},
+			chunks: []model.VanadisChunk{{BuildID: buildID, ID: "c1", PRNumber: pr}},
+		}
+	}
+	unmatched := &dbFixture{}
 	tests := []struct {
 		name        string
 		routerAgent string
-		st          store.VanadisStore
+		db          *dbFixture
 		req         store.AttachChunkPRRequest
 		wantBuildID string // empty: a freshly generated standalone build id
 		wantErr     bool
 	}{
-		{name: "validation failure", st: routeStore(dbScript{Row: sqltest.ValuesRow("b-existing")}), req: store.AttachChunkPRRequest{}, wantErr: true},
-		{name: "chunk id resolves existing build", st: routeStore(dbScript{Row: sqltest.ValuesRow("b-existing")}), req: store.AttachChunkPRRequest{ChunkID: "c1", PRNumber: 101, Repo: "aerial"}, wantBuildID: "b-existing"},
-		{name: "existing build ignores caller agent", st: routeStore(dbScript{Row: sqltest.ValuesRow("b1")}), req: store.AttachChunkPRRequest{ChunkID: "c1", PRNumber: 7, Agent: "agent-alpha"}, wantBuildID: "b1"},
-		{name: "repo lookup resolves existing pr", st: prRow("b-repo"), req: store.AttachChunkPRRequest{PRNumber: 101, Repo: "aerial"}, wantBuildID: "b-repo"},
-		{name: "existing pr on default runner", routerAgent: "agent-beta", st: prRow("b2"), req: store.AttachChunkPRRequest{Repo: "aerial", PRNumber: 7}, wantBuildID: "b2"},
-		{name: "chunk not found starts standalone build", st: routeStore(dbScript{Row: sqltest.ErrRow(store.ErrChunkNotFound)}), req: store.AttachChunkPRRequest{PRNumber: 999, Repo: "aerial"}},
+		{name: "validation failure", db: chunkIn("b-existing"), req: store.AttachChunkPRRequest{}, wantErr: true},
+		{name: "chunk id resolves existing build", db: chunkIn("b-existing"), req: store.AttachChunkPRRequest{ChunkID: "c1", PRNumber: 101, Repo: "aerial"}, wantBuildID: "b-existing"},
+		{name: "existing build ignores caller agent", db: chunkIn("b1"), req: store.AttachChunkPRRequest{ChunkID: "c1", PRNumber: 7, Agent: "agent-alpha"}, wantBuildID: "b1"},
+		{name: "repo lookup resolves existing pr", db: prIn("b-repo", 101), req: store.AttachChunkPRRequest{PRNumber: 101, Repo: "aerial"}, wantBuildID: "b-repo"},
+		{name: "existing pr on default runner", routerAgent: "agent-beta", db: prIn("b2", 7), req: store.AttachChunkPRRequest{Repo: "aerial", PRNumber: 7}, wantBuildID: "b2"},
+		{name: "chunk not found starts standalone build", db: chunkIn("b-existing"), req: store.AttachChunkPRRequest{PRNumber: 999, Repo: "aerial"}},
 		{name: "nil store starts standalone build", req: store.AttachChunkPRRequest{ChunkID: "c1", PRNumber: 101, Repo: "aerial"}},
-		{name: "new build without caller runs on default agent", st: unmatched, req: store.AttachChunkPRRequest{Repo: "aerial", PRNumber: 7}},
-		{name: "new build without caller ignores scoped router", routerAgent: "agent-beta", st: unmatched, req: store.AttachChunkPRRequest{Repo: "aerial", PRNumber: 7}},
-		{name: "new build runs on default runner", st: unmatched, req: store.AttachChunkPRRequest{Repo: "aerial", PRNumber: 7, Agent: "agent-alpha"}},
-		{name: "new build caller agent normalized", st: unmatched, req: store.AttachChunkPRRequest{Repo: "aerial", PRNumber: 7, Agent: " Agent-Alpha "}},
+		{name: "new build without caller runs on default agent", db: unmatched, req: store.AttachChunkPRRequest{Repo: "aerial", PRNumber: 7}},
+		{name: "new build without caller ignores scoped router", routerAgent: "agent-beta", db: unmatched, req: store.AttachChunkPRRequest{Repo: "aerial", PRNumber: 7}},
+		{name: "new build runs on default runner", db: unmatched, req: store.AttachChunkPRRequest{Repo: "aerial", PRNumber: 7, Agent: "agent-alpha"}},
+		{name: "new build caller agent normalized", db: unmatched, req: store.AttachChunkPRRequest{Repo: "aerial", PRNumber: 7, Agent: " Agent-Alpha "}},
+		{name: "unknown chunk id falls through to standalone build", db: chunkIn("b-existing"), req: store.AttachChunkPRRequest{ChunkID: "c-missing", PRNumber: 7, Repo: "aerial"}},
+		{name: "chunk lookup error propagates", db: &dbFixture{closed: true}, req: store.AttachChunkPRRequest{ChunkID: "c1", PRNumber: 7}, wantErr: true},
+		{name: "pr lookup error propagates", db: &dbFixture{closed: true}, req: store.AttachChunkPRRequest{Repo: "aerial", PRNumber: 7}, wantErr: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			inv := &mockInvoker{}
-			router := NewBuildRouterServiceWithAgent(tc.st, tc.routerAgent, func(restate.Context) BuildObjectInvoker { return inv })
+			router := NewBuildRouterServiceWithAgent(openFixture(t, tc.db), tc.routerAgent, func(restate.Context) BuildObjectInvoker { return inv })
 			res, err := router.RouteAttachPR(makeRouterMockContext(t), tc.req)
 			if tc.wantErr {
 				require.Error(t, err)
@@ -422,28 +434,31 @@ func TestBuildRouterService_RouteAttachPR(t *testing.T) {
 }
 
 func TestBuildRouterService_RouteFailChunk(t *testing.T) {
-	found := routeStore(dbScript{Row: sqltest.ValuesRow("b-fail")})
+	found := &dbFixture{
+		builds: []model.VanadisBuild{{ID: "b-fail"}},
+		chunks: []model.VanadisChunk{{BuildID: "b-fail", ID: "c1"}},
+	}
 	tests := []struct {
 		name           string
-		st             store.VanadisStore
+		db             *dbFixture
 		req            model.FailChunkRequest
 		wantBuildID    string
 		wantDispatchID string
 		wantErr        bool
 		wantMetric     float64
 	}{
-		{name: "validation failure", st: found, req: model.FailChunkRequest{}, wantErr: true},
-		{name: "chunk not found", st: routeStore(dbScript{Row: sqltest.ErrRow(store.ErrChunkNotFound)}), req: model.FailChunkRequest{ChunkID: "c-missing", Reason: "boom"}, wantErr: true},
+		{name: "validation failure", db: found, req: model.FailChunkRequest{}, wantErr: true},
+		{name: "chunk not found", db: found, req: model.FailChunkRequest{ChunkID: "c-missing", Reason: "boom"}, wantErr: true},
 		{name: "nil store is chunk not found", req: model.FailChunkRequest{ChunkID: "c1", Reason: "error"}, wantErr: true},
-		{name: "query error records metric", st: routeStore(dbScript{Row: sqltest.ErrRow(errors.New("db query error"))}), req: model.FailChunkRequest{ChunkID: "c1", Reason: "error"}, wantErr: true, wantMetric: 1},
-		{name: "legacy request routes to default runner", st: found, req: model.FailChunkRequest{ChunkID: "c1", Reason: "boom"}, wantBuildID: "b-fail"},
-		{name: "current generation", st: found, req: model.FailChunkRequest{BuildID: "b-fail", ChunkID: "c1", Reason: "boom", DispatchID: "vanadis-c1-turn-1"}, wantBuildID: "b-fail", wantDispatchID: "vanadis-c1-turn-1"},
-		{name: "wrong owner", st: found, req: model.FailChunkRequest{BuildID: "other", ChunkID: "c1", Reason: "boom", DispatchID: "vanadis-c1-turn-1"}, wantErr: true},
+		{name: "query error records metric", db: &dbFixture{closed: true}, req: model.FailChunkRequest{ChunkID: "c1", Reason: "error"}, wantErr: true, wantMetric: 1},
+		{name: "legacy request routes to default runner", db: found, req: model.FailChunkRequest{ChunkID: "c1", Reason: "boom"}, wantBuildID: "b-fail"},
+		{name: "current generation", db: found, req: model.FailChunkRequest{BuildID: "b-fail", ChunkID: "c1", Reason: "boom", DispatchID: "vanadis-c1-turn-1"}, wantBuildID: "b-fail", wantDispatchID: "vanadis-c1-turn-1"},
+		{name: "wrong owner", db: found, req: model.FailChunkRequest{BuildID: "other", ChunkID: "c1", Reason: "boom", DispatchID: "vanadis-c1-turn-1"}, wantErr: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			inv := &mockInvoker{}
-			router := NewBuildRouterService(tc.st, func(restate.Context) BuildObjectInvoker { return inv })
+			router := NewBuildRouterService(openFixture(t, tc.db), func(restate.Context) BuildObjectInvoker { return inv })
 			before := routerReconcileErrorsCount(t, "RouteFailChunk")
 			res, err := router.RouteFailChunk(makeRouterMockContext(t), tc.req)
 			assert.Equal(t, tc.wantErr, err != nil, "err = %v", err)
@@ -461,22 +476,22 @@ func TestBuildRouterService_RouteBuildReconcile(t *testing.T) {
 	tests := []struct {
 		name        string
 		buildID     string
-		db          dbScript
+		db          *dbFixture
 		wantErr     bool
 		wantBuildID string
 		wantReason  string
 	}{
-		{name: "empty build id rejected", buildID: " ", wantErr: true},
-		{name: "default runner", buildID: "b1", db: dbScript{BuildRow: &sqltest.Row{Build: &model.VanadisBuild{ID: "b1"}}}, wantBuildID: "b1", wantReason: "widget_sync"},
-		{name: "unknown build dropped", buildID: "b3", db: dbScript{BuildRow: sqltest.ErrRow(pgx.ErrNoRows)}},
-		{name: "storage error propagates", buildID: "b4", db: dbScript{BuildRow: sqltest.ErrRow(errors.New("db down"))}, wantErr: true},
+		{name: "empty build id rejected", buildID: " ", db: &dbFixture{}, wantErr: true},
+		{name: "default runner", buildID: "b1", db: &dbFixture{builds: []model.VanadisBuild{{ID: "b1"}}}, wantBuildID: "b1", wantReason: "widget_sync"},
+		{name: "unknown build dropped", buildID: "b3", db: &dbFixture{builds: []model.VanadisBuild{{ID: "b1"}}}},
+		{name: "storage error propagates", buildID: "b4", db: &dbFixture{closed: true}, wantErr: true},
+		{name: "nil store drops reconcile", buildID: "b1"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			inv := &mockInvoker{}
-			st, _ := open(tc.db)
-			router := NewBuildRouterService(st, func(restate.Context) BuildObjectInvoker { return inv })
+			router := NewBuildRouterService(openFixture(t, tc.db), func(restate.Context) BuildObjectInvoker { return inv })
 			err := router.RouteBuildReconcile(makeRouterMockContext(t), tc.buildID)
 			if tc.wantErr {
 				require.Error(t, err)
