@@ -48,9 +48,6 @@ const (
 	LabelRouteBuildReconcile       = "RouteBuildReconcile"
 )
 
-// legacyBuildServiceName is preserved for the dark-launch default agent.
-const legacyBuildServiceName = "Build"
-
 var reconcileErrorHandlerLabels = []string{
 	labelCreate,
 	labelUpdateBuild,
@@ -230,7 +227,7 @@ type restateObjectRuntime struct {
 
 func (r restateObjectRuntime) serviceName() string {
 	if strings.TrimSpace(r.buildService) == "" {
-		return legacyBuildServiceName
+		return buildplan.BuildServiceName("")
 	}
 	return r.buildService
 }
@@ -349,9 +346,9 @@ func (b *BuildObject) WithAuthority(st store.VanadisStore, exec *executor.Execut
 // ServiceName returns the Restate service name for this Virtual Object.
 func (b *BuildObject) ServiceName() string {
 	if b == nil {
-		return legacyBuildServiceName
+		return buildplan.BuildServiceName("")
 	}
-	return model.BuildServiceName(b.agentName)
+	return buildplan.BuildServiceName(b.agentName)
 }
 
 func (b *BuildObject) notifyTransitionError(ctx context.Context, buildID, stepName string, priorState *model.BuildObjectState, transErr error) error {
@@ -388,7 +385,7 @@ func (b *BuildObject) getRuntime(ctx restate.ObjectContext) objectRuntime {
 	if b != nil {
 		agent = b.agentName
 	}
-	return restateObjectRuntime{ctx: ctx, buildService: model.BuildServiceName(agent)}
+	return restateObjectRuntime{ctx: ctx, buildService: buildplan.BuildServiceName(agent)}
 }
 
 func ToTerminalErr(err error) error {

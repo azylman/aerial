@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
+	"github.com/azylman/aerial/pkg/buildplan"
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/deploygate"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/executor"
@@ -525,7 +526,7 @@ func TestBuildServiceName_Derivation(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			assert.Equal(t, tc.wantBuild, model.BuildServiceName(tc.agent))
+			assert.Equal(t, tc.wantBuild, buildplan.BuildServiceName(tc.agent))
 			assert.Equal(t, tc.wantBuild, NewBuildObjectWithAgent("", tc.agent, nil).ServiceName())
 		})
 	}

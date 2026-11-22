@@ -12,6 +12,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
+	"github.com/azylman/aerial/pkg/buildplan"
 	"github.com/azylman/aerial/pkg/pgutil"
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/vanadis/internal/metrics"
@@ -98,7 +99,7 @@ func (s *VanadisServer) restateClient() *Client {
 // build. runnerAgent is the build's runner_agent ("" and the default agent
 // resolve to the legacy Build service).
 func (s *VanadisServer) restateObjectPath(runnerAgent, buildID, handler string) string {
-	return s.restateClient().ObjectPath(BuildServiceName(runnerAgent), buildID, handler)
+	return s.restateClient().ObjectPath(buildplan.BuildServiceName(runnerAgent), buildID, handler)
 }
 
 func (s *VanadisServer) restateRouterPath(handler string) string {

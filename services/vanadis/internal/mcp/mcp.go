@@ -18,7 +18,6 @@ import (
 	"github.com/azylman/aerial/pkg/discordutil"
 	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/pkg/k8sauth"
-	"github.com/azylman/aerial/services/vanadis/internal/config"
 	"github.com/azylman/aerial/services/vanadis/internal/model"
 	"github.com/azylman/aerial/services/vanadis/internal/restate"
 	"github.com/azylman/aerial/services/vanadis/internal/store"
@@ -537,7 +536,7 @@ func (h *Handler) authorizeBuildMutation(ctx context.Context, buildID string) (s
 			return "", err
 		}
 	}
-	return config.BuildServiceName(targetBuild.RunnerAgent), nil
+	return buildplan.BuildServiceName(targetBuild.RunnerAgent), nil
 }
 
 func (h *Handler) handleMCPUpdateBuild(ctx context.Context, args MCPUpdateBuildArgs) (MCPUpdateBuildOutput, error) {
@@ -773,7 +772,7 @@ func (h *Handler) handleMCPCompleteChunk(ctx context.Context, args MCPCompleteCh
 		}
 	}
 	req := completeChunkPayload{BuildID: targetBuild.ID, ChunkID: chunkID, DispatchID: dispatchID, Summary: summary}
-	path := h.Restate.ObjectPath(config.BuildServiceName(targetBuild.RunnerAgent), targetBuild.ID, "CompleteChunk")
+	path := h.Restate.ObjectPath(buildplan.BuildServiceName(targetBuild.RunnerAgent), targetBuild.ID, "CompleteChunk")
 	var resp completeChunkResponse
 	if err := h.Restate.CallIngressKeyed(ctx, path, "complete:"+dispatchID, req, &resp); err != nil {
 		return MCPCompleteChunkOutput{}, err

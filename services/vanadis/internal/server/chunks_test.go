@@ -280,7 +280,7 @@ func mockRestateMisrouted(w http.ResponseWriter, path string, bodyBytes []byte) 
 	if strings.HasSuffix(path, "/Create") {
 		var createReq CreateBuildRequest
 		_ = json.Unmarshal(bodyBytes, &createReq)
-		want = "/" + BuildServiceName(createReq.Agent) + "/"
+		want = "/" + buildplan.BuildServiceName(createReq.Agent) + "/"
 	} else if strings.Contains(path, "runner-alpha") {
 		want = "/Build-agent-alpha/"
 	}

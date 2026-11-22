@@ -303,31 +303,3 @@ func TestLoadRestateConfig(t *testing.T) {
 		})
 	}
 }
-
-func TestRestateScopedNames(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name       string
-		agent      string
-		wantBuild  string
-		wantRouter string
-	}{
-		{name: "empty defaults to legacy", agent: "", wantBuild: "Build", wantRouter: "BuildRouter"},
-		{name: "aerial defaults to legacy", agent: "aerial", wantBuild: "Build", wantRouter: "BuildRouter"},
-		{name: "agent-beta scoped", agent: "agent-beta", wantBuild: "Build-agent-beta", wantRouter: "BuildRouter-agent-beta"},
-		{name: "agent-alpha scoped", agent: "agent-alpha", wantBuild: "Build-agent-alpha", wantRouter: "BuildRouter-agent-alpha"},
-		{name: "mixed case normalized", agent: "  Agent-Beta  ", wantBuild: "Build-agent-beta", wantRouter: "BuildRouter-agent-beta"},
-		{name: "unsafe chars route to default", agent: "Foo Bar", wantBuild: "Build", wantRouter: "BuildRouter"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			if got := BuildServiceName(tc.agent); got != tc.wantBuild {
-				t.Errorf("BuildServiceName(%q) = %q, want %q", tc.agent, got, tc.wantBuild)
-			}
-			if got := BuildRouterServiceName(tc.agent); got != tc.wantRouter {
-				t.Errorf("BuildRouterServiceName(%q) = %q, want %q", tc.agent, got, tc.wantRouter)
-			}
-		})
-	}
-}

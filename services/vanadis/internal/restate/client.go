@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/azylman/aerial/pkg/buildplan"
 	"github.com/azylman/aerial/pkg/restateingress"
 	"github.com/azylman/aerial/pkg/strutil"
 	"github.com/azylman/aerial/services/vanadis/internal/config"
@@ -34,12 +35,12 @@ func NewClient(cfg config.RestateConfig, httpClient *http.Client) *Client {
 // BuildRouterServiceName returns the single shared Restate BuildRouter
 // service name, owned by the configured (default) agent's vanadis-restate.
 func (c *Client) BuildRouterServiceName() string {
-	return config.BuildRouterServiceName(c.cfg.AgentName)
+	return buildplan.BuildRouterServiceName(c.cfg.AgentName)
 }
 
 // ObjectPath returns the Restate ingress path for a handler on the Build
 // Virtual Object named buildService. Callers derive buildService from the
-// build's runner agent via config.BuildServiceName.
+// build's runner agent via buildplan.BuildServiceName.
 func (*Client) ObjectPath(buildService, buildID, handler string) string {
 	return "/" + buildService + "/" + url.PathEscape(buildID) + "/" + handler
 }

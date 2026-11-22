@@ -44,10 +44,6 @@ var (
 	LoadConfig = config.LoadConfig
 	// LoadConfigFromEnv initializes configuration from environment variables with optional CONFIG_PATH fallback.
 	LoadConfigFromEnv = config.LoadConfigFromEnv
-	// BuildServiceName derives the Restate Build Virtual Object name for an agent.
-	BuildServiceName = config.BuildServiceName
-	// BuildRouterServiceName derives the Restate BuildRouter service name for an agent.
-	BuildRouterServiceName = config.BuildRouterServiceName
 	// LoadRestateConfig loads Restate configuration from an optional YAML file with environment variable overrides.
 	LoadRestateConfig = config.LoadRestateConfig
 )

@@ -118,27 +118,3 @@ func TestLoadConfigFromEnv(t *testing.T) {
 		})
 	}
 }
-
-func TestBuildServiceName_Derivation(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name       string
-		agent      string
-		wantRouter string
-	}{
-		{name: "empty defaults to legacy", agent: "", wantRouter: "BuildRouter"},
-		{name: "aerial defaults to legacy", agent: "aerial", wantRouter: "BuildRouter"},
-		{name: "whitespace aerial defaults to legacy", agent: "  Aerial  ", wantRouter: "BuildRouter"},
-		{name: "agent-beta scoped", agent: "agent-beta", wantRouter: "BuildRouter-agent-beta"},
-		{name: "agent-alpha scoped", agent: "agent-alpha", wantRouter: "BuildRouter-agent-alpha"},
-		{name: "unsafe chars route to default", agent: "Foo Bar", wantRouter: "BuildRouter"},
-		{name: "mixed case scoped normalized", agent: "Agent-Beta", wantRouter: "BuildRouter-agent-beta"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			assert.Equal(t, tc.wantRouter, BuildRouterServiceName(tc.agent))
-		})
-	}
-}

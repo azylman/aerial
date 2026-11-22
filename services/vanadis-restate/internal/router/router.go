@@ -15,12 +15,6 @@ import (
 	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
 )
 
-// Legacy Restate service names preserved for the dark-launch default agent.
-const (
-	legacyBuildServiceName       = "Build"
-	legacyBuildRouterServiceName = "BuildRouter"
-)
-
 // BuildObjectInvoker delivers routed requests to one build's Build object on
 // the runner that executes it. runner is the build's runner_agent.
 type BuildObjectInvoker interface {
@@ -37,29 +31,29 @@ type restateBuildObjectInvoker struct {
 
 func (r restateBuildObjectInvoker) RoutePREvent(ctx context.Context, runner, buildID string, ev pubsub.PRLifecycleEvent) error {
 	_ = ctx
-	_ = restate.ObjectSend(r.ctx, model.BuildServiceName(runner), buildID, "OnPREvent").Send(ev)
+	_ = restate.ObjectSend(r.ctx, buildplan.BuildServiceName(runner), buildID, "OnPREvent").Send(ev)
 	return nil
 }
 
 func (r restateBuildObjectInvoker) RouteDispatchOutcome(ctx context.Context, runner, buildID string, ev pubsub.DispatchOutcomeEvent) error {
 	_ = ctx
-	_ = restate.ObjectSend(r.ctx, model.BuildServiceName(runner), buildID, "OnDispatchOutcome").Send(ev)
+	_ = restate.ObjectSend(r.ctx, buildplan.BuildServiceName(runner), buildID, "OnDispatchOutcome").Send(ev)
 	return nil
 }
 
 func (r restateBuildObjectInvoker) RouteAttachPR(ctx context.Context, runner, buildID string, req store.AttachChunkPRRequest) (model.AttachChunkPRResponse, error) {
 	_ = ctx
-	return restate.Object[model.AttachChunkPRResponse](r.ctx, model.BuildServiceName(runner), buildID, "AttachPR").Request(req)
+	return restate.Object[model.AttachChunkPRResponse](r.ctx, buildplan.BuildServiceName(runner), buildID, "AttachPR").Request(req)
 }
 
 func (r restateBuildObjectInvoker) RouteFailChunk(ctx context.Context, runner, buildID string, req model.FailChunkRequest) (model.FailChunkResponse, error) {
 	_ = ctx
-	return restate.Object[model.FailChunkResponse](r.ctx, model.BuildServiceName(runner), buildID, "FailChunk").Request(req)
+	return restate.Object[model.FailChunkResponse](r.ctx, buildplan.BuildServiceName(runner), buildID, "FailChunk").Request(req)
 }
 
 func (r restateBuildObjectInvoker) RouteReconcile(ctx context.Context, runner, buildID string, req build.ReconcileBuildRequest) error {
 	_ = ctx
-	_ = restate.ObjectSend(r.ctx, model.BuildServiceName(runner), buildID, "Reconcile").Send(req)
+	_ = restate.ObjectSend(r.ctx, buildplan.BuildServiceName(runner), buildID, "Reconcile").Send(req)
 	return nil
 }
 
@@ -95,9 +89,9 @@ func NewBuildRouterServiceWithAgent(st store.VanadisStore, agentName string, inv
 // ServiceName returns the Restate service name.
 func (s *BuildRouterService) ServiceName() string {
 	if s == nil {
-		return legacyBuildRouterServiceName
+		return buildplan.BuildRouterServiceName("")
 	}
-	return model.BuildRouterServiceName(s.agentName)
+	return buildplan.BuildRouterServiceName(s.agentName)
 }
 
 func (s *BuildRouterService) getInvoker(ctx restate.Context) BuildObjectInvoker {
