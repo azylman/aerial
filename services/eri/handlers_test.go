@@ -19,6 +19,7 @@ import (
 
 	"github.com/bwmarrin/discordgo"
 
+	"github.com/azylman/aerial/pkg/eriwire"
 	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
@@ -42,6 +43,44 @@ func runHTTP(h http.HandlerFunc, method, target string, body io.Reader, headers 
 	return w
 }
 
+// restateCapture is an httptest Restate ingress that answers every call with
+// a fixed response and keeps the body of the last request it received.
+type restateCapture struct {
+	mu   sync.Mutex
+	last []byte
+}
+
+func (c *restateCapture) decodeLast(t *testing.T, out any) {
+	t.Helper()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.last) == 0 {
+		t.Fatal("restate ingress received no request")
+	}
+	if err := json.Unmarshal(c.last, out); err != nil {
+		t.Fatalf("decode restate request: %v", err)
+	}
+}
+
+// installRestateCapture swaps the active Restate ingress client for one
+// backed by a capturing fake until the test ends. Callers must not run in parallel.
+func installRestateCapture(t *testing.T, status int, resp string) *restateCapture {
+	t.Helper()
+	capture := &restateCapture{}
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		capture.mu.Lock()
+		capture.last = body
+		capture.mu.Unlock()
+		w.WriteHeader(status)
+		_, _ = w.Write([]byte(resp))
+	}))
+	t.Cleanup(ts.Close)
+	orig := activeRestateIngressClient.Swap(NewRestateIngressClient(ts.URL, "aerial", ts.Client()))
+	t.Cleanup(func() { activeRestateIngressClient.Store(orig) })
+	return capture
+}
+
 type promptPayloadCase struct {
 	name          string
 	pool          *queue.WorkerPool
@@ -54,7 +93,7 @@ type promptPayloadCase struct {
 	wantContent   string
 }
 
-func assertPromptPayloadCase(t *testing.T, store db.Store, tc promptPayloadCase) {
+func assertPromptPayloadCase(t *testing.T, store db.Store, capture *restateCapture, tc promptPayloadCase) {
 	t.Helper()
 	w := runHTTP(handlePrompt(store, tc.pool), http.MethodPost, "/prompt", strings.NewReader(tc.payload))
 	if w.Code != http.StatusAccepted {
@@ -66,41 +105,41 @@ func assertPromptPayloadCase(t *testing.T, store db.Store, tc promptPayloadCase)
 	if tc.wantChannelID != "" && !strings.Contains(w.Body.String(), fmt.Sprintf(`"channel_id":"%s"`, tc.wantChannelID)) {
 		t.Errorf("response body missing channel_id %q: %s", tc.wantChannelID, w.Body.String())
 	}
-	if tc.msgID == "" {
-		return
+	var got queue.ThreadEnqueueRequest
+	capture.decodeLast(t, &got)
+	if tc.msgID != "" && got.MessageID != tc.msgID {
+		t.Errorf("message_id=%q, want %q", got.MessageID, tc.msgID)
 	}
-	msg, err := store.GetMessage(context.Background(), tc.msgID)
-	if err != nil || msg == nil {
-		t.Fatalf("failed to retrieve persisted message %s: %v", tc.msgID, err)
+	if tc.wantChannelID != "" && got.ChannelID != tc.wantChannelID {
+		t.Errorf("channel_id=%q, want %q", got.ChannelID, tc.wantChannelID)
 	}
-	if tc.wantThreadID != "" && msg.ThreadID != tc.wantThreadID {
-		t.Errorf("thread_id=%q, want %q", msg.ThreadID, tc.wantThreadID)
+	if tc.wantContent != "" && got.Prompt != tc.wantContent {
+		t.Errorf("prompt=%q, want %q", got.Prompt, tc.wantContent)
 	}
-	if tc.wantChannelID != "" && msg.ChannelID != tc.wantChannelID {
-		t.Errorf("channel_id=%q, want %q", msg.ChannelID, tc.wantChannelID)
+	if tc.wantEffort != "" && got.Effort != tc.wantEffort {
+		t.Errorf("effort=%q, want %q", got.Effort, tc.wantEffort)
 	}
-	if tc.wantContent != "" && msg.Content != tc.wantContent {
-		t.Errorf("content=%q, want %q", msg.Content, tc.wantContent)
-	}
-	if tc.wantEffort != "" && msg.Effort != tc.wantEffort {
-		t.Errorf("effort=%q, want %q", msg.Effort, tc.wantEffort)
-	}
-	if tc.wantModel != "" && msg.Model != tc.wantModel {
-		t.Errorf("model=%q, want %q", msg.Model, tc.wantModel)
-	}
-	if !msg.IsAdmin {
-		t.Errorf("expected is_admin=true for /prompt message, got false")
+	if tc.wantModel != "" && got.Model != tc.wantModel {
+		t.Errorf("model=%q, want %q", got.Model, tc.wantModel)
 	}
 }
 
 func TestHandlePromptValidation(t *testing.T) {
+	capture := installRestateCapture(t, http.StatusOK, `{"status":"accepted"}`)
 	store := dbtest.NewFakeStore()
 	pool := newTestWorkerPool(store)
 	pool.Start()
 	defer pool.Stop()
 
-	closedStore := dbtest.NewFakeStore()
-	_ = closedStore.Close()
+	existingMsgStore := dbtest.NewFakeStore()
+	_ = existingMsgStore.InsertMessage(context.Background(), db.Message{
+		ID:       "msg-existing-123",
+		ThreadID: "1542423172400291873",
+		Status:   db.StatusCompleted,
+	})
+
+	msgExistsErrStore := dbtest.NewFakeStore()
+	msgExistsErrStore.FailNext("MessageExists", errors.New("simulated message exists failure"))
 
 	mockSess, _ := discordgo.New("Bot fake-token")
 	mockSess.State = discordgo.NewState()
@@ -139,8 +178,9 @@ func TestHandlePromptValidation(t *testing.T) {
 		{"channel name resolution prospera", http.MethodPost, store, prosperaPromptPool, strings.NewReader(`{"prompt":"hello","channel_id":"prospera"}`), http.StatusAccepted, "1564150557705248879"},
 		{"channel name resolution hash prospera", http.MethodPost, store, prosperaPromptPool, strings.NewReader(`{"prompt":"hello","channel_id":"#prospera"}`), http.StatusAccepted, "1564150557705248879"},
 		{"channel name unresolvable falls back to snowflake validation", http.MethodPost, store, prosperaPromptPool, strings.NewReader(`{"prompt":"hello","channel_id":"unknown-channel"}`), http.StatusBadRequest, "must be a valid numeric Discord snowflake"},
-		{"nil store", http.MethodPost, nil, pool, strings.NewReader(`{"prompt":"hello","channel_id":"1542423172400291873"}`), http.StatusInternalServerError, "Database store not configured"},
-		{"closed store", http.MethodPost, closedStore, pool, strings.NewReader(`{"prompt":"hello","channel_id":"1542423172400291873"}`), http.StatusInternalServerError, "Failed to persist prompt message"},
+		{"nil store", http.MethodPost, nil, pool, strings.NewReader(`{"prompt":"hello","channel_id":"1542423172400291873"}`), http.StatusAccepted, `"status":"accepted"`},
+		{"duplicate message_id returns 200 already_exists", http.MethodPost, existingMsgStore, nil, strings.NewReader(`{"prompt":"check","channel_id":"1542423172400291873","message_id":"msg-existing-123"}`), http.StatusOK, `"status":"already_exists"`},
+		{"message_exists store error returns 500", http.MethodPost, msgExistsErrStore, nil, strings.NewReader(`{"prompt":"check","channel_id":"1542423172400291873","message_id":"msg-check-err"}`), http.StatusInternalServerError, "Failed to check existing prompt message"},
 		{"body close error", http.MethodPost, store, pool, &errReadCloser{reader: strings.NewReader(`{"prompt":"hello","channel_id":"1542423172400291873"}`), closeErr: errors.New("close error")}, http.StatusAccepted, "channel_id"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -205,112 +245,13 @@ func TestHandlePromptValidation(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			assertPromptPayloadCase(t, store, tc)
-		})
-	}
-}
-
-func TestHandlePrompt_SkipIfActive(t *testing.T) {
-	activeStore := dbtest.NewFakeStore()
-	_ = activeStore.InsertMessage(context.Background(), db.Message{
-		ID:       "msg-active",
-		ThreadID: "1542423172400291873",
-		Status:   db.StatusProcessing,
-	})
-
-	inactiveStore := dbtest.NewFakeStore()
-
-	existingMsgStore := dbtest.NewFakeStore()
-	_ = existingMsgStore.InsertMessage(context.Background(), db.Message{
-		ID:       "msg-existing-123",
-		ThreadID: "1542423172400291873",
-		Status:   db.StatusCompleted,
-	})
-
-	msgExistsErrStore := dbtest.NewFakeStore()
-	msgExistsErrStore.FailNext("MessageExists", errors.New("simulated message exists failure"))
-
-	errStore := dbtest.NewFakeStore()
-	errStore.FailNext("HasActiveThreadTurn", errors.New("simulated db failure"))
-
-	redirectCfg := config.NewFromData(&config.ConfigData{
-		SystemChannel: "1564150557705248879",
-		Channels: map[string]config.ChannelPolicy{
-			"1542423172400291873": {
-				Mode:           "channel",
-				NoBuildUpdates: true,
-			},
-		},
-	})
-	redirectPool := queue.New(redirectCfg, queue.WorkerPoolConfig{
-		Store: activeStore,
-	})
-	defer redirectPool.Stop()
-
-	tests := []struct {
-		name       string
-		store      db.Store
-		pool       *queue.WorkerPool
-		body       string
-		wantStatus int
-		wantSubstr string
-	}{
-		{
-			name:       "active turn exists returns 200 skipped_active",
-			store:      activeStore,
-			body:       `{"prompt":"check","channel_id":"1542423172400291873","skip_if_active":true}`,
-			wantStatus: http.StatusOK,
-			wantSubstr: `"status":"skipped_active"`,
-		},
-		{
-			name:       "duplicate message_id returns 200 already_exists",
-			store:      existingMsgStore,
-			body:       `{"prompt":"check","channel_id":"1542423172400291873","message_id":"msg-existing-123"}`,
-			wantStatus: http.StatusOK,
-			wantSubstr: `"status":"already_exists"`,
-		},
-		{
-			name:       "message_exists store error returns 500",
-			store:      msgExistsErrStore,
-			body:       `{"prompt":"check","channel_id":"1542423172400291873","message_id":"msg-check-err"}`,
-			wantStatus: http.StatusInternalServerError,
-			wantSubstr: "Failed to check existing prompt message",
-		},
-		{
-			name:       "no active turn exists returns 202 accepted",
-			store:      inactiveStore,
-			body:       `{"prompt":"check","channel_id":"1542423172400291873","skip_if_active":true}`,
-			wantStatus: http.StatusAccepted,
-			wantSubstr: `"status":"accepted"`,
-		},
-		{
-			name:       "redirected build completion prompt on active channel succeeds if system channel idle",
-			store:      activeStore,
-			pool:       redirectPool,
-			body:       `{"prompt":"Vanadis build build-1 completed","channel_id":"1542423172400291873","skip_if_active":true}`,
-			wantStatus: http.StatusAccepted,
-			wantSubstr: `"status":"accepted"`,
-		},
-		{
-			name:       "store error returns 500",
-			store:      errStore,
-			body:       `{"prompt":"check","channel_id":"1542423172400291873","skip_if_active":true}`,
-			wantStatus: http.StatusInternalServerError,
-			wantSubstr: "Failed to check active turn",
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			w := runHTTP(handlePrompt(tc.store, tc.pool), http.MethodPost, "/prompt", strings.NewReader(tc.body))
-			if w.Code != tc.wantStatus || !strings.Contains(w.Body.String(), tc.wantSubstr) {
-				t.Fatalf("got status=%d body=%q, want status=%d substr=%q", w.Code, w.Body.String(), tc.wantStatus, tc.wantSubstr)
-			}
+			assertPromptPayloadCase(t, store, capture, tc)
 		})
 	}
 }
 
 func TestHandleDispatch(t *testing.T) {
+	capture := installRestateCapture(t, http.StatusOK, `{"status":"accepted"}`)
 	for _, tc := range []struct {
 		name               string
 		method             string
@@ -323,7 +264,6 @@ func TestHandleDispatch(t *testing.T) {
 		wantVanadisChunkID string
 	}{
 		{"method not allowed", http.MethodGet, dbtest.NewFakeStore(), "", http.StatusMethodNotAllowed, "Method not allowed", "", "", ""},
-		{"nil store", http.MethodPost, nil, `{"source":"heartbeat","prompt":"test"}`, http.StatusInternalServerError, "Database store not configured", "", "", ""},
 		{"invalid json", http.MethodPost, dbtest.NewFakeStore(), `{bad`, http.StatusBadRequest, "Invalid JSON payload", "", "", ""},
 		{"missing source", http.MethodPost, dbtest.NewFakeStore(), `{"prompt":"test"}`, http.StatusBadRequest, "'source' must match", "", "", ""},
 		{"invalid source", http.MethodPost, dbtest.NewFakeStore(), `{"source":"unknown!bad","prompt":"test"}`, http.StatusBadRequest, "'source' must match", "", "", ""},
@@ -337,26 +277,17 @@ func TestHandleDispatch(t *testing.T) {
 		{"valid with target_id normalized and chunk_id propagated", http.MethodPost, dbtest.NewFakeStore(), `{"id":"disp-norm-1","source":"vanadis","prompt":"execute chunk","target_id":"discord-987654321012345678","vanadis_chunk_id":"  build-42-chunk-1  "}`, http.StatusAccepted, `"status":"accepted"`, "disp-norm-1", "987654321012345678", "build-42-chunk-1"},
 		{"valid with pooled target_id normalized", http.MethodPost, dbtest.NewFakeStore(), `{"id":"disp-norm-2","source":"vanadis","prompt":"execute chunk","target_id":"stateful_medium:discord-11223344","vanadis_chunk_id":"build-42-chunk-2"}`, http.StatusAccepted, `"status":"accepted"`, "disp-norm-2", "11223344", "build-42-chunk-2"},
 		{"headless target_id blanked", http.MethodPost, dbtest.NewFakeStore(), `{"id":"disp-norm-3","source":"heartbeat","prompt":"pulse","target_id":"heartbeat-hb-1","vanadis_chunk_id":""}`, http.StatusAccepted, `"status":"accepted"`, "disp-norm-3", "", ""},
-		{"has active dispatch turn error", http.MethodPost, func() db.Store {
-			s := dbtest.NewFakeStore()
-			s.FailNext("HasActiveDispatchTurn", errors.New("simulated error"))
-			return s
-		}(), `{"source":"heartbeat","prompt":"test","skip_if_active":true}`, http.StatusInternalServerError, "Failed to check active turn", "", "", ""},
-		{"insert dispatch error", http.MethodPost, func() db.Store {
-			s := dbtest.NewFakeStore()
-			s.FailNext("InsertDispatch", errors.New("simulated error"))
-			return s
-		}(), `{"source":"heartbeat","prompt":"test"}`, http.StatusInternalServerError, "Failed to persist dispatch", "", "", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			w := runHTTP(handleDispatch(tc.store, nil), tc.method, "/dispatch", strings.NewReader(tc.body))
+			w := runHTTP(handleDispatch(tc.store), tc.method, "/dispatch", strings.NewReader(tc.body))
 			if w.Code != tc.wantStatus || !strings.Contains(w.Body.String(), tc.wantSubstr) {
 				t.Fatalf("got status=%d body=%q, want status=%d substr=%q", w.Code, w.Body.String(), tc.wantStatus, tc.wantSubstr)
 			}
-			if tc.checkID != "" && tc.store != nil {
-				d, err := tc.store.GetDispatch(context.Background(), tc.checkID)
-				if err != nil || d == nil {
-					t.Fatalf("failed to retrieve dispatch %s: %v", tc.checkID, err)
+			if tc.checkID != "" {
+				var d eriwire.BrainDispatchRequest
+				capture.decodeLast(t, &d)
+				if d.ID != tc.checkID {
+					t.Errorf("got id %q, want %q", d.ID, tc.checkID)
 				}
 				if d.TargetID != tc.wantTargetID {
 					t.Errorf("got target_id %q, want %q", d.TargetID, tc.wantTargetID)
@@ -369,82 +300,39 @@ func TestHandleDispatch(t *testing.T) {
 	}
 }
 
-func TestHandleDispatch_SkipIfActive(t *testing.T) {
-	s := dbtest.NewFakeStore()
-	_, _ = s.InsertDispatch(context.Background(), db.Dispatch{
-		ID:        "active-disp-1",
-		Source:    "heartbeat",
-		SessionID: "heartbeat-test",
-		Prompt:    "ongoing run",
-		Status:    db.StatusProcessing,
-	})
-
-	for _, tc := range []struct {
-		name       string
-		body       string
-		wantStatus int
-		wantSubstr string
-	}{
-		{"skip active session", `{"source":"heartbeat","session_id":"heartbeat-test","prompt":"test","skip_if_active":true}`, http.StatusOK, `"status":"skipped_active"`},
-		{"do not skip when skip_if_active false", `{"source":"heartbeat","session_id":"heartbeat-test","prompt":"test","skip_if_active":false}`, http.StatusAccepted, `"status":"accepted"`},
-		{"do not skip different session", `{"source":"heartbeat","session_id":"heartbeat-other","prompt":"test","skip_if_active":true}`, http.StatusAccepted, `"status":"accepted"`},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			w := runHTTP(handleDispatch(s, nil), http.MethodPost, "/dispatch", strings.NewReader(tc.body))
-			if w.Code != tc.wantStatus || !strings.Contains(w.Body.String(), tc.wantSubstr) {
-				t.Fatalf("got status=%d body=%q, want status=%d substr=%q", w.Code, w.Body.String(), tc.wantStatus, tc.wantSubstr)
-			}
-		})
-	}
-}
-
 func TestHandleCancelDispatch(t *testing.T) {
-	seedStore := func(failOp string) *dbtest.FakeStore {
-		s := dbtest.NewFakeStore()
-		ctx := context.Background()
-		for _, d := range []db.Dispatch{
-			{ID: "disp-b1-c1", Source: "vanadis", Prompt: "[VANADIS BUILD CHUNK EXECUTION]\nBuild ID: build-99\n", Status: db.StatusPending},
-			{ID: "disp-b1-c2", Source: "vanadis", Prompt: "[VANADIS BUILD CHUNK EXECUTION]\nBuild ID: build-99\n", Status: db.StatusPending},
-			{ID: "disp-active", Source: "vanadis", SessionID: "vanadis-build-99-chunk-1", Prompt: "[VANADIS BUILD CHUNK EXECUTION]\nBuild ID: build-99\n", Status: db.StatusProcessing},
-			{ID: "disp-active-sess", Source: "vanadis", SessionID: "vanadis-build-99-chunk-2", Prompt: "Action chunk without explicit prompt marker", Status: db.StatusProcessing},
-			{ID: "disp-single", Source: "heartbeat", Prompt: "hourly pulse", Status: db.StatusPending},
-		} {
-			_, _ = s.InsertDispatch(ctx, d)
-		}
-		if failOp != "" {
-			s.FailNext(failOp, errors.New("simulated "+failOp+" error"))
-		}
-		return s
-	}
-
+	capture := installRestateCapture(t, http.StatusOK, `{"status":"ok","cancelled_count":0}`)
 	for _, tc := range []struct {
-		name       string
-		method     string
-		store      db.Store
-		pool       *queue.WorkerPool
-		body       string
-		wantStatus int
-		wantSubstr string
+		name           string
+		method         string
+		body           string
+		wantStatus     int
+		wantSubstr     string
+		wantDispatchID string
+		wantBuildID    string
+		wantReason     string
 	}{
-		{"method not allowed", http.MethodGet, seedStore(""), nil, "", http.StatusMethodNotAllowed, "Method not allowed"},
-		{"nil store", http.MethodPost, nil, nil, `{"build_id":"build-99"}`, http.StatusInternalServerError, "Database store not configured"},
-		{"invalid json", http.MethodPost, seedStore(""), nil, `{invalid`, http.StatusBadRequest, "Invalid JSON payload"},
-		{"missing ids", http.MethodPost, seedStore(""), nil, `{"reason":"no ids"}`, http.StatusBadRequest, "'dispatch_id' (or 'message_id') or 'build_id' is required"},
-		{"store error", http.MethodPost, seedStore("CancelPendingDispatches"), nil, `{"build_id":"build-99"}`, http.StatusInternalServerError, "Failed to fetch cancelling dispatches"},
-		{"cancel by build_id", http.MethodPost, seedStore(""), nil, `{"build_id":"build-99"}`, http.StatusOK, `"cancelled_count":4`},
-		{"cancel by chunk_id", http.MethodPost, seedStore(""), nil, `{"chunk_id":"build-99"}`, http.StatusOK, `"cancelled_count":4`},
-		{"cancel by dispatch_id", http.MethodPost, seedStore(""), newTestWorkerPool(seedStore("")), `{"dispatch_id":"disp-single"}`, http.StatusOK, `"cancelled_ids":["disp-single"]`},
-		{"cancel by dispatch_id custom reason", http.MethodPost, seedStore(""), nil, `{"dispatch_id":"disp-single","reason":"superseded"}`, http.StatusOK, `"cancelled_ids":["disp-single"]`},
-		{"cancel by message_id alias", http.MethodPost, seedStore(""), nil, `{"message_id":"disp-single"}`, http.StatusOK, `"cancelled_ids":["disp-single"]`},
+		{"method not allowed", http.MethodGet, "", http.StatusMethodNotAllowed, "Method not allowed", "", "", ""},
+		{"invalid json", http.MethodPost, `{invalid`, http.StatusBadRequest, "Invalid JSON payload", "", "", ""},
+		{"missing ids", http.MethodPost, `{"reason":"no ids"}`, http.StatusBadRequest, "'dispatch_id' (or 'message_id') or 'build_id' is required", "", "", ""},
+		{"cancel by build_id", http.MethodPost, `{"build_id":"build-99"}`, http.StatusOK, `"status":"ok"`, "", "build-99", "cancelled vanadis build build-99"},
+		{"cancel by chunk_id", http.MethodPost, `{"chunk_id":"build-99"}`, http.StatusOK, `"status":"ok"`, "", "build-99", "cancelled vanadis build build-99"},
+		{"cancel by dispatch_id", http.MethodPost, `{"dispatch_id":"disp-single"}`, http.StatusOK, `"status":"ok"`, "disp-single", "", "cancelled dispatch disp-single"},
+		{"cancel by dispatch_id custom reason", http.MethodPost, `{"dispatch_id":"disp-single","reason":"superseded"}`, http.StatusOK, `"status":"ok"`, "disp-single", "", "superseded"},
+		{"cancel by message_id alias", http.MethodPost, `{"message_id":"disp-single"}`, http.StatusOK, `"status":"ok"`, "disp-single", "", "cancelled dispatch disp-single"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			var pools []*queue.WorkerPool
-			if tc.pool != nil {
-				pools = append(pools, tc.pool)
-			}
-			w := runHTTP(handleCancelDispatch(tc.store, pools...), tc.method, "/dispatch/cancel", strings.NewReader(tc.body))
+			w := runHTTP(handleCancelDispatch(), tc.method, "/dispatch/cancel", strings.NewReader(tc.body))
 			if w.Code != tc.wantStatus || !strings.Contains(w.Body.String(), tc.wantSubstr) {
 				t.Fatalf("got status=%d body=%q, want status=%d substr=%q", w.Code, w.Body.String(), tc.wantStatus, tc.wantSubstr)
+			}
+			if tc.wantReason == "" {
+				return
+			}
+			var got queue.CancelDispatchControlRequest
+			capture.decodeLast(t, &got)
+			if got.DispatchID != tc.wantDispatchID || got.BuildID != tc.wantBuildID || got.Reason != tc.wantReason {
+				t.Errorf("got cancel request %+v, want dispatch_id=%q build_id=%q reason=%q", got, tc.wantDispatchID, tc.wantBuildID, tc.wantReason)
 			}
 		})
 	}
@@ -1205,6 +1093,7 @@ func TestHandleInternalLLM(t *testing.T) {
 }
 
 func TestSetupBrainMux_And_Endpoints(t *testing.T) {
+	installRestateCapture(t, http.StatusOK, `{"status":"accepted"}`)
 	store := dbtest.NewFakeStore()
 	pool := newTestWorkerPool(store)
 	tmpHome := t.TempDir()
@@ -1260,7 +1149,7 @@ func TestSetupBrainMux_And_Endpoints(t *testing.T) {
 	}
 }
 
-func TestHandlePromptDispatch_RestatePathSkipsStorePrechecks(t *testing.T) {
+func TestHandlePromptDispatch_RelaysRestateStatus(t *testing.T) {
 	tests := []struct {
 		name       string
 		dispatch   bool
@@ -1270,21 +1159,18 @@ func TestHandlePromptDispatch_RestatePathSkipsStorePrechecks(t *testing.T) {
 		wantSubstr string
 	}{
 		{"prompt skipped_active relayed", false, `{"status":"skipped_active"}`, `{"prompt":"p","channel_id":"1542423172400291873","skip_if_active":true}`, http.StatusOK, `"status":"skipped_active"`},
-		{"prompt accepted despite store error", false, `{"status":"accepted"}`, `{"prompt":"p","channel_id":"1542423172400291873","skip_if_active":true}`, http.StatusAccepted, `"status":"accepted"`},
+		{"prompt accepted relayed", false, `{"status":"accepted"}`, `{"prompt":"p","channel_id":"1542423172400291873","skip_if_active":true}`, http.StatusAccepted, `"status":"accepted"`},
 		{"dispatch skipped_active relayed", true, `{"status":"skipped_active"}`, `{"source":"heartbeat","session_id":"s1","prompt":"p","skip_if_active":true}`, http.StatusOK, `"status":"skipped_active"`},
-		{"dispatch accepted despite store error", true, `{"status":"accepted"}`, `{"source":"heartbeat","session_id":"s1","prompt":"p","skip_if_active":true}`, http.StatusAccepted, `"status":"accepted"`},
+		{"dispatch accepted relayed", true, `{"status":"accepted"}`, `{"source":"heartbeat","session_id":"s1","prompt":"p","skip_if_active":true}`, http.StatusAccepted, `"status":"accepted"`},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			store := dbtest.NewFakeStore()
-			// Any consultation of the HasActive* checks would surface as a 500.
-			store.FailNext("HasActiveThreadTurn", errors.New("must not be consulted"))
-			store.FailNext("HasActiveDispatchTurn", errors.New("must not be consulted"))
 			runWithMockRestate(http.StatusOK, tc.serverResp, func() {
 				h := handlePrompt(store, nil)
 				path := "/prompt"
 				if tc.dispatch {
-					h = handleDispatch(store, nil)
+					h = handleDispatch(store)
 					path = "/dispatch"
 				}
 				w := httptest.NewRecorder()
