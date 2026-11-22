@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/azylman/aerial/pkg/k8sauthtest"
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/pkg/tracing"
 )
@@ -28,7 +29,10 @@ type mockEventBus struct {
 	// publishedTraceparents records the W3C traceparent the real bus injects into
 	// each published message's NATS headers.
 	publishedTraceparents []string
-	err                   error
+	// subjects and events record every publish subject and each event-trigger payload.
+	subjects []string
+	events   []pubsub.ExternalEvent
+	err      error
 }
 
 func (m *mockEventBus) Publish(ctx context.Context, subject, msgID string, data any) error {
@@ -38,6 +42,7 @@ func (m *mockEventBus) Publish(ctx context.Context, subject, msgID string, data 
 		return m.err
 	}
 	m.publishedTraceparents = append(m.publishedTraceparents, tracing.Traceparent(ctx))
+	m.subjects = append(m.subjects, subject)
 	m.recordPublishedEvents(data)
 	m.recordPublishedJobs(data)
 	return nil
@@ -45,6 +50,8 @@ func (m *mockEventBus) Publish(ctx context.Context, subject, msgID string, data 
 
 func (m *mockEventBus) recordPublishedEvents(data any) {
 	switch a := data.(type) {
+	case pubsub.ExternalEvent:
+		m.events = append(m.events, a)
 	case pubsub.PRLifecycleEvent:
 		m.publishedPREvents = append(m.publishedPREvents, a)
 	case *pubsub.PRLifecycleEvent:
@@ -83,6 +90,12 @@ func (m *mockEventBus) recordPublishedJobs(data any) {
 	}
 }
 
+func (m *mockEventBus) publishCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.subjects)
+}
+
 type errReader struct{}
 
 func (errReader) Read(p []byte) (n int, err error) {
@@ -96,19 +109,6 @@ type zeroCallTransport struct {
 func (z *zeroCallTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	z.calls.Add(1)
 	return nil, errors.New("unexpected outbound HTTP call")
-}
-
-type loopbackOnlyTransport struct{ base http.RoundTripper }
-
-func (l *loopbackOnlyTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	if h := req.URL.Hostname(); h != "127.0.0.1" && h != "::1" && h != "localhost" {
-		return nil, errors.New("hermetic test guard: blocked non-loopback HTTP call to " + req.URL.Host)
-	}
-	return l.base.RoundTrip(req)
-}
-
-func init() {
-	http.DefaultTransport = &loopbackOnlyTransport{base: http.DefaultTransport}
 }
 
 func newTestRouter(cfg Config, client *http.Client, disp OutboundDispatcher, bus ...pubsub.Bus) *RouterServer {
@@ -152,7 +152,7 @@ func TestRouterServer_AuthAccessors(t *testing.T) {
 	if srv.getAuthenticator() != nil {
 		t.Error("expected getAuthenticator to be nil")
 	}
-	authCfg := newTestK8sAuthConfig(t, &staticAuthRoundTripper{})
+	authCfg := k8sauthtest.Config(t, &k8sauthtest.RoundTripper{})
 	srvLazy := &RouterServer{cfgSrc: fixedConfig(Config{K8sAuthEnabled: true, K8sAuthConfig: authCfg})}
 	if srvLazy.authenticator != nil {
 		t.Error("expected authenticator to be uninitialized initially")

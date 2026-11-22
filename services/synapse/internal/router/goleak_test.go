@@ -1,13 +1,13 @@
 package router
 
 import (
-	"net/http"
 	"testing"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/propagation"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
-	"go.uber.org/goleak"
+
+	"github.com/azylman/aerial/pkg/hermetictest"
 )
 
 func TestMain(m *testing.M) {
@@ -15,7 +15,5 @@ func TestMain(m *testing.M) {
 	// so outbound clients create real child spans whose traceparent tests can assert on.
 	otel.SetTracerProvider(sdktrace.NewTracerProvider())
 	otel.SetTextMapPropagator(propagation.TraceContext{})
-	goleak.VerifyTestMain(m, goleak.Cleanup(func(exitCode int) {
-		http.DefaultClient.CloseIdleConnections()
-	}))
+	hermetictest.Main(m)
 }

@@ -10,7 +10,6 @@ import (
 	"net/http/httptest"
 	"slices"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -78,30 +77,6 @@ func verifyPublishedEvents(t *testing.T, tracker *eventTracker, wantCount int, w
 	}
 }
 
-type recordingBus struct {
-	pubsub.Bus
-
-	mu        sync.Mutex
-	publishes []string
-	events    []pubsub.ExternalEvent
-}
-
-func (b *recordingBus) Publish(ctx context.Context, subject, msgID string, payload any) error {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	b.publishes = append(b.publishes, subject)
-	if ev, ok := payload.(pubsub.ExternalEvent); ok {
-		b.events = append(b.events, ev)
-	}
-	return nil
-}
-
-func (b *recordingBus) publishCount() int {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return len(b.publishes)
-}
-
 type evaluateEventTriggersTestCase struct {
 	name          string
 	nilServer     bool
@@ -122,10 +97,10 @@ func assertEvaluateEventTriggersScenario(t *testing.T, tc evaluateEventTriggersT
 	srv := NewRouterServer(fixedConfig(Config{}), nil)
 
 	var tracker *eventTracker
-	var recBus *recordingBus
+	var recBus *mockEventBus
 
 	if tc.useSyncBus {
-		recBus = &recordingBus{}
+		recBus = &mockEventBus{}
 		srv.SetEventBus(recBus)
 	} else if tc.useBus {
 		memBus := pubsub.NewMemoryBus()
@@ -146,7 +121,7 @@ func assertEvaluateEventTriggersScenario(t *testing.T, tc evaluateEventTriggersT
 	}
 
 	if recBus != nil && recBus.publishCount() != tc.wantPubCount {
-		t.Errorf("recordingBus publish count = %d, want %d", recBus.publishCount(), tc.wantPubCount)
+		t.Errorf("bus publish count = %d, want %d", recBus.publishCount(), tc.wantPubCount)
 	}
 	verifyPublishedEvents(t, tracker, tc.wantPubCount, tc.wantPubTopic, nil, tc.contextHeader)
 }
@@ -235,7 +210,7 @@ func TestEvaluateGitHubEventTriggers(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			bus := &recordingBus{}
+			bus := &mockEventBus{}
 			srv := newTestRouter(Config{}, nil, nil, bus)
 			srv.evaluateGitHubEventTriggers(context.Background(), tc.res, nil)
 			got := make([]string, 0, len(bus.events))

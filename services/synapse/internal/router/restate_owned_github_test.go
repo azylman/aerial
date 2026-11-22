@@ -10,6 +10,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/azylman/aerial/pkg/k8sauthtest"
 	"github.com/azylman/aerial/pkg/prwire"
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/synapse/internal/model"
@@ -101,7 +102,7 @@ func ownedGitHub(t *testing.T, body string) string {
 type ownedHarness struct {
 	srv     *RouterServer
 	ingress *ownedIngress
-	bus     *recordingBus
+	bus     *mockEventBus
 	disp    *mockOutboundDispatcher
 }
 
@@ -111,7 +112,7 @@ func newOwnedHarness(t *testing.T, cfg Config, ingress *ownedIngress, ghBody str
 	if cfg.GitHubAPIURL == "" {
 		cfg.GitHubAPIURL = ownedGitHub(t, ghBody)
 	}
-	h := &ownedHarness{srv: NewRouterServer(fixedConfig(cfg), nil), ingress: ingress, bus: &recordingBus{}, disp: &mockOutboundDispatcher{}}
+	h := &ownedHarness{srv: NewRouterServer(fixedConfig(cfg), nil), ingress: ingress, bus: &mockEventBus{}, disp: &mockOutboundDispatcher{}}
 	h.srv.SetEventBus(h.bus)
 	h.srv.SetDispatcher(h.disp)
 	return h
@@ -121,7 +122,7 @@ func newOwnedHarness(t *testing.T, cfg Config, ingress *ownedIngress, ghBody str
 func (h *ownedHarness) effectCount() int {
 	h.bus.mu.Lock()
 	n := 0
-	for _, subject := range h.bus.publishes {
+	for _, subject := range h.bus.subjects {
 		if strings.HasPrefix(subject, pubsub.SubjectAerialPRPrefix) {
 			n++
 		}
@@ -338,7 +339,6 @@ func TestHandlePRRegisterRestateOwned(t *testing.T) {
 	const (
 		okBody    = `{"target_id":"100000000000000001","agent":"aerial","status":"open"}`
 		validReq  = `{"repo":"azylman/aerial","pr_number":42,"branch":"feat","head_sha":"sha1","target_id":"100000000000000001"}`
-		authOK    = `{"apiVersion":"authentication.k8s.io/v1","kind":"TokenReview","status":{"authenticated":true,"user":{"username":"system:serviceaccount:default:eri-aerial"}}}`
 		regPath   = "/PRObject/azylman%2Faerial%2342/Register"
 		sysTarget = "100000000000000009"
 	)
@@ -386,7 +386,7 @@ func TestHandlePRRegisterRestateOwned(t *testing.T) {
 			}
 			if tc.k8s {
 				cfg.K8sAuthEnabled = true
-				cfg.K8sAuthConfig = newTestK8sAuthConfig(t, &staticAuthRoundTripper{authStatus: http.StatusOK, authBody: authOK, sarRules: []sarRule{{Resource: "prs", Verb: "create", Name: "aerial"}}})
+				cfg.K8sAuthConfig = k8sauthtest.Config(t, &k8sauthtest.RoundTripper{AuthBody: k8sauthtest.TokenReview("system:serviceaccount:default:eri-aerial"), SARRules: map[string]bool{k8sauthtest.SARKey("prs", "create", "aerial"): true}})
 			}
 			srv := NewRouterServer(fixedConfig(cfg), nil)
 			req := httptest.NewRequest(http.MethodPost, "/internal/pr/register", strings.NewReader(tc.body))

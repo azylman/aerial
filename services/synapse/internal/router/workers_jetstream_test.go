@@ -9,32 +9,10 @@ import (
 	"time"
 
 	"github.com/bwmarrin/discordgo"
-	"github.com/nats-io/nats.go"
 
 	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/pkg/pubsubtest"
 )
-
-type synapseMemoryMsg struct {
-	data         []byte
-	subject      string
-	numDelivered uint64
-	termed       bool
-}
-
-func (m *synapseMemoryMsg) Data() []byte      { return m.data }
-func (m *synapseMemoryMsg) Subject() string   { return m.subject }
-func (*synapseMemoryMsg) Header() nats.Header { return nil }
-func (m *synapseMemoryMsg) NumDelivered() uint64 {
-	if m.numDelivered > 0 {
-		return m.numDelivered
-	}
-	return 1
-}
-func (*synapseMemoryMsg) Ack() error                         { return nil }
-func (*synapseMemoryMsg) NakWithDelay(_ time.Duration) error { return nil }
-func (m *synapseMemoryMsg) Term() error                      { m.termed = true; return nil }
-func (*synapseMemoryMsg) Snooze(_ time.Duration) error       { return nil }
-func (*synapseMemoryMsg) InProgress() error                  { return nil }
 
 func initTestJobBus(ctx context.Context, busErr error, busReceived chan struct{}) pubsub.Bus {
 	memBus := pubsub.NewMemoryBus()
@@ -288,10 +266,7 @@ func TestJetStreamJobHandlers(t *testing.T) {
 			}
 			srv.SetDispatcher(disp)
 
-			memMsg := &synapseMemoryMsg{
-				data:         []byte(tc.payload),
-				numDelivered: tc.numDelivered,
-			}
+			memMsg := &pubsubtest.Message{Payload: []byte(tc.payload), Delivered: max(tc.numDelivered, 1)}
 
 			testCtx, cancel := context.WithCancel(ctx)
 			defer cancel()
@@ -319,7 +294,7 @@ func TestJetStreamJobHandlers(t *testing.T) {
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("handler err = %v, wantErr = %v", err, tc.wantErr)
 			}
-			if tc.wantTerm && !memMsg.termed {
+			if tc.wantTerm && !memMsg.Termed() {
 				t.Errorf("expected msg.Term() called")
 			}
 		})
