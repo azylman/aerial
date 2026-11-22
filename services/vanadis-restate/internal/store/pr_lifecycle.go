@@ -43,7 +43,7 @@ const (
 // never complete here: a repair PR's deploy goes through
 // MarkActionRepairDeployed and the chunk completes only on its verdict.
 func (s *Store) CompletePRDeployment(ctx context.Context, chunkID string, rolloutState *pubsub.PRRolloutState) error {
-	return s.execDeployTransition(ctx, chunkID, rolloutState, "complete pr deployment", `UPDATE vanadis_chunks AS c SET status = 'completed', banner = '', rollout_state = COALESCE($1::jsonb, c.rollout_state), completed_at = COALESCE(c.completed_at, CURRENT_TIMESTAMP), updated_at = CURRENT_TIMESTAMP FROM vanadis_builds AS b WHERE c.id = $2 AND b.id = c.build_id AND c.mode = 'pr' AND c.status NOT IN ('failed', 'cancelled') AND b.status != 'cancelled';`)
+	return s.execDeployTransition(ctx, chunkID, rolloutState, "complete pr deployment", `WITH reopened_build AS (UPDATE vanadis_builds AS rb SET status = 'running', updated_at = CURRENT_TIMESTAMP FROM vanadis_chunks AS target WHERE target.id = $2 AND rb.id = target.build_id AND rb.status = 'failed' AND target.mode = 'pr' AND COALESCE(target.pr_number, 0) > 0 AND target.status = 'failed' AND NOT EXISTS (SELECT 1 FROM vanadis_chunks AS s WHERE s.build_id = target.build_id AND s.id != target.id AND s.status IN ('failed', 'cancelled'))) UPDATE vanadis_chunks AS c SET status = 'completed', banner = '', rollout_state = COALESCE($1::jsonb, c.rollout_state), completed_at = COALESCE(c.completed_at, CURRENT_TIMESTAMP), updated_at = CURRENT_TIMESTAMP FROM vanadis_builds AS b WHERE c.id = $2 AND b.id = c.build_id AND c.mode = 'pr' AND c.status != 'cancelled' AND (c.status != 'failed' OR COALESCE(c.pr_number, 0) > 0) AND b.status != 'cancelled';`)
 }
 
 // execDeployTransition runs one deploy_success chunk write. The query takes
@@ -397,7 +397,7 @@ func (s *Store) UpdatePRLifecycleStatus(ctx context.Context, chunkID, status str
 	if strings.TrimSpace(chunkID) == "" {
 		return errors.New("chunk_id cannot be empty")
 	}
-	tag, err := s.db.Exec(ctx, `UPDATE vanadis_chunks SET status = $1, completed_at = CASE WHEN $1 = 'merged' THEN COALESCE(completed_at, CURRENT_TIMESTAMP) WHEN $1 = 'deploying' THEN completed_at ELSE NULL END, updated_at = CURRENT_TIMESTAMP WHERE id = $2 AND status NOT IN ('completed', 'failed', 'cancelled');`, status, strings.TrimSpace(chunkID))
+	tag, err := s.db.Exec(ctx, `WITH reopened_build AS (UPDATE vanadis_builds AS rb SET status = 'running', updated_at = CURRENT_TIMESTAMP FROM vanadis_chunks AS target WHERE target.id = $2 AND rb.id = target.build_id AND rb.status = 'failed' AND target.mode = 'pr' AND COALESCE(target.pr_number, 0) > 0 AND target.status = 'failed' AND $1 IN ('merged', 'deploying') AND NOT EXISTS (SELECT 1 FROM vanadis_chunks AS s WHERE s.build_id = target.build_id AND s.id != target.id AND s.status IN ('failed', 'cancelled'))) UPDATE vanadis_chunks SET status = $1, banner = CASE WHEN status = 'failed' THEN '' ELSE banner END, completed_at = CASE WHEN $1 = 'merged' THEN COALESCE(completed_at, CURRENT_TIMESTAMP) WHEN $1 = 'deploying' THEN completed_at ELSE NULL END, updated_at = CURRENT_TIMESTAMP WHERE id = $2 AND status NOT IN ('completed', 'failed', 'cancelled') OR (id = $2 AND $1 IN ('merged', 'deploying') AND mode = 'pr' AND COALESCE(pr_number, 0) > 0 AND status = 'failed');`, status, strings.TrimSpace(chunkID))
 	if err != nil {
 		return fmt.Errorf("update pr lifecycle status: %w", err)
 	}
