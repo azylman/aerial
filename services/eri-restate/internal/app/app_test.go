@@ -487,9 +487,6 @@ type healthEndpointCase struct {
 	method        string
 	path          string
 	body          string
-	llmResponse   string
-	llmError      error
-	withNilLLM    bool
 	withUsage     bool
 	remoteAddr    string
 	wantStatus    int
@@ -506,20 +503,9 @@ func runHealthEndpointCase(t *testing.T, tc healthEndpointCase) {
 		metrics.RecordClaudeUsageJSON([]byte(`{"five_hour":{"utilization":50,"resets_at":"2026-11-20T12:00:00Z"}}`))
 	}
 
-	var llmFn runner.LLMFunc
-	if !tc.withNilLLM {
-		llmFn = func(ctx context.Context, model, prompt string) (string, error) {
-			if tc.llmError != nil {
-				return "", tc.llmError
-			}
-			return tc.llmResponse, nil
-		}
-	}
-
 	reloadTrigger := bootstrap.NewReloadTrigger(context.Background(), func(source string) {})
 	mux := SetupHealthMux(HealthMuxOptions{
 		AgentName:     "aerial",
-		LLMFunc:       llmFn,
 		ReloadTrigger: reloadTrigger,
 	})
 
@@ -582,65 +568,6 @@ func TestSetupHealthMux(t *testing.T) {
 			wantStatus:    http.StatusMethodNotAllowed,
 			wantHeaderKey: "Allow",
 			wantHeaderVal: "GET",
-		},
-		{
-			name:        "POST /internal/llm generates response",
-			method:      http.MethodPost,
-			path:        "/internal/llm",
-			body:        `{"prompt":"summarize text"}`,
-			llmResponse: "summary result",
-			wantStatus:  http.StatusOK,
-			wantBodySub: `{"response":"summary result"}`,
-		},
-		{
-			name:          "GET /internal/llm returns 405",
-			method:        http.MethodGet,
-			path:          "/internal/llm",
-			wantStatus:    http.StatusMethodNotAllowed,
-			wantHeaderKey: "Allow",
-			wantHeaderVal: "POST",
-		},
-		{
-			name:        "POST /internal/llm empty prompt returns 400",
-			method:      http.MethodPost,
-			path:        "/internal/llm",
-			body:        `{"prompt":"   "}`,
-			wantStatus:  http.StatusBadRequest,
-			wantBodySub: "prompt is required",
-		},
-		{
-			name:        "POST /internal/llm invalid json returns 400",
-			method:      http.MethodPost,
-			path:        "/internal/llm",
-			body:        `not-json`,
-			wantStatus:  http.StatusBadRequest,
-			wantBodySub: "invalid json payload",
-		},
-		{
-			name:        "POST /internal/llm nil llm returns 503",
-			method:      http.MethodPost,
-			path:        "/internal/llm",
-			body:        `{"prompt":"summarize"}`,
-			withNilLLM:  true,
-			wantStatus:  http.StatusServiceUnavailable,
-			wantBodySub: "llm function not available",
-		},
-		{
-			name:        "POST /internal/llm execution error returns 500",
-			method:      http.MethodPost,
-			path:        "/internal/llm",
-			body:        `{"prompt":"summarize"}`,
-			llmError:    errors.New("backend timeout"),
-			wantStatus:  http.StatusInternalServerError,
-			wantBodySub: "backend timeout",
-		},
-		{
-			name:        "POST /internal/llm body too large returns 413",
-			method:      http.MethodPost,
-			path:        "/internal/llm",
-			body:        strings.Repeat("a", (1<<20)+1024),
-			wantStatus:  http.StatusRequestEntityTooLarge,
-			wantBodySub: "request body too large",
 		},
 		{
 			name:        "loopback GET /internal/github-api/ reaches proxy without PAT",
@@ -886,13 +813,7 @@ func TestReconcileRestateServiceTimeouts_DefaultAndInvalidURL(t *testing.T) {
 	require.Error(t, err)
 }
 
-type errReader struct{}
-
-func (errReader) Read([]byte) (int, error) {
-	return 0, errors.New("read error")
-}
-
-func TestSetupHealthMux_LoopbackReloadAndLLMFallback(t *testing.T) {
+func TestSetupHealthMux_LoopbackReload(t *testing.T) {
 	t.Parallel()
 
 	activeTurns := runner.NewActiveTurnRegistry()
@@ -908,9 +829,6 @@ func TestSetupHealthMux_LoopbackReloadAndLLMFallback(t *testing.T) {
 		MCPRoutes:     mcpRoutes,
 		ActiveTurns:   activeTurns,
 		ReloadTrigger: reloadTrigger,
-		LLMFunc: func(ctx context.Context, model, prompt string) (string, error) {
-			return "ok", nil
-		},
 	})
 
 	// Test POST /-/reload from 127.0.0.1
@@ -920,28 +838,6 @@ func TestSetupHealthMux_LoopbackReloadAndLLMFallback(t *testing.T) {
 	mux.ServeHTTP(rec, req)
 	assert.Equal(t, http.StatusOK, rec.Code)
 	assert.Contains(t, rec.Body.String(), `"status":"queued"`)
-
-	// Test POST /internal/llm with errReader
-	reqErr := httptest.NewRequest(http.MethodPost, "/internal/llm", errReader{})
-	recErr := httptest.NewRecorder()
-	mux.ServeHTTP(recErr, reqErr)
-	assert.Equal(t, http.StatusBadRequest, recErr.Code)
-
-	// Test with pool LLMFunc fallback
-	pool := queue.New(nil, queue.WorkerPoolConfig{
-		LLMFunc: func(ctx context.Context, model, prompt string) (string, error) {
-			return "from-pool", nil
-		},
-	})
-	muxWithPool := SetupHealthMux(HealthMuxOptions{
-		AgentName: "aerial",
-		Pool:      pool,
-	})
-	reqPool := httptest.NewRequest(http.MethodPost, "/internal/llm", strings.NewReader(`{"prompt":"test"}`))
-	recPool := httptest.NewRecorder()
-	muxWithPool.ServeHTTP(recPool, reqPool)
-	assert.Equal(t, http.StatusOK, recPool.Code)
-	assert.Contains(t, recPool.Body.String(), "from-pool")
 }
 
 func TestRunApp_ConfigLoadError(t *testing.T) {
