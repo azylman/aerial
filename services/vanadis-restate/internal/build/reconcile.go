@@ -347,6 +347,8 @@ func (b *BuildObject) notifyBuildTerminal(ctx context.Context, build *model.Vana
 	if _, err := b.executor.SyncBuildWidget(ctx, b.store, *build, chunks, "Build "+status); err != nil {
 		slog.WarnContext(ctx, "[vanadis-restate] sync widget warning", "error", err)
 	}
+	b.executor.ClearActiveSteps(build.ID)
+	b.activeStepSyncs.Delete(build.ID)
 	return wakeErr
 }
 

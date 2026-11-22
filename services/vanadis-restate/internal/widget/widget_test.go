@@ -329,6 +329,7 @@ func TestBuildStatusWidgetChunk(t *testing.T) {
 		{"CIFailedStaysLive", model.VanadisChunk{ID: "c7", Mode: "pr", Repo: "aerial", Status: "ci_failed", Banner: `CI check "lint" failed`}, "pr", "aerial", "remediation", true},
 		{"ConflictStaysLive", model.VanadisChunk{ID: "c8", Mode: "pr", Repo: "aerial", Status: "conflict", Banner: "Merge conflict detected"}, "pr", "aerial", "remediation", true},
 		{"FailedIsTerminal", model.VanadisChunk{ID: "c9", Mode: "pr", Repo: "aerial", Status: "failed"}, "pr", "aerial", "", false},
+		{"ActiveStepOnLiveChunk", model.VanadisChunk{ID: "c10", Mode: "action", Status: "running", ActiveStep: "Compiling binary..."}, "action", "", "Compiling binary...", true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

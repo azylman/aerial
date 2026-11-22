@@ -17,7 +17,7 @@ var (
 
 const fullChunkJSON = `{"id":"c1","build_id":"build-1","chunk_index":2,"mode":"pr","repo":"aerial",` +
 	`"title":"T","instructions":"do it","target_files":["a.go"],"target_symbols":["Sym"],"effort":"low",` +
-	`"acceptance_criteria":["green"],"status":"merged","pr_number":42,"stall_nudges":1,"depends_on":["c0"],` +
+	`"acceptance_criteria":["green"],"status":"merged","active_step":"running tests","pr_number":42,"stall_nudges":1,"depends_on":["c0"],` +
 	`"ci_fail_count":3,"ci_checks":{"test":"success"},"head_sha":"h1","remediated_sha":"r1","merge_sha":"m1",` +
 	`"rollout_state":{"expected_jobs":["eri"],"started_jobs":["eri"],"deployed_jobs":["eri"],` +
 	`"job_states":{"eri":"deployed"},"kustomization_statuses":{"core":"ready"}},"banner":"b",` +
@@ -41,7 +41,7 @@ func TestVanadisChunkJSON(t *testing.T) {
 			chunk: VanadisChunk{
 				ID: "c1", BuildID: "build-1", ChunkIndex: 2, Mode: "pr", Repo: "aerial", Title: "T",
 				Instructions: "do it", TargetFiles: []string{"a.go"}, TargetSymbols: []string{"Sym"}, Effort: "low",
-				AcceptanceCriteria: []string{"green"}, Status: "merged", PRNumber: 42, StallNudges: 1,
+				AcceptanceCriteria: []string{"green"}, Status: "merged", ActiveStep: "running tests", PRNumber: 42, StallNudges: 1,
 				DependsOn: []string{"c0"}, CIFailCount: 3, CIChecks: map[string]string{"test": "success"},
 				HeadSHA: "h1", RemediatedSHA: "r1", MergeSHA: "m1",
 				RolloutState: &pubsub.PRRolloutState{
