@@ -17,7 +17,7 @@ import (
 	restate "github.com/restatedev/sdk-go"
 	"github.com/restatedev/sdk-go/server"
 
-	"github.com/azylman/aerial/pkg/buildplan"
+	"github.com/azylman/aerial/pkg/agent"
 	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/pkg/pgutil"
 	"github.com/azylman/aerial/pkg/pubsub"
@@ -153,11 +153,11 @@ func LoadConfig(getenv func(string) string) Config {
 // the Kubernetes/Flux client for Flux and image effects (git-push dispatch,
 // image promotion, reconcile requests). A sibling runner binds no prstate
 // services and ignores them.
-func bindRestateServices(agent string, restateObj *build.BuildObject, routerSvc *router.BuildRouterService, projection *prstate.PgProjectionStore, eri prstate.EriEffector, facts prstate.FactPublisher, gh *prstate.GitHubClient, kube *prstate.KubeClient) (*server.Restate, error) {
+func bindRestateServices(agentName string, restateObj *build.BuildObject, routerSvc *router.BuildRouterService, projection *prstate.PgProjectionStore, eri prstate.EriEffector, facts prstate.FactPublisher, gh *prstate.GitHubClient, kube *prstate.KubeClient) (*server.Restate, error) {
 	srv := server.NewRestate().
 		Bind(restate.Reflect(restateObj)).
 		Bind(restate.Reflect(routerSvc))
-	if ownsPRState(agent) {
+	if ownsPRState(agentName) {
 		pr, repo, err := newPRStateServices(projection, eri, facts, gh, kube)
 		if err != nil {
 			return nil, err
@@ -192,8 +192,9 @@ func newPRStateServices(projection *prstate.PgProjectionStore, eri prstate.EriEf
 }
 
 // ownsPRState reports whether agent is the default agent that owns prstate.
-func ownsPRState(agent string) bool {
-	return buildplan.BuildServiceName(agent) == buildplan.BuildServiceName("")
+func ownsPRState(a string) bool {
+	clean := agent.Clean(a)
+	return clean == "" || clean == agent.Default
 }
 
 // SetupHealthMux creates the ServeMux for health, metrics, and coverage flush.

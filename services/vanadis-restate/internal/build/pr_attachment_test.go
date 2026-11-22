@@ -152,3 +152,41 @@ func TestExecutePRAttachment(t *testing.T) {
 		})
 	}
 }
+
+func TestBuildObject_RefreshFailedPRWidget(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		build     *model.VanadisBuild
+		getErr    error
+		syncErr   error
+		noExec    bool
+		wantCalls int
+	}{
+		{name: "nil executor no-op", noExec: true, wantCalls: 0},
+		{name: "store read error skips widget sync", getErr: errors.New("db error"), wantCalls: 0},
+		{name: "non-failed build skips widget sync", build: &model.VanadisBuild{ID: "b1", Status: "running"}, wantCalls: 0},
+		{name: "failed build sync widget error logged", build: &model.VanadisBuild{ID: "b1", Status: "failed"}, syncErr: errors.New("sync error"), wantCalls: 1},
+		{name: "failed build sync widget success", build: &model.VanadisBuild{ID: "b1", Status: "failed"}, wantCalls: 1},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			st, _ := dbScript{buildRow: &mockRow{b: tc.build}, queryErr: tc.getErr}.open()
+			var widgetCalls int
+			var exec *executor.Executor
+			if !tc.noExec {
+				eri := &mockEriClient{
+					widgetFn: func(context.Context, executor.StatusWidgetRequest) (string, error) {
+						widgetCalls++
+						return "", tc.syncErr
+					},
+				}
+				exec = executor.NewExecutor(t.TempDir(), eri, pubsub.NewMemoryBus(), "token", "azylman", nil)
+			}
+			bo := NewBuildObject("", nil).WithAuthority(st, exec)
+			bo.refreshFailedPRWidget(context.Background(), "b1")
+			assert.Equal(t, tc.wantCalls, widgetCalls)
+		})
+	}
+}

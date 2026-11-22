@@ -277,11 +277,6 @@ func mockRestateMisrouted(w http.ResponseWriter, path string, bodyBytes []byte) 
 		return false
 	}
 	want := "/Build/"
-	if strings.HasSuffix(path, "/Create") {
-		want = "/Build/"
-	} else if strings.Contains(path, "runner-alpha") {
-		want = "/Build-agent-alpha/"
-	}
 	if strings.HasPrefix(path, want) {
 		return false
 	}

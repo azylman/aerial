@@ -13,152 +13,41 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/azylman/aerial/pkg/pubsub"
-	"github.com/azylman/aerial/services/vanadis-restate/internal/deploygate"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/ericlient"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/executor"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
 )
 
-// runnerLookupStore answers only the runner guard's build read. Any other
-// store call hits the nil embedded interface and panics, which proves a
-// refused handler had no side effects.
-type runnerLookupStore struct {
-	store.VanadisStore
-
-	runner  string
-	err     error
-	reads   int
-	missing bool
-}
-
-func (s *runnerLookupStore) GetBuild(_ context.Context, buildID string) (*model.VanadisBuild, []model.VanadisChunk, error) {
-	s.reads++
-	if s.err != nil {
-		return nil, nil, s.err
-	}
-	if s.missing {
-		return nil, nil, nil
-	}
-	return &model.VanadisBuild{ID: buildID, RunnerAgent: s.runner}, nil, nil
-}
-
-func TestRunsBuild(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name   string
-		own    string
-		runner string
-		want   bool
-	}{
-		{name: "empty and default compare equal", own: "", runner: "aerial", want: true},
-		{name: "default and empty compare equal", own: "aerial", runner: "", want: true},
-		{name: "same sibling", own: "agent-alpha", runner: "agent-alpha", want: true},
-		{name: "sibling normalized", own: "Agent-Alpha", runner: " agent-alpha ", want: true},
-		{name: "default refuses sibling", own: "", runner: "agent-alpha", want: false},
-		{name: "sibling refuses default", own: "agent-alpha", runner: "aerial", want: false},
-		{name: "siblings differ", own: "agent-alpha", runner: "agent-beta", want: false},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			assert.Equal(t, tc.want, RunsBuild(tc.own, tc.runner))
-		})
-	}
-}
-
 func TestBuildObject_GuardRunner(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name     string
-		ownAgent string
-		key      string
-		lookup   *runnerLookupStore
-		wantCode restate.Code
-		wantErr  bool
+		name          string
+		ownAgent      string
+		key           string
+		guardErr      error
+		wantGuardStep bool
+		wantErr       bool
 	}{
-		{name: "default object runs default build", key: "b1", lookup: &runnerLookupStore{runner: "aerial"}},
-		{name: "default object runs legacy empty runner", key: "b1", lookup: &runnerLookupStore{runner: ""}},
-		{name: "sibling object runs its own build", ownAgent: "agent-alpha", key: "b1", lookup: &runnerLookupStore{runner: "agent-alpha"}},
-		{name: "default object refuses sibling build", key: "b1", lookup: &runnerLookupStore{runner: "agent-alpha"}, wantErr: true, wantCode: 409},
-		{name: "sibling object refuses default build", ownAgent: "agent-alpha", key: "b1", lookup: &runnerLookupStore{runner: "aerial"}, wantErr: true, wantCode: 409},
-		{name: "sibling object refuses other sibling build", ownAgent: "agent-alpha", key: "b1", lookup: &runnerLookupStore{runner: "agent-beta"}, wantErr: true, wantCode: 409},
-		{name: "unknown build passes through", ownAgent: "agent-alpha", key: "b1", lookup: &runnerLookupStore{err: store.ErrBuildNotFound}},
-		{name: "absent build row passes through", ownAgent: "agent-alpha", key: "b1", lookup: &runnerLookupStore{missing: true}},
-		{name: "storage error is retryable", key: "b1", lookup: &runnerLookupStore{err: errors.New("db down")}, wantErr: true},
-		{name: "empty key skips lookup", key: "", lookup: &runnerLookupStore{runner: "agent-alpha"}},
+		{name: "non-empty key executes journaled runner guard", key: "b1", wantGuardStep: true},
+		{name: "empty key skips runner guard", key: "", wantGuardStep: false},
+		{name: "runner guard error surfaces", key: "b1", guardErr: errors.New("guard fail"), wantGuardStep: true, wantErr: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			rt := newFakeObjectRuntime(tc.key)
-			bo := NewBuildObjectWithAgent("", tc.ownAgent, nil, func(restate.ObjectContext) objectRuntime { return rt }).WithAuthority(tc.lookup, nil)
+			rt.runnerGuardErr = tc.guardErr
+			bo := NewBuildObjectWithAgent("", tc.ownAgent, nil, func(restate.ObjectContext) objectRuntime { return rt })
 			err := bo.guardRunner(nil, "test")
-			if !tc.wantErr {
+			if tc.wantErr {
+				require.Error(t, err)
+			} else {
 				require.NoError(t, err)
-				return
 			}
-			require.Error(t, err)
-			var terminal restate.TerminalError
-			if tc.wantCode == 0 {
-				assert.False(t, errors.As(err, &terminal))
-				return
-			}
-			require.ErrorAs(t, err, &terminal)
-			assert.Equal(t, tc.wantCode, terminal.Code())
-			assert.Contains(t, err.Error(), "build is executed by another runner")
+			assert.Equal(t, tc.wantGuardStep, rt.runnerGuardCalled)
 		})
 	}
-}
-
-func requireForeignRunner(t *testing.T, err error) {
-	t.Helper()
-	var terminal restate.TerminalError
-	require.ErrorAs(t, err, &terminal)
-	assert.Equal(t, restate.Code(409), terminal.Code())
-}
-
-// TestBuildObject_HandlersRefuseForeignRunner wires the guard into every
-// handler except Create: each refuses a build run by another agent with a
-// terminal 409 before touching the store, runtime state or widgets.
-func TestBuildObject_HandlersRefuseForeignRunner(t *testing.T) {
-	t.Parallel()
-	lookup := &runnerLookupStore{runner: "agent-alpha"}
-	rt := newFakeObjectRuntime("b1")
-	bo := NewBuildObject("", nil, func(restate.ObjectContext) objectRuntime { return rt }).WithAuthority(lookup, nil)
-	ctx := makeObjectMockContext(t, "b1")
-
-	_, err := bo.UpdateBuild(ctx, store.UpdateBuildRequest{Title: "t"})
-	requireForeignRunner(t, err)
-	_, err = bo.Cancel(ctx, CancelBuildRequest{Reason: "r"})
-	requireForeignRunner(t, err)
-	_, err = bo.AppendChunks(ctx, AppendChunksRequest{Chunks: []store.CreateChunkInput{{Title: "c"}}})
-	requireForeignRunner(t, err)
-	_, err = bo.UpdateChunk(ctx, store.UpdateChunkRequest{ChunkRef: "c1"})
-	requireForeignRunner(t, err)
-	requireForeignRunner(t, bo.RemoveChunk(ctx, RemoveChunkRequest{ChunkRef: "c1"}))
-	_, err = bo.FailChunk(ctx, model.FailChunkRequest{ChunkID: "c1", Reason: "boom"})
-	requireForeignRunner(t, err)
-	_, err = bo.AttachPR(ctx, store.AttachChunkPRRequest{ChunkID: "c1", PRNumber: 1})
-	requireForeignRunner(t, err)
-	requireForeignRunner(t, bo.OnPREvent(ctx, pubsub.PRLifecycleEvent{Repo: "aerial", PRNumber: 1, Event: "deploy_success"}))
-	requireForeignRunner(t, bo.OnDispatchOutcome(ctx, pubsub.DispatchOutcomeEvent{VanadisChunkID: "c1", Status: "completed"}))
-	_, err = bo.Reconcile(ctx, ReconcileBuildRequest{Reason: ReconcileReasonWidgetSync})
-	requireForeignRunner(t, err)
-	_, err = bo.Mutate(ctx, BuildMutationRequest{Action: mutationChunkDeploySuccess, ChunkID: "c1"})
-	requireForeignRunner(t, err)
-	_, err = bo.RetryActionChunk(ctx, store.RetryActionChunkRequest{BuildID: "b1", ChunkID: "c1", ExpectedDispatchID: "d1", Reason: "retry"})
-	requireForeignRunner(t, err)
-	_, err = bo.UpdateActiveStep(ctx, UpdateActiveStepRequest{ChunkID: "c1", ActiveStep: "step"})
-	requireForeignRunner(t, err)
-	requireForeignRunner(t, bo.DeploymentDeadline(ctx, deploygate.DeploymentDeadlineRequest{ChunkID: "c1"}))
-
-	assert.Equal(t, 14, lookup.reads)
-	assert.Empty(t, rt.stepsRun)
-	assert.Nil(t, rt.state)
-	assert.False(t, rt.cleared)
-	assert.False(t, rt.reconcileScheduled)
-	assert.Empty(t, rt.reconcilesSent)
 }
 
 // createCaptureStore records the build Create persists.
@@ -166,11 +55,20 @@ type createCaptureStore struct {
 	store.VanadisStore
 
 	created model.VanadisBuild
+	chunks  []model.VanadisChunk
 }
 
-func (s *createCaptureStore) CreateBuild(_ context.Context, b model.VanadisBuild, _ []model.VanadisChunk) error {
+func (s *createCaptureStore) CreateBuild(_ context.Context, b model.VanadisBuild, chunks []model.VanadisChunk) error {
 	s.created = b
+	s.chunks = chunks
 	return nil
+}
+
+func (s *createCaptureStore) GetBuild(_ context.Context, id string) (*model.VanadisBuild, []model.VanadisChunk, error) {
+	if s.created.ID == id {
+		return &s.created, s.chunks, nil
+	}
+	return nil, nil, store.ErrBuildNotFound
 }
 
 func TestBuildObject_CreateRecordsOwnRunner(t *testing.T) {
@@ -204,16 +102,17 @@ func TestBuildObject_CreateRecordsOwnRunner(t *testing.T) {
 	}
 }
 
-func TestBuildObject_CreateRefusesForeignOwner(t *testing.T) {
+func TestBuildObject_CreateAcceptsAllOwners(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name     string
-		ownAgent string
-		reqAgent string
+		name      string
+		ownAgent  string
+		reqAgent  string
+		wantAgent string
 	}{
-		{name: "sibling object refuses unowned build", ownAgent: "agent-alpha"},
-		{name: "sibling object refuses default-owned build", ownAgent: "agent-alpha", reqAgent: "aerial"},
-		{name: "sibling object refuses other sibling build", ownAgent: "agent-alpha", reqAgent: "agent-beta"},
+		{name: "sibling object accepts unowned build", ownAgent: "agent-alpha", wantAgent: "agent-alpha"},
+		{name: "sibling object accepts default-owned build", ownAgent: "agent-alpha", reqAgent: "aerial", wantAgent: "aerial"},
+		{name: "sibling object accepts other sibling build", ownAgent: "agent-alpha", reqAgent: "agent-beta", wantAgent: "agent-beta"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -222,13 +121,13 @@ func TestBuildObject_CreateRefusesForeignOwner(t *testing.T) {
 			rt := newFakeObjectRuntime("b1")
 			bo := NewBuildObjectWithAgent("", tc.ownAgent, nil, func(restate.ObjectContext) objectRuntime { return rt }).WithAuthority(st, nil)
 			req := CreateBuildRequest{Agent: tc.reqAgent, ThreadID: "t1", Objective: "o", Chunks: []store.CreateChunkInput{{ID: "c1", Title: "c", Mode: "action", Instructions: "i", DependsOn: []string{}}}}
-			_, err := bo.Create(makeObjectMockContext(t, "b1"), req)
-			var terminal restate.TerminalError
-			require.ErrorAs(t, err, &terminal)
-			assert.Equal(t, restate.Code(400), terminal.Code())
-			assert.Empty(t, st.created.ID)
-			assert.Nil(t, rt.state)
-			assert.Empty(t, rt.stepsRun)
+			created, err := bo.Create(makeObjectMockContext(t, "b1"), req)
+			require.NoError(t, err)
+			assert.Equal(t, "b1", created.ID)
+			assert.Equal(t, tc.wantAgent, created.Agent)
+			assert.Equal(t, tc.wantAgent, st.created.Agent)
+			require.NotNil(t, rt.state)
+			assert.Equal(t, tc.wantAgent, rt.state.Build.Agent)
 		})
 	}
 }
@@ -311,8 +210,8 @@ func TestBuildObject_CrossBuildReconcileSends(t *testing.T) {
 	}{
 		{name: "no sweep sends nothing"},
 		{name: "default runner build", swept: []store.SweptChunk{{ChunkID: "f1", BuildID: "b2", RunnerAgent: "aerial"}}, wantSent: []sentReconcile{{Service: "Build", BuildID: "b2", Reason: "widget_sync"}}},
-		{name: "sibling runner build", swept: []store.SweptChunk{{ChunkID: "f1", BuildID: "b2", RunnerAgent: "agent-alpha"}}, wantSent: []sentReconcile{{Service: "Build-agent-alpha", BuildID: "b2", Reason: "widget_sync"}}},
-		{name: "one send per build", swept: []store.SweptChunk{{ChunkID: "f1", BuildID: "b2", RunnerAgent: "agent-alpha"}, {ChunkID: "f2", BuildID: "b2", RunnerAgent: "agent-alpha"}, {ChunkID: "g1", BuildID: "b3"}}, wantSent: []sentReconcile{{Service: "Build-agent-alpha", BuildID: "b2", Reason: "widget_sync"}, {Service: "Build", BuildID: "b3", Reason: "widget_sync"}}},
+		{name: "sibling runner build", swept: []store.SweptChunk{{ChunkID: "f1", BuildID: "b2", RunnerAgent: "agent-alpha"}}, wantSent: []sentReconcile{{Service: "Build", BuildID: "b2", Reason: "widget_sync"}}},
+		{name: "one send per build", swept: []store.SweptChunk{{ChunkID: "f1", BuildID: "b2", RunnerAgent: "agent-alpha"}, {ChunkID: "f2", BuildID: "b2", RunnerAgent: "agent-alpha"}, {ChunkID: "g1", BuildID: "b3"}}, wantSent: []sentReconcile{{Service: "Build", BuildID: "b2", Reason: "widget_sync"}, {Service: "Build", BuildID: "b3", Reason: "widget_sync"}}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -338,7 +237,7 @@ func TestRestateObjectRuntime_RunnerOperations(t *testing.T) {
 	mc.EXPECT().Run(mock.Anything, mock.Anything, mock.Anything).RunAndReturn(runMockRunContext).Once()
 	mClient := mocks.NewMockClient(t)
 	mInv := mocks.NewMockInvocation(t)
-	mc.EXPECT().Object("Build-agent-alpha", "b2", "Reconcile").Return(mClient).Once()
+	mc.EXPECT().Object("Build", "b2", "Reconcile").Return(mClient).Once()
 	mClient.EXPECT().Send(ReconcileBuildRequest{Reason: ReconcileReasonWidgetSync}).Return(mInv).Once()
 	rt := restateObjectRuntime{ctx: restate.WithMockContext(mc)}
 	sendCrossBuildReconciles(rt, []store.BuildRoute{{BuildID: "b2", RunnerAgent: "agent-alpha"}})
@@ -424,10 +323,9 @@ func TestRouterFacingHelpers(t *testing.T) {
 	assert.True(t, CanFallbackThreadRepoLookup(pubsub.PRLifecycleEvent{Repo: "aerial", PRNumber: 1, Event: "opened", Branch: "feat/aerial-pr-20261116-123456", TargetID: "thread-1"}))
 }
 
-// attachRunnerSpyStore passes the runner guard as an unknown (new) build and
-// records the attach request the Build object persists.
+// attachRunnerSpyStore records the attach request the Build object persists.
 type attachRunnerSpyStore struct {
-	runnerLookupStore
+	store.VanadisStore
 
 	attached store.AttachChunkPRRequest
 }
@@ -456,7 +354,6 @@ func TestBuildObject_AttachPRStampsOwnRunner(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			spy := &attachRunnerSpyStore{}
-			spy.missing = true
 			rt := newFakeObjectRuntime("b1")
 			rt.runStepErr = errors.New("stop after attach")
 			bo := NewBuildObjectWithAgent("", tc.ownAgent, nil, func(restate.ObjectContext) objectRuntime { return rt }).WithAuthority(spy, nil)

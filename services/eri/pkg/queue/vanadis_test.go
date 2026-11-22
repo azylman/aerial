@@ -360,33 +360,6 @@ func TestWorkerPool_SetupDispatchTurn_OutcomePublishRetries(t *testing.T) {
 	}
 }
 
-func TestBuildServiceName(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name      string
-		agent     string
-		wantBuild string
-	}{
-		{name: "empty agent defaults to Build", agent: "", wantBuild: "Build"},
-		{name: "aerial agent defaults to Build", agent: "aerial", wantBuild: "Build"},
-		{name: "trimmed and upper aerial defaults to Build", agent: "  AERIAL  ", wantBuild: "Build"},
-		{name: "agent-alpha stack agent", agent: "agent-alpha", wantBuild: "Build-agent-alpha"},
-		{name: "trimmed upper agent-alpha", agent: "  AGENT-ALPHA  ", wantBuild: "Build-agent-alpha"},
-		{name: "agent-beta stack agent", agent: "agent-beta", wantBuild: "Build-agent-beta"},
-		{name: "custom agent identifier", agent: "custom-worker", wantBuild: "Build-custom-worker"},
-		{name: "unsafe characters route to Build", agent: "Foo Bar", wantBuild: "Build"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			got := BuildServiceName(tc.agent)
-			if got != tc.wantBuild {
-				t.Fatalf("BuildServiceName(%q) = %q, want %q", tc.agent, got, tc.wantBuild)
-			}
-		})
-	}
-}
-
 type flushActiveStepTestCase struct {
 	name            string
 	agentName       string
@@ -562,7 +535,7 @@ var flushActiveStepTestCases = []flushActiveStepTestCase{
 		step:           "Compiling binaries...",
 		serverStatus:   http.StatusOK,
 		serverBody:     `{"status":"ok"}`,
-		wantURI:        "/Build-agent-alpha/build-202/UpdateActiveStep/send",
+		wantURI:        "/Build/build-202/UpdateActiveStep/send",
 		wantChunkID:    "chunk-live-2",
 		wantActiveStep: "Compiling binaries...",
 	},
@@ -574,7 +547,7 @@ var flushActiveStepTestCases = []flushActiveStepTestCase{
 		step:           "   Running tests...   \n",
 		serverStatus:   http.StatusOK,
 		serverBody:     `{"status":"ok"}`,
-		wantURI:        "/Build-agent-beta/" + url.PathEscape("build/special:1") + "/UpdateActiveStep/send",
+		wantURI:        "/Build/" + url.PathEscape("build/special:1") + "/UpdateActiveStep/send",
 		wantChunkID:    "chunk-trim",
 		wantActiveStep: "Running tests...",
 	},

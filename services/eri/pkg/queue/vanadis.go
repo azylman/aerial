@@ -13,7 +13,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/azylman/aerial/pkg/agent"
 	"github.com/azylman/aerial/pkg/k8sauth"
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/eri/pkg/db"
@@ -40,8 +39,10 @@ func (p *WorkerPool) vanadisHTTPClient() *http.Client {
 }
 
 // BuildServiceName derives the Restate Build Virtual Object name for an agent.
-func BuildServiceName(name string) string {
-	return agent.ScopedServiceName("Build", name)
+// With vanadis-restate consolidated into a single agent-aware instance,
+// this unconditionally returns the canonical "Build" Virtual Object name.
+func BuildServiceName(_ string) string {
+	return "Build"
 }
 
 // resolveRestateIngressURL returns PoolConfig.RestateIngressURL without a trailing slash.

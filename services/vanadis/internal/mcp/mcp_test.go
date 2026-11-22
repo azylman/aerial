@@ -344,13 +344,9 @@ func mockMCPRestateHandler(actionGen *int) http.HandlerFunc {
 		}
 		bodyStr := string(bodyBytes)
 
-		// Build object calls must reach the build's runner: build-mcp-4 runs
-		// on agent-alpha, every other fixture build on the default runner.
+		// Build object calls must reach the canonical Build object.
 		if !strings.HasPrefix(path, "/BuildRouter/") {
 			want := "/Build/"
-			if strings.Contains(path, "build-mcp-4") {
-				want = "/Build-agent-alpha/"
-			}
 			if !strings.HasPrefix(path, want) {
 				w.WriteHeader(http.StatusTeapot)
 				_, _ = w.Write([]byte(`{"message":"misrouted build object"}`))

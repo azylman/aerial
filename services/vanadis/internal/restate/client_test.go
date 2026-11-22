@@ -331,12 +331,8 @@ type scopedNameCase struct {
 func TestClientScopedNames(t *testing.T) {
 	t.Parallel()
 	tests := []scopedNameCase{
-		{name: "empty runner targets legacy build", clientAgent: "", runnerAgent: "", buildID: "b1", wantRouter: "BuildRouter", wantObjectPath: "/Build/b1/Create", wantRouterPath: "/BuildRouter/RouteFailChunk"},
-		{name: "aerial runner targets legacy build", clientAgent: "aerial", runnerAgent: "aerial", buildID: "b1", wantRouter: "BuildRouter", wantObjectPath: "/Build/b1/Create", wantRouterPath: "/BuildRouter/RouteFailChunk"},
-		{name: "sibling runner targets its build service while router stays shared", clientAgent: "aerial", runnerAgent: "agent-beta", buildID: "b1", wantRouter: "BuildRouter", wantObjectPath: "/Build-agent-beta/b1/Create", wantRouterPath: "/BuildRouter/RouteFailChunk"},
-		{name: "default runner ignores scoped client agent", clientAgent: "agent-alpha", runnerAgent: "aerial", buildID: "b1", wantRouter: "BuildRouter-agent-alpha", wantObjectPath: "/Build/b1/Create", wantRouterPath: "/BuildRouter-agent-alpha/RouteFailChunk"},
-		{name: "mixed case runner normalized", clientAgent: "aerial", runnerAgent: "Agent-Beta", buildID: "b1", wantRouter: "BuildRouter", wantObjectPath: "/Build-agent-beta/b1/Create", wantRouterPath: "/BuildRouter/RouteFailChunk"},
-		{name: "special characters in buildID are escaped", clientAgent: "aerial", runnerAgent: "agent-beta", buildID: "build/1#test:special", wantRouter: "BuildRouter", wantObjectPath: "/Build-agent-beta/build%2F1%23test:special/Create", wantRouterPath: "/BuildRouter/RouteFailChunk"},
+		{name: "default build and router paths", clientAgent: "", runnerAgent: "", buildID: "b1", wantRouter: "BuildRouter", wantObjectPath: "/Build/b1/Create", wantRouterPath: "/BuildRouter/RouteFailChunk"},
+		{name: "special characters in buildID are escaped", clientAgent: "aerial", runnerAgent: "aerial", buildID: "build/1#test:special", wantRouter: "BuildRouter", wantObjectPath: "/Build/build%2F1%23test:special/Create", wantRouterPath: "/BuildRouter/RouteFailChunk"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
