@@ -1,6 +1,7 @@
 package metrics
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"net/http"
@@ -82,83 +83,95 @@ func TestRecordClaudeUsageJSON(t *testing.T) {
 	}
 }
 
+// newUsageEndpoint serves status/body on GET path and records the request headers it saw.
+func newUsageEndpoint(t *testing.T, path string, status int, body string) (*httptest.Server, <-chan http.Header) {
+	t.Helper()
+	seen := make(chan http.Header, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != path || r.Method != http.MethodGet {
+			http.NotFound(w, r)
+			return
+		}
+		seen <- r.Header.Clone()
+		w.WriteHeader(status)
+		_, _ = w.Write([]byte(body))
+	}))
+	t.Cleanup(srv.Close)
+	return srv, seen
+}
+
+// usageEndpointHeader returns the headers the endpoint recorded, or an empty set when no request reached it.
+func usageEndpointHeader(seen <-chan http.Header) http.Header {
+	select {
+	case h := <-seen:
+		return h
+	default:
+		return http.Header{}
+	}
+}
+
 func TestNewClaudeUsageRunner(t *testing.T) {
 	t.Parallel()
 	const token = "sk-ant-oat01-secret-token"
+	closed := httptest.NewServer(http.NotFoundHandler())
+	closed.Close()
 	tests := []struct {
 		name     string
+		baseURL  string // "" targets the live fake endpoint
 		status   int
 		body     string
 		wantBody string
 		wantErr  string
+		wantAuth string // Authorization header the endpoint saw; "" means no request reached it
 	}{
-		{name: "ok", status: http.StatusOK, body: claudeUsageFixture, wantBody: claudeUsageFixture},
-		{name: "forbidden", status: http.StatusForbidden, body: `{"error":"bad token ` + token + `"}`, wantErr: "claude usage endpoint returned HTTP 403"},
+		{name: "ok", status: http.StatusOK, body: claudeUsageFixture, wantBody: claudeUsageFixture, wantAuth: "Bearer " + token},
+		{name: "forbidden", status: http.StatusForbidden, body: `{"error":"bad token ` + token + `"}`, wantErr: "claude usage endpoint returned HTTP 403", wantAuth: "Bearer " + token},
+		{name: "closed server", baseURL: closed.URL, wantErr: "connection refused"},
+		{name: "invalid url", baseURL: "http://bad host", wantErr: "invalid character"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			seen := make(chan http.Header, 1)
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.URL.Path != "/api/oauth/usage" || r.Method != http.MethodGet {
-					http.NotFound(w, r)
-					return
-				}
-				seen <- r.Header.Clone()
-				w.WriteHeader(tc.status)
-				_, _ = w.Write([]byte(tc.body))
-			}))
-			defer srv.Close()
-			out, err := NewClaudeUsageRunner(srv.Client(), srv.URL, token)(context.Background())
+			srv, seen := newUsageEndpoint(t, "/api/oauth/usage", tc.status, tc.body)
+			out, err := NewClaudeUsageRunner(srv.Client(), cmp.Or(tc.baseURL, srv.URL), token)(context.Background())
 			if tc.wantErr != "" {
-				if err == nil || err.Error() != tc.wantErr || strings.Contains(err.Error(), token) {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) || strings.Contains(err.Error(), token) {
 					t.Fatalf("error = %v, want %q without token", err, tc.wantErr)
 				}
 			} else if err != nil || string(out) != tc.wantBody {
 				t.Fatalf("got (%q, %v), want %q", out, err, tc.wantBody)
 			}
-			h := <-seen
-			if h.Get("Authorization") != "Bearer "+token || h.Get("Anthropic-Beta") != "oauth-2025-04-20" {
-				t.Errorf("unexpected headers: Authorization=%q anthropic-beta=%q", h.Get("Authorization"), h.Get("Anthropic-Beta"))
+			h := usageEndpointHeader(seen)
+			if h.Get("Authorization") != tc.wantAuth {
+				t.Errorf("Authorization = %q, want %q", h.Get("Authorization"), tc.wantAuth)
+			}
+			if tc.wantAuth != "" && h.Get("Anthropic-Beta") != "oauth-2025-04-20" {
+				t.Errorf("anthropic-beta = %q, want oauth-2025-04-20", h.Get("Anthropic-Beta"))
 			}
 		})
 	}
 }
 
-func TestNewClaudeUsageRunnerTransportError(t *testing.T) {
-	t.Parallel()
-	srv := httptest.NewServer(http.NotFoundHandler())
-	srv.Close()
-	tests := []struct{ name, baseURL string }{
-		{"closed server", srv.URL},
-		{"invalid url", "http://bad host"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			if _, err := NewClaudeUsageRunner(srv.Client(), tc.baseURL, "tok")(context.Background()); err == nil {
-				t.Fatal("expected error")
-			}
-		})
-	}
-}
-
-func TestDefaultClaudeUsageRunner(t *testing.T) {
+// TestDefaultUsageRunners covers both subscription runners, which share the (credential, isTest) contract.
+func TestDefaultUsageRunners(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name, token string
-		isTest      bool
-		wantNil     bool
+		name, credential string
+		isTest           bool
+		wantNil          bool
 	}{
-		{"test mode", "tok", true, true},
-		{"blank token", "  ", false, true},
-		{"enabled", "tok", false, false},
+		{"test mode", "/path/to/auth.json", true, true},
+		{"blank credential", "  ", false, true},
+		{"enabled", "/path/to/auth.json", false, false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if got := DefaultClaudeUsageRunner(tc.token, tc.isTest); (got == nil) != tc.wantNil {
-				t.Errorf("DefaultClaudeUsageRunner(%q, %v) nil = %v, want %v", tc.token, tc.isTest, got == nil, tc.wantNil)
+			if got := DefaultClaudeUsageRunner(tc.credential, tc.isTest); (got == nil) != tc.wantNil {
+				t.Errorf("DefaultClaudeUsageRunner(%q, %v) nil = %v, want %v", tc.credential, tc.isTest, got == nil, tc.wantNil)
+			}
+			if got := DefaultCodexUsageRunner(tc.credential, tc.isTest); (got == nil) != tc.wantNil {
+				t.Errorf("DefaultCodexUsageRunner(%q, %v) nil = %v, want %v", tc.credential, tc.isTest, got == nil, tc.wantNil)
 			}
 		})
 	}
@@ -273,42 +286,42 @@ func TestNewCodexUsageRunner(t *testing.T) {
 	const token = "secret-codex-access-token"
 	const accountID = "chatgpt-acc-789"
 	tmp := t.TempDir()
-	authPath := filepath.Join(tmp, "auth.json")
-	_ = os.WriteFile(authPath, []byte(`{"tokens":{"access_token":"`+token+`","account_id":"`+accountID+`"}}`), 0o600)
+	writeAuth := func(name, content string) string {
+		path := filepath.Join(tmp, name)
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	authPath := writeAuth("auth.json", `{"tokens":{"access_token":"`+token+`","account_id":"`+accountID+`"}}`)
+	noTokenPath := writeAuth("no-token.json", `{"tokens":{}}`)
+	malformedPath := writeAuth("malformed.json", `{invalid`)
+	closed := httptest.NewServer(http.NotFoundHandler())
+	closed.Close()
 
 	tests := []struct {
-		name        string
-		status      int
-		body        string
-		authContent string
-		wantBody    string
-		wantErr     string
+		name     string
+		baseURL  string // "" targets the live fake endpoint
+		authPath string
+		status   int
+		body     string
+		wantBody string
+		wantErr  string
+		wantAuth string // Authorization header the endpoint saw; "" means no request reached it
 	}{
-		{name: "ok", status: http.StatusOK, body: codexUsageFixture, wantBody: codexUsageFixture},
-		{name: "forbidden", status: http.StatusForbidden, body: `{"error":"forbidden"}`, wantErr: "codex usage endpoint returned HTTP 403"},
-		{name: "no token in auth", authContent: `{"tokens":{}}`, wantErr: "has no access token"},
-		{name: "malformed auth", authContent: `{invalid`, wantErr: "unmarshal codex auth"},
+		{name: "ok", authPath: authPath, status: http.StatusOK, body: codexUsageFixture, wantBody: codexUsageFixture, wantAuth: "Bearer " + token},
+		{name: "forbidden", authPath: authPath, status: http.StatusForbidden, body: `{"error":"forbidden"}`, wantErr: "codex usage endpoint returned HTTP 403", wantAuth: "Bearer " + token},
+		{name: "no token in auth", authPath: noTokenPath, wantErr: "has no access token"},
+		{name: "malformed auth", authPath: malformedPath, wantErr: "unmarshal codex auth"},
+		{name: "missing auth file", authPath: filepath.Join(tmp, "nonexistent.json"), wantErr: "read codex auth file"},
+		{name: "closed server", baseURL: closed.URL, authPath: authPath, wantErr: "connection refused"},
+		{name: "invalid url", baseURL: "http://bad host", authPath: authPath, wantErr: "invalid character"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			filePath := authPath
-			if tc.authContent != "" {
-				filePath = filepath.Join(t.TempDir(), "auth.json")
-				_ = os.WriteFile(filePath, []byte(tc.authContent), 0o600)
-			}
-			seen := make(chan http.Header, 1)
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.URL.Path != "/wham/usage" || r.Method != http.MethodGet {
-					http.NotFound(w, r)
-					return
-				}
-				seen <- r.Header.Clone()
-				w.WriteHeader(tc.status)
-				_, _ = w.Write([]byte(tc.body))
-			}))
-			defer srv.Close()
-			out, err := NewCodexUsageRunner(srv.Client(), srv.URL, filePath)(context.Background())
+			srv, seen := newUsageEndpoint(t, "/wham/usage", tc.status, tc.body)
+			out, err := NewCodexUsageRunner(srv.Client(), cmp.Or(tc.baseURL, srv.URL), tc.authPath)(context.Background())
 			if tc.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
 					t.Fatalf("error = %v, want substring %q", err, tc.wantErr)
@@ -316,49 +329,15 @@ func TestNewCodexUsageRunner(t *testing.T) {
 			} else if err != nil || string(out) != tc.wantBody {
 				t.Fatalf("got (%q, %v), want %q", out, err, tc.wantBody)
 			}
-			if tc.wantErr == "" {
-				h := <-seen
-				if h.Get("Authorization") != "Bearer "+token || h.Get("Chatgpt-Account-Id") != accountID {
-					t.Errorf("unexpected headers: Authorization=%q Chatgpt-Account-Id=%q", h.Get("Authorization"), h.Get("Chatgpt-Account-Id"))
-				}
+			h := usageEndpointHeader(seen)
+			if h.Get("Authorization") != tc.wantAuth {
+				t.Errorf("Authorization = %q, want %q", h.Get("Authorization"), tc.wantAuth)
+			}
+			if tc.wantAuth != "" && h.Get("Chatgpt-Account-Id") != accountID {
+				t.Errorf("Chatgpt-Account-Id = %q, want %q", h.Get("Chatgpt-Account-Id"), accountID)
 			}
 		})
 	}
-}
-
-func TestNewCodexUsageRunnerTransportError(t *testing.T) {
-	t.Parallel()
-	tmp := t.TempDir()
-	authPath := filepath.Join(tmp, "auth.json")
-	_ = os.WriteFile(authPath, []byte(`{"tokens":{"access_token":"tok","account_id":"acc"}}`), 0o600)
-
-	srv := httptest.NewServer(http.NotFoundHandler())
-	srv.Close()
-	tests := []struct{ name, baseURL, authPath string }{
-		{"closed server", srv.URL, authPath},
-		{"invalid url", "http://bad host", authPath},
-		{"missing auth file", srv.URL, filepath.Join(tmp, "nonexistent.json")},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			if _, err := NewCodexUsageRunner(srv.Client(), tc.baseURL, tc.authPath)(context.Background()); err == nil {
-				t.Fatal("expected error")
-			}
-		})
-	}
-}
-
-func TestDefaultCodexUsageRunner(t *testing.T) {
-	t.Parallel()
-	check := func(p string, isTest bool, wantNil bool) {
-		if got := DefaultCodexUsageRunner(p, isTest); (got == nil) != wantNil {
-			t.Errorf("DefaultCodexUsageRunner(%q, %v) nil = %v, want %v", p, isTest, got == nil, wantNil)
-		}
-	}
-	check("/path/to/auth.json", true, true)
-	check("  ", false, true)
-	check("/path/to/auth.json", false, false)
 }
 
 func TestRecordUsageJSON(t *testing.T) {

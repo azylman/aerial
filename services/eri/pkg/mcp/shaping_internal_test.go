@@ -99,21 +99,9 @@ func TestMCPToolCallID(t *testing.T) {
 		body string
 		want string
 	}{
-		{
-			name: "malformed json returns empty",
-			body: "{not-json",
-			want: "",
-		},
-		{
-			name: "valid json without meta returns empty",
-			body: `{"params":{}}`,
-			want: "",
-		},
-		{
-			name: "valid json with claudecode toolUseId returns id",
-			body: `{"params":{"_meta":{"claudecode/toolUseId":"tool-xyz"}}}`,
-			want: "tool-xyz",
-		},
+		{name: "malformed json returns empty", body: "{not-json", want: ""},
+		{name: "valid json without meta returns empty", body: `{"params":{}}`, want: ""},
+		{name: "valid json with claudecode toolUseId returns id", body: `{"params":{"_meta":{"claudecode/toolUseId":"tool-xyz"}}}`, want: "tool-xyz"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

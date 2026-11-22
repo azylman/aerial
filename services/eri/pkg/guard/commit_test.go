@@ -26,9 +26,9 @@ const (
 	testJWT     = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9." + "eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ." + "SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"
 )
 
-func TestCustomPatterns(t *testing.T) {
-	// Not t.Parallel(): sibling tests reset the global sanitizer registry.
-	payloadTests := []struct {
+func TestParsePatternPayload(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
 		name     string
 		input    string
 		wantLen  int
@@ -44,89 +44,88 @@ func TestCustomPatterns(t *testing.T) {
 		{"format 4 comma delimited", "patA, patB", 2, "CustomRule_1"},
 		{"invalid regex skipped", `[{"pattern": "["}]`, 0, ""},
 	}
-
-	for _, tc := range payloadTests {
-		t.Run("payload_"+tc.name, func(t *testing.T) {
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			rules := parsePatternPayload([]byte(tc.input))
 			if len(rules) != tc.wantLen {
 				t.Fatalf("parsePatternPayload(%s) len = %d, want %d", tc.name, len(rules), tc.wantLen)
 			}
-			if tc.wantCat0 != "" && len(rules) > 0 && rules[0].Category != tc.wantCat0 {
+			if tc.wantCat0 != "" && rules[0].Category != tc.wantCat0 {
 				t.Fatalf("rules[0].Category = %q, want %q", rules[0].Category, tc.wantCat0)
 			}
 		})
 	}
+}
 
-	// ScanTextForSecrets with custom rules
-	customRules := parsePatternPayload([]byte(`[{"category": "APISecret", "pattern": "secret-[a-z0-9]+"}]`))
-	violations := ScanTextForSecrets("const token = \"secret-12345abc\"", "file.go", customRules)
-	if len(violations) != 1 || violations[0].Category != "APISecret" {
-		t.Fatalf("expected 1 custom violation APISecret, got: %+v", violations)
+func TestLoadCustomPatterns(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		file        string // written under <home>/.gemini/config
+		content     string
+		homeFromEnv bool // pass "" as homeDir and the temp home as HOME
+		want        int
+	}{
+		{name: "commit-guard.json", file: "commit-guard.json", content: `[{"pattern": "cg_pat_\\d+"}]`, want: 1},
+		{name: "guard.json fallback", file: "guard.json", content: `[{"pattern": "g_pat_\\d+"}]`, want: 1},
+		{name: "empty homeDir falls back to HOME", file: "guard.json", content: `[{"pattern": "g_pat_\\d+"}]`, homeFromEnv: true, want: 1},
 	}
-
-	// FormatCommitDenyReason check
-	reason := FormatCommitDenyReason(violations)
-	if !strings.Contains(reason, "APISecret") || !strings.Contains(reason, "se***bc") || strings.Contains(reason, "secret-12345abc") {
-		t.Fatalf("FormatCommitDenyReason missing details: %s", reason)
-	}
-
-	// LoadCustomPatterns file loading checks
-	tmpHome := t.TempDir()
-	geminiConfig := filepath.Join(tmpHome, ".gemini", "config")
-	if err := os.MkdirAll(geminiConfig, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(geminiConfig, "commit-guard.json"), []byte(`[{"pattern": "cg_pat_\\d+"}]`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	rulesCG := LoadCustomPatterns(tmpHome, mapEnv(nil))
-	if len(rulesCG) != 1 {
-		t.Fatalf("expected 1 rule from commit-guard.json, got %d", len(rulesCG))
-	}
-
-	// LoadCustomPatterns guard.json fallback
-	tmpHome2 := t.TempDir()
-	geminiConfig2 := filepath.Join(tmpHome2, ".gemini", "config")
-	if err := os.MkdirAll(geminiConfig2, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(geminiConfig2, "guard.json"), []byte(`[{"pattern": "g_pat_\\d+"}]`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	rulesG := LoadCustomPatterns(tmpHome2, mapEnv(nil))
-	if len(rulesG) != 1 {
-		t.Fatalf("expected 1 rule from guard.json, got %d", len(rulesG))
-	}
-
-	// Empty homeDir falls back to the injected HOME
-	if rulesHome := LoadCustomPatterns("", mapEnv(map[string]string{"HOME": tmpHome2})); len(rulesHome) != 1 {
-		t.Fatalf("expected 1 rule from HOME fallback, got %d", len(rulesHome))
-	}
-
-	// GetActivePatterns with injected pattern variable
-	activeWithEnv := GetActivePatterns(mapEnv(map[string]string{"AERIAL_COMMIT_GUARD_PATTERNS": `env_pat_\d+`}))
-	if len(activeWithEnv) != len(BuiltinPatterns)+1 {
-		t.Fatalf("expected GetActivePatterns with env to add 1 rule, got %d", len(activeWithEnv))
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			home := t.TempDir()
+			dir := filepath.Join(home, ".gemini", "config")
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, tc.file), []byte(tc.content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			homeDir, env := home, map[string]string{}
+			if tc.homeFromEnv {
+				homeDir, env = "", map[string]string{"HOME": home}
+			}
+			if got := LoadCustomPatterns(homeDir, mapEnv(env)); len(got) != tc.want {
+				t.Fatalf("LoadCustomPatterns() = %d rules, want %d", len(got), tc.want)
+			}
+		})
 	}
 }
 
 func TestScanTextForSecrets(t *testing.T) {
+	// Not t.Parallel(): rows reset the global sanitizer registry.
 	tests := []struct {
-		name      string
-		secret    string
-		text      string
-		wantCount int
+		name         string
+		secret       string
+		patterns     string            // custom rule payload; "" scans with GetActivePatterns(env)
+		env          map[string]string // environment for GetActivePatterns
+		text         string
+		wantCount    int
+		wantCategory string // category of the first violation, also expected in the deny reason
+		wantReason   string // substring of FormatCommitDenyReason
+		notInReason  string
 	}{
-		{"registered secret in text", "vault-secret-value-123", "curl -H 'Authorization: Bearer vault-secret-value-123' http://127.0.0.1:8080", 1},
-		{"builtin pattern in text", "", "export GITHUB_TOKEN=" + testPAT, 1},
-		{"private key in text", "", "echo '" + testPrivKey + "'", 1},
-		{"discord webhook in text", "", "curl " + testDiscord, 1},
-		{"slack webhook in text", "", "curl " + testSlack, 1},
-		{"api key in text", "", "export KEY=" + testAPIKey, 1},
-		{"jwt in text", "", "curl -H 'Authorization: Bearer " + testJWT + "'", 1},
-		{"internal domain in text allowed", "", "curl http://eri.aerial:8088/health", 0},
-		{"rfc1918 ip in text allowed", "", "ssh 192.168.1.50", 0},
-		{"empty text", "vault-secret-value-123", "", 0},
+		{name: "registered secret in text", secret: "vault-secret-value-123", text: "curl -H 'Authorization: Bearer vault-secret-value-123' http://127.0.0.1:8080", wantCount: 1},
+		{name: "builtin pattern in text", text: "export GITHUB_TOKEN=" + testPAT, wantCount: 1},
+		{name: "private key in text", text: "echo '" + testPrivKey + "'", wantCount: 1},
+		{name: "discord webhook in text", text: "curl " + testDiscord, wantCount: 1},
+		{name: "slack webhook in text", text: "curl " + testSlack, wantCount: 1},
+		{name: "api key in text", text: "export KEY=" + testAPIKey, wantCount: 1},
+		{name: "jwt in text", text: "curl -H 'Authorization: Bearer " + testJWT + "'", wantCount: 1},
+		{name: "internal domain in text allowed", text: "curl http://eri.aerial:8088/health", wantCount: 0},
+		{name: "rfc1918 ip in text allowed", text: "ssh 192.168.1.50", wantCount: 0},
+		{name: "empty text", secret: "vault-secret-value-123", text: "", wantCount: 0},
+		{name: "env pattern added to builtins", env: map[string]string{"AERIAL_COMMIT_GUARD_PATTERNS": `env_pat_\d+`}, text: "id=env_pat_42", wantCount: 1},
+		{
+			name:         "custom rule category with masked reason",
+			patterns:     `[{"category": "APISecret", "pattern": "secret-[a-z0-9]+"}]`,
+			text:         `const token = "secret-12345abc"`,
+			wantCount:    1,
+			wantCategory: "APISecret",
+			wantReason:   "se***bc",
+			notInReason:  "secret-12345abc",
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -135,10 +134,20 @@ func TestScanTextForSecrets(t *testing.T) {
 			if tc.secret != "" {
 				sanitizer.RegisterSensitiveTokens(tc.secret)
 			}
-
-			v := ScanTextForSecrets(tc.text, "test-label", GetActivePatterns(mapEnv(nil)))
+			rules := GetActivePatterns(mapEnv(tc.env))
+			if tc.patterns != "" {
+				rules = parsePatternPayload([]byte(tc.patterns))
+			}
+			v := ScanTextForSecrets(tc.text, "test-label", rules)
 			if len(v) != tc.wantCount {
 				t.Fatalf("ScanTextForSecrets(%s) got %d violations, want %d: %+v", tc.name, len(v), tc.wantCount, v)
+			}
+			if tc.wantCategory != "" && v[0].Category != tc.wantCategory {
+				t.Fatalf("violation category = %q, want %q", v[0].Category, tc.wantCategory)
+			}
+			reason := FormatCommitDenyReason(v)
+			if !strings.Contains(reason, tc.wantCategory) || !strings.Contains(reason, tc.wantReason) || (tc.notInReason != "" && strings.Contains(reason, tc.notInReason)) {
+				t.Fatalf("FormatCommitDenyReason() = %q, want %q and %q without %q", reason, tc.wantCategory, tc.wantReason, tc.notInReason)
 			}
 		})
 	}

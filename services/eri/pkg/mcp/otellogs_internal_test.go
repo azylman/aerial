@@ -16,36 +16,12 @@ func TestOtlpAnyValue_AsString(t *testing.T) {
 		val  *otlpAnyValue
 		want string
 	}{
-		{
-			name: "nil returns empty",
-			val:  nil,
-			want: "",
-		},
-		{
-			name: "stringValue returns string",
-			val:  &otlpAnyValue{StringValue: &strVal},
-			want: "hello",
-		},
-		{
-			name: "intValue returns formatted int",
-			val:  &otlpAnyValue{IntValue: 123},
-			want: "123",
-		},
-		{
-			name: "doubleValue returns formatted float",
-			val:  &otlpAnyValue{DoubleValue: &dblVal},
-			want: "3.14",
-		},
-		{
-			name: "boolValue returns formatted bool",
-			val:  &otlpAnyValue{BoolValue: &boolVal},
-			want: "true",
-		},
-		{
-			name: "empty struct returns empty",
-			val:  &otlpAnyValue{},
-			want: "",
-		},
+		{name: "nil returns empty", val: nil, want: ""},
+		{name: "stringValue returns string", val: &otlpAnyValue{StringValue: &strVal}, want: "hello"},
+		{name: "intValue returns formatted int", val: &otlpAnyValue{IntValue: 123}, want: "123"},
+		{name: "doubleValue returns formatted float", val: &otlpAnyValue{DoubleValue: &dblVal}, want: "3.14"},
+		{name: "boolValue returns formatted bool", val: &otlpAnyValue{BoolValue: &boolVal}, want: "true"},
+		{name: "empty struct returns empty", val: &otlpAnyValue{}, want: ""},
 	}
 
 	for _, tc := range tests {
@@ -71,66 +47,16 @@ func TestOtlpAnyValue_AsScalar(t *testing.T) {
 		wantVal  any
 		wantType string
 	}{
-		{
-			name:     "nil returns nil",
-			val:      nil,
-			wantVal:  nil,
-			wantType: "",
-		},
-		{
-			name:     "stringValue",
-			val:      &otlpAnyValue{StringValue: &strVal},
-			wantVal:  "test",
-			wantType: "string",
-		},
-		{
-			name:     "intValue float64",
-			val:      &otlpAnyValue{IntValue: float64(456)},
-			wantVal:  int64(456),
-			wantType: typeInt,
-		},
-		{
-			name:     "intValue valid string",
-			val:      &otlpAnyValue{IntValue: "789"},
-			wantVal:  int64(789),
-			wantType: typeInt,
-		},
-		{
-			name:     "intValue invalid string",
-			val:      &otlpAnyValue{IntValue: "not-int"},
-			wantVal:  "not-int",
-			wantType: typeInt,
-		},
-		{
-			name:     "intValue json.Number",
-			val:      &otlpAnyValue{IntValue: json.Number("101")},
-			wantVal:  int64(101),
-			wantType: typeInt,
-		},
-		{
-			name:     "intValue other type",
-			val:      &otlpAnyValue{IntValue: int64(42)},
-			wantVal:  int64(42),
-			wantType: typeInt,
-		},
-		{
-			name:     "doubleValue",
-			val:      &otlpAnyValue{DoubleValue: &dblVal},
-			wantVal:  2.5,
-			wantType: "double",
-		},
-		{
-			name:     "boolValue",
-			val:      &otlpAnyValue{BoolValue: &boolVal},
-			wantVal:  false,
-			wantType: "bool",
-		},
-		{
-			name:     "empty struct",
-			val:      &otlpAnyValue{},
-			wantVal:  nil,
-			wantType: "",
-		},
+		{name: "nil returns nil", val: nil, wantVal: nil, wantType: ""},
+		{name: "stringValue", val: &otlpAnyValue{StringValue: &strVal}, wantVal: "test", wantType: "string"},
+		{name: "intValue float64", val: &otlpAnyValue{IntValue: float64(456)}, wantVal: int64(456), wantType: typeInt},
+		{name: "intValue valid string", val: &otlpAnyValue{IntValue: "789"}, wantVal: int64(789), wantType: typeInt},
+		{name: "intValue invalid string", val: &otlpAnyValue{IntValue: "not-int"}, wantVal: "not-int", wantType: typeInt},
+		{name: "intValue json.Number", val: &otlpAnyValue{IntValue: json.Number("101")}, wantVal: int64(101), wantType: typeInt},
+		{name: "intValue other type", val: &otlpAnyValue{IntValue: int64(42)}, wantVal: int64(42), wantType: typeInt},
+		{name: "doubleValue", val: &otlpAnyValue{DoubleValue: &dblVal}, wantVal: 2.5, wantType: "double"},
+		{name: "boolValue", val: &otlpAnyValue{BoolValue: &boolVal}, wantVal: false, wantType: "bool"},
+		{name: "empty struct", val: &otlpAnyValue{}, wantVal: nil, wantType: ""},
 	}
 
 	for _, tc := range tests {
@@ -153,20 +79,9 @@ func TestOtlpAnyValue_UnmarshalJSON(t *testing.T) {
 		wantHasInt  bool
 		wantErrBool bool
 	}{
-		{
-			name: "empty bytes returns nil",
-			data: "",
-		},
-		{
-			name:       "quoted string",
-			data:       `"direct-string"`,
-			wantString: "direct-string",
-		},
-		{
-			name:       "object with intValue",
-			data:       `{"intValue":42}`,
-			wantHasInt: true,
-		},
+		{name: "empty bytes returns nil", data: ""},
+		{name: "quoted string", data: `"direct-string"`, wantString: "direct-string"},
+		{name: "object with intValue", data: `{"intValue":42}`, wantHasInt: true},
 	}
 
 	for _, tc := range tests {
@@ -228,30 +143,11 @@ func TestInferEngine(t *testing.T) {
 			},
 			want: "codex",
 		},
-		{
-			name:      "scope name claude",
-			scopeName: "claude-code-scope",
-			want:      "claude",
-		},
-		{
-			name:      "scope name codex",
-			scopeName: "codex-scope",
-			want:      "codex",
-		},
-		{
-			name:         "event name claude_code prefix",
-			rawEventName: "claude_code.command",
-			want:         "claude",
-		},
-		{
-			name:         "event name codex prefix",
-			rawEventName: "codex.action",
-			want:         "codex",
-		},
-		{
-			name: "no match returns empty",
-			want: "",
-		},
+		{name: "scope name claude", scopeName: "claude-code-scope", want: "claude"},
+		{name: "scope name codex", scopeName: "codex-scope", want: "codex"},
+		{name: "event name claude_code prefix", rawEventName: "claude_code.command", want: "claude"},
+		{name: "event name codex prefix", rawEventName: "codex.action", want: "codex"},
+		{name: "no match returns empty", want: ""},
 	}
 
 	for _, tc := range tests {
@@ -276,23 +172,9 @@ func TestExtractRecordMessage(t *testing.T) {
 		rawEventName string
 		want         string
 	}{
-		{
-			name: "body string value takes precedence",
-			body: &otlpAnyValue{StringValue: &bodyStr},
-			want: "custom body message",
-		},
-		{
-			name:         "nil body with rawEventName",
-			body:         nil,
-			rawEventName: "api_call",
-			want:         "api_call",
-		},
-		{
-			name:         "nil body with empty rawEventName",
-			body:         nil,
-			rawEventName: "",
-			want:         "agent log",
-		},
+		{name: "body string value takes precedence", body: &otlpAnyValue{StringValue: &bodyStr}, want: "custom body message"},
+		{name: "nil body with rawEventName", body: nil, rawEventName: "api_call", want: "api_call"},
+		{name: "nil body with empty rawEventName", body: nil, rawEventName: "", want: "agent log"},
 	}
 
 	for _, tc := range tests {

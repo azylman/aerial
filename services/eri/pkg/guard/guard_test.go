@@ -119,6 +119,9 @@ func TestGuardProcess_EndToEnd(t *testing.T) {
 		{"manage_subagents kill allowed", "schedule", `{"toolCall": {"name": "manage_subagents", "args": {"Action": "kill"}}}`, false, 0, "", ""},
 		{"view_file task log denied", "schedule", `{"toolCall": {"name": "view_file", "args": {"AbsolutePath": "/data/runtimes/discord/.gemini/antigravity-cli/brain/abc/.system_generated/tasks/task-1.log"}}}`, true, 0, "", ""},
 		{"read_file task log denied", "schedule", `{"toolCall": {"name": "read_file", "args": {"Path": "/data/runtimes/discord/.gemini/antigravity-cli/brain/abc/.system_generated/tasks/task-1.log"}}}`, true, 0, "", ""},
+		{"read tool task log denied", "schedule", `{"toolCall": {"name": "read", "args": {"file": "/data/runtimes/discord/.gemini/antigravity-cli/brain/a/.system_generated/tasks/task-1.log"}}}`, true, 0, "", ""},
+		{"bash tool sleep denied", "schedule", `{"toolCall": {"name": "bash", "args": {"CommandLine": "sleep 5"}}}`, true, 0, "", ""},
+		{"bash tool safe command allowed", "schedule", `{"toolCall": {"name": "bash", "args": {"CommandLine": "ls -la"}}}`, false, 10000, "", ""},
 		{"run_command cat task log denied", "schedule", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "cat /data/brain/abc/.system_generated/tasks/task-1.log | tail -n 20"}}}`, true, 0, "", ""},
 		{"run_command 5000ms overwritten to 10000ms", "schedule", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "ls -la", "WaitMsBeforeAsync": 5000}}}`, false, 10000, "", ""},
 		{"run_command string 5000ms overwritten to 10000ms", "schedule", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "ls -la", "WaitMsBeforeAsync": "5000"}}}`, false, 10000, "", ""},
@@ -273,34 +276,6 @@ func (errorWriter) Write([]byte) (int, error) {
 	return 0, errors.New("simulated write failure")
 }
 
-func TestDirectCheckSchedule(t *testing.T) {
-	tests := []struct {
-		name     string
-		toolName string
-		args     ToolArgs
-		wantDeny bool
-	}{
-		{"schedule denied", "schedule", ToolArgs{}, true},
-		{"task status denied", "manage_task", ToolArgs{Action: "status"}, true},
-		{"task list denied", "manage_task", ToolArgs{Action: "list"}, true},
-		{"subagent list denied", "manage_subagents", ToolArgs{Action: "list"}, true},
-		{"task log read denied", "read", ToolArgs{File: "/data/runtimes/discord/.gemini/antigravity-cli/brain/a/.system_generated/tasks/task-1.log"}, true},
-		{"sleep denied", "bash", ToolArgs{CommandLine: "sleep 5"}, true},
-		{"safe bash allowed", "bash", ToolArgs{CommandLine: "ls -la"}, false},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			d := CheckSchedule(Payload{ToolCall: ToolCall{Name: tc.toolName}}, tc.args)
-			if tc.wantDeny && d.Decision != DecisionDeny {
-				t.Fatalf("expected deny for %s, got %v", tc.name, d)
-			}
-			if !tc.wantDeny && d.Decision != DecisionAllow {
-				t.Fatalf("expected allow for %s, got %v", tc.name, d)
-			}
-		})
-	}
-}
-
 func TestClaudeHookResponseFormatting(t *testing.T) {
 	t.Parallel()
 
@@ -389,29 +364,43 @@ func TestClaudeHookResponseFormatting(t *testing.T) {
 func TestGuardProcess_IOAndModes(t *testing.T) {
 	t.Parallel()
 
-	ioTests := []struct {
-		name   string
-		r      io.Reader
-		mode   string
-		expect DecisionType
+	tests := []struct {
+		name    string
+		r       io.Reader
+		w       io.Writer // nil captures the decision in a buffer
+		mode    string
+		expect  DecisionType
+		wantErr bool
 	}{
-		{"failing reader fail-open", errorReader{}, "all", DecisionAllow},
-		{"panic reader fail-open", panicReader{}, "all", DecisionAllow},
-		{"empty reader fail-open", strings.NewReader(""), "all", DecisionAllow},
-		{"whitespace reader fail-open", strings.NewReader("   \n\t  "), "all", DecisionAllow},
-		{"invalid json fail-open", strings.NewReader("invalid-json{"), "all", DecisionAllow},
-		{"pre-invocation failing reader fail-open", errorReader{}, "pre-invocation", ""},
-		{"post-batch invalid json fail-open", strings.NewReader("invalid-json{"), "post-batch", ""},
-		{"pre-invocation valid payload", strings.NewReader(`{"conversationId":"c1","invocationNum":2}`), "pre-invocation", ""},
-		{"post-batch valid payload", strings.NewReader(`{"conversationId":"c1","stepIdx":1,"toolCall":{"name":"edit_file","args":{"Path":"/tmp/a.go"}}}`), "post-batch", ""},
+		{name: "failing reader fail-open", r: errorReader{}, mode: "all", expect: DecisionAllow},
+		{name: "panic reader fail-open", r: panicReader{}, mode: "all", expect: DecisionAllow},
+		{name: "panic recovery with failing writer", r: panicReader{}, w: errorWriter{}, mode: "all", wantErr: true},
+		{name: "empty reader fail-open", r: strings.NewReader(""), mode: "all", expect: DecisionAllow},
+		{name: "whitespace reader fail-open", r: strings.NewReader("   \n\t  "), mode: "all", expect: DecisionAllow},
+		{name: "invalid json fail-open", r: strings.NewReader("invalid-json{"), mode: "all", expect: DecisionAllow},
+		{name: "pre-invocation failing reader fail-open", r: errorReader{}, mode: "pre-invocation"},
+		{name: "post-batch invalid json fail-open", r: strings.NewReader("invalid-json{"), mode: "post-batch"},
+		{name: "pre-invocation valid payload", r: strings.NewReader(`{"conversationId":"c1","invocationNum":2}`), mode: "pre-invocation"},
+		{
+			name: "post-batch valid payload",
+			r:    strings.NewReader(`{"conversationId":"c1","stepIdx":1,"toolCall":{"name":"edit_file","args":{"Path":"/tmp/a.go"}}}`),
+			mode: "post-batch",
+		},
 	}
-	for _, tc := range ioTests {
+	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			var out bytes.Buffer
-			err := ProcessWithOptions(tc.r, &out, tc.mode, testOptions(t))
-			if err != nil {
-				t.Fatalf("expected nil error on fail-open, got: %v", err)
+			w := tc.w
+			if w == nil {
+				w = &out
+			}
+			err := ProcessWithOptions(tc.r, w, tc.mode, testOptions(t))
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("ProcessWithOptions() error = %v, wantErr %v", err, tc.wantErr)
+			}
+			if tc.wantErr {
+				return
 			}
 			var d Decision
 			if err := json.Unmarshal(out.Bytes(), &d); err != nil {
@@ -422,16 +411,12 @@ func TestGuardProcess_IOAndModes(t *testing.T) {
 			}
 		})
 	}
+}
 
-	t.Run("panic recovery with failing writer", func(t *testing.T) {
-		t.Parallel()
-		err := ProcessWithOptions(panicReader{}, errorWriter{}, "all", testOptions(t))
-		if err == nil {
-			t.Fatalf("expected error from failing writer during panic recovery, got nil")
-		}
-	})
+func TestParseArgs(t *testing.T) {
+	t.Parallel()
 
-	parseTests := []struct {
+	tests := []struct {
 		name          string
 		raw           string
 		wantFile      string
@@ -456,8 +441,8 @@ func TestGuardProcess_IOAndModes(t *testing.T) {
 		{"limit only", `{"limit": 25}`, "", "", 1, 25},
 		{"patch only", `{"patch": "*** Update File: /tmp/patch.go\n"}`, "/tmp/patch.go", "", 0, 0},
 	}
-	for _, tc := range parseTests {
-		t.Run("parse_"+tc.name, func(t *testing.T) {
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			var raw []byte
 			if tc.raw != "" {
@@ -523,19 +508,9 @@ func TestPayloadAndToolArgsAccessors(t *testing.T) {
 	t.Parallel()
 
 	tests := []payloadArgsCase{
-		{
-			name: "nil instances",
-		},
-		{
-			name:    "empty instances",
-			payload: &Payload{},
-			args:    &ToolArgs{},
-		},
-		{
-			name:       "claude session id",
-			payload:    &Payload{SessionID: "s1"},
-			wantClaude: true,
-		},
+		{name: "nil instances"},
+		{name: "empty instances", payload: &Payload{}, args: &ToolArgs{}},
+		{name: "claude session id", payload: &Payload{SessionID: "s1"}, wantClaude: true},
 		{
 			name: "tool args populated",
 			args: &ToolArgs{
