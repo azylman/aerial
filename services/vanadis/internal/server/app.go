@@ -109,6 +109,11 @@ func (s *VanadisServer) callRestateIngress(ctx context.Context, path string, pay
 	return s.restateClient().CallIngress(ctx, path, payload, out)
 }
 
+// callRestateIngressKeyed proxies a synchronous command with an Idempotency-Key to Restate ingress.
+func (s *VanadisServer) callRestateIngressKeyed(ctx context.Context, path, idempotencyKey string, payload any, out any) error {
+	return s.restateClient().CallIngressKeyed(ctx, path, idempotencyKey, payload, out)
+}
+
 func (s *VanadisServer) collectBuildMetrics(ctx context.Context) {
 	if s == nil || s.store == nil {
 		return
@@ -202,7 +207,7 @@ func runServer(ctx context.Context, cfg Config, restateCfg RestateConfig, onRead
 		}
 		return fmt.Errorf("listening on port %s: %w", cfg.Port, err)
 	}
-	httpServer := &http.Server{Handler: server.Routes(), ReadTimeout: 15 * time.Second, WriteTimeout: 15 * time.Second, IdleTimeout: 60 * time.Second}
+	httpServer := &http.Server{Handler: server.Routes(), ReadTimeout: 15 * time.Second, WriteTimeout: 35 * time.Second, IdleTimeout: 60 * time.Second}
 	if onReady != nil {
 		onReady(ln.Addr().String())
 	}

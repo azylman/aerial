@@ -11,11 +11,11 @@ import (
 )
 
 // Store is an airgapped VanadisStore seeded directly by tests. GetErr fails
-// GetBuild and GetChunk; ListErr fails ListBuilds.
+// GetBuild and GetChunk; ListErr fails ListBuilds; PreRecordErr fails PreRecordChunkPR.
 type Store struct {
-	Builds          map[string]model.VanadisBuild
-	Chunks          map[string][]model.VanadisChunk
-	GetErr, ListErr error
+	Builds                        map[string]model.VanadisBuild
+	Chunks                        map[string][]model.VanadisChunk
+	GetErr, ListErr, PreRecordErr error
 }
 
 // New returns an empty Store with initialized maps.
@@ -80,6 +80,27 @@ func (s *Store) GetChunk(_ context.Context, chunkID string) (*model.VanadisChunk
 		}
 	}
 	return nil, nil, model.ErrChunkNotFound
+}
+
+// PreRecordChunkPR records a PR number and sets status to pr_opened for an active chunk.
+func (s *Store) PreRecordChunkPR(_ context.Context, chunkID, repo string, prNumber int) error {
+	if s.PreRecordErr != nil {
+		return s.PreRecordErr
+	}
+	if chunkID == "" || prNumber <= 0 {
+		return nil
+	}
+	for buildID, chunks := range s.Chunks {
+		for i, c := range chunks {
+			if c.ID == chunkID {
+				c.PRNumber = prNumber
+				c.Status = "pr_opened"
+				s.Chunks[buildID][i] = c
+				return nil
+			}
+		}
+	}
+	return nil
 }
 
 // Build returns a tier-2 build.
