@@ -1,17 +1,28 @@
-package main
+package server
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	_ "modernc.org/sqlite"
+
 	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/pkg/k8sauth"
+	"github.com/azylman/aerial/pkg/pgutil"
+	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/pkg/transcriptwire"
+	"github.com/azylman/aerial/services/transcripts/internal/config"
+	"github.com/azylman/aerial/services/transcripts/internal/store"
 )
 
 func init() {
@@ -19,14 +30,81 @@ func init() {
 	httpkit.WriteMetaDirFn = func(string) error { return nil }
 }
 
+const transcriptsTestSchema = `CREATE TABLE session_summaries (
+    agent TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    engine TEXT NOT NULL DEFAULT '',
+    thread_id TEXT NOT NULL DEFAULT '',
+    summary TEXT NOT NULL DEFAULT '',
+    last_indexed_step INT NOT NULL DEFAULT -1,
+    last_mtime DATETIME,
+    summary_step_watermark INT NOT NULL DEFAULT -1,
+    is_settled BOOLEAN NOT NULL DEFAULT 0,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (agent, session_id)
+);
+CREATE TABLE transcript_steps (
+    agent TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    step_index INT NOT NULL,
+    step_type TEXT NOT NULL DEFAULT '',
+    tool_name TEXT NOT NULL DEFAULT '',
+    tool_kind TEXT NOT NULL DEFAULT '',
+    tool_call_id TEXT NOT NULL DEFAULT '',
+    content TEXT NOT NULL DEFAULT '',
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (agent, session_id, step_index)
+);`
+
+var testStoreSeq atomic.Int64
+
+func newTestStoreWithDB(t *testing.T, stack string) (*store.Store, *sql.DB) {
+	t.Helper()
+	dsn := fmt.Sprintf("file:transcripts-server-%d?mode=memory&cache=shared", testStoreSeq.Add(1))
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		t.Fatalf("open sqlite fixture: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if _, err := db.Exec(transcriptsTestSchema); err != nil {
+		t.Fatalf("create fixture schema: %v", err)
+	}
+	return store.NewStore(db, stack), db
+}
+
+func newTestStore(t *testing.T, stack string) *store.Store {
+	t.Helper()
+	st, _ := newTestStoreWithDB(t, stack)
+	return st
+}
+
+func testBatch(session string, mtime time.Time, first, last int, final, reset bool) transcriptwire.TranscriptStepBatch {
+	steps := make([]transcriptwire.TranscriptStep, 0, last-first+1)
+	for i := first; i <= last; i++ {
+		steps = append(steps, transcriptwire.TranscriptStep{StepIndex: i, Type: "model_response", Content: "content"})
+	}
+	return transcriptwire.TranscriptStepBatch{
+		Stack: "aerial", SessionID: session, ThreadID: "thread-1", Engine: "agy",
+		FileMtime: mtime, BaseStep: first, FirstStep: first, LastStep: last,
+		Final: final, Reset: reset, Steps: steps,
+	}
+}
+
+func finalSeedBatch(session string, mtime time.Time) transcriptwire.TranscriptStepBatch {
+	b := testBatch(session, mtime, 0, 4, false, false)
+	b.Final = true
+	return b
+}
+
 func newSeededServer(t *testing.T) *Server {
 	t.Helper()
-	store := newTestStore(t, "aerial")
+	st := newTestStore(t, "aerial")
 	epoch := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
-	if _, err := store.ApplyBatch(context.Background(), testBatch("sess-a", epoch, 0, 2, false, false)); err != nil {
+	if _, err := st.ApplyBatch(context.Background(), testBatch("sess-a", epoch, 0, 2, false, false)); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
-	return NewServer(store)
+	return NewServer(st)
 }
 
 func TestServerRoutes(t *testing.T) {
@@ -103,28 +181,28 @@ const (
 	degradedDroppedSteps
 )
 
-func newDegradedStore(t *testing.T, fixture degradedFixture) *Store {
+func newDegradedStore(t *testing.T, fixture degradedFixture) *store.Store {
 	t.Helper()
 	switch fixture {
 	case degradedNilDB:
-		return NewStore(nil, "aerial")
+		return store.NewStore(nil, "aerial")
 	case degradedClosedDB:
-		store := newTestStore(t, "aerial")
-		if err := store.db.Close(); err != nil {
+		st, db := newTestStoreWithDB(t, "aerial")
+		if err := db.Close(); err != nil {
 			t.Fatalf("close fixture db: %v", err)
 		}
-		return store
+		return st
 	case degradedDroppedSteps:
-		store := newTestStore(t, "aerial")
+		st, db := newTestStoreWithDB(t, "aerial")
 		ctx := context.Background()
 		epoch := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
-		if _, err := store.ApplyBatch(ctx, testBatch("sess-a", epoch, 0, 1, false, false)); err != nil {
+		if _, err := st.ApplyBatch(ctx, testBatch("sess-a", epoch, 0, 1, false, false)); err != nil {
 			t.Fatalf("seed: %v", err)
 		}
-		if _, err := store.db.ExecContext(ctx, `DROP TABLE transcript_steps`); err != nil {
+		if _, err := db.ExecContext(ctx, `DROP TABLE transcript_steps`); err != nil {
 			t.Fatalf("drop steps: %v", err)
 		}
-		return store
+		return st
 	default:
 		return nil
 	}
@@ -279,13 +357,13 @@ func TestServerAuth_RBAC(t *testing.T) {
 		HTTPClient:   k8sMock.Client(),
 	})
 
-	store := newTestStore(t, "aerial")
+	st := newTestStore(t, "aerial")
 	epoch := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
-	if _, err := store.ApplyBatch(context.Background(), testBatch("sess-a", epoch, 0, 2, false, false)); err != nil {
+	if _, err := st.ApplyBatch(context.Background(), testBatch("sess-a", epoch, 0, 2, false, false)); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 
-	srv := NewServer(store, auth)
+	srv := NewServer(st, auth)
 
 	tests := []struct {
 		name       string
@@ -342,4 +420,225 @@ func TestServerAuth_RBAC(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestNewBusIngester(t *testing.T) {
+	t.Parallel()
+	st := newTestStore(t, "aerial")
+	bus := pubsub.NewMemoryBus()
+	defer bus.Close()
+
+	withBus := NewBusIngester(st, bus)
+	if withBus.store != st {
+		t.Errorf("NewBusIngester did not keep store")
+	}
+	if err := withBus.publish(context.Background(), "subject", "id", map[string]string{"k": "v"}); err != nil {
+		t.Errorf("memory bus publish err = %v", err)
+	}
+
+	nilBus := NewBusIngester(st, nil)
+	if err := nilBus.publish(context.Background(), "subject", "id", nil); err == nil {
+		t.Errorf("expected error publishing through nil bus")
+	}
+}
+
+// busKind selects the fake bus newBusFn returns in a table row.
+type busKind int
+
+const (
+	busMemory busKind = iota
+	busDialErr
+	busEnsureFail
+	busConsumeFail
+	busCloseFail
+)
+
+var (
+	errDialTest     = errors.New("dial failed")
+	errEnsureTest   = errors.New("ensure down")
+	errConsumeTest  = errors.New("subscribe down")
+	errCloseTest    = errors.New("close down")
+	errShutdownTest = errors.New("shutdown down")
+)
+
+type ensureFailBus struct{ pubsub.Bus }
+
+func (ensureFailBus) EnsureCoreStreams(context.Context) error { return errEnsureTest }
+
+type consumeFailBus struct{ pubsub.Bus }
+
+func (consumeFailBus) ConsumeQueue(context.Context, string, string, pubsub.Handler) (pubsub.Subscription, error) {
+	return nil, errConsumeTest
+}
+
+type closeFailBus struct{ pubsub.Bus }
+
+func (closeFailBus) Close() error { return errCloseTest }
+
+// stubNewBus swaps newBusFn for a factory returning the bus kind's fake.
+func stubNewBus(t *testing.T, kind busKind) {
+	t.Helper()
+	old := newBusFn
+	newBusFn = func(context.Context, string) (pubsub.Bus, error) {
+		switch kind {
+		case busDialErr:
+			return nil, errDialTest
+		case busEnsureFail:
+			return ensureFailBus{Bus: pubsub.NewMemoryBus()}, nil
+		case busConsumeFail:
+			return consumeFailBus{Bus: pubsub.NewMemoryBus()}, nil
+		case busCloseFail:
+			return closeFailBus{Bus: pubsub.NewMemoryBus()}, nil
+		default:
+			return pubsub.NewMemoryBus(), nil
+		}
+	}
+	t.Cleanup(func() { newBusFn = old })
+}
+
+func TestInitTranscriptsJetStream(t *testing.T) {
+	tests := []struct {
+		name        string
+		natsURL     string
+		nilIngester bool
+		bus         busKind
+		wantNil     bool
+	}{
+		{name: "empty url yields nil", natsURL: "", bus: busMemory, wantNil: true},
+		{name: "nil ingester yields nil", natsURL: "nats://nats:4222", nilIngester: true, bus: busMemory, wantNil: true},
+		{name: "dial error yields nil", natsURL: "nats://nats:4222", bus: busDialErr, wantNil: true},
+		{name: "memory bus subscribes", natsURL: "nats://nats:4222", bus: busMemory},
+		{name: "ensure streams failure still returns bus", natsURL: "nats://nats:4222", bus: busEnsureFail},
+		{name: "subscribe failure still returns bus", natsURL: "nats://nats:4222", bus: busConsumeFail},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			stubNewBus(t, tc.bus)
+			ingester := NewIngester(newTestStore(t, "aerial"), nil)
+			if tc.nilIngester {
+				ingester = nil
+			}
+			bus := initTranscriptsJetStream(context.Background(), ingester, tc.natsURL)
+			if (bus == nil) != tc.wantNil {
+				t.Errorf("bus nil = %v, want nil = %v", bus == nil, tc.wantNil)
+			}
+			if bus != nil {
+				_ = bus.Close()
+			}
+		})
+	}
+}
+
+func stubOpenDB(t *testing.T, db *sql.DB, err error) func() {
+	t.Helper()
+	old := openDBFn
+	openDBFn = func(context.Context, string, pgutil.SQLOptions) (*sql.DB, error) { return db, err }
+	return func() { openDBFn = old }
+}
+
+// runAppConfig fills the fields every listening RunApp row shares.
+func runAppConfig(c config.Config) *config.Config {
+	c.Port, c.DatabaseURL, c.Stack = "0", "postgres://x", "aerial"
+	return &c
+}
+
+func TestRunApp(t *testing.T) {
+	tests := []struct {
+		name        string
+		cfg         *config.Config
+		stubDB      bool
+		openErr     error
+		bus         busKind
+		shutdownErr error
+		canceled    bool
+		wantErr     string
+	}{
+		{name: "nil config", wantErr: "config cannot be nil"},
+		{name: "empty port", cfg: &config.Config{DatabaseURL: "postgres://x"}, wantErr: "port cannot be empty"},
+		{name: "open db error", cfg: &config.Config{Port: "4017", DatabaseURL: "postgres://x"}, stubDB: true, openErr: errors.New("db down"), wantErr: "db down"},
+		{name: "listen failure surfaces", cfg: &config.Config{Port: "99999", DatabaseURL: "postgres://x"}, stubDB: true, wantErr: "invalid port"},
+		{name: "canceled context shuts down cleanly", cfg: runAppConfig(config.Config{}), stubDB: true, canceled: true},
+		{name: "auth enabled shuts down cleanly", cfg: runAppConfig(config.Config{Auth: k8sauth.Config{Enabled: true}}), stubDB: true, canceled: true},
+		{name: "bus close error is logged not returned", cfg: runAppConfig(config.Config{NATSURL: "nats://nats:4222"}), stubDB: true, bus: busCloseFail, canceled: true},
+		{name: "shutdown error surfaces", cfg: runAppConfig(config.Config{}), stubDB: true, shutdownErr: errShutdownTest, canceled: true, wantErr: "shutdown down"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.stubDB {
+				_, db := newTestStoreWithDB(t, "aerial")
+				defer stubOpenDB(t, db, tc.openErr)()
+			}
+			stubNewBus(t, tc.bus)
+			if tc.shutdownErr != nil {
+				oldShutdown := httpShutdown
+				httpShutdown = func(*http.Server, context.Context) error { return tc.shutdownErr }
+				t.Cleanup(func() { httpShutdown = oldShutdown })
+			}
+			ctx := context.Background()
+			if tc.canceled {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithCancel(ctx)
+				cancel()
+			}
+			err := RunApp(ctx, tc.cfg)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Errorf("RunApp() err = %v, want substring %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Errorf("RunApp() err = %v", err)
+			}
+		})
+	}
+}
+
+func TestNewBusFnDials(t *testing.T) {
+	bus, err := newBusFn(context.Background(), "nats://127.0.0.1:1")
+	if err != nil {
+		t.Fatalf("newBusFn err = %v", err)
+	}
+	_ = bus.Close()
+}
+
+func TestInitJetStreamDeliversBatch(t *testing.T) {
+	st := newTestStore(t, "aerial")
+	ingester := NewIngester(st, nil)
+	wrapped := &signalBus{Bus: pubsub.NewMemoryBus(), handled: make(chan struct{})}
+	bus := initTranscriptsJetStreamWithFactory(context.Background(), ingester, "nats://nats:4222", func(context.Context, string) (pubsub.Bus, error) {
+		return wrapped, nil
+	})
+	if bus == nil {
+		t.Fatalf("expected non-nil bus")
+	}
+	defer bus.Close()
+	epoch := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
+	raw := marshalBatch(t, testBatch("sess-live", epoch, 0, 0, false, false))
+	if err := wrapped.Publish(context.Background(), pubsub.SubjectTranscriptsStepsPrefix+"sess-live", "live-1", raw); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+	<-wrapped.handled
+	marks, err := st.GetWatermarks(context.Background(), "aerial")
+	if err != nil || len(marks) != 1 {
+		t.Fatalf("watermarks = %+v, err = %v", marks, err)
+	}
+}
+
+type signalBus struct {
+	pubsub.Bus
+
+	handled chan struct{}
+	fired   atomic.Bool
+}
+
+func (b *signalBus) ConsumeQueue(ctx context.Context, subject, queue string, handler pubsub.Handler) (pubsub.Subscription, error) {
+	return b.Bus.ConsumeQueue(ctx, subject, queue, func(msgCtx context.Context, msg pubsub.Message) error {
+		defer func() {
+			if b.fired.CompareAndSwap(false, true) {
+				close(b.handled)
+			}
+		}()
+		return handler(msgCtx, msg)
+	})
 }
