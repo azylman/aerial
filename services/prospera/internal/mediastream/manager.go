@@ -53,19 +53,18 @@ type SessionManagerOption func(*CallSessionManager)
 
 // CallSessionManager coordinates active Twilio Media Stream <-> Gemini Live sessions.
 type CallSessionManager struct {
-	mu             sync.RWMutex
-	cfgSrc         config.ConfigSource
-	store          store.Store
-	twilioClient   twilio.TwilioClient
-	consultClient  gemini.ContextConsultClient
-	tokenMgr       *twilio.StreamTokenManager
-	pacerInterval  time.Duration
-	geminiDialer   func(ctx context.Context, modelName string) (*websocket.Conn, error)
-	newSession     SessionFactory
-	sessions       map[string]Session
-	sessionWaiters map[string][]chan Session
-	recordings     map[string][]byte
-	upgrader       websocket.Upgrader
+	mu            sync.RWMutex
+	cfgSrc        config.ConfigSource
+	store         store.Store
+	twilioClient  twilio.TwilioClient
+	consultClient gemini.ContextConsultClient
+	tokenMgr      *twilio.StreamTokenManager
+	pacerInterval time.Duration
+	geminiDialer  func(ctx context.Context, modelName string) (*websocket.Conn, error)
+	newSession    SessionFactory
+	sessions      map[string]Session
+	recordings    map[string][]byte
+	upgrader      websocket.Upgrader
 }
 
 // NewCallSessionManager initializes a CallSessionManager.
@@ -82,15 +81,14 @@ func NewCallSessionManager(
 	}
 
 	m := &CallSessionManager{
-		cfgSrc:         cfgSrc,
-		store:          st,
-		twilioClient:   twilioClient,
-		consultClient:  consultClient,
-		tokenMgr:       tokenMgr,
-		pacerInterval:  20 * time.Millisecond,
-		sessions:       make(map[string]Session),
-		sessionWaiters: make(map[string][]chan Session),
-		recordings:     make(map[string][]byte),
+		cfgSrc:        cfgSrc,
+		store:         st,
+		twilioClient:  twilioClient,
+		consultClient: consultClient,
+		tokenMgr:      tokenMgr,
+		pacerInterval: 20 * time.Millisecond,
+		sessions:      make(map[string]Session),
+		recordings:    make(map[string][]byte),
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool {
 				return true
@@ -155,13 +153,6 @@ func (m *CallSessionManager) RegisterSession(callID string, sess Session) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.sessions[callID] = sess
-	for _, ch := range m.sessionWaiters[callID] {
-		select {
-		case ch <- sess:
-		default:
-		}
-	}
-	delete(m.sessionWaiters, callID)
 }
 
 // DeregisterSession removes a session, snapshotting any recording first.

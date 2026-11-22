@@ -1,35 +1,12 @@
 package testutil
 
 import (
+	"context"
 	"database/sql"
 	"testing"
 
-	"github.com/azylman/aerial/services/prospera/internal/store"
+	"github.com/azylman/aerial/services/prospera/internal/model"
 )
-
-func TestOpenTestSQLiteDB(t *testing.T) {
-	t.Parallel()
-	db := OpenTestSQLiteDB(t)
-	tests := []struct {
-		name  string
-		table string
-	}{
-		{name: "voice calls table exists", table: "voice_calls"},
-		{name: "voice messages table exists", table: "voice_messages"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			count, err := tableCount(db, tc.table)
-			if err != nil {
-				t.Fatalf("tableCount(%q) error = %v", tc.table, err)
-			}
-			if count != 1 {
-				t.Errorf("tableCount(%q) = %d, want 1", tc.table, count)
-			}
-		})
-	}
-}
 
 func TestVerifyTestSchema(t *testing.T) {
 	t.Parallel()
@@ -158,11 +135,19 @@ func TestColumnCount(t *testing.T) {
 	}
 }
 
-func TestSetUpTestStoreIsSQLiteBacked(t *testing.T) {
+func TestSetUpTestStore(t *testing.T) {
 	t.Parallel()
+	ctx := context.Background()
 	st := SetUpTestStore(t)
-	var _ store.Store = st
-	if !st.IsSQLite() {
-		t.Errorf("IsSQLite() = false, want true for test store")
+	call := model.VoiceCall{CallID: "call-alpha", Direction: "outbound", State: "queued", FromNumber: "+15105550100", ToNumber: "+15105550101"}
+	if err := st.CreateOutboundCall(ctx, call, 1); err != nil {
+		t.Fatalf("CreateOutboundCall() error = %v", err)
+	}
+	got, err := st.GetCall(ctx, "call-alpha")
+	if err != nil {
+		t.Fatalf("GetCall() error = %v", err)
+	}
+	if got.ToNumber != "+15105550101" || got.State != "queued" {
+		t.Errorf("GetCall() = {ToNumber: %q, State: %q}, want {+15105550101, queued}", got.ToNumber, got.State)
 	}
 }
