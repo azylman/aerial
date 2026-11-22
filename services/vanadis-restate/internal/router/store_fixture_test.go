@@ -143,10 +143,10 @@ func seedChunk(t *testing.T, pool *pgxpool.Pool, c model.VanadisChunk) {
 			t.Fatalf("marshal rollout: %v", err)
 		}
 	}
-	_, err = pool.Exec(context.Background(), `INSERT INTO vanadis_chunks (id, build_id, chunk_index, mode, repo, title, instructions, target_files, target_symbols, effort, acceptance_criteria, status, pr_number, stall_nudges, depends_on, ci_fail_count, ci_checks, rollout_state, banner, merge_awakeable_id, deploy_awakeable_id, started_at, completed_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NULLIF($13, 0), $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)`,
+	_, err = pool.Exec(context.Background(), `INSERT INTO vanadis_chunks (id, build_id, chunk_index, mode, repo, title, instructions, target_files, target_symbols, effort, acceptance_criteria, status, pr_number, stall_nudges, depends_on, ci_fail_count, ci_checks, rollout_state, banner, started_at, completed_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NULLIF($13, 0), $14, $15, $16, $17, $18, $19, $20, $21)`,
 		c.ID, c.BuildID, c.ChunkIndex, c.Mode, c.Repo, c.Title, c.Instructions, nonNil(c.TargetFiles), nonNil(c.TargetSymbols), c.Effort, nonNil(c.AcceptanceCriteria), c.Status,
-		c.PRNumber, c.StallNudges, nonNil(c.DependsOn), c.CIFailCount, rawChecks, rawRollout, c.Banner, c.MergeAwakeableID, c.DeployAwakeableID, nullTime(c.StartedAt), nullTime(c.CompletedAt))
+		c.PRNumber, c.StallNudges, nonNil(c.DependsOn), c.CIFailCount, rawChecks, rawRollout, c.Banner, nullTime(c.StartedAt), nullTime(c.CompletedAt))
 	if err != nil {
 		t.Fatalf("seed chunk %s: %v", c.ID, err)
 	}

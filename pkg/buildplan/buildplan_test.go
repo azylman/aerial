@@ -21,7 +21,7 @@ const fullChunkJSON = `{"id":"c1","build_id":"build-1","chunk_index":2,"mode":"p
 	`"ci_fail_count":3,"ci_checks":{"test":"success"},"head_sha":"h1","remediated_sha":"r1","merge_sha":"m1",` +
 	`"rollout_state":{"expected_jobs":["eri"],"started_jobs":["eri"],"deployed_jobs":["eri"],` +
 	`"job_states":{"eri":"deployed"},"kustomization_statuses":{"core":"ready"}},"banner":"b",` +
-	`"merge_awakeable_id":"ma","deploy_awakeable_id":"da","started_at":"2026-11-21T10:00:00Z",` +
+	`"started_at":"2026-11-21T10:00:00Z",` +
 	`"completed_at":"2026-11-21T11:30:00Z","created_at":"2026-11-21T10:00:00Z","updated_at":"2026-11-21T11:30:00Z"}`
 
 const zeroChunkJSON = `{"id":"","build_id":"","chunk_index":0,"mode":"","title":"","instructions":"",` +
@@ -48,7 +48,7 @@ func TestVanadisChunkJSON(t *testing.T) {
 					ExpectedJobs: []string{"eri"}, StartedJobs: []string{"eri"}, DeployedJobs: []string{"eri"},
 					JobStates: map[string]string{"eri": "deployed"}, KustomizationStatuses: map[string]string{"core": "ready"},
 				},
-				Banner: "b", MergeAwakeableID: "ma", DeployAwakeableID: "da",
+				Banner:    "b",
 				StartedAt: jsonCreatedAt, CompletedAt: jsonUpdatedAt, CreatedAt: jsonCreatedAt, UpdatedAt: jsonUpdatedAt,
 			},
 			wantJSON: fullChunkJSON,

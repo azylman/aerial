@@ -862,7 +862,7 @@ func TestExecuteLaunchChunk_HTTPGenerationAcceptance(t *testing.T) {
 			}))
 			defer srv.Close()
 			st := lifecycleStore(t, model.VanadisBuild{ID: "b", Status: "running"}, "", model.VanadisChunk{ID: "c", Mode: tc.mode, Status: "running", StallNudges: tc.nudges})
-			bo := NewBuildObject("", nil).WithAuthority(st, executor.NewExecutor(t.TempDir(), executor.NewHTTPEriClient(srv.URL, srv.Client()), nil, "", "example-owner", nil))
+			bo := NewBuildObject("", nil).WithAuthority(st, executor.NewExecutor(t.TempDir(), executor.NewRestateEriClient(srv.URL, "", "aerial", srv.Client()), nil, "", "example-owner", nil))
 			out, err := bo.executeAuthoritativeTransition(context.Background(), "b", nil, nil, nil, false)
 			assert.Equal(t, tc.wantError, err != nil)
 			assert.Equal(t, tc.wantAcknowledged, out.LaunchedMap[tc.key])
@@ -874,7 +874,7 @@ func TestBuildObject_HTTPRecoverySiblingProgress(t *testing.T) {
 	t.Parallel()
 	accepted := make(chan string, 4)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/dispatch" {
+		if !strings.HasSuffix(r.URL.Path, "/Enqueue") {
 			w.WriteHeader(http.StatusOK)
 			return
 		}
@@ -901,7 +901,7 @@ func TestBuildObject_HTTPRecoverySiblingProgress(t *testing.T) {
 		{ID: "sibling", Mode: "action", Status: "pending"},
 		{ID: "dependent", Mode: "action", Status: "pending", DependsOn: []string{"retry"}},
 	}
-	bo := NewBuildObject("", nil).WithAuthority(&mockStoreForLaunch{}, executor.NewExecutor(t.TempDir(), executor.NewHTTPEriClient(srv.URL, srv.Client()), nil, "", "example-owner", nil))
+	bo := NewBuildObject("", nil).WithAuthority(&mockStoreForLaunch{}, executor.NewExecutor(t.TempDir(), executor.NewRestateEriClient(srv.URL, "", "aerial", srv.Client()), nil, "", "example-owner", nil))
 	launched := map[string]bool{}
 	_, err := bo.launchEligibleChunks(context.Background(), build, chunks, launched)
 	assert.ErrorIs(t, err, eriwire.ErrDispatchActive)
