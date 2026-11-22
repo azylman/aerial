@@ -120,7 +120,7 @@ type VanadisServer struct {
 // resolved once by app wiring (RunApp); the server never reads env itself.
 func NewVanadisServer(cfg Config, restateCfg RestateConfig, st VanadisStore, httpClient *http.Client, auth ...*k8sauth.Authenticator) *VanadisServer {
 	if httpClient == nil {
-		httpClient = &http.Client{Timeout: 15 * time.Second}
+		httpClient = &http.Client{Timeout: 35 * time.Second}
 	}
 	var a *k8sauth.Authenticator
 	if len(auth) > 0 {

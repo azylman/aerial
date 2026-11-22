@@ -302,25 +302,27 @@ func TestVanadisServer_HandleAttachChunkPR(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name        string
-		nilStore    bool
-		errBody     bool
-		method      string
-		body        string
-		wantCode    int
-		wantStatus  string
-		wantPresent []string
+		name         string
+		nilStore     bool
+		errBody      bool
+		preRecordErr error
+		method       string
+		body         string
+		wantCode     int
+		wantStatus   string
+		wantPresent  []string
 	}{
-		{"attach_existing_chunk", false, false, http.MethodPost, `{"chunk_id":"chunk-1","pr_number":103,"repo":"aerial"}`, http.StatusOK, "attached", []string{"thread_id", "build_id", "chunk_id"}},
-		{"attach_standalone", false, false, http.MethodPost, `{"chunk_id":"","repo":"aerial","pr_number":401,"branch":"feature-1","title":"Feature 1"}`, http.StatusOK, "attached", []string{"build_id", "chunk_id"}},
-		{"missing_chunk", false, false, http.MethodPost, `{"chunk_id":"missing-chunk","pr_number":101,"repo":"aerial"}`, http.StatusNotFound, "", nil},
-		{"body_read_error", false, true, http.MethodPost, "", http.StatusBadRequest, "", nil},
-		{"invalid_json", false, false, http.MethodPost, `{invalid-json`, http.StatusBadRequest, "", nil},
-		{"missing_chunk_id_and_repo", false, false, http.MethodPost, `{"chunk_id":"","repo":"","pr_number":101}`, http.StatusBadRequest, "", nil},
-		{"zero_pr_number", false, false, http.MethodPost, `{"chunk_id":"chunk-1","pr_number":0}`, http.StatusBadRequest, "", nil},
-		{"method_not_allowed", false, false, http.MethodGet, "", http.StatusMethodNotAllowed, "", nil},
-		{"nil_store", true, false, http.MethodPost, `{}`, http.StatusInternalServerError, "", nil},
-		{"invalid_agent", false, false, http.MethodPost, `{"repo":"aerial","pr_number":402,"agent":"BAD_SLUG!"}`, http.StatusBadRequest, "", nil},
+		{"attach_existing_chunk", false, false, nil, http.MethodPost, `{"chunk_id":"chunk-1","pr_number":103,"repo":"aerial"}`, http.StatusOK, "attached", []string{"thread_id", "build_id", "chunk_id"}},
+		{"attach_prerecord_err_logs_and_continues", false, false, errors.New("prerecord failure"), http.MethodPost, `{"chunk_id":"chunk-1","pr_number":103,"repo":"aerial"}`, http.StatusOK, "attached", []string{"thread_id", "build_id", "chunk_id"}},
+		{"attach_standalone", false, false, nil, http.MethodPost, `{"chunk_id":"","repo":"aerial","pr_number":401,"branch":"feature-1","title":"Feature 1"}`, http.StatusOK, "attached", []string{"build_id", "chunk_id"}},
+		{"missing_chunk", false, false, nil, http.MethodPost, `{"chunk_id":"missing-chunk","pr_number":101,"repo":"aerial"}`, http.StatusNotFound, "", nil},
+		{"body_read_error", false, true, nil, http.MethodPost, "", http.StatusBadRequest, "", nil},
+		{"invalid_json", false, false, nil, http.MethodPost, `{invalid-json`, http.StatusBadRequest, "", nil},
+		{"missing_chunk_id_and_repo", false, false, nil, http.MethodPost, `{"chunk_id":"","repo":"","pr_number":101}`, http.StatusBadRequest, "", nil},
+		{"zero_pr_number", false, false, nil, http.MethodPost, `{"chunk_id":"chunk-1","pr_number":0}`, http.StatusBadRequest, "", nil},
+		{"method_not_allowed", false, false, nil, http.MethodGet, "", http.StatusMethodNotAllowed, "", nil},
+		{"nil_store", true, false, nil, http.MethodPost, `{}`, http.StatusInternalServerError, "", nil},
+		{"invalid_agent", false, false, nil, http.MethodPost, `{"repo":"aerial","pr_number":402,"agent":"BAD_SLUG!"}`, http.StatusBadRequest, "", nil},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -330,7 +332,9 @@ func TestVanadisServer_HandleAttachChunkPR(t *testing.T) {
 
 			var store VanadisStore
 			if !tc.nilStore {
-				store, _, _ = setupTestStoreWithBuild()
+				mem, _, _ := setupTestStoreWithBuild()
+				mem.PreRecordErr = tc.preRecordErr
+				store = mem
 			}
 			srv := NewVanadisServer(Config{}, RestateConfig{}, store, restateSrv.Client())
 			if !tc.nilStore {

@@ -25,6 +25,7 @@ type VanadisStore interface {
 	GetBuild(ctx context.Context, buildID string) (*model.VanadisBuild, []model.VanadisChunk, error)
 	ListBuilds(ctx context.Context, limit int) ([]model.VanadisBuildEntry, error)
 	GetChunk(ctx context.Context, chunkID string) (*model.VanadisChunk, *model.VanadisBuild, error)
+	PreRecordChunkPR(ctx context.Context, chunkID, repo string, prNumber int) error
 }
 
 // QueryExecer abstracts the pgx query surface consumed by PostgresVanadisStore.
@@ -222,4 +223,22 @@ func (s *PostgresVanadisStore) GetChunk(ctx context.Context, chunkID string) (*m
 		return nil, nil, fmt.Errorf("query build %s for chunk %s: %w", c.BuildID, chunkID, err)
 	}
 	return &c, &b, nil
+}
+
+// PreRecordChunkPR records a PR number and sets status to pr_opened for an active chunk
+// before waiting on the Restate build lock.
+func (s *PostgresVanadisStore) PreRecordChunkPR(ctx context.Context, chunkID, repo string, prNumber int) error {
+	if s == nil || s.db == nil {
+		return errors.New("database connection is nil")
+	}
+	chunkID = strings.TrimSpace(chunkID)
+	repo = strings.TrimSpace(repo)
+	if chunkID == "" || prNumber <= 0 {
+		return nil
+	}
+	const updateQuery = `UPDATE vanadis_chunks AS c SET pr_number = $1, status = 'pr_opened', updated_at = CURRENT_TIMESTAMP FROM vanadis_builds AS b WHERE c.id = $2 AND b.id = c.build_id AND c.mode = 'pr' AND COALESCE(c.pr_number, 0) = 0 AND c.status IN ('running', 'coding') AND b.status IN ('running', 'failed') AND ($3 = '' OR c.repo = $3 OR c.repo LIKE '%/' || $3 OR $3 LIKE '%/' || c.repo);`
+	if _, err := s.db.Exec(ctx, updateQuery, prNumber, chunkID, repo); err != nil {
+		return fmt.Errorf("prerecord chunk pr %s (#%d): %w", chunkID, prNumber, err)
+	}
+	return nil
 }

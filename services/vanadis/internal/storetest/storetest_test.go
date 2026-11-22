@@ -127,6 +127,45 @@ func TestStoreGetChunk(t *testing.T) {
 	}
 }
 
+func TestStorePreRecordChunkPR(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		preErr     error
+		chunkID    string
+		prNumber   int
+		wantErr    error
+		wantStatus string
+		wantPR     int
+	}{
+		{name: "injected error", preErr: errStoreBoom, chunkID: "c1", prNumber: 42, wantErr: errStoreBoom},
+		{name: "empty chunk id no-op", chunkID: "", prNumber: 42},
+		{name: "nonpositive pr number no-op", chunkID: "c1", prNumber: 0},
+		{name: "chunk not found no-op", chunkID: "c-missing", prNumber: 42},
+		{name: "updates matching chunk", chunkID: "c1", prNumber: 42, wantStatus: "pr_opened", wantPR: 42},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			s := seededStore(nil, nil)
+			s.PreRecordErr = tc.preErr
+			err := s.PreRecordChunkPR(context.Background(), tc.chunkID, "aerial", tc.prNumber)
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("PreRecordChunkPR err = %v, want %v", err, tc.wantErr)
+			}
+			if tc.wantStatus != "" {
+				c, _, getErr := s.GetChunk(context.Background(), tc.chunkID)
+				if getErr != nil {
+					t.Fatalf("GetChunk err = %v", getErr)
+				}
+				if c.Status != tc.wantStatus || c.PRNumber != tc.wantPR {
+					t.Errorf("chunk = status %q, pr %d; want %q, %d", c.Status, c.PRNumber, tc.wantStatus, tc.wantPR)
+				}
+			}
+		})
+	}
+}
+
 func chunkIDs(chunks []model.VanadisChunk) []string {
 	if chunks == nil {
 		return nil
