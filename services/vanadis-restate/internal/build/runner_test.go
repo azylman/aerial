@@ -287,7 +287,7 @@ func TestBuildObject_ChunkRemovalCancelsOnOwnerSessions(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			eri := &mockEriClient{}
-			exec := executor.NewExecutor("", eri, pubsub.NewMemoryBus(), "test-token", nil)
+			exec := executor.NewExecutor("", eri, pubsub.NewMemoryBus(), "test-token", "azylman", nil)
 			rt := newFakeObjectRuntime("b1")
 			rt.runStepErr = errors.New("stop after removal")
 			bo := NewBuildObject("", nil, func(restate.ObjectContext) objectRuntime { return rt }).WithAuthority(&removalStore{owner: tc.owner}, exec)
@@ -406,7 +406,7 @@ func TestBuildObject_ReconcileWidgetSyncFailedBuild(t *testing.T) {
 				ownChunks: []model.VanadisChunk{{ID: "c1", BuildID: "b1", Mode: "pr", Repo: "aerial", Status: "pr_opened", PRNumber: 3}},
 			}
 			rt := newFakeObjectRuntime("b1")
-			exec := executor.NewExecutor("", &mockEriClient{}, &recordingChunkBus{}, "token", nil)
+			exec := executor.NewExecutor("", &mockEriClient{}, &recordingChunkBus{}, "token", "azylman", nil)
 			bo := NewBuildObject("", nil, func(restate.ObjectContext) objectRuntime { return rt }).WithAuthority(spy, exec)
 			res, err := bo.Reconcile(makeObjectMockContext(t, "b1"), ReconcileBuildRequest{Reason: tc.reason})
 			require.NoError(t, err)

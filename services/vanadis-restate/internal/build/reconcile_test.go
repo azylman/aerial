@@ -38,7 +38,7 @@ func TestBuildObject_WithRestateMockContext_Running(t *testing.T) {
 	c1 := model.VanadisChunk{ID: "c1", BuildID: "b-restate-mock", Status: "pending", Repo: "aerial", Mode: "pr"}
 	st, _ := dbScript{buildRow: &mockRow{b: &b}, chunks: []model.VanadisChunk{c1}, execTag: "UPDATE 1"}.open()
 	eri := &mockEriClient{}
-	exec := executor.NewExecutor(t.TempDir(), eri, nil, "token", nil)
+	exec := executor.NewExecutor(t.TempDir(), eri, nil, "token", "azylman", nil)
 	bo := NewBuildObject("", nil).WithAuthority(st, exec)
 
 	ctx := makeObjectMockContext(t, "b-restate-mock")
@@ -238,7 +238,7 @@ func TestBuildObject_Transitions_Table(t *testing.T) {
 			st := &leaseStore{VanadisStore: raw, failErr: tc.failErr}
 			eri := &mockEriClient{dispatchFn: func(context.Context, eriwire.BrainDispatchRequest) error { return tc.dispatchErr }}
 			bus := pubsub.NewMemoryBus()
-			exec := executor.NewExecutor(t.TempDir(), eri, bus, "token", nil)
+			exec := executor.NewExecutor(t.TempDir(), eri, bus, "token", "azylman", nil)
 			bo := NewBuildObject("", nil)
 			if !tc.nilStore {
 				bo = bo.WithAuthority(st, exec)
@@ -410,7 +410,7 @@ func TestBuildObject_Transitions_WidgetSyncTable(t *testing.T) {
 					return "msg-123", nil
 				},
 			}
-			exec := executor.NewExecutor(t.TempDir(), eri, pubsub.NewMemoryBus(), "token", nil)
+			exec := executor.NewExecutor(t.TempDir(), eri, pubsub.NewMemoryBus(), "token", "azylman", nil)
 			bo := NewBuildObject("", nil).WithAuthority(st, exec)
 			rt := newFakeObjectRuntime("b-trans")
 			rt.state = tc.priorState
@@ -426,7 +426,7 @@ func TestBuildObject_AuthoritativeTransitions(t *testing.T) {
 	t.Parallel()
 	eri := &mockEriClient{}
 	bus := pubsub.NewMemoryBus()
-	exec := executor.NewExecutor("", eri, bus, "test-token", nil)
+	exec := executor.NewExecutor("", eri, bus, "test-token", "azylman", nil)
 
 	b := model.VanadisBuild{ID: "b-trans", Title: "Build", Status: "running", ThreadID: "th-1"}
 	c1 := model.VanadisChunk{ID: "c1", BuildID: "b-trans", Status: "pending", Repo: "aerial", Mode: "pr"}
@@ -487,7 +487,7 @@ func TestBuildObject_MutationActionsAndTerminalGuards(t *testing.T) {
 	t.Parallel()
 	eri := &mockEriClient{}
 	bus := pubsub.NewMemoryBus()
-	exec := executor.NewExecutor("", eri, bus, "token", nil)
+	exec := executor.NewExecutor("", eri, bus, "token", "azylman", nil)
 	b := model.VanadisBuild{ID: "b-ext", Title: "Build", Status: "running", ThreadID: "th-1"}
 	c1 := model.VanadisChunk{ID: "c1", BuildID: "b-ext", Status: "running", Repo: "aerial", Mode: "pr"}
 
@@ -585,7 +585,7 @@ func TestBuildObject_AuthoritativeTransitions_LaunchAndAllDone(t *testing.T) {
 	}
 
 	eriMock := &mockEriClient{}
-	exec := executor.NewExecutor(t.TempDir(), eriMock, nil, "token", nil)
+	exec := executor.NewExecutor(t.TempDir(), eriMock, nil, "token", "azylman", nil)
 	storeLaunch, _ := dbScript{
 		buildRow: &mockRow{b: &bLaunch},
 		chunks:   []model.VanadisChunk{chunkPending},
@@ -743,7 +743,7 @@ func TestBuildObject_ObjectTransitionsDirect(t *testing.T) {
 		execTag:  "UPDATE 1",
 	}.open()
 	eri := &mockEriClient{}
-	exec := executor.NewExecutor(t.TempDir(), eri, nil, "token", nil)
+	exec := executor.NewExecutor(t.TempDir(), eri, nil, "token", "azylman", nil)
 	bo := NewBuildObject("", nil).WithAuthority(st, exec)
 
 	rt := newFakeObjectRuntime("b-active")
@@ -804,7 +804,7 @@ func openAuthorityHandlerHarness(t *testing.T) (*BuildObject, *fakeObjectRuntime
 		},
 		execTag: "UPDATE 1",
 	}.open()
-	exec := executor.NewExecutor(t.TempDir(), &mockEriClient{}, &mockBusExecutor{}, "token", nil)
+	exec := executor.NewExecutor(t.TempDir(), &mockEriClient{}, &mockBusExecutor{}, "token", "azylman", nil)
 	bo := NewBuildObject("", nil).WithAuthority(st, exec)
 	rt := newFakeObjectRuntime("b-cov")
 	rt.SetState(model.BuildObjectState{Build: b1, Chunks: []model.VanadisChunk{c1}})
@@ -959,7 +959,7 @@ func TestBuildObject_ReconcileErrorBranches(t *testing.T) {
 					return "", errors.New("widget fail")
 				}
 			}
-			bo.executor = executor.NewExecutor(t.TempDir(), eri, &mockBusExecutor{}, "token", nil)
+			bo.executor = executor.NewExecutor(t.TempDir(), eri, &mockBusExecutor{}, "token", "azylman", nil)
 			build := &model.VanadisBuild{ID: "b-replay", Status: tc.buildStatus, ThreadID: "th-1"}
 			chunks := []model.VanadisChunk{{ID: tc.chunkID, BuildID: "b-replay", Mode: tc.chunkMode, PRNumber: tc.chunkPR}}
 			mutation := &BuildMutationRequest{Action: tc.action, ChunkID: tc.chunkID, Reason: tc.reason}
@@ -978,7 +978,7 @@ func TestBuildObject_ReconcileErrorBranches(t *testing.T) {
 	cMerge := model.VanadisChunk{ID: "c1", BuildID: "b-merge", Status: "open", Mode: "pr", Repo: "aerial"}
 	stMerge, _ := dbScript{buildRow: &mockRow{b: &bMerge}, chunks: []model.VanadisChunk{cMerge}, execTag: "UPDATE 1"}.open()
 	busErr := &mockBusError{err: errors.New("pub fail")}
-	boMerge := NewBuildObject("", nil).WithAuthority(stMerge, executor.NewExecutor(t.TempDir(), &mockEriClient{}, busErr, "token", nil))
+	boMerge := NewBuildObject("", nil).WithAuthority(stMerge, executor.NewExecutor(t.TempDir(), &mockEriClient{}, busErr, "token", "azylman", nil))
 	assert.NoError(t, boMerge.applyMutation(context.Background(), "b-merge", &BuildMutationRequest{Action: "chunk_merged", ChunkID: "c1"}))
 
 	bBegin := model.VanadisBuild{ID: "b-begin", Status: "running", ThreadID: "th-1"}
@@ -1004,7 +1004,7 @@ func TestBuildObject_ReconcileErrorBranches(t *testing.T) {
 		return "", errors.New("widget fail")
 	}
 	boReplayFail := NewBuildObject("", nil).WithAuthority(&replayFailStore{},
-		executor.NewExecutor(t.TempDir(), eriReplayFail, &mockBusExecutor{}, "token", nil))
+		executor.NewExecutor(t.TempDir(), eriReplayFail, &mockBusExecutor{}, "token", "azylman", nil))
 	rtReplayFail := newFakeObjectRuntime("b-replay-fail")
 	_, err = boReplayFail.executeObjectTransition(rtReplayFail, labelMutateBuild,
 		&BuildMutationRequest{Action: "action_completed", ChunkID: "c1"})
@@ -1018,7 +1018,7 @@ func TestBuildObject_ReconcileErrorBranches(t *testing.T) {
 		return "", errors.New("widget fail")
 	}
 	boDeadline := NewBuildObject("", nil).WithAuthority(stDeadline,
-		executor.NewExecutor(t.TempDir(), eriDeadlineWidgetFail, &mockBusExecutor{}, "token", nil))
+		executor.NewExecutor(t.TempDir(), eriDeadlineWidgetFail, &mockBusExecutor{}, "token", "azylman", nil))
 	rtDeadline := &errDeploymentAttemptsRuntime{fakeObjectRuntime: newFakeObjectRuntime("b-deadline")}
 	rtDeadline.SetState(model.BuildObjectState{Build: bDeadline, Chunks: []model.VanadisChunk{cDeadline}})
 	_, err = boDeadline.executeObjectTransition(rtDeadline, "reconcile", nil)
@@ -1078,7 +1078,7 @@ func TestRunTransitionStep_NotifyOnceAcrossReplay(t *testing.T) {
 				deliveries++
 				return "msg-1", nil
 			}
-			exec := executor.NewExecutor(t.TempDir(), eri, nil, "token", nil)
+			exec := executor.NewExecutor(t.TempDir(), eri, nil, "token", "azylman", nil)
 			bo := NewBuildObject("", nil).WithAuthority(st, exec)
 			rt := &replayNotifyRuntime{fakeObjectRuntime: newFakeObjectRuntime("b1"), primaryErr: errors.New("boom")}
 			prior := &model.BuildObjectState{Build: b}
@@ -1355,7 +1355,7 @@ func TestBuildObject_EvaluateBuildTerminalStatus_SkipWidgetSync(t *testing.T) {
 					return "msg-123", nil
 				},
 			}
-			exec := executor.NewExecutor(t.TempDir(), eri, pubsub.NewMemoryBus(), "token", nil)
+			exec := executor.NewExecutor(t.TempDir(), eri, pubsub.NewMemoryBus(), "token", "azylman", nil)
 			bo := NewBuildObject("", nil).WithAuthority(&mockStoreForLaunch{}, exec)
 			bld := model.VanadisBuild{ID: "b-test", Status: "running", StatusMessageID: "msg-123", ThreadID: "th-1"}
 			chunks := []model.VanadisChunk{{ID: "c1", Status: "running"}}

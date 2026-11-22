@@ -73,7 +73,7 @@ func TestUpdatePRLifecycleStatus(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			fake := &lifecycleStampFake{stamp: tc.initial, write: writeStamp, tag: tc.tag, failWrite: tc.execFailure}
-			st := New(mockDB{execFn: fake.exec})
+			st := New(mockDB{execFn: fake.exec}, "azylman")
 			if tc.nilDB {
 				st = &Store{}
 			}
@@ -122,7 +122,7 @@ func TestIncrementChunkCIFailCount(t *testing.T) {
 					return tc.row
 				}
 				return valuesRow(1)
-			}})
+			}}, "azylman")
 			if tc.nilDB {
 				st = &Store{}
 			}
@@ -167,7 +167,7 @@ func TestCompletePRDeployment(t *testing.T) {
 					return pgconn.NewCommandTag("UPDATE 0"), nil
 				}
 				return pgconn.NewCommandTag("UPDATE 1"), nil
-			}})
+			}}, "azylman")
 			if tc.nilDB {
 				st = &Store{}
 			}
@@ -220,7 +220,7 @@ func TestMarkActionRepairDeployed(t *testing.T) {
 					return pgconn.NewCommandTag("UPDATE 0"), nil
 				}
 				return pgconn.NewCommandTag("UPDATE 1"), nil
-			}})
+			}}, "azylman")
 			if tc.nilDB {
 				st = &Store{}
 			}

@@ -203,7 +203,7 @@ func TestRetryActionDispatchRecovery(t *testing.T) {
 			ts := httptest.NewServer(f)
 			defer ts.Close()
 			rt := &retryJournalRuntime{fakeObjectRuntime: newFakeObjectRuntime("b1"), journal: map[string]reconcileStepOutput{}, loseReconcile: tc.loseJournal}
-			bo := NewBuildObject("", nil, func(restate.ObjectContext) objectRuntime { return rt }).WithAuthority(authority, executor.NewExecutor(t.TempDir(), executor.NewHTTPEriClient(ts.URL, ts.Client()), nil, "", nil))
+			bo := NewBuildObject("", nil, func(restate.ObjectContext) objectRuntime { return rt }).WithAuthority(authority, executor.NewExecutor(t.TempDir(), executor.NewHTTPEriClient(ts.URL, ts.Client()), nil, "", "azylman", nil))
 			req := store.RetryActionChunkRequest{BuildID: "b1", ChunkID: "c1", ExpectedDispatchID: "vanadis-c1-turn-0", Reason: "retry", ExpectedInstructions: tc.expected, ReplacementInstructions: tc.replacement}
 			got, err := bo.RetryActionChunk(nil, req)
 			if tc.loseJournal {

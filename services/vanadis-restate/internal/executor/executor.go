@@ -28,9 +28,8 @@ const (
 
 	// Local vocabulary retained after the frozen-helper extraction; the
 	// canonical pure repo/branch helpers live in internal/model.
-	chunkModeAction  = "action"
-	defaultRepoOwner = "azylman"
-	effortMedium     = "medium"
+	chunkModeAction = "action"
+	effortMedium    = "medium"
 )
 
 // Type aliases preserving the executor public surface.
@@ -69,10 +68,12 @@ type Executor struct {
 	GitHubAPIURL string
 	HTTPClient   *http.Client
 	deployUIURL  string
+	gitHubOwner  string
 }
 
-// NewExecutor creates a new Executor instance.
-func NewExecutor(shareRoot string, eriClient EriClient, bus pubsub.Bus, gitHubToken string, httpClient *http.Client, deployUIURL ...string) *Executor {
+// NewExecutor creates a new Executor instance. gitHubOwner qualifies bare
+// repo names in GitHub API paths and PR lookups.
+func NewExecutor(shareRoot string, eriClient EriClient, bus pubsub.Bus, gitHubToken, gitHubOwner string, httpClient *http.Client, deployUIURL ...string) *Executor {
 	if shareRoot == "" {
 		shareRoot = DefaultShareRoot
 	}
@@ -91,14 +92,23 @@ func NewExecutor(shareRoot string, eriClient EriClient, bus pubsub.Bus, gitHubTo
 		GitHubAPIURL: githubapi.DefaultAPIURL,
 		HTTPClient:   httpClient,
 		deployUIURL:  dURL,
+		gitHubOwner:  gitHubOwner,
 	}
+}
+
+// GitHubOwner returns the configured GitHub owner; "" for a nil Executor.
+func (e *Executor) GitHubOwner() string {
+	if e == nil {
+		return ""
+	}
+	return e.gitHubOwner
 }
 
 func (e *Executor) ciClient() *cilog.Client {
 	if e == nil {
 		return nil
 	}
-	c := cilog.NewClient(e.gitHubToken, e.HTTPClient)
+	c := cilog.NewClient(e.gitHubToken, e.gitHubOwner, e.HTTPClient)
 	c.GitHubAPIURL = e.GitHubAPIURL
 	if e.HTTPClient == nil {
 		c.HTTPClient = nil

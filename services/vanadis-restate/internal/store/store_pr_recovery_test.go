@@ -152,7 +152,7 @@ func recoveryFixtureStore(mu *sync.Mutex, parent *string, chunks *[]model.Vanadi
 			}
 			return nil
 		}}, nil
-	}})
+	}}, "azylman")
 }
 
 // retryTransaction models the external database's atomic commit and parent lock.

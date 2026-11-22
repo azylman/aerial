@@ -267,7 +267,7 @@ func TestAttachStandalonePR_RecordsOwnerAndRunner(t *testing.T) {
 				return pgconn.NewCommandTag("INSERT 0 1"), nil
 			}
 			tx := &mockTx{queryRowFn: queryRow, execFn: exec}
-			st := New(mockDB{beginFn: func(context.Context) (pgx.Tx, error) { return tx, nil }})
+			st := New(mockDB{beginFn: func(context.Context) (pgx.Tx, error) { return tx, nil }}, "azylman")
 			req := AttachChunkPRRequest{Repo: "aerial", PRNumber: 9, Agent: tc.agent, RunnerAgent: tc.runner}
 			if _, _, _, err := st.AttachChunkPR(context.Background(), req); err != nil {
 				t.Fatalf("AttachChunkPR: %v", err)

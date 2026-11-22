@@ -50,6 +50,44 @@ func TestParseGitHubCredential(t *testing.T) {
 	}
 }
 
+// staticConfigFile serves one fixed read result.
+type staticConfigFile struct {
+	data string
+	err  error
+}
+
+func (f staticConfigFile) read(string) ([]byte, error) { return []byte(f.data), f.err }
+
+func TestReadGitHubOwner(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		file    staticConfigFile
+		want    string
+		wantErr string
+	}{
+		{name: "owner set", file: staticConfigFile{data: "vanadis_restate:\n  github_owner: acme\n"}, want: "acme"},
+		{name: "owner trimmed", file: staticConfigFile{data: "vanadis_restate:\n  github_owner: \" acme/ \"\n"}, want: "acme"},
+		{name: "owner beside credential", file: staticConfigFile{data: "vanadis_restate:\n  github_credential: pat\n  github_owner: agent-alpha\n"}, want: "agent-alpha"},
+		{name: "owner unset", file: staticConfigFile{data: "vanadis_restate:\n  github_credential: app\n"}, wantErr: "vanadis_restate.github_owner is not set in /cfg/vanadis.yaml"},
+		{name: "owner blank", file: staticConfigFile{data: "vanadis_restate:\n  github_owner: \" / \"\n"}, wantErr: "vanadis_restate.github_owner is not set in /cfg/vanadis.yaml"},
+		{name: "missing file", file: staticConfigFile{err: fs.ErrNotExist}, wantErr: "read github_owner config /cfg/vanadis.yaml: file does not exist"},
+		{name: "bad yaml", file: staticConfigFile{data: "vanadis_restate: [\n"}, wantErr: "parse github_owner config /cfg/vanadis.yaml: yaml: line 1: did not find expected node content"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := ReadGitHubOwner("/cfg/vanadis.yaml", tc.file.read)
+			require.Equal(t, tc.want, got)
+			if tc.wantErr == "" {
+				require.NoError(t, err)
+				return
+			}
+			require.EqualError(t, err, tc.wantErr)
+		})
+	}
+}
+
 // fakeConfigFile serves a sequence of file reads; the last one repeats.
 type fakeConfigFile struct {
 	mu    sync.Mutex

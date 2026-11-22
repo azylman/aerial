@@ -97,8 +97,8 @@ func GenerateBuildID() string {
 	return fmt.Sprintf("build-%d-%s", time.Now().Unix(), hex.EncodeToString(b))
 }
 
-// NormalizeRepo trims repo whitespace.
-func NormalizeRepo(repo string) string {
+// TrimRepo trims repo whitespace.
+func TrimRepo(repo string) string {
 	return strings.TrimSpace(repo)
 }
 
@@ -134,7 +134,7 @@ func ValidateChunkModeAndRepo(idx int, modeStr, repo string, targetFiles, target
 	}
 	switch mode {
 	case "pr":
-		if NormalizeRepo(repo) == "" {
+		if TrimRepo(repo) == "" {
 			return fmt.Errorf("chunk[%d] repo is required for pr mode", idx)
 		}
 	case chunkModeAction:

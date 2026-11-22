@@ -244,7 +244,7 @@ func (b *BuildObject) completeCrossBuildSweptDeployments(ctx context.Context, de
 // Skipped transitions (a concurrent completion, failure, or cancellation)
 // are harmless; other errors abort so the journaled step retries the sweep.
 func (b *BuildObject) completeSweptDeployments(ctx context.Context, chunks []model.VanadisChunk, chunkID string) error {
-	for _, sweptID := range store.EarlierDeploymentSweepIDs(chunks, chunkID) {
+	for _, sweptID := range store.EarlierDeploymentSweepIDs(b.executor.GitHubOwner(), chunks, chunkID) {
 		if idx := findChunkIndex(chunks, sweptID); idx >= 0 && chunks[idx].Mode == chunkModeAction {
 			// A swept action chunk's repair deployed; it stays running.
 			if err := b.store.MarkActionRepairDeployed(ctx, sweptID, nil); err != nil && !errors.Is(err, errPRTransitionSkipped) {

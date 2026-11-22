@@ -19,20 +19,30 @@ import (
 func TestRepoMatchCandidates(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		repo string
-		want []string
+		name  string
+		owner string
+		repo  string
+		want  []string
 	}{
-		{repo: "", want: nil},
-		{repo: "aerial", want: []string{"aerial", "azylman/aerial"}},
-		{repo: "azylman/aerial", want: []string{"azylman/aerial", "aerial"}},
-		{repo: "other/repo", want: []string{"other/repo"}},
+		{name: "empty repo", owner: "azylman", repo: "", want: nil},
+		{name: "blank repo", owner: "azylman", repo: "  ", want: nil},
+		{name: "bare repo adds qualified", owner: "azylman", repo: "aerial", want: []string{"aerial", "azylman/aerial"}},
+		{name: "bare repo trimmed", owner: "azylman", repo: " aerial ", want: []string{"aerial", "azylman/aerial"}},
+		{name: "owner repo adds bare", owner: "azylman", repo: "azylman/aerial", want: []string{"azylman/aerial", "aerial"}},
+		{name: "other owner as given", owner: "azylman", repo: "other/x", want: []string{"other/x"}},
+		{name: "other configured owner", owner: "acme", repo: "aerial", want: []string{"aerial", "acme/aerial"}},
+		{name: "configured owner trimmed", owner: " acme/ ", repo: "acme/aerial", want: []string{"acme/aerial", "aerial"}},
+		{name: "owner prefix with nested path", owner: "azylman", repo: "azylman/a/b", want: []string{"azylman/a/b"}},
+		{name: "owner prefix with empty name", owner: "azylman", repo: "azylman/", want: []string{"azylman/"}},
+		{name: "empty owner bare repo", owner: "", repo: "aerial", want: []string{"aerial"}},
+		{name: "empty owner qualified repo", owner: "", repo: "azylman/aerial", want: []string{"azylman/aerial"}},
 	}
 	for _, tc := range tests {
-		t.Run(tc.repo, func(t *testing.T) {
+		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := RepoMatchCandidates(tc.repo)
+			got := RepoMatchCandidates(tc.owner, tc.repo)
 			if !slices.Equal(got, tc.want) {
-				t.Errorf("RepoMatchCandidates(%q) = %v, want %v", tc.repo, got, tc.want)
+				t.Errorf("RepoMatchCandidates(%q, %q) = %v, want %v", tc.owner, tc.repo, got, tc.want)
 			}
 		})
 	}
@@ -354,7 +364,7 @@ func TestEarlierDeploymentSweepIDs(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if got := EarlierDeploymentSweepIDs(tc.chunks, tc.deployID); !slices.Equal(got, tc.want) {
+			if got := EarlierDeploymentSweepIDs("azylman", tc.chunks, tc.deployID); !slices.Equal(got, tc.want) {
 				t.Errorf("EarlierDeploymentSweepIDs(%q) = %q, want %q", tc.deployID, got, tc.want)
 			}
 		})
@@ -466,7 +476,7 @@ func TestCrossBuildDeploymentSweepIDs(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if got := CrossBuildDeploymentSweepIDs(tc.deploying, tc.candidates); !slices.Equal(got, tc.want) {
+			if got := CrossBuildDeploymentSweepIDs("azylman", tc.deploying, tc.candidates); !slices.Equal(got, tc.want) {
 				t.Errorf("CrossBuildDeploymentSweepIDs = %v, want %v", got, tc.want)
 			}
 		})
@@ -491,7 +501,7 @@ func sweepMockStore(queryErr, execErr bool, execTag, failChunk string, candidate
 			}
 			return &mockRows{items: candidates, runners: runners}, nil
 		},
-	})
+	}, "azylman")
 }
 
 func TestSweepEarlierDeploymentsAcrossBuilds(t *testing.T) {

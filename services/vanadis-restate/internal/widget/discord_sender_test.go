@@ -289,7 +289,7 @@ func TestDeliverStatusWidgetSinking(t *testing.T) {
 				msgs:      tc.msgs,
 			}
 
-			id, err := DeliverStatusWidget(mock, tc.req, now)
+			id, err := DeliverStatusWidget(mock, "azylman", tc.req, now)
 			require.NoError(t, err)
 			assert.Equal(t, tc.expectID, id)
 			if tc.expectDeleted {
@@ -306,7 +306,7 @@ func TestDelivererNilAndEmptyGuards(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "discord widget deliverer is nil")
 
-	d, nErr := NewDiscordWidgetDeliverer("", "", nil, filepath.Join(t.TempDir(), "config.yaml"))
+	d, nErr := NewDiscordWidgetDeliverer("", "", "azylman", nil, filepath.Join(t.TempDir(), "config.yaml"))
 	require.NoError(t, nErr)
 	_, dErr := d.DeliverStatusWidget(context.Background(), ericlient.StatusWidgetRequest{ChannelID: "c1"})
 	require.Error(t, dErr)
@@ -758,7 +758,7 @@ func TestDelivererWithNow(t *testing.T) {
 	t.Parallel()
 	fixedTime := time.Date(2026, 11, 19, 15, 0, 0, 0, time.UTC)
 	mockSender := &mockWidgetSender{sendMsg: &discordgo.Message{ID: "m-clock"}}
-	d, err := NewDiscordWidgetDeliverer("", "", nil, filepath.Join(t.TempDir(), "config.yaml"))
+	d, err := NewDiscordWidgetDeliverer("", "", "azylman", nil, filepath.Join(t.TempDir(), "config.yaml"))
 	require.NoError(t, err)
 	d.agentSenders = map[string]DiscordWidgetSender{"aerial": mockSender}
 	d.nowFn = func() time.Time { return fixedTime }
@@ -1020,7 +1020,7 @@ func TestNewDiscordWidgetDelivererTokens(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			d, err := NewDiscordWidgetDeliverer(tc.agent, tc.token, tc.environ, tc.configPath)
+			d, err := NewDiscordWidgetDeliverer(tc.agent, tc.token, "azylman", tc.environ, tc.configPath)
 			require.NoError(t, err)
 			assert.NotNil(t, d)
 			assert.Equal(t, tc.wantConfigPath, d.configPath)

@@ -202,21 +202,21 @@ func sweepStampStrictlyBefore(candidate, deploying model.VanadisChunk) bool {
 // crossBuildSweepEligible checks the gates shared by sweep and recovery:
 // another build, PR mode with a number, same repo, proven merge inclusion,
 // and a shared deploy job. Status gating stays with the callers.
-func crossBuildSweepEligible(candidate, deploying model.VanadisChunk) bool {
+func crossBuildSweepEligible(owner string, candidate, deploying model.VanadisChunk) bool {
 	if candidate.BuildID == "" || candidate.BuildID == deploying.BuildID {
 		return false
 	}
 	if candidate.Mode != "pr" || candidate.PRNumber <= 0 {
 		return false
 	}
-	return sameDeployRepo(candidate.Repo, deploying.Repo) && sweepStampStrictlyBefore(candidate, deploying) && sharedDeployJob(candidate, deploying)
+	return sameDeployRepo(owner, candidate.Repo, deploying.Repo) && sweepStampStrictlyBefore(candidate, deploying) && sharedDeployJob(candidate, deploying)
 }
 
 // supersededAcrossBuilds reports whether candidate in another build merged
 // early enough and on a shared job to be contained in the deploying chunk's
 // landed commit.
-func supersededAcrossBuilds(candidate, deploying model.VanadisChunk) bool {
-	return crossBuildSweepEligible(candidate, deploying) && sweepPreDeployStatus(candidate.Status)
+func supersededAcrossBuilds(owner string, candidate, deploying model.VanadisChunk) bool {
+	return crossBuildSweepEligible(owner, candidate, deploying) && sweepPreDeployStatus(candidate.Status)
 }
 
 // recoveredAcrossBuilds reports whether an already-completed chunk in
@@ -224,8 +224,8 @@ func supersededAcrossBuilds(candidate, deploying model.VanadisChunk) bool {
 // lands after a prior attempt completed the writes but failed before the
 // side effects re-derives these so events, widget sync, and build
 // completion still happen.
-func recoveredAcrossBuilds(candidate, deploying model.VanadisChunk) bool {
-	return crossBuildSweepEligible(candidate, deploying) && strings.EqualFold(strings.TrimSpace(candidate.Status), statusCompleted)
+func recoveredAcrossBuilds(owner string, candidate, deploying model.VanadisChunk) bool {
+	return crossBuildSweepEligible(owner, candidate, deploying) && strings.EqualFold(strings.TrimSpace(candidate.Status), statusCompleted)
 }
 
 // CrossBuildDeploymentSweepIDs returns the earlier chunks in OTHER builds a
@@ -234,13 +234,13 @@ func recoveredAcrossBuilds(candidate, deploying model.VanadisChunk) bool {
 // share at least one deploy job with the deploying chunk. Terminal and
 // never-merged chunks, same-build chunks, and job-disjoint chunks are never
 // swept.
-func CrossBuildDeploymentSweepIDs(deploying model.VanadisChunk, candidates []model.VanadisChunk) []SweptChunk {
+func CrossBuildDeploymentSweepIDs(owner string, deploying model.VanadisChunk, candidates []model.VanadisChunk) []SweptChunk {
 	if strings.TrimSpace(deploying.BuildID) == "" {
 		return nil
 	}
 	var swept []SweptChunk
 	for _, candidate := range candidates {
-		if supersededAcrossBuilds(candidate, deploying) {
+		if supersededAcrossBuilds(owner, candidate, deploying) {
 			swept = append(swept, SweptChunk{ChunkID: candidate.ID, BuildID: candidate.BuildID})
 		}
 	}
@@ -263,7 +263,7 @@ func (s *Store) SweepEarlierDeploymentsAcrossBuilds(ctx context.Context, deployi
 	if strings.TrimSpace(deploying.BuildID) == "" || strings.TrimSpace(deploying.ID) == "" {
 		return nil, nil, nil
 	}
-	repos := RepoMatchCandidates(deploying.Repo)
+	repos := RepoMatchCandidates(s.gitHubOwner, deploying.Repo)
 	if len(repos) == 0 {
 		return nil, nil, nil
 	}
@@ -286,16 +286,16 @@ func (s *Store) SweepEarlierDeploymentsAcrossBuilds(ctx context.Context, deployi
 	if err := rows.Err(); err != nil {
 		return nil, nil, fmt.Errorf("iterate cross-build sweep candidates: %w", err)
 	}
-	for _, sw := range withSweptRunners(CrossBuildDeploymentSweepIDs(deploying, candidates), runners) {
+	for _, sw := range withSweptRunners(CrossBuildDeploymentSweepIDs(s.gitHubOwner, deploying, candidates), runners) {
 		if err := s.CompletePRDeployment(ctx, sw.ChunkID, nil); err != nil {
 			if errors.Is(err, ErrPRTransitionSkipped) {
 				continue
 			}
-			return swept, withSweptRunners(recoveredCrossBuildChunks(deploying, candidates), runners), err
+			return swept, withSweptRunners(recoveredCrossBuildChunks(s.gitHubOwner, deploying, candidates), runners), err
 		}
 		swept = append(swept, sw)
 	}
-	return swept, withSweptRunners(recoveredCrossBuildChunks(deploying, candidates), runners), nil
+	return swept, withSweptRunners(recoveredCrossBuildChunks(s.gitHubOwner, deploying, candidates), runners), nil
 }
 
 // withSweptRunners stamps each swept chunk with its build's runner agent so
@@ -310,13 +310,13 @@ func withSweptRunners(chunks []SweptChunk, runners map[string]string) []SweptChu
 // recoveredCrossBuildChunks re-derives already-completed chunks matching
 // the cross-build sweep eligibility so a retry can finish their side
 // effects idempotently.
-func recoveredCrossBuildChunks(deploying model.VanadisChunk, candidates []model.VanadisChunk) []SweptChunk {
+func recoveredCrossBuildChunks(owner string, deploying model.VanadisChunk, candidates []model.VanadisChunk) []SweptChunk {
 	if strings.TrimSpace(deploying.BuildID) == "" {
 		return nil
 	}
 	var recovered []SweptChunk
 	for _, candidate := range candidates {
-		if recoveredAcrossBuilds(candidate, deploying) {
+		if recoveredAcrossBuilds(owner, candidate, deploying) {
 			recovered = append(recovered, SweptChunk{ChunkID: candidate.ID, BuildID: candidate.BuildID})
 		}
 	}
@@ -331,7 +331,7 @@ func recoveredCrossBuildChunks(deploying model.VanadisChunk, candidates []model.
 // candidate is skipped. Terminal (failed, cancelled, completed) and
 // never-merged chunks are never swept, so in-flight builds keep working and
 // completed work is unaffected.
-func EarlierDeploymentSweepIDs(chunks []model.VanadisChunk, chunkID string) []string {
+func EarlierDeploymentSweepIDs(owner string, chunks []model.VanadisChunk, chunkID string) []string {
 	var deploying *model.VanadisChunk
 	for i := range chunks {
 		if chunks[i].ID == chunkID {
@@ -344,7 +344,7 @@ func EarlierDeploymentSweepIDs(chunks []model.VanadisChunk, chunkID string) []st
 	}
 	var swept []string
 	for i := range chunks {
-		if supersededByDeployment(chunks[i], *deploying) {
+		if supersededByDeployment(owner, chunks[i], *deploying) {
 			swept = append(swept, chunks[i].ID)
 		}
 	}
@@ -353,11 +353,11 @@ func EarlierDeploymentSweepIDs(chunks []model.VanadisChunk, chunkID string) []st
 
 // supersededByDeployment reports whether candidate merged early enough to be
 // contained in the deploying chunk's landed commit.
-func supersededByDeployment(candidate, deploying model.VanadisChunk) bool {
+func supersededByDeployment(owner string, candidate, deploying model.VanadisChunk) bool {
 	if candidate.ID == deploying.ID || candidate.BuildID != deploying.BuildID {
 		return false
 	}
-	return sameDeployRepo(candidate.Repo, deploying.Repo) && deployCompletableMode(candidate) && sweepPreDeployStatus(candidate.Status) && sweepStampProvesInclusion(candidate, deploying)
+	return sameDeployRepo(owner, candidate.Repo, deploying.Repo) && deployCompletableMode(candidate) && sweepPreDeployStatus(candidate.Status) && sweepStampProvesInclusion(candidate, deploying)
 }
 
 // deployCompletableMode reports which chunks a deploy sweep touches: plain PR
@@ -372,15 +372,15 @@ func deployCompletableMode(c model.VanadisChunk) bool {
 
 // sameDeployRepo matches repo spellings the chunk lookup already treats as
 // the same repository, including the owner-qualified variant.
-func sameDeployRepo(a, b string) bool {
-	a, b = buildplan.NormalizeRepo(a), buildplan.NormalizeRepo(b)
+func sameDeployRepo(owner string, a, b string) bool {
+	a, b = buildplan.TrimRepo(a), buildplan.TrimRepo(b)
 	if a == "" || b == "" {
 		return false
 	}
 	if a == b {
 		return true
 	}
-	return slices.Contains(RepoMatchCandidates(a), b) || slices.Contains(RepoMatchCandidates(b), a)
+	return slices.Contains(RepoMatchCandidates(owner, a), b) || slices.Contains(RepoMatchCandidates(owner, b), a)
 }
 
 // UpdatePRLifecycleStatus prevents delayed pre-deployment events from reopening

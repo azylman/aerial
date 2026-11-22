@@ -181,7 +181,7 @@ func TestBuildObject_HandlePRCheckEvent(t *testing.T) {
 		fmt.Fprintf(w, `{"state":"open","merged":false,"head":{"sha":%q}}`, currentHead.Load())
 	}))
 	defer api.Close()
-	exec := executor.NewExecutor("", nil, nil, "", api.Client())
+	exec := executor.NewExecutor("", nil, nil, "", "azylman", api.Client())
 	exec.GitHubAPIURL = api.URL
 	bo := NewBuildObject("", nil).WithAuthority(spy, exec)
 
@@ -237,7 +237,7 @@ func TestBuildObject_ExecutorErrorBranches(t *testing.T) {
 		messageFn: func(context.Context, string, string) error { return errors.New("msg err") },
 	}
 	mockBusErr := &mockBusError{err: errors.New("pub err")}
-	execErr := executor.NewExecutor(t.TempDir(), eriErr, mockBusErr, "token", nil)
+	execErr := executor.NewExecutor(t.TempDir(), eriErr, mockBusErr, "token", "azylman", nil)
 	boErr := NewBuildObject("", nil).WithAuthority(st, execErr)
 
 	// notifyBuildTerminal error branches
@@ -302,7 +302,7 @@ func newRemediationTestHarness(t *testing.T, spy *checkStatusSpyStore, dispatchE
 		eri.widgetFn = func(context.Context, executor.StatusWidgetRequest) (string, error) { return "", notifyErr }
 		bus = &mockBusError{err: notifyErr}
 	}
-	exec := executor.NewExecutor(t.TempDir(), eri, bus, "token", nil)
+	exec := executor.NewExecutor(t.TempDir(), eri, bus, "token", "azylman", nil)
 	bo := NewBuildObject("", nil).WithAuthority(spy, exec)
 	return bo, eri
 }
@@ -430,7 +430,7 @@ func TestResolveCIFailureDetailsChecked(t *testing.T) {
 				apiURL = "http://127.0.0.1:1"
 			}
 
-			exec := executor.NewExecutor("", nil, nil, "token", client)
+			exec := executor.NewExecutor("", nil, nil, "token", "azylman", client)
 			exec.GitHubAPIURL = apiURL
 
 			checkName := "unit-tests"
@@ -534,7 +534,7 @@ func TestBuildObject_TransitionErrorPropagation(t *testing.T) {
 				},
 			}.open()
 
-			bo := NewBuildObject("", nil).WithAuthority(st, executor.NewExecutor(t.TempDir(), &mockEriClient{}, pubsub.NewMemoryBus(), "token", nil))
+			bo := NewBuildObject("", nil).WithAuthority(st, executor.NewExecutor(t.TempDir(), &mockEriClient{}, pubsub.NewMemoryBus(), "token", "azylman", nil))
 			bo.runtimeFactory = func(restate.ObjectContext) objectRuntime {
 				rt := newFakeObjectRuntime("b-trans")
 				rt.runStepErr = errors.New("transition failed")
@@ -573,7 +573,7 @@ func TestBuildObject_AuthoritativeFailureContinuation(t *testing.T) {
 		queuedPrompts = append(queuedPrompts, prompt)
 		return nil
 	}}
-	bo := NewBuildObject("", nil).WithAuthority(st, executor.NewExecutor("", eri, bus, "token", nil))
+	bo := NewBuildObject("", nil).WithAuthority(st, executor.NewExecutor("", eri, bus, "token", "azylman", nil))
 
 	out, err := bo.executeAuthoritativeTransition(context.Background(), "b-failed", &BuildMutationRequest{Action: "chunk_failed", ChunkID: "c1", DispatchID: "vanadis-c1-turn-1", Reason: "execution error"}, nil, nil, false)
 	assert.NoError(t, err)
@@ -601,7 +601,7 @@ func TestBuildObject_AuthoritativeFailureContinuation(t *testing.T) {
 
 	// 3. FailChunk second journaled step failure propagates before ClearState
 	eriFail := &mockEriClient{promptFn: func(context.Context, string, string) error { return errors.New("prompt unavailable") }}
-	execFail := executor.NewExecutor(t.TempDir(), eriFail, pubsub.NewMemoryBus(), "token", nil)
+	execFail := executor.NewExecutor(t.TempDir(), eriFail, pubsub.NewMemoryBus(), "token", "azylman", nil)
 	bRunning := model.VanadisBuild{ID: "b-running", Status: "running", ThreadID: "th-1"}
 	cAction := model.VanadisChunk{ID: "c1", BuildID: "b-running", Status: "running", Mode: chunkModeAction}
 	storeFailChunk, _ := dbScript{buildRow: &mockRow{b: &bRunning}, chunks: []model.VanadisChunk{cAction}, row: failRow("running", "running")}.open()
@@ -614,7 +614,7 @@ func TestBuildObject_AuthoritativeFailureContinuation(t *testing.T) {
 
 	// 4. FailChunk success on failed build leaves fakeRT.cleared false (non-terminal failed state)
 	eriSuccess := &mockEriClient{}
-	execSuccess := executor.NewExecutor(t.TempDir(), eriSuccess, pubsub.NewMemoryBus(), "token", nil)
+	execSuccess := executor.NewExecutor(t.TempDir(), eriSuccess, pubsub.NewMemoryBus(), "token", "azylman", nil)
 	cRunningPR := model.VanadisChunk{ID: "c1", BuildID: "b-failed", Mode: "pr", Repo: "aerial", Status: "running"}
 	failPRRow := &genericMockRow{scanFn: func(dest ...any) error {
 		now := time.Now()
@@ -820,7 +820,7 @@ func TestBuildObject_PRRecoveryAfterRejectedCheck(t *testing.T) {
 				_, _ = w.Write([]byte(`{"state":"open","merged":false,"head":{"sha":"h2"}}`))
 			}))
 			t.Cleanup(api.Close)
-			exec := executor.NewExecutor("", nil, nil, "", api.Client())
+			exec := executor.NewExecutor("", nil, nil, "", "azylman", api.Client())
 			exec.GitHubAPIURL = api.URL
 			bo := NewBuildObject("", nil).WithAuthority(st, exec)
 			ctx := mockRunContext{Context: context.Background()}
@@ -867,7 +867,7 @@ func TestBuildObject_PRRecoveryAfterClosure(t *testing.T) {
 			}
 			api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(tc.body)) }))
 			t.Cleanup(api.Close)
-			exec := executor.NewExecutor("", nil, nil, "", api.Client())
+			exec := executor.NewExecutor("", nil, nil, "", "azylman", api.Client())
 			exec.GitHubAPIURL = api.URL
 			bo.WithAuthority(st, exec)
 			err := bo.handlePREventType(ctx, "b1", "c1", "synchronize", pubsub.PRLifecycleEvent{Repo: "owner/repo", PRNumber: 12, HeadSHA: "h2"})
@@ -903,7 +903,7 @@ func TestBuildObject_PRRecoveryWidget(t *testing.T) {
 				_, _ = w.Write([]byte(`{"state":"open","merged":false,"head":{"sha":"new"}}`))
 			}))
 			t.Cleanup(api.Close)
-			exec := executor.NewExecutor("", eri, nil, "", nil)
+			exec := executor.NewExecutor("", eri, nil, "", "azylman", nil)
 			exec.GitHubAPIURL = api.URL
 			exec.HTTPClient = api.Client()
 			bo := NewBuildObject("", nil).WithAuthority(st, exec)
@@ -981,7 +981,7 @@ func TestBuildObject_OnPREvent_UnattachedPRResolution_Matches(t *testing.T) {
 						return "msg-1", tc.widgetErr
 					},
 				}
-				exec = executor.NewExecutor(t.TempDir(), eri, nil, "token", api.Client())
+				exec = executor.NewExecutor(t.TempDir(), eri, nil, "token", "azylman", api.Client())
 				exec.GitHubAPIURL = api.URL
 			}
 			bo := NewBuildObject("", nil).WithAuthority(spy, exec)
@@ -1086,7 +1086,7 @@ func TestBuildObject_OnPREvent_UnattachedPRResolution_Errors(t *testing.T) {
 				fmt.Fprint(w, validGitHubPR)
 			}))
 			t.Cleanup(api.Close)
-			exec := executor.NewExecutor(t.TempDir(), &mockEriClient{}, nil, "token", api.Client())
+			exec := executor.NewExecutor(t.TempDir(), &mockEriClient{}, nil, "token", "azylman", api.Client())
 			exec.GitHubAPIURL = api.URL
 			spy := &unattachedPREventSpyStore{
 				chunks: []model.VanadisChunk{
@@ -1347,7 +1347,7 @@ func TestCompletePRDeploymentMutation_SweepsAcrossBuilds(t *testing.T) {
 			}
 			var exec *executor.Executor
 			if tc.withExecutor {
-				exec = executor.NewExecutor("", &mockEriClient{}, busPub, "token", nil)
+				exec = executor.NewExecutor("", &mockEriClient{}, busPub, "token", "azylman", nil)
 			}
 			bo := NewBuildObject("", nil).WithAuthority(spy, exec)
 			ctx, crossBuild := withCrossBuildReconciles(context.Background())

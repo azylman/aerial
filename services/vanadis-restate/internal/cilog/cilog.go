@@ -15,7 +15,8 @@ import (
 	"time"
 
 	"github.com/azylman/aerial/pkg/githubapi"
-	"github.com/azylman/aerial/services/vanadis-restate/internal/prompt"
+	"github.com/azylman/aerial/pkg/prwire"
+	"github.com/azylman/aerial/pkg/strutil"
 )
 
 const maxRoboRevCommentRunes = 4000
@@ -47,10 +48,12 @@ type Client struct {
 	GitHubToken  string
 	GitHubAPIURL string
 	HTTPClient   *http.Client
+	gitHubOwner  string
 }
 
 // NewClient builds a CI log client with the default GitHub API URL.
-func NewClient(gitHubToken string, httpClient *http.Client) *Client {
+// gitHubOwner qualifies bare repo names.
+func NewClient(gitHubToken, gitHubOwner string, httpClient *http.Client) *Client {
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: 30 * time.Second}
 	}
@@ -58,6 +61,7 @@ func NewClient(gitHubToken string, httpClient *http.Client) *Client {
 		GitHubToken:  gitHubToken,
 		GitHubAPIURL: githubapi.DefaultAPIURL,
 		HTTPClient:   httpClient,
+		gitHubOwner:  gitHubOwner,
 	}
 }
 
@@ -67,7 +71,7 @@ func (c *Client) ResolveCIFailureDetailsChecked(ctx context.Context, repo string
 	if c == nil {
 		return details, nil
 	}
-	if prNumber > 0 && IsRoboRevCheck(checkName) {
+	if prNumber > 0 && prwire.IsRoboRevCheck(checkName) {
 		comment, err := c.fetchLatestRoboRevCommentChecked(ctx, repo, prNumber, headSHA)
 		if err != nil {
 			return details, err
@@ -93,23 +97,11 @@ func (c *Client) ResolveCIFailureDetailsChecked(ctx context.Context, repo string
 	return details, nil
 }
 
-// ResolveGitHubRepoPath normalizes a repo slug to an owner/repo path.
-func ResolveGitHubRepoPath(repo string) string {
-	clean := strings.Trim(strings.TrimSpace(repo), "/")
-	if clean == "" {
-		return ""
-	}
-	if strings.Contains(clean, "/") {
-		return clean
-	}
-	return "azylman/" + clean
-}
-
 func (c *Client) fetchCheckJobFailureLogsChecked(ctx context.Context, repo string, jobID int64) (string, error) {
 	if c == nil || c.HTTPClient == nil {
 		return "", nil
 	}
-	repoPath := ResolveGitHubRepoPath(repo)
+	repoPath := githubapi.QualifyRepo(c.gitHubOwner, repo)
 	if repoPath == "" || jobID <= 0 {
 		return "", nil
 	}
@@ -148,8 +140,11 @@ type gitHubIssueComment struct {
 }
 
 func (c *Client) fetchLatestRoboRevCommentChecked(ctx context.Context, repo string, prNumber int, headSHA string) (string, error) {
-	repoPath := ResolveGitHubRepoPath(repo)
-	if c == nil || repoPath == "" || prNumber <= 0 || c.HTTPClient == nil {
+	if c == nil || c.HTTPClient == nil {
+		return "", nil
+	}
+	repoPath := githubapi.QualifyRepo(c.gitHubOwner, repo)
+	if repoPath == "" || prNumber <= 0 {
 		return "", nil
 	}
 	var comments []gitHubIssueComment
@@ -190,7 +185,7 @@ func (c *Client) fetchLatestRoboRevCommentChecked(ctx context.Context, repo stri
 		if shortSHA != "" && !strings.Contains(body, "`"+shortSHA) && !strings.Contains(body, headSHA) {
 			continue
 		}
-		return prompt.TruncatePromptRunes(body, maxRoboRevCommentRunes), nil
+		return strutil.TruncateRunes(body, maxRoboRevCommentRunes), nil
 	}
 	return "", nil
 }
@@ -207,7 +202,7 @@ func ExtractCIFailureDetails(rawLog string) string {
 		if cleaned == "Post job cleanup." {
 			break
 		}
-		if cleaned == "" || hasAnyPrefix(cleaned, ciPlumbingPrefixes) {
+		if cleaned == "" || slices.ContainsFunc(ciPlumbingPrefixes, func(p string) bool { return strings.HasPrefix(cleaned, p) }) {
 			continue
 		}
 		cleanedLines = append(cleanedLines, cleaned)
@@ -249,12 +244,6 @@ func isHighSignalLine(line string) bool {
 	return goCoordinateRegex.MatchString(line)
 }
 
-// IsRoboRevCheck reports whether a check name is a RoboRev review.
-func IsRoboRevCheck(name string) bool {
-	lower := strings.ToLower(strings.TrimSpace(name))
-	return strings.Contains(lower, "roborev")
-}
-
 // NeedsCIJobLogFetch reports whether details require a CI job log fetch.
 func NeedsCIJobLogFetch(details string) bool {
 	return strings.TrimSpace(details) == "" || strings.EqualFold(details, "failure") || strings.EqualFold(details, "timed_out")
@@ -271,13 +260,4 @@ func ExtractActionsJobID(url string) int64 {
 		return 0
 	}
 	return id
-}
-
-func hasAnyPrefix(s string, prefixes []string) bool {
-	for _, p := range prefixes {
-		if strings.HasPrefix(s, p) {
-			return true
-		}
-	}
-	return false
 }

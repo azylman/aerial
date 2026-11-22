@@ -62,9 +62,13 @@ type Config struct {
 	// vanadis_restate.github_credential (app|pat, default app) picks the
 	// GitHub REST credential, re-read JIT.
 	ServiceConfigPath string
-	DiscordToken      string
-	ShareRoot         string
-	AgentName         string
+	// GitHubOwner qualifies bare repo names for every GitHub and PR lookup;
+	// main reads it once at startup from ServiceConfigPath
+	// (vanadis_restate.github_owner). Empty fails RunApp.
+	GitHubOwner  string
+	DiscordToken string
+	ShareRoot    string
+	AgentName    string
 	// ConfigPath is the agent config.yaml read for widget channel policy (shared CONFIG_PATH convention).
 	ConfigPath string
 	// Environ is the process environment (os.Environ form) the widget deliverer scans for
@@ -197,12 +201,24 @@ func SetupHealthMux() *http.ServeMux {
 	return httpkit.SetupHealthMux("vanadis-restate", promhttp.Handler())
 }
 
-// RunApp runs both the health server and the Restate worker server.
-func RunApp(ctx context.Context, cfg Config) error {
+// requireStartupConfig rejects a config missing the settings RunApp needs
+// before it connects to anything.
+func requireStartupConfig(cfg Config) error {
 	if strings.TrimSpace(cfg.PostgresURL) == "" {
 		return errors.New("postgres_url is required")
 	}
-	pgStore, closeStore, pErr := initPostgres(ctx, cfg.PostgresURL)
+	if strings.TrimSpace(cfg.GitHubOwner) == "" {
+		return errors.New("github_owner is required (vanadis_restate.github_owner in the vanadis service config)")
+	}
+	return nil
+}
+
+// RunApp runs both the health server and the Restate worker server.
+func RunApp(ctx context.Context, cfg Config) error {
+	if err := requireStartupConfig(cfg); err != nil {
+		return err
+	}
+	pgStore, closeStore, pErr := initPostgres(ctx, cfg.PostgresURL, cfg.GitHubOwner)
 	if pErr != nil {
 		return fmt.Errorf("connect to postgres: %w", pErr)
 	}
@@ -249,7 +265,7 @@ func RunApp(ctx context.Context, cfg Config) error {
 
 	// Internal clients propagate traceparent; GitHub calls record spans without leaking headers.
 	var widgetDeliverer ericlient.StatusWidgetDeliverer
-	if deliverer, dErr := newDiscordWidgetDelivererFn(cfg.AgentName, cfg.DiscordToken, cfg.Environ, cfg.ConfigPath); dErr != nil {
+	if deliverer, dErr := newDiscordWidgetDelivererFn(cfg.AgentName, cfg.DiscordToken, cfg.GitHubOwner, cfg.Environ, cfg.ConfigPath); dErr != nil {
 		log.Printf("[vanadis-restate] warning: failed to construct discord widget deliverer: %v", dErr)
 	} else {
 		widgetDeliverer = deliverer
@@ -269,7 +285,7 @@ func RunApp(ctx context.Context, cfg Config) error {
 		PAT:            cfg.GitHubToken,
 	}, newCredentialSetting(cfg.ServiceConfigPath, os.ReadFile, time.Now, slog.Default()).Current,
 		tracing.ExternalClient(&http.Client{Timeout: 10 * time.Second}), slog.Default())
-	exec := executor.NewExecutor(cfg.ShareRoot, eriClient, bus, "", newGitHubHTTPClient(ghSource, nil, 30*time.Second))
+	exec := executor.NewExecutor(cfg.ShareRoot, eriClient, bus, "", cfg.GitHubOwner, newGitHubHTTPClient(ghSource, nil, 30*time.Second))
 
 	restateObj := build.NewBuildObjectWithAgent(cfg.VanadisURL, cfg.AgentName, tracing.Client(&http.Client{Timeout: 30 * time.Second})).WithAuthority(pgStore, exec)
 	routerSvc := router.NewBuildRouterServiceWithAgent(pgStore, cfg.AgentName)
@@ -305,12 +321,12 @@ func RunApp(ctx context.Context, cfg Config) error {
 
 var newPoolFn = pgutil.NewPool
 
-var initPostgres = func(ctx context.Context, pgURL string) (*store.Store, func(context.Context), error) {
+var initPostgres = func(ctx context.Context, pgURL, gitHubOwner string) (*store.Store, func(context.Context), error) {
 	pool, err := newPoolFn(ctx, pgURL, pgutil.PoolOptions{MaxConns: 10, MinConns: 2, Ping: true})
 	if err != nil {
 		return nil, nil, err
 	}
-	st := store.New(pool)
+	st := store.New(pool, gitHubOwner)
 	return st, func(context.Context) {
 		pool.Close()
 	}, nil

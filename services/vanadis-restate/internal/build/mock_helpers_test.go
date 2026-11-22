@@ -105,7 +105,7 @@ func (s dbScript) open() (*store.Store, *[]string) {
 		return s.bare.store, new([]string)
 	}
 	db, candidates := s.openRaw()
-	return store.New(db), candidates
+	return store.New(db, "azylman"), candidates
 }
 
 func (s dbScript) openRaw() (mockDB, *[]string) {
@@ -363,7 +363,7 @@ func (db mockDB) Begin(ctx context.Context) (pgx.Tx, error) {
 }
 
 func newMockStore(db mockDB) *store.Store {
-	return store.New(db)
+	return store.New(db, "azylman")
 }
 
 func attachRoutes(mode string, exists, cancelled bool) []sqlRoute {

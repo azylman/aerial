@@ -17,6 +17,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/azylman/aerial/pkg/discordutil"
+	"github.com/azylman/aerial/pkg/githubapi"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/ericlient"
 )
 
@@ -115,6 +116,7 @@ type DiscordWidgetDeliverer struct {
 	session               *discordgo.Session
 	agentSenders          map[string]DiscordWidgetSender
 	configPath            string
+	gitHubOwner           string
 	nowFn                 func() time.Time
 	channelPolicyResolver func(channelID string) (noBuildUpdates bool, systemChannel string)
 	channelResolver       func(nameOrID string) (string, error)
@@ -172,7 +174,8 @@ func discoverAgentTokens(runnerAgent string, environ []string) map[string]string
 // The explicit token (or DISCORD_TOKEN in environ) is keyed under the normalized agentName and
 // becomes the deliverer's default session; DISCORD_TOKEN_<AGENT> entries in environ stay available
 // per agent. configPath is the channel-policy config.yaml; empty disables channel policy lookups.
-func NewDiscordWidgetDeliverer(agentName, token string, environ []string, configPath string) (*DiscordWidgetDeliverer, error) {
+// gitHubOwner qualifies bare chunk repos in PR links.
+func NewDiscordWidgetDeliverer(agentName, token, gitHubOwner string, environ []string, configPath string) (*DiscordWidgetDeliverer, error) {
 	owner := normalizeRunnerAgent(agentName)
 	tokens := discoverAgentTokens(owner, environ)
 	cleanToken := strings.TrimSpace(token)
@@ -202,6 +205,7 @@ func NewDiscordWidgetDeliverer(agentName, token string, environ []string, config
 		session:          defaultSess,
 		agentSenders:     agentSenders,
 		configPath:       cfgPath,
+		gitHubOwner:      gitHubOwner,
 		resolvedChannels: make(map[string]cachedResolvedChannel),
 		channelMetaCache: make(map[string]cachedChannelMeta),
 	}, nil
@@ -558,7 +562,7 @@ func (d *DiscordWidgetDeliverer) DeliverStatusWidget(ctx context.Context, req er
 		defer chLock.Unlock()
 	}
 
-	return DeliverStatusWidget(sender, req, now, opts...)
+	return DeliverStatusWidget(sender, d.gitHubOwner, req, now, opts...)
 }
 
 // DeliverDirectMessageWithAgent delivers a direct plain-text channel alert message using the specified agent sender.
@@ -727,7 +731,7 @@ func updateExistingStatusWidget(s DiscordWidgetSender, req ericlient.StatusWidge
 }
 
 // DeliverStatusWidget delivers or updates a status widget via Discord Components V2 using only s.
-func DeliverStatusWidget(s DiscordWidgetSender, req ericlient.StatusWidgetRequest, now time.Time, opts ...discordgo.RequestOption) (string, error) {
+func DeliverStatusWidget(s DiscordWidgetSender, owner string, req ericlient.StatusWidgetRequest, now time.Time, opts ...discordgo.RequestOption) (string, error) {
 	if isNilSender(s) {
 		return "", errors.New("discord widget sender is nil")
 	}
@@ -735,7 +739,7 @@ func DeliverStatusWidget(s DiscordWidgetSender, req ericlient.StatusWidgetReques
 		return "", errors.New("channel_id is required")
 	}
 
-	components, err := BuildStatusWidgetComponents(req, now)
+	components, err := BuildStatusWidgetComponents(owner, req, now)
 	if err != nil {
 		return "", fmt.Errorf("failed to build status widget components: %w", err)
 	}
@@ -793,17 +797,11 @@ func statusBadge(status string) string {
 	}
 }
 
-// NormalizeRepo returns the full repository path (e.g. "azylman/aerial") and short name ("aerial").
-func NormalizeRepo(repo string) (fullRepo string, shortRepo string) {
-	trimmed := strings.TrimSpace(repo)
-	if trimmed == "" {
-		return "", ""
-	}
-	parts := strings.Split(trimmed, "/")
-	if len(parts) == 1 {
-		return "azylman/" + parts[0], parts[0]
-	}
-	return trimmed, parts[len(parts)-1]
+// NormalizeRepo returns repo qualified with owner (e.g. "acme/aerial") and
+// its short name, the last path segment ("aerial").
+func NormalizeRepo(owner, repo string) (fullRepo string, shortRepo string) {
+	fullRepo = githubapi.QualifyRepo(owner, repo)
+	return fullRepo, fullRepo[strings.LastIndex(fullRepo, "/")+1:]
 }
 
 // FormatChunkDuration formats a chunk execution duration into a concise human-readable string.
@@ -867,7 +865,7 @@ func buildWidgetHeaderText(req ericlient.StatusWidgetRequest) string {
 	shortRepo := ""
 	if len(req.Chunks) == 1 {
 		prNum = req.Chunks[0].PRNumber
-		_, shortRepo = NormalizeRepo(req.Chunks[0].Repo)
+		_, shortRepo = NormalizeRepo("", req.Chunks[0].Repo)
 	}
 	repoTag := shortRepo
 	if repoTag == "" {
@@ -951,9 +949,9 @@ func isChunkTerminal(status string) bool {
 	}
 }
 
-func buildWidgetChunkComponent(c ericlient.StatusWidgetChunk) discordgo.MessageComponent {
+func buildWidgetChunkComponent(owner string, c ericlient.StatusWidgetChunk) discordgo.MessageComponent {
 	badge := statusBadge(c.Status)
-	fullRepo, shortRepo := NormalizeRepo(c.Repo)
+	fullRepo, shortRepo := NormalizeRepo(owner, c.Repo)
 	repoTag := shortRepo
 	switch {
 	case c.Mode == chunkModeAction:
@@ -1202,8 +1200,9 @@ func dropLastWidgetRow(rows []widgetRow, keep []bool) bool {
 	return false
 }
 
-// BuildStatusWidgetComponents constructs a Components V2 Container message component.
-func BuildStatusWidgetComponents(req ericlient.StatusWidgetRequest, now time.Time) ([]discordgo.MessageComponent, error) {
+// BuildStatusWidgetComponents constructs a Components V2 Container message
+// component; owner qualifies bare chunk repos in PR links.
+func BuildStatusWidgetComponents(owner string, req ericlient.StatusWidgetRequest, now time.Time) ([]discordgo.MessageComponent, error) {
 	// Evict stale active step entries for terminal chunks or completed widgets.
 	completed := isWidgetCompleted(req)
 	for _, c := range req.Chunks {
@@ -1239,7 +1238,7 @@ func BuildStatusWidgetComponents(req ericlient.StatusWidgetRequest, now time.Tim
 
 	rows := make([]widgetRow, 0, len(chunks))
 	for _, c := range chunks {
-		rows = append(rows, widgetRow{stage: widgetChunkStage(c.Status), component: buildWidgetChunkComponent(c)})
+		rows = append(rows, widgetRow{stage: widgetChunkStage(c.Status), component: buildWidgetChunkComponent(owner, c)})
 	}
 
 	footer := &discordgo.TextDisplay{

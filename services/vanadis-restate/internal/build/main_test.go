@@ -217,7 +217,7 @@ func TestBuildObject_AuthoritativeHandlers(t *testing.T) {
 	t.Parallel()
 	eri := &mockEriClient{}
 	bus := pubsub.NewMemoryBus()
-	exec := executor.NewExecutor("", eri, bus, "test-token", nil)
+	exec := executor.NewExecutor("", eri, bus, "test-token", "azylman", nil)
 	b1 := model.VanadisBuild{ID: "b1", Title: "Build 1", Objective: "Obj 1", Status: "running", ThreadID: "th-1"}
 	c1 := model.VanadisChunk{ID: "c1", BuildID: "b1", Title: "Chunk 1", Instructions: "Inst 1", Status: "pending", Mode: "pr", Repo: "aerial", TargetFiles: []string{"pkg/a.go"}}
 	c2 := model.VanadisChunk{ID: "c2", BuildID: "b1", Title: "Chunk 2", Instructions: "Inst 2", Status: "pending", Mode: "pr", Repo: "aerial", DependsOn: []string{"c1"}, TargetFiles: []string{"pkg/b.go"}}
@@ -450,7 +450,7 @@ func TestBuildObject_HandlersWithAuthorityAndMockContext(t *testing.T) {
 		execTag: "UPDATE 1",
 	}.open()
 	eri := &mockEriClient{}
-	exec := executor.NewExecutor(t.TempDir(), eri, nil, "token", nil)
+	exec := executor.NewExecutor(t.TempDir(), eri, nil, "token", "azylman", nil)
 	bo := NewBuildObject("", nil).WithAuthority(st, exec)
 
 	ctx := makeObjectMockContext(t, "b-auth")

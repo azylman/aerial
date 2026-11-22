@@ -128,7 +128,7 @@ func TestCompletePRDeploymentMutation_SweepsEarlierChunks(t *testing.T) {
 			var exec *executor.Executor
 			bus := &recordingChunkBus{}
 			if tc.withExecutor {
-				exec = executor.NewExecutor("", &mockEriClient{}, bus, "token", nil)
+				exec = executor.NewExecutor("", &mockEriClient{}, bus, "token", "azylman", nil)
 			}
 			bo := NewBuildObject("", nil).WithAuthority(spy, exec)
 			err := bo.completePRDeploymentMutation(context.Background(), "b1", &BuildMutationRequest{Action: mutationChunkDeploySuccess, ChunkID: tc.deployID})

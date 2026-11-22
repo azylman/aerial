@@ -153,7 +153,7 @@ func TestUpdateActiveStep(t *testing.T) {
 					return "msg-123", tc.widgetErr
 				},
 			}
-			exec := executor.NewExecutor("", eri, nil, "", nil)
+			exec := executor.NewExecutor("", eri, nil, "", "azylman", nil)
 
 			var bo *BuildObject
 			if tc.nilStore {

@@ -82,7 +82,28 @@ func (promGitHubMetrics) IncTokenMint(result string) {
 type serviceYAML struct {
 	VanadisRestate struct {
 		GitHubCredential *string `yaml:"github_credential"`
+		// GitHubOwner qualifies bare repo names; read once at startup.
+		GitHubOwner string `yaml:"github_owner"`
 	} `yaml:"vanadis_restate"`
+}
+
+// ReadGitHubOwner reads vanadis_restate.github_owner from the service config
+// at path. A read or parse failure, or an unset or blank owner, is an error:
+// there is no code default, so vanadis-restate refuses to start without it.
+func ReadGitHubOwner(path string, readFile func(string) ([]byte, error)) (string, error) {
+	data, err := readFile(path)
+	if err != nil {
+		return "", fmt.Errorf("read github_owner config %s: %w", path, err)
+	}
+	var cfg serviceYAML
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		return "", fmt.Errorf("parse github_owner config %s: %w", path, err)
+	}
+	owner := strings.Trim(strings.TrimSpace(cfg.VanadisRestate.GitHubOwner), "/")
+	if owner == "" {
+		return "", fmt.Errorf("vanadis_restate.github_owner is not set in %s", path)
+	}
+	return owner, nil
 }
 
 // parseGitHubCredential resolves the github_credential choice from one read

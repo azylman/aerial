@@ -156,7 +156,7 @@ func InsertBuildChunk(ctx context.Context, tx pgx.Tx, buildID string, c model.Va
 	}
 	cRepo := ""
 	if cMode == "pr" {
-		cRepo = buildplan.NormalizeRepo(c.Repo)
+		cRepo = buildplan.TrimRepo(c.Repo)
 		if cRepo == "" {
 			return fmt.Errorf("chunk %s: repo is required for pr mode", c.ID)
 		}
@@ -244,7 +244,7 @@ func sameBuildCreation(a model.VanadisBuild, ac []model.VanadisChunk, b model.Va
 		}
 		repo := ""
 		if mode == "pr" {
-			repo = buildplan.NormalizeRepo(c.Repo)
+			repo = buildplan.TrimRepo(c.Repo)
 		}
 		return model.VanadisChunk{
 			ID: strings.TrimSpace(c.ID), ChunkIndex: c.ChunkIndex, Mode: mode, Repo: repo,

@@ -88,7 +88,7 @@ func TestFetchGitHubPullRequest(t *testing.T) {
 			defer srv.Close()
 			var exec *Executor
 			if !tc.nilExec {
-				exec = NewExecutor("", nil, nil, "", srv.Client())
+				exec = NewExecutor("", nil, nil, "", "azylman", srv.Client())
 				exec.GitHubAPIURL = srv.URL
 			}
 			pr, owner, full, err := exec.fetchGitHubPullRequest(context.Background(), tc.repo, tc.number)
@@ -135,7 +135,7 @@ func TestValidatePRHead(t *testing.T) {
 				_, _ = w.Write([]byte(tc.body))
 			}))
 			defer srv.Close()
-			exec := NewExecutor("", nil, nil, "", srv.Client())
+			exec := NewExecutor("", nil, nil, "", "azylman", srv.Client())
 			exec.GitHubAPIURL = srv.URL
 			err := exec.ValidatePRHead(context.Background(), tc.repo, 12, tc.head)
 			if tc.wantSkipped {
@@ -240,7 +240,7 @@ func TestValidateChunkPRAttachment(t *testing.T) {
 				_, _ = w.Write([]byte(tc.prBody))
 			}))
 			defer srv.Close()
-			exec := NewExecutor("", nil, nil, "", srv.Client())
+			exec := NewExecutor("", nil, nil, "", "azylman", srv.Client())
 			exec.GitHubAPIURL = srv.URL
 			build := model.VanadisBuild{ID: "b", ThreadID: "th-1"}
 			chunk := model.VanadisChunk{ID: "c1"}

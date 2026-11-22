@@ -73,7 +73,7 @@ func TestDeliverStatusWidgetFunction(t *testing.T) {
 				sender = mock
 			}
 
-			id, err := DeliverStatusWidget(sender, tc.req, now)
+			id, err := DeliverStatusWidget(sender, "azylman", tc.req, now)
 			if tc.expectErrSub != "" {
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), tc.expectErrSub)

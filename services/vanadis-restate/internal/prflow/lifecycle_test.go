@@ -383,7 +383,7 @@ func TestBuildObject_HandlePREventType_Deployment(t *testing.T) {
 			if tc.promptErr != nil {
 				eri.promptFn = func(context.Context, string, string) error { return tc.promptErr }
 			}
-			exec := executor.NewExecutor(t.TempDir(), eri, nil, "token", nil)
+			exec := executor.NewExecutor(t.TempDir(), eri, nil, "token", "azylman", nil)
 			f := NewFlow(spy, exec)
 
 			err := f.HandlePREventType(context.Background(), "b1", "c1", tc.event, tc.prEvent)
@@ -438,7 +438,7 @@ func newRemediationTestHarness(t *testing.T, spy *checkStatusSpyStore, dispatchE
 		eri.widgetFn = func(context.Context, executor.StatusWidgetRequest) (string, error) { return "", notifyErr }
 		bus = &mockBusError{err: notifyErr}
 	}
-	exec := executor.NewExecutor(t.TempDir(), eri, bus, "token", nil)
+	exec := executor.NewExecutor(t.TempDir(), eri, bus, "token", "azylman", nil)
 	f := NewFlow(spy, exec)
 	return f, eri
 }
@@ -774,7 +774,7 @@ func TestFlow_SelectUnattachedTargetChunk(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := SelectUnattachedTargetChunk(tc.build, tc.chunks, tc.ev)
+			got := SelectUnattachedTargetChunk("azylman", tc.build, tc.chunks, tc.ev)
 			if tc.want == "" {
 				assert.Nil(t, got)
 				return
@@ -849,7 +849,7 @@ func TestFlow_ResolveOrAttachPRChunk(t *testing.T) {
 					return "", errors.New("widget unavailable")
 				}
 			}
-			exec := executor.NewExecutor(t.TempDir(), eri, nil, "token", nil)
+			exec := executor.NewExecutor(t.TempDir(), eri, nil, "token", "azylman", nil)
 			exec.GitHubAPIURL = api.URL
 			spy := &checkStatusSpyStore{chunks: tc.chunks, attachErr: tc.attachErr, getBuildErr: tc.getBuildErr}
 			ex := exec
@@ -895,7 +895,7 @@ func TestFlow_ResumeNoPRChunk(t *testing.T) {
 					return "", errors.New("widget unavailable")
 				}
 			}
-			exec := executor.NewExecutor(t.TempDir(), eri, nil, "token", nil)
+			exec := executor.NewExecutor(t.TempDir(), eri, nil, "token", "azylman", nil)
 			f := NewFlow(spy, exec)
 			err := f.ResumeNoPRChunk(context.Background(), bld, chunks, 0)
 			assert.Equal(t, tc.wantErr, err != nil)
@@ -957,7 +957,7 @@ func TestFlow_ResumeActionChunk(t *testing.T) {
 				dispatchFn: func(context.Context, eriwire.BrainDispatchRequest) error { return tc.dispatchErr },
 				widgetFn:   func(context.Context, executor.StatusWidgetRequest) (string, error) { return "msg-1", tc.widgetErr },
 			}
-			f := NewFlow(&checkStatusSpyStore{}, executor.NewExecutor(t.TempDir(), eri, nil, "token", nil))
+			f := NewFlow(&checkStatusSpyStore{}, executor.NewExecutor(t.TempDir(), eri, nil, "token", "azylman", nil))
 			err := f.ResumeActionChunk(context.Background(), bld, chunks, 0, tc.k)
 			assert.Equal(t, tc.wantErr, err != nil)
 			require.NotNil(t, eri.lastDispatch)
@@ -1029,7 +1029,7 @@ func TestFlow_HandleClosedPREventNotifyBranches(t *testing.T) {
 			if tc.busErr != nil {
 				bus = &mockBusError{err: tc.busErr}
 			}
-			exec := executor.NewExecutor(t.TempDir(), eri, bus, "token", nil)
+			exec := executor.NewExecutor(t.TempDir(), eri, bus, "token", "azylman", nil)
 			f := NewFlow(spy, exec)
 			err := f.HandleClosedPREvent(context.Background(), "c1", pubsub.PRLifecycleEvent{Event: "closed_unmerged"})
 			assert.Equal(t, tc.wantErr, err != nil)
@@ -1067,7 +1067,7 @@ func TestFlow_HandleDeployFailureEventBranches(t *testing.T) {
 			if tc.promptErr != nil {
 				eri.dispatchFn = func(context.Context, eriwire.BrainDispatchRequest) error { return tc.promptErr }
 			}
-			exec := executor.NewExecutor(t.TempDir(), eri, nil, "token", nil)
+			exec := executor.NewExecutor(t.TempDir(), eri, nil, "token", "azylman", nil)
 			var st store.VanadisStore = spy
 			ex := exec
 			if tc.storeNil {
@@ -1105,7 +1105,7 @@ func TestFlow_HandleDeployFailureEvent_OccurrenceDistinguishesDispatchID(t *test
 		t.Helper()
 		spy := &checkStatusSpyStore{}
 		eri := &mockEriClient{}
-		f := NewFlow(spy, executor.NewExecutor(t.TempDir(), eri, nil, "token", nil))
+		f := NewFlow(spy, executor.NewExecutor(t.TempDir(), eri, nil, "token", "azylman", nil))
 		ev := pubsub.PRLifecycleEvent{Event: "deploy_failed", JobName: "synapse", Details: details}
 		if err := f.HandleDeployFailureEvent(ctx, "b1", "c1", ev); err != nil {
 			t.Fatal(err)
@@ -1144,7 +1144,7 @@ func TestFlow_CIFailureDetailsErrorPropagates(t *testing.T) {
 	}))
 	defer api.Close()
 	eri := &mockEriClient{}
-	exec := executor.NewExecutor(t.TempDir(), eri, nil, "token", nil)
+	exec := executor.NewExecutor(t.TempDir(), eri, nil, "token", "azylman", nil)
 	exec.GitHubAPIURL = api.URL
 	spy := &checkStatusSpyStore{}
 	f := NewFlow(spy, exec)
@@ -1183,7 +1183,7 @@ func TestFlow_HandlePREventTypeMergedBranches(t *testing.T) {
 	bus := &mockBusError{err: notifyErr}
 	eri.cancelFn = func(context.Context, string) error { return notifyErr }
 	eri.widgetFn = func(context.Context, executor.StatusWidgetRequest) (string, error) { return "", notifyErr }
-	exec := executor.NewExecutor(t.TempDir(), eri, bus, "token", nil)
+	exec := executor.NewExecutor(t.TempDir(), eri, bus, "token", "azylman", nil)
 	assert.NoError(t, NewFlow(notifySpy, exec).HandlePREventType(ctx, "b1", "c1", "merged", pubsub.PRLifecycleEvent{HeadSHA: "head", MergeSHA: "merge"}))
 	assert.Equal(t, "merged", notifySpy.lifecycleStatus)
 	assert.Equal(t, "c1", eri.lastCancel)
@@ -1217,7 +1217,7 @@ func TestFlow_NotifyChunkFailure_Guards(t *testing.T) {
 			if !tc.nilFlow {
 				var exec *executor.Executor
 				if !tc.nilExec {
-					exec = executor.NewExecutor(t.TempDir(), &mockEriClient{}, nil, "token", nil)
+					exec = executor.NewExecutor(t.TempDir(), &mockEriClient{}, nil, "token", "azylman", nil)
 				}
 				f = NewFlow(&checkStatusSpyStore{}, exec)
 			}
@@ -1252,7 +1252,7 @@ func TestFlow_IsEligibleUnattachedChunk(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			assert.Equal(t, tc.want, IsEligibleUnattachedChunk(tc.build, tc.chunk, tc.event))
+			assert.Equal(t, tc.want, IsEligibleUnattachedChunk("azylman", tc.build, tc.chunk, tc.event))
 		})
 	}
 }

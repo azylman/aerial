@@ -166,7 +166,7 @@ func ParseCreateBuildChunks(buildID string, now time.Time, rawChunks []CreateChu
 		}
 		repo := ""
 		if mode == "pr" {
-			repo = buildplan.NormalizeRepo(c.Repo)
+			repo = buildplan.TrimRepo(c.Repo)
 		}
 		effort, err := buildplan.NormalizeChunkEffort(c.Effort)
 		if err != nil {

@@ -18,7 +18,6 @@ const (
 	statusDeployFailed = "deploy_failed"
 	statusCIFailed     = "ci_failed"
 	chunkModeAction    = "action"
-	defaultRepoOwner   = "azylman"
 	effortLow          = "low"
 	effortMedium       = "medium"
 	effortHigh         = "high"
