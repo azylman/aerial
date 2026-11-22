@@ -1,4 +1,4 @@
-package main
+package store
 
 import (
 	"context"
@@ -85,7 +85,7 @@ func scanSessionResult(r *sql.Rows) (SessionResult, error) {
 		return SessionResult{}, fmt.Errorf("scan session result: %w", err)
 	}
 	out.Agent = out.Stack
-	if t, ok := parseDBTime(rawMtime); ok {
+	if t, ok := ParseDBTime(rawMtime); ok {
 		out.LastMtime = t
 	}
 	return out, nil
@@ -98,7 +98,7 @@ func scanStepResult(r *sql.Rows) (StepResult, error) {
 		return StepResult{}, fmt.Errorf("scan step result: %w", err)
 	}
 	out.Agent = out.Stack
-	if t, ok := parseDBTime(rawCreatedAt); ok {
+	if t, ok := ParseDBTime(rawCreatedAt); ok {
 		out.CreatedAt = t
 	}
 	return out, nil
@@ -120,14 +120,14 @@ func scanSessionWatermark(r *sql.Rows) (SessionWatermark, error) {
 		return SessionWatermark{}, fmt.Errorf("scan watermark: %w", err)
 	}
 	out.Agent = out.Stack
-	if t, ok := parseDBTime(rawMtime); ok {
+	if t, ok := ParseDBTime(rawMtime); ok {
 		out.LastMtime = t
 	}
 	return out, nil
 }
 
-// parseDBTime normalizes driver time representations without failing the row.
-func parseDBTime(v any) (time.Time, bool) {
+// ParseDBTime normalizes driver time representations without failing the row.
+func ParseDBTime(v any) (time.Time, bool) {
 	switch t := v.(type) {
 	case time.Time:
 		return t, !t.IsZero()
