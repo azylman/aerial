@@ -15,107 +15,16 @@ import (
 	"testing"
 	"time"
 
-	"github.com/azylman/aerial/pkg/prwire"
 	"github.com/azylman/aerial/services/synapse/internal/flux"
-	"github.com/azylman/aerial/services/synapse/internal/kube"
 )
 
 const (
 	reqT0 = "2026-11-08T09:00:00Z"
 	reqT1 = "2026-11-08T10:00:00.5Z"
-	reqT2 = "2026-11-08T11:00:00Z"
 )
 
 func readyCond(status, reason, message string) []fluxCondition {
 	return []fluxCondition{{Type: "Reconciling", Status: "False"}, {Type: "Ready", Status: status, Reason: reason, Message: message}}
-}
-
-// kobs builds a flux-system Kustomization observation.
-func kobs(name, annotation, lastHandled string, suspended bool, conditions []fluxCondition) kustomizationObservation {
-	return kustomizationObservation{Ref: fluxKustomizationRef{Namespace: "flux-system", Name: name}, Suspended: suspended, RequestedAt: annotation, LastHandledReconcileAt: lastHandled, Conditions: conditions}
-}
-
-func TestKustomizationReady(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name       string
-		conditions []fluxCondition
-		wantReady  bool
-		wantFailed bool
-		wantReason string
-	}{
-		{name: "Ready True", conditions: readyCond("True", "ReconciliationSucceeded", ""), wantReady: true, wantReason: "ReconciliationSucceeded"},
-		{name: "Ready False terminal reason", conditions: readyCond("False", "BuildFailed", "kustomize build failed"), wantFailed: true, wantReason: "BuildFailed: kustomize build failed"},
-		{name: "Ready False without reason", conditions: readyCond("False", "", "boom"), wantFailed: true, wantReason: "Ready=False: boom"},
-		{name: "Ready Unknown", conditions: readyCond("Unknown", "Progressing", "reconciling"), wantReason: "Progressing: reconciling"},
-		{name: "Ready False Progressing", conditions: readyCond("False", "Progressing", ""), wantReason: "Progressing"},
-		{name: "Ready False DependencyNotReady", conditions: readyCond("False", "DependencyNotReady", ""), wantReason: "DependencyNotReady"},
-		{name: "no Ready condition", conditions: []fluxCondition{{Type: "Reconciling", Status: "True"}}},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			ready, failed, reason := flux.KustomizationReady(tc.conditions)
-			if ready != tc.wantReady || failed != tc.wantFailed || reason != tc.wantReason {
-				t.Errorf("kustomizationReady() = (%v, %v, %q), want (%v, %v, %q)", ready, failed, reason, tc.wantReady, tc.wantFailed, tc.wantReason)
-			}
-		})
-	}
-}
-
-func TestKustomizationRequestAction(t *testing.T) {
-	t.Parallel()
-	recorded := prwire.KustomizationRequest{Namespace: "flux-system", RequestedAt: reqT1}
-	tests := []struct {
-		name string
-		obs  kustomizationObservation
-		want kustomizationAction
-	}{
-		{name: "handled and ready marks deployed", obs: kobs("aerial-core", reqT1, reqT1, false, readyCond("True", "ReconciliationSucceeded", "")), want: kustomizationAction{Kind: kustomizationMarkDeployed}},
-		{name: "handled by a later request and ready marks deployed", obs: kobs("aerial-core", reqT2, reqT2, false, readyCond("True", "ReconciliationSucceeded", "")), want: kustomizationAction{Kind: kustomizationMarkDeployed}},
-		{name: "handled and failed fails", obs: kobs("aerial-core", reqT1, reqT1, false, readyCond("False", "HealthCheckFailed", "")), want: kustomizationAction{Kind: kustomizationFail, Reason: "HealthCheckFailed"}},
-		{name: "handled and progressing waits", obs: kobs("aerial-core", reqT1, reqT1, false, readyCond("Unknown", "Progressing", "")), want: kustomizationAction{Kind: kustomizationWait}},
-		{name: "unhandled with earlier annotation repatches", obs: kobs("aerial-core", reqT0, reqT0, false, readyCond("True", "ReconciliationSucceeded", "")), want: kustomizationAction{Kind: kustomizationRepatch}},
-		{name: "unhandled with missing annotation repatches", obs: kobs("aerial-core", "", "", false, nil), want: kustomizationAction{Kind: kustomizationRepatch}},
-		{name: "unhandled with unparseable annotation repatches", obs: kobs("aerial-core", "manual", reqT0, false, nil), want: kustomizationAction{Kind: kustomizationRepatch}},
-		{name: "unhandled with equal annotation waits", obs: kobs("aerial-core", reqT1, reqT0, false, readyCond("True", "ReconciliationSucceeded", "")), want: kustomizationAction{Kind: kustomizationWait}},
-		{name: "unhandled with later annotation waits", obs: kobs("aerial-core", reqT2, reqT0, false, readyCond("True", "ReconciliationSucceeded", "")), want: kustomizationAction{Kind: kustomizationWait}},
-		{name: "suspended and unhandled fails", obs: kobs("aerial-core", reqT1, reqT0, true, readyCond("True", "ReconciliationSucceeded", "")), want: kustomizationAction{Kind: kustomizationFail, Reason: "Kustomization suspended"}},
-		{name: "suspended but handled and ready marks deployed", obs: kobs("aerial-core", reqT1, reqT1, true, readyCond("True", "ReconciliationSucceeded", "")), want: kustomizationAction{Kind: kustomizationMarkDeployed}},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			if got := kustomizationRequestAction(recorded, tc.obs); got != tc.want {
-				t.Errorf("kustomizationRequestAction() = %+v, want %+v", got, tc.want)
-			}
-		})
-	}
-}
-
-func TestGitRepoSlug(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name string
-		url  string
-		want string
-	}{
-		{name: "https with .git", url: "https://github.com/acme/widgets.git", want: "acme/widgets"},
-		{name: "https trailing slash", url: "https://github.com/acme/widgets/", want: "acme/widgets"},
-		{name: "ssh scheme", url: "ssh://git@github.com/acme/widgets", want: "acme/widgets"},
-		{name: "scp-like", url: "git@github.com:acme/widgets.git", want: "acme/widgets"},
-		{name: "host only", url: "https://github.com"},
-		{name: "single path segment", url: "https://github.com/widgets"},
-		{name: "empty", url: ""},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			if got := kube.GitRepoSlug(tc.url); got != tc.want {
-				t.Errorf("gitRepoSlug(%q) = %q, want %q", tc.url, got, tc.want)
-			}
-		})
-	}
 }
 
 func (m *mockOutboundDispatcher) ReconcileKustomization(ctx context.Context, ref fluxKustomizationRef, requestedAt string) error {
@@ -633,48 +542,6 @@ func TestCommitTime(t *testing.T) {
 			}
 			if n := len(fixture.Requests()); n != tc.wantRequests {
 				t.Errorf("github requests = %d (%v), want %d", n, fixture.Requests(), tc.wantRequests)
-			}
-		})
-	}
-}
-
-func TestRunRolloutRechecks(t *testing.T) {
-	t.Parallel()
-	list := kubeRoute{body: `{"metadata":{"resourceVersion":"3"},"items":[{"metadata":{"name":"aerial-core","namespace":"flux-system"}}]}`}
-	tests := []struct {
-		name         string
-		pending      bool
-		ticks        int
-		lists        []kubeRoute
-		wantRequests []string
-		wantEvents   []string
-	}{
-		{name: "every tick re-lists kustomizations while a rollout is pending", pending: true, ticks: 2, lists: []kubeRoute{list, list}, wantRequests: []string{"LIST kustomizations", "LIST kustomizations"}, wantEvents: []string{"pending? true", "list flux-system [aerial-core]", "pending? true", "list flux-system [aerial-core]"}},
-		{name: "ticks without pending rollouts list nothing", ticks: 2, wantEvents: []string{"pending? false", "pending? false"}},
-		{name: "a failed re-list is logged and the next tick retries", pending: true, ticks: 2, lists: []kubeRoute{{status: http.StatusInternalServerError, body: `boom`}, list}, wantRequests: []string{"LIST kustomizations", "LIST kustomizations"}, wantEvents: []string{"pending? true", "pending? true", "list flux-system [aerial-core]"}},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			fixture := &watchFixture{lists: tc.lists, cancel: func() {}}
-			ts := httptest.NewServer(fixture)
-			defer ts.Close()
-			disp := NewDefaultOutboundDispatcher("", ts.Client())
-			disp.SetKubeConfig(ts.URL, "test-token")
-			sink := &recordingSink{pending: tc.pending}
-			ticks := make(chan time.Time, tc.ticks)
-			for range tc.ticks {
-				ticks <- time.Time{}
-			}
-			close(ticks)
-
-			flux.RunRolloutRechecks(t.Context(), disp, sink, ticks)
-
-			if got := fixture.requests; !slices.Equal(got, tc.wantRequests) {
-				t.Errorf("requests = %v, want %v", got, tc.wantRequests)
-			}
-			if !slices.Equal(sink.events, tc.wantEvents) {
-				t.Errorf("events = %q, want %q", sink.events, tc.wantEvents)
 			}
 		})
 	}

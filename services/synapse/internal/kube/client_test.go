@@ -426,22 +426,6 @@ func TestClient_DiscoverRepoKustomizations(t *testing.T) {
 func TestPureDecoders(t *testing.T) {
 	t.Parallel()
 
-	// GitRepoSlug
-	slugTests := []struct {
-		url  string
-		want string
-	}{
-		{url: "https://github.com/azylman/aerial.git", want: "azylman/aerial"},
-		{url: "ssh://git@github.com/azylman/aerial", want: "azylman/aerial"},
-		{url: "git@github.com:azylman/aerial.git", want: "azylman/aerial"},
-		{url: "invalid", want: ""},
-	}
-	for _, tc := range slugTests {
-		if got := GitRepoSlug(tc.url); got != tc.want {
-			t.Errorf("GitRepoSlug(%q) = %q, want %q", tc.url, got, tc.want)
-		}
-	}
-
 	// CleanRevisionSHA
 	shaTests := []struct {
 		rev  string
@@ -750,18 +734,6 @@ func TestKubeClient_FinalPushes(t *testing.T) {
 	}
 }
 
-func TestKubeClient_Over95Percent(t *testing.T) {
-	t.Parallel()
-
-	// 1. GitRepoSlug edge cases
-	if s := GitRepoSlug("https://github.com"); s != "" {
-		t.Errorf("expected empty slug for https://github.com, got %q", s)
-	}
-	if s := GitRepoSlug("git@github.com:"); s != "" {
-		t.Errorf("expected empty slug for git@github.com:, got %q", s)
-	}
-}
-
 func TestKubeClient_PushOver95_DecodingAndEdgeCases(t *testing.T) {
 	t.Parallel()
 
@@ -855,5 +827,32 @@ func TestKubeClient_PushOver95_ServerErrors(t *testing.T) {
 	cClosed.SetKubeConfig(tsClosed.URL, "tok")
 	if _, watchErr := cClosed.watchKube(ctx, "/path", url.Values{}, "1"); watchErr == nil {
 		t.Errorf("expected network failure from watchKube")
+	}
+}
+
+func TestGitRepoSlug(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		url  string
+		want string
+	}{
+		{"https with .git", "https://github.com/acme/widgets.git", "acme/widgets"},
+		{"https trailing slash", "https://github.com/acme/widgets/", "acme/widgets"},
+		{"ssh scheme", "ssh://git@github.com/acme/widgets", "acme/widgets"},
+		{"scp-like", "git@github.com:acme/widgets.git", "acme/widgets"},
+		{"host only", "https://github.com", ""},
+		{"scp-like without path", "git@github.com:", ""},
+		{"single path segment", "https://github.com/widgets", ""},
+		{"not a url", "invalid", ""},
+		{"empty", "", ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := GitRepoSlug(tc.url); got != tc.want {
+				t.Errorf("GitRepoSlug(%q) = %q, want %q", tc.url, got, tc.want)
+			}
+		})
 	}
 }
