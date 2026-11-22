@@ -472,6 +472,9 @@ func (b *BuildObject) OnDispatchOutcome(ctx restate.ObjectContext, ev pubsub.Dis
 	}
 	if !applied {
 		if b.executor != nil && isVerdictlessDispatchStatus(ev.Status) {
+			if _, _, ok := executor.ParseCIRemediationDispatchID(ev.VanadisChunkID, ev.DispatchID); ok {
+				return b.handleCIRemediationTurnEnded(ctx, ev)
+			}
 			return b.handleNoPRTurnOutcome(ctx, ev)
 		}
 		return nil
@@ -482,6 +485,33 @@ func (b *BuildObject) OnDispatchOutcome(ctx restate.ObjectContext, ev pubsub.Dis
 		return ToTerminalErr(tErr)
 	}
 	return nil
+}
+
+// handleCIRemediationTurnEnded pauses a PR chunk whose CI fix-up turn ended
+// without a push, RoboRev override, or fail_chunk, then reconciles so the
+// chunk failure wake fires. GitHub and store I/O run inside one journaled step.
+func (b *BuildObject) handleCIRemediationTurnEnded(ctx restate.ObjectContext, ev pubsub.DispatchOutcomeEvent) error {
+	buildID := restate.Key(ctx)
+	chunkID := strings.TrimSpace(ev.VanadisChunkID)
+	if _, err := RunJournaled(ctx, labelOnDispatchOutcome, "handle-cifail-turn-ended", func(rc restate.RunContext) (bool, error) {
+		return true, githubClientErrToTerminal(b.flow().HandleCIRemediationTurnEnded(rc, buildID, chunkID, ev.DispatchID))
+	}); err != nil {
+		return err
+	}
+	if _, tErr := b.executeObjectTransition(b.getRuntime(ctx), labelReconcileAfterDispatch, nil); tErr != nil {
+		return ToTerminalErr(tErr)
+	}
+	return nil
+}
+
+// githubClientErrToTerminal makes non-rate-limited GitHub 4xx responses
+// terminal; transport, 5xx and rate-limit failures stay retryable.
+func githubClientErrToTerminal(err error) error {
+	var se *githubapi.StatusError
+	if errors.As(err, &se) && !se.RateLimited && se.StatusCode >= 400 && se.StatusCode < 500 {
+		return restate.ToTerminalError(err, restate.WithErrorCode(restate.Code(se.StatusCode)))
+	}
+	return err
 }
 
 // applyDispatchOutcome applies a dispatch outcome inside the journaled

@@ -139,38 +139,72 @@ type gitHubIssueComment struct {
 	Body string `json:"body"`
 }
 
-func (c *Client) fetchLatestRoboRevCommentChecked(ctx context.Context, repo string, prNumber int, headSHA string) (string, error) {
+// fetchIssueCommentsChecked reads the first page of PR issue comments. It
+// returns a retryable error for transport failures and retryable statuses, and
+// no comments for any other non-200 response or malformed body.
+func (c *Client) fetchIssueCommentsChecked(ctx context.Context, repo string, prNumber int) ([]gitHubIssueComment, error) {
 	if c == nil || c.HTTPClient == nil {
-		return "", nil
+		return nil, nil
 	}
 	repoPath := githubapi.QualifyRepo(c.gitHubOwner, repo)
 	if repoPath == "" || prNumber <= 0 {
-		return "", nil
+		return nil, nil
 	}
-	var comments []gitHubIssueComment
 	path := fmt.Sprintf("/repos/%s/issues/%d/comments?per_page=100", repoPath, prNumber)
 	req, err := githubapi.NewRequest(ctx, c.GitHubAPIURL, c.GitHubToken, http.MethodGet, path, nil)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	resp, err := c.HTTPClient.Do(req)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	defer resp.Body.Close()
 
 	if githubapi.IsRetryable(resp) {
-		return "", fmt.Errorf("github api error (%d): %s", resp.StatusCode, http.StatusText(resp.StatusCode))
+		return nil, fmt.Errorf("github api error (%d): %s", resp.StatusCode, http.StatusText(resp.StatusCode))
 	}
 	if resp.StatusCode != http.StatusOK {
-		return "", nil
+		return nil, nil
 	}
 	respBody, rErr := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
 	if rErr != nil {
-		return "", rErr
+		return nil, rErr
 	}
+	var comments []gitHubIssueComment
 	if uErr := json.Unmarshal(respBody, &comments); uErr != nil {
-		return "", nil
+		return nil, nil
+	}
+	return comments, nil
+}
+
+// HasRoboRevOverrideChecked reports whether the PR carries the override comment
+// `aerial-pr.sh override-roborev` posts for headSHA: a "## roborev-override"
+// comment naming the head's 7-character short SHA.
+func (c *Client) HasRoboRevOverrideChecked(ctx context.Context, repo string, prNumber int, headSHA string) (bool, error) {
+	shortSHA := strings.ToLower(strings.TrimSpace(headSHA))
+	if len(shortSHA) > 7 {
+		shortSHA = shortSHA[:7]
+	}
+	if shortSHA == "" {
+		return false, nil
+	}
+	comments, err := c.fetchIssueCommentsChecked(ctx, repo, prNumber)
+	if err != nil {
+		return false, err
+	}
+	for _, comment := range comments {
+		if strings.Contains(comment.Body, "## roborev-override") && strings.Contains(comment.Body, shortSHA) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (c *Client) fetchLatestRoboRevCommentChecked(ctx context.Context, repo string, prNumber int, headSHA string) (string, error) {
+	comments, err := c.fetchIssueCommentsChecked(ctx, repo, prNumber)
+	if err != nil {
+		return "", err
 	}
 
 	shortSHA := strings.TrimSpace(headSHA)
