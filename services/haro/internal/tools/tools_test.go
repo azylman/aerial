@@ -5,24 +5,25 @@ import (
 	"database/sql"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/azylman/aerial/pkg/pgtest"
 	"github.com/azylman/aerial/services/haro/internal/config"
 	"github.com/azylman/aerial/services/haro/internal/model"
 	"github.com/azylman/aerial/services/haro/internal/store"
 	"github.com/azylman/aerial/services/haro/internal/testutil"
 )
 
+func TestMain(m *testing.M) {
+	os.Exit(pgtest.Main(m))
+}
+
 func openToolsTestDB(t *testing.T) *sql.DB {
 	t.Helper()
-	db, err := testutil.OpenSQLiteTestDB(":memory:")
-	if err != nil {
-		t.Fatalf("OpenSQLiteTestDB failed: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-	return db
+	return testutil.NewDB(t)
 }
 
 // newMemoryToolHandler opens a hermetic in-memory haro DB and returns a
@@ -180,11 +181,7 @@ func TestFormatSchedulesSummary_Table(t *testing.T) {
 // newClosedToolHandler returns a handler over an already-closed database.
 func newClosedToolHandler(t *testing.T) *ToolHandler {
 	t.Helper()
-	db, err := sql.Open("sqlite", ":memory:")
-	if err != nil {
-		t.Fatalf("sql.Open err = %v", err)
-	}
-	_ = db.Close()
+	db := testutil.NewClosedDB(t)
 	return NewToolHandler(&config.Config{DatabaseURL: ":memory:", Timezone: "America/Los_Angeles"}, db)
 }
 
@@ -299,8 +296,8 @@ func seedToolSchedules(t *testing.T, db *sql.DB) {
 		t.Fatalf("expected non-zero CreatedAt, got %+v, err: %v", listZero, err)
 	}
 	for _, stmt := range []string{
-		"INSERT INTO cron_schedules (id, target_id, title_prefix, cron_expr, prompt, timezone, next_run_at, enabled, created_at, effort) VALUES ('c-empty', 'ch-raw', '', '0 0 * * *', 'p', 'UTC', ?, TRUE, ?, '')",
-		"INSERT INTO one_shot_schedules (id, thread_id, prompt, run_at, created_at, effort) VALUES ('o-empty', 'ch-raw', 'p', ?, ?, '')",
+		"INSERT INTO cron_schedules (id, target_id, title_prefix, cron_expr, prompt, timezone, next_run_at, enabled, created_at, effort) VALUES ('c-empty', 'ch-raw', '', '0 0 * * *', 'p', 'UTC', $1, TRUE, $2, '')",
+		"INSERT INTO one_shot_schedules (id, thread_id, prompt, run_at, created_at, effort) VALUES ('o-empty', 'ch-raw', 'p', $1, $2, '')",
 	} {
 		if _, err := db.Exec(stmt, now, now); err != nil {
 			t.Fatalf("raw insert err = %v", err)

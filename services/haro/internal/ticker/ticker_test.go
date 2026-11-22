@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -12,6 +13,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/azylman/aerial/pkg/eriwire"
+	"github.com/azylman/aerial/pkg/pgtest"
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/pkg/pubsubtest"
 	"github.com/azylman/aerial/services/haro/internal/dispatch"
@@ -20,14 +22,20 @@ import (
 	"github.com/azylman/aerial/services/haro/internal/testutil"
 )
 
+func TestMain(m *testing.M) {
+	os.Exit(pgtest.Main(m))
+}
+
 func openTickerTestDB(t *testing.T) *sql.DB {
 	t.Helper()
-	db, err := testutil.OpenSQLiteTestDB(":memory:")
-	if err != nil {
-		t.Fatalf("OpenSQLiteTestDB failed: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-	return db
+	return testutil.NewDB(t)
+}
+
+// failTriggerSQL returns DDL that makes every op (UPDATE or DELETE) on table
+// raise msg, sabotaging only the calling test's private database.
+func failTriggerSQL(table, op, msg string) string {
+	return fmt.Sprintf(`CREATE FUNCTION fail_%[1]s_%[2]s() RETURNS trigger LANGUAGE plpgsql AS $$BEGIN RAISE EXCEPTION '%[3]s'; END$$;
+CREATE TRIGGER fail_%[1]s_%[2]s BEFORE %[2]s ON %[1]s FOR EACH ROW EXECUTE FUNCTION fail_%[1]s_%[2]s();`, table, op, msg)
 }
 
 type fakeDispatcher struct {
@@ -147,7 +155,7 @@ func runEvaluateDueSchedulesCase(t *testing.T, tc evaluateDueSchedulesTestCase) 
 	if tc.wantRunStatus == "" {
 		return
 	}
-	row := db.QueryRowContext(ctx, "SELECT id, status, error, thread_id, message_id FROM schedule_runs WHERE schedule_id = ?", scheduleID)
+	row := db.QueryRowContext(ctx, "SELECT id, status, error, thread_id, message_id FROM schedule_runs WHERE schedule_id = $1", scheduleID)
 	var runID, status, errMsg, threadID, messageID string
 	if err := row.Scan(&runID, &status, &errMsg, &threadID, &messageID); err != nil {
 		t.Fatalf("failed to query schedule_runs for %s: %v", scheduleID, err)
@@ -442,7 +450,7 @@ func assertHeartbeatScheduleRuns(t *testing.T, db *sql.DB, tc evaluateDueHeartbe
 	t.Helper()
 	var runCount int
 	var runStatus, runPrompt, runType string
-	_ = db.QueryRow("SELECT COUNT(*), COALESCE(MAX(status), ''), COALESCE(MAX(prompt), ''), COALESCE(MAX(schedule_type), '') FROM schedule_runs WHERE schedule_id = ?", tc.hbID).Scan(&runCount, &runStatus, &runPrompt, &runType)
+	_ = db.QueryRow("SELECT COUNT(*), COALESCE(MAX(status), ''), COALESCE(MAX(prompt), ''), COALESCE(MAX(schedule_type), '') FROM schedule_runs WHERE schedule_id = $1", tc.hbID).Scan(&runCount, &runStatus, &runPrompt, &runType)
 
 	if tc.seedRunningRun {
 		if runCount != 1 || runStatus != "running" {
@@ -814,7 +822,7 @@ func TestHandleDispatchOutcome(t *testing.T) {
 			name:             "outcome update failure returns error",
 			seedScheduleType: "heartbeat", seedScheduleID: "hb-upd-fail", seedRunID: "run-upd-fail",
 			event:       &pubsub.DispatchOutcomeEvent{DispatchID: "run-upd-fail", Status: "completed", StartedAt: now, CompletedAt: now.Add(time.Second)},
-			sabotageSQL: "CREATE TRIGGER trg_fail_run_upd BEFORE UPDATE ON schedule_runs BEGIN SELECT RAISE(ABORT, 'forced update failure'); END;",
+			sabotageSQL: failTriggerSQL("schedule_runs", "UPDATE", "forced update failure"),
 			wantErr:     true, wantDurationMs: -1,
 		},
 		{name: "empty dispatch id returns nil", event: &pubsub.DispatchOutcomeEvent{DispatchID: "   "}, wantDurationMs: -1},
@@ -1030,12 +1038,12 @@ func TestTicker_EvaluateFaults(t *testing.T) {
 	tests := []evaluateFaultTestCase{
 		{
 			name: "cron advance failure skips dispatch without run", seedCron: faultCron("cron-adv", due),
-			sabotageSQL:  "CREATE TRIGGER trg_fail_cron_upd BEFORE UPDATE ON cron_schedules BEGIN SELECT RAISE(ABORT, 'forced advance failure'); END;",
+			sabotageSQL:  failTriggerSQL("cron_schedules", "UPDATE", "forced advance failure"),
 			wantDispatch: 0, wantRuns: 0,
 		},
 		{
 			name: "stale cron advance failure still records stale run", seedCron: faultCron("cron-adv-stale", stale),
-			sabotageSQL:  "CREATE TRIGGER trg_fail_cron_upd2 BEFORE UPDATE ON cron_schedules BEGIN SELECT RAISE(ABORT, 'forced advance failure'); END;",
+			sabotageSQL:  failTriggerSQL("cron_schedules", "UPDATE", "forced advance failure"),
 			wantDispatch: 0, wantRuns: 1,
 		},
 		{
@@ -1048,7 +1056,7 @@ func TestTicker_EvaluateFaults(t *testing.T) {
 		},
 		{
 			name: "one-shot delete failure skips dispatch without run", seedOneShot: faultOneShot("os-del", due),
-			sabotageSQL:  "CREATE TRIGGER trg_fail_os_del BEFORE DELETE ON one_shot_schedules BEGIN SELECT RAISE(ABORT, 'forced delete failure'); END;",
+			sabotageSQL:  failTriggerSQL("one_shot_schedules", "DELETE", "forced delete failure"),
 			wantDispatch: 0, wantRuns: 0,
 		},
 		{
@@ -1061,12 +1069,12 @@ func TestTicker_EvaluateFaults(t *testing.T) {
 		},
 		{
 			name: "heartbeat advance failure skips dispatch without run", seedBeat: faultHeartbeat("hb-adv", due),
-			sabotageSQL:  "CREATE TRIGGER trg_fail_hb_upd BEFORE UPDATE ON heartbeat_schedules BEGIN SELECT RAISE(ABORT, 'forced advance failure'); END;",
+			sabotageSQL:  failTriggerSQL("heartbeat_schedules", "UPDATE", "forced advance failure"),
 			wantDispatch: 0, wantRuns: 0,
 		},
 		{
 			name: "stale heartbeat advance failure still records stale run", seedBeat: faultHeartbeat("hb-adv-stale", stale),
-			sabotageSQL:  "CREATE TRIGGER trg_fail_hb_upd2 BEFORE UPDATE ON heartbeat_schedules BEGIN SELECT RAISE(ABORT, 'forced advance failure'); END;",
+			sabotageSQL:  failTriggerSQL("heartbeat_schedules", "UPDATE", "forced advance failure"),
 			wantDispatch: 0, wantRuns: 1,
 		},
 		{
@@ -1151,7 +1159,7 @@ func TestTicker_EvaluateCancelledMidLoop(t *testing.T) {
 				t.Errorf("dispatched = %d, want exactly 1 before cancellation", got)
 			}
 			var secondRuns int
-			if err := db.QueryRowContext(context.Background(), "SELECT COUNT(*) FROM schedule_runs WHERE schedule_id = ?", seedIDs[1]).Scan(&secondRuns); err != nil {
+			if err := db.QueryRowContext(context.Background(), "SELECT COUNT(*) FROM schedule_runs WHERE schedule_id = $1", seedIDs[1]).Scan(&secondRuns); err != nil {
 				t.Fatalf("counting second schedule runs failed: %v", err)
 			}
 			if secondRuns != 0 {

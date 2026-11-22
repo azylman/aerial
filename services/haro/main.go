@@ -30,7 +30,6 @@ import (
 
 // RunApp bootstraps the scheduler MCP HTTP server with graceful shutdown.
 var (
-	openDBFn = store.OpenDB
 	newBusFn = func(ctx context.Context, url string) (pubsub.Bus, error) {
 		return pubsub.NewJetStreamBus(ctx, url)
 	}
@@ -115,7 +114,7 @@ func RunApp(ctx context.Context, cfg *config.Config) error {
 		return fmt.Errorf("app: eri URL cannot be empty")
 	}
 
-	database, err := openDBFn(ctx, cfg)
+	database, err := store.OpenDB(ctx, cfg)
 	if err != nil {
 		return err
 	}
