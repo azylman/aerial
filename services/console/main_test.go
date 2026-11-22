@@ -22,18 +22,19 @@ import (
 
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/azylman/aerial/pkg/httpkit"
+	"github.com/azylman/aerial/pkg/httpkittest"
 )
 
 func TestStatusHandler(t *testing.T) {
 	mockServer := newStatusMockServer(t)
 	defer mockServer.Close()
+	k8sAPI := newFakeK8sAPI(t)
 
 	tests := append(statusHandlerPrimaryCases(), statusHandlerSecondaryCases()...)
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			runStatusHandlerCase(t, tc, mockServer.URL)
+			runStatusHandlerCase(t, tc, mockServer.URL, k8sAPI.URL)
 		})
 	}
 }
@@ -99,16 +100,6 @@ func newStatusMockServer(t *testing.T) *httptest.Server {
 					{ID: "b-1", Agent: "agent-gamma"},
 				},
 			})
-		case strings.HasPrefix(r.URL.Path, "/k8s/ok/apis/apps/v1/namespaces/default/deployments"):
-			_, _ = w.Write([]byte(`{"items":[{"metadata":{"name":"k8s-brain"},"spec":{"replicas":1},"status":{"replicas":1,"readyReplicas":1}}]}`))
-		case strings.HasPrefix(r.URL.Path, "/k8s/ok/api/v1/namespaces/default/pods"):
-			_, _ = w.Write([]byte(`{"items":[{"metadata":{"name":"k8s-brain-pod","labels":{"app.kubernetes.io/name":"k8s-brain"}},"status":{"phase":"Running","containerStatuses":[{"name":"k8s-brain","ready":true,"state":{}}]}}]}`))
-		case strings.HasPrefix(r.URL.Path, "/k8s/degraded/apis/apps/v1/namespaces/default/deployments"):
-			_, _ = w.Write([]byte(`{"items":[{"metadata":{"name":"k8s-brain"},"spec":{"replicas":1},"status":{"replicas":1,"readyReplicas":0}}]}`))
-		case strings.HasPrefix(r.URL.Path, "/k8s/degraded/api/v1/namespaces/default/pods"):
-			_, _ = w.Write([]byte(`{"items":[{"metadata":{"name":"k8s-brain-pod","labels":{"app.kubernetes.io/name":"k8s-brain"}},"status":{"phase":"Running","containerStatuses":[{"name":"k8s-brain","ready":false,"state":{"waiting":{"reason":"CrashLoopBackOff"}}}]}}]}`))
-		case strings.HasPrefix(r.URL.Path, "/k8s/error500"):
-			http.Error(w, "k8s server error", http.StatusInternalServerError)
 		default:
 			http.NotFound(w, r)
 		}
@@ -140,7 +131,7 @@ func statusHandlerPrimaryCases() []statusTestCase {
 			name: "EnrichedFields", yamlContent: "console:\n  quick_launch_links:\n    - name: \"HOME\"\n      url: \"https://home.example.com\"\n",
 			wantCode: http.StatusOK, wantQuickLink: "HOME",
 		},
-		{name: "DegradedClusterStatus", k8sPath: "/k8s/degraded", wantCode: http.StatusOK, wantClusterStatus: "degraded"},
+		{name: "DegradedClusterStatus", k8sPath: "/degraded", wantCode: http.StatusOK, wantClusterStatus: "degraded"},
 	}
 }
 
@@ -167,13 +158,13 @@ func statusHandlerSecondaryCases() []statusTestCase {
 			wantIsDeploying:   true,
 		},
 		{name: "MethodNotAllowed", method: http.MethodPost, wantCode: http.StatusMethodNotAllowed},
-		{name: "K8s_State_Success", k8sPath: "/k8s/ok", wantCode: http.StatusOK, wantServiceName: "k8s-brain"},
-		{name: "K8s_Error_FallbackServices", k8sPath: "/k8s/error500", wantCode: http.StatusOK, wantMinServices: 1},
+		{name: "K8s_State_Success", k8sPath: "/ok", wantCode: http.StatusOK, wantServiceName: "k8s-brain"},
+		{name: "K8s_Error_FallbackServices", k8sPath: "/dep500", wantCode: http.StatusOK, wantMinServices: 1},
 	}
 }
 
-// statusTestCase routes each upstream to the shared mock server by path suffix; an empty
-// suffix leaves that upstream unconfigured.
+// statusTestCase routes each upstream to the shared mock server (k8sPath: the fake k8s API)
+// by path suffix; an empty suffix leaves that upstream unconfigured.
 type statusTestCase struct {
 	name                 string
 	method               string
@@ -206,7 +197,7 @@ func statusMockURL(mockServerURL, path string) string {
 	return mockServerURL + path
 }
 
-func runStatusHandlerCase(t *testing.T, tc statusTestCase, mockServerURL string) {
+func runStatusHandlerCase(t *testing.T, tc statusTestCase, mockServerURL, k8sURL string) {
 	t.Helper()
 	if tc.pollerRuns != nil {
 		oldPoller := globalGHPoller
@@ -227,7 +218,7 @@ func runStatusHandlerCase(t *testing.T, tc statusTestCase, mockServerURL string)
 	}
 
 	brainURL := statusMockURL(mockServerURL, tc.brainPath)
-	kubeAPIServer := statusMockURL(mockServerURL, tc.k8sPath)
+	kubeAPIServer := statusMockURL(k8sURL, tc.k8sPath)
 	haroURL := statusMockURL(mockServerURL, tc.haroPath)
 	vanadisURL := statusMockURL(mockServerURL, tc.vanadisPath)
 
@@ -460,7 +451,7 @@ func TestConsoleServerLifecycle(t *testing.T) {
 
 	cfg := ConsoleConfig{
 		Port:       port,
-		BrainURL:   "http://127.0.0.1:54321",
+		BrainURL:   downServerURL(t),
 		GHRepo:     "azylman/aerial",
 		GHToken:    "dummy",
 		APIBaseURL: ghMock.URL,
@@ -868,11 +859,7 @@ func TestSetupConsoleMux_StaticRouting(t *testing.T) {
 }
 
 func TestCoverageFlushEndpoint(t *testing.T) {
-	oldFn, oldMetaFn := httpkit.WriteCountersDirFn, httpkit.WriteMetaDirFn
-	t.Cleanup(func() { httpkit.WriteCountersDirFn, httpkit.WriteMetaDirFn = oldFn, oldMetaFn })
-	var flushes []string
-	httpkit.WriteCountersDirFn = func(string) error { flushes = append(flushes, "counters"); return nil }
-	httpkit.WriteMetaDirFn = func(string) error { flushes = append(flushes, "meta"); return nil }
+	httpkittest.StubCoverageWriters(t, nil, nil)
 	h := SetupConsoleMux(ConsoleConfig{}, nil)
 
 	tests := []struct {
@@ -884,14 +871,10 @@ func TestCoverageFlushEndpoint(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			flushes = nil
 			rr := httptest.NewRecorder()
 			h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, tc.path, http.NoBody))
-			if rr.Code != http.StatusOK {
-				t.Errorf("GET %s = %d, want 200", tc.path, rr.Code)
-			}
-			if got := strings.Join(flushes, ","); got != "meta,counters" {
-				t.Errorf("flushes = %q, want %q", got, "meta,counters")
+			if rr.Code != http.StatusOK || rr.Header().Get("Content-Type") != "application/x-tar" {
+				t.Errorf("GET %s = %d %q, want 200 \"application/x-tar\"", tc.path, rr.Code, rr.Header().Get("Content-Type"))
 			}
 		})
 	}

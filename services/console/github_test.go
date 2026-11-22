@@ -347,7 +347,7 @@ func runPollAndDecodeSpecialPoller(ctx context.Context, t *testing.T, tc githubP
 		return nil, true
 	case "unreachable":
 		badPoller := NewMultiGitHubPoller([]string{"azylman/aerial"}, "")
-		badPoller.apiBaseURL = "http://127.0.0.1:54321"
+		badPoller.apiBaseURL = downServerURL(t)
 		if badPoller.pollOnce(ctx) {
 			t.Errorf("expected false on network failure")
 		}
