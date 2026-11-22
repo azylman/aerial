@@ -5,11 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
-	"net/http/httptest"
 	"sync"
 	"testing"
 
 	"github.com/azylman/aerial/pkg/eriwire"
+	"github.com/azylman/aerial/pkg/restateingresstest"
 )
 
 // ingressCall is one request the fake Restate ingress received.
@@ -17,32 +17,6 @@ type ingressCall struct {
 	path string
 	key  string
 	body map[string]any
-}
-
-// ingressRecorder is a declarative fake Restate ingress (and eri HTTP
-// fallback) that records each request and replies with status and body.
-type ingressRecorder struct {
-	status int
-	body   string
-
-	mu    sync.Mutex
-	calls []ingressCall
-}
-
-func (r *ingressRecorder) ServeHTTP(w http.ResponseWriter, req *http.Request) {
-	var body map[string]any
-	_ = json.NewDecoder(req.Body).Decode(&body)
-	r.mu.Lock()
-	r.calls = append(r.calls, ingressCall{path: req.URL.Path, key: req.Header.Get("Idempotency-Key"), body: body})
-	r.mu.Unlock()
-	w.WriteHeader(r.status)
-	_, _ = w.Write([]byte(r.body))
-}
-
-func (r *ingressRecorder) Calls() []ingressCall {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return append([]ingressCall(nil), r.calls...)
 }
 
 // TestRestateEriClient_PromptAgent pins the agent-scoped Restate prompt:
@@ -80,16 +54,9 @@ func TestRestateEriClient_PromptAgent(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			ingress := &ingressRecorder{status: tc.status}
-			eri := &ingressRecorder{status: http.StatusOK}
-			ingressSrv, eriSrv := httptest.NewServer(ingress), httptest.NewServer(eri)
-			t.Cleanup(ingressSrv.Close)
-			t.Cleanup(eriSrv.Close)
-			restateURL := ingressSrv.URL
-			if tc.noRestate {
-				restateURL = ""
-			}
-			client := NewRestateEriClient(restateURL, eriSrv.URL, "aerial", nil)
+			ingress, eri := restateClientFake(t, "/ThreadSession-agent-alpha/T1/Enqueue", tc.status, "")
+			restateURL, eriURL := restateClientURLs(ingress, eri, tc.noRestate, false, "")
+			client := NewRestateEriClient(restateURL, eriURL, "aerial", nil)
 			err := client.PromptAgent(context.Background(), tc.agent, tc.thread, "wake", tc.key)
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("PromptAgent err = %v, wantErr %v", err, tc.wantErr)
@@ -122,24 +89,18 @@ func TestRestateEriClient_DispatchRestate(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			ingress := &ingressRecorder{status: http.StatusOK, body: tc.body}
-			eri := &ingressRecorder{status: http.StatusOK, body: `{"status":"accepted","dispatch_id":"prstate-d1"}`}
-			ingressSrv, eriSrv := httptest.NewServer(ingress), httptest.NewServer(eri)
-			t.Cleanup(ingressSrv.Close)
-			t.Cleanup(eriSrv.Close)
-			restateURL := ingressSrv.URL
-			if tc.noRestate {
-				restateURL = ""
-			}
-			err := NewRestateEriClient(restateURL, eriSrv.URL, "aerial", nil).DispatchRestate(context.Background(), req)
+			ingress, eri := restateClientFake(t, "/DispatchSession-agent-alpha/dispatch-prstate-d1/Enqueue", http.StatusOK, tc.body)
+			eri.Routes = map[string]restateingresstest.Response{"/dispatch": {Body: `{"status":"accepted","dispatch_id":"prstate-d1"}`}}
+			restateURL, eriURL := restateClientURLs(ingress, eri, tc.noRestate, false, "")
+			err := NewRestateEriClient(restateURL, eriURL, "aerial", nil).DispatchRestate(context.Background(), req)
 			if !errors.Is(err, tc.wantErr) || (tc.wantErr == nil && err != nil) {
 				t.Fatalf("DispatchRestate err = %v, want %v", err, tc.wantErr)
 			}
 			var paths []string
 			for _, c := range ingress.Calls() {
-				paths = append(paths, c.path)
-				if c.key != "prstate-d1" {
-					t.Errorf("Idempotency-Key = %q, want prstate-d1", c.key)
+				paths = append(paths, c.Path)
+				if c.IdempotencyKey != "prstate-d1" {
+					t.Errorf("Idempotency-Key = %q, want prstate-d1", c.IdempotencyKey)
 				}
 			}
 			if len(paths) != len(tc.wantPaths) || (len(paths) == 1 && paths[0] != tc.wantPaths[0]) {
@@ -169,6 +130,13 @@ func (a *agentDeliverer) DeliverDirectMessageWithAgent(_ context.Context, agent,
 	return a.err
 }
 
+// delivered is the last agent-routed message as "<agent> <channel> <content>".
+func (a *agentDeliverer) delivered() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.lastAgent + " " + a.lastChannel + " " + a.lastContent
+}
+
 // TestRestateEriClient_MessageAgent pins the agent-routed direct message:
 // it sends through the agent's Discord sender, requires direct Discord auth
 // and an agent-routing deliverer, and never falls back to eri HTTP.
@@ -196,16 +164,14 @@ func TestRestateEriClient_MessageAgent(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			eri := &ingressRecorder{status: http.StatusOK}
-			eriSrv := httptest.NewServer(eri)
-			t.Cleanup(eriSrv.Close)
+			ingress, eri := restateClientFake(t, "/discord/message", http.StatusOK, "")
 			deliverer := &agentDeliverer{}
 			deliverer.err = tc.deliverErr
 			var wd StatusWidgetDeliverer = deliverer
 			if tc.plain {
 				wd = &mockDeliverer{}
 			}
-			client := NewRestateEriClient("http://restate.invalid", eriSrv.URL, "aerial", nil, wd)
+			client := NewRestateEriClient(ingress.URL(), eri.URL(), "aerial", nil, wd)
 			client.SetDiscordAuth(tc.auth)
 			err := client.MessageAgent(context.Background(), tc.agent, tc.channel, "hello")
 			if (err != nil) != tc.wantErr {
@@ -214,25 +180,29 @@ func TestRestateEriClient_MessageAgent(t *testing.T) {
 			if deliverer.sends != tc.wantSends || deliverer.lastAgent != tc.wantAgent || deliverer.lastChannel != tc.wantChannel {
 				t.Errorf("deliverer = (%d, %q, %q), want (%d, %q, %q)", deliverer.sends, deliverer.lastAgent, deliverer.lastChannel, tc.wantSends, tc.wantAgent, tc.wantChannel)
 			}
-			if got := len(eri.Calls()); got != 0 {
-				t.Errorf("eri HTTP hits = %d, want 0", got)
+			if got := restateClientCalls(ingress, eri); len(got) != 0 {
+				t.Errorf("ingress/eri HTTP calls = %v, want none", got)
 			}
 		})
 	}
 }
 
-func assertIngressCalls(t *testing.T, want, got []ingressCall) {
+func assertIngressCalls(t *testing.T, want []ingressCall, got []restateingresstest.Call) {
 	t.Helper()
 	if len(got) != len(want) {
 		t.Fatalf("ingress calls = %+v, want %+v", got, want)
 	}
 	for i := range want {
-		if got[i].path != want[i].path || got[i].key != want[i].key {
-			t.Errorf("call %d = (%q, %q), want (%q, %q)", i, got[i].path, got[i].key, want[i].path, want[i].key)
+		if got[i].Path != want[i].path || got[i].IdempotencyKey != want[i].key {
+			t.Errorf("call %d = (%q, %q), want (%q, %q)", i, got[i].Path, got[i].IdempotencyKey, want[i].path, want[i].key)
+		}
+		var body map[string]any
+		if err := json.Unmarshal(got[i].Body, &body); err != nil {
+			t.Fatalf("call %d body %q: %v", i, got[i].Body, err)
 		}
 		for k, v := range want[i].body {
-			if got[i].body[k] != v {
-				t.Errorf("call %d body[%s] = %v, want %v", i, k, got[i].body[k], v)
+			if body[k] != v {
+				t.Errorf("call %d body[%s] = %v, want %v", i, k, body[k], v)
 			}
 		}
 	}
