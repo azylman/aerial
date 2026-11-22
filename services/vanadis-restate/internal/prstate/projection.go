@@ -5,20 +5,17 @@ package prstate
 // committed PRObject state plus a SHA lookup index. Routing may use the
 // projection; authority may not.
 //
-// Typed dual-write: the same transaction also writes the typed scalar
-// columns and the child tables (pr_registry_checks, _jobs,
-// _kustomizations, _build_selections, _build_results), each derived from
-// the snapshot exactly as the typed backfill migration derives it from the
-// metadata blob, so typed data and metadata always agree.
+// Typed-only write: one transaction writes the row columns, the typed
+// scalar columns and the child tables (pr_registry_checks, _jobs,
+// _kustomizations, _build_selections, _build_results). The legacy
+// pr_registry.metadata JSON column is neither read nor written; it keeps
+// whatever it last held until it is dropped.
 //
-// Ownership ruling: prstate owns every pr_registry column and every metadata
-// key in OwnedMetadataKeys, which is the full set of keys a registry row
-// carries in prod. BuildProjection maps the whole PRState row; the upsert
-// replaces the owned keys wholesale (an owned key absent from the snapshot
-// is removed, exactly like the registry's `- 'banner'` idioms) and leaves any
-// unknown key untouched. Synapse registry code is not imported: the SQL below
-// mirrors its metadata-blob idioms (jsonb `-` / `||`, ON CONFLICT (repo,
-// pr_number)).
+// Ownership ruling: prstate owns every pr_registry column and child table.
+// BuildProjection maps the whole PRState row; ProjectionMetadata is only the
+// in-memory snapshot of the non-column state those typed columns and child
+// tables derive from (it also feeds the ProjectionJournalKey digest, whose
+// encoding is unchanged so recorded ProjectedKey values stay valid).
 //
 // Ordering contract: the projection runs as a one-way PRObject self-send AFTER the state commit (PRObject.ProjectRegistry).
 // The send re-derives the snapshot from committed state at delivery time, so
@@ -49,10 +46,10 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// ProjectionMetadata is the typed pr_registry metadata blob. JSON tags match
-// the synapse registry keys exactly, and every field is omitempty so an empty
-// value projects as an absent key (the registry removes or never sets keys
-// it has no value for).
+// ProjectionMetadata is the in-memory snapshot of the per-PR state the typed
+// scalar columns and child tables derive from. It is never stored as JSON;
+// its JSON encoding only feeds the ProjectionJournalKey digest, so the tags
+// and omitempty markers must stay as they are.
 type ProjectionMetadata struct {
 	Agent                  string                          `json:"agent,omitempty"`
 	BotID                  string                          `json:"bot_id,omitempty"`
@@ -88,22 +85,10 @@ type ProjectionSnapshot struct {
 	Metadata   ProjectionMetadata `json:"metadata"`
 }
 
-// OwnedMetadataKeys returns every metadata key prstate writes, sorted. The
-// upsert replaces exactly these keys; any other key in the blob survives.
-func OwnedMetadataKeys() []string {
-	return []string{
-		"agent", "banner", "bot_id", "build_metadata", "ci_checks", "ci_fail_count",
-		"deploy_failed_published", "deploy_success_pending", "deployed_jobs",
-		"deployed_kustomizations", "job_states", "jobs", "kustomization_requests",
-		"started_jobs", "vanadis_chunk_id", "widget_state",
-	}
-}
-
 // BuildProjection maps committed PRState to a full registry row write. It
 // reads only the state it is given and never consults the projection, so
-// the projection can never feed back into a transition decision. It always
-// writes metadata.agent from the stored owner, which matches the typed
-// owner column the registry moves to.
+// the projection can never feed back into a transition decision. The agent
+// column always carries the stored owner.
 func BuildProjection(s *PRState) ProjectionSnapshot {
 	snap := ProjectionSnapshot{Agent: s.OwnerAgent(), Status: s.RegistryStatus()}
 	if s == nil {
@@ -166,10 +151,11 @@ func cloneNonEmpty[V any](in map[string]V) map[string]V {
 	return out
 }
 
-// metadataJSON marshals the metadata blob. Every field type marshals
-// infallibly (strings, ints, bools, string maps and slices, plain structs),
-// so a failure is impossible; it still degrades to an empty object.
-func metadataJSON(m ProjectionMetadata) []byte {
+// digestJSON encodes the snapshot state for the ProjectionJournalKey digest.
+// Every field type marshals infallibly (strings, ints, bools, string maps and
+// slices, plain structs), so a failure is impossible; it still degrades to
+// an empty object.
+func digestJSON(m ProjectionMetadata) []byte {
 	raw, err := json.Marshal(m)
 	if err != nil {
 		return []byte("{}")
@@ -192,7 +178,7 @@ func ProjectionJournalKey(snap ProjectionSnapshot) string {
 		strings.TrimSpace(snap.Branch), strings.TrimSpace(snap.HeadSHA),
 		strings.TrimSpace(snap.MergeSHA), strings.TrimSpace(snap.Title),
 		strings.TrimSpace(snap.TargetID), strings.TrimSpace(snap.Status),
-		snap.Generation, snap.MetaEpoch, metadataJSON(normalizeMetadata(snap.Metadata)))
+		snap.Generation, snap.MetaEpoch, digestJSON(normalizeMetadata(snap.Metadata)))
 	sum := sha256.Sum256([]byte(sb.String()))
 	return fmt.Sprintf("projection:%s:%s:%d@%s:gen%d:epoch%d:%x",
 		agent, NormalizeRepo(snap.Repo), snap.PRNumber,
@@ -200,19 +186,18 @@ func ProjectionJournalKey(snap ProjectionSnapshot) string {
 		sum[:8])
 }
 
-// projectionUpsertSQL writes every column and replaces the owned metadata
-// keys ($11) wholesale with the snapshot blob ($10). A blank text column
-// never overwrites a stored value (state that has not learned a field yet
-// cannot erase it); status and agent always follow state. The typed scalar
-// columns ($12-$36) always follow state, mirroring exactly what the typed
-// backfill derives from the metadata blob written in the same statement.
-const projectionUpsertSQL = `INSERT INTO pr_registry (repo, pr_number, agent, branch, head_sha, merge_sha, target_id, title, status, metadata, ` +
+// projectionUpsertSQL writes every column except the legacy metadata JSON,
+// which it never touches (an insert takes the column default). A blank text
+// column never overwrites a stored value (state that has not learned a field
+// yet cannot erase it); status and agent always follow state. The typed
+// scalar columns ($10-$34) always follow state.
+const projectionUpsertSQL = `INSERT INTO pr_registry (repo, pr_number, agent, branch, head_sha, merge_sha, target_id, title, status, ` +
 	`vanadis_chunk_id, bot_id, ci_fail_count, deploy_failed_published, deploy_success_pending, banner, widget_state, ` +
 	`build_version, build_kind, build_repository, build_workflow_path, build_run_id, build_run_number, build_run_attempt, ` +
 	`build_event, build_source_sha, build_execution_sha, build_pr_number, build_service, build_image_name, build_state, ` +
 	`build_pushed, build_source_attempt, build_image_refs, build_digest, created_at, updated_at) ` +
-	`VALUES ($1, $2, $3, $4, $5, NULLIF($6, ''), $7, $8, $9, $10::jsonb, ` +
-	`$12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35::text[], $36, ` +
+	`VALUES ($1, $2, $3, $4, $5, NULLIF($6, ''), $7, $8, $9, ` +
+	`$10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33::text[], $34, ` +
 	`CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) ` +
 	`ON CONFLICT (repo, pr_number) DO UPDATE SET ` +
 	`agent = EXCLUDED.agent, ` +
@@ -222,7 +207,6 @@ const projectionUpsertSQL = `INSERT INTO pr_registry (repo, pr_number, agent, br
 	`target_id = CASE WHEN EXCLUDED.target_id != '' THEN EXCLUDED.target_id ELSE pr_registry.target_id END, ` +
 	`title = CASE WHEN EXCLUDED.title != '' THEN EXCLUDED.title ELSE pr_registry.title END, ` +
 	`status = EXCLUDED.status, ` +
-	`metadata = (COALESCE(pr_registry.metadata, '{}'::jsonb) - $11::text[]) || EXCLUDED.metadata, ` +
 	`vanadis_chunk_id = EXCLUDED.vanadis_chunk_id, bot_id = EXCLUDED.bot_id, ci_fail_count = EXCLUDED.ci_fail_count, ` +
 	`deploy_failed_published = EXCLUDED.deploy_failed_published, deploy_success_pending = EXCLUDED.deploy_success_pending, ` +
 	`banner = EXCLUDED.banner, widget_state = EXCLUDED.widget_state, ` +
@@ -238,22 +222,20 @@ const projectionUpsertSQL = `INSERT INTO pr_registry (repo, pr_number, agent, br
 	`updated_at = CURRENT_TIMESTAMP;`
 
 // ProjectionUpsertQuery builds the full-row pr_registry upsert for snap:
-// the columns, the metadata blob and the typed scalar columns.
+// the row columns and the typed scalar columns, never metadata.
 func ProjectionUpsertQuery(snap ProjectionSnapshot) (string, []any) {
 	agent := strings.TrimSpace(snap.Agent)
 	if agent == "" {
 		agent = DefaultAgent
 	}
 	meta := normalizeMetadata(snap.Metadata)
-	args := make([]any, 0, 36)
+	args := make([]any, 0, 34)
 	args = append(args,
 		NormalizeRepo(snap.Repo), snap.PRNumber,
 		agent,
 		strings.TrimSpace(snap.Branch), strings.TrimSpace(snap.HeadSHA),
 		strings.TrimSpace(snap.MergeSHA), strings.TrimSpace(snap.TargetID),
 		strings.TrimSpace(snap.Title), strings.TrimSpace(snap.Status),
-		string(metadataJSON(meta)),
-		OwnedMetadataKeys(),
 		meta.VanadisChunkID, meta.BotID, meta.CIFailCount,
 		meta.DeployFailedPublished, meta.DeploySuccessPending,
 		meta.Banner, meta.WidgetState,
@@ -262,7 +244,7 @@ func ProjectionUpsertQuery(snap ProjectionSnapshot) (string, []any) {
 }
 
 // buildColumnArgs maps the build-metadata snapshot to the build_* columns
-// ($19-$36) with the backfill's JSON semantics: no
+// ($17-$34) with the typed backfill's semantics: no
 // snapshot projects all NULL; a field whose JSON tag is omitempty projects
 // NULL at its zero value (the key is absent from the blob); every other
 // field projects its value.
@@ -299,7 +281,7 @@ type ProjectionStatement struct {
 
 // Child-table sync statements. Each table gets one delete of the entries the
 // snapshot no longer holds and one upsert that skips unchanged entries, the
-// same full sync the typed backfill migration runs from metadata. Arrays
+// same full sync the typed backfill migration ran. Arrays
 // are always non-nil so an empty set deletes every entry instead of binding
 // NULL. Checks take the row head_sha the upsert just wrote.
 const (
@@ -343,11 +325,10 @@ const (
 )
 
 // ProjectionStatements returns the ordered statements of one projection
-// transaction: the row upsert (columns, metadata, typed scalars) followed by
+// transaction: the row upsert (columns and typed scalars) followed by
 // the child-table syncs for checks, jobs, kustomizations, build selections
 // and build results. Result rows carry a string list each, so they upsert
-// one statement per result. Every value derives from the snapshot exactly as
-// the typed backfill derives it from the metadata blob the upsert writes.
+// one statement per result. Every value derives from the snapshot.
 func ProjectionStatements(snap ProjectionSnapshot) []ProjectionStatement {
 	query, args := ProjectionUpsertQuery(snap)
 	repo, pr := NormalizeRepo(snap.Repo), snap.PRNumber
@@ -516,9 +497,9 @@ func NewPgProjectionStore(db ProjectionDB) *PgProjectionStore {
 	return &PgProjectionStore{db: db}
 }
 
-// UpsertProjection writes the row, its metadata blob, the typed columns and
-// the child tables in one transaction, so a reader never sees the typed
-// data disagree with metadata and a failure leaves the previous row intact.
+// UpsertProjection writes the row, the typed columns and the child tables in
+// one transaction, so a reader never sees a half-written projection and a
+// failure leaves the previous row intact.
 func (p *PgProjectionStore) UpsertProjection(ctx context.Context, snap ProjectionSnapshot) error {
 	if p == nil || p.db == nil {
 		return errors.New("projection database is nil")
