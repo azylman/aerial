@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/azylman/aerial/pkg/prwire"
 	"github.com/azylman/aerial/services/synapse/internal/flux"
 	"github.com/azylman/aerial/services/synapse/internal/kube"
 )
@@ -64,7 +65,7 @@ func TestKustomizationReady(t *testing.T) {
 
 func TestKustomizationRequestAction(t *testing.T) {
 	t.Parallel()
-	recorded := kustomizationRequest{Namespace: "flux-system", RequestedAt: reqT1}
+	recorded := prwire.KustomizationRequest{Namespace: "flux-system", RequestedAt: reqT1}
 	tests := []struct {
 		name string
 		obs  kustomizationObservation

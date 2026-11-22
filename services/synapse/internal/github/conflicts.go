@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/azylman/aerial/pkg/prwire"
 	"github.com/azylman/aerial/services/synapse/internal/model"
 )
 
@@ -85,7 +86,7 @@ func ResolvePRFromCommitSHA(ctx context.Context, client *Client, repo, sha strin
 // and merge state.
 func ResolveCommitPR(ctx context.Context, client *Client, repo, sha string) (CommitPR, error) {
 	repo = model.NormalizeRepo(repo)
-	if repo == "" || sha == "" || model.IsZeroSHA(sha) {
+	if repo == "" || sha == "" || prwire.IsZeroSHA(sha) {
 		return CommitPR{}, fmt.Errorf("invalid repo or sha for pr resolution")
 	}
 	if client == nil {

@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/azylman/aerial/pkg/prwire"
 	"github.com/azylman/aerial/pkg/pubsub"
-	"github.com/azylman/aerial/services/synapse/internal/restateclient"
 )
 
 // Deploy path: the deploy-side twin of restate_owned_github.go. For a
@@ -45,14 +45,14 @@ import (
 //     the durable index.
 
 // ownedDeployView reads PRObject's deploy read model for one PR.
-func (s *RouterServer) ownedDeployView(ctx context.Context, repo string, prNumber int) (restateclient.DeployView, error) {
+func (s *RouterServer) ownedDeployView(ctx context.Context, repo string, prNumber int) (prwire.DeployView, error) {
 	c, err := s.restateClient()
 	if err != nil {
-		return restateclient.DeployView{}, err
+		return prwire.DeployView{}, err
 	}
 	view, err := c.GetDeployView(ctx, repo, prNumber)
 	if err != nil {
-		return restateclient.DeployView{}, fmt.Errorf("restate deploy view %s#%d: %w", normalizeRepo(repo), prNumber, err)
+		return prwire.DeployView{}, fmt.Errorf("restate deploy view %s#%d: %w", normalizeRepo(repo), prNumber, err)
 	}
 	return view, nil
 }
@@ -84,7 +84,7 @@ func (s *RouterServer) ownedTrackedRollouts(ctx context.Context) ([]trackedRollo
 
 // rolloutFromView maps a deploying view with recorded requests to the
 // watcher's tracked rollout.
-func rolloutFromView(v restateclient.DeployView) (trackedRollout, bool) {
+func rolloutFromView(v prwire.DeployView) (trackedRollout, bool) {
 	if !v.Found || v.PRNumber <= 0 || v.Status != statusDeploying || len(v.KustomizationRequests) == 0 {
 		return trackedRollout{}, false
 	}
@@ -116,17 +116,17 @@ func (s *RouterServer) sendOwnedRolloutProgress(ctx context.Context, pr Deployin
 	if len(readyJobs) == 0 && !done {
 		return nil
 	}
-	ev := restateclient.PREvent{
+	ev := prwire.PREvent{
 		Repo: pr.Repo, PRNumber: pr.PRNumber, HeadSHA: pr.HeadSHA, MergeSHA: pr.MergeSHA, Branch: pr.Branch, JobName: name,
 		DeployedJobs: readyJobs, Facts: facts(ownedRolloutFact(pr, name, "rollout_updated", statusDeploying)),
 	}
 	if done {
 		ev.DeployedKustomizations = []string{name}
 	}
-	if err := s.sendOwnedPR(ctx, "HandleRolloutProgress", ev); err != nil || !done {
+	if err := s.sendOwnedPR(ctx, prwire.PRHandlerRolloutProgress, ev); err != nil || !done {
 		return err
 	}
-	return s.sendOwnedPR(ctx, "HandleDeploySuccess", restateclient.PREvent{
+	return s.sendOwnedPR(ctx, prwire.PRHandlerDeploySuccess, prwire.PREvent{
 		Repo: pr.Repo, PRNumber: pr.PRNumber, HeadSHA: pr.HeadSHA, MergeSHA: firstNonEmpty(pr.MergeSHA, pr.HeadSHA), JobName: name,
 		Facts: facts(ownedRolloutFact(pr, name, eventDeploySuccess, statusDeployed)),
 	})
@@ -138,7 +138,7 @@ func (s *RouterServer) sendOwnedReconcileLost(ctx context.Context, prs []Deployi
 	errs := make([]error, 0, len(prs))
 	for _, pr := range prs {
 		slog.InfoContext(ctx, "[synapse] [flux-watch] re-requesting lost reconcile through PRObject", "namespace", obs.Ref.Namespace, "name", obs.Ref.Name, "repo", pr.Repo, "pr", pr.PRNumber)
-		errs = append(errs, s.sendOwnedPR(ctx, "HandleReconcileLost", restateclient.PREvent{
+		errs = append(errs, s.sendOwnedPR(ctx, prwire.PRHandlerReconcileLost, prwire.PREvent{
 			Repo: pr.Repo, PRNumber: pr.PRNumber, JobName: obs.Ref.Name, ObservedReconcileAt: obs.LastHandledReconcileAt,
 		}))
 	}
@@ -163,7 +163,7 @@ func ownedDeployFact(evt DeployEvent, eventName, status, branch string) pubsub.P
 // sendOwnedDeployFailed reports one PR deploy failure (or rollback) to
 // PRObject with the rendered deploy_failed fact.
 func (s *RouterServer) sendOwnedDeployFailed(ctx context.Context, evt DeployEvent, branch string) error {
-	return s.sendOwnedPR(ctx, "HandleDeployFailed", restateclient.PREvent{
+	return s.sendOwnedPR(ctx, prwire.PRHandlerDeployFailed, prwire.PREvent{
 		Repo: evt.Repo, PRNumber: evt.PRNumber, MergeSHA: evt.CommitSHA,
 		Facts: facts(ownedDeployFact(evt, eventDeployFailed, eventDeployFailed, branch)),
 	})
@@ -179,7 +179,7 @@ func (s *RouterServer) sendOwnedDeployFailed(ctx context.Context, evt DeployEven
 // upstream Flux source commit resolved to a PR nobody registered) is
 // handled without tracking: the Kustomizations are patched once and nothing is tracked, so no rollout
 // starts that could never complete.
-func (s *RouterServer) ownedDeferPRToWatcher(ctx context.Context, repo string, prNum int, view restateclient.DeployView) (bool, error) {
+func (s *RouterServer) ownedDeferPRToWatcher(ctx context.Context, repo string, prNum int, view prwire.DeployView) (bool, error) {
 	if s.dispatcher == nil || prNum <= 0 {
 		return false, nil
 	}
@@ -204,7 +204,7 @@ func (s *RouterServer) ownedDeferPRToWatcher(ctx context.Context, repo string, p
 		Event: eventDeployStarted, Repo: repo, PRNumber: prNum, Status: statusDeploying,
 		Quiet: isDependabotBranch(branch), OccurredAt: time.Now().UTC(),
 	}
-	if err := s.sendOwnedPR(ctx, "HandleKustomizationRequested", restateclient.PREvent{
+	if err := s.sendOwnedPR(ctx, prwire.PRHandlerKustomizationRequested, prwire.PREvent{
 		Repo: repo, PRNumber: prNum, Branch: branch, Jobs: names,
 		KustomizationRequests: requests, Facts: facts(started),
 	}); err != nil {
@@ -220,7 +220,7 @@ func (s *RouterServer) ownedDeferPRToWatcher(ctx context.Context, repo string, p
 // webhooks) is sent to PRObject before the caller forwards its event.
 func (s *RouterServer) resolveOwnedSHAPR(ctx context.Context, repo, sha string) (int, string) {
 	sha = strings.TrimSpace(sha)
-	if normalizeRepo(repo) == "" || sha == "" || isZeroSHA(sha) {
+	if normalizeRepo(repo) == "" || sha == "" || prwire.IsZeroSHA(sha) {
 		return 0, ""
 	}
 	if c, err := s.restateClient(); err == nil {
@@ -246,7 +246,7 @@ func (s *RouterServer) processOwnedDeployEvent(ctx context.Context, evt DeployEv
 	if evt.PRNumber == 0 && evt.CommitSHA != "" {
 		evt.PRNumber, _ = s.resolveOwnedSHAPR(ctx, evt.Repo, evt.CommitSHA)
 	}
-	var view restateclient.DeployView
+	var view prwire.DeployView
 	if evt.PRNumber > 0 {
 		v, err := s.ownedDeployView(ctx, evt.Repo, evt.PRNumber)
 		if err != nil {
@@ -287,12 +287,12 @@ func (s *RouterServer) processOwnedDeployEvent(ctx context.Context, evt DeployEv
 // PRObject, reports whether the PR expects deploy jobs, and otherwise
 // hands completion to the watcher when the repo sources a Kustomization.
 // Other events expect nothing and never defer.
-func (s *RouterServer) ownedSyncExpected(ctx context.Context, evt DeployEvent, view restateclient.DeployView, expected []string) (hasExpected, deferred bool, err error) {
+func (s *RouterServer) ownedSyncExpected(ctx context.Context, evt DeployEvent, view prwire.DeployView, expected []string) (hasExpected, deferred bool, err error) {
 	if evt.Event != eventSyncSuccess {
 		return false, false, nil
 	}
 	if len(expected) > 0 {
-		if sendErr := s.sendOwnedPR(ctx, "HandleDeployObserved", restateclient.PREvent{Repo: evt.Repo, PRNumber: evt.PRNumber, MergeSHA: evt.CommitSHA, ExpectedJobs: expected}); sendErr != nil {
+		if sendErr := s.sendOwnedPR(ctx, prwire.PRHandlerDeployObserved, prwire.PREvent{Repo: evt.Repo, PRNumber: evt.PRNumber, MergeSHA: evt.CommitSHA, ExpectedJobs: expected}); sendErr != nil {
 			return false, false, sendErr
 		}
 		return true, false, nil
@@ -309,7 +309,7 @@ func (s *RouterServer) ownedSyncExpected(ctx context.Context, evt DeployEvent, v
 // itself. Already-tracked alerts defer silently; untracked started/success
 // alerts start the rollout through ownedDeferPRToWatcher unless the image
 // build is still pending.
-func (s *RouterServer) ownedDeferDeployEventToWatcher(ctx context.Context, evt DeployEvent, view restateclient.DeployView, waiting bool) (bool, error) {
+func (s *RouterServer) ownedDeferDeployEventToWatcher(ctx context.Context, evt DeployEvent, view prwire.DeployView, waiting bool) (bool, error) {
 	tracked := len(view.KustomizationRequests) > 0
 	owned, discErr := s.ownedDeployEventWatcherOwnership(ctx, evt, tracked)
 	if !owned {
@@ -354,7 +354,7 @@ func (s *RouterServer) ownedDeployEventWatcherOwnership(ctx context.Context, evt
 // state: an open/merged PR whose image build has not started, that records
 // no reconcile requests, and whose final build metadata is missing or still
 // selects images. A failed lifecycle read waits.
-func (s *RouterServer) ownedWaitingForImageBuild(ctx context.Context, repo string, prNumber int, view restateclient.DeployView) bool {
+func (s *RouterServer) ownedWaitingForImageBuild(ctx context.Context, repo string, prNumber int, view prwire.DeployView) bool {
 	repo = normalizeRepo(repo)
 	if repo == "" || prNumber <= 0 || metadataWorkflowPath(repo) == "" {
 		return false
@@ -377,7 +377,7 @@ func (s *RouterServer) ownedWaitingForImageBuild(ctx context.Context, repo strin
 		return false
 	}
 	m := lc.BuildMetadata
-	return !lc.HasBuildMetadata || m == nil || m.Kind != buildMetadataFinal || len(m.Selected) > 0
+	return !lc.HasBuildMetadata || m == nil || m.Kind != prwire.BuildMetadataFinal || len(m.Selected) > 0
 }
 
 // publishOwnedDeployEvent sends the lifecycle outcome of an alert the
@@ -386,23 +386,23 @@ func (s *RouterServer) publishOwnedDeployEvent(ctx context.Context, evt DeployEv
 	if evt.Event == eventDeployStarted && evt.JobName != "" {
 		// The transition itself is state: it applies whatever the target,
 		// and PRObject publishes deploy_started only when it transitioned.
-		ev := restateclient.PREvent{Repo: evt.Repo, PRNumber: evt.PRNumber, MergeSHA: evt.CommitSHA, JobName: evt.JobName, ExpectedJobs: expected}
+		ev := prwire.PREvent{Repo: evt.Repo, PRNumber: evt.PRNumber, MergeSHA: evt.CommitSHA, JobName: evt.JobName, ExpectedJobs: expected}
 		if s.isValidAlertTarget(evt.TargetID) && s.dispatcher != nil {
 			ev.Facts = facts(ownedDeployFact(evt, eventDeployStarted, statusDeploying, branch))
 		}
-		return s.sendOwnedPR(ctx, "HandleDeployObserved", ev)
+		return s.sendOwnedPR(ctx, prwire.PRHandlerDeployObserved, ev)
 	}
 	if !s.isValidAlertTarget(evt.TargetID) || s.dispatcher == nil {
 		return nil
 	}
 	observed := func(eventName, status string) error {
-		return s.sendOwnedPR(ctx, "HandleDeployObserved", restateclient.PREvent{
+		return s.sendOwnedPR(ctx, prwire.PRHandlerDeployObserved, prwire.PREvent{
 			Repo: evt.Repo, PRNumber: evt.PRNumber, MergeSHA: evt.CommitSHA, Facts: facts(ownedDeployFact(evt, eventName, status, branch)),
 		})
 	}
 	success := func() error {
 		fact := ownedDeployFact(evt, eventDeploySuccess, statusDeployed, branch)
-		return s.sendOwnedPR(ctx, "HandleDeploySuccess", restateclient.PREvent{
+		return s.sendOwnedPR(ctx, prwire.PRHandlerDeploySuccess, prwire.PREvent{
 			Repo: evt.Repo, PRNumber: evt.PRNumber, MergeSHA: evt.CommitSHA, JobName: evt.JobName, Facts: facts(fact),
 		})
 	}
@@ -450,7 +450,7 @@ func (s *RouterServer) processOwnedMainWorkflowRun(ctx context.Context, p GitHub
 	}
 	switch res.Conclusion {
 	case conclusionFailure, conclusionTimedOut:
-		if isGateAggregatorCheck(res.CheckName) || res.HeadSHA == "" || isZeroSHA(res.HeadSHA) {
+		if isGateAggregatorCheck(res.CheckName) || res.HeadSHA == "" || prwire.IsZeroSHA(res.HeadSHA) {
 			return nil
 		}
 		if p.WorkflowRun.RunAttempt == 1 && p.WorkflowRun.ID > 0 {
@@ -458,7 +458,7 @@ func (s *RouterServer) processOwnedMainWorkflowRun(ctx context.Context, p GitHub
 		}
 		details := fmt.Sprintf("Workflow %q concluded with %s", p.WorkflowRun.Name, p.WorkflowRun.Conclusion)
 		fact := ownedImageDeployFailedFact(res.Repo, res.PRNumber, prBranch, res.HeadSHA, details)
-		return s.sendOwnedPROrSHA(ctx, "HandleWorkflowRunBySHA", "HandleDeployFailed", res.HeadSHA, restateclient.PREvent{
+		return s.sendOwnedPROrSHA(ctx, prwire.RepoHandlerWorkflowRunBySHA, prwire.PRHandlerDeployFailed, res.HeadSHA, prwire.PREvent{
 			Repo: res.Repo, PRNumber: res.PRNumber, HeadSHA: res.HeadSHA, MergeSHA: res.HeadSHA, Facts: facts(fact),
 		})
 	case conclusionSuccess:
@@ -473,12 +473,12 @@ func (s *RouterServer) processOwnedMainWorkflowRun(ctx context.Context, p GitHub
 // sendOwnedMainRerun reruns the failed jobs of an attempt-1 main-branch run
 // in RepoObject and records the rerun request on the PR it built.
 func (s *RouterServer) sendOwnedMainRerun(ctx context.Context, p GitHubWorkflowRunPayload, res *ResolvedGitHubEvent) error {
-	if err := s.sendOwnedPR(ctx, "HandleCheckRerunRequested", restateclient.PREvent{
+	if err := s.sendOwnedPR(ctx, prwire.PRHandlerCheckRerunRequested, prwire.PREvent{
 		Repo: res.Repo, PRNumber: res.PRNumber, HeadSHA: res.HeadSHA, MergeSHA: res.HeadSHA, CheckName: res.CheckName,
 	}); err != nil {
 		return err
 	}
-	return s.sendOwnedRepo(ctx, "HandleWorkflowRerun", restateclient.RepoEvent{
+	return s.sendOwnedRepo(ctx, prwire.RepoHandlerWorkflowRerun, prwire.RepoEvent{
 		Repo: res.Repo, PRNumber: res.PRNumber, HeadSHA: res.HeadSHA, CheckName: res.CheckName, RunID: p.WorkflowRun.ID,
 	})
 }
@@ -506,7 +506,7 @@ func (s *RouterServer) dispatchOwnedWorkflowRunImages(ctx context.Context, run w
 		slog.ErrorContext(ctx, "[synapse] [dispatcher] error resolving images for workflow run", "run_id", run.ID, "attempt", run.Attempt, "repo", repo, "error", err)
 		if prNum > 0 {
 			fact := ownedImageDeployFailedFact(repo, prNum, prBranch, headSHA, err.Error())
-			if rErr := s.sendOwnedPR(ctx, "HandleDeployAttemptFailed", restateclient.PREvent{
+			if rErr := s.sendOwnedPR(ctx, prwire.PRHandlerDeployAttemptFailed, prwire.PREvent{
 				Repo: repo, PRNumber: prNum, HeadSHA: headSHA, MergeSHA: headSHA, Banner: fact.Details, Facts: facts(fact),
 			}); rErr != nil {
 				return rErr
@@ -533,7 +533,7 @@ func (s *RouterServer) promoteOwnedImages(ctx context.Context, repo string, prNu
 		slog.ErrorContext(ctx, "[synapse] [dispatcher] error discovering kustomizations for images", "repo", repo, "images", imageNames, "error", err)
 		return fmt.Errorf("discover image kustomizations: %w", err)
 	}
-	ev := restateclient.RepoEvent{
+	ev := prwire.RepoEvent{
 		Repo: repo, HeadSHA: headSHA, PRNumber: prNum, Branch: prBranch, Images: images, Jobs: workloads,
 		DeployFailedFacts: facts(ownedImageDeployFailedFact(repo, prNum, prBranch, headSHA, "")),
 	}
@@ -544,7 +544,7 @@ func (s *RouterServer) promoteOwnedImages(ctx context.Context, repo string, prNu
 			Quiet: isDependabotBranch(prBranch), OccurredAt: time.Now().UTC(),
 		})
 	}
-	if err := s.sendOwnedRepo(ctx, "HandleImagePromotion", ev); err != nil {
+	if err := s.sendOwnedRepo(ctx, prwire.RepoHandlerImagePromotion, ev); err != nil {
 		return err
 	}
 	if len(refs) == 0 {
@@ -576,7 +576,7 @@ func (s *RouterServer) ownedCompleteNoDeploy(ctx context.Context, repo, headSHA 
 		Event: eventDeploySuccess, Repo: repo, PRNumber: prNum, HeadSHA: headSHA, Status: statusDeployed,
 		JobName: jobGitMerge, Quiet: isDependabotBranch(branch), OccurredAt: time.Now().UTC(),
 	}
-	return s.sendOwnedPR(ctx, "HandleDeploySuccess", restateclient.PREvent{
+	return s.sendOwnedPR(ctx, prwire.PRHandlerDeploySuccess, prwire.PREvent{
 		Repo: repo, PRNumber: prNum, HeadSHA: headSHA, JobName: jobGitMerge, Facts: facts(fact),
 	})
 }

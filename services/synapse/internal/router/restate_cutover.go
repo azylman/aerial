@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/azylman/aerial/pkg/prwire"
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/synapse/internal/metrics"
 	"github.com/azylman/aerial/services/synapse/internal/restateclient"
@@ -131,7 +132,7 @@ func (s *RouterServer) restateSend(ctx context.Context, handler string, send fun
 // sendOwnedPR sends one PRObject event. The agent stays whatever the caller
 // knows (empty when unknown); synapse never looks the owner up. PR-less
 // events have no PRObject key and send nothing.
-func (s *RouterServer) sendOwnedPR(ctx context.Context, handler string, ev restateclient.PREvent) error {
+func (s *RouterServer) sendOwnedPR(ctx context.Context, handler string, ev prwire.PREvent) error {
 	if ev.PRNumber <= 0 || normalizeRepo(ev.Repo) == "" {
 		return nil
 	}
@@ -141,7 +142,7 @@ func (s *RouterServer) sendOwnedPR(ctx context.Context, handler string, ev resta
 }
 
 // sendOwnedRepo sends one RepoObject event.
-func (s *RouterServer) sendOwnedRepo(ctx context.Context, handler string, ev restateclient.RepoEvent) error {
+func (s *RouterServer) sendOwnedRepo(ctx context.Context, handler string, ev prwire.RepoEvent) error {
 	if normalizeRepo(ev.Repo) == "" {
 		return nil
 	}
@@ -153,16 +154,16 @@ func (s *RouterServer) sendOwnedRepo(ctx context.Context, handler string, ev res
 // sendOwnedPROrSHA sends ev to PRObject when it carries a PR number and
 // otherwise wraps it for the RepoObject SHA handler keyed on sha. Events
 // with neither a PR nor a usable SHA send nothing.
-func (s *RouterServer) sendOwnedPROrSHA(ctx context.Context, shaHandler, prHandler, sha string, ev restateclient.PREvent) error {
+func (s *RouterServer) sendOwnedPROrSHA(ctx context.Context, shaHandler, prHandler, sha string, ev prwire.PREvent) error {
 	if ev.PRNumber > 0 {
 		return s.sendOwnedPR(ctx, prHandler, ev)
 	}
 	sha = strings.TrimSpace(sha)
-	if sha == "" || isZeroSHA(sha) || normalizeRepo(ev.Repo) == "" {
+	if sha == "" || prwire.IsZeroSHA(sha) || normalizeRepo(ev.Repo) == "" {
 		return nil
 	}
 	return s.restateSend(ctx, shaHandler, func(c *restateclient.Client) error {
-		return c.SendSHAEvent(ctx, shaHandler, restateclient.SHAEvent{Repo: ev.Repo, SHA: sha, Handler: prHandler, Event: ev})
+		return c.SendSHAEvent(ctx, shaHandler, prwire.SHAEvent{Repo: ev.Repo, SHA: sha, Handler: prHandler, Event: ev})
 	})
 }
 

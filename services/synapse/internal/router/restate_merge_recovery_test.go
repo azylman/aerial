@@ -12,9 +12,9 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
 
+	"github.com/azylman/aerial/pkg/prwire"
 	"github.com/azylman/aerial/services/synapse/internal/github"
 	"github.com/azylman/aerial/services/synapse/internal/metrics"
-	"github.com/azylman/aerial/services/synapse/internal/restateclient"
 )
 
 const (
@@ -97,18 +97,18 @@ func TestShouldRecoverMerge(t *testing.T) {
 		name string
 		pr   github.CommitPR
 		sha  string
-		view restateclient.DeployView
+		view prwire.DeployView
 		want bool
 	}{
-		{name: "open tracked pr merged on the commit recovers", pr: merged, sha: recoveryMerge, view: restateclient.DeployView{Found: true, Status: "open"}, want: true},
-		{name: "merge sha match ignores case and space", pr: merged, sha: " " + strings.ToUpper(recoveryMerge) + " ", view: restateclient.DeployView{Found: true}, want: true},
-		{name: "pr merged on another commit in restate still recovers", pr: merged, sha: recoveryMerge, view: restateclient.DeployView{Found: true, MergeSHA: recoveryHead}, want: true},
-		{name: "already merged on the commit sends nothing", pr: merged, sha: recoveryMerge, view: restateclient.DeployView{Found: true, MergeSHA: strings.ToUpper(recoveryMerge)}},
+		{name: "open tracked pr merged on the commit recovers", pr: merged, sha: recoveryMerge, view: prwire.DeployView{Found: true, Status: "open"}, want: true},
+		{name: "merge sha match ignores case and space", pr: merged, sha: " " + strings.ToUpper(recoveryMerge) + " ", view: prwire.DeployView{Found: true}, want: true},
+		{name: "pr merged on another commit in restate still recovers", pr: merged, sha: recoveryMerge, view: prwire.DeployView{Found: true, MergeSHA: recoveryHead}, want: true},
+		{name: "already merged on the commit sends nothing", pr: merged, sha: recoveryMerge, view: prwire.DeployView{Found: true, MergeSHA: strings.ToUpper(recoveryMerge)}},
 		{name: "untracked pr sends nothing", pr: merged, sha: recoveryMerge},
-		{name: "unmerged pr sends nothing", pr: github.CommitPR{Number: 2327, HeadSHA: recoveryHead, MergeCommitSHA: recoveryMerge}, sha: recoveryMerge, view: restateclient.DeployView{Found: true}},
-		{name: "merge commit other than the sha sends nothing", pr: merged, sha: recoveryHead, view: restateclient.DeployView{Found: true}},
-		{name: "blank sha sends nothing", pr: merged, view: restateclient.DeployView{Found: true}},
-		{name: "no pr sends nothing", pr: github.CommitPR{Merged: true, MergeCommitSHA: recoveryMerge}, sha: recoveryMerge, view: restateclient.DeployView{Found: true}},
+		{name: "unmerged pr sends nothing", pr: github.CommitPR{Number: 2327, HeadSHA: recoveryHead, MergeCommitSHA: recoveryMerge}, sha: recoveryMerge, view: prwire.DeployView{Found: true}},
+		{name: "merge commit other than the sha sends nothing", pr: merged, sha: recoveryHead, view: prwire.DeployView{Found: true}},
+		{name: "blank sha sends nothing", pr: merged, view: prwire.DeployView{Found: true}},
+		{name: "no pr sends nothing", pr: github.CommitPR{Merged: true, MergeCommitSHA: recoveryMerge}, sha: recoveryMerge, view: prwire.DeployView{Found: true}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -223,7 +223,7 @@ func TestOwnedDeployEventRecoversMergeFirst(t *testing.T) {
 			if sends[0].handler != tc.wantFirst || !strings.Contains(sends[0].key, tc.wantKeyPart) {
 				t.Errorf("first send = %s key %q, want %s keyed %q", sends[0].handler, sends[0].key, tc.wantFirst, tc.wantKeyPart)
 			}
-			var ev restateclient.PREvent
+			var ev prwire.PREvent
 			if err := json.Unmarshal([]byte(sends[0].body), &ev); err != nil {
 				t.Fatal(err)
 			}

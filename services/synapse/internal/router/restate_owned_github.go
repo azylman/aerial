@@ -8,11 +8,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/azylman/aerial/pkg/prwire"
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/synapse/internal/buildmeta"
 	"github.com/azylman/aerial/services/synapse/internal/github"
 	"github.com/azylman/aerial/services/synapse/internal/model"
-	"github.com/azylman/aerial/services/synapse/internal/restateclient"
 )
 
 // GitHub path: for every webhook job synapse is a Postgres-free edge. It
@@ -103,14 +103,14 @@ func (s *RouterServer) processOwnedPullRequest(ctx context.Context, delivery str
 	// Reopened and synchronize carry the title (PRObject fills it only
 	// when empty); every other action
 	// leaves it to the self-registration.
-	ev := restateclient.PREvent{
+	ev := prwire.PREvent{
 		Repo: res.Repo, PRNumber: res.PRNumber, HeadSHA: res.HeadSHA, Branch: res.Branch,
 		Agent: meta.OwningAgent(),
 	}
 	var handler string
 	switch res.Action {
 	case ghActionOpened:
-		handler = "HandleOpened"
+		handler = prwire.PRHandlerOpened
 		fact := ownedFact(res, ghActionOpened, prOpen)
 		fact.Title = title
 		ev.Facts = facts(fact)
@@ -118,10 +118,10 @@ func (s *RouterServer) processOwnedPullRequest(ctx context.Context, delivery str
 		if strings.TrimSpace(res.HeadSHA) == "" {
 			return res, nil
 		}
-		handler = "HandleReopened"
+		handler = prwire.PRHandlerReopened
 		ev.Title = title
 	case ghActionSynchronize:
-		handler = "HandleSynchronized"
+		handler = prwire.PRHandlerSynchronized
 		ev.Title = title
 		ev.BeforeSHA = res.BeforeSHA
 		fact := ownedFact(res, ghActionSynchronize, prOpen)
@@ -130,11 +130,11 @@ func (s *RouterServer) processOwnedPullRequest(ctx context.Context, delivery str
 		ev.Facts = facts(fact)
 	case ghActionClosed:
 		if p.PullRequest.Merged {
-			handler = "HandleMerged"
+			handler = prwire.PRHandlerMerged
 			ev.MergeSHA = res.MergeSHA
 			ev.Facts = facts(ownedFact(res, prMerged, prMerged))
 		} else {
-			handler = "HandleClosed"
+			handler = prwire.PRHandlerClosed
 			ev.Facts = facts(ownedFact(res, prClosedUnmerged, prClosedUnmerged))
 		}
 	case "auto_merge_disabled":
@@ -170,7 +170,7 @@ func (s *RouterServer) processOwnedAutoMergeDisabled(ctx context.Context, res *R
 			return s.notifyCollaboratorConflict(ctx, res.Repo, resolved)
 		}
 	}
-	return s.sendOwnedPR(ctx, "HandleConflict", restateclient.PREvent{
+	return s.sendOwnedPR(ctx, prwire.PRHandlerConflict, prwire.PREvent{
 		Repo: res.Repo, PRNumber: res.PRNumber, HeadSHA: res.HeadSHA, Branch: res.Branch,
 		TargetID: res.TargetID, Facts: facts(ownedFact(res, prConflict, prConflict)),
 	})
@@ -192,7 +192,7 @@ func resolveOwnedPayloadPR(res *ResolvedGitHubEvent, prs []GitHubCheckRunPR, sou
 // resolveOwnedCommitPR fills a missing PR from the GitHub commits API, the
 // stateless lookup that stays in synapse.
 func (s *RouterServer) resolveOwnedCommitPR(ctx context.Context, res *ResolvedGitHubEvent) {
-	if res.PRNumber > 0 || res.HeadSHA == "" || isZeroSHA(res.HeadSHA) {
+	if res.PRNumber > 0 || res.HeadSHA == "" || prwire.IsZeroSHA(res.HeadSHA) {
 		return
 	}
 	prNum, branch, err := s.resolvePRFromCommitSHA(ctx, res.Repo, res.HeadSHA)
@@ -231,7 +231,7 @@ func (s *RouterServer) processOwnedCheckRun(ctx context.Context, delivery string
 	}
 	details = github.SanitizeDetailsForPrompt(details, 2000)
 	checkURL := firstNonEmpty(strings.TrimSpace(p.CheckRun.HTMLURL), strings.TrimSpace(p.CheckRun.DetailsURL))
-	if err := s.sendOwnedCheckOutcome(ctx, res, p.Action, details, checkURL, "HandleCheckRunBySHA"); err != nil {
+	if err := s.sendOwnedCheckOutcome(ctx, res, p.Action, details, checkURL, prwire.RepoHandlerCheckRunBySHA); err != nil {
 		return nil, err
 	}
 	return res, nil
@@ -268,7 +268,7 @@ func (s *RouterServer) processOwnedWorkflowRun(ctx context.Context, delivery str
 		return res, nil
 	}
 	details := fmt.Sprintf("Workflow %q concluded with %s", p.WorkflowRun.Name, p.WorkflowRun.Conclusion)
-	if err := s.sendOwnedCheckOutcome(ctx, res, p.Action, details, strings.TrimSpace(p.WorkflowRun.HTMLURL), "HandleWorkflowRunBySHA"); err != nil {
+	if err := s.sendOwnedCheckOutcome(ctx, res, p.Action, details, strings.TrimSpace(p.WorkflowRun.HTMLURL), prwire.RepoHandlerWorkflowRunBySHA); err != nil {
 		return nil, err
 	}
 	return res, nil
@@ -282,20 +282,20 @@ func (s *RouterServer) processOwnedWorkflowRun(ctx context.Context, delivery str
 // failure slots, stale-head guards and dedup. Gate aggregators never fail a
 // PR.
 func (s *RouterServer) sendOwnedCheckOutcome(ctx context.Context, res *ResolvedGitHubEvent, action, details, checkURL, shaHandler string) error {
-	if res.HeadSHA == "" || isZeroSHA(res.HeadSHA) {
+	if res.HeadSHA == "" || prwire.IsZeroSHA(res.HeadSHA) {
 		return nil
 	}
 	if err := s.sendOwnedCheckStatus(ctx, res); err != nil {
 		return err
 	}
-	base := restateclient.PREvent{
+	base := prwire.PREvent{
 		Repo: res.Repo, PRNumber: res.PRNumber, HeadSHA: res.HeadSHA, MergeSHA: res.MergeSHA,
 		CheckName: res.CheckName, Branch: res.Branch,
 	}
 	switch checkOutcomeHandler(res) {
-	case "HandleCheckPassed":
+	case prwire.PRHandlerCheckPassed:
 		return s.sendOwnedCheckPassed(ctx, res, action, shaHandler, base)
-	case "HandleCheckFailed":
+	case prwire.PRHandlerCheckFailed:
 		if isGateAggregatorCheck(res.CheckName) {
 			return nil
 		}
@@ -307,7 +307,7 @@ func (s *RouterServer) sendOwnedCheckOutcome(ctx context.Context, res *ResolvedG
 		}
 		failed := base
 		failed.Facts = facts(s.ownedCIFailedFact(ctx, res, details, checkURL))
-		if err := s.sendOwnedPROrSHA(ctx, shaHandler, "HandleCheckFailed", res.HeadSHA, failed); err != nil {
+		if err := s.sendOwnedPROrSHA(ctx, shaHandler, prwire.PRHandlerCheckFailed, res.HeadSHA, failed); err != nil {
 			return err
 		}
 		// Legacy's ci_failure auto-update trigger: RepoObject dedupes it
@@ -330,7 +330,7 @@ func (s *RouterServer) sendOwnedCheckOutcome(ctx context.Context, res *ResolvedG
 // are stateless and go straight to RepoObject; only PRObject knows a check
 // recovered, so the recovery carries the policy and PRObject forwards the
 // trigger when it applies.
-func (s *RouterServer) sendOwnedCheckPassed(ctx context.Context, res *ResolvedGitHubEvent, action, shaHandler string, base restateclient.PREvent) error {
+func (s *RouterServer) sendOwnedCheckPassed(ctx context.Context, res *ResolvedGitHubEvent, action, shaHandler string, base prwire.PREvent) error {
 	gateTrigger := ownedGateSuccessTrigger(res, action)
 	if action == ghStatusCompleted && res.PRNumber > 0 {
 		recovered := base
@@ -338,11 +338,11 @@ func (s *RouterServer) sendOwnedCheckPassed(ctx context.Context, res *ResolvedGi
 		if res.Event == ghEventCheckRun && !gateTrigger {
 			recovered.AutoUpdate = s.autoUpdatePolicy(normalizeRepo(res.Repo))
 		}
-		if err := s.sendOwnedPR(ctx, "HandleCIRecovered", recovered); err != nil {
+		if err := s.sendOwnedPR(ctx, prwire.PRHandlerCIRecovered, recovered); err != nil {
 			return err
 		}
 	}
-	if err := s.sendOwnedPROrSHA(ctx, shaHandler, "HandleCheckPassed", res.HeadSHA, base); err != nil {
+	if err := s.sendOwnedPROrSHA(ctx, shaHandler, prwire.PRHandlerCheckPassed, res.HeadSHA, base); err != nil {
 		return err
 	}
 	if gateTrigger {
@@ -364,7 +364,7 @@ func ownedGateSuccessTrigger(res *ResolvedGitHubEvent, action string) bool {
 // policy; RepoObject runs the cascade and its update-branch calls.
 func (s *RouterServer) sendOwnedAutoUpdate(ctx context.Context, repo string, prNumber int, headSHA, mainSHA, checkName string) error {
 	normRepo := normalizeRepo(repo)
-	return s.sendOwnedRepo(ctx, "HandleAutoUpdate", restateclient.RepoEvent{
+	return s.sendOwnedRepo(ctx, prwire.RepoHandlerAutoUpdate, prwire.RepoEvent{
 		Repo: normRepo, PRNumber: prNumber, HeadSHA: headSHA, MainSHA: mainSHA, CheckName: checkName, AutoUpdate: s.autoUpdatePolicy(normRepo),
 	})
 }
@@ -383,7 +383,7 @@ func (s *RouterServer) sendOwnedCheckStatus(ctx context.Context, res *ResolvedGi
 	fact.MergeSHA = ""
 	fact.CheckName = res.CheckName
 	fact.CheckState = checkState
-	return s.sendOwnedPR(ctx, "HandleCheckStatus", restateclient.PREvent{
+	return s.sendOwnedPR(ctx, prwire.PRHandlerCheckStatus, prwire.PREvent{
 		Repo: res.Repo, PRNumber: res.PRNumber, HeadSHA: res.HeadSHA, Branch: res.Branch,
 		CheckName: res.CheckName, CheckState: checkState, Facts: facts(fact),
 	})
@@ -418,7 +418,7 @@ func (s *RouterServer) processOwnedPush(ctx context.Context, body []byte, res *R
 	}
 	res.Repo = p.Repository.FullName
 	res.Branch = p.Ref
-	if p.Deleted || isZeroSHA(p.After) {
+	if p.Deleted || prwire.IsZeroSHA(p.After) {
 		res.ResolutionSource = "branch_deleted"
 		return res, nil
 	}
@@ -434,7 +434,7 @@ func (s *RouterServer) processOwnedPush(ctx context.Context, body []byte, res *R
 		res.ResolutionSource = "non_main_branch"
 		return res, nil
 	}
-	if err := s.sendOwnedRepo(ctx, "HandleMainPush", restateclient.RepoEvent{Repo: res.Repo, MainSHA: res.HeadSHA}); err != nil {
+	if err := s.sendOwnedRepo(ctx, prwire.RepoHandlerMainPush, prwire.RepoEvent{Repo: res.Repo, MainSHA: res.HeadSHA}); err != nil {
 		return nil, err
 	}
 	res.Branch = ""
@@ -447,7 +447,7 @@ func (s *RouterServer) processOwnedPush(ctx context.Context, body []byte, res *R
 	s.resolveOwnedCommitPR(ctx, res)
 	res.MergeSHA = res.HeadSHA
 	slog.InfoContext(ctx, "[synapse] [restate] push", "repo", res.Repo, "ref", p.Ref, "head_sha", res.HeadSHA, "resolved_pr", res.PRNumber, "source", res.ResolutionSource, "delivery", res.Delivery)
-	if err := s.sendOwnedPROrSHA(ctx, "HandlePushBySHA", "HandleMerged", res.HeadSHA, restateclient.PREvent{
+	if err := s.sendOwnedPROrSHA(ctx, prwire.RepoHandlerPushBySHA, prwire.PRHandlerMerged, res.HeadSHA, prwire.PREvent{
 		Repo: res.Repo, PRNumber: res.PRNumber, HeadSHA: res.HeadSHA, MergeSHA: res.MergeSHA, Branch: res.Branch,
 		Facts: facts(ownedFact(res, prMerged, prMerged)),
 	}); err != nil {
@@ -462,7 +462,7 @@ func (s *RouterServer) processOwnedPush(ctx context.Context, body []byte, res *R
 	// still deploys. Only the default owner dispatches it; synapse reads no
 	// PR targets.
 	if s.cfgSrc.Current().DefaultOwner {
-		if err := s.sendOwnedRepo(ctx, "HandleGitPush", restateclient.RepoEvent{
+		if err := s.sendOwnedRepo(ctx, prwire.RepoHandlerGitPush, prwire.RepoEvent{
 			Repo: res.Repo, MainSHA: res.HeadSHA, PRNumber: res.PRNumber, Ref: p.Ref,
 		}); err != nil {
 			return nil, err
@@ -481,10 +481,10 @@ type restateBuildMetadataStore struct {
 
 var _ buildmeta.PRMetadataRegistry = restateBuildMetadataStore{}
 
-func (st restateBuildMetadataStore) lifecycle(ctx context.Context, repo string, prNumber int) (restateclient.BuildLifecycle, error) {
+func (st restateBuildMetadataStore) lifecycle(ctx context.Context, repo string, prNumber int) (prwire.BuildLifecycle, error) {
 	c, err := st.srv.restateClient()
 	if err != nil {
-		return restateclient.BuildLifecycle{}, err
+		return prwire.BuildLifecycle{}, err
 	}
 	return c.GetBuildLifecycle(ctx, repo, prNumber)
 }
@@ -497,23 +497,23 @@ func (st restateBuildMetadataStore) LoadPRBuildLifecycle(ctx context.Context, re
 	return model.PRBuildLifecycle{Status: lc.Status, HeadSHA: lc.HeadSHA, MergeSHA: lc.MergeSHA, Started: lc.Started}, nil
 }
 
-func (st restateBuildMetadataStore) LoadPRBuildMetadata(ctx context.Context, repo string, prNumber int) (model.BuildMetadata, bool, error) {
+func (st restateBuildMetadataStore) LoadPRBuildMetadata(ctx context.Context, repo string, prNumber int) (prwire.BuildMetadata, bool, error) {
 	lc, err := st.lifecycle(ctx, repo, prNumber)
 	if err != nil || !lc.HasBuildMetadata || lc.BuildMetadata == nil {
-		return model.BuildMetadata{}, false, err
+		return prwire.BuildMetadata{}, false, err
 	}
 	return *lc.BuildMetadata, true, nil
 }
 
 // RecordPRBuildMetadata sends the snapshot; PRObject applies its own
 // revision and ordering fence, so a sent snapshot reports updated.
-func (st restateBuildMetadataStore) RecordPRBuildMetadata(ctx context.Context, repo string, prNumber int, metadata model.BuildMetadata) (bool, error) {
+func (st restateBuildMetadataStore) RecordPRBuildMetadata(ctx context.Context, repo string, prNumber int, metadata prwire.BuildMetadata) (bool, error) {
 	snapshot := metadata
-	ev := restateclient.PREvent{Repo: repo, PRNumber: prNumber, HeadSHA: metadata.SourceSHA, BuildMetadata: &snapshot}
+	ev := prwire.PREvent{Repo: repo, PRNumber: prNumber, HeadSHA: metadata.SourceSHA, BuildMetadata: &snapshot}
 	if st.fact != nil {
 		ev.Facts = facts(*st.fact)
 	}
-	if err := st.srv.sendOwnedPR(ctx, "HandleBuildMetadata", ev); err != nil {
+	if err := st.srv.sendOwnedPR(ctx, prwire.PRHandlerBuildMetadata, ev); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -566,9 +566,9 @@ func checkOutcomeHandler(res *ResolvedGitHubEvent) string {
 	}
 	switch strings.ToLower(strings.TrimSpace(res.Conclusion)) {
 	case conclusionSuccess:
-		return "HandleCheckPassed"
+		return prwire.PRHandlerCheckPassed
 	case conclusionFailure, conclusionTimedOut:
-		return "HandleCheckFailed"
+		return prwire.PRHandlerCheckFailed
 	default:
 		return ""
 	}

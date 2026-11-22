@@ -4,6 +4,8 @@ import (
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/azylman/aerial/pkg/prwire"
 )
 
 func TestParseBuildMetadata(t *testing.T) {
@@ -103,8 +105,8 @@ func TestParseStoredBuildMetadata(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error parsing stored progress metadata: %v", err)
 	}
-	if m.Kind != BuildMetadataProgress {
-		t.Fatalf("got kind %q, want %q", m.Kind, BuildMetadataProgress)
+	if m.Kind != prwire.BuildMetadataProgress {
+		t.Fatalf("got kind %q, want %q", m.Kind, prwire.BuildMetadataProgress)
 	}
 }
 
@@ -134,13 +136,13 @@ func TestValidWorkflowPath(t *testing.T) {
 
 func TestValidBuildMetadataTransport(t *testing.T) {
 	t.Parallel()
-	mManifest := BuildMetadata{Kind: BuildMetadataManifest}
+	mManifest := prwire.BuildMetadata{Kind: prwire.BuildMetadataManifest}
 	if !validBuildMetadataTransport(mManifest) {
 		t.Fatal("manifest should pass transport check")
 	}
 
-	mResultValid := BuildMetadata{
-		Kind:          BuildMetadataResult,
+	mResultValid := prwire.BuildMetadata{
+		Kind:          prwire.BuildMetadataResult,
 		Service:       "engine",
 		ImageName:     "engine",
 		State:         ConclusionSuccess,

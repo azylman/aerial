@@ -232,10 +232,6 @@ type GitHubCommitPRItem struct {
 	} `json:"head"`
 }
 
-func isZeroSHA(sha string) bool {
-	return strings.Trim(sha, "0") == ""
-}
-
 var (
 	squashCommitPRRegex = regexp.MustCompile(`\(#([1-9]\d*)\)\s*$`)
 	mergeCommitPRRegex  = regexp.MustCompile(`^Merge pull request #([1-9]\d*)\b`)

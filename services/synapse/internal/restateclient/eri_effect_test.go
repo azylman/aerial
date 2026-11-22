@@ -5,6 +5,8 @@ import (
 	"os"
 	"reflect"
 	"testing"
+
+	"github.com/azylman/aerial/pkg/prwire"
 )
 
 // fixtureDir is the shared cross-module golden fixture directory at the
@@ -46,10 +48,10 @@ func TestPREventEriEffectsWire(t *testing.T) {
 	var fx wireFixture
 	readFixture(t, "eri_effect_wire.json", &fx)
 	f := fx.Fields
-	withEffect := PREvent{
+	withEffect := prwire.PREvent{
 		Repo: f.Repo, PRNumber: f.PRNumber, HeadSHA: f.HeadSHA, CheckName: f.CheckName,
 		Branch: f.Branch, Title: f.Title, Unmanaged: f.Unmanaged, Agent: f.Agent,
-		EriEffects: []EriEffect{{Kind: EffectEriDirectMessage, ChannelID: f.ChannelID, Content: f.Content}},
+		EriEffects: []prwire.EriEffect{{Kind: prwire.EffectEriDirectMessage, ChannelID: f.ChannelID, Content: f.Content}},
 	}
 	withoutEffect := withEffect
 	withoutEffect.EriEffects = nil
@@ -61,7 +63,7 @@ func TestPREventEriEffectsWire(t *testing.T) {
 	}
 	tests := []struct {
 		name string
-		ev   PREvent
+		ev   prwire.PREvent
 		want map[string]any
 	}{
 		{name: "rendered DM matches the golden event", ev: withEffect, want: fx.Event},
@@ -96,16 +98,16 @@ func TestRepoEventAutoUpdateWire(t *testing.T) {
 	readFixture(t, "github_effect_wire.json", &fx)
 	tests := []struct {
 		name string
-		ev   RepoEvent
+		ev   prwire.RepoEvent
 		want map[string]any
 	}{
 		{
 			name: "gate-success trigger matches the golden event",
-			ev: RepoEvent{
-				Repo: "azylman/mirrormere", PRNumber: 1010, HeadSHA: "def5678", Agent: "aerial", CheckName: "CI Gate",
-				AutoUpdate: &AutoUpdatePolicy{
+			ev: prwire.RepoEvent{
+				Repo: "azylman/mirrormere", PRNumber: 1010, HeadSHA: "def5678", CheckName: "CI Gate",
+				AutoUpdate: &prwire.AutoUpdatePolicy{
 					Authors: []string{"aerial-bot", "dependabot[bot]"}, DefaultOwner: true,
-					Collaborators: []CollaboratorAlert{{Author: "octo", ChannelID: "111111111111111111", Mention: "<@42>"}},
+					Collaborators: []prwire.CollaboratorAlert{{Author: "octo", ChannelID: "111111111111111111", Mention: "<@42>"}},
 				},
 			},
 			want: fx.Event,

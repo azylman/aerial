@@ -111,28 +111,6 @@ func TestIs4xxClientError(t *testing.T) {
 	}
 }
 
-func TestIsZeroSHA(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		sha  string
-		want bool
-	}{
-		{"", true},
-		{"0", true},
-		{"0000000000000000000000000000000000000000", true},
-		{"0000000000000000000000000000000000000001", false},
-		{"abc123", false},
-	}
-	for _, tc := range tests {
-		t.Run(tc.sha, func(t *testing.T) {
-			t.Parallel()
-			if got := IsZeroSHA(tc.sha); got != tc.want {
-				t.Fatalf("IsZeroSHA(%q) = %v, want %v", tc.sha, got, tc.want)
-			}
-		})
-	}
-}
-
 func TestFirstNonEmptyAndRandomNonce(t *testing.T) {
 	t.Parallel()
 	if got := FirstNonEmpty("", "  ", "first", "second"); got != "  " {

@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/azylman/aerial/pkg/prwire"
 	"github.com/azylman/aerial/services/synapse/internal/github"
-	"github.com/azylman/aerial/services/synapse/internal/restateclient"
 )
 
 func TestFormatCollaboratorPRTarget(t *testing.T) {
@@ -690,7 +690,7 @@ func assertCollaboratorAlerts(t *testing.T, ingress *ownedIngress, disp *mockOut
 	if !strings.HasSuffix(paths[0], "/HandleCollaboratorAlert/send") {
 		t.Errorf("send path = %s, want HandleCollaboratorAlert", paths[0])
 	}
-	var ev restateclient.PREvent
+	var ev prwire.PREvent
 	if err := json.Unmarshal([]byte(bodies[0]), &ev); err != nil {
 		t.Fatalf("decode alert: %v", err)
 	}

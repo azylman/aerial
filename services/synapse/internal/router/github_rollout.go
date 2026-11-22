@@ -7,8 +7,8 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/azylman/aerial/pkg/prwire"
 	"github.com/azylman/aerial/services/synapse/internal/github"
-	"github.com/azylman/aerial/services/synapse/internal/restateclient"
 )
 
 const (
@@ -138,8 +138,8 @@ func (s *RouterServer) resolveCollaboratorAlertTarget(ctx context.Context, repo 
 
 // collaboratorDMEffect renders the collaborator DM as the eri effect the
 // HandleCollaboratorAlert event carries to PRObject.
-func collaboratorDMEffect(channelID, msg string) []restateclient.EriEffect {
-	return []restateclient.EriEffect{{Kind: restateclient.EffectEriDirectMessage, ChannelID: channelID, Content: msg}}
+func collaboratorDMEffect(channelID, msg string) []prwire.EriEffect {
+	return []prwire.EriEffect{{Kind: prwire.EffectEriDirectMessage, ChannelID: channelID, Content: msg}}
 }
 
 func (s *RouterServer) notifyCollaboratorConflict(ctx context.Context, repo string, pr GitHubPullRequest) error {
@@ -165,7 +165,7 @@ func (s *RouterServer) notifyCollaboratorConflict(ctx context.Context, repo stri
 	msg := formatCollaboratorConflictMessage(mention, repo, prNum, resolvedPR.Title, branch, sha)
 	// The event carries the rendered DM; PRObject owns alert dedup and
 	// sends it.
-	return s.sendOwnedPR(ctx, "HandleCollaboratorAlert", restateclient.PREvent{
+	return s.sendOwnedPR(ctx, prwire.PRHandlerCollaboratorAlert, prwire.PREvent{
 		Repo: repo, PRNumber: prNum, HeadSHA: sha, Branch: branch,
 		Title: resolvedPR.Title, Unmanaged: true,
 		EriEffects: collaboratorDMEffect(channelID, msg),
@@ -173,7 +173,7 @@ func (s *RouterServer) notifyCollaboratorConflict(ctx context.Context, repo stri
 }
 
 func (s *RouterServer) notifyCollaboratorCIFailure(ctx context.Context, res *ResolvedGitHubEvent, checkURL string) error {
-	if s == nil || res == nil || res.TargetID != "" || res.PRNumber <= 0 || res.HeadSHA == "" || isZeroSHA(res.HeadSHA) || !s.hasCollaboratorCIAlertsForRepo(res.Repo) {
+	if s == nil || res == nil || res.TargetID != "" || res.PRNumber <= 0 || res.HeadSHA == "" || prwire.IsZeroSHA(res.HeadSHA) || !s.hasCollaboratorCIAlertsForRepo(res.Repo) {
 		return nil
 	}
 	resolvedPR, channelID, mention, ok, err := s.resolveCollaboratorAlertTarget(ctx, res.Repo, res.PRNumber, res.HeadSHA, GitHubPullRequest{
@@ -186,7 +186,7 @@ func (s *RouterServer) notifyCollaboratorCIFailure(ctx context.Context, res *Res
 	branch := firstNonEmpty(resolvedPR.Head.Ref, res.Branch)
 	sha := firstNonEmpty(resolvedPR.Head.SHA, res.HeadSHA)
 	msg := formatCollaboratorCIFailureMessage(mention, res.Repo, resolvedPR.Number, resolvedPR.Title, branch, sha, res.CheckName, checkURL)
-	return s.sendOwnedPR(ctx, "HandleCollaboratorAlert", restateclient.PREvent{
+	return s.sendOwnedPR(ctx, prwire.PRHandlerCollaboratorAlert, prwire.PREvent{
 		Repo: res.Repo, PRNumber: resolvedPR.Number, HeadSHA: sha, MergeSHA: res.MergeSHA,
 		CheckName: res.CheckName, Branch: branch, Title: resolvedPR.Title, Unmanaged: true,
 		EriEffects: collaboratorDMEffect(channelID, msg),

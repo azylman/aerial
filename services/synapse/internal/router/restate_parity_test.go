@@ -15,6 +15,7 @@ import (
 	"sort"
 	"testing"
 
+	"github.com/azylman/aerial/pkg/prwire"
 	"github.com/azylman/aerial/pkg/pubsub"
 )
 
@@ -42,13 +43,13 @@ type parityRow struct {
 
 // parityRollout records reconcile requests for an image rollout.
 type parityRollout struct {
-	Repo     string                          `json:"repo"`
-	PRNumber int                             `json:"pr_number"`
-	HeadSHA  string                          `json:"head_sha"`
-	Branch   string                          `json:"branch"`
-	TargetID string                          `json:"target_id"`
-	Jobs     []string                        `json:"jobs"`
-	Requests map[string]kustomizationRequest `json:"requests"`
+	Repo     string                                 `json:"repo"`
+	PRNumber int                                    `json:"pr_number"`
+	HeadSHA  string                                 `json:"head_sha"`
+	Branch   string                                 `json:"branch"`
+	TargetID string                                 `json:"target_id"`
+	Jobs     []string                               `json:"jobs"`
+	Requests map[string]prwire.KustomizationRequest `json:"requests"`
 }
 
 // parityObservation is one Ready Kustomization the watcher observes.

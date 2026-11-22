@@ -4,8 +4,8 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/azylman/aerial/pkg/prwire"
 	"github.com/azylman/aerial/services/synapse/internal/config"
-	"github.com/azylman/aerial/services/synapse/internal/restateclient"
 )
 
 func TestAutoUpdatePolicy(t *testing.T) {
@@ -14,7 +14,7 @@ func TestAutoUpdatePolicy(t *testing.T) {
 		name string
 		cfg  Config
 		repo string
-		want *restateclient.AutoUpdatePolicy
+		want *prwire.AutoUpdatePolicy
 	}{
 		{
 			name: "authors, default owner, and the repo's collaborators sorted by author",
@@ -23,12 +23,12 @@ func TestAutoUpdatePolicy(t *testing.T) {
 				{Repo: "azylman/mirrormere", ChannelID: "333333333333333333", Authors: map[string]string{"other": "<@3>"}},
 			}},
 			repo: "azylman/aerial",
-			want: &restateclient.AutoUpdatePolicy{Authors: []string{"bot"}, DefaultOwner: true, Collaborators: []restateclient.CollaboratorAlert{
+			want: &prwire.AutoUpdatePolicy{Authors: []string{"bot"}, DefaultOwner: true, Collaborators: []prwire.CollaboratorAlert{
 				{Author: "amy", ChannelID: "111111111111111111", Mention: "<@1>"},
 				{Author: "zed", ChannelID: "111111111111111111", Mention: "<@2>"},
 			}},
 		},
-		{name: "empty config renders an empty policy", repo: "azylman/aerial", want: &restateclient.AutoUpdatePolicy{}},
+		{name: "empty config renders an empty policy", repo: "azylman/aerial", want: &prwire.AutoUpdatePolicy{}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

@@ -15,6 +15,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/azylman/aerial/pkg/prwire"
 	"github.com/azylman/aerial/services/synapse/internal/config"
 	"github.com/azylman/aerial/services/synapse/internal/model"
 )
@@ -151,16 +152,16 @@ type testPRRegistry struct {
 	lifecycle model.PRBuildLifecycle
 	lifeErr   error
 	recordErr error
-	metadata  model.BuildMetadata
+	metadata  prwire.BuildMetadata
 	hasMeta   bool
-	recorded  []model.BuildMetadata
+	recorded  []prwire.BuildMetadata
 }
 
 func (r *testPRRegistry) LoadPRBuildLifecycle(ctx context.Context, repo string, prNumber int) (model.PRBuildLifecycle, error) {
 	return r.lifecycle, r.lifeErr
 }
 
-func (r *testPRRegistry) RecordPRBuildMetadata(ctx context.Context, repo string, prNumber int, metadata model.BuildMetadata) (bool, error) {
+func (r *testPRRegistry) RecordPRBuildMetadata(ctx context.Context, repo string, prNumber int, metadata prwire.BuildMetadata) (bool, error) {
 	r.recorded = append(r.recorded, metadata)
 	if r.recordErr != nil {
 		return false, r.recordErr
@@ -170,7 +171,7 @@ func (r *testPRRegistry) RecordPRBuildMetadata(ctx context.Context, repo string,
 	return true, nil
 }
 
-func (r *testPRRegistry) LoadPRBuildMetadata(ctx context.Context, repo string, prNumber int) (model.BuildMetadata, bool, error) {
+func (r *testPRRegistry) LoadPRBuildMetadata(ctx context.Context, repo string, prNumber int) (prwire.BuildMetadata, bool, error) {
 	return r.metadata, r.hasMeta, r.lifeErr
 }
 
@@ -182,11 +183,11 @@ func (c *testConfigSource) Current() *config.Config {
 	return &c.cfg
 }
 
-func tRepoMeta(repo string, attempt int, svc, image string) model.BuildMetadata {
+func tRepoMeta(repo string, attempt int, svc, image string) prwire.BuildMetadata {
 	m := tMeta(attempt)
 	m.Repository, m.WorkflowPath = repo, MetadataWorkflowPath(repo)
 	if svc != "" {
-		m.Selected = []model.BuildSelection{{Service: svc, ImageName: image}}
+		m.Selected = []prwire.BuildSelection{{Service: svc, ImageName: image}}
 	}
 	return m
 }
@@ -197,20 +198,20 @@ func tRepoRun(repo string, attempt int, event, status, conclusion string) Metada
 	return r
 }
 
-func tPublished(m model.BuildMetadata) []model.GitHubMetadataCheck {
+func tPublished(m prwire.BuildMetadata) []model.GitHubMetadataCheck {
 	out := []model.GitHubMetadataCheck{tCheck(withRunAttempt(m, 1))}
-	results := make([]model.BuildResult, 0, len(m.Selected))
+	results := make([]prwire.BuildResult, 0, len(m.Selected))
 	for _, sel := range m.Selected {
 		r := withRunAttempt(m, 1)
-		r.Kind, r.Service, r.ImageName, r.State, r.Pushed, r.SourceAttempt = model.BuildMetadataResult, sel.Service, sel.ImageName, model.ConclusionSuccess, true, 1
+		r.Kind, r.Service, r.ImageName, r.State, r.Pushed, r.SourceAttempt = prwire.BuildMetadataResult, sel.Service, sel.ImageName, model.ConclusionSuccess, true, 1
 		r.ImageRefs = []string{"ghcr.io/" + strings.Split(m.Repository, "/")[0] + "/" + sel.ImageName + ":" + tHead}
 		out = append(out, tCheck(r))
-		results = append(results, model.BuildResult{Service: sel.Service, ImageName: sel.ImageName, State: model.ConclusionSuccess, Pushed: true, SourceAttempt: 1, ImageRefs: r.ImageRefs})
+		results = append(results, prwire.BuildResult{Service: sel.Service, ImageName: sel.ImageName, State: model.ConclusionSuccess, Pushed: true, SourceAttempt: 1, ImageRefs: r.ImageRefs})
 	}
 	return append(out, tCheck(tFinalOf(m, results...)))
 }
 
-func withRunAttempt(m model.BuildMetadata, attempt int) model.BuildMetadata {
+func withRunAttempt(m prwire.BuildMetadata, attempt int) prwire.BuildMetadata {
 	m.RunAttempt = attempt
 	return m
 }
@@ -225,7 +226,7 @@ func withRunPath(r MetadataWorkflowRun, path string) MetadataWorkflowRun {
 	return r
 }
 
-func withMetaEvent(m model.BuildMetadata, event string) model.BuildMetadata {
+func withMetaEvent(m prwire.BuildMetadata, event string) prwire.BuildMetadata {
 	m.Event = event
 	return m
 }
@@ -351,12 +352,12 @@ func TestRefreshPRBuildMetadata(t *testing.T) {
 		wantUpdated bool
 		wantErr     bool
 	}{
-		{"PR head final", open, nil, nil, metadataAPI{runs: runs(prRun), checks: prChecks, parents: bound}, model.BuildMetadataFinal, true, false},
-		{"Dependabot-free conflict status still tracked", model.PRBuildLifecycle{Status: "conflict", HeadSHA: tHead}, nil, nil, metadataAPI{runs: runs(prRun), checks: prChecks, parents: bound}, model.BuildMetadataFinal, true, false},
+		{"PR head final", open, nil, nil, metadataAPI{runs: runs(prRun), checks: prChecks, parents: bound}, prwire.BuildMetadataFinal, true, false},
+		{"Dependabot-free conflict status still tracked", model.PRBuildLifecycle{Status: "conflict", HeadSHA: tHead}, nil, nil, metadataAPI{runs: runs(prRun), checks: prChecks, parents: bound}, prwire.BuildMetadataFinal, true, false},
 		{"unbound execution revision", open, nil, nil, metadataAPI{runs: runs(prRun), checks: prChecks, parents: []string{tBase, tOther}}, "", false, true},
 		{"execution commit unavailable", open, nil, nil, metadataAPI{runs: runs(prRun), checks: prChecks, cmt: http.StatusNotFound}, "", false, true},
 		{"stale PR revision", model.PRBuildLifecycle{Status: "open", HeadSHA: tOther}, nil, nil, metadataAPI{runs: runs(prRun), checks: prChecks, parents: bound}, "", false, false},
-		{"merged PR follows main run", merged, nil, nil, metadataAPI{runs: runs(priorPRRun(), tRun(1, "completed", model.ConclusionSuccess)), checks: tPublished(tMeta(1, "engine"))}, model.BuildMetadataFinal, true, false},
+		{"merged PR follows main run", merged, nil, nil, metadataAPI{runs: runs(priorPRRun(), tRun(1, "completed", model.ConclusionSuccess)), checks: tPublished(tMeta(1, "engine"))}, prwire.BuildMetadataFinal, true, false},
 		{"newer pending run hides older success", open, nil, nil, metadataAPI{runs: runs(prRun, newer), checks: prChecks, parents: bound}, "", false, false},
 		{"newer failed run without metadata", open, nil, nil, metadataAPI{runs: runs(prRun, newerFailed), checks: prChecks, parents: bound, blob: tOther, logs: tLegacyLogs(tMerge)}, "", false, true},
 		{"no eligible run yet", open, nil, nil, metadataAPI{}, "", false, false},
@@ -371,7 +372,7 @@ func TestRefreshPRBuildMetadata(t *testing.T) {
 		{"authoritative run unavailable", open, nil, nil, metadataAPI{runs: runs(prRun), runStatus: http.StatusBadGateway}, "", false, true},
 		{"authoritative run identity invalid", open, nil, nil, metadataAPI{runs: runs(tPRRun(0, "queued", ""))}, "", false, true},
 		{"lifecycle unavailable", open, errors.New("offline"), nil, metadataAPI{}, "", false, true},
-		{"snapshot write fails", open, nil, errors.New("offline"), metadataAPI{runs: runs(prRun), checks: prChecks, parents: bound}, model.BuildMetadataFinal, false, true},
+		{"snapshot write fails", open, nil, errors.New("offline"), metadataAPI{runs: runs(prRun), checks: prChecks, parents: bound}, prwire.BuildMetadataFinal, false, true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -430,7 +431,7 @@ func TestSupersedeStaleBuildAttempt(t *testing.T) {
 			}
 			if tc.wantWrite {
 				got := reg.recorded[0]
-				if got.Kind != model.BuildMetadataManifest || got.RunAttempt != 2 || len(got.Results) != 0 || !reflect.DeepEqual(got.Selected, stored.Selected) {
+				if got.Kind != prwire.BuildMetadataManifest || got.RunAttempt != 2 || len(got.Results) != 0 || !reflect.DeepEqual(got.Selected, stored.Selected) {
 					t.Fatalf("demoted snapshot=%+v", got)
 				}
 			}
@@ -444,8 +445,8 @@ func TestConsumer_DirectEdgeCases(t *testing.T) {
 
 	// Consumer with nil dependencies
 	c := NewConsumer(nil, nil, nil, nil)
-	c.recordPRBuildSnapshot(ctx, "repo", 0, model.BuildMetadata{})
-	c.recordPRBuildSnapshot(ctx, "repo", 1, model.BuildMetadata{})
+	c.recordPRBuildSnapshot(ctx, "repo", 0, prwire.BuildMetadata{})
+	c.recordPRBuildSnapshot(ctx, "repo", 1, prwire.BuildMetadata{})
 
 	if _, err := c.fetchMetadataRun(ctx, "example/aerial", -1); err == nil {
 		t.Fatal("expected error for id <= 0")
