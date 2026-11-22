@@ -33,9 +33,6 @@ func (b *BuildObject) CompleteChunk(ctx restate.ObjectContext, req CompleteChunk
 	if b == nil || b.store == nil {
 		return CompleteChunkResponse{}, restate.TerminalErrorf("verdict authority not configured")
 	}
-	if err := b.guardRunner(ctx, labelCompleteChunk); err != nil {
-		return CompleteChunkResponse{}, err
-	}
 	rt := b.getRuntime(ctx)
 	buildID := strings.TrimSpace(rt.Key())
 	req = normalizeCompleteChunkRequest(req)

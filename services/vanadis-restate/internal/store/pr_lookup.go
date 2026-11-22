@@ -33,7 +33,6 @@ var ErrPRTransitionSkipped = errors.New("pr lifecycle transition not applied")
 type chunkPRMatch struct {
 	chunkID      string
 	buildID      string
-	runnerAgent  string
 	chunkIdx     int
 	effort       string
 	hasRemaining bool
@@ -75,7 +74,7 @@ func (s *Store) LookupPRChunk(ctx context.Context, repo string, prNumber int) (B
 	if !found {
 		return BuildRoute{}, "", ErrChunkNotFound
 	}
-	return BuildRoute{BuildID: match.buildID, RunnerAgent: NormalizeRunnerAgent(match.runnerAgent)}, match.chunkID, nil
+	return BuildRoute{BuildID: match.buildID}, match.chunkID, nil
 }
 
 // LookupChunkBuildID resolves the build route that owns a chunk.
@@ -95,7 +94,6 @@ func (s *Store) LookupChunkBuildID(ctx context.Context, chunkID string) (BuildRo
 		}
 		return BuildRoute{}, fmt.Errorf("lookup chunk build id: %w", err)
 	}
-	route.RunnerAgent = defaultAgent
 	return route, nil
 }
 
@@ -133,7 +131,7 @@ func (s *Store) LookupUnattachedChunkByThreadAndRepo(ctx context.Context, thread
 		return BuildRoute{}, "", fmt.Errorf("iterate unattached chunks: %w", err)
 	}
 	if len(matches) == 1 {
-		return BuildRoute{BuildID: matches[0].buildID, RunnerAgent: defaultAgent}, matches[0].chunkID, nil
+		return BuildRoute{BuildID: matches[0].buildID}, matches[0].chunkID, nil
 	}
 	return BuildRoute{}, "", ErrChunkNotFound
 }
@@ -148,7 +146,6 @@ func (s *Store) findChunkPRMatch(ctx context.Context, candidates []string, prNum
 	if err != nil {
 		return chunkPRMatch{}, false, fmt.Errorf("query chunk by pr candidates %v #%d: %w", candidates, prNumber, err)
 	}
-	m.runnerAgent = defaultAgent
 	return m, true, nil
 }
 

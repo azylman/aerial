@@ -492,13 +492,13 @@ func TestServer_MutationEndpoints(t *testing.T) {
 			{ID: "c2", Status: "pending", ChunkIndex: 1},
 		}, http.MethodDelete, "/builds/b1/chunks/c2", "", http.StatusOK},
 
-		// Per-build mutations route to the build's runner, not the server agent.
-		{"patch_build_routes_to_runner", false, false, &VanadisBuild{ID: "b-runner-alpha", Agent: "agent-alpha", RunnerAgent: "agent-alpha", Status: "running"}, nil, http.MethodPatch, "/builds/b-runner-alpha", `{"title":"New Title"}`, http.StatusOK},
-		{"patch_chunk_routes_to_runner", false, false, &VanadisBuild{ID: "b-runner-alpha", Agent: "agent-alpha", RunnerAgent: "agent-alpha", Status: "running"}, []VanadisChunk{{ID: "c1", Status: "pending"}}, http.MethodPatch, "/builds/b-runner-alpha/chunks/c1", `{"title":"New Chunk Title"}`, http.StatusOK},
-		{"append_chunks_routes_to_runner", false, false, &VanadisBuild{ID: "b-runner-alpha", Agent: "agent-alpha", RunnerAgent: "agent-alpha", Status: "running"}, nil, http.MethodPost, "/builds/b-runner-alpha/chunks", `{"chunks":[{"repo":"aerial","title":"T","instructions":"I"}]}`, http.StatusOK},
-		{"delete_chunk_routes_to_runner", false, false, &VanadisBuild{ID: "b-runner-alpha", Agent: "agent-alpha", RunnerAgent: "agent-alpha", Status: "running"}, []VanadisChunk{{ID: "c1", Status: "running", ChunkIndex: 0}, {ID: "c2", Status: "pending", ChunkIndex: 1}}, http.MethodDelete, "/builds/b-runner-alpha/chunks/c2", "", http.StatusOK},
-		{"active_step_routes_to_runner", false, false, &VanadisBuild{ID: "b-runner-alpha", Agent: "agent-alpha", RunnerAgent: "agent-alpha", Status: "running"}, []VanadisChunk{{ID: "c1", Status: "running"}}, http.MethodPost, "/builds/b-runner-alpha/active-step", `{"chunk_id":"c1","step":"testing"}`, http.StatusOK},
-		{"sibling_owned_build_pinned_to_default_runner", false, false, &VanadisBuild{ID: "b1", Agent: "agent-alpha", RunnerAgent: "aerial", Status: "running"}, nil, http.MethodPatch, "/builds/b1", `{"title":"New Title"}`, http.StatusOK},
+		// Per-build mutations route to the canonical Build object.
+		{"patch_build_routes_to_runner", false, false, &VanadisBuild{ID: "b-runner-alpha", Agent: "agent-alpha", Status: "running"}, nil, http.MethodPatch, "/builds/b-runner-alpha", `{"title":"New Title"}`, http.StatusOK},
+		{"patch_chunk_routes_to_runner", false, false, &VanadisBuild{ID: "b-runner-alpha", Agent: "agent-alpha", Status: "running"}, []VanadisChunk{{ID: "c1", Status: "pending"}}, http.MethodPatch, "/builds/b-runner-alpha/chunks/c1", `{"title":"New Chunk Title"}`, http.StatusOK},
+		{"append_chunks_routes_to_runner", false, false, &VanadisBuild{ID: "b-runner-alpha", Agent: "agent-alpha", Status: "running"}, nil, http.MethodPost, "/builds/b-runner-alpha/chunks", `{"chunks":[{"repo":"aerial","title":"T","instructions":"I"}]}`, http.StatusOK},
+		{"delete_chunk_routes_to_runner", false, false, &VanadisBuild{ID: "b-runner-alpha", Agent: "agent-alpha", Status: "running"}, []VanadisChunk{{ID: "c1", Status: "running", ChunkIndex: 0}, {ID: "c2", Status: "pending", ChunkIndex: 1}}, http.MethodDelete, "/builds/b-runner-alpha/chunks/c2", "", http.StatusOK},
+		{"active_step_routes_to_runner", false, false, &VanadisBuild{ID: "b-runner-alpha", Agent: "agent-alpha", Status: "running"}, []VanadisChunk{{ID: "c1", Status: "running"}}, http.MethodPost, "/builds/b-runner-alpha/active-step", `{"chunk_id":"c1","step":"testing"}`, http.StatusOK},
+		{"sibling_owned_build_pinned_to_default_runner", false, false, &VanadisBuild{ID: "b1", Agent: "agent-alpha", Status: "running"}, nil, http.MethodPatch, "/builds/b1", `{"title":"New Title"}`, http.StatusOK},
 
 		// Method and path errors
 		{"method_not_allowed_put_build", false, false, &VanadisBuild{ID: "b1", Status: "running"}, nil, http.MethodPut, "/builds/b1", "", http.StatusMethodNotAllowed},

@@ -234,7 +234,7 @@ func (b *BuildObject) completeCrossBuildSweptDeployments(ctx context.Context, de
 				slog.WarnContext(ctx, "[vanadis-restate] publish event warning", "error", pubErr)
 			}
 		}
-		recordCrossBuildReconcile(ctx, store.BuildRoute{BuildID: sw.BuildID, RunnerAgent: sw.RunnerAgent})
+		recordCrossBuildReconcile(ctx, store.BuildRoute{BuildID: sw.BuildID})
 	}
 	return err
 }
@@ -434,9 +434,6 @@ func (b *BuildObject) OnPREvent(ctx restate.ObjectContext, ev pubsub.PRLifecycle
 	if b.store == nil {
 		return nil
 	}
-	if err := b.guardRunner(ctx, labelOnPREvent); err != nil {
-		return err
-	}
 	buildID := restate.Key(ctx)
 	outcome, err := RunJournaled(ctx, labelOnPREvent, "handle-pr-event-postgres", func(rc restate.RunContext) (prEventOutcome, error) {
 		return b.recordDeploymentPREvent(rc, buildID, ev)
@@ -466,9 +463,6 @@ func (b *BuildObject) OnPREvent(ctx restate.ObjectContext, ev pubsub.PRLifecycle
 func (b *BuildObject) OnDispatchOutcome(ctx restate.ObjectContext, ev pubsub.DispatchOutcomeEvent) error {
 	if b.store == nil {
 		return nil
-	}
-	if err := b.guardRunner(ctx, labelOnDispatchOutcome); err != nil {
-		return err
 	}
 	applied, err := RunJournaled(ctx, labelOnDispatchOutcome, "handle-dispatch-outcome-postgres", func(rc restate.RunContext) (bool, error) {
 		return b.applyDispatchOutcome(rc, restate.Key(ctx), ev)

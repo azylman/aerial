@@ -220,12 +220,8 @@ func knownCreationConflict(err error, constraints ...string) bool {
 // after a successful commit whose acknowledgement was lost.
 func sameBuildCreation(a model.VanadisBuild, ac []model.VanadisChunk, b model.VanadisBuild, bc []model.VanadisChunk) bool {
 	buildKey := func(v model.VanadisBuild) model.VanadisBuild {
-		agent := strings.TrimSpace(v.Agent)
-		if agent == "" {
-			agent = "aerial"
-		}
 		return model.VanadisBuild{
-			ID: strings.TrimSpace(v.ID), Agent: agent, RunnerAgent: defaultAgent, ThreadID: strings.TrimSpace(v.ThreadID), Tier: v.Tier,
+			ID: strings.TrimSpace(v.ID), Agent: NormalizeRunnerAgent(v.Agent), ThreadID: strings.TrimSpace(v.ThreadID), Tier: v.Tier,
 			Title:     strutil.FirstNonEmpty(strings.TrimSpace(v.Title), strings.TrimSpace(v.Objective)),
 			Objective: strings.TrimSpace(v.Objective), SharedContext: strings.TrimSpace(v.SharedContext), Quiet: v.Quiet,
 		}

@@ -77,9 +77,6 @@ func (b *BuildObject) syncDeploymentDeadlines(rt objectRuntime, state *model.Bui
 // DeploymentDeadline returns promptly: failed delivery is retried by a delayed
 // self-send, never by holding the exclusive object across a sleeping invocation.
 func (b *BuildObject) DeploymentDeadline(ctx restate.ObjectContext, req deploygate.DeploymentDeadlineRequest) error {
-	if err := b.guardRunner(ctx, "DeploymentDeadline"); err != nil {
-		return err
-	}
 	return b.expireDeploymentDeadline(b.getRuntime(ctx), req)
 }
 

@@ -287,7 +287,7 @@ func newMCPToolsStore(listErr, getErr error) *memoryStore {
 	st.builds["build-mcp-2"], st.chunks["build-mcp-2"] = b2, []model.VanadisChunk{mkChunk("chunk-2-0", "build-mcp-2", 0, "C2", "I2", "low", "completed")}
 	st.builds["build-mcp-3"], st.chunks["build-mcp-3"] = b3, []model.VanadisChunk{mkChunk("chunk-3-0", "build-mcp-3", 0, "C3", "I3", "low", "completed")}
 	b4 := mkBuild("build-mcp-4", "4444444444", "Build 4 Title", "Objective 4", "running")
-	b4.Agent, b4.RunnerAgent = "agent-alpha", "agent-alpha"
+	b4.Agent = "agent-alpha"
 	b4.CreatedAt = now.Add(-20 * time.Minute)
 	st.builds["build-mcp-4"], st.chunks["build-mcp-4"] = b4, []model.VanadisChunk{
 		mkChunk("chunk-4-0", "build-mcp-4", 0, "C4", "I4", "low", "running"),

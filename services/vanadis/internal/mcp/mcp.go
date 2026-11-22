@@ -508,7 +508,7 @@ func (h *Handler) requireStoreAndBuildID(buildID string) (string, error) {
 }
 
 // authorizeBuildMutation loads the build, authorizes the caller to update it,
-// and returns the Restate Build service of the runner that executes it.
+// and returns the Restate Build service name.
 func (h *Handler) authorizeBuildMutation(ctx context.Context, buildID string) (string, error) {
 	var caller k8sauth.CallerIdentity
 	if h.authEnabled() {
@@ -536,7 +536,7 @@ func (h *Handler) authorizeBuildMutation(ctx context.Context, buildID string) (s
 			return "", err
 		}
 	}
-	return buildplan.BuildServiceName(targetBuild.RunnerAgent), nil
+	return buildplan.BuildServiceName(""), nil
 }
 
 func (h *Handler) handleMCPUpdateBuild(ctx context.Context, args MCPUpdateBuildArgs) (MCPUpdateBuildOutput, error) {
@@ -772,7 +772,7 @@ func (h *Handler) handleMCPCompleteChunk(ctx context.Context, args MCPCompleteCh
 		}
 	}
 	req := completeChunkPayload{BuildID: targetBuild.ID, ChunkID: chunkID, DispatchID: dispatchID, Summary: summary}
-	path := h.Restate.ObjectPath(buildplan.BuildServiceName(targetBuild.RunnerAgent), targetBuild.ID, "CompleteChunk")
+	path := h.Restate.ObjectPath(buildplan.BuildServiceName(""), targetBuild.ID, "CompleteChunk")
 	var resp completeChunkResponse
 	if err := h.Restate.CallIngressKeyed(ctx, path, "complete:"+dispatchID, req, &resp); err != nil {
 		return MCPCompleteChunkOutput{}, err

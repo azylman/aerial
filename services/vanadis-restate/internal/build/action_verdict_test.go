@@ -82,7 +82,6 @@ func (s *verdictStore) chunkStatus(id string) string {
 type completeChunkCase struct {
 	name             string
 	noStore          bool
-	runner           string
 	buildStatus      string
 	chunks           []model.VanadisChunk
 	req              CompleteChunkRequest
@@ -130,7 +129,7 @@ func TestBuildObject_CompleteChunk(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			st := &verdictStore{build: model.VanadisBuild{ID: "b1", ThreadID: "th-1", Status: tc.buildStatus, RunnerAgent: tc.runner, Quiet: true}, chunks: tc.chunks, getBuildFailFrom: tc.getBuildFailFrom, completeErr: tc.completeErr}
+			st := &verdictStore{build: model.VanadisBuild{ID: "b1", ThreadID: "th-1", Status: tc.buildStatus, Quiet: true}, chunks: tc.chunks, getBuildFailFrom: tc.getBuildFailFrom, completeErr: tc.completeErr}
 			eri, bus := &mockEriClient{}, &mockBusExecutor{}
 			var authority store.VanadisStore = st
 			if tc.noStore {

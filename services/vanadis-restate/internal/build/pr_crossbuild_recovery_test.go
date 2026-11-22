@@ -40,14 +40,14 @@ func TestCompleteCrossBuildSweep_RecoveryAndOverlay(t *testing.T) {
 			crossRecovered: []store.SweptChunk{{ChunkID: "f1", BuildID: "b2"}},
 			foreignStatus:  statusRunning, foreignChunkStatus: statusCompleted,
 			wantDeployJobs: []string{"eri"}, wantEvents: []string{"f1"},
-			wantReconciles: []store.BuildRoute{{BuildID: "b2", RunnerAgent: "aerial"}},
+			wantReconciles: []store.BuildRoute{{BuildID: "b2"}},
 		},
 		{
 			name: "failed foreign build on sibling runner is reconciled there, not locally", deployJobs: []string{"eri"},
-			crossSwept:    []store.SweptChunk{{ChunkID: "f1", BuildID: "b2", RunnerAgent: "agent-alpha"}},
+			crossSwept:    []store.SweptChunk{{ChunkID: "f1", BuildID: "b2"}},
 			foreignStatus: statusFailed, foreignChunkStatus: statusMerged,
 			wantDeployJobs: []string{"eri"}, wantEvents: []string{"f1"},
-			wantReconciles: []store.BuildRoute{{BuildID: "b2", RunnerAgent: "agent-alpha"}},
+			wantReconciles: []store.BuildRoute{{BuildID: "b2"}},
 		},
 		{
 			name: "swept and recovered chunks of one build queue one reconcile", deployJobs: []string{"eri"},
@@ -55,7 +55,7 @@ func TestCompleteCrossBuildSweep_RecoveryAndOverlay(t *testing.T) {
 			crossRecovered: []store.SweptChunk{{ChunkID: "f0", BuildID: "b2"}},
 			foreignStatus:  statusRunning, foreignChunkStatus: statusMerged,
 			wantDeployJobs: []string{"eri"}, wantEvents: []string{"f1", "f0"},
-			wantReconciles: []store.BuildRoute{{BuildID: "b2", RunnerAgent: "aerial"}},
+			wantReconciles: []store.BuildRoute{{BuildID: "b2"}},
 		},
 		{
 			name:          "mutation rollout jobs overlay onto stale deploying snapshot",
@@ -63,21 +63,21 @@ func TestCompleteCrossBuildSweep_RecoveryAndOverlay(t *testing.T) {
 			crossSwept:    []store.SweptChunk{{ChunkID: "f1", BuildID: "b2"}},
 			foreignStatus: statusRunning, foreignChunkStatus: statusMerged,
 			wantDeployJobs: []string{"eri"}, wantEvents: []string{"f1"},
-			wantReconciles: []store.BuildRoute{{BuildID: "b2", RunnerAgent: "aerial"}},
+			wantReconciles: []store.BuildRoute{{BuildID: "b2"}},
 		},
 		{
 			name: "absent mutation jobs keep stored jobs", deployJobs: []string{"worker"},
 			crossSwept:    []store.SweptChunk{{ChunkID: "f1", BuildID: "b2"}},
 			foreignStatus: statusRunning, foreignChunkStatus: statusMerged,
 			wantDeployJobs: []string{"worker"}, wantEvents: []string{"f1"},
-			wantReconciles: []store.BuildRoute{{BuildID: "b2", RunnerAgent: "aerial"}},
+			wantReconciles: []store.BuildRoute{{BuildID: "b2"}},
 		},
 		{
 			name: "store error after partial sweep still processes swept chunks", deployJobs: []string{"eri"},
 			crossSwept: []store.SweptChunk{{ChunkID: "f1", BuildID: "b2"}}, crossErr: true,
 			foreignStatus: statusRunning, foreignChunkStatus: statusMerged,
 			wantDeployJobs: []string{"eri"}, wantEvents: []string{"f1"}, wantErr: true,
-			wantReconciles: []store.BuildRoute{{BuildID: "b2", RunnerAgent: "aerial"}},
+			wantReconciles: []store.BuildRoute{{BuildID: "b2"}},
 		},
 	}
 	for _, tc := range tests {

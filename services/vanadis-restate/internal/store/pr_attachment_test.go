@@ -251,18 +251,16 @@ func TestPostgresVanadisStore_AttachChunkPR(t *testing.T) {
 	}
 }
 
-func TestAttachStandalonePR_RecordsOwnerAndRunner(t *testing.T) {
+func TestAttachStandalonePR_RecordsOwner(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name       string
-		agent      string
-		runner     string
-		wantAgent  string
-		wantRunner string
+		name      string
+		agent     string
+		wantAgent string
 	}{
-		{name: "defaults to the default agent", wantAgent: "aerial", wantRunner: "aerial"},
-		{name: "caller owns and its runner executes", agent: "agent-alpha", runner: "agent-alpha", wantAgent: "agent-alpha", wantRunner: "agent-alpha"},
-		{name: "names are normalized", agent: " Agent-Beta ", runner: "AGENT-BETA", wantAgent: "agent-beta", wantRunner: "agent-beta"},
+		{name: "defaults to the default agent", wantAgent: "aerial"},
+		{name: "caller owns the build", agent: "agent-alpha", wantAgent: "agent-alpha"},
+		{name: "names are normalized", agent: " Agent-Beta ", wantAgent: "agent-beta"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -277,7 +275,7 @@ func TestAttachStandalonePR_RecordsOwnerAndRunner(t *testing.T) {
 			}
 			tx := &mockTx{queryRowFn: queryRow, execFn: exec}
 			st := New(mockDB{beginFn: func(context.Context) (pgx.Tx, error) { return tx, nil }}, "azylman")
-			req := AttachChunkPRRequest{Repo: "aerial", PRNumber: 9, Agent: tc.agent, RunnerAgent: tc.runner}
+			req := AttachChunkPRRequest{Repo: "aerial", PRNumber: 9, Agent: tc.agent}
 			if _, _, _, err := st.AttachChunkPR(context.Background(), req); err != nil {
 				t.Fatalf("AttachChunkPR: %v", err)
 			}

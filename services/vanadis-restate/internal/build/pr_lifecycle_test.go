@@ -1341,14 +1341,14 @@ func TestCompletePRDeploymentMutation_SweepsAcrossBuilds(t *testing.T) {
 			foreignChunks: crossBuildForeignChunks(),
 			crossSwept:    []store.SweptChunk{{ChunkID: "f1", BuildID: "b2"}}, withExecutor: true,
 			wantCrossCalled: true, wantOwnCompleted: []string{"deploying"},
-			wantReconciles: []store.BuildRoute{{BuildID: "b2", RunnerAgent: "aerial"}}, wantEvents: []string{"deploying", "f1"},
+			wantReconciles: []store.BuildRoute{{BuildID: "b2"}}, wantEvents: []string{"deploying", "f1"},
 		},
 		{
 			name: "failed pr chunk with pr_number in failed build completes", deployingStatus: statusFailed, deployingPR: 7, buildStatus: statusFailed,
 			foreignChunks: crossBuildForeignChunks(),
 			crossSwept:    []store.SweptChunk{{ChunkID: "f1", BuildID: "b2"}}, withExecutor: true,
 			wantCrossCalled: true, wantOwnCompleted: []string{"deploying"},
-			wantReconciles: []store.BuildRoute{{BuildID: "b2", RunnerAgent: "aerial"}}, wantEvents: []string{"deploying", "f1"},
+			wantReconciles: []store.BuildRoute{{BuildID: "b2"}}, wantEvents: []string{"deploying", "f1"},
 		},
 		{
 			name: "failed pr chunk without pr_number returns early", deployingStatus: statusFailed, deployingPR: -1, buildStatus: statusRunning,
@@ -1363,7 +1363,7 @@ func TestCompletePRDeploymentMutation_SweepsAcrossBuilds(t *testing.T) {
 			foreignChunks: crossBuildForeignChunks(),
 			crossSwept:    []store.SweptChunk{{ChunkID: "f1", BuildID: "b2"}}, withExecutor: true,
 			wantCrossCalled: true, wantOwnRepaired: []string{"deploying"},
-			wantReconciles: []store.BuildRoute{{BuildID: "b2", RunnerAgent: "aerial"}}, wantEvents: []string{"f1"}, wantNoEvent: "deploying",
+			wantReconciles: []store.BuildRoute{{BuildID: "b2"}}, wantEvents: []string{"f1"}, wantNoEvent: "deploying",
 		},
 		{
 			name: "action repair cross sweep error aborts", deployingMode: "action", buildStatus: statusRunning,
@@ -1373,23 +1373,23 @@ func TestCompletePRDeploymentMutation_SweepsAcrossBuilds(t *testing.T) {
 		{
 			name: "foreign earlier merged completes and its runner reconciles the build", buildStatus: statusRunning,
 			foreignChunks:   crossBuildForeignChunks(),
-			crossSwept:      []store.SweptChunk{{ChunkID: "f1", BuildID: "b2", RunnerAgent: "aerial"}},
+			crossSwept:      []store.SweptChunk{{ChunkID: "f1", BuildID: "b2"}},
 			wantCrossCalled: true, wantOwnCompleted: []string{"deploying"},
-			wantReconciles: []store.BuildRoute{{BuildID: "b2", RunnerAgent: "aerial"}},
+			wantReconciles: []store.BuildRoute{{BuildID: "b2"}},
 		},
 		{
 			name: "foreign build on sibling runner is reconciled by that runner", buildStatus: statusRunning,
 			foreignChunks:   crossBuildForeignChunks(),
-			crossSwept:      []store.SweptChunk{{ChunkID: "f1", BuildID: "b2", RunnerAgent: "agent-alpha"}},
+			crossSwept:      []store.SweptChunk{{ChunkID: "f1", BuildID: "b2"}},
 			wantCrossCalled: true, wantOwnCompleted: []string{"deploying"},
-			wantReconciles: []store.BuildRoute{{BuildID: "b2", RunnerAgent: "agent-alpha"}},
+			wantReconciles: []store.BuildRoute{{BuildID: "b2"}},
 		},
 		{
 			name: "foreign deploying and synced complete with one reconcile", buildStatus: statusRunning,
 			foreignChunks:   crossBuildRunningChunks(),
 			crossSwept:      []store.SweptChunk{{ChunkID: "f1", BuildID: "b2"}, {ChunkID: "f2", BuildID: "b2"}},
 			wantCrossCalled: true, wantOwnCompleted: []string{"deploying"},
-			wantReconciles: []store.BuildRoute{{BuildID: "b2", RunnerAgent: "aerial"}},
+			wantReconciles: []store.BuildRoute{{BuildID: "b2"}},
 		},
 		{
 			name: "no foreign sweep touches nothing", buildStatus: statusRunning,
@@ -1411,14 +1411,14 @@ func TestCompletePRDeploymentMutation_SweepsAcrossBuilds(t *testing.T) {
 			foreignChunks: crossBuildForeignChunks(),
 			crossSwept:    []store.SweptChunk{{ChunkID: "f1", BuildID: "b2"}}, withExecutor: true,
 			wantCrossCalled: true, wantOwnCompleted: []string{"deploying"},
-			wantReconciles: []store.BuildRoute{{BuildID: "b2", RunnerAgent: "aerial"}}, wantEvents: []string{"deploying", "f1"},
+			wantReconciles: []store.BuildRoute{{BuildID: "b2"}}, wantEvents: []string{"deploying", "f1"},
 		},
 		{
 			name: "publish error warns without aborting", buildStatus: statusRunning,
 			foreignChunks: crossBuildForeignChunks(),
 			crossSwept:    []store.SweptChunk{{ChunkID: "f1", BuildID: "b2"}}, publishErr: true, withExecutor: true,
 			wantCrossCalled: true, wantOwnCompleted: []string{"deploying"},
-			wantReconciles: []store.BuildRoute{{BuildID: "b2", RunnerAgent: "aerial"}},
+			wantReconciles: []store.BuildRoute{{BuildID: "b2"}},
 		},
 	}
 	for _, tc := range tests {

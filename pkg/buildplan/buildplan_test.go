@@ -86,18 +86,18 @@ func TestVanadisBuildJSON(t *testing.T) {
 		{
 			name: "fully populated",
 			build: VanadisBuild{
-				ID: "build-1", Agent: "beta", RunnerAgent: "aerial", ThreadID: "123", Tier: 3, Title: "T",
+				ID: "build-1", Agent: "beta", ThreadID: "123", Tier: 3, Title: "T",
 				Objective: "O", SharedContext: "S", Status: "running", StatusMessageID: "456", Quiet: true,
 				CreatedAt: jsonCreatedAt, UpdatedAt: jsonUpdatedAt,
 			},
-			wantJSON: `{"id":"build-1","agent":"beta","runner_agent":"aerial","thread_id":"123","tier":3,"title":"T",` +
+			wantJSON: `{"id":"build-1","agent":"beta","thread_id":"123","tier":3,"title":"T",` +
 				`"objective":"O","shared_context":"S","status":"running","status_message_id":"456","quiet":true,` +
 				`"created_at":"2026-11-21T10:00:00Z","updated_at":"2026-11-21T11:30:00Z"}`,
 		},
 		{
-			name:  "zero value keeps runner_agent",
+			name:  "zero value",
 			build: VanadisBuild{},
-			wantJSON: `{"id":"","runner_agent":"","thread_id":"","tier":0,"title":"","objective":"","status":"",` +
+			wantJSON: `{"id":"","thread_id":"","tier":0,"title":"","objective":"","status":"",` +
 				`"quiet":false,"created_at":"0001-01-01T00:00:00Z","updated_at":"0001-01-01T00:00:00Z"}`,
 		},
 	}

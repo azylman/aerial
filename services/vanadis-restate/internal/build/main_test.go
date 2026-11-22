@@ -35,8 +35,6 @@ type fakeObjectRuntime struct {
 	reconcilesSent     []sentReconcile
 	invocationID       string
 	deferredSends      []deferredSend
-	runnerGuardCalled  bool
-	runnerGuardErr     error
 }
 
 // deferredSend records one delayed deferral Reconcile.
@@ -500,14 +498,6 @@ func (f *fakeObjectRuntime) ScheduleDeferredReconcile(delay time.Duration, seq i
 }
 
 func (f *fakeObjectRuntime) InvocationID() string { return f.invocationID }
-
-func (f *fakeObjectRuntime) RunRunnerGuard(fn func(ctx context.Context) (runnerGuardResult, error)) (runnerGuardResult, error) {
-	f.runnerGuardCalled = true
-	if f.runnerGuardErr != nil {
-		return runnerGuardResult{}, f.runnerGuardErr
-	}
-	return fn(context.Background())
-}
 
 func (f *fakeObjectRuntime) SendReconcile(service, buildID, reason string) {
 	f.reconcilesSent = append(f.reconcilesSent, sentReconcile{Service: service, BuildID: buildID, Reason: reason})

@@ -100,7 +100,7 @@ func TestScanBuild(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ScanBuild unexpected error: %v", err)
 	}
-	if got.ID != "b1" || got.Agent != "aerial" || got.ThreadID != "thread-1" || got.Tier != 2 || !got.Quiet || got.RunnerAgent != "aerial" {
+	if got.ID != "b1" || got.Agent != "aerial" || got.ThreadID != "thread-1" || got.Tier != 2 || !got.Quiet {
 		t.Errorf("ScanBuild decoded %+v", got)
 	}
 	if _, err := ScanBuild(stubScanRow{err: errors.New("scan boom")}); err == nil {
@@ -532,7 +532,7 @@ func TestSweepEarlierDeploymentsAcrossBuilds(t *testing.T) {
 			name: "sweeps eligible candidate and returns ids", deploying: newDeploying([]string{"eri"}),
 			candidates:  []model.VanadisChunk{newCandidate()},
 			execTag:     "UPDATE 1",
-			want:        []SweptChunk{{ChunkID: "f1", BuildID: "b2", RunnerAgent: "aerial"}},
+			want:        []SweptChunk{{ChunkID: "f1", BuildID: "b2"}},
 			wantUpdates: 1,
 		},
 		{
@@ -568,8 +568,8 @@ func TestSweepEarlierDeploymentsAcrossBuilds(t *testing.T) {
 				xbuildChunk("r1", "b3", 1, "pr", "aerial", "completed", 5, mergeBase, nil, nil),
 			},
 			execTag:       "UPDATE 1",
-			want:          []SweptChunk{{ChunkID: "f1", BuildID: "b2", RunnerAgent: "aerial"}},
-			wantRecovered: []SweptChunk{{ChunkID: "r1", BuildID: "b3", RunnerAgent: "aerial"}},
+			want:          []SweptChunk{{ChunkID: "f1", BuildID: "b2"}},
+			wantRecovered: []SweptChunk{{ChunkID: "r1", BuildID: "b3"}},
 			wantUpdates:   1,
 		},
 		{
@@ -580,7 +580,7 @@ func TestSweepEarlierDeploymentsAcrossBuilds(t *testing.T) {
 			},
 			execTag:     "UPDATE 1",
 			failChunk:   "f2",
-			want:        []SweptChunk{{ChunkID: "f1", BuildID: "b2", RunnerAgent: "aerial"}},
+			want:        []SweptChunk{{ChunkID: "f1", BuildID: "b2"}},
 			wantErr:     true,
 			wantUpdates: 2,
 		},

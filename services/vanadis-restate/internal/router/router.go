@@ -15,45 +15,44 @@ import (
 	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
 )
 
-// BuildObjectInvoker delivers routed requests to one build's Build object on
-// the runner that executes it. runner is the build's runner_agent.
+// BuildObjectInvoker delivers routed requests to one build's Build object.
 type BuildObjectInvoker interface {
-	RoutePREvent(ctx context.Context, runner, buildID string, ev pubsub.PRLifecycleEvent) error
-	RouteDispatchOutcome(ctx context.Context, runner, buildID string, ev pubsub.DispatchOutcomeEvent) error
-	RouteAttachPR(ctx context.Context, runner, buildID string, req store.AttachChunkPRRequest) (model.AttachChunkPRResponse, error)
-	RouteFailChunk(ctx context.Context, runner, buildID string, req model.FailChunkRequest) (model.FailChunkResponse, error)
-	RouteReconcile(ctx context.Context, runner, buildID string, req build.ReconcileBuildRequest) error
+	RoutePREvent(ctx context.Context, buildID string, ev pubsub.PRLifecycleEvent) error
+	RouteDispatchOutcome(ctx context.Context, buildID string, ev pubsub.DispatchOutcomeEvent) error
+	RouteAttachPR(ctx context.Context, buildID string, req store.AttachChunkPRRequest) (model.AttachChunkPRResponse, error)
+	RouteFailChunk(ctx context.Context, buildID string, req model.FailChunkRequest) (model.FailChunkResponse, error)
+	RouteReconcile(ctx context.Context, buildID string, req build.ReconcileBuildRequest) error
 }
 
 type restateBuildObjectInvoker struct {
 	ctx restate.Context
 }
 
-func (r restateBuildObjectInvoker) RoutePREvent(ctx context.Context, runner, buildID string, ev pubsub.PRLifecycleEvent) error {
+func (r restateBuildObjectInvoker) RoutePREvent(ctx context.Context, buildID string, ev pubsub.PRLifecycleEvent) error {
 	_ = ctx
-	_ = restate.ObjectSend(r.ctx, buildplan.BuildServiceName(runner), buildID, "OnPREvent").Send(ev)
+	_ = restate.ObjectSend(r.ctx, buildplan.BuildServiceName(""), buildID, "OnPREvent").Send(ev)
 	return nil
 }
 
-func (r restateBuildObjectInvoker) RouteDispatchOutcome(ctx context.Context, runner, buildID string, ev pubsub.DispatchOutcomeEvent) error {
+func (r restateBuildObjectInvoker) RouteDispatchOutcome(ctx context.Context, buildID string, ev pubsub.DispatchOutcomeEvent) error {
 	_ = ctx
-	_ = restate.ObjectSend(r.ctx, buildplan.BuildServiceName(runner), buildID, "OnDispatchOutcome").Send(ev)
+	_ = restate.ObjectSend(r.ctx, buildplan.BuildServiceName(""), buildID, "OnDispatchOutcome").Send(ev)
 	return nil
 }
 
-func (r restateBuildObjectInvoker) RouteAttachPR(ctx context.Context, runner, buildID string, req store.AttachChunkPRRequest) (model.AttachChunkPRResponse, error) {
+func (r restateBuildObjectInvoker) RouteAttachPR(ctx context.Context, buildID string, req store.AttachChunkPRRequest) (model.AttachChunkPRResponse, error) {
 	_ = ctx
-	return restate.Object[model.AttachChunkPRResponse](r.ctx, buildplan.BuildServiceName(runner), buildID, "AttachPR").Request(req)
+	return restate.Object[model.AttachChunkPRResponse](r.ctx, buildplan.BuildServiceName(""), buildID, "AttachPR").Request(req)
 }
 
-func (r restateBuildObjectInvoker) RouteFailChunk(ctx context.Context, runner, buildID string, req model.FailChunkRequest) (model.FailChunkResponse, error) {
+func (r restateBuildObjectInvoker) RouteFailChunk(ctx context.Context, buildID string, req model.FailChunkRequest) (model.FailChunkResponse, error) {
 	_ = ctx
-	return restate.Object[model.FailChunkResponse](r.ctx, buildplan.BuildServiceName(runner), buildID, "FailChunk").Request(req)
+	return restate.Object[model.FailChunkResponse](r.ctx, buildplan.BuildServiceName(""), buildID, "FailChunk").Request(req)
 }
 
-func (r restateBuildObjectInvoker) RouteReconcile(ctx context.Context, runner, buildID string, req build.ReconcileBuildRequest) error {
+func (r restateBuildObjectInvoker) RouteReconcile(ctx context.Context, buildID string, req build.ReconcileBuildRequest) error {
 	_ = ctx
-	_ = restate.ObjectSend(r.ctx, buildplan.BuildServiceName(runner), buildID, "Reconcile").Send(req)
+	_ = restate.ObjectSend(r.ctx, buildplan.BuildServiceName(""), buildID, "Reconcile").Send(req)
 	return nil
 }
 
@@ -162,7 +161,7 @@ func (s *BuildRouterService) RoutePREvent(ctx restate.Context, ev pubsub.PRLifec
 	}
 
 	inv := s.getInvoker(ctx)
-	return inv.RoutePREvent(ctx, route.RunnerAgent, route.BuildID, ev)
+	return inv.RoutePREvent(ctx, route.BuildID, ev)
 }
 
 // RouteDispatchOutcome routes dispatch outcomes to the target Build Virtual Object.
@@ -194,7 +193,7 @@ func (s *BuildRouterService) RouteDispatchOutcome(ctx restate.Context, ev pubsub
 	}
 
 	inv := s.getInvoker(ctx)
-	return inv.RouteDispatchOutcome(ctx, route.RunnerAgent, route.BuildID, ev)
+	return inv.RouteDispatchOutcome(ctx, route.BuildID, ev)
 }
 
 // RouteAttachPR resolves the build and delegates PR attachment to the target Build.
@@ -210,7 +209,7 @@ func (s *BuildRouterService) RouteAttachPR(ctx restate.Context, req store.Attach
 	// A new standalone build runs on the canonical default Build runner
 	// while retaining req.Agent as the build owner.
 	newBuild := func() store.BuildRoute {
-		return store.BuildRoute{BuildID: buildplan.GenerateBuildID(), RunnerAgent: store.NormalizeRunnerAgent("")}
+		return store.BuildRoute{BuildID: buildplan.GenerateBuildID()}
 	}
 	route, err := build.RunJournaled(ctx, build.LabelRouteAttachPR, "resolve-attach-build-id", func(rc restate.RunContext) (store.BuildRoute, error) {
 		if s.store == nil {
@@ -241,7 +240,7 @@ func (s *BuildRouterService) RouteAttachPR(ctx restate.Context, req store.Attach
 	}
 
 	inv := s.getInvoker(ctx)
-	return inv.RouteAttachPR(ctx, route.RunnerAgent, route.BuildID, req)
+	return inv.RouteAttachPR(ctx, route.BuildID, req)
 }
 
 // RouteFailChunk resolves the build for a chunk and delegates failure to the Build object.
@@ -272,10 +271,10 @@ func (s *BuildRouterService) RouteFailChunk(ctx restate.Context, req model.FailC
 		return model.FailChunkResponse{}, build.ToTerminalErr(build.ErrChunkNotFound)
 	}
 	inv := s.getInvoker(ctx)
-	return inv.RouteFailChunk(ctx, route.RunnerAgent, route.BuildID, req)
+	return inv.RouteFailChunk(ctx, route.BuildID, req)
 }
 
-// RouteBuildReconcile resolves a build's runner and sends it a one-way
+// RouteBuildReconcile resolves a build and sends it a one-way
 // widget_sync Reconcile. Unknown builds are dropped.
 func (s *BuildRouterService) RouteBuildReconcile(ctx restate.Context, buildID string) error {
 	buildID = strings.TrimSpace(buildID)
@@ -298,7 +297,7 @@ func (s *BuildRouterService) RouteBuildReconcile(ctx restate.Context, buildID st
 		if bld == nil {
 			return store.BuildRoute{}, nil
 		}
-		return store.BuildRoute{BuildID: bld.ID, RunnerAgent: store.NormalizeRunnerAgent(bld.RunnerAgent)}, nil
+		return store.BuildRoute{BuildID: bld.ID}, nil
 	})
 	if err != nil {
 		return err
@@ -307,5 +306,5 @@ func (s *BuildRouterService) RouteBuildReconcile(ctx restate.Context, buildID st
 		return nil
 	}
 	inv := s.getInvoker(ctx)
-	return inv.RouteReconcile(ctx, route.RunnerAgent, route.BuildID, build.ReconcileBuildRequest{Reason: build.ReconcileReasonWidgetSync})
+	return inv.RouteReconcile(ctx, route.BuildID, build.ReconcileBuildRequest{Reason: build.ReconcileReasonWidgetSync})
 }
