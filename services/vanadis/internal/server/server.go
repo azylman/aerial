@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -108,12 +109,20 @@ type ExecuteChunkArgs struct {
 
 // VanadisServer manages HTTP endpoints and JetStream worker coordination for Vanadis builds.
 type VanadisServer struct {
-	cfg        Config
-	restateCfg RestateConfig
-	httpClient *http.Client
-	store      VanadisStore
-	queueStats consumerStatsQuerier
-	auth       *k8sauth.Authenticator
+	cfg                   Config
+	restateCfg            RestateConfig
+	httpClient            *http.Client
+	store                 VanadisStore
+	queueStats            consumerStatsQuerier
+	auth                  *k8sauth.Authenticator
+	activeStepMu          sync.Mutex
+	stepsByBuild          map[string]map[string]string
+	inFlightBuilds        map[string]bool
+	lastForwardedAt       map[string]time.Time
+	dirtyBuilds           map[string]bool
+	trailingTimer         map[string]*time.Timer
+	minActiveStepInterval time.Duration
+	nowFn                 func() time.Time
 }
 
 // NewVanadisServer constructs a new VanadisServer instance. restateCfg is
@@ -130,11 +139,18 @@ func NewVanadisServer(cfg Config, restateCfg RestateConfig, st VanadisStore, htt
 	}
 	// Traced so eri turns join the chunk dispatch span (and widget/wake posts carry traceparent).
 	return &VanadisServer{
-		cfg:        cfg,
-		restateCfg: restateCfg,
-		httpClient: tracing.Client(httpClient),
-		store:      st,
-		auth:       a,
+		cfg:                   cfg,
+		restateCfg:            restateCfg,
+		httpClient:            tracing.Client(httpClient),
+		store:                 st,
+		auth:                  a,
+		stepsByBuild:          make(map[string]map[string]string),
+		inFlightBuilds:        make(map[string]bool),
+		lastForwardedAt:       make(map[string]time.Time),
+		dirtyBuilds:           make(map[string]bool),
+		trailingTimer:         make(map[string]*time.Timer),
+		minActiveStepInterval: 2 * time.Second,
+		nowFn:                 time.Now,
 	}
 }
 
