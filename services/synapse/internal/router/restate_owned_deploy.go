@@ -13,6 +13,7 @@ import (
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/pkg/strutil"
 	"github.com/azylman/aerial/services/synapse/internal/buildmeta"
+	"github.com/azylman/aerial/services/synapse/internal/flux"
 	"github.com/azylman/aerial/services/synapse/internal/model"
 )
 
@@ -93,7 +94,7 @@ func rolloutFromView(v prwire.DeployView) (trackedRollout, bool) {
 		return trackedRollout{}, false
 	}
 	return trackedRollout{
-		PR:       DeployingPR{Repo: v.Repo, PRNumber: v.PRNumber, Branch: v.Branch, HeadSHA: v.HeadSHA, MergeSHA: v.MergeSHA, TargetID: v.TargetID},
+		PR:       DeployingPR{Repo: v.Repo, PRNumber: v.PRNumber, Branch: v.Branch, HeadSHA: v.HeadSHA, MergeSHA: v.MergeSHA, TargetID: v.TargetID, Jobs: flux.ServiceJobs(v.Jobs, v.KustomizationRequests)},
 		Requests: v.KustomizationRequests,
 		Deployed: v.DeployedKustomizations,
 	}, true
