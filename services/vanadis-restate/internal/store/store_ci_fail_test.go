@@ -12,11 +12,8 @@ import (
 
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
+	"github.com/azylman/aerial/services/vanadis-restate/internal/sqltest"
 )
-
-func buildRow(id, status string) pgx.Row {
-	return valuesRow(id, "aerial", "thread", 3, "title", "objective", "", status, "", false, time.Time{}, time.Time{})
-}
 
 // lifecycleStampFake simulates the completed_at CASE of the lifecycle status
 // write: merged stamps an unknown merge time, deploying preserves the stamp
@@ -73,7 +70,7 @@ func TestUpdatePRLifecycleStatus(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			fake := &lifecycleStampFake{stamp: tc.initial, write: writeStamp, tag: tc.tag, failWrite: tc.execFailure}
-			st := New(mockDB{execFn: fake.exec}, "azylman")
+			st := New(sqltest.DB{ExecFn: fake.exec}, "example-org")
 			if tc.nilDB {
 				st = &Store{}
 			}
@@ -107,22 +104,22 @@ func TestIncrementChunkCIFailCount(t *testing.T) {
 	}{
 		{"nil database", "c1", nil, true, nil, 0, true, nil, ""},
 		{"empty id", "", nil, false, nil, 0, true, nil, ""},
-		{"successful increment without sha", "c1", nil, false, valuesRow(2), 2, false, nil, ""},
-		{"successful increment with sha", "c1", []string{"sha1234"}, false, valuesRow(3), 3, false, nil, "sha1234"},
-		{"skipped terminal transition", "c1", []string{"sha1234"}, false, errRow(pgx.ErrNoRows), 0, true, ErrPRTransitionSkipped, ""},
-		{"query error", "c1", nil, false, errRow(errors.New("db error")), 0, true, nil, ""},
+		{"successful increment without sha", "c1", nil, false, sqltest.ValuesRow(2), 2, false, nil, ""},
+		{"successful increment with sha", "c1", []string{"sha1234"}, false, sqltest.ValuesRow(3), 3, false, nil, "sha1234"},
+		{"skipped terminal transition", "c1", []string{"sha1234"}, false, sqltest.ErrRow(pgx.ErrNoRows), 0, true, ErrPRTransitionSkipped, ""},
+		{"query error", "c1", nil, false, sqltest.ErrRow(errors.New("db error")), 0, true, nil, ""},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			var capturedArgs []any
-			st := New(mockDB{queryRowFn: func(_ context.Context, _ string, args ...any) pgx.Row {
+			st := New(sqltest.DB{QueryRowFn: func(_ context.Context, _ string, args ...any) pgx.Row {
 				capturedArgs = args
 				if tc.row != nil {
 					return tc.row
 				}
-				return valuesRow(1)
-			}}, "azylman")
+				return sqltest.ValuesRow(1)
+			}}, "example-org")
 			if tc.nilDB {
 				st = &Store{}
 			}
@@ -158,7 +155,7 @@ func TestCompletePRDeployment(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			var gotArgs []any
-			st := New(mockDB{execFn: func(_ context.Context, query string, args ...any) (pgconn.CommandTag, error) {
+			st := New(sqltest.DB{ExecFn: func(_ context.Context, query string, args ...any) (pgconn.CommandTag, error) {
 				gotArgs = args
 				if tc.execFailure {
 					return pgconn.CommandTag{}, errors.New("database unavailable")
@@ -167,7 +164,7 @@ func TestCompletePRDeployment(t *testing.T) {
 					return pgconn.NewCommandTag("UPDATE 0"), nil
 				}
 				return pgconn.NewCommandTag("UPDATE 1"), nil
-			}}, "azylman")
+			}}, "example-org")
 			if tc.nilDB {
 				st = &Store{}
 			}
@@ -211,7 +208,7 @@ func TestMarkActionRepairDeployed(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			var gotArgs []any
-			st := New(mockDB{execFn: func(_ context.Context, _ string, args ...any) (pgconn.CommandTag, error) {
+			st := New(sqltest.DB{ExecFn: func(_ context.Context, _ string, args ...any) (pgconn.CommandTag, error) {
 				gotArgs = args
 				if tc.execFailure {
 					return pgconn.CommandTag{}, errors.New("database unavailable")
@@ -220,7 +217,7 @@ func TestMarkActionRepairDeployed(t *testing.T) {
 					return pgconn.NewCommandTag("UPDATE 0"), nil
 				}
 				return pgconn.NewCommandTag("UPDATE 1"), nil
-			}}, "azylman")
+			}}, "example-org")
 			if tc.nilDB {
 				st = &Store{}
 			}
@@ -277,7 +274,7 @@ func TestPostgresVanadisStore_RecordPRCheckStatus(t *testing.T) {
 	assert.Error(t, sNil.ResetPRCheckState(context.Background(), "c1", "sha-1", ""))
 
 	// Empty arguments
-	st, _ := dbScript{execTag: "UPDATE 1"}.open()
+	st, _ := open(dbScript{ExecTag: "UPDATE 1"})
 	assert.Error(t, st.RecordPRCheckStatus(context.Background(), "", "sha-1", "test", "passed"))
 	assert.Error(t, st.RecordPRCheckStatus(context.Background(), "c1", "sha-1", "", "passed"))
 	assert.Error(t, st.ResetPRCheckState(context.Background(), "", "sha-1", ""))
@@ -288,13 +285,13 @@ func TestPostgresVanadisStore_RecordPRCheckStatus(t *testing.T) {
 	assert.NoError(t, st.ResetPRCheckState(context.Background(), "c1", "sha-2", "merge-sha-1"))
 
 	// Skipped transition (0 rows affected)
-	storeZero, _ := dbScript{execTag: "UPDATE 0", row: errRow(pgx.ErrNoRows)}.open()
+	storeZero, _ := open(dbScript{ExecTag: "UPDATE 0", Row: sqltest.ErrRow(pgx.ErrNoRows)})
 	assert.ErrorIs(t, storeZero.RecordPRCheckStatus(context.Background(), "c1", "sha-1", "test", "passed"), ErrPRTransitionSkipped)
 	assert.ErrorIs(t, storeZero.ResetPRCheckState(context.Background(), "c1", "sha-2", ""), ErrPRTransitionSkipped)
 	assert.ErrorIs(t, storeZero.ResetPRCheckState(context.Background(), "c1", "sha-2", "merge-sha-1"), ErrPRTransitionSkipped)
 
 	// DB Exec error
-	storeErr, _ := dbScript{execErr: errors.New("db error")}.open()
+	storeErr, _ := open(dbScript{ExecErr: errors.New("db error")})
 	assert.Error(t, storeErr.RecordPRCheckStatus(context.Background(), "c1", "sha-1", "test", "passed"))
 	assert.Error(t, storeErr.ResetPRCheckState(context.Background(), "c1", "sha-2", ""))
 	assert.Error(t, storeErr.ResetPRCheckState(context.Background(), "c1", "sha-2", "merge-sha-1"))

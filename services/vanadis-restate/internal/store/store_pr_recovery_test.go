@@ -18,6 +18,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
+	"github.com/azylman/aerial/services/vanadis-restate/internal/sqltest"
 )
 
 func TestPostgresVanadisStore_RecoverFailedPR(t *testing.T) {
@@ -46,11 +47,11 @@ func TestPostgresVanadisStore_RecoverFailedPR(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			st, _ := dbScript{row: valuesRow("b1"), buildRow: buildRow("b1", tc.parent), chunks: []model.VanadisChunk{{ID: "c1", BuildID: "b1", Status: tc.status, Mode: tc.mode, PRNumber: tc.pr, HeadSHA: "old", MergeSHA: tc.mergeSHA}, {ID: "c2", Status: tc.sibling}}}.open()
+			st, _ := open(dbScript{Row: sqltest.ValuesRow("b1"), BuildRow: sqltest.BuildRow("b1", tc.parent), Chunks: []model.VanadisChunk{{ID: "c1", BuildID: "b1", Status: tc.status, Mode: tc.mode, PRNumber: tc.pr, HeadSHA: "old", MergeSHA: tc.mergeSHA}, {ID: "c2", Status: tc.sibling}}})
 			err := st.recoverFailedPR(context.WithValue(context.Background(), PrHeadVerifiedContextKey{}, !tc.unverified), "c1", tc.head)
 			if tc.skip && !tc.legacySeed {
 				forbidden := errors.New("excluded legacy chunk attempted write or commit")
-				legacy, _ := dbScript{execErr: forbidden, commitErr: forbidden, row: valuesRow("b1"), buildRow: buildRow("b1", tc.parent), chunks: []model.VanadisChunk{{ID: "c1", BuildID: "b1", Status: tc.status, Mode: tc.mode, PRNumber: tc.pr, MergeSHA: tc.mergeSHA}}}.open()
+				legacy, _ := open(dbScript{ExecErr: forbidden, CommitErr: forbidden, Row: sqltest.ValuesRow("b1"), BuildRow: sqltest.BuildRow("b1", tc.parent), Chunks: []model.VanadisChunk{{ID: "c1", BuildID: "b1", Status: tc.status, Mode: tc.mode, PRNumber: tc.pr, MergeSHA: tc.mergeSHA}}})
 				if legacyErr := legacy.recoverFailedPR(context.WithValue(context.Background(), PrHeadVerifiedContextKey{}, !tc.unverified), "c1", tc.head); !errors.Is(legacyErr, ErrPRTransitionSkipped) {
 					t.Fatalf("legacy error=%v", legacyErr)
 				}
@@ -71,31 +72,31 @@ func TestPostgresVanadisStore_RecoverFailedPRFailures(t *testing.T) {
 		baseline bool
 		want     error
 	}{
-		{name: "begin", db: dbScript{beginErr: injected}, want: injected},
-		{name: "lookup", db: dbScript{row: errRow(injected)}, want: injected},
-		{name: "parent", db: dbScript{buildRow: errRow(injected)}, want: injected},
-		{name: "chunks", db: dbScript{queryErr: injected}, want: injected},
-		{name: "chunk write", db: dbScript{failExec: "UPDATE vanadis_chunks", execErr: injected}, want: injected},
-		{name: "parent write", db: dbScript{failExec: "UPDATE vanadis_builds", execErr: injected}, want: injected},
-		{name: "baseline write", baseline: true, db: dbScript{failExec: "UPDATE vanadis_chunks", execErr: injected}, want: injected},
-		{name: "baseline commit", baseline: true, db: dbScript{commitErr: injected}, want: injected},
-		{name: "commit", db: dbScript{commitErr: injected}, want: injected},
+		{name: "begin", db: dbScript{BeginErr: injected}, want: injected},
+		{name: "lookup", db: dbScript{Row: sqltest.ErrRow(injected)}, want: injected},
+		{name: "parent", db: dbScript{BuildRow: sqltest.ErrRow(injected)}, want: injected},
+		{name: "chunks", db: dbScript{QueryErr: injected}, want: injected},
+		{name: "chunk write", db: dbScript{FailExec: "UPDATE vanadis_chunks", ExecErr: injected}, want: injected},
+		{name: "parent write", db: dbScript{FailExec: "UPDATE vanadis_builds", ExecErr: injected}, want: injected},
+		{name: "baseline write", baseline: true, db: dbScript{FailExec: "UPDATE vanadis_chunks", ExecErr: injected}, want: injected},
+		{name: "baseline commit", baseline: true, db: dbScript{CommitErr: injected}, want: injected},
+		{name: "commit", db: dbScript{CommitErr: injected}, want: injected},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			db := tc.db
-			if db.row == nil {
-				db.row = valuesRow("b1")
+			if db.Row == nil {
+				db.Row = sqltest.ValuesRow("b1")
 			}
-			if db.buildRow == nil {
-				db.buildRow = buildRow("b1", "failed")
+			if db.BuildRow == nil {
+				db.BuildRow = sqltest.BuildRow("b1", "failed")
 			}
-			db.chunks = []model.VanadisChunk{{ID: "c1", BuildID: "b1", Mode: "pr", PRNumber: 12, Status: "failed", HeadSHA: "old"}}
+			db.Chunks = []model.VanadisChunk{{ID: "c1", BuildID: "b1", Mode: "pr", PRNumber: 12, Status: "failed", HeadSHA: "old"}}
 			if tc.baseline {
-				db.chunks[0].HeadSHA = ""
+				db.Chunks[0].HeadSHA = ""
 			}
-			st, _ := db.open()
+			st, _ := open(db)
 			ctx := context.WithValue(context.Background(), PrHeadVerifiedContextKey{}, true)
 			if err := st.recoverFailedPR(ctx, "c1", "new"); !errors.Is(err, tc.want) {
 				t.Fatalf("err=%v want=%v", err, tc.want)
@@ -107,24 +108,24 @@ func TestPostgresVanadisStore_RecoverFailedPRFailures(t *testing.T) {
 // recoveryFixtureStore models the external database's atomic commit and parent
 // lock for recovery tests.
 func recoveryFixtureStore(mu *sync.Mutex, parent *string, chunks *[]model.VanadisChunk, failParent bool) *Store {
-	return New(mockDB{execFn: func(context.Context, string, ...any) (pgconn.CommandTag, error) {
+	return New(sqltest.DB{ExecFn: func(context.Context, string, ...any) (pgconn.CommandTag, error) {
 		return pgconn.NewCommandTag("UPDATE 0"), nil
-	}, beginFn: func(context.Context) (pgx.Tx, error) {
+	}, BeginFn: func(context.Context) (pgx.Tx, error) {
 		var local []model.VanadisChunk
 		var state string
 		locked, closed := false, false
-		tx := &mockTx{
-			queryRowFn: func(_ context.Context, q string, _ ...any) pgx.Row {
+		tx := &sqltest.Tx{
+			QueryRowFn: func(_ context.Context, q string, _ ...any) pgx.Row {
 				if strings.Contains(q, "SELECT build_id") {
-					return valuesRow("b1")
+					return sqltest.ValuesRow("b1")
 				}
 				mu.Lock()
 				locked = true
 				state = *parent
 				local = append([]model.VanadisChunk(nil), (*chunks)...)
-				return buildRow("b1", state)
-			}, queryFn: func(context.Context, string, ...any) (pgx.Rows, error) { return &mockRows{items: local}, nil },
-			execFn: func(_ context.Context, q string, args ...any) (pgconn.CommandTag, error) {
+				return sqltest.BuildRow("b1", state)
+			}, QueryFn: func(context.Context, string, ...any) (pgx.Rows, error) { return &sqltest.Rows{Items: local}, nil },
+			ExecFn: func(_ context.Context, q string, args ...any) (pgconn.CommandTag, error) {
 				if !locked {
 					return pgconn.CommandTag{}, errors.New("write without lock")
 				}
@@ -139,7 +140,7 @@ func recoveryFixtureStore(mu *sync.Mutex, parent *string, chunks *[]model.Vanadi
 				return pgconn.NewCommandTag("UPDATE 1"), nil
 			},
 		}
-		return &retryTransaction{mockTx: tx, finish: func(commit bool) error {
+		return &sqltest.AtomicTx{Tx: tx, Finish: func(commit bool) error {
 			if closed {
 				return pgx.ErrTxClosed
 			}
@@ -155,16 +156,6 @@ func recoveryFixtureStore(mu *sync.Mutex, parent *string, chunks *[]model.Vanadi
 		}}, nil
 	}}, "example-org")
 }
-
-// retryTransaction models the external database's atomic commit and parent lock.
-type retryTransaction struct {
-	*mockTx
-
-	finish func(commit bool) error
-}
-
-func (tx *retryTransaction) Commit(context.Context) error   { return tx.finish(true) }
-func (tx *retryTransaction) Rollback(context.Context) error { return tx.finish(false) }
 
 func applyRecoveryFixtureHead(chunks []model.VanadisChunk, args []any, baseline bool) {
 	for i := range chunks {
