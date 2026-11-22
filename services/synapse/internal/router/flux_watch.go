@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/azylman/aerial/pkg/prwire"
 	"github.com/azylman/aerial/services/synapse/internal/flux"
 	"github.com/azylman/aerial/services/synapse/internal/model"
 	"github.com/azylman/aerial/services/synapse/internal/restateclient"
@@ -31,7 +32,7 @@ const (
 type kustomizationAction = flux.KustomizationAction
 
 // kustomizationRequestAction decides how an observation affects a recorded reconcile request.
-func kustomizationRequestAction(recorded kustomizationRequest, obs kustomizationObservation) kustomizationAction {
+func kustomizationRequestAction(recorded prwire.KustomizationRequest, obs kustomizationObservation) kustomizationAction {
 	return flux.KustomizationRequestAction(recorded, obs)
 }
 
@@ -311,12 +312,12 @@ func (s *RouterServer) failKustomizationRollout(ctx context.Context, pr Deployin
 }
 
 // newKustomizationRequests builds the reconcile request recorded for each ref, all requested at now.
-func newKustomizationRequests(refs []fluxKustomizationRef, now time.Time) map[string]kustomizationRequest {
+func newKustomizationRequests(refs []fluxKustomizationRef, now time.Time) map[string]prwire.KustomizationRequest {
 	return flux.NewKustomizationRequests(refs, now)
 }
 
 // reconcileImageKustomizations patches each ref with its recorded request; one failure never skips the rest.
-func (s *RouterServer) reconcileImageKustomizations(ctx context.Context, refs []fluxKustomizationRef, requests map[string]kustomizationRequest) error {
+func (s *RouterServer) reconcileImageKustomizations(ctx context.Context, refs []fluxKustomizationRef, requests map[string]prwire.KustomizationRequest) error {
 	var errs []error
 	for _, ref := range refs {
 		if err := s.dispatcher.ReconcileKustomization(ctx, ref, requests[ref.Name].RequestedAt); err != nil {

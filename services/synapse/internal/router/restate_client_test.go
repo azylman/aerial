@@ -8,7 +8,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/azylman/aerial/services/synapse/internal/restateclient"
+	"github.com/azylman/aerial/pkg/prwire"
 )
 
 func TestCheckOutcomeHandler(t *testing.T) {
@@ -72,7 +72,7 @@ func TestRestateSend(t *testing.T) {
 				cfg.RestateURL = ""
 			}
 			s := NewRouterServer(fixedConfig(cfg), nil)
-			err := s.sendOwnedPR(context.Background(), "HandleMerged", restateclient.PREvent{Repo: "azylman/aerial", PRNumber: 7, MergeSHA: "abc123"})
+			err := s.sendOwnedPR(context.Background(), "HandleMerged", prwire.PREvent{Repo: "azylman/aerial", PRNumber: 7, MergeSHA: "abc123"})
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("sendOwnedPR() err = %v, wantErr %v", err, tc.wantErr)
 			}
@@ -90,12 +90,12 @@ func TestRestateSendSkipsKeylessEvents(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name string
-		pr   restateclient.PREvent
-		repo restateclient.RepoEvent
+		pr   prwire.PREvent
+		repo prwire.RepoEvent
 		sha  string
 	}{
-		{name: "pr-less events without sha", pr: restateclient.PREvent{Repo: "azylman/aerial"}, repo: restateclient.RepoEvent{}, sha: ""},
-		{name: "repo-less events with zero sha", pr: restateclient.PREvent{PRNumber: 7}, repo: restateclient.RepoEvent{MainSHA: "abc123"}, sha: "0000000"},
+		{name: "pr-less events without sha", pr: prwire.PREvent{Repo: "azylman/aerial"}, repo: prwire.RepoEvent{}, sha: ""},
+		{name: "repo-less events with zero sha", pr: prwire.PREvent{PRNumber: 7}, repo: prwire.RepoEvent{MainSHA: "abc123"}, sha: "0000000"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

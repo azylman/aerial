@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/azylman/aerial/pkg/prwire"
 	"github.com/azylman/aerial/services/synapse/internal/model"
-	"github.com/azylman/aerial/services/synapse/internal/restateclient"
 )
 
 const (
@@ -228,13 +228,13 @@ func TestOwnedWaitingForImageBuild(t *testing.T) {
 		noURL     bool
 		callCode  int
 		lifecycle string
-		view      restateclient.DeployView
+		view      prwire.DeployView
 		want      bool
 	}{
 		{name: "repo without build metadata never waits", repo: "azylman/aerial-config"},
 		{name: "open pr without a final build waits", repo: "azylman/aerial", lifecycle: `{"found":true,"status":"open"}`, want: true},
 		{name: "started build stops waiting", repo: "azylman/aerial", lifecycle: `{"found":true,"status":"merged","started":true}`},
-		{name: "tracked requests stop waiting", repo: "azylman/aerial", lifecycle: `{"found":true,"status":"merged"}`, view: restateclient.DeployView{KustomizationRequests: map[string]kustomizationRequest{"core": {}}}},
+		{name: "tracked requests stop waiting", repo: "azylman/aerial", lifecycle: `{"found":true,"status":"merged"}`, view: prwire.DeployView{KustomizationRequests: map[string]prwire.KustomizationRequest{"core": {}}}},
 		{name: "final build with nothing selected stops waiting", repo: "azylman/aerial", lifecycle: `{"found":true,"status":"merged","has_build_metadata":true,"build_metadata":{"version":1,"kind":"final","selected":[]}}`},
 		{name: "deploying pr never waits", repo: "azylman/aerial", lifecycle: `{"found":true,"status":"deploying"}`},
 		{name: "lifecycle read failure waits", repo: "azylman/aerial", callCode: http.StatusInternalServerError, want: true},
@@ -596,7 +596,7 @@ func TestPromoteOwnedImages(t *testing.T) {
 		{
 			name: "owned images start the pr rollout", images: images, byImage: refs,
 			wantPaths:  []string{"/RepoObject/azylman%2Faerial/HandleImagePromotion/send"},
-			wantBodies: []string{`"pr_number":42,"head_sha":"` + ownedMerge + `","agent":"","branch":"feat","images":["ghcr.io/azylman/synapse:latest"],"jobs":["synapse"],"kustomization_requests":{"aerial-core":`},
+			wantBodies: []string{`"pr_number":42,"head_sha":"` + ownedMerge + `","branch":"feat","images":["ghcr.io/azylman/synapse:latest"],"jobs":["synapse"],"kustomization_requests":{"aerial-core":`},
 		},
 		{
 			name: "unowned images promote then complete with git-merge", images: images,
@@ -626,21 +626,21 @@ func TestPromoteOwnedImages(t *testing.T) {
 // TestRolloutFromView pins which deploy views the watcher tracks.
 func TestRolloutFromView(t *testing.T) {
 	t.Parallel()
-	reqs := map[string]kustomizationRequest{"core": {Namespace: "flux-system", RequestedAt: ownedReqAt}}
+	reqs := map[string]prwire.KustomizationRequest{"core": {Namespace: "flux-system", RequestedAt: ownedReqAt}}
 	tests := []struct {
 		name   string
-		view   restateclient.DeployView
+		view   prwire.DeployView
 		wantOK bool
 		want   trackedRollout
 	}{
 		{
 			name: "deploying view with requests is tracked", wantOK: true,
-			view: restateclient.DeployView{Found: true, Repo: "azylman/aerial", PRNumber: 42, Status: statusDeploying, Branch: "feat", HeadSHA: ownedHead, MergeSHA: ownedMerge, TargetID: ownedThread, KustomizationRequests: reqs, DeployedKustomizations: []string{"web"}},
+			view: prwire.DeployView{Found: true, Repo: "azylman/aerial", PRNumber: 42, Status: statusDeploying, Branch: "feat", HeadSHA: ownedHead, MergeSHA: ownedMerge, TargetID: ownedThread, KustomizationRequests: reqs, DeployedKustomizations: []string{"web"}},
 			want: trackedRollout{PR: DeployingPR{Repo: "azylman/aerial", PRNumber: 42, Branch: "feat", HeadSHA: ownedHead, MergeSHA: ownedMerge, TargetID: ownedThread}, Requests: reqs, Deployed: []string{"web"}},
 		},
-		{name: "unknown pr is skipped", view: restateclient.DeployView{}},
-		{name: "deployed view is skipped", view: restateclient.DeployView{Found: true, PRNumber: 42, Status: "deployed", KustomizationRequests: reqs}},
-		{name: "deploying view without requests is skipped", view: restateclient.DeployView{Found: true, PRNumber: 42, Status: statusDeploying}},
+		{name: "unknown pr is skipped", view: prwire.DeployView{}},
+		{name: "deployed view is skipped", view: prwire.DeployView{Found: true, PRNumber: 42, Status: "deployed", KustomizationRequests: reqs}},
+		{name: "deploying view without requests is skipped", view: prwire.DeployView{Found: true, PRNumber: 42, Status: statusDeploying}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

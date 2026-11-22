@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/azylman/aerial/pkg/prwire"
 	"github.com/azylman/aerial/services/synapse/internal/model"
 )
 
@@ -37,51 +38,51 @@ func tPRRun(attempt int, status, conclusion string) MetadataWorkflowRun {
 	return r
 }
 
-func tSelected(services ...string) []model.BuildSelection {
-	out := make([]model.BuildSelection, 0, len(services))
+func tSelected(services ...string) []prwire.BuildSelection {
+	out := make([]prwire.BuildSelection, 0, len(services))
 	for _, svc := range services {
-		out = append(out, model.BuildSelection{Service: svc, ImageName: "aerial-" + svc})
+		out = append(out, prwire.BuildSelection{Service: svc, ImageName: "aerial-" + svc})
 	}
 	return out
 }
 
-func tMeta(attempt int, services ...string) model.BuildMetadata {
-	return model.BuildMetadata{Version: 1, Kind: model.BuildMetadataManifest, Repository: tRepo, WorkflowPath: tPath, RunID: tRunID, RunNumber: 8, RunAttempt: attempt, Event: model.BuildEventPush, SourceSHA: tHead, ExecutionSHA: tHead, Selected: tSelected(services...)}
+func tMeta(attempt int, services ...string) prwire.BuildMetadata {
+	return prwire.BuildMetadata{Version: 1, Kind: prwire.BuildMetadataManifest, Repository: tRepo, WorkflowPath: tPath, RunID: tRunID, RunNumber: 8, RunAttempt: attempt, Event: model.BuildEventPush, SourceSHA: tHead, ExecutionSHA: tHead, Selected: tSelected(services...)}
 }
 
-func tPRMeta(attempt int, services ...string) model.BuildMetadata {
+func tPRMeta(attempt int, services ...string) prwire.BuildMetadata {
 	m := tMeta(attempt, services...)
 	pr := 42
 	m.Event, m.ExecutionSHA, m.PRNumber = model.GHEventPullRequest, tMerge, &pr
 	return m
 }
 
-func tImageResult(svc, state string, pushed bool, sourceAttempt int) model.BuildResult {
-	r := model.BuildResult{Service: svc, ImageName: "aerial-" + svc, State: state, Pushed: pushed, SourceAttempt: sourceAttempt}
+func tImageResult(svc, state string, pushed bool, sourceAttempt int) prwire.BuildResult {
+	r := prwire.BuildResult{Service: svc, ImageName: "aerial-" + svc, State: state, Pushed: pushed, SourceAttempt: sourceAttempt}
 	if pushed {
 		r.ImageRefs, r.Digest = []string{"ghcr.io/example/aerial-" + svc + ":tree-" + tTree}, tDigest
 	}
 	return r
 }
 
-func tResultOf(m model.BuildMetadata, svc, state string, pushed bool) model.BuildMetadata {
+func tResultOf(m prwire.BuildMetadata, svc, state string, pushed bool) prwire.BuildMetadata {
 	r := tImageResult(svc, state, pushed, m.RunAttempt)
-	m.Kind, m.Service, m.ImageName, m.State, m.Pushed, m.SourceAttempt, m.ImageRefs, m.Digest = model.BuildMetadataResult, r.Service, r.ImageName, r.State, r.Pushed, r.SourceAttempt, r.ImageRefs, r.Digest
+	m.Kind, m.Service, m.ImageName, m.State, m.Pushed, m.SourceAttempt, m.ImageRefs, m.Digest = prwire.BuildMetadataResult, r.Service, r.ImageName, r.State, r.Pushed, r.SourceAttempt, r.ImageRefs, r.Digest
 	return m
 }
 
-func tFinalOf(m model.BuildMetadata, results ...model.BuildResult) model.BuildMetadata {
-	m.Kind, m.Results = model.BuildMetadataFinal, append([]model.BuildResult{}, results...)
+func tFinalOf(m prwire.BuildMetadata, results ...prwire.BuildResult) prwire.BuildMetadata {
+	m.Kind, m.Results = prwire.BuildMetadataFinal, append([]prwire.BuildResult{}, results...)
 	return m
 }
 
-func tCheck(m model.BuildMetadata) model.GitHubMetadataCheck {
+func tCheck(m prwire.BuildMetadata) model.GitHubMetadataCheck {
 	raw, err := json.Marshal(m)
 	if err != nil {
 		panic(err)
 	}
 	c := model.GitHubMetadataCheck{ID: 100 + int64(m.RunAttempt), Name: model.BuildMetadataCheckName, HeadSHA: m.SourceSHA, ExternalID: MetadataExternalID(m), Status: "completed", Conclusion: "neutral"}
-	if m.Kind == model.BuildMetadataResult {
+	if m.Kind == prwire.BuildMetadataResult {
 		c.Name = model.BuildMetadataResultCheckName
 	}
 	c.App.ID = BuildMetadataActionsAppID
@@ -125,37 +126,37 @@ func withSuite(c model.GitHubMetadataCheck, suite int64) model.GitHubMetadataChe
 	return c
 }
 
-func withRunNumber(m model.BuildMetadata, n int64) model.BuildMetadata {
+func withRunNumber(m prwire.BuildMetadata, n int64) prwire.BuildMetadata {
 	m.RunNumber = n
 	return m
 }
 
-func withRunID(m model.BuildMetadata, id int64) model.BuildMetadata {
+func withRunID(m prwire.BuildMetadata, id int64) prwire.BuildMetadata {
 	m.RunID = id
 	return m
 }
 
-func withSelected(m model.BuildMetadata, sel []model.BuildSelection) model.BuildMetadata {
+func withSelected(m prwire.BuildMetadata, sel []prwire.BuildSelection) prwire.BuildMetadata {
 	m.Selected = sel
 	return m
 }
 
-func withRefs(m model.BuildMetadata, refs ...string) model.BuildMetadata {
+func withRefs(m prwire.BuildMetadata, refs ...string) prwire.BuildMetadata {
 	m.ImageRefs = refs
 	return m
 }
 
-func withDigest(m model.BuildMetadata, digest string) model.BuildMetadata {
+func withDigest(m prwire.BuildMetadata, digest string) prwire.BuildMetadata {
 	m.Digest = digest
 	return m
 }
 
-func withPRNumber(m model.BuildMetadata, pr *int) model.BuildMetadata {
+func withPRNumber(m prwire.BuildMetadata, pr *int) prwire.BuildMetadata {
 	m.PRNumber = pr
 	return m
 }
 
-func withExecution(m model.BuildMetadata, sha string) model.BuildMetadata {
+func withExecution(m prwire.BuildMetadata, sha string) prwire.BuildMetadata {
 	m.ExecutionSHA = sha
 	return m
 }
@@ -184,19 +185,19 @@ func TestCurrentMetadataSnapshot(t *testing.T) {
 		wantErr     bool
 	}{
 		{"no records", nil, tRun(1, "completed", model.ConclusionSuccess), false, "", nil, false},
-		{"manifest only", checks(tCheck(m1)), tRun(1, "in_progress", ""), true, model.BuildMetadataManifest, nil, false},
-		{"concurrent matrix progress", checks(tCheck(m1), tCheck(failWorker), tCheck(ok1)), tRun(1, "in_progress", ""), true, model.BuildMetadataProgress, map[string]string{"engine": model.ConclusionSuccess, "worker": model.BuildResultFailure}, false},
-		{"result before manifest", checks(tCheck(ok1)), tRun(1, "in_progress", ""), true, model.BuildMetadataProgress, map[string]string{"engine": model.ConclusionSuccess}, false},
-		{"final aggregate", checks(tCheck(m1), tCheck(ok1), tCheck(ok2), tCheck(final1)), tRun(1, "completed", model.ConclusionSuccess), true, model.BuildMetadataFinal, map[string]string{"engine": model.ConclusionSuccess, "worker": model.ConclusionSuccess}, false},
-		{"custom suite differs from actions suite", checks(tCheck(m1), tCheck(ok1), tCheck(ok2), sidecarSuite), tRun(1, "completed", model.ConclusionSuccess), true, model.BuildMetadataFinal, map[string]string{"engine": model.ConclusionSuccess, "worker": model.ConclusionSuccess}, false},
-		{"explicit empty selection", checks(tCheck(tMeta(1)), tCheck(empty)), tRun(1, "completed", model.ConclusionSuccess), true, model.BuildMetadataFinal, map[string]string{}, false},
-		{"identical rerun replicas deduplicate", checks(tCheck(m1), tCheck(ok1), tCheck(ok1), tCheck(ok2), tCheck(final1)), tRun(1, "completed", model.ConclusionSuccess), true, model.BuildMetadataFinal, map[string]string{"engine": model.ConclusionSuccess, "worker": model.ConclusionSuccess}, false},
-		{"rerun-failed retains prior success", checks(tCheck(m1), tCheck(ok1), tCheck(failWorker), tCheck(retryWorker), tCheck(final2)), tRun(2, "completed", model.ConclusionSuccess), true, model.BuildMetadataFinal, map[string]string{"engine": model.ConclusionSuccess, "worker": model.ConclusionSuccess}, false},
-		{"rerun pending hides prior final", checks(tCheck(m1), tCheck(ok1), tCheck(ok2), tCheck(final1)), tRun(2, "queued", ""), true, model.BuildMetadataManifest, nil, false},
-		{"rerun progress shows only current attempt", checks(tCheck(m1), tCheck(ok1), tCheck(failWorker), tCheck(retryRunning)), tRun(2, "in_progress", ""), true, model.BuildMetadataProgress, map[string]string{"worker": model.BuildResultRunning}, false},
+		{"manifest only", checks(tCheck(m1)), tRun(1, "in_progress", ""), true, prwire.BuildMetadataManifest, nil, false},
+		{"concurrent matrix progress", checks(tCheck(m1), tCheck(failWorker), tCheck(ok1)), tRun(1, "in_progress", ""), true, prwire.BuildMetadataProgress, map[string]string{"engine": model.ConclusionSuccess, "worker": model.BuildResultFailure}, false},
+		{"result before manifest", checks(tCheck(ok1)), tRun(1, "in_progress", ""), true, prwire.BuildMetadataProgress, map[string]string{"engine": model.ConclusionSuccess}, false},
+		{"final aggregate", checks(tCheck(m1), tCheck(ok1), tCheck(ok2), tCheck(final1)), tRun(1, "completed", model.ConclusionSuccess), true, prwire.BuildMetadataFinal, map[string]string{"engine": model.ConclusionSuccess, "worker": model.ConclusionSuccess}, false},
+		{"custom suite differs from actions suite", checks(tCheck(m1), tCheck(ok1), tCheck(ok2), sidecarSuite), tRun(1, "completed", model.ConclusionSuccess), true, prwire.BuildMetadataFinal, map[string]string{"engine": model.ConclusionSuccess, "worker": model.ConclusionSuccess}, false},
+		{"explicit empty selection", checks(tCheck(tMeta(1)), tCheck(empty)), tRun(1, "completed", model.ConclusionSuccess), true, prwire.BuildMetadataFinal, map[string]string{}, false},
+		{"identical rerun replicas deduplicate", checks(tCheck(m1), tCheck(ok1), tCheck(ok1), tCheck(ok2), tCheck(final1)), tRun(1, "completed", model.ConclusionSuccess), true, prwire.BuildMetadataFinal, map[string]string{"engine": model.ConclusionSuccess, "worker": model.ConclusionSuccess}, false},
+		{"rerun-failed retains prior success", checks(tCheck(m1), tCheck(ok1), tCheck(failWorker), tCheck(retryWorker), tCheck(final2)), tRun(2, "completed", model.ConclusionSuccess), true, prwire.BuildMetadataFinal, map[string]string{"engine": model.ConclusionSuccess, "worker": model.ConclusionSuccess}, false},
+		{"rerun pending hides prior final", checks(tCheck(m1), tCheck(ok1), tCheck(ok2), tCheck(final1)), tRun(2, "queued", ""), true, prwire.BuildMetadataManifest, nil, false},
+		{"rerun progress shows only current attempt", checks(tCheck(m1), tCheck(ok1), tCheck(failWorker), tCheck(retryRunning)), tRun(2, "in_progress", ""), true, prwire.BuildMetadataProgress, map[string]string{"worker": model.BuildResultRunning}, false},
 		{"final disagrees with newer result", checks(tCheck(m1), tCheck(ok1), tCheck(ok2), tCheck(retryRunning), tCheck(final2)), tRun(2, "completed", model.ConclusionSuccess), false, "", nil, true},
 		{"final claims missing transport", checks(tCheck(m1), tCheck(ok1), tCheck(final1)), tRun(1, "completed", model.ConclusionSuccess), false, "", nil, true},
-		{"other run on same commit ignored", checks(tCheck(otherRun), tCheck(m1)), tRun(1, "in_progress", ""), true, model.BuildMetadataManifest, nil, false},
+		{"other run on same commit ignored", checks(tCheck(otherRun), tCheck(m1)), tRun(1, "in_progress", ""), true, prwire.BuildMetadataManifest, nil, false},
 		{"foreign app ignored", checks(withApp(tCheck(m1), 9)), tRun(1, "completed", model.ConclusionSuccess), false, "", nil, false},
 		{"conflicting replica", checks(tCheck(ok1), withText(tCheck(ok1), strings.Replace(tCheck(ok1).Output.Text, tDigest, strings.ReplaceAll(tDigest, "1", "2"), 1))), tRun(1, "in_progress", ""), false, "", nil, true},
 		{"conflicting selection", checks(tCheck(m1), tCheck(tResultOf(withSelected(m1, tSelected("engine")), "engine", model.BuildResultRunning, false))), tRun(1, "in_progress", ""), false, "", nil, true},
@@ -214,10 +215,10 @@ func TestCurrentMetadataSnapshot(t *testing.T) {
 		{"branch build with PR number", checks(tCheck(withPRNumber(m1, new(int)))), tRun(1, "completed", model.ConclusionSuccess), false, "", nil, true},
 		{"branch build with distinct execution", checks(tCheck(withExecution(m1, tMerge))), tRun(1, "completed", model.ConclusionSuccess), false, "", nil, true},
 		{"PR record on branch run", checks(tCheck(tPRMeta(1))), tRun(1, "completed", model.ConclusionSuccess), false, "", nil, true},
-		{"PR merge identity", checks(tCheck(tPRMeta(1, "engine"))), tPRRun(1, "in_progress", ""), true, model.BuildMetadataManifest, nil, false},
+		{"PR merge identity", checks(tCheck(tPRMeta(1, "engine"))), tPRRun(1, "in_progress", ""), true, prwire.BuildMetadataManifest, nil, false},
 		{"PR without merge revision", checks(tCheck(withExecution(tPRMeta(1), tHead))), tPRRun(1, "completed", model.ConclusionSuccess), false, "", nil, true},
-		{"service maps to foreign image", checks(tCheck(withSelected(m1, []model.BuildSelection{{Service: "engine", ImageName: "other-engine"}}))), tRun(1, "completed", model.ConclusionSuccess), false, "", nil, true},
-		{"none sentinel never a service", checks(tCheck(withSelected(m1, []model.BuildSelection{{Service: "none", ImageName: "aerial-none"}}))), tRun(1, "completed", model.ConclusionSuccess), false, "", nil, true},
+		{"service maps to foreign image", checks(tCheck(withSelected(m1, []prwire.BuildSelection{{Service: "engine", ImageName: "other-engine"}}))), tRun(1, "completed", model.ConclusionSuccess), false, "", nil, true},
+		{"none sentinel never a service", checks(tCheck(withSelected(m1, []prwire.BuildSelection{{Service: "none", ImageName: "aerial-none"}}))), tRun(1, "completed", model.ConclusionSuccess), false, "", nil, true},
 		{"image ref wrong owner", checks(tCheck(withRefs(ok1, "ghcr.io/other/aerial-engine:"+tHead))), tRun(1, "in_progress", ""), false, "", nil, true},
 		{"image ref wrong image", checks(tCheck(withRefs(ok1, "ghcr.io/example/aerial-worker:"+tHead))), tRun(1, "in_progress", ""), false, "", nil, true},
 		{"image ref mutable tag", checks(tCheck(withRefs(ok1, "ghcr.io/example/aerial-engine:latest"))), tRun(1, "in_progress", ""), false, "", nil, true},
@@ -229,7 +230,7 @@ func TestCurrentMetadataSnapshot(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			records, err := CollectMetadataRecords(tc.records, tRepo, tc.run)
-			var got model.BuildMetadata
+			var got prwire.BuildMetadata
 			found := false
 			if err == nil {
 				got, found, err = CurrentMetadataSnapshot(records, tc.run.RunAttempt)
@@ -260,7 +261,7 @@ func TestMetadataPublishable(t *testing.T) {
 	m := tMeta(2, "engine")
 	tests := []struct {
 		name     string
-		snapshot model.BuildMetadata
+		snapshot prwire.BuildMetadata
 		run      MetadataWorkflowRun
 		want     bool
 	}{

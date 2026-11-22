@@ -52,12 +52,6 @@ type PRBuildLifecycle struct {
 	Started  bool
 }
 
-// KustomizationRequest is the reconcile request recorded for one Flux Kustomization of a PR rollout.
-type KustomizationRequest struct {
-	Namespace   string `json:"namespace"`
-	RequestedAt string `json:"requested_at"`
-}
-
 // DeployEvent represents a deployment or sync lifecycle event.
 type DeployEvent struct {
 	Event        string    `json:"event"`

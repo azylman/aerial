@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/azylman/aerial/pkg/httpkit"
+	"github.com/azylman/aerial/pkg/prwire"
 	"github.com/azylman/aerial/services/synapse/internal/metrics"
 	"github.com/azylman/aerial/services/synapse/internal/restateclient"
 )
@@ -68,7 +69,7 @@ func (s *RouterServer) retryReadinessRestate(ctx context.Context, w http.Respons
 		httpkit.WriteJSON(w, 503, map[string]string{fieldError: "readiness retry unavailable"})
 		return
 	}
-	req := restateclient.RetryReadinessRequest{MergeSHA: merge, Agent: agent}
+	req := prwire.RetryReadinessRequest{MergeSHA: merge, Agent: agent}
 	if s.k8sAuthEnabled() {
 		req.EnforceOwner, req.ExpectedOwner = true, agent
 	}

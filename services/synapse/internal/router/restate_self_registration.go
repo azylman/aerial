@@ -4,8 +4,8 @@ import (
 	"context"
 	"strings"
 
+	"github.com/azylman/aerial/pkg/prwire"
 	"github.com/azylman/aerial/services/synapse/internal/model"
-	"github.com/azylman/aerial/services/synapse/internal/restateclient"
 )
 
 // Self-registration: synapse tells PRObject about PRs nobody registered
@@ -99,8 +99,8 @@ func (s *RouterServer) pullRequestSelfRegistration(res *ResolvedGitHubEvent, p G
 }
 
 // selfRegistrationEvent renders the HandleSelfRegistered payload.
-func selfRegistrationEvent(res *ResolvedGitHubEvent, reg prSelfRegistration) restateclient.PREvent {
-	return restateclient.PREvent{
+func selfRegistrationEvent(res *ResolvedGitHubEvent, reg prSelfRegistration) prwire.PREvent {
+	return prwire.PREvent{
 		Repo: res.Repo, PRNumber: res.PRNumber, HeadSHA: res.HeadSHA, Branch: res.Branch,
 		Title: reg.Title, TargetID: reg.TargetID, Agent: reg.Agent,
 	}
@@ -110,5 +110,5 @@ func selfRegistrationEvent(res *ResolvedGitHubEvent, reg prSelfRegistration) res
 // the owner seed for a PR PRObject has not seen; it never overwrites a
 // stored owner.
 func (s *RouterServer) routeSelfRegistration(ctx context.Context, res *ResolvedGitHubEvent, reg prSelfRegistration) error {
-	return s.sendOwnedPR(ctx, restateclient.HandlerSelfRegistered, selfRegistrationEvent(res, reg))
+	return s.sendOwnedPR(ctx, prwire.PRHandlerSelfRegistered, selfRegistrationEvent(res, reg))
 }

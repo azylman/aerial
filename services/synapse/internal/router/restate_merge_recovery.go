@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"strings"
 
+	"github.com/azylman/aerial/pkg/prwire"
 	"github.com/azylman/aerial/services/synapse/internal/github"
 	"github.com/azylman/aerial/services/synapse/internal/metrics"
 	"github.com/azylman/aerial/services/synapse/internal/restateclient"
@@ -34,7 +35,7 @@ func mergeRecoveryIdentity(repo string, prNumber int, mergeSHA string) string {
 // merge commit, and PRObject tracks the PR but not as merged on sha. A head
 // match or an unmerged PR never infers a merge, and an untracked PR (no
 // registration or hydrated row) gets no state from a deploy event.
-func shouldRecoverMerge(pr github.CommitPR, sha string, view restateclient.DeployView) bool {
+func shouldRecoverMerge(pr github.CommitPR, sha string, view prwire.DeployView) bool {
 	if !pr.MergedOn(sha) || !view.Found {
 		return false
 	}
@@ -65,12 +66,12 @@ func (s *RouterServer) recoverLostMerge(ctx context.Context, path, repo, sha str
 	if !shouldRecoverMerge(pr, sha, view) {
 		return
 	}
-	ev := restateclient.PREvent{
+	ev := prwire.PREvent{
 		Repo: repo, PRNumber: pr.Number, HeadSHA: pr.HeadSHA,
 		MergeSHA: strings.TrimSpace(sha), Branch: pr.Branch,
 	}
 	sendCtx := restateclient.WithEventIdentity(ctx, mergeRecoveryIdentity(repo, pr.Number, sha))
-	if err := s.sendOwnedPR(sendCtx, "HandleMerged", ev); err != nil {
+	if err := s.sendOwnedPR(sendCtx, prwire.PRHandlerMerged, ev); err != nil {
 		slog.WarnContext(ctx, "[synapse] restate merge recovery send failed",
 			"repo", repo, "pr", pr.Number, "merge_sha", sha, "path", path, "error", err)
 		return

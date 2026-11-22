@@ -10,6 +10,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/azylman/aerial/pkg/prwire"
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/synapse/internal/model"
 	"github.com/azylman/aerial/services/synapse/internal/restateclient"
@@ -267,7 +268,7 @@ func TestRestateBuildMetadataStore(t *testing.T) {
 			if lc != tc.wantLifecycle || found != tc.wantMetaFound || m.RunID != tc.wantMetaRun {
 				t.Fatalf("reads = %+v / %v run %d, want %+v / %v run %d", lc, found, m.RunID, tc.wantLifecycle, tc.wantMetaFound, tc.wantMetaRun)
 			}
-			updated, err := store.RecordPRBuildMetadata(ctx, "azylman/aerial", 42, model.BuildMetadata{SourceSHA: "h1"})
+			updated, err := store.RecordPRBuildMetadata(ctx, "azylman/aerial", 42, prwire.BuildMetadata{SourceSHA: "h1"})
 			if (err != nil) != tc.wantRecordErr || updated == tc.wantRecordErr {
 				t.Fatalf("RecordPRBuildMetadata() = %v, %v, want err %v", updated, err, tc.wantRecordErr)
 			}
@@ -412,8 +413,8 @@ func restateOwnedPullRequestCases() []restateOwnedGitHubCase {
 			body:      prPayload("azylman/aerial", ghActionOpened, false, "feat", aerialBody("aerial", ownedThread), ""),
 			wantPaths: []string{ownedPRKey + "HandleSelfRegistered/send", ownedPRKey + "HandleOpened/send"},
 			wantBodies: []string{
-				`"title":"Fix it","gate_generation":0,"reopen_epoch":0,"unmanaged":false,"build_id":"","agent":"aerial","target_id":"` + ownedThread + `"}`,
-				`"agent":"aerial"`,
+				`"title":"Fix it","gate_generation":0,"reopen_epoch":0,"unmanaged":false,"build_id":"","target_id":"` + ownedThread + `"}`,
+				`"pr_number":42,"agent":"aerial","head_sha"`,
 			},
 		},
 		{
@@ -425,15 +426,15 @@ func restateOwnedPullRequestCases() []restateOwnedGitHubCase {
 			name: "default-owned dependabot pr gets the system channel target", event: ghEventPullRequest, cfg: Config{DefaultOwner: true, SystemChannelID: ownedSystem},
 			body:       prPayload("azylman/aerial", "reopened", false, "dependabot/go/x", "", ""),
 			wantPaths:  []string{ownedPRKey + "HandleSelfRegistered/send", ownedPRKey + "HandleReopened/send"},
-			wantBodies: []string{`"title":"Fix it","gate_generation":0,"reopen_epoch":0,"unmanaged":false,"build_id":"","agent":"","target_id":"` + ownedSystem + `"}`, `"title":"Fix it","gate_generation":0,"reopen_epoch":0,"unmanaged":false,"build_id":"","agent":""}`},
+			wantBodies: []string{`"title":"Fix it","gate_generation":0,"reopen_epoch":0,"unmanaged":false,"build_id":"","target_id":"` + ownedSystem + `"}`, `"title":"Fix it","gate_generation":0,"reopen_epoch":0,"unmanaged":false,"build_id":""}`},
 		},
 		{
 			name: "default-owned dependabot opened registers with the system channel and title", event: ghEventPullRequest, cfg: Config{DefaultOwner: true, SystemChannelID: ownedSystem},
 			body:      prPayload("azylman/aerial", ghActionOpened, false, "dependabot/go/x", "", ""),
 			wantPaths: []string{ownedPRKey + "HandleSelfRegistered/send", ownedPRKey + "HandleOpened/send"},
 			wantBodies: []string{
-				`"branch":"dependabot/go/x","title":"Fix it","gate_generation":0,"reopen_epoch":0,"unmanaged":false,"build_id":"","agent":"","target_id":"` + ownedSystem + `"}`,
-				`"title":"","gate_generation":0,"reopen_epoch":0,"unmanaged":false,"build_id":"","agent":"","facts":[{"event":"opened","repo":"azylman/aerial","pr_number":42,"branch":"dependabot/go/x","head_sha":"` + ownedHead + `","title":"Fix it","target_id":"` + ownedSystem + `"`,
+				`"branch":"dependabot/go/x","title":"Fix it","gate_generation":0,"reopen_epoch":0,"unmanaged":false,"build_id":"","target_id":"` + ownedSystem + `"}`,
+				`"title":"","gate_generation":0,"reopen_epoch":0,"unmanaged":false,"build_id":"","facts":[{"event":"opened","repo":"azylman/aerial","pr_number":42,"branch":"dependabot/go/x","head_sha":"` + ownedHead + `","title":"Fix it","target_id":"` + ownedSystem + `"`,
 			},
 		},
 		{
@@ -464,7 +465,7 @@ func restateOwnedPullRequestCases() []restateOwnedGitHubCase {
 		{
 			name: "headless metadata without a system channel sends no target", event: ghEventPullRequest,
 			body:      prPayload("azylman/aerial", "reopened", false, "feat", aerialBody("aerial", "headless:abc"), ""),
-			wantPaths: []string{ownedPRKey + "HandleReopened/send"}, wantBodies: []string{`"agent":"aerial"}`},
+			wantPaths: []string{ownedPRKey + "HandleReopened/send"}, wantBodies: []string{`"pr_number":42,"agent":"aerial","head_sha"`},
 		},
 		{
 			name: "synchronize carries the compare-and-set head and fact", event: ghEventPullRequest,
@@ -543,7 +544,7 @@ func restateOwnedCheckAndPushCases() []restateOwnedGitHubCase {
 			name: "gate success triggers the auto-update cascade directly", event: ghEventCheckRun,
 			body:       checkRunPayload("CI Gate", "completed", "success", true),
 			wantPaths:  []string{ownedOther + "HandleCIRecovered/send", ownedOther + "HandleCheckPassed/send", ownedOtherR + "HandleAutoUpdate/send"},
-			wantBodies: []string{`"facts":[{"event":"synchronize"`, `"check_name":"CI Gate"`, `"pr_number":42,"head_sha":"` + ownedHead + `","agent":"","check_name":"CI Gate"`},
+			wantBodies: []string{`"facts":[{"event":"synchronize"`, `"check_name":"CI Gate"`, `"pr_number":42,"head_sha":"` + ownedHead + `","check_name":"CI Gate"`},
 		},
 		{
 			name: "pr workflow success never triggers the auto-update cascade", event: ghEventWorkflowRun,
@@ -593,7 +594,7 @@ func restateOwnedCheckAndPushCases() []restateOwnedGitHubCase {
 			name: "default-owned dependabot failure self-registers first", event: ghEventWorkflowRun, cfg: Config{DefaultOwner: true, SystemChannelID: ownedSystem},
 			body:       workflowRunPayload("dependabot/go/x", "failure", true),
 			wantPaths:  []string{ownedOther + "HandleSelfRegistered/send", ownedOther + "HandleCheckFailed/send", ownedOtherR + "HandleAutoUpdate/send"},
-			wantBodies: []string{`"branch":"dependabot/go/x","title":"","gate_generation":0,"reopen_epoch":0,"unmanaged":false,"build_id":"","agent":"","target_id":"` + ownedSystem + `"}`, `Workflow \"CI\" concluded with failure`},
+			wantBodies: []string{`"branch":"dependabot/go/x","title":"","gate_generation":0,"reopen_epoch":0,"unmanaged":false,"build_id":"","target_id":"` + ownedSystem + `"}`, `Workflow \"CI\" concluded with failure`},
 		},
 		{
 			name: "sha-only workflow success rides the repo sha route", event: ghEventWorkflowRun,
@@ -626,13 +627,13 @@ func restateOwnedCheckAndPushCases() []restateOwnedGitHubCase {
 			name: "default owner direct commit dispatches the git push with no pr", event: "push", ghBody: "[]", cfg: Config{DefaultOwner: true},
 			body:       pushPayload("refs/heads/main", "Direct commit"),
 			wantPaths:  []string{ownedRepoK + "HandleMainPush/send", ownedRepoK + "HandlePushBySHA/send", ownedRepoK + "HandleAutoUpdate/send", ownedRepoK + "HandleGitPush/send"},
-			wantBodies: []string{`"main_sha"`, `"handler":"HandleMerged"`, `"auto_update":{"default_owner":true}`, `"main_sha":"` + ownedMerge + `","generation":0,"pr_number":0,"head_sha":"","agent":"","ref":"refs/heads/main"`},
+			wantBodies: []string{`"main_sha"`, `"handler":"HandleMerged"`, `"auto_update":{"default_owner":true}`, `"main_sha":"` + ownedMerge + `","generation":0,"pr_number":0,"head_sha":"","ref":"refs/heads/main"`},
 		},
 		{
 			name: "default owner squash push dispatches the git push for the pr", event: "push", ghBody: "[]", cfg: Config{DefaultOwner: true},
 			body:       pushPayload("refs/heads/main", "Fix it (#42)"),
 			wantPaths:  []string{ownedRepoK + "HandleMainPush/send", ownedPRKey + "HandleMerged/send", ownedRepoK + "HandleAutoUpdate/send", ownedRepoK + "HandleGitPush/send"},
-			wantBodies: []string{`"main_sha"`, `"pr_number":42`, `"auto_update":{"default_owner":true}`, `"pr_number":42,"head_sha":"","agent":"","ref":"refs/heads/main"`},
+			wantBodies: []string{`"main_sha"`, `"pr_number":42`, `"auto_update":{"default_owner":true}`, `"pr_number":42,"head_sha":"","ref":"refs/heads/main"`},
 		},
 		{name: "branch push sends nothing", event: "push", body: pushPayload("refs/heads/feat", "wip")},
 		{name: "tag push sends nothing", event: "push", body: pushPayload("refs/tags/v1", "tag")},

@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/azylman/aerial/pkg/httpkit"
+	"github.com/azylman/aerial/pkg/prwire"
 	"github.com/azylman/aerial/services/synapse/internal/metrics"
 	"github.com/azylman/aerial/services/synapse/internal/model"
 	"github.com/azylman/aerial/services/synapse/internal/restateclient"
@@ -41,7 +42,7 @@ func (s *RouterServer) handlePRRegisterRestate(w http.ResponseWriter, r *http.Re
 	}
 	req.Metadata = injectAgentPRMetadata(req.Metadata, req.Agent)
 
-	rr := restateclient.RegisterRequest{
+	rr := prwire.RegisterRequest{
 		Repo: req.Repo, PRNumber: req.PRNumber, Branch: req.Branch, HeadSHA: req.HeadSHA,
 		TargetID: req.TargetID, Title: req.Title, Agent: req.Agent, BotID: req.BotID,
 		Metadata:         registerMetadataStrings(req.Metadata),
@@ -69,16 +70,16 @@ func (s *RouterServer) handlePRRegisterRestate(w http.ResponseWriter, r *http.Re
 
 // registerWithRestate invokes PRObject.Register through the configured
 // client, counting the outcome like every other Restate send.
-func (s *RouterServer) registerWithRestate(ctx context.Context, rr restateclient.RegisterRequest) (restateclient.RegisterResponse, error) {
+func (s *RouterServer) registerWithRestate(ctx context.Context, rr prwire.RegisterRequest) (prwire.RegisterResponse, error) {
 	c, err := s.restateClient()
 	if err != nil {
 		metrics.RecordRestateSend("Register", "error")
-		return restateclient.RegisterResponse{}, err
+		return prwire.RegisterResponse{}, err
 	}
 	resp, err := c.Register(ctx, rr)
 	if err != nil {
 		metrics.RecordRestateSend("Register", "error")
-		return restateclient.RegisterResponse{}, err
+		return prwire.RegisterResponse{}, err
 	}
 	metrics.RecordRestateSend("Register", "sent")
 	return resp, nil

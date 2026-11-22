@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/azylman/aerial/pkg/prwire"
 	"github.com/azylman/aerial/services/synapse/internal/config"
 	"github.com/azylman/aerial/services/synapse/internal/model"
 )
@@ -105,9 +106,9 @@ func ValidateMetadataRunIdentity(r MetadataWorkflowRun, repo string, id int64) e
 	}
 }
 
-func MetadataExternalID(m model.BuildMetadata) string {
+func MetadataExternalID(m prwire.BuildMetadata) string {
 	suffix := m.Kind
-	if m.Kind == model.BuildMetadataResult {
+	if m.Kind == prwire.BuildMetadataResult {
 		suffix = m.Service
 	}
 	return fmt.Sprintf("build-metadata:v1:%s:%d:%d:%s", m.Repository, m.RunID, m.RunAttempt, suffix)
@@ -131,13 +132,13 @@ func ParseMetadataExternalRun(externalID string) (string, int64, bool) {
 
 // MetadataRecords holds one run's provenance-validated, replica-deduplicated records.
 type MetadataRecords struct {
-	Identity  *model.BuildMetadata
-	Snapshots map[int]model.BuildMetadata // manifest or final per attempt (final wins)
-	Results   map[string]model.BuildMetadata
+	Identity  *prwire.BuildMetadata
+	Snapshots map[int]prwire.BuildMetadata // manifest or final per attempt (final wins)
+	Results   map[string]prwire.BuildMetadata
 }
 
-func (rs *MetadataRecords) NewestResult(service string, attempt int) (model.BuildMetadata, bool) {
-	var newest model.BuildMetadata
+func (rs *MetadataRecords) NewestResult(service string, attempt int) (prwire.BuildMetadata, bool) {
+	var newest prwire.BuildMetadata
 	found := false
 	for _, r := range rs.Results {
 		if r.Service == service && r.RunAttempt <= attempt && (!found || r.RunAttempt > newest.RunAttempt) {
@@ -147,7 +148,7 @@ func (rs *MetadataRecords) NewestResult(service string, attempt int) (model.Buil
 	return newest, found
 }
 
-func (rs *MetadataRecords) Add(m model.BuildMetadata) error {
+func (rs *MetadataRecords) Add(m prwire.BuildMetadata) error {
 	if rs.Identity == nil {
 		identity := m
 		rs.Identity = &identity
@@ -155,19 +156,19 @@ func (rs *MetadataRecords) Add(m model.BuildMetadata) error {
 		return fmt.Errorf("conflicting immutable build metadata")
 	}
 	switch m.Kind {
-	case model.BuildMetadataResult:
+	case prwire.BuildMetadataResult:
 		rs.Results[MetadataExternalID(m)] = m
-	case model.BuildMetadataFinal:
+	case prwire.BuildMetadataFinal:
 		rs.Snapshots[m.RunAttempt] = m
 	default:
-		if prior, ok := rs.Snapshots[m.RunAttempt]; !ok || prior.Kind != model.BuildMetadataFinal {
+		if prior, ok := rs.Snapshots[m.RunAttempt]; !ok || prior.Kind != prwire.BuildMetadataFinal {
 			rs.Snapshots[m.RunAttempt] = m
 		}
 	}
 	return nil
 }
 
-func SameMetadataIdentity(a, b model.BuildMetadata) bool {
+func SameMetadataIdentity(a, b prwire.BuildMetadata) bool {
 	return a.Event == b.Event && a.SourceSHA == b.SourceSHA && a.ExecutionSHA == b.ExecutionSHA &&
 		reflect.DeepEqual(a.PRNumber, b.PRNumber) && reflect.DeepEqual(a.Selected, b.Selected)
 }
@@ -176,7 +177,7 @@ func SameMetadataIdentity(a, b model.BuildMetadata) bool {
 // deduplication. Custom check suites need not equal the Actions suite: the app,
 // external ID, source SHA and JSON run identity bind each record instead.
 func CollectMetadataRecords(checks []model.GitHubMetadataCheck, repo string, r MetadataWorkflowRun) (MetadataRecords, error) {
-	rs := MetadataRecords{Snapshots: map[int]model.BuildMetadata{}, Results: map[string]model.BuildMetadata{}}
+	rs := MetadataRecords{Snapshots: map[int]prwire.BuildMetadata{}, Results: map[string]prwire.BuildMetadata{}}
 	raws := map[string]string{}
 	for _, c := range checks {
 		if !model.IsBuildMetadataCheck(c.Name) || c.App.ID != BuildMetadataActionsAppID {
@@ -210,7 +211,7 @@ func CollectMetadataRecords(checks []model.GitHubMetadataCheck, repo string, r M
 	return rs, nil
 }
 
-func ValidateMetadataProvenance(c model.GitHubMetadataCheck, m model.BuildMetadata, repo string, r MetadataWorkflowRun) error {
+func ValidateMetadataProvenance(c model.GitHubMetadataCheck, m prwire.BuildMetadata, repo string, r MetadataWorkflowRun) error {
 	if err := ValidateMetadataTransport(c, m, r); err != nil {
 		return err
 	}
@@ -228,9 +229,9 @@ func ValidateMetadataProvenance(c model.GitHubMetadataCheck, m model.BuildMetada
 
 // ValidateMetadataTransport binds the check itself: fixed name, exact external
 // ID, a completed-neutral record on the run's source commit.
-func ValidateMetadataTransport(c model.GitHubMetadataCheck, m model.BuildMetadata, r MetadataWorkflowRun) error {
+func ValidateMetadataTransport(c model.GitHubMetadataCheck, m prwire.BuildMetadata, r MetadataWorkflowRun) error {
 	name := model.BuildMetadataCheckName
-	if m.Kind == model.BuildMetadataResult {
+	if m.Kind == prwire.BuildMetadataResult {
 		name = model.BuildMetadataResultCheckName
 	}
 	switch {
@@ -245,7 +246,7 @@ func ValidateMetadataTransport(c model.GitHubMetadataCheck, m model.BuildMetadat
 }
 
 // ValidateMetadataRevisions binds the JSON identity to the authoritative run.
-func ValidateMetadataRevisions(m model.BuildMetadata, repo string, r MetadataWorkflowRun) error {
+func ValidateMetadataRevisions(m prwire.BuildMetadata, repo string, r MetadataWorkflowRun) error {
 	switch {
 	case m.SourceSHA != r.HeadSHA:
 		return fmt.Errorf("source revision mismatch")
@@ -260,13 +261,13 @@ func ValidateMetadataRevisions(m model.BuildMetadata, repo string, r MetadataWor
 }
 
 // ValidateMetadataImages checks result subsets, owner-scoped image references and digests.
-func ValidateMetadataImages(m model.BuildMetadata) error {
+func ValidateMetadataImages(m prwire.BuildMetadata) error {
 	results := m.Results
-	if m.Kind == model.BuildMetadataResult {
+	if m.Kind == prwire.BuildMetadataResult {
 		if !slicesContainsSelection(m.Selected, m.Service, m.ImageName) || m.SourceAttempt != m.RunAttempt {
 			return fmt.Errorf("result outside selection or attempt")
 		}
-		results = []model.BuildResult{{Service: m.Service, ImageName: m.ImageName, State: m.State, Pushed: m.Pushed, ImageRefs: m.ImageRefs, Digest: m.Digest}}
+		results = []prwire.BuildResult{{Service: m.Service, ImageName: m.ImageName, State: m.State, Pushed: m.Pushed, ImageRefs: m.ImageRefs, Digest: m.Digest}}
 	}
 	owner := MetadataOwner(m.Repository)
 	for _, result := range results {
@@ -292,7 +293,7 @@ func MetadataOwner(repo string) string {
 	return strings.ToLower(owner)
 }
 
-func slicesContainsSelection(selected []model.BuildSelection, service, image string) bool {
+func slicesContainsSelection(selected []prwire.BuildSelection, service, image string) bool {
 	for _, sel := range selected {
 		if sel.Service == service && sel.ImageName == image {
 			return true
@@ -305,11 +306,11 @@ func slicesContainsSelection(selected []model.BuildSelection, service, image str
 // final for that attempt must agree with the newest result record of every
 // service. Without one, only current-attempt results are shown so inherited or
 // superseded successes never read as current progress.
-func CurrentMetadataSnapshot(rs MetadataRecords, attempt int) (model.BuildMetadata, bool, error) {
+func CurrentMetadataSnapshot(rs MetadataRecords, attempt int) (prwire.BuildMetadata, bool, error) {
 	if rs.Identity == nil {
-		return model.BuildMetadata{}, false, nil
+		return prwire.BuildMetadata{}, false, nil
 	}
-	if final, ok := rs.Snapshots[attempt]; ok && final.Kind == model.BuildMetadataFinal {
+	if final, ok := rs.Snapshots[attempt]; ok && final.Kind == prwire.BuildMetadataFinal {
 		for _, result := range final.Results {
 			newest, found := rs.NewestResult(result.Service, attempt)
 			if !found || newest.RunAttempt != result.SourceAttempt || newest.State != result.State || newest.Pushed != result.Pushed ||
@@ -320,15 +321,15 @@ func CurrentMetadataSnapshot(rs MetadataRecords, attempt int) (model.BuildMetada
 		return final, true, nil
 	}
 	snapshot := *rs.Identity
-	snapshot.Kind = model.BuildMetadataManifest
+	snapshot.Kind = prwire.BuildMetadataManifest
 	snapshot.RunAttempt = attempt
 	snapshot.Results = nil
 	snapshot.Service, snapshot.ImageName, snapshot.State, snapshot.Pushed = "", "", "", false
 	snapshot.SourceAttempt, snapshot.ImageRefs, snapshot.Digest = 0, nil, ""
 	for _, sel := range snapshot.Selected {
-		if r, ok := rs.Results[MetadataExternalID(model.BuildMetadata{Kind: model.BuildMetadataResult, Repository: snapshot.Repository, RunID: snapshot.RunID, RunAttempt: attempt, Service: sel.Service})]; ok {
-			snapshot.Kind = model.BuildMetadataProgress
-			snapshot.Results = append(snapshot.Results, model.BuildResult{Service: r.Service, ImageName: r.ImageName, State: r.State, Pushed: r.Pushed, SourceAttempt: attempt, ImageRefs: r.ImageRefs, Digest: r.Digest})
+		if r, ok := rs.Results[MetadataExternalID(prwire.BuildMetadata{Kind: prwire.BuildMetadataResult, Repository: snapshot.Repository, RunID: snapshot.RunID, RunAttempt: attempt, Service: sel.Service})]; ok {
+			snapshot.Kind = prwire.BuildMetadataProgress
+			snapshot.Results = append(snapshot.Results, prwire.BuildResult{Service: r.Service, ImageName: r.ImageName, State: r.State, Pushed: r.Pushed, SourceAttempt: attempt, ImageRefs: r.ImageRefs, Digest: r.Digest})
 		}
 	}
 	return snapshot, true, nil
@@ -337,8 +338,8 @@ func CurrentMetadataSnapshot(rs MetadataRecords, attempt int) (model.BuildMetada
 // MetadataPublishable reports whether a snapshot authorizes promotion: the
 // current attempt's final aggregate, every selected image pushed, and the whole
 // workflow (including any separate promotion job) successful.
-func MetadataPublishable(m model.BuildMetadata, r MetadataWorkflowRun) bool {
-	if m.Kind != model.BuildMetadataFinal || m.RunAttempt != r.RunAttempt || r.Status != statusCompleted || r.Conclusion != model.ConclusionSuccess || len(m.Results) != len(m.Selected) {
+func MetadataPublishable(m prwire.BuildMetadata, r MetadataWorkflowRun) bool {
+	if m.Kind != prwire.BuildMetadataFinal || m.RunAttempt != r.RunAttempt || r.Status != statusCompleted || r.Conclusion != model.ConclusionSuccess || len(m.Results) != len(m.Selected) {
 		return false
 	}
 	for _, result := range m.Results {
@@ -367,8 +368,8 @@ type LegacyImageResolver func(ctx context.Context, repo string, runID int64) ([]
 // PRMetadataRegistry is the PR state store build metadata tracking reads and writes (PRObject, through Restate).
 type PRMetadataRegistry interface {
 	LoadPRBuildLifecycle(ctx context.Context, repo string, prNumber int) (model.PRBuildLifecycle, error)
-	RecordPRBuildMetadata(ctx context.Context, repo string, prNumber int, metadata model.BuildMetadata) (bool, error)
-	LoadPRBuildMetadata(ctx context.Context, repo string, prNumber int) (model.BuildMetadata, bool, error)
+	RecordPRBuildMetadata(ctx context.Context, repo string, prNumber int, metadata prwire.BuildMetadata) (bool, error)
+	LoadPRBuildMetadata(ctx context.Context, repo string, prNumber int) (prwire.BuildMetadata, bool, error)
 }
 
 type Consumer struct {
@@ -445,7 +446,7 @@ func (c *Consumer) newestMetadataRun(ctx context.Context, repo, sha string, pull
 	return newest, false, fmt.Errorf("workflow run listing exceeds %d pages", MaxMetadataListPages)
 }
 
-func (c *Consumer) recordPRBuildSnapshot(ctx context.Context, repo string, prNum int, m model.BuildMetadata) {
+func (c *Consumer) recordPRBuildSnapshot(ctx context.Context, repo string, prNum int, m prwire.BuildMetadata) {
 	if c.registry == nil || prNum <= 0 {
 		return
 	}
@@ -537,14 +538,14 @@ func (c *Consumer) ValidateMetadataExecution(ctx context.Context, repo string, r
 // ResolveRunMetadata returns the run's current-attempt snapshot. A run without
 // structured records is legacy only when its exact executed workflow blob is in
 // the immutable allowlist; a completed run otherwise lacks required metadata.
-func (c *Consumer) ResolveRunMetadata(ctx context.Context, repo string, r MetadataWorkflowRun) (model.BuildMetadata, MetadataSource, error) {
+func (c *Consumer) ResolveRunMetadata(ctx context.Context, repo string, r MetadataWorkflowRun) (prwire.BuildMetadata, MetadataSource, error) {
 	checks, err := c.listCommitCheckRuns(ctx, repo, r.HeadSHA)
 	if err != nil {
-		return model.BuildMetadata{}, MetadataPending, err
+		return prwire.BuildMetadata{}, MetadataPending, err
 	}
 	records, err := CollectMetadataRecords(checks, repo, r)
 	if err != nil {
-		return model.BuildMetadata{}, MetadataPending, err
+		return prwire.BuildMetadata{}, MetadataPending, err
 	}
 	m, found, err := CurrentMetadataSnapshot(records, r.RunAttempt)
 	if err != nil {
@@ -668,9 +669,9 @@ func (c *Consumer) SupersedeStaleBuildAttempt(ctx context.Context, repo string, 
 	if err != nil || !found || m.RunID != ev.ID || m.RunAttempt >= ev.Attempt || m.SourceSHA != ev.HeadSHA {
 		return
 	}
-	pending := model.BuildMetadata{
+	pending := prwire.BuildMetadata{
 		Version:      m.Version,
-		Kind:         model.BuildMetadataManifest,
+		Kind:         prwire.BuildMetadataManifest,
 		Repository:   m.Repository,
 		WorkflowPath: m.WorkflowPath,
 		RunID:        m.RunID,

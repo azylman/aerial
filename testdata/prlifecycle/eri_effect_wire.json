@@ -1,5 +1,5 @@
 {
-  "description": "HandleCollaboratorAlert wire payload carrying one rendered collaborator DM. synapse restateclient.PREvent must marshal to event (key for key) and prstate PREvent must decode it to the same eri_effects.",
+  "description": "HandleCollaboratorAlert wire payload carrying one rendered collaborator DM. prwire.PREvent (synapse) must marshal to event (key for key) and prstate PREvent must decode it to the same eri_effects.",
   "fields": {
     "repo": "azylman/mirrormere",
     "pr_number": 1010,

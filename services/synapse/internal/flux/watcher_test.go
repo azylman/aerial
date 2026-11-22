@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/azylman/aerial/pkg/prwire"
 	"github.com/azylman/aerial/services/synapse/internal/kube"
 	"github.com/azylman/aerial/services/synapse/internal/model"
 )
@@ -87,7 +88,7 @@ func TestKustomizationReady(t *testing.T) {
 
 func TestKustomizationRequestAction(t *testing.T) {
 	t.Parallel()
-	recorded := model.KustomizationRequest{Namespace: "flux-system", RequestedAt: reqT1}
+	recorded := prwire.KustomizationRequest{Namespace: "flux-system", RequestedAt: reqT1}
 	tests := []struct {
 		name string
 		obs  model.KustomizationObservation
@@ -165,7 +166,7 @@ func TestTrackedRollout(t *testing.T) {
 			Repo:     "azylman/aerial",
 			PRNumber: 42,
 		},
-		Requests: map[string]model.KustomizationRequest{
+		Requests: map[string]prwire.KustomizationRequest{
 			"aerial-core": {Namespace: "flux-system", RequestedAt: reqT1},
 		},
 	}
@@ -203,7 +204,7 @@ func TestTrackedRollout(t *testing.T) {
 
 	// Empty requestedAt
 	emptyReq := TrackedRollout{
-		Requests: map[string]model.KustomizationRequest{
+		Requests: map[string]prwire.KustomizationRequest{
 			"aerial-core": {Namespace: "flux-system", RequestedAt: ""},
 		},
 	}

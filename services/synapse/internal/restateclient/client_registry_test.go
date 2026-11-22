@@ -15,8 +15,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/azylman/aerial/pkg/prwire"
 	"github.com/azylman/aerial/pkg/pubsub"
-	"github.com/azylman/aerial/services/synapse/internal/model"
 )
 
 type registryCall struct {
@@ -69,7 +69,7 @@ func TestClientRegister(t *testing.T) {
 	tests := []struct {
 		name         string
 		unconfigured bool
-		req          RegisterRequest
+		req          prwire.RegisterRequest
 		status       int
 		body         string
 		wantErrSub   string
@@ -77,13 +77,13 @@ func TestClientRegister(t *testing.T) {
 		wantCalls    int
 		wantPath     string
 		wantBodySub  string
-		want         RegisterResponse
+		want         prwire.RegisterResponse
 	}{
-		{name: "register round-trips", req: RegisterRequest{Repo: "aerial", PRNumber: 7, Branch: "feat", HeadSHA: "h1", TargetID: "headless:x", FallbackTargetID: "123456789012345678", EnforceOwner: true, ExpectedOwner: "aerial"}, status: 200, body: okBody, wantCalls: 1, wantPath: "/PRObject/azylman%2Faerial%237/Register", wantBodySub: `"expected_owner":"aerial"`, want: RegisterResponse{TargetID: "123456789012345678", Agent: "aerial", Status: "open"}},
-		{name: "owner mismatch is terminal", req: RegisterRequest{Repo: "aerial", PRNumber: 7}, status: 409, body: "owner", wantErrSub: "status 409", wantTerminal: true, wantCalls: 1, wantPath: "/PRObject/azylman%2Faerial%237/Register"},
-		{name: "undecodable body surfaces", req: RegisterRequest{Repo: "aerial", PRNumber: 7}, status: 200, body: "nope{", wantErrSub: "decode restate response", wantCalls: 1, wantPath: "/PRObject/azylman%2Faerial%237/Register"},
-		{name: "missing pr rejected without request", req: RegisterRequest{Repo: "aerial"}, status: 200, body: okBody, wantErrSub: "required", wantTerminal: true},
-		{name: "unconfigured fails closed", unconfigured: true, req: RegisterRequest{Repo: "aerial", PRNumber: 7}, wantErrSub: "not configured"},
+		{name: "register round-trips", req: prwire.RegisterRequest{Repo: "aerial", PRNumber: 7, Branch: "feat", HeadSHA: "h1", TargetID: "headless:x", FallbackTargetID: "123456789012345678", EnforceOwner: true, ExpectedOwner: "aerial"}, status: 200, body: okBody, wantCalls: 1, wantPath: "/PRObject/azylman%2Faerial%237/Register", wantBodySub: `"expected_owner":"aerial"`, want: prwire.RegisterResponse{TargetID: "123456789012345678", Agent: "aerial", Status: "open"}},
+		{name: "owner mismatch is terminal", req: prwire.RegisterRequest{Repo: "aerial", PRNumber: 7}, status: 409, body: "owner", wantErrSub: "status 409", wantTerminal: true, wantCalls: 1, wantPath: "/PRObject/azylman%2Faerial%237/Register"},
+		{name: "undecodable body surfaces", req: prwire.RegisterRequest{Repo: "aerial", PRNumber: 7}, status: 200, body: "nope{", wantErrSub: "decode restate response", wantCalls: 1, wantPath: "/PRObject/azylman%2Faerial%237/Register"},
+		{name: "missing pr rejected without request", req: prwire.RegisterRequest{Repo: "aerial"}, status: 200, body: okBody, wantErrSub: "required", wantTerminal: true},
+		{name: "unconfigured fails closed", unconfigured: true, req: prwire.RegisterRequest{Repo: "aerial", PRNumber: 7}, wantErrSub: "not configured"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -119,9 +119,9 @@ func TestClientGetBuildLifecycle(t *testing.T) {
 		body         string
 		wantErrSub   string
 		wantCalls    int
-		want         BuildLifecycle
+		want         prwire.BuildLifecycle
 	}{
-		{name: "lifecycle round-trips", repo: "aerial", pr: 7, status: 200, body: lifecycleBody, wantCalls: 1, want: BuildLifecycle{Found: true, Status: "merged", HeadSHA: "h1", MergeSHA: "m1", Started: true, HasBuildMetadata: true, BuildMetadata: &model.BuildMetadata{Version: 1, Kind: "final", Repository: "azylman/aerial", RunID: 9, SourceSHA: "m1"}}},
+		{name: "lifecycle round-trips", repo: "aerial", pr: 7, status: 200, body: lifecycleBody, wantCalls: 1, want: prwire.BuildLifecycle{Found: true, Status: "merged", HeadSHA: "h1", MergeSHA: "m1", Started: true, HasBuildMetadata: true, BuildMetadata: &prwire.BuildMetadata{Version: 1, Kind: "final", Repository: "azylman/aerial", RunID: 9, SourceSHA: "m1"}}},
 		{name: "unknown pr is zero", repo: "aerial", pr: 7, status: 200, body: `{"found":false,"status":"","head_sha":"","merge_sha":"","started":false,"has_build_metadata":false}`, wantCalls: 1},
 		{name: "ingress 500 surfaces", repo: "aerial", pr: 7, status: 500, body: "boom", wantErrSub: "status 500", wantCalls: 1},
 		{name: "empty repo rejected without request", pr: 7, wantErrSub: "required"},
@@ -152,7 +152,7 @@ func TestClientGetBuildLifecycle(t *testing.T) {
 func TestClientRetryReadiness(t *testing.T) {
 	t.Parallel()
 	const wantBody = `{"merge_sha":"m1","enforce_owner":true,"expected_owner":"aerial"}`
-	req := RetryReadinessRequest{MergeSHA: "m1", EnforceOwner: true, ExpectedOwner: "aerial"}
+	req := prwire.RetryReadinessRequest{MergeSHA: "m1", EnforceOwner: true, ExpectedOwner: "aerial"}
 	tests := []struct {
 		name         string
 		unconfigured bool
@@ -192,16 +192,16 @@ func TestClientRetryReadiness(t *testing.T) {
 
 func TestIdempotencyPayload(t *testing.T) {
 	t.Parallel()
-	req := func(ns, at string) map[string]model.KustomizationRequest {
-		return map[string]model.KustomizationRequest{"aerial-core": {Namespace: ns, RequestedAt: at}}
+	req := func(ns, at string) map[string]prwire.KustomizationRequest {
+		return map[string]prwire.KustomizationRequest{"aerial-core": {Namespace: ns, RequestedAt: at}}
 	}
-	base := PREvent{Repo: "azylman/aerial", PRNumber: 7, Jobs: []string{"eri"}, KustomizationRequests: req("flux-system", "2026-11-20T00:00:00Z")}
+	base := prwire.PREvent{Repo: "azylman/aerial", PRNumber: 7, Jobs: []string{"eri"}, KustomizationRequests: req("flux-system", "2026-11-20T00:00:00Z")}
 	retried := base
 	retried.KustomizationRequests = req("flux-system", "2026-11-20T00:05:00Z")
 	otherNS := base
 	otherNS.KustomizationRequests = req("apps", "2026-11-20T00:00:00Z")
-	fact := func(at time.Time, status string) PREvent {
-		return PREvent{Repo: "azylman/aerial", PRNumber: 7, Facts: []pubsub.PRLifecycleEvent{{Event: "conflict", HeadSHA: "h1", Status: status, OccurredAt: at}}}
+	fact := func(at time.Time, status string) prwire.PREvent {
+		return prwire.PREvent{Repo: "azylman/aerial", PRNumber: 7, Facts: []pubsub.PRLifecycleEvent{{Event: "conflict", HeadSHA: "h1", Status: status, OccurredAt: at}}}
 	}
 	t0 := time.Date(2026, 11, 20, 0, 0, 0, 0, time.UTC)
 	tests := []struct {
@@ -211,8 +211,8 @@ func TestIdempotencyPayload(t *testing.T) {
 	}{
 		{name: "retry with new requested_at dedups", a: base, b: retried, wantSame: true},
 		{name: "different namespace does not dedup", a: base, b: otherNS, wantSame: false},
-		{name: "repo events digest as sent", a: RepoEvent{Repo: "azylman/aerial", MainSHA: "a"}, b: RepoEvent{Repo: "azylman/aerial", MainSHA: "b"}, wantSame: false},
-		{name: "events without requests digest as sent", a: PREvent{Repo: "azylman/aerial", PRNumber: 7}, b: PREvent{Repo: "azylman/aerial", PRNumber: 7}, wantSame: true},
+		{name: "repo events digest as sent", a: prwire.RepoEvent{Repo: "azylman/aerial", MainSHA: "a"}, b: prwire.RepoEvent{Repo: "azylman/aerial", MainSHA: "b"}, wantSame: false},
+		{name: "events without requests digest as sent", a: prwire.PREvent{Repo: "azylman/aerial", PRNumber: 7}, b: prwire.PREvent{Repo: "azylman/aerial", PRNumber: 7}, wantSame: true},
 		{name: "fact retry with new occurred_at dedups", a: fact(t0, "conflict"), b: fact(t0.Add(time.Minute), "conflict"), wantSame: true},
 		{name: "different fact body does not dedup", a: fact(t0, "conflict"), b: fact(t0, "open"), wantSame: false},
 	}
@@ -232,6 +232,31 @@ func TestIdempotencyPayload(t *testing.T) {
 	}
 }
 
+func TestDigestShape(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		payload any
+		want    string
+	}{
+		{name: "pr event digests in the pre-prwire field order", payload: prwire.PREvent{Repo: "azylman/aerial", PRNumber: 7, Agent: "agent-alpha", Jobs: []string{"eri"}, AutoUpdate: &prwire.AutoUpdatePolicy{DefaultOwner: true}}, want: `{"event":"","repo":"azylman/aerial","pr_number":7,"head_sha":"","merge_sha":"","check_name":"","job_name":"","branch":"","title":"","gate_generation":0,"reopen_epoch":0,"unmanaged":false,"build_id":"","agent":"agent-alpha","jobs":["eri"],"auto_update":{"default_owner":true}}`},
+		{name: "sha event wraps the pre-prwire pr event with an empty agent key", payload: prwire.SHAEvent{Repo: "azylman/aerial", SHA: "abc", Handler: "HandleMerged", Event: prwire.PREvent{Repo: "azylman/aerial", MergeSHA: "abc"}}, want: `{"repo":"azylman/aerial","sha":"abc","handler":"HandleMerged","event":{"event":"","repo":"azylman/aerial","pr_number":0,"head_sha":"","merge_sha":"abc","check_name":"","job_name":"","branch":"","title":"","gate_generation":0,"reopen_epoch":0,"unmanaged":false,"build_id":"","agent":""}}`},
+		{name: "repo event digests as sent", payload: prwire.RepoEvent{Repo: "azylman/aerial", MainSHA: "a"}, want: `{"repo":"azylman/aerial","main_sha":"a","generation":0,"pr_number":0,"head_sha":""}`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := json.Marshal(digestShape(tc.payload))
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			if string(got) != tc.want {
+				t.Errorf("digest bytes = %s, want %s", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestClientSendSHAEvent(t *testing.T) {
 	t.Parallel()
 	const sha = "0123456789abcdef0123456789abcdef01234567"
@@ -239,7 +264,7 @@ func TestClientSendSHAEvent(t *testing.T) {
 		name         string
 		unconfigured bool
 		handler      string
-		ev           SHAEvent
+		ev           prwire.SHAEvent
 		status       int
 		wantErrSub   string
 		wantTerminal bool
@@ -247,14 +272,14 @@ func TestClientSendSHAEvent(t *testing.T) {
 		wantPath     string
 		wantBodySub  string
 	}{
-		{name: "check run routes by sha", handler: "HandleCheckRunBySHA", ev: SHAEvent{Repo: "aerial", SHA: sha, Handler: "HandleCheckFailed", Event: PREvent{HeadSHA: sha, CheckName: "ci"}}, status: 202, wantCalls: 1, wantPath: "/RepoObject/azylman%2Faerial/HandleCheckRunBySHA/send", wantBodySub: `"event":{"event":"","repo":"azylman/aerial","pr_number":0`},
-		{name: "push routes merged by sha", handler: "HandlePushBySHA", ev: SHAEvent{Repo: "aerial", SHA: sha, Handler: "HandleMerged", Event: PREvent{MergeSHA: sha}}, status: 202, wantCalls: 1, wantPath: "/RepoObject/azylman%2Faerial/HandlePushBySHA/send", wantBodySub: `"merge_sha":"0123456789abcdef0123456789abcdef01234567"`},
-		{name: "unknown sha handler rejected without request", handler: "HandleMainPush", ev: SHAEvent{Repo: "aerial", SHA: sha, Handler: "HandleMerged"}, wantErrSub: "unknown repo sha handler", wantTerminal: true},
-		{name: "unroutable pr handler rejected without request", handler: "HandleCheckRunBySHA", ev: SHAEvent{Repo: "aerial", SHA: sha, Handler: "HandleCheckStatus"}, wantErrSub: "not routable", wantTerminal: true},
-		{name: "zero sha rejected without request", handler: "HandlePushBySHA", ev: SHAEvent{Repo: "aerial", SHA: "0000000", Handler: "HandleMerged"}, wantErrSub: "sha is required", wantTerminal: true},
-		{name: "empty repo rejected without request", handler: "HandlePushBySHA", ev: SHAEvent{SHA: sha, Handler: "HandleMerged"}, wantErrSub: "repo is required", wantTerminal: true},
-		{name: "ingress 500 surfaces", handler: "HandleWorkflowRunBySHA", ev: SHAEvent{Repo: "aerial", SHA: sha, Handler: "HandleCheckPassed"}, status: 500, wantErrSub: "status 500", wantCalls: 1, wantPath: "/RepoObject/azylman%2Faerial/HandleWorkflowRunBySHA/send"},
-		{name: "unconfigured fails closed", unconfigured: true, handler: "HandlePushBySHA", ev: SHAEvent{Repo: "aerial", SHA: sha, Handler: "HandleMerged"}, wantErrSub: "not configured"},
+		{name: "check run routes by sha", handler: "HandleCheckRunBySHA", ev: prwire.SHAEvent{Repo: "aerial", SHA: sha, Handler: "HandleCheckFailed", Event: prwire.PREvent{HeadSHA: sha, CheckName: "ci"}}, status: 202, wantCalls: 1, wantPath: "/RepoObject/azylman%2Faerial/HandleCheckRunBySHA/send", wantBodySub: `"event":{"event":"","repo":"azylman/aerial","pr_number":0`},
+		{name: "push routes merged by sha", handler: "HandlePushBySHA", ev: prwire.SHAEvent{Repo: "aerial", SHA: sha, Handler: "HandleMerged", Event: prwire.PREvent{MergeSHA: sha}}, status: 202, wantCalls: 1, wantPath: "/RepoObject/azylman%2Faerial/HandlePushBySHA/send", wantBodySub: `"merge_sha":"0123456789abcdef0123456789abcdef01234567"`},
+		{name: "unknown sha handler rejected without request", handler: "HandleMainPush", ev: prwire.SHAEvent{Repo: "aerial", SHA: sha, Handler: "HandleMerged"}, wantErrSub: "unknown repo sha handler", wantTerminal: true},
+		{name: "unroutable pr handler rejected without request", handler: "HandleCheckRunBySHA", ev: prwire.SHAEvent{Repo: "aerial", SHA: sha, Handler: "HandleCheckStatus"}, wantErrSub: "not routable", wantTerminal: true},
+		{name: "zero sha rejected without request", handler: "HandlePushBySHA", ev: prwire.SHAEvent{Repo: "aerial", SHA: "0000000", Handler: "HandleMerged"}, wantErrSub: "sha is required", wantTerminal: true},
+		{name: "empty repo rejected without request", handler: "HandlePushBySHA", ev: prwire.SHAEvent{SHA: sha, Handler: "HandleMerged"}, wantErrSub: "repo is required", wantTerminal: true},
+		{name: "ingress 500 surfaces", handler: "HandleWorkflowRunBySHA", ev: prwire.SHAEvent{Repo: "aerial", SHA: sha, Handler: "HandleCheckPassed"}, status: 500, wantErrSub: "status 500", wantCalls: 1, wantPath: "/RepoObject/azylman%2Faerial/HandleWorkflowRunBySHA/send"},
+		{name: "unconfigured fails closed", unconfigured: true, handler: "HandlePushBySHA", ev: prwire.SHAEvent{Repo: "aerial", SHA: sha, Handler: "HandleMerged"}, wantErrSub: "not configured"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -293,9 +318,9 @@ func TestClientResolvePRBySHA(t *testing.T) {
 		body         string
 		wantErrSub   string
 		wantCalls    int
-		want         ResolveSHAResponse
+		want         prwire.ResolveSHAResponse
 	}{
-		{name: "indexed sha resolves", repo: "aerial", sha: "abc", status: 200, body: `{"pr_number":7,"branch":"feat","found":true}`, wantCalls: 1, want: ResolveSHAResponse{PRNumber: 7, Branch: "feat", Found: true}},
+		{name: "indexed sha resolves", repo: "aerial", sha: "abc", status: 200, body: `{"pr_number":7,"branch":"feat","found":true}`, wantCalls: 1, want: prwire.ResolveSHAResponse{PRNumber: 7, Branch: "feat", Found: true}},
 		{name: "unknown sha is zero", repo: "aerial", sha: "abc", status: 200, body: `{"pr_number":0,"branch":"","found":false}`, wantCalls: 1},
 		{name: "ingress 500 surfaces", repo: "aerial", sha: "abc", status: 500, body: "boom", wantErrSub: "status 500", wantCalls: 1},
 		{name: "empty sha rejected without request", repo: "aerial", wantErrSub: "required"},
@@ -332,13 +357,13 @@ func TestClientGetDeployView(t *testing.T) {
 		body         string
 		wantErrSub   string
 		wantCalls    int
-		want         DeployView
+		want         prwire.DeployView
 	}{
 		{
 			name: "view round-trips", repo: "aerial", pr: 7, status: 200, body: viewBody, wantCalls: 1,
-			want: DeployView{
+			want: prwire.DeployView{
 				Found: true, Repo: "azylman/aerial", PRNumber: 7, Status: "deploying", Branch: "feat/x", HeadSHA: "h1", MergeSHA: "m1", TargetID: "123456789012345678",
-				KustomizationRequests: map[string]model.KustomizationRequest{"core": {Namespace: "flux-system", RequestedAt: "t1"}}, DeployedKustomizations: []string{"core"}, HasExpectedDeployJobs: true,
+				KustomizationRequests: map[string]prwire.KustomizationRequest{"core": {Namespace: "flux-system", RequestedAt: "t1"}}, DeployedKustomizations: []string{"core"}, HasExpectedDeployJobs: true,
 			},
 		},
 		{name: "ingress 500 surfaces", repo: "aerial", pr: 7, status: 500, body: "boom", wantErrSub: "status 500", wantCalls: 1},
@@ -373,9 +398,9 @@ func TestClientListRollouts(t *testing.T) {
 		body         string
 		wantErrSub   string
 		wantCalls    int
-		want         []RolloutRef
+		want         []prwire.RolloutRef
 	}{
-		{name: "rollouts round-trip", status: 200, body: `{"rollouts":[{"repo":"azylman/aerial","pr_number":7}]}`, wantCalls: 1, want: []RolloutRef{{Repo: "azylman/aerial", PRNumber: 7}}},
+		{name: "rollouts round-trip", status: 200, body: `{"rollouts":[{"repo":"azylman/aerial","pr_number":7}]}`, wantCalls: 1, want: []prwire.RolloutRef{{Repo: "azylman/aerial", PRNumber: 7}}},
 		{name: "empty index", status: 200, body: `{"rollouts":null}`, wantCalls: 1},
 		{name: "undecodable body surfaces", status: 200, body: `nope`, wantErrSub: "decode", wantCalls: 1},
 		{name: "unconfigured fails closed", unconfigured: true, wantErrSub: "not configured"},

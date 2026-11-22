@@ -9,18 +9,18 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/azylman/aerial/services/synapse/internal/restateclient"
+	"github.com/azylman/aerial/pkg/prwire"
 )
 
 // effectCaptureServer is a declarative Restate ingress fake that records
 // every decoded PREvent body and acknowledges with 202.
 type effectCaptureServer struct {
 	mu     sync.Mutex
-	events []restateclient.PREvent
+	events []prwire.PREvent
 }
 
 func (c *effectCaptureServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	var ev restateclient.PREvent
+	var ev prwire.PREvent
 	if err := json.NewDecoder(r.Body).Decode(&ev); err == nil {
 		c.mu.Lock()
 		c.events = append(c.events, ev)
@@ -29,10 +29,10 @@ func (c *effectCaptureServer) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 	w.WriteHeader(http.StatusAccepted)
 }
 
-func (c *effectCaptureServer) Events() []restateclient.PREvent {
+func (c *effectCaptureServer) Events() []prwire.PREvent {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return append([]restateclient.PREvent(nil), c.events...)
+	return append([]prwire.PREvent(nil), c.events...)
 }
 
 // TestCollaboratorConflictCarriesRenderedDM pins the eri effect ownership
@@ -52,7 +52,7 @@ func TestCollaboratorConflictCarriesRenderedDM(t *testing.T) {
 		Head: GitHubPRRef{Ref: "feat/conflict", SHA: "sha-conflict-9"},
 	}
 	wantMsg := formatCollaboratorConflictMessage("<@123456>", "azylman/aerial", 42, "Conflict PR", "feat/conflict", "sha-conflict-9")
-	wantEffects := []restateclient.EriEffect{{Kind: "eri_direct_message", ChannelID: "111111111111111111", Content: wantMsg}}
+	wantEffects := []prwire.EriEffect{{Kind: "eri_direct_message", ChannelID: "111111111111111111", Content: wantMsg}}
 
 	tests := []struct {
 		name    string

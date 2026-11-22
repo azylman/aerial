@@ -21,7 +21,6 @@ type (
 	configMapChange              = model.ConfigMapChange
 	fluxCondition                = model.FluxCondition
 	prRolloutInput               = flux.PRRolloutInput
-	kustomizationRequest         = model.KustomizationRequest
 	fluxKustomizationRef         = model.FluxKustomizationRef
 	DeployEvent                  = model.DeployEvent
 	DeployWebhookArgs            = model.DeployWebhookArgs
@@ -34,7 +33,6 @@ type (
 	PromptRequest                = model.PromptRequest
 	DispatchRequest              = model.DispatchRequest
 	DirectMessageRequest         = model.DirectMessageRequest
-	BuildMetadata                = model.BuildMetadata
 	PRBuildLifecycle             = model.PRBuildLifecycle
 	DeployingPR                  = model.DeployingPR
 	PRRegisterRequest            = model.PRRegisterRequest
@@ -46,8 +44,6 @@ type (
 	ConfigMapChange              = model.ConfigMapChange
 	FluxKustomizationRef         = model.FluxKustomizationRef
 	KustomizationObservation     = model.KustomizationObservation
-	BuildSelection               = model.BuildSelection
-	BuildResult                  = model.BuildResult
 	GitHubCheckRunsResponse      = model.GitHubCheckRunsResponse
 	GitHubMetadataCheck          = model.GitHubMetadataCheck
 	LegacyBuildWorkflow          = config.LegacyBuildWorkflow
@@ -74,10 +70,6 @@ const (
 	fieldJobName                 = "job_name"
 	fieldPRNumber                = "pr_number"
 	errMsgInvalidJSONPayload     = "invalid json payload"
-	buildMetadataFinal           = model.BuildMetadataFinal
-	buildMetadataManifest        = model.BuildMetadataManifest
-	buildMetadataResult          = model.BuildMetadataResult
-	buildMetadataProgress        = model.BuildMetadataProgress
 	buildMetadataCheckName       = model.BuildMetadataCheckName
 	buildMetadataResultCheckName = model.BuildMetadataResultCheckName
 	buildEventPush               = model.BuildEventPush
