@@ -45,9 +45,9 @@ func assertServeBrainHTTPCase(t *testing.T, tc serveBrainHTTPCase) {
 	mux := http.NewServeMux()
 	var errResult error
 	if asyncErrCh != nil {
-		errResult = serveBrainHTTP(ctx, ln, mux, "test-model", asyncErrCh)
+		errResult = serveBrainHTTP(ctx, ln, mux, "test-model", 120, asyncErrCh)
 	} else {
-		errResult = serveBrainHTTP(ctx, ln, mux, "test-model")
+		errResult = serveBrainHTTP(ctx, ln, mux, "test-model", 120)
 	}
 
 	if tc.wantErr {

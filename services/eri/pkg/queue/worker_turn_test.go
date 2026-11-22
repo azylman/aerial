@@ -184,7 +184,6 @@ func runWorkerInterruptCase(t *testing.T, tc workerInterruptTestCase) {
 		ProcessPool:    procPool,
 		SessionManager: session.New(tmpHome, tempData),
 		Store:          store,
-		TimeoutMinutes: 1,
 		MaxAttempts:    3,
 		BackoffBase:    tc.backoffBase,
 		OnMessageCompleted: func(msg db.Message, status string) {
@@ -825,7 +824,6 @@ func runStatefulEvictionCase(t *testing.T, tc statefulEvictionTestCase) {
 	pool := NewWorkerPool(WorkerPoolConfig{
 		Store:          store,
 		SessionManager: sessMgr,
-		TimeoutMinutes: 1,
 		RunnerWithOptionsFunc: func(ctx context.Context, agyBin, prompt, sID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
 			mu.Lock()
 			promptsSeen = append(promptsSeen, prompt)

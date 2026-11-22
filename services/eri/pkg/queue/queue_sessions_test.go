@@ -309,9 +309,8 @@ type dispatchExecutionHeadlessCase struct {
 func setupHeadlessWorkerPool(t *testing.T, tc dispatchExecutionHeadlessCase, store db.Store, doneCh chan struct{}, bus pubsub.Bus) *WorkerPool {
 	t.Helper()
 	return NewWorkerPool(WorkerPoolConfig{
-		Store:          store,
-		TimeoutMinutes: 1,
-		EventBus:       bus,
+		Store:    store,
+		EventBus: bus,
 		DeliveryFunc: func(s *discordgo.Session, c, text string) error {
 			t.Errorf("unexpected Discord DeliveryFunc call for headless dispatch")
 			return nil
@@ -439,8 +438,7 @@ func TestDispatchExecution_ColdStartAndRotation(t *testing.T) {
 	doneCh := make(chan struct{})
 
 	pool := NewWorkerPool(WorkerPoolConfig{
-		Store:          store,
-		TimeoutMinutes: 1,
+		Store: store,
 		RunnerWithOptionsFunc: func(ctx context.Context, agyBin, prompt, sID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
 			promptMu.Lock()
 			capturedPrompt = prompt
@@ -502,8 +500,7 @@ func TestDispatchExecution_ScopeLockIsolation(t *testing.T) {
 	messageFinished := make(chan struct{})
 
 	pool := NewWorkerPool(WorkerPoolConfig{
-		Store:          store,
-		TimeoutMinutes: 1,
+		Store: store,
 		DeliveryFunc: func(s *discordgo.Session, c, text string) error {
 			return nil
 		},
@@ -600,9 +597,8 @@ func TestRecoverInterrupted_Dispatches(t *testing.T) {
 	})
 
 	pool := NewWorkerPool(WorkerPoolConfig{
-		Store:          store,
-		TimeoutMinutes: 1,
-		EventBus:       memBus,
+		Store:    store,
+		EventBus: memBus,
 		RunnerWithOptionsFunc: func(ctx context.Context, agyBin, prompt, sID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
 			mu.Lock()
 			if strings.Contains(prompt, "pending prompt") {
@@ -684,10 +680,9 @@ func TestDispatchExecution_RetriesAndFailure(t *testing.T) {
 			exhausted := make(chan struct{})
 			var attempts atomic.Int32
 			pool := New(nil, WorkerPoolConfig{
-				Store:          store,
-				MaxAttempts:    2,
-				BackoffBase:    1 * time.Millisecond,
-				TimeoutMinutes: 1,
+				Store:       store,
+				MaxAttempts: 2,
+				BackoffBase: 1 * time.Millisecond,
 				RunnerWithOptionsFunc: func(ctx context.Context, agyBin, prompt, sID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
 					if attempts.Add(1) == 2 {
 						close(exhausted)

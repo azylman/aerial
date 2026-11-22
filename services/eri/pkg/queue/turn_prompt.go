@@ -159,11 +159,14 @@ type attemptConfig struct {
 	apiKey            string
 }
 
+// applyAppConfigOverrides overlays the live config snapshot onto cfg. The turn cap is always
+// resolved here, per attempt, so a turn_timeout_minutes edit applies to the next attempt.
 func applyAppConfigOverrides(cfg *attemptConfig, appCfg *config.Config) {
-	if appCfg == nil {
-		return
+	var cur *config.ConfigData
+	if appCfg != nil {
+		cur = appCfg.Current()
 	}
-	cur := appCfg.Current()
+	cfg.timeoutMinutes = cur.TurnTimeout()
 	if cur == nil {
 		return
 	}
@@ -194,7 +197,7 @@ func (te *turnExecution) resolveAttemptConfig(ctx context.Context, attempt int) 
 	}
 	te.pool.mu.Lock()
 	cfg.model, cfg.lowEffortModel, cfg.mediumEffortModel = te.pool.cfg.Model, te.pool.cfg.LowEffortModel, te.pool.cfg.MediumEffortModel
-	cfg.timeoutMinutes, cfg.agyBin, cfg.apiKey = te.pool.cfg.TimeoutMinutes, te.pool.cfg.AgyBin, te.pool.cfg.APIKey
+	cfg.agyBin, cfg.apiKey = te.pool.cfg.AgyBin, te.pool.cfg.APIKey
 	overrideModel := te.pool.overrideModel
 	te.pool.mu.Unlock()
 

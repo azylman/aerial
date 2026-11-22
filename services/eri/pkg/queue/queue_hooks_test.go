@@ -116,7 +116,7 @@ func TestThreadStatusQueueIntegration(t *testing.T) {
 	})
 
 	pool := NewWorkerPool(WorkerPoolConfig{
-		Store: store, TimeoutMinutes: 1, BackoffBase: 10 * time.Millisecond, MaxAttempts: 1,
+		Store: store, BackoffBase: 10 * time.Millisecond, MaxAttempts: 1,
 		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
 			finalDelivered.Add(1)
 			return nil
@@ -236,7 +236,7 @@ func TestWorkerPool_NotifierInvocationMatrix(t *testing.T) {
 			notifierCalled := false
 
 			pool := NewWorkerPool(WorkerPoolConfig{
-				Store: store, MaxAttempts: tt.maxAttempts, TimeoutMinutes: 1, BackoffBase: 5 * time.Millisecond,
+				Store: store, MaxAttempts: tt.maxAttempts, BackoffBase: 5 * time.Millisecond,
 				RunnerWithOptionsFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
 					return "", tt.runnerStderr, tt.runnerExitCode, tt.runnerErr
 				},
@@ -302,7 +302,7 @@ func runWorkerPoolCancellationCase(t *testing.T, tt workerPoolCancellationCase) 
 	var mu sync.Mutex
 
 	pool = NewWorkerPool(WorkerPoolConfig{
-		Store: store, MaxAttempts: tt.maxAttempts, TimeoutMinutes: 1, BackoffBase: tt.backoffBase,
+		Store: store, MaxAttempts: tt.maxAttempts, BackoffBase: tt.backoffBase,
 		RunnerWithOptionsFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
 			if tt.maxAttempts > 1 {
 				go func() {
@@ -519,7 +519,7 @@ func TestOnWakeHook_FullProcessBurst(t *testing.T) {
 	var mu sync.Mutex
 	var runnerCalls, deliveryCalls int
 	pool := NewWorkerPool(WorkerPoolConfig{
-		Store: store, SessionManager: session.New(t.TempDir(), ""), TimeoutMinutes: 1,
+		Store: store, SessionManager: session.New(t.TempDir(), ""),
 		WebhookDispatcher: &mockWebhookDispatcher{callWakeHookFunc: func(ctx context.Context, endpoint *config.WebhookEndpoint, req *WakeRequest) (*WakeResponse, error) {
 			if req.Message.Content == "wake message" {
 				return &WakeResponse{Override: "wake"}, nil
@@ -596,7 +596,7 @@ func runPreTurnHookBurst(t *testing.T, hookResps []*PreTurnResponse, hookErr err
 	var capturedReq *PreTurnRequest
 
 	pool := NewWorkerPool(WorkerPoolConfig{
-		Store: store, SessionManager: session.New(t.TempDir(), ""), TimeoutMinutes: 1, MaxAttempts: 3,
+		Store: store, SessionManager: session.New(t.TempDir(), ""), MaxAttempts: 3,
 		RetryDelayOverride: 10 * time.Millisecond, DeliveryFunc: noopDelivery,
 		WebhookDispatcher: &mockWebhookDispatcher{callPreTurnHookFunc: func(ctx context.Context, endpoint *config.WebhookEndpoint, req *PreTurnRequest) (*PreTurnResponse, error) {
 			mu.Lock()
@@ -719,7 +719,7 @@ func runPostTurnHookBurst(t *testing.T, preResp *PreTurnResponse, runnerStderr s
 	expectedUsage := runner.TokenUsage{InputTokens: 100, OutputTokens: 50, ThinkingTokens: 10, CacheReadTokens: 5, TotalTokens: 150}
 
 	pool := NewWorkerPool(WorkerPoolConfig{
-		Store: store, TimeoutMinutes: 1, MaxAttempts: 1,
+		Store: store, MaxAttempts: 1,
 		WebhookDispatcher: &mockWebhookDispatcher{
 			callPreTurnHookFunc: func(ctx context.Context, endpoint *config.WebhookEndpoint, req *PreTurnRequest) (*PreTurnResponse, error) {
 				if preResp != nil {
@@ -804,7 +804,7 @@ func TestPostTurnHook_SerializedRelease(t *testing.T) {
 	turn1PostFinished, turn2PreCalledWhileTurn1InPost, turn2PreCalled := false, false, false
 
 	pool := NewWorkerPool(WorkerPoolConfig{
-		Store: store, TimeoutMinutes: 1, MaxAttempts: 1,
+		Store: store, MaxAttempts: 1,
 		WebhookDispatcher: &mockWebhookDispatcher{
 			callPreTurnHookFunc: func(ctx context.Context, endpoint *config.WebhookEndpoint, req *PreTurnRequest) (*PreTurnResponse, error) {
 				mu.Lock()
@@ -890,7 +890,7 @@ func TestPostTurnHook_HelperEdgeCases(t *testing.T) {
 	store := setupTestStore(t)
 	var postHookFired bool
 	pool := NewWorkerPool(WorkerPoolConfig{
-		Store: store, TimeoutMinutes: 1, MaxAttempts: 1,
+		Store: store, MaxAttempts: 1,
 		WebhookDispatcher: &mockWebhookDispatcher{
 			callPreTurnHookFunc: func(ctx context.Context, endpoint *config.WebhookEndpoint, req *PreTurnRequest) (*PreTurnResponse, error) {
 				return &PreTurnResponse{Allow: false, Action: "drop", Reason: "denied"}, nil
@@ -934,7 +934,7 @@ func TestWorkerPool_MultiTurn_AlwaysDeliversFinalOutputText(t *testing.T) {
 			var mu sync.Mutex
 			doneCh := make(chan struct{})
 			pool := NewWorkerPool(WorkerPoolConfig{
-				SessionManager: session.New(tempDir, ""), Store: store, TimeoutMinutes: 1, BackoffBase: 10 * time.Millisecond, MaxAttempts: 1,
+				SessionManager: session.New(tempDir, ""), Store: store, BackoffBase: 10 * time.Millisecond, MaxAttempts: 1,
 				RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
 					return mockMultiTurnJSONResponse(tc.convID, tc.runnerResponse, 2), "", 0, nil
 				},
@@ -1055,7 +1055,6 @@ func runSessionRotationCase(t *testing.T, tc sessionRotationCase) {
 	poolCfg := WorkerPoolConfig{
 		SessionManager:        sessMgr,
 		Store:                 store,
-		TimeoutMinutes:        1,
 		BackoffBase:           5 * time.Millisecond,
 		MaxAttempts:           2,
 		DeliveryFunc:          noopDelivery,
