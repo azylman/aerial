@@ -167,8 +167,6 @@ func streamRestateVoiceEvents(ctx context.Context, pool *queue.WorkerPool, clien
 	}
 }
 
-const errVoiceRestateUnavailable = "voice turns unavailable: restate client not configured"
-
 func handleVoiceAskSSE(w http.ResponseWriter, r *http.Request, pool *queue.WorkerPool, req VoiceAskRequest, sessionID string, reqStart time.Time) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -224,31 +222,26 @@ func handleVoiceAskSSE(w http.ResponseWriter, r *http.Request, pool *queue.Worke
 		emitSSE("sentence", map[string]string{"text": sentence})
 	}
 
-	if client := resolveRestateClient(); client != nil {
-		if bus := resolveVoiceEventBus(pool); bus != nil {
-			streamRestateVoiceEvents(r.Context(), pool, client, bus, req, sessionID, onStatus, onSentence, emitSSE)
-			return
-		}
-		res, err := client.AskVoice(r.Context(), sessionID, queue.VoiceSessionRequest{
-			TurnID:         uuid.New().String(),
-			Prompt:         req.Prompt,
-			DeviceKey:      sessionID,
-			ConversationID: req.ConversationID,
-			Effort:         req.Effort,
-		})
-		if err != nil {
-			emitSSE(sseEventError, map[string]string{jsonKeyError: err.Error()})
-			emitSSE("done", map[string]any{})
-			return
-		}
-		emitSSE(sseEventReply, map[string]string{sseEventReply: res.Reply, sseFieldConversationID: res.ConversationID})
-		emitSSE("done", map[string]any{sseFieldConversationID: res.ConversationID})
-		persistVoiceConversationID(r.Context(), pool, sessionID, res.ConversationID)
+	client := resolveRestateClient()
+	if bus := resolveVoiceEventBus(pool); bus != nil {
+		streamRestateVoiceEvents(r.Context(), pool, client, bus, req, sessionID, onStatus, onSentence, emitSSE)
 		return
 	}
-
-	emitSSE(sseEventError, map[string]string{jsonKeyError: errVoiceRestateUnavailable})
-	emitSSE("done", map[string]any{})
+	res, err := client.AskVoice(r.Context(), sessionID, queue.VoiceSessionRequest{
+		TurnID:         uuid.New().String(),
+		Prompt:         req.Prompt,
+		DeviceKey:      sessionID,
+		ConversationID: req.ConversationID,
+		Effort:         req.Effort,
+	})
+	if err != nil {
+		emitSSE(sseEventError, map[string]string{jsonKeyError: err.Error()})
+		emitSSE("done", map[string]any{})
+		return
+	}
+	emitSSE(sseEventReply, map[string]string{sseEventReply: res.Reply, sseFieldConversationID: res.ConversationID})
+	emitSSE("done", map[string]any{sseFieldConversationID: res.ConversationID})
+	persistVoiceConversationID(r.Context(), pool, sessionID, res.ConversationID)
 }
 
 func handleVoiceAsk(pool *queue.WorkerPool) http.HandlerFunc {
@@ -285,31 +278,26 @@ func handleVoiceAsk(pool *queue.WorkerPool) http.HandlerFunc {
 			return
 		}
 
-		if client := resolveRestateClient(); client != nil {
-			res, err := client.AskVoice(r.Context(), sessionID, queue.VoiceSessionRequest{
-				TurnID:         uuid.New().String(),
-				Prompt:         req.Prompt,
-				DeviceKey:      sessionID,
-				ConversationID: req.ConversationID,
-				Effort:         req.Effort,
-			})
-			if err != nil {
-				metrics.RecordVoiceTTFR("json", outcomeError, time.Since(reqStart))
-				httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{jsonKeyError: err.Error()})
-				return
-			}
-			metrics.RecordVoiceTTFR("json", "success", time.Since(reqStart))
-			httpkit.WriteJSON(w, http.StatusOK, VoiceAskResponse{
-				Reply:          res.Reply,
-				ConversationID: res.ConversationID,
-				SessionID:      res.ConversationID,
-				NodeID:         req.NodeID,
-			})
-			persistVoiceConversationID(r.Context(), pool, sessionID, res.ConversationID)
+		client := resolveRestateClient()
+		res, err := client.AskVoice(r.Context(), sessionID, queue.VoiceSessionRequest{
+			TurnID:         uuid.New().String(),
+			Prompt:         req.Prompt,
+			DeviceKey:      sessionID,
+			ConversationID: req.ConversationID,
+			Effort:         req.Effort,
+		})
+		if err != nil {
+			metrics.RecordVoiceTTFR("json", outcomeError, time.Since(reqStart))
+			httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{jsonKeyError: err.Error()})
 			return
 		}
-
-		metrics.RecordVoiceTTFR("json", outcomeError, time.Since(reqStart))
-		httpkit.WriteJSON(w, http.StatusServiceUnavailable, map[string]string{jsonKeyError: errVoiceRestateUnavailable})
+		metrics.RecordVoiceTTFR("json", "success", time.Since(reqStart))
+		httpkit.WriteJSON(w, http.StatusOK, VoiceAskResponse{
+			Reply:          res.Reply,
+			ConversationID: res.ConversationID,
+			SessionID:      res.ConversationID,
+			NodeID:         req.NodeID,
+		})
+		persistVoiceConversationID(r.Context(), pool, sessionID, res.ConversationID)
 	}
 }

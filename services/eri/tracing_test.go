@@ -17,7 +17,6 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/azylman/aerial/pkg/tracing"
-	"github.com/azylman/aerial/services/eri/pkg/db"
 	"github.com/azylman/aerial/services/eri/pkg/db/dbtest"
 	"github.com/azylman/aerial/services/eri/pkg/queue"
 )
@@ -63,23 +62,10 @@ func TestSetupTracing(t *testing.T) {
 	}
 }
 
-// storedTraceparent returns the traceparent persisted on the queued row (message or dispatch) with id.
-func storedTraceparent(t *testing.T, store db.Store, id string) string {
-	t.Helper()
-	if m, err := store.GetMessage(context.Background(), id); err == nil && m != nil {
-		return m.Traceparent
-	}
-	if d, err := store.GetDispatch(context.Background(), id); err == nil && d != nil {
-		return d.Traceparent
-	}
-	t.Fatalf("no queued row with id %q", id)
-	return ""
-}
-
-// TestIngressHandlers_StampTraceparent serves each queueing ingress through the production
-// tracing middleware with tracing disabled (no config file), proving inbound trace context is
-// still persisted on the row for the turn to resume.
-func TestIngressHandlers_StampTraceparent(t *testing.T) {
+// TestInternalDiscordMessage_ForwardsTraceparent serves the Discord ingress through the
+// production tracing middleware with tracing disabled (no config file), proving inbound trace
+// context still rides on the message enqueued to the thread coordinator.
+func TestInternalDiscordMessage_ForwardsTraceparent(t *testing.T) {
 	setupTestConfig(t, `
 model: "gemini-2.5-flash"
 channels:
@@ -95,49 +81,27 @@ channels:
 	const inbound = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
 	tests := []struct {
 		name        string
-		path        string
 		body        string
 		traceparent string
-		rowID       string
 		want        string
 	}{
 		{
-			name: "prompt", path: "/prompt", traceparent: inbound, rowID: "msg-tp-1", want: inbound,
-			body: `{"prompt":"check","channel_id":"1542423172400291873","message_id":"msg-tp-1"}`,
-		},
-		{
-			name: "prompt without trace context", path: "/prompt", rowID: "msg-tp-2", want: "",
-			body: `{"prompt":"check","channel_id":"1542423172400291873","message_id":"msg-tp-2"}`,
-		},
-		{
-			name: "dispatch", path: "/dispatch", traceparent: inbound, rowID: "disp-tp-1", want: inbound,
-			body: `{"id":"disp-tp-1","source":"heartbeat","session_id":"heartbeat-tp","prompt":"poll"}`,
-		},
-		{
-			name: "discord message", path: "/internal/discord/message", traceparent: inbound,
-			rowID: "123456789012345679", want: inbound,
+			name: "with trace context", traceparent: inbound, want: inbound,
 			body: `{"bot_user_id":"bot-1","message":{"id":"123456789012345679","channel_id":"ch-1","author":{"id":"u-1","username":"alice"},"content":"hey aerial"}}`,
+		},
+		{
+			name: "without trace context", want: "",
+			body: `{"bot_user_id":"bot-1","message":{"id":"123456789012345680","channel_id":"ch-1","author":{"id":"u-1","username":"alice"},"content":"hey aerial"}}`,
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			capture := installRestateCapture(t, http.StatusOK, `{"status":"accepted"}`)
 			store := dbtest.NewFakeStore()
-			pool := newTestWorkerPool(store)
 			mux := http.NewServeMux()
-			var handler func(db.Store, *queue.WorkerPool) http.HandlerFunc
-			switch tc.path {
-			case "/prompt":
-				handler = handlePrompt
-			case "/dispatch":
-				handler = handleDispatch
-			case "/internal/discord/message":
-				handler = handleInternalDiscordMessage
-			default:
-				t.Fatalf("unknown path %q", tc.path)
-			}
-			mux.HandleFunc(tc.path, handler(store, pool))
+			mux.HandleFunc("/internal/discord/message", handleInternalDiscordMessage(newTestWorkerPool(store)))
 
-			req := httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(tc.body))
+			req := httptest.NewRequest(http.MethodPost, "/internal/discord/message", strings.NewReader(tc.body))
 			if tc.traceparent != "" {
 				req.Header.Set("Traceparent", tc.traceparent)
 			}
@@ -146,8 +110,10 @@ channels:
 			if rec.Code >= http.StatusBadRequest {
 				t.Fatalf("status = %d (body: %s)", rec.Code, rec.Body.String())
 			}
-			if got := storedTraceparent(t, store, tc.rowID); got != tc.want {
-				t.Errorf("stored traceparent = %q, want %q", got, tc.want)
+			var got queue.ThreadEnqueueRequest
+			capture.decodeLast(t, &got)
+			if got.Message == nil || got.Message.Traceparent != tc.want {
+				t.Errorf("enqueued message = %+v, want traceparent %q", got.Message, tc.want)
 			}
 		})
 	}
