@@ -3,19 +3,13 @@ import { Profiler, type ProfilerOnRenderCallback } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { TabActiveContext } from '../../hooks/useTabActive';
 import type { FactItem, FactsAPIResponse } from '../../api/types';
-import { useKeyboardShortcuts } from '../../hooks/useKeyboardShortcuts';
 import { useConsoleStore } from '../../store/store';
 import MemoryView from './MemoryView';
+import { Shortcuts, text } from '../../test/dom';
+import { type FetchMock, json, stubFetch } from '../../test/fetch';
+import { fact } from '../../test/fixtures';
 
 const NOW = Date.parse('2026-11-08T12:00:00Z');
-
-const fact = (id: number, text: string, count: number, last?: string): FactItem => ({
-  id,
-  fact_text: text,
-  reinforce_count: count,
-  created_at: '2026-11-06T12:00:00Z',
-  ...(last === undefined ? {} : { last_reinforced_at: last }),
-});
 
 // Importance order: 12, 7, 9, 30, 4.
 const FACTS: readonly FactItem[] = [
@@ -33,17 +27,12 @@ const payload = (facts: readonly FactItem[] = FACTS): FactsAPIResponse => ({
   status: 'ok',
 });
 
-const fetchMock = vi.fn<(url: string) => Promise<Response>>();
-const pending = (): Promise<Response> => new Promise(() => undefined);
-const json = (body: unknown, status = 200): Promise<Response> =>
-  Promise.resolve(new Response(JSON.stringify(body), { status }));
+let fetchMock: FetchMock;
 const writeText = vi.fn<(text: string) => Promise<void>>();
 
 beforeEach(() => {
   useConsoleStore.setState(useConsoleStore.getInitialState(), true);
-  fetchMock.mockReset();
-  fetchMock.mockImplementation(pending);
-  vi.stubGlobal('fetch', fetchMock);
+  fetchMock = stubFetch();
   writeText.mockReset();
   writeText.mockResolvedValue(undefined);
   Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } });
@@ -57,13 +46,7 @@ afterEach(() => {
 
 const seed = (data: FactsAPIResponse): void => act(() => useConsoleStore.getState().setFacts(data));
 const nodes = (): string[] => [...document.querySelectorAll('.fact-category-tag')].map((el) => el.textContent ?? '');
-const text = (selector: string): string => (document.querySelector(selector)?.textContent ?? '').replace(/\s+/g, ' ').trim();
 const search = (): HTMLInputElement => screen.getByRole('textbox', { name: 'Search memory facts' });
-
-function Shortcuts() {
-  useKeyboardShortcuts('memory');
-  return null;
-}
 
 describe('MemoryView lifecycle', () => {
   it.each([
@@ -125,7 +108,7 @@ describe('MemoryView filters', () => {
     seed(payload());
     render(
       <>
-        <Shortcuts />
+        <Shortcuts tab="memory" />
         <MemoryView />
       </>,
     );
@@ -179,7 +162,7 @@ describe('MemoryView actions', () => {
     seed(payload());
     if (error !== null) act(() => useConsoleStore.getState().failFacts(error));
     render(<MemoryView />);
-    fetchMock.mockImplementation(() => json(payload()));
+    fetchMock.mockImplementation(() => json(200, payload()));
     vi.setSystemTime(NOW + 60_000);
     await act(async () => {
       fireEvent.click(screen.getByRole('button', { name: new RegExp(button) }));
@@ -195,7 +178,7 @@ describe('MemoryView actions', () => {
   it('a failed sync keeps the previous stamp', async () => {
     seed(payload());
     render(<MemoryView />);
-    fetchMock.mockImplementation(() => json({ error: 'nope' }, 502));
+    fetchMock.mockImplementation(() => json(502, { error: 'nope' }));
     vi.setSystemTime(NOW + 60_000);
     await act(async () => {
       fireEvent.click(screen.getByRole('button', { name: /SYNC ARCHIVE/ }));
