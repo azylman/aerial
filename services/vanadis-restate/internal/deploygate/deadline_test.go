@@ -200,23 +200,37 @@ func TestDeploymentDeadlineAttempts(t *testing.T) {
 	}
 }
 
+type mockRateLimitTransport struct {
+	resetAt time.Time
+}
+
+func (*mockRateLimitTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, nil
+}
+
+func (m *mockRateLimitTransport) RateLimitResetAt() time.Time {
+	return m.resetAt
+}
+
 func TestDeploymentDeadlineLifecycle(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	tests := []struct {
-		name          string
-		status        string
-		revision      string
-		generation    int
-		delivered     bool
-		absent        bool
-		early         bool
-		fail          bool
-		wantDelivered bool
-		wantRetry     bool
-		wantWake      bool
+		name           string
+		status         string
+		revision       string
+		generation     int
+		delivered      bool
+		absent         bool
+		early          bool
+		fail           bool
+		rateLimitReset time.Time
+		wantDelivered  bool
+		wantRetry      bool
+		wantWake       bool
 	}{
 		{name: "expiry", status: statusDeploying, revision: "sha", generation: 1, wantDelivered: true, wantWake: true},
+		{name: "rate limit delay pauses deadline", status: statusDeploying, revision: "sha", generation: 1, rateLimitReset: now.Add(5 * time.Minute), wantDelivered: false, wantRetry: true, wantWake: false},
 		{name: "completion races expiry", status: statusSynced, revision: "sha", generation: 1, wantDelivered: true},
 		{name: "superseded revision", status: statusDeploying, revision: "new", generation: 1, wantDelivered: true},
 		{name: "stale retry", status: statusDeploying, revision: "sha", generation: 2},
@@ -245,11 +259,18 @@ func TestDeploymentDeadlineLifecycle(t *testing.T) {
 				}
 				return nil
 			}
-			g := NewGate(st, &executor.Executor{EriClient: eri})
+			exec := &executor.Executor{EriClient: eri}
+			if !tc.rateLimitReset.IsZero() {
+				exec.HTTPClient = &http.Client{Transport: &mockRateLimitTransport{resetAt: tc.rateLimitReset}}
+			}
+			g := NewGate(st, exec)
 			require.NoError(t, g.ExpireDeadline(rt, DeploymentDeadlineRequest{ChunkID: "c", Revision: "sha", Generation: 1}))
 			require.Equal(t, tc.wantDelivered, rt.attempts["c"].Delivered)
 			require.Equal(t, tc.wantRetry, len(rt.scheduled) > 0)
 			require.Equal(t, tc.wantWake, eri.lastDispatch != nil)
+			if !tc.rateLimitReset.IsZero() {
+				require.Equal(t, tc.rateLimitReset.Add(time.Minute), rt.attempts["c"].Deadline)
+			}
 			if eri.lastDispatch != nil {
 				require.Contains(t, eri.lastDispatch.Prompt, "Readiness remains unconfirmed")
 				require.Contains(t, eri.lastDispatch.Prompt, "web")
@@ -409,6 +430,8 @@ func TestDeploymentStartValidation(t *testing.T) {
 		rollout                *pubsub.PRRolloutState
 		storeErr, statusErr    error
 		buildStatus            string
+		mode                   string
+		prNumber               int
 		nilBuild               bool
 		wantValid, wantError   bool
 		wantStatus             string
@@ -418,6 +441,10 @@ func TestDeploymentStartValidation(t *testing.T) {
 		{name: "stale revision", status: statusDeploying, revision: "old"},
 		{name: "completed", status: statusSynced, revision: "sha"},
 		{name: "failed chunk preserves failure", status: statusDeployFailed, revision: "sha", wantValid: true},
+		{name: "failed pr chunk with pr_number in running build", status: statusFailed, revision: "sha", mode: "pr", prNumber: 101, wantValid: true, wantStatus: statusDeploying},
+		{name: "failed pr chunk without pr_number in running build", status: statusFailed, revision: "sha", mode: "pr", prNumber: 0, wantValid: false},
+		{name: "failed action chunk in statusFailed", status: statusFailed, revision: "sha", mode: "action", prNumber: 101, wantValid: false},
+		{name: "failed pr chunk accepted in failed build", status: statusFailed, revision: "sha", buildStatus: statusFailed, mode: "pr", prNumber: 101, wantValid: true, wantStatus: statusDeploying},
 		{name: "nil build", nilBuild: true, revision: "sha"},
 		{name: "terminal build", buildStatus: statusCompleted, revision: "sha"},
 		{name: "read unavailable", storeErr: errors.New("read unavailable"), wantError: true},
@@ -426,7 +453,11 @@ func TestDeploymentStartValidation(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			st := &fakeStore{getBuildErr: tc.storeErr, statusErr: tc.statusErr, buildStatus: tc.buildStatus, nilBuild: tc.nilBuild, chunks: []model.VanadisChunk{{ID: "c", Status: tc.status, MergeSHA: "sha"}}}
+			mode := tc.mode
+			if mode == "" {
+				mode = "pr"
+			}
+			st := &fakeStore{getBuildErr: tc.storeErr, statusErr: tc.statusErr, buildStatus: tc.buildStatus, nilBuild: tc.nilBuild, chunks: []model.VanadisChunk{{ID: "c", Status: tc.status, Mode: mode, PRNumber: tc.prNumber, MergeSHA: "sha"}}}
 			g := NewGate(st, nil)
 			valid, _, err := g.RecordDeploymentStart(context.Background(), "b", "c", pubsub.PRLifecycleEvent{MergeSHA: tc.revision, RolloutState: tc.rollout})
 			require.Equal(t, tc.wantValid, valid)
