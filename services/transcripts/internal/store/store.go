@@ -1,4 +1,4 @@
-package main
+package store
 
 import (
 	"context"
@@ -98,6 +98,16 @@ type Store struct {
 // An empty stack yields a read-only store.
 func NewStore(database *sql.DB, stack string) *Store {
 	return &Store{db: database, stack: strings.TrimSpace(stack)}
+}
+
+// Stack returns the configured stack identifier.
+func (s *Store) Stack() string {
+	return s.stack
+}
+
+// CheckDB validates the underlying database connection.
+func (s *Store) CheckDB() error {
+	return s.checkDB()
 }
 
 func (s *Store) checkDB() error {
@@ -208,9 +218,9 @@ func lockSessionCursor(ctx context.Context, tx *sql.Tx, db *sql.DB, stack, sessi
 	switch scanErr := row.Scan(&rawMtime, &lastStep, &isSettled); {
 	case scanErr == nil:
 		cur.found = true
-		// any-typed scan plus parseDBTime keeps NULL and driver-specific
+		// any-typed scan plus ParseDBTime keeps NULL and driver-specific
 		// time encodings portable across PostgreSQL and SQLite fixtures.
-		if t, ok := parseDBTime(rawMtime); ok {
+		if t, ok := ParseDBTime(rawMtime); ok {
 			cur.lastMtime = t
 		}
 		if lastStep.Valid {
@@ -347,23 +357,6 @@ func summaryLockKey(threadID string) string {
 	return "transcripts-summary:" + strings.TrimSpace(threadID)
 }
 
-// darkTranscriptsAnchor keeps the per-thread idle-summarizer lock reachable in
-// the production call graph until the idle-summarizer chunk wires its loop to
-// AcquireThreadSummaryLock. Every call below is a validated no-op: the empty
-// thread ID returns before any connection is opened, so this performs no
-// network or database work and changes no behavior. The summarizer chunk
-// removes this anchor when it wires the live lock holder.
-var _ = func() bool {
-	_ = summaryLockKey("")
-	store := NewStore(nil, DefaultStack)
-	release, errLock := store.AcquireThreadSummaryLock(context.Background(), "")
-	if release != nil {
-		release()
-	}
-	_ = []error{errLock}
-	return true
-}()
-
 // AcquireThreadSummaryLock takes a session-level PostgreSQL advisory lock for
 // one thread's idle summarization and returns an idempotent release closure.
 // The release unlocks on a detached context with a short timeout so shutdown
@@ -422,4 +415,85 @@ func destroyConn(conn *sql.Conn) {
 		log.Printf("[Transcripts] warning: failed to access summary lock conn for destroy: %v", rawErr)
 	}
 	httpkit.CloseWarn(conn, "summary lock conn after failed unlock")
+}
+
+// SummaryCandidate is one session whose indexed steps outran its summary watermark.
+type SummaryCandidate struct {
+	Agent       string
+	SessionID   string
+	ThreadID    string
+	Summary     string
+	LastIndexed int
+	Watermark   int
+}
+
+// ListDueSessions lists sessions whose indexed steps outran the summary watermark,
+// oldest first, bounded by the configured batch limit.
+func (s *Store) ListDueSessions(ctx context.Context, idleThreshold time.Duration, minStepDelta, batchLimit int, now time.Time) ([]SummaryCandidate, error) {
+	if err := s.checkWriter(); err != nil {
+		return nil, err
+	}
+	queryCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	if now.IsZero() {
+		now = time.Now()
+	}
+	cutoff := now.UTC().Add(-idleThreshold)
+	scanLimit := batchLimit * 4
+	rows, err := s.db.QueryContext(queryCtx,
+		`SELECT agent, session_id, thread_id, summary, last_indexed_step, summary_step_watermark, last_mtime, is_settled FROM session_summaries
+		 WHERE summary_step_watermark < last_indexed_step
+		   AND (summary = '' OR (summary_step_watermark > 0 AND last_indexed_step - summary_step_watermark >= $1))
+		 ORDER BY updated_at ASC LIMIT $2`, minStepDelta, scanLimit)
+	if err != nil {
+		return nil, fmt.Errorf("select summary candidates: %w", err)
+	}
+	defer rows.Close()
+	var out []SummaryCandidate
+	for rows.Next() {
+		var cand SummaryCandidate
+		var rawMtime any
+		var isSettled sql.NullBool
+		if err := rows.Scan(&cand.Agent, &cand.SessionID, &cand.ThreadID, &cand.Summary, &cand.LastIndexed, &cand.Watermark, &rawMtime, &isSettled); err != nil {
+			return nil, fmt.Errorf("scan summary candidate: %w", err)
+		}
+		cand.Agent = strings.TrimSpace(cand.Agent)
+		cand.SessionID = strings.TrimSpace(cand.SessionID)
+		cand.ThreadID = strings.TrimSpace(cand.ThreadID)
+		cand.Summary = strings.TrimSpace(cand.Summary)
+		if cand.SessionID == "" {
+			continue
+		}
+		var lastMtime time.Time
+		if t, ok := ParseDBTime(rawMtime); ok {
+			lastMtime = t
+		}
+		settled := isSettled.Valid && isSettled.Bool
+		if !settled && !lastMtime.IsZero() && lastMtime.After(cutoff) {
+			continue
+		}
+		out = append(out, cand)
+		if len(out) >= batchLimit {
+			break
+		}
+	}
+	return out, rows.Err()
+}
+
+// SaveSummary persists the refreshed summary and advances only the summary
+// watermark. It never touches is_settled or last_indexed_step: a failed LLM
+// or embedding call returns before this runs, so failures cannot settle.
+func (s *Store) SaveSummary(ctx context.Context, agent, sessionID, summary string, lastIndexed int) error {
+	if err := s.checkWriter(); err != nil {
+		return err
+	}
+	queryCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	if _, err := s.db.ExecContext(queryCtx,
+		`UPDATE session_summaries SET summary = $1, summary_step_watermark = $2, updated_at = CURRENT_TIMESTAMP
+		 WHERE agent = $3 AND session_id = $4`,
+		summary, lastIndexed, agent, sessionID); err != nil {
+		return fmt.Errorf("store session summary: %w", err)
+	}
+	return nil
 }
