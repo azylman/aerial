@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"io/fs"
 	"log"
 	"net"
@@ -295,8 +294,6 @@ func ReconcileRestateServiceTimeouts(ctx context.Context, adminURL string, agent
 // HealthMuxOptions configures the health and internal endpoint HTTP mux.
 type HealthMuxOptions struct {
 	AgentName     string
-	Pool          *queue.WorkerPool
-	LLMFunc       runner.LLMFunc
 	MCPRoutes     *env.MCPProxyRoutes
 	ActiveTurns   *runner.ActiveTurnRegistry
 	ReloadTrigger *bootstrap.ReloadTrigger
@@ -309,7 +306,7 @@ func writeErr(w http.ResponseWriter, status int, msg string) {
 	httpkit.WriteJSON(w, status, map[string]string{"error": msg})
 }
 
-// SetupHealthMux creates the ServeMux for health, metrics, quota, llm, and diagnostics.
+// SetupHealthMux creates the ServeMux for health, metrics, quota, and diagnostics.
 func SetupHealthMux(opts HealthMuxOptions) *http.ServeMux {
 	mux := http.NewServeMux()
 
@@ -330,9 +327,9 @@ func SetupHealthMux(opts HealthMuxOptions) *http.ServeMux {
 	}
 
 	// NOTE: Unlike POST /-/reload (which is invoked by the pod-local git-sync sidecar over 127.0.0.1),
-	// /internal/quota and /internal/llm are cross-pod cluster endpoints invoked by stateless
+	// /internal/quota is a cross-pod cluster endpoint invoked by stateless
 	// Deployment/eri pods over the Kubernetes pod network via Service/eri-restate-health:4028
-	// (isolated by Kubernetes NetworkPolicy). They must NOT be wrapped in httpkit.LoopbackOnly,
+	// (isolated by Kubernetes NetworkPolicy). It must NOT be wrapped in httpkit.LoopbackOnly,
 	// which would reject cross-pod requests from Deployment/eri with 403 Forbidden.
 	mux.HandleFunc("/internal/quota", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
@@ -341,52 +338,6 @@ func SetupHealthMux(opts HealthMuxOptions) *http.ServeMux {
 			return
 		}
 		httpkit.WriteJSON(w, http.StatusOK, metrics.LatestQuotaSnapshot())
-	})
-
-	llmFn := opts.LLMFunc
-	if llmFn == nil && opts.Pool != nil {
-		llmFn = opts.Pool.LLMFunc()
-	}
-
-	mux.HandleFunc("/internal/llm", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			w.Header().Set("Allow", "POST")
-			writeErr(w, http.StatusMethodNotAllowed, "method not allowed")
-			return
-		}
-		if llmFn == nil {
-			writeErr(w, http.StatusServiceUnavailable, "llm function not available")
-			return
-		}
-		var req struct {
-			Prompt string `json:"prompt"`
-			Model  string `json:"model"`
-		}
-		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
-		body, err := io.ReadAll(r.Body)
-		if err != nil {
-			if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
-				writeErr(w, http.StatusRequestEntityTooLarge, "request body too large")
-				return
-			}
-			writeErr(w, http.StatusBadRequest, "failed to read body: "+err.Error())
-			return
-		}
-		if uErr := json.Unmarshal(body, &req); uErr != nil {
-			writeErr(w, http.StatusBadRequest, "invalid json payload: "+uErr.Error())
-			return
-		}
-		prompt := strings.TrimSpace(req.Prompt)
-		if prompt == "" {
-			writeErr(w, http.StatusBadRequest, "prompt is required")
-			return
-		}
-		resp, err := llmFn(r.Context(), req.Model, prompt)
-		if err != nil {
-			writeErr(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-		httpkit.WriteJSON(w, http.StatusOK, map[string]string{"response": resp})
 	})
 
 	if opts.MCPRoutes != nil {
@@ -707,8 +658,6 @@ func RunApp(ctx context.Context, cfg Config, opts ...AppOption) error {
 
 	healthMux := SetupHealthMux(HealthMuxOptions{
 		AgentName:     cfg.AgentName,
-		Pool:          workerPool,
-		LLMFunc:       llmFn,
 		MCPRoutes:     mcpRoutes,
 		ActiveTurns:   activeTurns,
 		ReloadTrigger: reloadTrigger,
