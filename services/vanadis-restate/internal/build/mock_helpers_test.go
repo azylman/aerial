@@ -1,8 +1,8 @@
 package build
 
-// Shared BuildObject test harness: the scripted SQL fake comes from
-// internal/sqltest (dbScript/sqlRoute aliases plus the local open wrapper);
-// mockEriClient/launch helpers and the unattached-PR spy stay here.
+// Shared BuildObject test harness: mockEriClient/launch helpers and the
+// unattached-PR spy. Store-backed tests use the Postgres fixture in
+// store_fixture_test.go.
 
 import (
 	"context"
@@ -17,25 +17,8 @@ import (
 	"github.com/azylman/aerial/services/vanadis-restate/internal/eritest"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/executor"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
-	"github.com/azylman/aerial/services/vanadis-restate/internal/sqltest"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
 )
-
-type (
-	dbScript = sqltest.Script
-	sqlRoute = sqltest.Route
-)
-
-// nilDB is the sentinel script open turns into a Store without a database.
-var nilDB = dbScript{ExecTag: "nil db"}
-
-func open(s dbScript) (*store.Store, *[]string) {
-	db, candidates := s.DB()
-	if s.ExecTag == nilDB.ExecTag {
-		return &store.Store{}, candidates
-	}
-	return store.New(db, "example-owner"), candidates
-}
 
 func attachRequest(chunkID, repo string) store.AttachChunkPRRequest {
 	return store.AttachChunkPRRequest{ChunkID: chunkID, PRNumber: 101, Repo: repo}

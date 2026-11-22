@@ -30,7 +30,7 @@ func withBuildOwner(ctx context.Context, bld *model.VanadisBuild) context.Contex
 type crossBuildReconcileKey struct{}
 
 type crossBuildReconciles struct {
-	routes []store.BuildRoute
+	targets []store.SweptChunk
 }
 
 func withCrossBuildReconciles(ctx context.Context) (context.Context, *crossBuildReconciles) {
@@ -38,32 +38,39 @@ func withCrossBuildReconciles(ctx context.Context) (context.Context, *crossBuild
 	return context.WithValue(ctx, crossBuildReconcileKey{}, c), c
 }
 
-// recordCrossBuildReconcile queues a Reconcile for another build on the
-// collector in ctx, deduplicating by build ID.
-func recordCrossBuildReconcile(ctx context.Context, route store.BuildRoute) {
+// recordCrossBuildReconcile queues a Mutate(chunk_deploy_success) for another
+// build on the collector in ctx, deduplicating by BuildID + "/" + ChunkID
+// (ignoring empty BuildID or ChunkID).
+func recordCrossBuildReconcile(ctx context.Context, target store.SweptChunk) {
 	c, ok := ctx.Value(crossBuildReconcileKey{}).(*crossBuildReconciles)
-	if !ok || c == nil || strings.TrimSpace(route.BuildID) == "" {
+	if !ok || c == nil {
 		return
 	}
-	for _, existing := range c.routes {
-		if existing.BuildID == route.BuildID {
+	buildID := strings.TrimSpace(target.BuildID)
+	chunkID := strings.TrimSpace(target.ChunkID)
+	if buildID == "" || chunkID == "" {
+		return
+	}
+	key := buildID + "/" + chunkID
+	for _, existing := range c.targets {
+		if existing.BuildID+"/"+existing.ChunkID == key {
 			return
 		}
 	}
-	c.routes = append(c.routes, route)
+	c.targets = append(c.targets, store.SweptChunk{ChunkID: chunkID, BuildID: buildID})
 }
 
-func (c *crossBuildReconciles) list() []store.BuildRoute {
-	if c == nil || len(c.routes) == 0 {
+func (c *crossBuildReconciles) list() []store.SweptChunk {
+	if c == nil || len(c.targets) == 0 {
 		return nil
 	}
-	return append([]store.BuildRoute(nil), c.routes...)
+	return append([]store.SweptChunk(nil), c.targets...)
 }
 
-// sendCrossBuildReconciles delivers journaled cross-build reconciles one-way
-// to each build's own runner, which evaluates it under its own lock and token.
-func sendCrossBuildReconciles(rt objectRuntime, routes []store.BuildRoute) {
-	for _, route := range routes {
-		rt.SendReconcile(buildplan.BuildServiceName(""), route.BuildID, ReconcileReasonWidgetSync)
+// sendCrossBuildReconciles delivers journaled cross-build deploy success mutations
+// one-way to each build's own runner.
+func sendCrossBuildReconciles(rt objectRuntime, targets []store.SweptChunk) {
+	for _, target := range targets {
+		rt.SendCrossBuildDeploySuccess(buildplan.BuildServiceName(""), target.BuildID, target.ChunkID)
 	}
 }
