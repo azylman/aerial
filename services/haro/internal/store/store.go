@@ -474,7 +474,22 @@ func CreateScheduleRun(ctx context.Context, database *sql.DB, r model.ScheduleRu
 	if r.StartedAt.IsZero() {
 		r.StartedAt = time.Now().UTC()
 	}
-	query := `INSERT INTO schedule_runs (id, agent, schedule_id, schedule_type, message_id, target_id, thread_id, title, prompt, status, started_at, completed_at, duration_ms, error, effort, model) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)`
+	query := `INSERT INTO schedule_runs (id, agent, schedule_id, schedule_type, message_id, target_id, thread_id, title, prompt, status, started_at, completed_at, duration_ms, error, effort, model) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16) ON CONFLICT (id) DO UPDATE SET
+		agent = EXCLUDED.agent,
+		schedule_id = EXCLUDED.schedule_id,
+		schedule_type = EXCLUDED.schedule_type,
+		message_id = EXCLUDED.message_id,
+		target_id = EXCLUDED.target_id,
+		thread_id = EXCLUDED.thread_id,
+		title = EXCLUDED.title,
+		prompt = EXCLUDED.prompt,
+		status = EXCLUDED.status,
+		started_at = EXCLUDED.started_at,
+		completed_at = EXCLUDED.completed_at,
+		duration_ms = EXCLUDED.duration_ms,
+		error = EXCLUDED.error,
+		effort = EXCLUDED.effort,
+		model = EXCLUDED.model`
 	_, err = database.ExecContext(ctx, query,
 		r.ID,
 		model.NormalizeAgent(r.Agent),

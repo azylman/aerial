@@ -389,6 +389,62 @@ func TestClaimEventTriggersErrors(t *testing.T) {
 	}
 }
 
+func TestGetEventTrigger_Errors(t *testing.T) {
+	t.Parallel()
+	db := openStoreTestDB(t)
+	_ = db.Close()
+	if _, err := GetEventTrigger(context.Background(), db, "et-1"); err == nil {
+		t.Error("expected error on closed db")
+	}
+	if _, err := GetEventTrigger(context.Background(), nil, "et-1"); err == nil {
+		t.Error("expected error on nil db")
+	}
+	db2 := openStoreTestDB(t)
+	if _, err := GetEventTrigger(context.Background(), db2, ""); err == nil {
+		t.Error("expected error on empty id")
+	}
+}
+
+func TestQueryMatchingEventTriggers_Errors(t *testing.T) {
+	t.Parallel()
+	db := openStoreTestDB(t)
+	_ = db.Close()
+	if _, err := QueryMatchingEventTriggers(context.Background(), db, "source", []string{"target"}, "type"); err == nil {
+		t.Error("expected error on closed db")
+	}
+	if _, err := QueryMatchingEventTriggers(context.Background(), nil, "source", []string{"target"}, "type"); err == nil {
+		t.Error("expected error on nil db")
+	}
+	db2 := openStoreTestDB(t)
+	res, err := QueryMatchingEventTriggers(context.Background(), db2, "", nil, "")
+	if err != nil || res != nil {
+		t.Errorf("expected nil result and nil err on empty filter, got %v, %v", res, err)
+	}
+}
+
+func TestConsumeEventTrigger_Errors(t *testing.T) {
+	t.Parallel()
+	db := openStoreTestDB(t)
+	_ = db.Close()
+	if _, err := ConsumeEventTrigger(context.Background(), db, "et-1"); err == nil {
+		t.Error("expected error on closed db")
+	}
+	if _, err := ConsumeEventTrigger(context.Background(), nil, "et-1"); err == nil {
+		t.Error("expected error on nil db")
+	}
+	db2 := openStoreTestDB(t)
+	if _, err := ConsumeEventTrigger(context.Background(), db2, ""); err == nil {
+		t.Error("expected error on empty id")
+	}
+}
+
+func TestValidateLiveEventTarget_NilDB(t *testing.T) {
+	t.Parallel()
+	if err := ValidateLiveEventTarget(context.Background(), nil, "flux", "target"); err == nil {
+		t.Error("expected error on nil db")
+	}
+}
+
 func TestBuildEventTriggerFilterArgs(t *testing.T) {
 	tests := []struct {
 		name             string
@@ -441,18 +497,43 @@ func TestVanadisURL_Precedence(t *testing.T) {
 	}
 }
 
+func seedGetEventTriggerTest(ctx context.Context, t *testing.T, db *sql.DB, id, agent string, updated bool, now time.Time) {
+	t.Helper()
+	if err := InsertEventTrigger(ctx, db, model.EventTrigger{ID: id, ChannelID: "ch", Source: "flux", Target: "t", EventType: "ev", Prompt: "p", CreatedAt: now, Agent: agent}); err != nil {
+		t.Fatalf("InsertEventTrigger err = %v", err)
+	}
+	if updated {
+		if _, err := db.ExecContext(ctx, "UPDATE event_triggers SET updated_at = CURRENT_TIMESTAMP WHERE id = $1", id); err != nil {
+			t.Fatalf("set updated_at err = %v", err)
+		}
+	}
+}
+
+func checkGetEventTriggerResult(t *testing.T, trig *model.EventTrigger, wantAgent string, wantUpdated bool) {
+	t.Helper()
+	if trig.Agent != wantAgent {
+		t.Errorf("trig.Agent = %q, want %q", trig.Agent, wantAgent)
+	}
+	if wantUpdated && (trig.UpdatedAt == nil || trig.UpdatedAt.IsZero()) {
+		t.Errorf("trig.UpdatedAt = %v, want valid timestamp", trig.UpdatedAt)
+	}
+}
+
 func TestGetEventTrigger(t *testing.T) {
 	now := time.Now().UTC()
 	tests := []struct {
-		name      string
-		id        string
-		seed      bool
-		seedAgent string
-		nilDB     bool
-		wantAgent string
-		wantErr   string
+		name        string
+		id          string
+		seed        bool
+		seedUpdated bool
+		seedAgent   string
+		nilDB       bool
+		wantAgent   string
+		wantUpdated bool
+		wantErr     string
 	}{
 		{name: "found trigger", id: "et-found", seed: true, seedAgent: "agent-alpha", wantAgent: "agent-alpha"},
+		{name: "trigger with db updated_at read back", id: "et-updated", seed: true, seedUpdated: true, seedAgent: "aerial", wantAgent: "aerial", wantUpdated: true},
 		{name: "empty id errors", id: "   ", wantErr: "id cannot be empty"},
 		{name: "nil db errors", id: "et-1", nilDB: true, wantErr: "database is nil"},
 		{name: "not found trigger", id: "et-missing", wantErr: `event watch "et-missing" not found`},
@@ -462,9 +543,7 @@ func TestGetEventTrigger(t *testing.T) {
 			db := openStoreTestDB(t)
 			ctx := context.Background()
 			if tc.seed {
-				if err := InsertEventTrigger(ctx, db, model.EventTrigger{ID: tc.id, ChannelID: "ch", Source: "flux", Target: "t", EventType: "ev", Prompt: "p", CreatedAt: now, Agent: tc.seedAgent}); err != nil {
-					t.Fatalf("InsertEventTrigger err = %v", err)
-				}
+				seedGetEventTriggerTest(ctx, t, db, tc.id, tc.seedAgent, tc.seedUpdated, now)
 			}
 			database := db
 			if tc.nilDB {
@@ -480,9 +559,7 @@ func TestGetEventTrigger(t *testing.T) {
 			if err != nil {
 				t.Fatalf("GetEventTrigger err = %v", err)
 			}
-			if trig.Agent != tc.wantAgent {
-				t.Errorf("trig.Agent = %q, want %q", trig.Agent, tc.wantAgent)
-			}
+			checkGetEventTriggerResult(t, trig, tc.wantAgent, tc.wantUpdated)
 		})
 	}
 }
@@ -514,6 +591,87 @@ func TestListEventTriggers_MultiAgent(t *testing.T) {
 			}
 			if len(got) != tc.wantCount {
 				t.Errorf("ListEventTriggers count = %d, want %d", len(got), tc.wantCount)
+			}
+		})
+	}
+}
+
+func TestQueryMatchingEventTriggers(t *testing.T) {
+	now := time.Now().UTC()
+	db := openStoreTestDB(t)
+	ctx := context.Background()
+
+	_ = InsertEventTrigger(ctx, db, model.EventTrigger{ID: "et-q1", ChannelID: "ch", Source: "flux", Target: "t1", EventType: "sync_success", Prompt: "p1", CreatedAt: now})
+	_ = InsertEventTrigger(ctx, db, model.EventTrigger{ID: "et-q2", ChannelID: "ch", Source: "flux", Target: "t2", EventType: "sync_success", Prompt: "p2", CreatedAt: now, Persistent: true})
+
+	tests := []struct {
+		name      string
+		nilDB     bool
+		source    string
+		targets   []string
+		eventType string
+		wantCount int
+		wantErr   bool
+	}{
+		{name: "matching single target", source: "flux", targets: []string{"t1"}, eventType: "sync_success", wantCount: 1},
+		{name: "matching multiple targets", source: "flux", targets: []string{"t1", "t2"}, eventType: "sync_success", wantCount: 2},
+		{name: "no match", source: "flux", targets: []string{"other"}, eventType: "sync_success", wantCount: 0},
+		{name: "empty targets", source: "flux", targets: nil, eventType: "sync_success", wantCount: 0},
+		{name: "nil db errors", nilDB: true, source: "flux", targets: []string{"t1"}, eventType: "sync_success", wantErr: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			database := db
+			if tc.nilDB {
+				database = nil
+			}
+			got, err := QueryMatchingEventTriggers(ctx, database, tc.source, tc.targets, tc.eventType)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("QueryMatchingEventTriggers() err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			if !tc.wantErr && len(got) != tc.wantCount {
+				t.Errorf("got %d triggers, want %d", len(got), tc.wantCount)
+			}
+		})
+	}
+}
+
+func TestConsumeEventTrigger(t *testing.T) {
+	now := time.Now().UTC()
+	db := openStoreTestDB(t)
+	ctx := context.Background()
+
+	_ = InsertEventTrigger(ctx, db, model.EventTrigger{ID: "et-c1", ChannelID: "ch", Source: "flux", Target: "t1", EventType: "sync_success", Prompt: "p1", CreatedAt: now})
+	_ = InsertEventTrigger(ctx, db, model.EventTrigger{ID: "et-c2", ChannelID: "ch", Source: "flux", Target: "t2", EventType: "sync_success", Prompt: "p2", CreatedAt: now, Persistent: true})
+
+	tests := []struct {
+		name        string
+		nilDB       bool
+		id          string
+		wantSuccess bool
+		wantErr     bool
+	}{
+		{name: "consume non-persistent deletes trigger", id: "et-c1", wantSuccess: true},
+		{name: "consuming already consumed returns false", id: "et-c1", wantSuccess: false},
+		{name: "consume persistent updates trigger", id: "et-c2", wantSuccess: true},
+		{name: "non-existent trigger returns false", id: "non-existent", wantSuccess: false},
+		{name: "empty id returns error", id: "   ", wantErr: true},
+		{name: "nil db returns error", nilDB: true, id: "et-c2", wantErr: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			database := db
+			if tc.nilDB {
+				database = nil
+			}
+			ok, err := ConsumeEventTrigger(ctx, database, tc.id)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("ConsumeEventTrigger() err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			if !tc.wantErr && ok != tc.wantSuccess {
+				t.Errorf("ConsumeEventTrigger() = %v, want %v", ok, tc.wantSuccess)
 			}
 		})
 	}
