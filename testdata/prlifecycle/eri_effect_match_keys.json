@@ -3,7 +3,7 @@
   "cases": [
     {
       "name": "collaborator conflict DM has no check",
-      "repo": "aerial",
+      "repo": "azylman/aerial",
       "pr_number": 2281,
       "head_sha": "abc1234",
       "kind": "eri_direct_message",

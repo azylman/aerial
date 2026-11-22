@@ -62,12 +62,12 @@ func (s *PRObjectService) WithProjection(store ProjectionStore) *PRObjectService
 // it syncs the rollout index and sends a one-way self-send to Project, which
 // writes the pr_registry row from committed state.
 func (s *PRObjectService) afterCommit(ctx restate.ObjectContext, st *PRState) {
-	if st == nil || NormalizeRepo(st.Repo) == "" || st.PRNumber <= 0 {
+	if st == nil || st.Repo == "" || st.PRNumber <= 0 {
 		return
 	}
 	s.syncRolloutIndex(ctx, st)
 	if s.projection != nil {
-		restate.ObjectSend(ctx, prwire.PRObjectServiceName, PRObjectKey(st.Repo, st.PRNumber), PRHandlerProject).Send(ProjectRequest{})
+		restate.ObjectSend(ctx, prwire.PRObjectServiceName, prwire.PRObjectKey(st.Repo, st.PRNumber), PRHandlerProject).Send(ProjectRequest{})
 	}
 }
 

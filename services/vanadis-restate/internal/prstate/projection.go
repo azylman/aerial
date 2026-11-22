@@ -94,7 +94,7 @@ func BuildProjection(s *PRState) ProjectionSnapshot {
 	if s == nil {
 		return snap
 	}
-	snap.Repo = NormalizeRepo(s.Repo)
+	snap.Repo = s.Repo
 	snap.PRNumber = s.PRNumber
 	snap.Branch = strings.TrimSpace(s.Branch)
 	snap.HeadSHA = strings.TrimSpace(s.HeadSHA)
@@ -174,14 +174,14 @@ func ProjectionJournalKey(snap ProjectionSnapshot) string {
 	}
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "%s\x00%s\x00%d\x00%s\x00%s\x00%s\x00%s\x00%s\x00%s\x00%d\x00%d\x00%s",
-		agent, NormalizeRepo(snap.Repo), snap.PRNumber,
+		agent, snap.Repo, snap.PRNumber,
 		strings.TrimSpace(snap.Branch), strings.TrimSpace(snap.HeadSHA),
 		strings.TrimSpace(snap.MergeSHA), strings.TrimSpace(snap.Title),
 		strings.TrimSpace(snap.TargetID), strings.TrimSpace(snap.Status),
 		snap.Generation, snap.MetaEpoch, digestJSON(normalizeMetadata(snap.Metadata)))
 	sum := sha256.Sum256([]byte(sb.String()))
 	return fmt.Sprintf("projection:%s:%s:%d@%s:gen%d:epoch%d:%x",
-		agent, NormalizeRepo(snap.Repo), snap.PRNumber,
+		agent, snap.Repo, snap.PRNumber,
 		strings.TrimSpace(snap.HeadSHA), snap.Generation, snap.MetaEpoch,
 		sum[:8])
 }
@@ -231,7 +231,7 @@ func ProjectionUpsertQuery(snap ProjectionSnapshot) (string, []any) {
 	meta := normalizeMetadata(snap.Metadata)
 	args := make([]any, 0, 34)
 	args = append(args,
-		NormalizeRepo(snap.Repo), snap.PRNumber,
+		snap.Repo, snap.PRNumber,
 		agent,
 		strings.TrimSpace(snap.Branch), strings.TrimSpace(snap.HeadSHA),
 		strings.TrimSpace(snap.MergeSHA), strings.TrimSpace(snap.TargetID),
@@ -331,7 +331,7 @@ const (
 // one statement per result. Every value derives from the snapshot.
 func ProjectionStatements(snap ProjectionSnapshot) []ProjectionStatement {
 	query, args := ProjectionUpsertQuery(snap)
-	repo, pr := NormalizeRepo(snap.Repo), snap.PRNumber
+	repo, pr := snap.Repo, snap.PRNumber
 	meta := normalizeMetadata(snap.Metadata)
 	checkNames := sortedKeys(meta.CIChecks)
 	checkStates := make([]string, 0, len(checkNames))
@@ -525,7 +525,7 @@ func ProjectRegistry(ctx context.Context, store ProjectionStore, snap Projection
 	if store == nil {
 		return errors.New("projection store is nil")
 	}
-	if NormalizeRepo(snap.Repo) == "" || snap.PRNumber <= 0 {
+	if snap.Repo == "" || snap.PRNumber <= 0 {
 		return errors.New("projection snapshot missing repo or pr number")
 	}
 	if strings.TrimSpace(snap.Status) == "" {

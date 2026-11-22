@@ -19,6 +19,15 @@ func IsRoboRevCheck(checkName string) bool {
 	return strings.EqualFold(trimmed, "roborev") || strings.EqualFold(trimmed, "RoboRev Code Review")
 }
 
+// CanonicalFailedCheckKey is the failed-check map key for checkName: "roborev"
+// for any RoboRev review gate name, else the trimmed lowercase name.
+func CanonicalFailedCheckKey(checkName string) string {
+	if IsRoboRevCheck(checkName) {
+		return "roborev"
+	}
+	return strings.ToLower(strings.TrimSpace(checkName))
+}
+
 // IsGateAggregatorCheck reports an overarching gate check ("CI Gate", "* gate").
 func IsGateAggregatorCheck(checkName string) bool {
 	lower := strings.ToLower(strings.TrimSpace(checkName))

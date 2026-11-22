@@ -81,7 +81,7 @@ func isHeadlessSessionKey(id string) bool {
 // FormatCollaboratorPRTarget renders the PR link plus title, branch, and
 // short commit, matching synapse FormatCollaboratorPRTarget.
 func FormatCollaboratorPRTarget(repo string, prNumber int, title, branch, headSHA string) string {
-	repo = NormalizeRepo(repo)
+	repo = strings.TrimSpace(repo)
 	short := strings.TrimSpace(headSHA)
 	if len(short) > 7 {
 		short = short[:7]

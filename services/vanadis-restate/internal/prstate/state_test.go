@@ -16,10 +16,10 @@ func TestPRStateRecordFailedCISHA(t *testing.T) {
 		sha  string
 		want bool
 	}{
-		{name: "records fresh sha", repo: "aerial", pr: 101, sha: "abc123", want: true},
-		{name: "rejects empty sha", repo: "aerial", pr: 101, sha: "", want: false},
-		{name: "rejects zero sha", repo: "aerial", pr: 101, sha: "0000000", want: false},
-		{name: "rejects zero pr", repo: "aerial", pr: 0, sha: "abc123", want: false},
+		{name: "records fresh sha", repo: "azylman/aerial", pr: 101, sha: "abc123", want: true},
+		{name: "rejects empty sha", repo: "azylman/aerial", pr: 101, sha: "", want: false},
+		{name: "rejects zero sha", repo: "azylman/aerial", pr: 101, sha: "0000000", want: false},
+		{name: "rejects zero pr", repo: "azylman/aerial", pr: 0, sha: "abc123", want: false},
 		{name: "rejects empty repo", repo: "", pr: 101, sha: "abc123", want: false},
 	}
 	for _, tc := range tests {
@@ -48,7 +48,7 @@ func TestPRStateRecordFailedCISHAChange(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			s := NewPRState("aerial", 101)
+			s := NewPRState("azylman/aerial", 101)
 			s.RecordFailedCISHA(tc.first)
 			if got := s.RecordFailedCISHA(tc.second); got != tc.want {
 				t.Fatalf("second RecordFailedCISHA = %v, want %v", got, tc.want)
@@ -73,7 +73,7 @@ func TestPRStateHasFailedCISHA(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			s := NewPRState("aerial", 101)
+			s := NewPRState("azylman/aerial", 101)
 			s.RecordFailedCISHA(tc.stored)
 			if got := s.HasFailedCISHA(tc.query); got != tc.want {
 				t.Fatalf("HasFailedCISHA(%q) = %v, want %v", tc.query, got, tc.want)
@@ -105,7 +105,7 @@ func TestPRStateFailedCheckRunDetailed(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			s := NewPRState("aerial", 101)
+			s := NewPRState("azylman/aerial", 101)
 			emit, wasActive, hadPrior := s.RecordFailedCheckRunDetailed("abc123", tc.firstCheck)
 			if emit != tc.wantEmit || wasActive != tc.wantWasActive || hadPrior != tc.wantHadPriorEver {
 				t.Fatalf("first record = (%v,%v,%v), want (%v,%v,%v)", emit, wasActive, hadPrior, tc.wantEmit, tc.wantWasActive, tc.wantHadPriorEver)
@@ -134,7 +134,7 @@ func TestPRStateFailedCheckRunSHAReset(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			s := NewPRState("aerial", 101)
+			s := NewPRState("azylman/aerial", 101)
 			s.RecordFailedCheckRunDetailed("abc123", tc.check)
 			_, _, hadPrior := s.RecordFailedCheckRunDetailed("def456", tc.check)
 			if hadPrior != tc.wantPrior {
@@ -170,7 +170,7 @@ func TestPRStateRollbackFailedCheckRun(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			s := NewPRState("aerial", 101)
+			s := NewPRState("azylman/aerial", 101)
 			s.RecordFailedCheckRunDetailed(tc.recordSHA, tc.check)
 			s.RecordNonRoboRevFailedSHA(tc.recordSHA)
 			s.RollbackFailedCheckRun(tc.rollbackSHA, tc.check, tc.wasActive, tc.hadPrior)
@@ -195,7 +195,7 @@ func TestPRStateClearFailedCISHAFanout(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			s := NewPRState("aerial", 101)
+			s := NewPRState("azylman/aerial", 101)
 			s.RecordFailedCISHA(tc.sha)
 			s.RecordNonRoboRevFailedSHA(tc.sha)
 			s.RecordCancelledCheckSHA(tc.sha)
@@ -252,7 +252,7 @@ func TestPRStateClearActiveCheckRun(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			s := NewPRState("aerial", 101)
+			s := NewPRState("azylman/aerial", 101)
 			s.RecordFailedCheckRunDetailed("abc123", tc.record)
 			s.ClearActiveFailedCheckRun(tc.sha, tc.clear)
 			if got := s.HasActiveCheckRun("abc123", tc.record); got != tc.wantActive {
@@ -282,7 +282,7 @@ func TestPRStateClearFailedCheckRun(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			s := NewPRState("aerial", 101)
+			s := NewPRState("azylman/aerial", 101)
 			s.RecordFailedCheckRunDetailed("abc123", tc.record)
 			if got := s.ClearFailedCheckRun(tc.sha, tc.clear); got != tc.want {
 				t.Fatalf("ClearFailedCheckRun = %v, want %v", got, tc.want)
@@ -311,7 +311,7 @@ func TestPRStateActiveQueries(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			s := NewPRState("aerial", 101)
+			s := NewPRState("azylman/aerial", 101)
 			for _, c := range tc.checks {
 				s.RecordFailedCheckRunDetailed("abc123", c)
 			}
@@ -348,7 +348,7 @@ func TestPRStateCanRecoverNonGateCheckSuccess(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			s := NewPRState("aerial", 101)
+			s := NewPRState("azylman/aerial", 101)
 			for _, c := range tc.setup {
 				s.RecordFailedCheckRunDetailed("abc123", c)
 			}
@@ -374,7 +374,7 @@ func TestPRStateGenerationGating(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			s := NewPRState("aerial", 101)
+			s := NewPRState("azylman/aerial", 101)
 			gen := s.RecordKustomizationRequests()
 			if gen != tc.wantGen1 {
 				t.Fatalf("first generation = %d, want %d", gen, tc.wantGen1)
@@ -410,7 +410,7 @@ func TestPRStateRetryNeverMintsGeneration(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			s := NewPRState("aerial", 101)
+			s := NewPRState("azylman/aerial", 101)
 			gen := s.RecordKustomizationRequests()
 			k := s.EffectKeyFor(prwire.EffectDiscordAlert, tc.sha, "", "")
 			s.MarkEffectDispatched(k)
@@ -440,7 +440,7 @@ func TestPRStateDeployDedupBothKeys(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			s := NewPRState("aerial", 101)
+			s := NewPRState("azylman/aerial", 101)
 			s.RecordDeployedPR()
 			s.RecordDeployedSHAJob(tc.job, tc.sha)
 			if got := s.WasDeployedPR(); got != tc.wantPR {
@@ -474,12 +474,12 @@ func TestPRStateTerminalAndReopen(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			s := NewPRState("aerial", 101)
+			s := NewPRState("azylman/aerial", 101)
 			s.RecordFailedCISHA("abc123")
 			if tc.terminal != TerminalNone {
 				s.MarkTerminal(tc.terminal)
 			}
-			ev := PREvent{Repo: "aerial", PRNumber: 101, HeadSHA: "abc123", ReopenEpoch: tc.epoch}
+			ev := PREvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "abc123", ReopenEpoch: tc.epoch}
 			if got := s.ApplyEvent(ev); got != tc.want {
 				t.Fatalf("ApplyEvent = %q, want %q", got, tc.want)
 			}
@@ -492,7 +492,7 @@ func TestPRStateTerminalAndReopen(t *testing.T) {
 					t.Fatalf("ReopenEpoch = %d, want 1", s.ReopenEpoch)
 				}
 				s.RecordFailedCISHA("def456")
-				ev2 := PREvent{Repo: "aerial", PRNumber: 101, HeadSHA: "def456", ReopenEpoch: 1}
+				ev2 := PREvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "def456", ReopenEpoch: 1}
 				if got := s.ApplyEvent(ev2); got != DispositionApply {
 					t.Fatalf("ApplyEvent after reopen = %q, want %q", got, DispositionApply)
 				}
@@ -525,10 +525,10 @@ func TestPRStateApplyEventStale(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			s := NewPRState("aerial", 101)
+			s := NewPRState("azylman/aerial", 101)
 			s.RecordFailedCISHA(tc.current)
 			s.MergeSHA = tc.stored
-			ev := PREvent{Repo: "aerial", PRNumber: 101, HeadSHA: tc.event, MergeSHA: tc.merge}
+			ev := PREvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: tc.event, MergeSHA: tc.merge}
 			if got := s.ApplyEvent(ev); got != tc.want {
 				t.Fatalf("ApplyEvent = %q, want %q", got, tc.want)
 			}
@@ -549,7 +549,7 @@ func TestPRStateCollaboratorAndConflict(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			s := NewPRState("aerial", 101)
+			s := NewPRState("azylman/aerial", 101)
 			if got := s.MarkCollaboratorAlerted(tc.sha); got != tc.want {
 				t.Fatalf("MarkCollaboratorAlerted = %v, want %v", got, tc.want)
 			}
@@ -596,7 +596,7 @@ func TestPRStateCachedFailedCISHA(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			s := NewPRState("aerial", 101)
+			s := NewPRState("azylman/aerial", 101)
 			if tc.setupFail != "" {
 				s.RecordFailedCISHA(tc.setupFail)
 			}
@@ -629,7 +629,7 @@ func TestRepoStateMainPushIndex(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			s := NewRepoState("aerial")
+			s := NewRepoState("azylman/aerial")
 			var got bool
 			for _, sha := range tc.shas {
 				got = s.RecordMainPushSHA(sha)
@@ -656,7 +656,7 @@ func TestRepoStateMainPushBounded(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			s := NewRepoState("aerial")
+			s := NewRepoState("azylman/aerial")
 			for i := range tc.count {
 				s.RecordMainPushSHA("sha" + string(rune('a'+i%26)) + string(rune('0'+i/26)) + "x1")
 			}
@@ -686,7 +686,7 @@ func TestRepoStateTouchPRKey(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			s := NewRepoState("aerial")
+			s := NewRepoState("azylman/aerial")
 			for _, k := range tc.keys {
 				s.TouchPRKey(k)
 			}
@@ -696,7 +696,7 @@ func TestRepoStateTouchPRKey(t *testing.T) {
 				if err != nil {
 					t.Fatalf("marshal RepoState: %v", err)
 				}
-				restored := NewRepoState("aerial")
+				restored := NewRepoState("azylman/aerial")
 				//nolint:musttag // RepoState is Restate-owned state with intentionally untagged fields; this pins codec survival, not wire names.
 				if err := json.Unmarshal(raw, restored); err != nil {
 					t.Fatalf("unmarshal RepoState: %v", err)
@@ -729,7 +729,7 @@ func TestRepoStateTombstones(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			s := NewRepoState("aerial")
+			s := NewRepoState("azylman/aerial")
 			s.RecordTombstone(tc.sha, tc.gen)
 			s.EvictTombstonesBelowGeneration(tc.minGen)
 			if got := s.HasTombstone(tc.sha); got != tc.want {
@@ -795,7 +795,7 @@ func TestPRStateMiscSlots(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			s := NewPRState("aerial", 101)
+			s := NewPRState("azylman/aerial", 101)
 			if tc.record != "" {
 				s.RecordFailedCISHA(tc.record)
 				s.RecordNonRoboRevFailedSHA(tc.record)
@@ -853,7 +853,7 @@ func checkZeroValuePRState(t *testing.T) {
 	if !zero.WasDeployedSHAJob("eri", "abc123") || zero.WasDeployedSHAJob("eri", "zzz999") {
 		t.Fatalf("zero-value sha job dedup mismatch")
 	}
-	zeroPR := NewPRState("aerial", 0)
+	zeroPR := NewPRState("azylman/aerial", 0)
 	if zeroPR.RecordFailedCISHA("abc123") || zeroPR.MarkCollaboratorAlerted("abc123") || zeroPR.MarkCollaboratorConflict("abc123") {
 		t.Fatalf("zero-pr marks must report false")
 	}
@@ -957,7 +957,7 @@ func TestRepoStateMiscSlots(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			s := NewRepoState("aerial")
+			s := NewRepoState("azylman/aerial")
 			s.RecordTombstone("abc123", 2)
 			if got := s.HasTombstone(tc.sha); got != tc.want {
 				t.Fatalf("HasTombstone(%q) = %v, want %v", tc.sha, got, tc.want)

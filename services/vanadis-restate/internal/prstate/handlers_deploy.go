@@ -135,7 +135,7 @@ func WasDispatched(s *PRState, repo, jobName, sha string, prNumber int) bool {
 	if s == nil {
 		return false
 	}
-	if prNumber > 0 && prNumber == s.PRNumber && NormalizeRepo(repo) == s.Repo && s.WasDeployedPR() {
+	if prNumber > 0 && prNumber == s.PRNumber && strings.TrimSpace(repo) == s.Repo && s.WasDeployedPR() {
 		return true
 	}
 	cleanJob := strings.TrimSpace(jobName)
@@ -240,7 +240,7 @@ func (s *PRState) TakeDeployFailure(seq uint64) (*PendingDeployFailure, bool) {
 // deploy-failure deadline as a delayed self-send; the deadline, not a
 // delivery count, decides deploy_failed.
 func (s *PRObjectService) HandleDeployAttemptFailed(ctx restate.ObjectContext, ev PREvent) error {
-	if NormalizeRepo(ev.Repo) == "" || ev.PRNumber <= 0 {
+	if strings.TrimSpace(ev.Repo) == "" || ev.PRNumber <= 0 {
 		return nil
 	}
 	st, stored, err := s.loadPRState(ctx, ev)
@@ -253,7 +253,7 @@ func (s *PRObjectService) HandleDeployAttemptFailed(ctx restate.ObjectContext, e
 	seq, armed := st.ArmDeployFailure(ev)
 	restate.Set(ctx, s.stateKey, st)
 	if armed {
-		restate.ObjectSend(ctx, prwire.PRObjectServiceName, PRObjectKey(st.Repo, st.PRNumber), prwire.PRHandlerDeployFailureDeadline).
+		restate.ObjectSend(ctx, prwire.PRObjectServiceName, prwire.PRObjectKey(st.Repo, st.PRNumber), prwire.PRHandlerDeployFailureDeadline).
 			Send(DeployFailureDeadlineRequest{Seq: seq}, restate.WithDelay(s.deployFailureDeadline))
 	}
 	return nil

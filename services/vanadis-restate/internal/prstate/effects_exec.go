@@ -10,6 +10,8 @@ import (
 	"log/slog"
 
 	restate "github.com/restatedev/sdk-go"
+
+	"github.com/azylman/aerial/pkg/prwire"
 )
 
 // plannedEffect is one bound effect: its generation-scoped key, the owner
@@ -28,7 +30,7 @@ var errEffectUnconfigured = errors.New("prstate: effect boundary not configured"
 // fails fast with one attempt so the exclusive PR lock is never held across
 // backoff; callers schedule a delayed retry on failure.
 func executeEffect(ctx restate.ObjectContext, p plannedEffect) bool {
-	pr := PRObjectKey(p.key.Repo, p.key.PRNumber)
+	pr := prwire.PRObjectKey(p.key.Repo, p.key.PRNumber)
 	_, err := restate.Run(ctx, func(rc restate.RunContext) (restate.Void, error) {
 		if p.do == nil {
 			effectsTotal.WithLabelValues(p.key.Kind, effectResultUnconfigured).Inc()

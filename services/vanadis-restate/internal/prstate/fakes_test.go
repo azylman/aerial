@@ -11,6 +11,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/azylman/aerial/pkg/prwire"
 )
 
 // MemPRStore is an in-memory PRStateStore for hermetic tests. It stores
@@ -57,7 +59,7 @@ func (s *MemPRStore) SavePR(state *PRState) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.prs[PRObjectKey(state.Repo, state.PRNumber)] = raw
+	s.prs[prwire.PRObjectKey(state.Repo, state.PRNumber)] = raw
 }
 
 // MemRepoStore is an in-memory RepoStateStore for hermetic tests. It stores
@@ -93,7 +95,7 @@ func (s *MemRepoStore) LoadRepo(repo string) (*RepoState, error) {
 	if s.err != nil {
 		return nil, s.err
 	}
-	raw, ok := s.repos[NormalizeRepo(repo)]
+	raw, ok := s.repos[strings.TrimSpace(repo)]
 	if !ok {
 		return nil, nil
 	}
@@ -117,7 +119,7 @@ func (s *MemRepoStore) SaveRepo(state *RepoState) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.repos[NormalizeRepo(state.Repo)] = raw
+	s.repos[strings.TrimSpace(state.Repo)] = raw
 }
 
 type noopConflictChecker struct{}

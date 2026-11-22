@@ -275,7 +275,7 @@ func TestShadowStaleHeadSynchronizeGolden(t *testing.T) {
 			}
 			st := simPRState(t, sim, tc.Setup[0])
 			got := staleHeadWant{Owner: st.OwnerAgent(), HeadSHA: st.HeadSHA, PriorHeads: st.PriorHeads, Status: st.RegistryStatus()}
-			repoRaw, ok := sim.kv[prwire.RepoObjectServiceName+"/"+RepoObjectKey(st.Repo)+"/"+repoObjectStateKey]
+			repoRaw, ok := sim.kv[prwire.RepoObjectServiceName+"/"+prwire.RepoObjectKey(st.Repo)+"/"+repoObjectStateKey]
 			require.True(t, ok, "RepoObject index committed")
 			repoSt, err := decodeInput[RepoState](repoRaw)
 			require.NoError(t, err)
@@ -374,7 +374,7 @@ func TestShadowMergedStaleHeadDeployGolden(t *testing.T) {
 				DeployedJobs: st.DeployedJobs, DeployedKustomizations: st.DeployedKustomizations,
 				Rollouts: simActiveRollouts(t, sim), Effects: sim.effects,
 			}
-			repoRaw, ok := sim.kv[prwire.RepoObjectServiceName+"/"+RepoObjectKey(st.Repo)+"/"+repoObjectStateKey]
+			repoRaw, ok := sim.kv[prwire.RepoObjectServiceName+"/"+prwire.RepoObjectKey(st.Repo)+"/"+repoObjectStateKey]
 			require.True(t, ok, "RepoObject index committed")
 			repoSt, err := decodeInput[RepoState](repoRaw)
 			require.NoError(t, err)
@@ -459,7 +459,7 @@ func TestShadowLostMergeWebhooksGolden(t *testing.T) {
 				PriorHeads: st.PriorHeads, DeployedJobs: st.DeployedJobs, DeployedKustomizations: st.DeployedKustomizations,
 				Rollouts: simActiveRollouts(t, sim), Effects: sim.effects,
 			}
-			repoRaw, ok := sim.kv[prwire.RepoObjectServiceName+"/"+RepoObjectKey(st.Repo)+"/"+repoObjectStateKey]
+			repoRaw, ok := sim.kv[prwire.RepoObjectServiceName+"/"+prwire.RepoObjectKey(st.Repo)+"/"+repoObjectStateKey]
 			require.True(t, ok, "RepoObject index committed")
 			repoSt, err := decodeInput[RepoState](repoRaw)
 			require.NoError(t, err)
@@ -525,7 +525,7 @@ type selfRegisteredCase struct {
 // when no send ever committed one (a PR synapse journaled nothing for).
 func simSelfRegisteredState(t *testing.T, sim *paritySim, pr PREvent) PRState {
 	t.Helper()
-	raw, ok := sim.kv[prwire.PRObjectServiceName+"/"+PRObjectKey(pr.Repo, pr.PRNumber)+"/"+prObjectStateKey]
+	raw, ok := sim.kv[prwire.PRObjectServiceName+"/"+prwire.PRObjectKey(pr.Repo, pr.PRNumber)+"/"+prObjectStateKey]
 	if !ok {
 		return *NewPRState(pr.Repo, pr.PRNumber)
 	}

@@ -65,7 +65,7 @@ func TestJournalGitHub(t *testing.T) {
 			mc := mocks.NewMockContext(t)
 			stubRunKeepTerminal(mc)
 			j := journaled(restate.WithMockContext(mc), tc.gh)
-			got, gerr := j.UpdateBranch(context.Background(), "aerial", 7)
+			got, gerr := j.UpdateBranch(context.Background(), "azylman/aerial", 7)
 			require.Equal(t, tc.want, got)
 			if tc.wantNilErr {
 				require.Nil(t, gerr)
@@ -134,15 +134,15 @@ func TestRepoObjectServiceGitHubEffects(t *testing.T) {
 	}{
 		{
 			name: "repo state load failure surfaces for the invocation retry", handler: prwire.RepoHandlerAutoUpdate, gh: &fakeGitHub{}, failGet: true,
-			ev: RepoEvent{Repo: "aerial", MainSHA: "m1", AutoUpdate: policy}, wantErr: true,
+			ev: RepoEvent{Repo: "azylman/aerial", MainSHA: "m1", AutoUpdate: policy}, wantErr: true,
 		},
 		{
 			name: "unstamped cascade executes", handler: prwire.RepoHandlerAutoUpdate, gh: &fakeGitHub{},
-			ev: RepoEvent{Repo: "aerial", MainSHA: "m1", AutoUpdate: policy}, wantSet: true, wantRun: true,
+			ev: RepoEvent{Repo: "azylman/aerial", MainSHA: "m1", AutoUpdate: policy}, wantSet: true, wantRun: true,
 		},
 		{
 			name: "restate cascade executes and forwards conflicts", handler: prwire.RepoHandlerAutoUpdate, gh: conflictGH(),
-			ev: RepoEvent{Repo: "aerial", MainSHA: "m1", AutoUpdate: policy}, wantSet: true, wantRun: true,
+			ev: RepoEvent{Repo: "azylman/aerial", MainSHA: "m1", AutoUpdate: policy}, wantSet: true, wantRun: true,
 			wantSends: []sentCall{{
 				service: "PRObject", key: "azylman/aerial#4", method: prwire.PRHandlerBranchConflict,
 				input: PREvent{Event: "branch_conflict", Repo: "azylman/aerial", PRNumber: 4, HeadSHA: "h4", Branch: "b4", Title: "PR 4"},
@@ -150,26 +150,26 @@ func TestRepoObjectServiceGitHubEffects(t *testing.T) {
 		},
 		{
 			name: "retryable failure schedules a delayed retry", handler: prwire.RepoHandlerAutoUpdate, gh: &fakeGitHub{listErr: errGHServer},
-			ev: RepoEvent{Repo: "aerial", MainSHA: "m1", AutoUpdate: policy, Attempt: 2}, wantRun: true,
-			wantSends: retrySend(prwire.RepoHandlerAutoUpdate, RepoEvent{Repo: "aerial", MainSHA: "m1", AutoUpdate: policy, Attempt: 3}),
+			ev: RepoEvent{Repo: "azylman/aerial", MainSHA: "m1", AutoUpdate: policy, Attempt: 2}, wantRun: true,
+			wantSends: retrySend(prwire.RepoHandlerAutoUpdate, RepoEvent{Repo: "azylman/aerial", MainSHA: "m1", AutoUpdate: policy, Attempt: 3}),
 		},
 		{
 			name: "spent retry budget drops", handler: prwire.RepoHandlerAutoUpdate, gh: &fakeGitHub{listErr: errGHServer},
-			ev: RepoEvent{Repo: "aerial", MainSHA: "m1", AutoUpdate: policy, Attempt: maxRepoEffectRetries}, wantRun: true,
+			ev: RepoEvent{Repo: "azylman/aerial", MainSHA: "m1", AutoUpdate: policy, Attempt: maxRepoEffectRetries}, wantRun: true,
 		},
 		{
 			name: "deduped trigger reports nothing", handler: prwire.RepoHandlerAutoUpdate, gh: &fakeGitHub{},
 			seed: &RepoState{Repo: "azylman/aerial", RepoEffects: []string{autoUpdateKeyMain}},
-			ev:   RepoEvent{Repo: "aerial", MainSHA: "m1", AutoUpdate: policy},
+			ev:   RepoEvent{Repo: "azylman/aerial", MainSHA: "m1", AutoUpdate: policy},
 		},
-		{name: "invalid trigger fails terminally", handler: prwire.RepoHandlerAutoUpdate, gh: &fakeGitHub{}, ev: RepoEvent{Repo: "aerial"}, wantErr: true},
+		{name: "invalid trigger fails terminally", handler: prwire.RepoHandlerAutoUpdate, gh: &fakeGitHub{}, ev: RepoEvent{Repo: "azylman/aerial"}, wantErr: true},
 		{
 			name: "skipped cascade reports unconfigured", handler: prwire.RepoHandlerAutoUpdate, gh: &fakeGitHub{},
-			ev: RepoEvent{Repo: "aerial", MainSHA: "m1"}, wantSet: true, wantRun: true,
+			ev: RepoEvent{Repo: "azylman/aerial", MainSHA: "m1"}, wantSet: true, wantRun: true,
 		},
 		{
 			name: "terminal rerun failure reports an error", handler: prwire.RepoHandlerWorkflowRerun, gh: &fakeGitHub{rerunErr: errGHNotFound},
-			ev: RepoEvent{Repo: "aerial", HeadSHA: "s1", RunID: 55}, wantSet: true, wantRun: true,
+			ev: RepoEvent{Repo: "azylman/aerial", HeadSHA: "s1", RunID: 55}, wantSet: true, wantRun: true,
 		},
 	}
 	for _, tc := range tests {
@@ -216,7 +216,7 @@ func TestPRObjectServiceHandleConflictCheck(t *testing.T) {
 	dirty := fetchResult{pr: GitHubPR{Number: 101, State: "open", Mergeable: &conflicted, Head: GitHubPRRef{SHA: "h1"}}}
 	clean := fetchResult{pr: GitHubPR{Number: 101, State: "open", MergeableState: "clean", Head: GitHubPRRef{SHA: "h1"}}}
 	ev := func(head string) PREvent {
-		return PREvent{Repo: "aerial", PRNumber: 101, HeadSHA: head, Branch: "feat", EriEffects: []EriEffect{dmEffect()}}
+		return PREvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: head, Branch: "feat", EriEffects: []EriEffect{dmEffect()}}
 	}
 	recheck := sentCall{service: "PRObject", key: "azylman/aerial#101", method: prwire.PRHandlerConflictCheck, input: ev("h1"), delayed: true}
 	tests := []struct {
@@ -298,7 +298,7 @@ func TestPRObjectServiceHandleBranchConflict(t *testing.T) {
 		return st
 	}
 	ev := func(head string) PREvent {
-		return PREvent{Repo: "aerial", PRNumber: 101, HeadSHA: head, Branch: "feat", EriEffects: []EriEffect{dmEffect()}}
+		return PREvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: head, Branch: "feat", EriEffects: []EriEffect{dmEffect()}}
 	}
 	at := time.Time{}
 	tests := []struct {
@@ -320,7 +320,7 @@ func TestPRObjectServiceHandleBranchConflict(t *testing.T) {
 		{name: "collaborator pr fires the dm", state: collaboratorPR(), ev: ev(""), wantSet: true, wantDMs: 1, wantStatus: RegistryStatusOpen},
 		{name: "stale head drops", state: registeredPR(), ev: ev("h0"), wantStatus: RegistryStatusOpen},
 		{name: "kv failure surfaces", failGet: true, ev: ev("h1"), wantErr: true},
-		{name: "invalid event ignored", state: registeredPR(), ev: PREvent{Repo: "aerial"}, wantStatus: RegistryStatusOpen},
+		{name: "invalid event ignored", state: registeredPR(), ev: PREvent{Repo: "azylman/aerial"}, wantStatus: RegistryStatusOpen},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -356,7 +356,7 @@ func TestPRObjectServiceHandleBranchConflict(t *testing.T) {
 func TestPRObjectServiceHandleHeadRefMissing(t *testing.T) {
 	t.Parallel()
 	ev := func(head string) PREvent {
-		return PREvent{Repo: "aerial", PRNumber: 101, HeadSHA: head, Branch: "dependabot/x"}
+		return PREvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: head, Branch: "dependabot/x"}
 	}
 	tests := []struct {
 		name         string
@@ -375,7 +375,7 @@ func TestPRObjectServiceHandleHeadRefMissing(t *testing.T) {
 		},
 		{name: "moved head drops", state: registeredPR(), ev: ev("h0")},
 		{name: "kv failure surfaces", failGet: true, ev: ev("h1"), wantErr: true},
-		{name: "invalid event ignored", state: registeredPR(), ev: PREvent{Repo: "aerial"}},
+		{name: "invalid event ignored", state: registeredPR(), ev: PREvent{Repo: "azylman/aerial"}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -432,7 +432,7 @@ func TestRestateConflictCheckerCheckConflict(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got, err := restateConflictChecker{gh: tc.gh}.CheckConflict(context.Background(), "aerial", 101, "h1")
+			got, err := restateConflictChecker{gh: tc.gh}.CheckConflict(context.Background(), "azylman/aerial", 101, "h1")
 			require.Equal(t, tc.want, got)
 			require.Equal(t, tc.wantErr, err != nil)
 		})

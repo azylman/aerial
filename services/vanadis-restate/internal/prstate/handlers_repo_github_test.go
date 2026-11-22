@@ -100,7 +100,7 @@ func TestRepoHandlersHandleAutoUpdate(t *testing.T) {
 	defaultPolicy := &AutoUpdatePolicy{Authors: []string{"bot"}, DefaultOwner: true, Collaborators: []CollaboratorAlert{{Author: "bot", ChannelID: testChannel, Mention: "<@1>"}}}
 	indexedOnly := &AutoUpdatePolicy{Authors: []string{"bot"}}
 	mainPush := func(policy *AutoUpdatePolicy) RepoEvent {
-		return RepoEvent{Repo: "aerial", MainSHA: "m1", AutoUpdate: policy}
+		return RepoEvent{Repo: "azylman/aerial", MainSHA: "m1", AutoUpdate: policy}
 	}
 	draft := openGitHubPR(3, "bot", "h3")
 	draft.Draft = true
@@ -148,7 +148,7 @@ func TestRepoHandlersHandleAutoUpdate(t *testing.T) {
 		},
 		{
 			name: "cascade skips ineligible and blocked prs, forwards conflicts and stale closes, stops at the first update",
-			ev:   RepoEvent{Repo: "aerial", PRNumber: 9, HeadSHA: "h9", CheckName: "CI Gate", AutoUpdate: defaultPolicy},
+			ev:   RepoEvent{Repo: "azylman/aerial", PRNumber: 9, HeadSHA: "h9", CheckName: "CI Gate", AutoUpdate: defaultPolicy},
 			gh: &fakeGitHub{
 				prs:     []GitHubPR{openGitHubPR(1, "human", "h1"), openGitHubPR(2, "bot", "h2"), draft, openGitHubPR(4, "bot", "h4"), openGitHubPR(5, "bot", "h5"), openGitHubPR(6, "bot", "h6"), openGitHubPR(7, "bot", "h7"), openGitHubPR(8, "bot", "h8"), openGitHubPR(10, "bot", "h10")},
 				blocked: map[string]bool{"h2": true},
@@ -210,7 +210,7 @@ func TestRepoHandlersHandleAutoUpdate(t *testing.T) {
 			wantSent:    []sentPR{{handler: prwire.PRHandlerHeadRefMissing, ev: PREvent{Event: "head_ref_missing", Repo: "azylman/aerial", PRNumber: 1}}},
 			wantEffects: []string{autoUpdateKeyMain},
 		},
-		{name: "missing trigger sha is invalid", ev: RepoEvent{Repo: "aerial"}, gh: &fakeGitHub{}, wantErr: ErrInvalidRepoEvent},
+		{name: "missing trigger sha is invalid", ev: RepoEvent{Repo: "azylman/aerial"}, gh: &fakeGitHub{}, wantErr: ErrInvalidRepoEvent},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -240,7 +240,7 @@ func TestRepoHandlersHandleAutoUpdate(t *testing.T) {
 // storedRepoEffects loads the committed repo-effect keys.
 func storedRepoEffects(t *testing.T, store *MemRepoStore) []string {
 	t.Helper()
-	st, err := store.LoadRepo("aerial")
+	st, err := store.LoadRepo("azylman/aerial")
 	require.NoError(t, err)
 	if st == nil {
 		return nil
@@ -266,10 +266,10 @@ func TestRepoHandlersHandleAutoUpdateForwardFailure(t *testing.T) {
 			store := NewMemRepoStore()
 			gh := &fakeGitHub{prs: []GitHubPR{openGitHubPR(1, "bot", "h1")}, updates: map[int]updateResult{1: {outcome: UpdateBranchConflict}}}
 			h := testRepoHandlers(t, store, &fakePRSender{failPR: tc.failPR}, nil).WithGitHub(gh)
-			out, err := h.HandleAutoUpdate(context.Background(), RepoEvent{Repo: "aerial", MainSHA: "m1", AutoUpdate: &AutoUpdatePolicy{Authors: []string{"bot"}, DefaultOwner: true}})
+			out, err := h.HandleAutoUpdate(context.Background(), RepoEvent{Repo: "azylman/aerial", MainSHA: "m1", AutoUpdate: &AutoUpdatePolicy{Authors: []string{"bot"}, DefaultOwner: true}})
 			require.ErrorIs(t, err, tc.wantErr)
 			require.Equal(t, tc.wantForward, out.Forwards)
-			st, lerr := store.LoadRepo("aerial")
+			st, lerr := store.LoadRepo("azylman/aerial")
 			require.NoError(t, lerr)
 			require.Equal(t, tc.wantEffects, st.RepoEffects)
 		})
@@ -281,7 +281,7 @@ func TestRepoHandlersHandleWorkflowRerun(t *testing.T) {
 	rerunKey := "azylman/aerial#12@s1:gen0:github_rerun:check=ci"
 	key := EffectKey{Repo: "azylman/aerial", PRNumber: 12, HeadSHA: "s1", Kind: prwire.EffectGitHubRerun, CheckName: "CI"}
 	ev := func() RepoEvent {
-		return RepoEvent{Repo: "aerial", PRNumber: 12, HeadSHA: "s1", CheckName: "CI", RunID: 55}
+		return RepoEvent{Repo: "azylman/aerial", PRNumber: 12, HeadSHA: "s1", CheckName: "CI", RunID: 55}
 	}
 	tests := []struct {
 		name        string
@@ -298,7 +298,7 @@ func TestRepoHandlersHandleWorkflowRerun(t *testing.T) {
 		{name: "retryable failure leaves the key open", ev: ev(), gh: &fakeGitHub{rerunErr: errGHServer}, wantOutcome: RepoEffectOutcome{Key: key, Retry: true, Err: errGHServer}, wantCalls: []string{"rerun 55"}},
 		{name: "terminal failure commits the key", ev: ev(), gh: &fakeGitHub{rerunErr: errGHNotFound}, wantOutcome: RepoEffectOutcome{Key: key, Err: errGHNotFound}, wantCalls: []string{"rerun 55"}, wantEffects: []string{rerunKey}},
 		{name: "missing client retries", ev: ev(), noGitHub: true, wantOutcome: RepoEffectOutcome{Key: key, Retry: true, Err: errGitHubUnconfigured}},
-		{name: "missing run id is invalid", ev: RepoEvent{Repo: "aerial", HeadSHA: "s1"}, gh: &fakeGitHub{}, wantErr: ErrInvalidRepoEvent},
+		{name: "missing run id is invalid", ev: RepoEvent{Repo: "azylman/aerial", HeadSHA: "s1"}, gh: &fakeGitHub{}, wantErr: ErrInvalidRepoEvent},
 		{name: "store failure surfaces", ev: ev(), gh: &fakeGitHub{}, storeErr: errKVUnavailable, wantErr: errKVUnavailable},
 	}
 	for _, tc := range tests {
@@ -321,7 +321,7 @@ func TestRepoHandlersHandleWorkflowRerun(t *testing.T) {
 			if tc.storeErr != nil {
 				return
 			}
-			st, lerr := store.LoadRepo("aerial")
+			st, lerr := store.LoadRepo("azylman/aerial")
 			require.NoError(t, lerr)
 			var effects []string
 			if st != nil {
@@ -346,9 +346,9 @@ func TestRepoStateRepoEffectRing(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			st := NewRepoState("aerial")
+			st := NewRepoState("azylman/aerial")
 			for i := range tc.marks {
-				k := EffectKey{Repo: "aerial", HeadSHA: fmt.Sprintf("s%d", i), Kind: prwire.EffectGitHubRerun}
+				k := EffectKey{Repo: "azylman/aerial", HeadSHA: fmt.Sprintf("s%d", i), Kind: prwire.EffectGitHubRerun}
 				st.MarkRepoEffect(k)
 				st.MarkRepoEffect(k)
 			}

@@ -97,7 +97,7 @@ func (s *PRState) InRollout() bool {
 // commit, advancing its index sequence. ok is false when the indexed
 // membership already matches.
 func (s *PRState) TakeRolloutIndexUpdate() (RolloutIndexEvent, bool) {
-	if s == nil || NormalizeRepo(s.Repo) == "" || s.PRNumber <= 0 {
+	if s == nil || s.Repo == "" || s.PRNumber <= 0 {
 		return RolloutIndexEvent{}, false
 	}
 	active := s.InRollout()
@@ -147,14 +147,14 @@ type RolloutIndexState struct {
 // Apply records ev unless an equal or newer sequence for the PR is already
 // recorded, and reports whether the index changed.
 func (s *RolloutIndexState) Apply(ev RolloutIndexEvent) bool {
-	repo := NormalizeRepo(ev.Repo)
+	repo := strings.TrimSpace(ev.Repo)
 	if s == nil || repo == "" || ev.PRNumber <= 0 {
 		return false
 	}
 	if s.Entries == nil {
 		s.Entries = make(map[string]RolloutIndexEntry)
 	}
-	key := PRObjectKey(repo, ev.PRNumber)
+	key := prwire.PRObjectKey(repo, ev.PRNumber)
 	cur, ok := s.Entries[key]
 	if ok && cur.Seq >= ev.Seq {
 		return false
@@ -325,7 +325,7 @@ func ReconcileLostKey(s *PRState, name, observedAt string) EffectKey {
 // recorded request, does nothing. A retryable failure schedules the delayed reconcile retry.
 func (s *PRObjectService) HandleReconcileLost(ctx restate.ObjectContext, ev PREvent) error {
 	name := strings.TrimSpace(ev.JobName)
-	if NormalizeRepo(ev.Repo) == "" || ev.PRNumber <= 0 || name == "" {
+	if strings.TrimSpace(ev.Repo) == "" || ev.PRNumber <= 0 || name == "" {
 		return nil
 	}
 	st, err := restate.Get[*PRState](ctx, s.stateKey)

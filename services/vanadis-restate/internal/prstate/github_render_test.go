@@ -48,7 +48,7 @@ func TestCollaboratorConflictMessage(t *testing.T) {
 		want    string
 	}{
 		{
-			name: "full target with mention", mention: " <@42> ", repo: "mirrormere", title: "Fix", branch: "refs/heads/feat", head: "abcdef1234",
+			name: "full target with mention", mention: " <@42> ", repo: "azylman/mirrormere", title: "Fix", branch: "refs/heads/feat", head: "abcdef1234",
 			want: "<@42> Merge conflict with `main` detected on [azylman/mirrormere#9](https://github.com/azylman/mirrormere/pull/9) (\"Fix\", branch: feat, commit: abcdef1) — automatic branch update could not resolve conflicts. Please rebase or merge `origin/main` and push.",
 		},
 		{
@@ -96,7 +96,7 @@ func TestCollaboratorConflictDM(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got, ok := collaboratorConflictDM(tc.policy, "aerial", tc.pr)
+			got, ok := collaboratorConflictDM(tc.policy, "azylman/aerial", tc.pr)
 			require.Equal(t, tc.wantOK, ok)
 			require.Equal(t, tc.want, got)
 		})

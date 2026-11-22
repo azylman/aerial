@@ -101,7 +101,7 @@ func (h *RepoHandlers) loadOrNew(repo string) (*RepoState, error) {
 // StateTracker.ClearUpdatedPRsForMainCommit. Duplicate SHAs are idempotent:
 // no fan-out and nothing persisted unless the push touches a new PR key.
 func (h *RepoHandlers) HandleMainPush(ctx context.Context, ev RepoEvent) error {
-	repo := NormalizeRepo(ev.Repo)
+	repo := strings.TrimSpace(ev.Repo)
 	if repo == "" {
 		return fmt.Errorf("%w: repo is required for main push", ErrInvalidRepoEvent)
 	}
@@ -114,7 +114,7 @@ func (h *RepoHandlers) HandleMainPush(ctx context.Context, ev RepoEvent) error {
 		return err
 	}
 	recorded := st.RecordMainPushSHA(mainSHA)
-	touched := ev.PRNumber > 0 && st.TouchPRKey(PRObjectKey(repo, ev.PRNumber))
+	touched := ev.PRNumber > 0 && st.TouchPRKey(prwire.PRObjectKey(repo, ev.PRNumber))
 	if !recorded && !touched {
 		return nil
 	}
@@ -134,7 +134,7 @@ func (h *RepoHandlers) sendMainAdvanced(ctx context.Context, st *RepoState) erro
 	for _, pr := range st.OpenPRNumbers() {
 		ev := PREvent{Event: "main_advanced", Repo: st.Repo, PRNumber: pr}
 		if err := h.prs.SendPR(ctx, prwire.PRHandlerMainAdvanced, ev); err != nil {
-			errs = append(errs, fmt.Errorf("main advanced %s: %w", PRObjectKey(st.Repo, pr), err))
+			errs = append(errs, fmt.Errorf("main advanced %s: %w", prwire.PRObjectKey(st.Repo, pr), err))
 		}
 	}
 	return errors.Join(errs...)
@@ -145,7 +145,7 @@ func (h *RepoHandlers) sendMainAdvanced(ctx context.Context, st *RepoState) erro
 // main SHA already fanned out (by HandleMainPush or an earlier fan-out)
 // sends nothing, so a redelivered fan-out never re-fires.
 func (h *RepoHandlers) HandleFanout(ctx context.Context, ev RepoEvent) error {
-	repo := NormalizeRepo(ev.Repo)
+	repo := strings.TrimSpace(ev.Repo)
 	if repo == "" {
 		return fmt.Errorf("%w: repo is required for fanout", ErrInvalidRepoEvent)
 	}
@@ -169,7 +169,7 @@ func (h *RepoHandlers) HandleFanout(ctx context.Context, ev RepoEvent) error {
 // replaces the registry ListDeployingPRs scan. A status without a SHA still
 // fans out but persists nothing.
 func (h *RepoHandlers) HandleKustomizationStatus(ctx context.Context, ev RepoEvent) error {
-	repo := NormalizeRepo(ev.Repo)
+	repo := strings.TrimSpace(ev.Repo)
 	if repo == "" {
 		return fmt.Errorf("%w: repo is required for kustomization status", ErrInvalidRepoEvent)
 	}
@@ -198,7 +198,7 @@ func (h *RepoHandlers) HandleKustomizationStatus(ctx context.Context, ev RepoEve
 			Kustomization:  strings.TrimSpace(ev.Kustomization),
 		}
 		if err := h.prs.SendPR(ctx, prwire.PRHandlerRolloutProgress, fwd); err != nil {
-			errs = append(errs, fmt.Errorf("kustomization status %s: %w", PRObjectKey(repo, pr), err))
+			errs = append(errs, fmt.Errorf("kustomization status %s: %w", prwire.PRObjectKey(repo, pr), err))
 		}
 	}
 	if changed {
@@ -211,7 +211,7 @@ func (h *RepoHandlers) HandleKustomizationStatus(ctx context.Context, ev RepoEve
 // held events schedule a delayed replay self-send BEFORE the state persists,
 // so a scheduling failure leaves nothing behind and the retry re-applies.
 func (h *RepoHandlers) HandlePRIndex(ctx context.Context, ev PRIndexEvent) error {
-	repo := NormalizeRepo(ev.Repo)
+	repo := strings.TrimSpace(ev.Repo)
 	if repo == "" || ev.PRNumber <= 0 {
 		return fmt.Errorf("%w: repo and pr number are required for pr index", ErrInvalidRepoEvent)
 	}
@@ -236,7 +236,7 @@ func (h *RepoHandlers) HandlePRIndex(ctx context.Context, ev PRIndexEvent) error
 // A miss holds the event, scheduling its expiry before persisting; beyond
 // MaxHeldSHAEvents the oldest held event is evicted and reported.
 func (h *RepoHandlers) RouteBySHA(ctx context.Context, kind string, ev SHAEvent) (SHARouteOutcome, error) {
-	repo := NormalizeRepo(ev.Repo)
+	repo := strings.TrimSpace(ev.Repo)
 	sha := normalizeIndexSHA(ev.SHA)
 	if repo == "" || sha == "" {
 		return SHARouteOutcome{}, fmt.Errorf("%w: repo and sha are required for %s", ErrInvalidRepoEvent, kind)
@@ -288,7 +288,7 @@ func forwardSHAEvent(kind, repo string, entry SHAIndexEntry, ev SHAEvent) PREven
 // ReplayHeld forwards every event held for sha once the SHA resolves. An
 // unresolved SHA keeps its events held for the expiry self-send.
 func (h *RepoHandlers) ReplayHeld(ctx context.Context, repo, sha string) error {
-	repo = NormalizeRepo(repo)
+	repo = strings.TrimSpace(repo)
 	if repo == "" || normalizeIndexSHA(sha) == "" {
 		return fmt.Errorf("%w: repo and sha are required for held replay", ErrInvalidRepoEvent)
 	}
@@ -317,7 +317,7 @@ func (h *RepoHandlers) ReplayHeld(ctx context.Context, repo, sha string) error {
 // an event was dropped; replayed or evicted IDs report false.
 func (h *RepoHandlers) ExpireHeld(ctx context.Context, repo string, id uint64) (bool, error) {
 	_ = ctx
-	repo = NormalizeRepo(repo)
+	repo = strings.TrimSpace(repo)
 	if repo == "" {
 		return false, fmt.Errorf("%w: repo is required for held expiry", ErrInvalidRepoEvent)
 	}
@@ -423,14 +423,14 @@ func repoEffectTrigger(ev RepoEvent) string {
 // push) + trigger SHA + kind + trigger check. Repo effects have no gate
 // generation. Synapse's [synapse-effect] line renders the same match key.
 func RepoEffectKey(kind string, ev RepoEvent) EffectKey {
-	return EffectKey{Repo: NormalizeRepo(ev.Repo), PRNumber: ev.PRNumber, HeadSHA: repoEffectTrigger(ev), Kind: kind, CheckName: ev.CheckName}
+	return EffectKey{Repo: strings.TrimSpace(ev.Repo), PRNumber: ev.PRNumber, HeadSHA: repoEffectTrigger(ev), Kind: kind, CheckName: ev.CheckName}
 }
 
 // beginRepoEffect loads the repo state and resolves dedup for one repo
 // effect. done reports that the outcome is final (deduped); otherwise the
 // caller executes the effect.
 func (h *RepoHandlers) beginRepoEffect(kind string, ev RepoEvent) (*RepoState, RepoEffectOutcome, bool, error) {
-	repo := NormalizeRepo(ev.Repo)
+	repo := strings.TrimSpace(ev.Repo)
 	if repo == "" || repoEffectTrigger(ev) == "" {
 		return nil, RepoEffectOutcome{}, true, fmt.Errorf("%w: repo and trigger sha are required for %s", ErrInvalidRepoEvent, kind)
 	}
@@ -522,7 +522,7 @@ func (h *RepoHandlers) runAutoUpdate(ctx context.Context, st *RepoState, policy 
 // forward sends one restate-owned PRObject event and counts it.
 func (h *RepoHandlers) forward(ctx context.Context, handler string, ev PREvent, out *RepoEffectOutcome) error {
 	if err := h.prs.SendPR(ctx, handler, ev); err != nil {
-		return fmt.Errorf("%s %s: %w", handler, PRObjectKey(ev.Repo, ev.PRNumber), err)
+		return fmt.Errorf("%s %s: %w", handler, prwire.PRObjectKey(ev.Repo, ev.PRNumber), err)
 	}
 	out.Forwards++
 	return nil
@@ -674,7 +674,7 @@ func sortedRequestNames(requests map[string]KustomizationRequest) []string {
 // binding's delayed retry; a failed restate-owned PR promotion also reports
 // HandleDeployAttemptFailed so the PR's deploy-failure deadline arms.
 func (h *RepoHandlers) HandleImagePromotion(ctx context.Context, ev RepoEvent) (RepoEffectOutcome, error) {
-	repo := NormalizeRepo(ev.Repo)
+	repo := strings.TrimSpace(ev.Repo)
 	commit := usableHeadSHA(ev.HeadSHA)
 	images := cleanStrings(ev.Images)
 	if repo == "" || commit == "" || len(images) == 0 {
@@ -828,7 +828,7 @@ func (h *RepoHandlers) reportPromotionFailure(ctx context.Context, ev RepoEvent,
 	}
 	head := usableHeadSHA(ev.HeadSHA)
 	return h.forward(ctx, prwire.PRHandlerDeployAttemptFailed, PREvent{
-		Event: "deploy_attempt_failed", Repo: NormalizeRepo(ev.Repo), PRNumber: ev.PRNumber, HeadSHA: head, MergeSHA: head,
+		Event: "deploy_attempt_failed", Repo: strings.TrimSpace(ev.Repo), PRNumber: ev.PRNumber, HeadSHA: head, MergeSHA: head,
 		Branch: strings.TrimSpace(ev.Branch), Banner: msg, Facts: failed,
 	}, out)
 }
