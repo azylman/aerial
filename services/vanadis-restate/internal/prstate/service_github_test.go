@@ -81,7 +81,7 @@ func TestGitHubStepError(t *testing.T) {
 	}
 }
 
-func TestRepoObjectServiceGitHubEffects(t *testing.T) {
+func TestRepoObjectService_HandleAutoUpdate(t *testing.T) {
 	t.Parallel()
 	policy := &AutoUpdatePolicy{Authors: []string{"bot"}, DefaultOwner: true}
 	retrySend := func(handler string, ev RepoEvent) []sentCall {
@@ -92,7 +92,6 @@ func TestRepoObjectServiceGitHubEffects(t *testing.T) {
 	}
 	tests := []struct {
 		name      string
-		handler   string
 		ev        RepoEvent
 		seed      *RepoState
 		failGet   bool
@@ -103,15 +102,15 @@ func TestRepoObjectServiceGitHubEffects(t *testing.T) {
 		wantSends []sentCall
 	}{
 		{
-			name: "repo state load failure surfaces for the invocation retry", handler: prwire.RepoHandlerAutoUpdate, gh: &fakeGitHub{}, failGet: true,
+			name: "repo state load failure surfaces for the invocation retry", gh: &fakeGitHub{}, failGet: true,
 			ev: RepoEvent{Repo: "azylman/aerial", MainSHA: "m1", AutoUpdate: policy}, wantErr: true,
 		},
 		{
-			name: "unstamped cascade executes", handler: prwire.RepoHandlerAutoUpdate, gh: &fakeGitHub{},
+			name: "unstamped cascade executes", gh: &fakeGitHub{},
 			ev: RepoEvent{Repo: "azylman/aerial", MainSHA: "m1", AutoUpdate: policy}, wantSet: true, wantRun: true,
 		},
 		{
-			name: "restate cascade executes and forwards conflicts", handler: prwire.RepoHandlerAutoUpdate, gh: conflictGH(),
+			name: "restate cascade executes and forwards conflicts", gh: conflictGH(),
 			ev: RepoEvent{Repo: "azylman/aerial", MainSHA: "m1", AutoUpdate: policy}, wantSet: true, wantRun: true,
 			wantSends: []sentCall{{
 				service: "PRObject", key: "azylman/aerial#4", method: prwire.PRHandlerBranchConflict,
@@ -119,36 +118,32 @@ func TestRepoObjectServiceGitHubEffects(t *testing.T) {
 			}},
 		},
 		{
-			name: "retryable failure schedules a delayed retry", handler: prwire.RepoHandlerAutoUpdate, gh: &fakeGitHub{listErr: errGHServer},
+			name: "retryable failure schedules a delayed retry", gh: &fakeGitHub{listErr: errGHServer},
 			ev: RepoEvent{Repo: "azylman/aerial", MainSHA: "m1", AutoUpdate: policy, Attempt: 2}, wantRun: true,
 			wantSends: retrySend(prwire.RepoHandlerAutoUpdate, RepoEvent{Repo: "azylman/aerial", MainSHA: "m1", AutoUpdate: policy, Attempt: 3}),
 		},
 		{
-			name: "rate limit failure schedules a delayed retry with rate limit reset delay", handler: prwire.RepoHandlerAutoUpdate,
-			gh: &fakeGitHub{listErr: &GitHubError{Status: 403, RateLimited: true, RetryAfter: 5 * time.Minute, Message: "rate limit"}},
-			ev: RepoEvent{Repo: "azylman/aerial", MainSHA: "m1", AutoUpdate: policy, Attempt: 2}, wantRun: true,
+			name: "rate limit failure schedules a delayed retry with rate limit reset delay",
+			gh:   &fakeGitHub{listErr: &GitHubError{Status: 403, RateLimited: true, RetryAfter: 5 * time.Minute, Message: "rate limit"}},
+			ev:   RepoEvent{Repo: "azylman/aerial", MainSHA: "m1", AutoUpdate: policy, Attempt: 2}, wantRun: true,
 			wantSends: []sentCall{{
 				service: "RepoObject", key: "azylman/aerial", method: prwire.RepoHandlerAutoUpdate,
 				input: RepoEvent{Repo: "azylman/aerial", MainSHA: "m1", AutoUpdate: policy, Attempt: 3}, delayed: true,
 			}},
 		},
 		{
-			name: "spent retry budget drops", handler: prwire.RepoHandlerAutoUpdate, gh: &fakeGitHub{listErr: errGHServer},
+			name: "spent retry budget drops", gh: &fakeGitHub{listErr: errGHServer},
 			ev: RepoEvent{Repo: "azylman/aerial", MainSHA: "m1", AutoUpdate: policy, Attempt: maxRepoEffectRetries}, wantRun: true,
 		},
 		{
-			name: "deduped trigger reports nothing", handler: prwire.RepoHandlerAutoUpdate, gh: &fakeGitHub{},
+			name: "deduped trigger reports nothing", gh: &fakeGitHub{},
 			seed: &RepoState{Repo: "azylman/aerial", RepoEffects: []string{autoUpdateKeyMain}},
 			ev:   RepoEvent{Repo: "azylman/aerial", MainSHA: "m1", AutoUpdate: policy},
 		},
-		{name: "invalid trigger fails terminally", handler: prwire.RepoHandlerAutoUpdate, gh: &fakeGitHub{}, ev: RepoEvent{Repo: "azylman/aerial"}, wantErr: true},
+		{name: "invalid trigger fails terminally", gh: &fakeGitHub{}, ev: RepoEvent{Repo: "azylman/aerial"}, wantErr: true},
 		{
-			name: "skipped cascade reports unconfigured", handler: prwire.RepoHandlerAutoUpdate, gh: &fakeGitHub{},
+			name: "skipped cascade reports unconfigured", gh: &fakeGitHub{},
 			ev: RepoEvent{Repo: "azylman/aerial", MainSHA: "m1"}, wantSet: true, wantRun: true,
-		},
-		{
-			name: "terminal rerun failure reports an error", handler: prwire.RepoHandlerWorkflowRerun, gh: &fakeGitHub{rerunErr: errGHNotFound},
-			ev: RepoEvent{Repo: "azylman/aerial", HeadSHA: "s1", RunID: 55}, wantSet: true, wantRun: true,
 		},
 	}
 	for _, tc := range tests {
@@ -157,16 +152,42 @@ func TestRepoObjectServiceGitHubEffects(t *testing.T) {
 			mc, rec := repoKV(t, tc.seed, tc.failGet)
 			run := stubRun(mc, true)
 			svc := NewRepoObjectService().WithGitHub(tc.gh)
-			var err error
-			if tc.handler == prwire.RepoHandlerWorkflowRerun {
-				err = svc.HandleWorkflowRerun(restate.WithMockContext(mc), tc.ev)
-			} else {
-				err = svc.HandleAutoUpdate(restate.WithMockContext(mc), tc.ev)
-			}
+			err := svc.HandleAutoUpdate(restate.WithMockContext(mc), tc.ev)
 			require.Equal(t, tc.wantErr, err != nil)
 			require.Equal(t, tc.wantSet, rec.setCalled)
 			require.Equal(t, tc.wantRun, run.ran)
 			require.Equal(t, tc.wantSends, rec.sends.snapshot())
+		})
+	}
+}
+
+// TestRepoObjectService_HandleWorkflowRerun pins the rerun binding: the
+// journaled GitHub call runs, applied and terminal-failure outcomes persist
+// the effect key, and malformed input fails terminally before K/V.
+func TestRepoObjectService_HandleWorkflowRerun(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		ev      RepoEvent
+		gh      *fakeGitHub
+		wantErr bool
+		wantSet bool
+		wantRun bool
+	}{
+		{name: "rerun applies and persists", ev: RepoEvent{Repo: "azylman/aerial", HeadSHA: "s1", RunID: 55}, gh: &fakeGitHub{}, wantSet: true, wantRun: true},
+		{name: "terminal rerun failure reports an error", ev: RepoEvent{Repo: "azylman/aerial", HeadSHA: "s1", RunID: 55}, gh: &fakeGitHub{rerunErr: errGHNotFound}, wantSet: true, wantRun: true},
+		{name: "missing run id fails terminally", ev: RepoEvent{Repo: "azylman/aerial", HeadSHA: "s1"}, gh: &fakeGitHub{}, wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			mc, rec := repoKV(t, nil, false)
+			run := stubRun(mc, true)
+			err := NewRepoObjectService().WithGitHub(tc.gh).HandleWorkflowRerun(restate.WithMockContext(mc), tc.ev)
+			require.Equal(t, tc.wantErr, err != nil, "err = %v", err)
+			require.Equal(t, tc.wantSet, rec.setCalled)
+			require.Equal(t, tc.wantRun, run.ran)
+			require.Empty(t, rec.sends.snapshot())
 		})
 	}
 }

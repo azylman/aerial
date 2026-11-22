@@ -169,8 +169,6 @@ func TestRegisterPRStateServices(t *testing.T) {
 func TestPRObjectService_DarkHandlers(t *testing.T) {
 	t.Parallel()
 	ev := PREvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "abc123", Event: "check_failed"}
-	prMc01, prRec01 := newStateMock[*PRState](t, nil)
-	prMc02, prRec02 := newStateMock[*PRState](t, nil)
 	prMc03, prRec03 := newStateMock[*PRState](t, nil)
 	prMc04, prRec04 := newStateMock[*PRState](t, nil)
 	prMc05, prRec05 := newStateMock[*PRState](t, nil)
@@ -192,8 +190,6 @@ func TestPRObjectService_DarkHandlers(t *testing.T) {
 		wantAlert    string
 		wantGen      uint64
 	}{
-		{name: "check failed applies", got: NewPRObjectService().HandleCheckFailed(restate.WithMockContext(prMc01), ev), rec: prRec01, wantSet: true},
-		{name: "check passed applies", got: NewPRObjectService().HandleCheckPassed(restate.WithMockContext(prMc02), ev), rec: prRec02, wantSet: true},
 		{name: "check rerun requested applies", got: NewPRObjectService().HandleCheckRerunRequested(restate.WithMockContext(prMc03), ev), rec: prRec03, wantSet: true},
 		{name: "collaborator alert applies", got: NewPRObjectService().HandleCollaboratorAlert(restate.WithMockContext(prMc04), ev), rec: prRec04, wantSet: true, wantAlert: "abc123"},
 		{name: "conflict resolved applies", got: NewPRObjectService().HandleConflictResolved(restate.WithMockContext(prMc05), ev), rec: prRec05, wantSet: true},
@@ -232,67 +228,70 @@ func TestPRObjectService_DarkHandlers(t *testing.T) {
 	}
 }
 
-// TestPRObjectService_HandleCheckFailed tests granular check recording transitions.
+// TestPRObjectService_HandleCheckFailed pins the check-failed handler end to
+// end: granular check recording, the shared stale-drop and terminal-absorbing
+// guards, malformed input dropping before K/V, K/V failures surfacing, and
+// the stored owner surviving lifecycle agent hints (an event agent only
+// fills an empty slot).
 func TestPRObjectService_HandleCheckFailed(t *testing.T) {
 	t.Parallel()
+	staleState := &PRState{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "aaa111"}
+	terminalState := &PRState{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "aaa111", Terminal: TerminalMerged}
+	reopenedState := &PRState{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "aaa111", Terminal: TerminalMerged}
+	ownedState := func() *PRState { return &PRState{Repo: "azylman/aerial", PRNumber: 101, Agent: "agent-alpha"} }
 	tests := []struct {
 		name           string
 		existing       *PRState
 		ev             PREvent
+		kvFail         bool
+		noKV           bool
+		wantErr        bool
 		wantSet        bool
 		wantFailedCI   string
 		wantNonRoboRev string
-		wantActiveFail bool
-		wantRoboActive bool
+		wantActive     bool
+		wantRobo       bool
+		wantAgent      string
 	}{
-		{
-			name:           "non-roborev check failure",
-			ev:             PREvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "abc123", CheckName: "ci/lint"},
-			wantSet:        true,
-			wantFailedCI:   "abc123",
-			wantNonRoboRev: "abc123",
-			wantActiveFail: true,
-		},
-		{
-			name:           "roborev check failure",
-			ev:             PREvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "abc123", CheckName: "roborev"},
-			wantSet:        true,
-			wantFailedCI:   "abc123",
-			wantRoboActive: true,
-		},
-		{
-			name:         "empty check name records failed ci sha only",
-			ev:           PREvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "abc123"},
-			wantSet:      true,
-			wantFailedCI: "abc123",
-		},
+		{name: "non-roborev check failure", ev: checkFailedEv(101, "abc123", "ci/lint", ""), wantSet: true, wantFailedCI: "abc123", wantNonRoboRev: "abc123", wantActive: true},
+		{name: "roborev check failure", ev: checkFailedEv(101, "abc123", "roborev", ""), wantSet: true, wantFailedCI: "abc123", wantActive: false, wantRobo: true},
+		{name: "empty check name records failed ci sha only", ev: checkFailedEv(101, "abc123", "", ""), wantSet: true, wantFailedCI: "abc123"},
+		{name: "stale sha drops", existing: staleState, ev: checkFailedEv(101, "bbb222", "", "")},
+		{name: "terminal absorbs same epoch", existing: terminalState, ev: checkFailedEv(101, "aaa111", "", "")},
+		{name: "reopen epoch applies", existing: reopenedState, ev: PREvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "aaa111", ReopenEpoch: 1}, wantSet: true, wantFailedCI: "aaa111"},
+		{name: "zero sha event applies on empty state", ev: checkFailedEv(101, "0000000", "", ""), wantSet: true},
+		{name: "state load error surfaces", kvFail: true, ev: checkFailedEv(101, "abc123", "", ""), wantErr: true},
+		{name: "empty repo drops before kv", noKV: true, ev: PREvent{PRNumber: 101, HeadSHA: "abc123"}},
+		{name: "zero pr number drops before kv", noKV: true, ev: checkFailedEv(0, "abc123", "", "")},
+		{name: "negative pr number drops before kv", noKV: true, ev: checkFailedEv(-1, "abc123", "", "")},
+		{name: "stored owner survives a different event agent", existing: ownedState(), ev: checkFailedEv(101, "abc123", "", "aerial"), wantSet: true, wantFailedCI: "abc123", wantAgent: "agent-alpha"},
+		{name: "stored owner survives an empty event agent", existing: ownedState(), ev: checkFailedEv(101, "abc123", "", ""), wantSet: true, wantFailedCI: "abc123", wantAgent: "agent-alpha"},
+		{name: "hint fills an empty stored owner", existing: &PRState{Repo: "azylman/aerial", PRNumber: 101}, ev: checkFailedEv(101, "abc123", "", " agent-beta "), wantSet: true, wantFailedCI: "abc123", wantAgent: "agent-beta"},
+		{name: "first touch adopts the hint", ev: checkFailedEv(101, "abc123", "", "agent-beta"), wantSet: true, wantFailedCI: "abc123", wantAgent: "agent-beta"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			mc, rec := newStateMock[*PRState](t, tc.existing)
+			mc, rec := prKV(t, tc.existing, tc.kvFail, tc.noKV)
 			err := NewPRObjectService().HandleCheckFailed(restate.WithMockContext(mc), tc.ev)
-			require.NoError(t, err)
-			if rec.setCalled != tc.wantSet {
-				t.Fatalf("setCalled = %v, want %v", rec.setCalled, tc.wantSet)
+			require.Equal(t, tc.wantErr, err != nil, "err = %v", err)
+			require.Equal(t, tc.wantSet, rec.setCalled)
+			if !tc.wantSet {
+				return
 			}
-			if tc.wantSet {
-				require.NotNil(t, rec.saved)
-				if rec.saved.FailedCISHA != tc.wantFailedCI {
-					t.Fatalf("FailedCISHA = %q, want %q", rec.saved.FailedCISHA, tc.wantFailedCI)
-				}
-				if rec.saved.NonRoboRevSHA != tc.wantNonRoboRev {
-					t.Fatalf("NonRoboRevSHA = %q, want %q", rec.saved.NonRoboRevSHA, tc.wantNonRoboRev)
-				}
-				if tc.wantActiveFail && !rec.saved.Checks.ActiveFailed[prwire.CanonicalFailedCheckKey(tc.ev.CheckName)] {
-					t.Fatalf("ActiveFailed[%s] = false, want true", tc.ev.CheckName)
-				}
-				if tc.wantRoboActive != rec.saved.Checks.RoboRevActiveFailed {
-					t.Fatalf("RoboRevActiveFailed = %v, want %v", rec.saved.Checks.RoboRevActiveFailed, tc.wantRoboActive)
-				}
-			}
+			require.NotNil(t, rec.saved)
+			assert.Equal(t, tc.wantFailedCI, rec.saved.FailedCISHA, "FailedCISHA")
+			assert.Equal(t, tc.wantNonRoboRev, rec.saved.NonRoboRevSHA, "NonRoboRevSHA")
+			assert.Equal(t, tc.wantActive, rec.saved.Checks.ActiveFailed[prwire.CanonicalFailedCheckKey(tc.ev.CheckName)], "ActiveFailed")
+			assert.Equal(t, tc.wantRobo, rec.saved.Checks.RoboRevActiveFailed, "RoboRevActiveFailed")
+			assert.Equal(t, tc.wantAgent, rec.saved.Agent, "Agent")
 		})
 	}
+}
+
+// checkFailedEv builds one check_failed event for azylman/aerial.
+func checkFailedEv(pr int, head, check, agent string) PREvent {
+	return PREvent{Event: "check_failed", Repo: "azylman/aerial", PRNumber: pr, HeadSHA: head, CheckName: check, Agent: agent}
 }
 
 // TestPRObjectService_HandleCheckPassed tests granular check pass transitions.
@@ -354,86 +353,25 @@ func TestPRObjectService_HandleCheckPassed(t *testing.T) {
 	}
 }
 
-// TestPRObjectService_DarkDispositions pins the shared stale-drop and
-// terminal-absorbing guards through one representative handler: stale SHAs
-// and same-epoch terminal states persist nothing, newer reopen epochs apply,
-// and K/V failures surface without persisting.
-func TestPRObjectService_DarkDispositions(t *testing.T) {
-	t.Parallel()
-	terminalState := NewPRState("azylman/aerial", 101)
-	terminalState.HeadSHA = "aaa111"
-	terminalState.Terminal = TerminalMerged
-	reopenedState := NewPRState("azylman/aerial", 101)
-	reopenedState.HeadSHA = "aaa111"
-	reopenedState.Terminal = TerminalMerged
-	staleState := NewPRState("azylman/aerial", 101)
-	staleState.HeadSHA = "aaa111"
-	tests := []struct {
-		name       string
-		existing   *PRState
-		ev         PREvent
-		failGet    bool
-		expectNoKV bool
-		wantSet    bool
-		wantErr    bool
-	}{
-		{name: "fresh state applies", existing: nil, ev: PREvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "abc123"}, wantSet: true},
-		{name: "stale sha drops", existing: staleState, ev: PREvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "bbb222"}, wantSet: false},
-		{name: "terminal absorbs same epoch", existing: terminalState, ev: PREvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "aaa111"}, wantSet: false},
-		{name: "reopen epoch applies", existing: reopenedState, ev: PREvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "aaa111", ReopenEpoch: 1}, wantSet: true},
-		{name: "zero sha event applies on empty state", existing: nil, ev: PREvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "0000000"}, wantSet: true},
-		{name: "state load error surfaces", failGet: true, ev: PREvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "abc123"}, wantSet: false, wantErr: true},
-		{name: "empty repo drops before kv", existing: nil, ev: PREvent{Repo: "", PRNumber: 101, HeadSHA: "abc123"}, expectNoKV: true, wantSet: false},
-		{name: "zero pr number drops before kv", existing: nil, ev: PREvent{Repo: "azylman/aerial", PRNumber: 0, HeadSHA: "abc123"}, expectNoKV: true, wantSet: false},
-		{name: "negative pr number drops before kv", existing: nil, ev: PREvent{Repo: "azylman/aerial", PRNumber: -1, HeadSHA: "abc123"}, expectNoKV: true, wantSet: false},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			mc, rec := prKV(t, tc.existing, tc.failGet, tc.expectNoKV)
-			err := NewPRObjectService().HandleCheckFailed(restate.WithMockContext(mc), tc.ev)
-			if tc.wantErr && err == nil {
-				t.Fatal("handler returned nil, want kv error")
-			}
-			if !tc.wantErr && err != nil {
-				t.Fatalf("handler returned %v, want nil", err)
-			}
-			if rec.setCalled != tc.wantSet {
-				t.Fatalf("setCalled = %v, want %v", rec.setCalled, tc.wantSet)
-			}
-		})
-	}
-}
-
 // TestPRObjectService_ConflictResolve pins the conflict-republish verdict
-// wiring: fresh and new SHAs publish, recorded SHAs dedupe, terminal
-// states absorb, and the resolve never persists. K/V failures surface.
+// wiring: the decision applies without persisting and K/V failures surface.
+// TestResolveConflictDispatchDecision owns the dedupe/terminal verdicts.
 func TestPRObjectService_ConflictResolve(t *testing.T) {
 	t.Parallel()
-	recordedState := NewPRState("azylman/aerial", 101)
-	recordedState.MarkConflictPublished("abc123")
-	terminalState := NewPRState("azylman/aerial", 101)
-	terminalState.MarkTerminal(TerminalMerged)
 	tests := []struct {
 		name              string
-		existing          *PRState
-		evHead            string
 		failGet           bool
 		wantShouldPublish bool
-		wantDeduped       bool
 		wantErr           bool
 	}{
-		{name: "fresh state publishes", evHead: "abc123", wantShouldPublish: true},
-		{name: "new sha publishes after recorded publish", existing: recordedState, evHead: "def456", wantShouldPublish: true},
-		{name: "recorded sha dedupes", existing: recordedState, evHead: "abc123", wantDeduped: true},
-		{name: "terminal absorbs without publish", existing: terminalState, evHead: "abc123"},
-		{name: "state load error surfaces", failGet: true, evHead: "abc123", wantErr: true},
+		{name: "fresh state publishes", wantShouldPublish: true},
+		{name: "state load error surfaces", failGet: true, wantErr: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			mc, rec := prKV(t, tc.existing, tc.failGet, false)
-			ev := PREvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: tc.evHead, Event: "conflict_detected"}
+			mc, rec := prKV(t, nil, tc.failGet, false)
+			ev := PREvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "abc123", Event: "conflict_detected"}
 			got, err := NewPRObjectService().HandleConflictDetected(restate.WithMockContext(mc), ev)
 			if tc.wantErr && err == nil {
 				t.Fatal("HandleConflictDetected err = nil, want kv error")
@@ -441,8 +379,8 @@ func TestPRObjectService_ConflictResolve(t *testing.T) {
 			if !tc.wantErr && err != nil {
 				t.Fatalf("HandleConflictDetected err = %v, want nil", err)
 			}
-			if !tc.wantErr && (got.ShouldPublish != tc.wantShouldPublish || got.Deduped != tc.wantDeduped) {
-				t.Fatalf("ShouldPublish/Deduped = %v/%v, want %v/%v", got.ShouldPublish, got.Deduped, tc.wantShouldPublish, tc.wantDeduped)
+			if !tc.wantErr && (got.ShouldPublish != tc.wantShouldPublish || got.Deduped) {
+				t.Fatalf("ShouldPublish/Deduped = %v/%v, want %v/false", got.ShouldPublish, got.Deduped, tc.wantShouldPublish)
 			}
 			if rec.setCalled {
 				t.Fatal("resolve persisted state, want no record")
@@ -452,15 +390,11 @@ func TestPRObjectService_ConflictResolve(t *testing.T) {
 }
 
 // TestPRObjectService_ConflictPublishedAck pins the publish-recorded ack
-// wiring: fresh publishes record and persist, recorded SHAs re-ack
-// idempotently, terminal states absorb without persisting. K/V failures
-// surface.
+// wiring: applied publishes persist, terminal states absorb without
+// persisting, malformed input drops before K/V and K/V failures surface.
+// TestRecordConflictPublished owns the re-ack and overwrite verdicts.
 func TestPRObjectService_ConflictPublishedAck(t *testing.T) {
 	t.Parallel()
-	recordedSame := NewPRState("azylman/aerial", 101)
-	recordedSame.MarkConflictPublished("abc123")
-	recordedNew := NewPRState("azylman/aerial", 101)
-	recordedNew.MarkConflictPublished("abc123")
 	terminalState := NewPRState("azylman/aerial", 101)
 	terminalState.MarkTerminal(TerminalMerged)
 	tests := []struct {
@@ -468,28 +402,24 @@ func TestPRObjectService_ConflictPublishedAck(t *testing.T) {
 		repo          string
 		pr            int
 		existing      *PRState
-		evHead        string
 		failGet       bool
 		expectNoKV    bool
 		wantRecorded  bool
-		wantDeduped   bool
 		wantSet       bool
 		wantErr       bool
 		wantPublished string
 	}{
-		{name: "fresh publish records and persists", repo: "azylman/aerial", pr: 101, evHead: "abc123", wantRecorded: true, wantSet: true, wantPublished: "abc123"},
-		{name: "recorded publish re-acks idempotent", repo: "azylman/aerial", pr: 101, existing: recordedSame, evHead: "abc123", wantRecorded: true, wantDeduped: true, wantSet: true, wantPublished: "abc123"},
-		{name: "new sha overwrites and persists", repo: "azylman/aerial", pr: 101, existing: recordedNew, evHead: "def456", wantRecorded: true, wantSet: true, wantPublished: "def456"},
-		{name: "terminal absorbs without persisting", repo: "azylman/aerial", pr: 101, existing: terminalState, evHead: "abc123"},
-		{name: "state load error surfaces", repo: "azylman/aerial", pr: 101, failGet: true, evHead: "abc123", wantErr: true},
-		{name: "empty repo drops before kv", repo: "", pr: 101, evHead: "abc123", expectNoKV: true, wantSet: false},
-		{name: "zero pr drops before kv", repo: "azylman/aerial", pr: 0, evHead: "abc123", expectNoKV: true, wantSet: false},
+		{name: "fresh publish records and persists", repo: "azylman/aerial", pr: 101, wantRecorded: true, wantSet: true, wantPublished: "abc123"},
+		{name: "terminal absorbs without persisting", repo: "azylman/aerial", pr: 101, existing: terminalState},
+		{name: "state load error surfaces", repo: "azylman/aerial", pr: 101, failGet: true, wantErr: true},
+		{name: "empty repo drops before kv", repo: "", pr: 101, expectNoKV: true},
+		{name: "zero pr drops before kv", repo: "azylman/aerial", pr: 0, expectNoKV: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			mc, rec := prKV(t, tc.existing, tc.failGet, tc.expectNoKV)
-			ev := PREvent{Repo: tc.repo, PRNumber: tc.pr, HeadSHA: tc.evHead, Event: "conflict_detected"}
+			ev := PREvent{Repo: tc.repo, PRNumber: tc.pr, HeadSHA: "abc123", Event: "conflict_detected"}
 			got, err := NewPRObjectService().HandleConflictPublished(restate.WithMockContext(mc), ev)
 			if tc.wantErr && err == nil {
 				t.Fatal("HandleConflictPublished err = nil, want kv error")
@@ -497,8 +427,8 @@ func TestPRObjectService_ConflictPublishedAck(t *testing.T) {
 			if !tc.wantErr && err != nil {
 				t.Fatalf("HandleConflictPublished err = %v, want nil", err)
 			}
-			if !tc.wantErr && (got.Recorded != tc.wantRecorded || got.Deduped != tc.wantDeduped) {
-				t.Fatalf("Recorded/Deduped = %v/%v, want %v/%v", got.Recorded, got.Deduped, tc.wantRecorded, tc.wantDeduped)
+			if !tc.wantErr && (got.Recorded != tc.wantRecorded || got.Deduped) {
+				t.Fatalf("Recorded/Deduped = %v/%v, want %v/false", got.Recorded, got.Deduped, tc.wantRecorded)
 			}
 			if rec.setCalled != tc.wantSet {
 				t.Fatalf("setCalled = %v, want %v", rec.setCalled, tc.wantSet)
@@ -593,8 +523,8 @@ func TestPRObjectService_DeploySuccessPublishedAck(t *testing.T) {
 }
 
 // TestPRObjectService_CIRecoveryResolve pins the CI-recovery verdict wiring:
-// recorded failures recover, clean states stay clean, and the resolve never
-// persists. K/V failures surface.
+// the resolve applies without persisting and K/V failures surface.
+// TestResolveCIRecovery owns the mismatch and clean-state verdicts.
 func TestPRObjectService_CIRecoveryResolve(t *testing.T) {
 	t.Parallel()
 	failedState := NewPRState("azylman/aerial", 101)
@@ -602,21 +532,18 @@ func TestPRObjectService_CIRecoveryResolve(t *testing.T) {
 	tests := []struct {
 		name       string
 		existing   *PRState
-		evHead     string
 		failGet    bool
 		wantFailed bool
 		wantErr    bool
 	}{
-		{name: "recorded failure recovers", existing: failedState, evHead: "abc123", wantFailed: true},
-		{name: "sha mismatch stays clean", existing: failedState, evHead: "def456"},
-		{name: "clean state stays clean", evHead: "abc123"},
-		{name: "state load error surfaces", failGet: true, evHead: "abc123", wantErr: true},
+		{name: "recorded failure recovers", existing: failedState, wantFailed: true},
+		{name: "state load error surfaces", failGet: true, wantErr: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			mc, rec := prKV(t, tc.existing, tc.failGet, false)
-			ev := PREvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: tc.evHead, Event: "check_success"}
+			ev := PREvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "abc123", Event: "check_success"}
 			got, err := NewPRObjectService().HandleCIRecovery(restate.WithMockContext(mc), ev)
 			if tc.wantErr && err == nil {
 				t.Fatal("HandleCIRecovery err = nil, want kv error")
@@ -630,34 +557,6 @@ func TestPRObjectService_CIRecoveryResolve(t *testing.T) {
 			if rec.setCalled {
 				t.Fatal("resolve persisted state, want no record")
 			}
-		})
-	}
-}
-
-// TestPRObjectService_OwnerPreserved proves lifecycle events never clobber a
-// stored owner: an event agent is only a hint that fills an empty slot.
-func TestPRObjectService_OwnerPreserved(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name      string
-		existing  *PRState
-		evAgent   string
-		wantAgent string
-	}{
-		{name: "stored owner survives a different event agent", existing: &PRState{Repo: "azylman/aerial", PRNumber: 7, Agent: "agent-alpha"}, evAgent: "aerial", wantAgent: "agent-alpha"},
-		{name: "stored owner survives an empty event agent", existing: &PRState{Repo: "azylman/aerial", PRNumber: 7, Agent: "agent-alpha"}, evAgent: "", wantAgent: "agent-alpha"},
-		{name: "hint fills an empty stored owner", existing: &PRState{Repo: "azylman/aerial", PRNumber: 7}, evAgent: " agent-beta ", wantAgent: "agent-beta"},
-		{name: "first touch adopts the hint", existing: nil, evAgent: "agent-beta", wantAgent: "agent-beta"},
-		{name: "first touch without hint leaves owner unset", existing: nil, evAgent: "", wantAgent: ""},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			mc, rec := newStateMock[*PRState](t, tc.existing)
-			ev := PREvent{Repo: "azylman/aerial", PRNumber: 7, HeadSHA: "abc123", Agent: tc.evAgent, Event: "check_failed"}
-			require.NoError(t, NewPRObjectService().HandleCheckFailed(restate.WithMockContext(mc), ev))
-			require.True(t, rec.setCalled)
-			assert.Equal(t, tc.wantAgent, rec.saved.Agent)
 		})
 	}
 }
