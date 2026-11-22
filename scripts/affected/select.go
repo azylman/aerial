@@ -82,7 +82,7 @@ func globalReasons(changed []string, forceAll bool) []string {
 		switch {
 		case selectAllFiles[f] != "":
 			reasons = append(reasons, selectAllFiles[f]+": "+f)
-		case strings.HasPrefix(f, toolDir):
+		case strings.HasPrefix(f, toolDir) && !testOnly(f):
 			reasons = append(reasons, "selection tool changed: "+f)
 		case base == "go.work" || base == "go.work.sum":
 			reasons = append(reasons, "workspace file changed: "+f)
@@ -105,15 +105,22 @@ func selectAffected(root string, cat []image, changed []string, forceAll bool) r
 	if err != nil {
 		res.Reasons = append(res.Reasons, err.Error())
 	}
-	var affected map[string]bool
+	imgChanged := slices.DeleteFunc(slices.Clone(changed), testOnly)
+	var affected, imgAffected map[string]bool
 	if g != nil {
 		res.Reasons = append(res.Reasons, g.unresolved...)
 		var fileReasons []string
 		affected, fileReasons = affectedPackages(r, changed)
 		res.Reasons = append(res.Reasons, fileReasons...)
+		imgAffected, _ = affectedPackages(r, imgChanged)
+		if len(imgChanged) < len(changed) {
+			for _, f := range r.testdataEmbeds {
+				res.Reasons = append(res.Reasons, "non-test file embeds testdata, test-only changes may reach a binary: "+f)
+			}
+		}
 	}
 	all := len(res.Reasons) > 0
-	res.Images = imageGate(cat, g, affected, changed, all)
+	res.Images = imageGate(cat, g, imgAffected, imgChanged, all)
 	mods := moduleDirs(r, root)
 	res.Test = moduleGate(mods, g, affected, changed, all || slices.Contains(changed, coverageFile))
 	res.Lint = moduleGate(mods, g, affected, changed, all || slices.Contains(changed, lintConfig))
@@ -121,6 +128,28 @@ func selectAffected(root string, cat []image, changed []string, forceAll bool) r
 		res.Reasons = []string{}
 	}
 	return res
+}
+
+// testOnly reports whether f can only affect tests: Go and JS/TS test files,
+// test shell scripts, and anything under a testdata or __tests__ dir. No
+// Dockerfile runs tests, so such files never change an image.
+func testOnly(f string) bool {
+	if slices.ContainsFunc(strings.Split(path.Dir(f), "/"), func(seg string) bool { return seg == "testdata" || seg == "__tests__" }) {
+		return true
+	}
+	base := path.Base(f)
+	for _, suffix := range testSuffixes {
+		if strings.HasSuffix(base, suffix) {
+			return true
+		}
+	}
+	return false
+}
+
+var testSuffixes = []string{
+	"_test.go", ".test.sh",
+	".test.ts", ".test.tsx", ".test.js", ".test.cjs", ".test.mjs",
+	".spec.ts", ".spec.tsx",
 }
 
 // graph holds each image's build closure and each module's test closure.

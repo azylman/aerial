@@ -73,141 +73,183 @@ var (
 	badRoot     = []image{{Service: "bad", Select: selectRule{GoRoots: []string{"nowhere"}}}}
 )
 
+// selectAffectedCase is one TestSelectAffected row.
+type selectAffectedCase struct {
+	name     string
+	fixture  string
+	overlay  map[string]string
+	subdir   string // run against root/subdir (a missing dir exercises scan errors)
+	catalog  []image
+	changed  []string
+	forceAll bool
+	want     result
+}
+
+// selectAffectedCases lives at package level to keep TestSelectAffected under funlen.
+var selectAffectedCases = []selectAffectedCase{
+	{
+		name: "shared package rebuilds only importers", fixture: "repo", catalog: repoCatalog, changed: []string{"lib/text/text.go"},
+		want: result{Images: sel(false, "app"), Test: sel(false, "app", "lib"), Lint: sel(false, "app", "lib"), Reasons: []string{}},
+	},
+	{
+		name: "build-tagged import still counts", fixture: "repo", catalog: repoCatalog, changed: []string{"lib/tagged/tagged_windows.go"},
+		want: result{Images: sel(false, "app"), Test: sel(false, "app", "lib"), Lint: sel(false, "app", "lib"), Reasons: []string{}},
+	},
+	{
+		name: "embed asset dir maps to its package", fixture: "repo", catalog: repoCatalog, changed: []string{"lib/embedded/assets/page.txt"},
+		want: result{Images: sel(false, "app"), Test: sel(false, "lib"), Lint: sel(false, "lib"), Reasons: []string{}},
+	},
+	{
+		name: "file in sub-package also affects enclosing package", fixture: "repo", catalog: repoCatalog, changed: []string{"lib/embedded/sub/data.txt"},
+		want: result{Images: sel(false, "app"), Test: sel(false, "lib"), Lint: sel(false, "lib"), Reasons: []string{}},
+	},
+	{
+		name: "external test import selects tests not images", fixture: "repo", catalog: repoCatalog, changed: []string{"lib/onlytest/onlytest.go"},
+		want: result{Images: noImages, Test: sel(false, "app", "lib"), Lint: sel(false, "app", "lib"), Reasons: []string{}},
+	},
+	{
+		name: "test file runs only its own module", fixture: "repo", catalog: repoCatalog, changed: []string{"lib/text/text_test.go"},
+		want: result{Images: noImages, Test: sel(false, "lib"), Lint: sel(false, "lib"), Reasons: []string{}},
+	},
+	{
+		name: "test file in image input dir selects no image", fixture: "repo", catalog: repoCatalog, changed: []string{"app/x_test.go"},
+		want: result{Images: noImages, Test: sel(false, "app"), Lint: sel(false, "app"), Reasons: []string{}},
+	},
+	{
+		name: "testdata file selects no image", fixture: "repo", catalog: repoCatalog, changed: []string{"app/testdata/f.json"},
+		want: result{Images: noImages, Test: sel(false, "app"), Lint: sel(false, "app"), Reasons: []string{}},
+	},
+	{
+		name: "js test files select no image", fixture: "repo", catalog: repoCatalog, changed: []string{"static/a.test.ts", "web/__tests__/b.js"},
+		want: result{Images: noImages, Test: noModules, Lint: noModules, Reasons: []string{}},
+	},
+	{
+		name: "selection tool test file selects nothing globally", fixture: "repo", catalog: repoCatalog, changed: []string{"scripts/affected/x_test.go"},
+		want: result{Images: noImages, Test: noModules, Lint: noModules, Reasons: []string{}},
+	},
+	{
+		name: "test file beside prod file still selects image", fixture: "repo", catalog: repoCatalog, changed: []string{"app/x_test.go", "app/main.go"},
+		want: result{Images: sel(false, "app"), Test: sel(false, "app"), Lint: sel(false, "app"), Reasons: []string{}},
+	},
+	{
+		name: "prod embed of testdata selects all on test-only change", fixture: "repo", catalog: repoCatalog, changed: []string{"lib/text/testdata/a.json"},
+		overlay: map[string]string{"lib/text/embed.go": "package text\n\nimport \"embed\"\n\n//go:embed testdata\nvar FS embed.FS\n"},
+		want: result{Images: allImages, Test: allModules, Lint: allModules, Reasons: []string{
+			"non-test file embeds testdata, test-only changes may reach a binary: lib/text/embed.go",
+		}},
+	},
+	{
+		name: "testutil embed of testdata is exempt", fixture: "repo", catalog: repoCatalog, changed: []string{"lib/testutil/testdata/a.json"},
+		overlay: map[string]string{"lib/testutil/testutil.go": "package testutil\n\nimport \"embed\"\n\n//go:embed testdata\nvar FS embed.FS\n"},
+		want:    result{Images: noImages, Test: sel(false, "lib"), Lint: sel(false, "lib"), Reasons: []string{}},
+	},
+	{
+		name: "prod embed of testdata ignored without test-only change", fixture: "repo", catalog: repoCatalog, changed: []string{"web/style.css"},
+		overlay: map[string]string{"lib/text/embed.go": "package text\n\nimport \"embed\"\n\n//go:embed testdata\nvar FS embed.FS\n"},
+		want:    result{Images: sel(false, "app", "static"), Test: noModules, Lint: noModules, Reasons: []string{}},
+	},
+	{
+		name: "go.sum affects every package of its module", fixture: "repo", catalog: repoCatalog, changed: []string{"lib/go.sum"},
+		want: result{Images: sel(false, "app"), Test: sel(false, "app", "lib"), Lint: sel(false, "app", "lib"), Reasons: []string{}},
+	},
+	{
+		name: "explicit non-Go input", fixture: "repo", catalog: repoCatalog, changed: []string{"web/style.css"},
+		want: result{Images: sel(false, "app", "static"), Test: noModules, Lint: noModules, Reasons: []string{}},
+	},
+	{
+		name: "own dir glob and own module", fixture: "repo", catalog: repoCatalog, changed: []string{"tool/README.md"},
+		want: result{Images: sel(false, "tool"), Test: sel(false, "tool"), Lint: sel(false, "tool"), Reasons: []string{}},
+	},
+	{
+		name: "nested module is not its parent", fixture: "repo", catalog: repoCatalog, changed: []string{"tool/nested/nested.go"},
+		want: result{Images: sel(false, "tool"), Test: sel(false, "tool", "tool/nested"), Lint: sel(false, "tool", "tool/nested"), Reasons: []string{}},
+	},
+	{
+		name: "code outside every module selects nothing", fixture: "repo", catalog: repoCatalog, changed: []string{"deep/a/b/deep.go", "lib/testdata/fixture.go"},
+		want: result{Images: noImages, Test: sel(false, "lib"), Lint: sel(false, "lib"), Reasons: []string{}},
+	},
+	{
+		name: "pkg output tracks pkg paths", fixture: "repo", catalog: repoCatalog, changed: []string{"pkg/README.md"},
+		want: result{Pkg: true, Images: noImages, Test: noModules, Lint: noModules, Reasons: []string{}},
+	},
+	{
+		name: "coverage script selects every test module", fixture: "repo", catalog: repoCatalog, changed: []string{"scripts/check-coverage.sh"},
+		want: result{Images: noImages, Test: allModules, Lint: noModules, Reasons: []string{}},
+	},
+	{
+		name: "lint config selects every lint module", fixture: "repo", catalog: repoCatalog, changed: []string{".golangci.yml"},
+		want: result{Images: noImages, Test: noModules, Lint: allModules, Reasons: []string{}},
+	},
+	{
+		name: "force all", fixture: "repo", catalog: repoCatalog, changed: []string{"web/style.css"}, forceAll: true,
+		want: result{Images: allImages, Test: allModules, Lint: allModules, Reasons: []string{"force_all requested"}},
+	},
+	{
+		name: "empty changed list", fixture: "repo", catalog: repoCatalog,
+		want: result{Images: allImages, Test: allModules, Lint: allModules, Reasons: []string{"empty changed-file list"}},
+	},
+	{
+		name: "workflow change", fixture: "repo", catalog: repoCatalog, changed: []string{".github/workflows/docker-publish.yml"},
+		want: result{Images: allImages, Test: allModules, Lint: allModules, Reasons: []string{"workflow changed: .github/workflows/docker-publish.yml"}},
+	},
+	{
+		name: "dockerignore change", fixture: "repo", catalog: repoCatalog, changed: []string{".dockerignore"},
+		want: result{Images: allImages, Test: allModules, Lint: allModules, Reasons: []string{"root .dockerignore changed: .dockerignore"}},
+	},
+	{
+		name: "tool change", fixture: "repo", catalog: repoCatalog, changed: []string{"scripts/affected/catalog.json"},
+		want: result{Images: allImages, Test: allModules, Lint: allModules, Reasons: []string{"selection tool changed: scripts/affected/catalog.json"}},
+	},
+	{
+		name: "workspace file", fixture: "repo", catalog: repoCatalog, changed: []string{"go.work"},
+		want: result{Images: allImages, Test: allModules, Lint: allModules, Reasons: []string{"workspace file changed: go.work"}},
+	},
+	{
+		name: "go.mod of an undiscovered module", fixture: "repo", catalog: repoCatalog, changed: []string{"deep/a/b/go.mod"},
+		want: result{Images: allImages, Test: allModules, Lint: allModules, Reasons: []string{"module file outside a known module: deep/a/b/go.mod"}},
+	},
+	{
+		name: "unresolvable repo imports", fixture: "repo", catalog: repoCatalog, changed: []string{"web/style.css"},
+		overlay: map[string]string{"app/internal/core/core.go": "package core\n\nimport (\n\t_ \"example.com/fx/app/missing\"\n\t_ \"example.com/fx/ghost\"\n)\n\nconst Name = \"core\"\n"},
+		want: result{Images: allImages, Test: allModules, Lint: allModules, Reasons: []string{
+			"unresolvable import app/internal/core: example.com/fx/app/missing",
+			"unresolvable import app/internal/core: example.com/fx/ghost",
+		}},
+	},
+	{
+		name: "parse error", fixture: "repo", catalog: repoCatalog, changed: []string{"web/style.css"},
+		overlay: map[string]string{"app/bad.go": "package main\n\nimport (\n"},
+		want:    result{Images: allImages, Test: allModules, Lint: allModules, Reasons: []string{"parse app/bad.go: app/bad.go:3:10: expected ')', found 'EOF'"}},
+	},
+	{
+		name: "unknown go root", fixture: "repo", catalog: badRoot, changed: []string{"web/style.css"},
+		want: result{Images: sel(true, "bad"), Test: allModules, Lint: allModules, Reasons: []string{`catalog bad: go root "nowhere" is neither a module nor a package`}},
+	},
+	{
+		name: "missing root", subdir: "missing", catalog: staticOnly, changed: []string{"static/a"},
+		want: result{Images: sel(true, "static"), Test: sel(true), Lint: sel(true), Reasons: []string{"lstat $ROOT/missing: no such file or directory"}},
+	},
+	{
+		name: "go.mod without module directive", overlay: map[string]string{"m/go.mod": "go 1.27.3\n"}, catalog: staticOnly, changed: []string{"static/a"},
+		want: result{Images: sel(true, "static"), Test: sel(true), Lint: sel(true), Reasons: []string{"$ROOT/m/go.mod: no module directive"}},
+	},
+	{
+		name: "repo without modules", overlay: map[string]string{"static/index.html": ""}, catalog: staticOnly, changed: []string{"static/index.html"},
+		want: result{Images: sel(false, "static"), Test: noModules, Lint: noModules, Reasons: []string{}},
+	},
+	{
+		name: "root module", fixture: "rootmod", catalog: rootCatalog, changed: []string{"internal/x/x.go"},
+		want: result{Images: sel(false, "root"), Test: sel(false, "."), Lint: sel(false, "."), Reasons: []string{}},
+	},
+	{
+		name: "root module non-Go file", fixture: "rootmod", catalog: rootCatalog, changed: []string{"README.md"},
+		want: result{Images: sel(false, "root"), Test: sel(false, "."), Lint: sel(false, "."), Reasons: []string{}},
+	},
+}
+
 func TestSelectAffected(t *testing.T) {
 	t.Parallel()
-	tests := []struct {
-		name     string
-		fixture  string
-		overlay  map[string]string
-		subdir   string // run against root/subdir (a missing dir exercises scan errors)
-		catalog  []image
-		changed  []string
-		forceAll bool
-		want     result
-	}{
-		{
-			name: "shared package rebuilds only importers", fixture: "repo", catalog: repoCatalog, changed: []string{"lib/text/text.go"},
-			want: result{Images: sel(false, "app"), Test: sel(false, "app", "lib"), Lint: sel(false, "app", "lib"), Reasons: []string{}},
-		},
-		{
-			name: "build-tagged import still counts", fixture: "repo", catalog: repoCatalog, changed: []string{"lib/tagged/tagged_windows.go"},
-			want: result{Images: sel(false, "app"), Test: sel(false, "app", "lib"), Lint: sel(false, "app", "lib"), Reasons: []string{}},
-		},
-		{
-			name: "embed asset dir maps to its package", fixture: "repo", catalog: repoCatalog, changed: []string{"lib/embedded/assets/page.txt"},
-			want: result{Images: sel(false, "app"), Test: sel(false, "lib"), Lint: sel(false, "lib"), Reasons: []string{}},
-		},
-		{
-			name: "file in sub-package also affects enclosing package", fixture: "repo", catalog: repoCatalog, changed: []string{"lib/embedded/sub/data.txt"},
-			want: result{Images: sel(false, "app"), Test: sel(false, "lib"), Lint: sel(false, "lib"), Reasons: []string{}},
-		},
-		{
-			name: "external test import selects tests not images", fixture: "repo", catalog: repoCatalog, changed: []string{"lib/onlytest/onlytest.go"},
-			want: result{Images: noImages, Test: sel(false, "app", "lib"), Lint: sel(false, "app", "lib"), Reasons: []string{}},
-		},
-		{
-			name: "test file runs only its own module", fixture: "repo", catalog: repoCatalog, changed: []string{"lib/text/text_test.go"},
-			want: result{Images: noImages, Test: sel(false, "lib"), Lint: sel(false, "lib"), Reasons: []string{}},
-		},
-		{
-			name: "go.sum affects every package of its module", fixture: "repo", catalog: repoCatalog, changed: []string{"lib/go.sum"},
-			want: result{Images: sel(false, "app"), Test: sel(false, "app", "lib"), Lint: sel(false, "app", "lib"), Reasons: []string{}},
-		},
-		{
-			name: "explicit non-Go input", fixture: "repo", catalog: repoCatalog, changed: []string{"web/style.css"},
-			want: result{Images: sel(false, "app", "static"), Test: noModules, Lint: noModules, Reasons: []string{}},
-		},
-		{
-			name: "own dir glob and own module", fixture: "repo", catalog: repoCatalog, changed: []string{"tool/README.md"},
-			want: result{Images: sel(false, "tool"), Test: sel(false, "tool"), Lint: sel(false, "tool"), Reasons: []string{}},
-		},
-		{
-			name: "nested module is not its parent", fixture: "repo", catalog: repoCatalog, changed: []string{"tool/nested/nested.go"},
-			want: result{Images: sel(false, "tool"), Test: sel(false, "tool", "tool/nested"), Lint: sel(false, "tool", "tool/nested"), Reasons: []string{}},
-		},
-		{
-			name: "code outside every module selects nothing", fixture: "repo", catalog: repoCatalog, changed: []string{"deep/a/b/deep.go", "lib/testdata/fixture.go"},
-			want: result{Images: noImages, Test: sel(false, "lib"), Lint: sel(false, "lib"), Reasons: []string{}},
-		},
-		{
-			name: "pkg output tracks pkg paths", fixture: "repo", catalog: repoCatalog, changed: []string{"pkg/README.md"},
-			want: result{Pkg: true, Images: noImages, Test: noModules, Lint: noModules, Reasons: []string{}},
-		},
-		{
-			name: "coverage script selects every test module", fixture: "repo", catalog: repoCatalog, changed: []string{"scripts/check-coverage.sh"},
-			want: result{Images: noImages, Test: allModules, Lint: noModules, Reasons: []string{}},
-		},
-		{
-			name: "lint config selects every lint module", fixture: "repo", catalog: repoCatalog, changed: []string{".golangci.yml"},
-			want: result{Images: noImages, Test: noModules, Lint: allModules, Reasons: []string{}},
-		},
-		{
-			name: "force all", fixture: "repo", catalog: repoCatalog, changed: []string{"web/style.css"}, forceAll: true,
-			want: result{Images: allImages, Test: allModules, Lint: allModules, Reasons: []string{"force_all requested"}},
-		},
-		{
-			name: "empty changed list", fixture: "repo", catalog: repoCatalog,
-			want: result{Images: allImages, Test: allModules, Lint: allModules, Reasons: []string{"empty changed-file list"}},
-		},
-		{
-			name: "workflow change", fixture: "repo", catalog: repoCatalog, changed: []string{".github/workflows/docker-publish.yml"},
-			want: result{Images: allImages, Test: allModules, Lint: allModules, Reasons: []string{"workflow changed: .github/workflows/docker-publish.yml"}},
-		},
-		{
-			name: "dockerignore change", fixture: "repo", catalog: repoCatalog, changed: []string{".dockerignore"},
-			want: result{Images: allImages, Test: allModules, Lint: allModules, Reasons: []string{"root .dockerignore changed: .dockerignore"}},
-		},
-		{
-			name: "tool change", fixture: "repo", catalog: repoCatalog, changed: []string{"scripts/affected/catalog.json"},
-			want: result{Images: allImages, Test: allModules, Lint: allModules, Reasons: []string{"selection tool changed: scripts/affected/catalog.json"}},
-		},
-		{
-			name: "workspace file", fixture: "repo", catalog: repoCatalog, changed: []string{"go.work"},
-			want: result{Images: allImages, Test: allModules, Lint: allModules, Reasons: []string{"workspace file changed: go.work"}},
-		},
-		{
-			name: "go.mod of an undiscovered module", fixture: "repo", catalog: repoCatalog, changed: []string{"deep/a/b/go.mod"},
-			want: result{Images: allImages, Test: allModules, Lint: allModules, Reasons: []string{"module file outside a known module: deep/a/b/go.mod"}},
-		},
-		{
-			name: "unresolvable repo imports", fixture: "repo", catalog: repoCatalog, changed: []string{"web/style.css"},
-			overlay: map[string]string{"app/internal/core/core.go": "package core\n\nimport (\n\t_ \"example.com/fx/app/missing\"\n\t_ \"example.com/fx/ghost\"\n)\n\nconst Name = \"core\"\n"},
-			want: result{Images: allImages, Test: allModules, Lint: allModules, Reasons: []string{
-				"unresolvable import app/internal/core: example.com/fx/app/missing",
-				"unresolvable import app/internal/core: example.com/fx/ghost",
-			}},
-		},
-		{
-			name: "parse error", fixture: "repo", catalog: repoCatalog, changed: []string{"web/style.css"},
-			overlay: map[string]string{"app/bad.go": "package main\n\nimport (\n"},
-			want:    result{Images: allImages, Test: allModules, Lint: allModules, Reasons: []string{"parse app/bad.go: app/bad.go:3:10: expected ')', found 'EOF'"}},
-		},
-		{
-			name: "unknown go root", fixture: "repo", catalog: badRoot, changed: []string{"web/style.css"},
-			want: result{Images: sel(true, "bad"), Test: allModules, Lint: allModules, Reasons: []string{`catalog bad: go root "nowhere" is neither a module nor a package`}},
-		},
-		{
-			name: "missing root", subdir: "missing", catalog: staticOnly, changed: []string{"static/a"},
-			want: result{Images: sel(true, "static"), Test: sel(true), Lint: sel(true), Reasons: []string{"lstat $ROOT/missing: no such file or directory"}},
-		},
-		{
-			name: "go.mod without module directive", overlay: map[string]string{"m/go.mod": "go 1.27.3\n"}, catalog: staticOnly, changed: []string{"static/a"},
-			want: result{Images: sel(true, "static"), Test: sel(true), Lint: sel(true), Reasons: []string{"$ROOT/m/go.mod: no module directive"}},
-		},
-		{
-			name: "repo without modules", overlay: map[string]string{"static/index.html": ""}, catalog: staticOnly, changed: []string{"static/index.html"},
-			want: result{Images: sel(false, "static"), Test: noModules, Lint: noModules, Reasons: []string{}},
-		},
-		{
-			name: "root module", fixture: "rootmod", catalog: rootCatalog, changed: []string{"internal/x/x.go"},
-			want: result{Images: sel(false, "root"), Test: sel(false, "."), Lint: sel(false, "."), Reasons: []string{}},
-		},
-		{
-			name: "root module non-Go file", fixture: "rootmod", catalog: rootCatalog, changed: []string{"README.md"},
-			want: result{Images: sel(false, "root"), Test: sel(false, "."), Lint: sel(false, "."), Reasons: []string{}},
-		},
-	}
-	for _, tc := range tests {
+	for _, tc := range selectAffectedCases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			root := copyFixture(t, tc.fixture, tc.overlay)
