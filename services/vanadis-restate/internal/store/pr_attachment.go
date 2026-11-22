@@ -117,7 +117,7 @@ func (s *Store) attachPRTransaction(ctx context.Context, chunkID string, req Att
 		return "", "", "", ErrBuildConflict
 	}
 
-	recoverWorker := firstWorkerFailure(c)
+	recoverWorker := firstWorkerFailure(c, req.PRNumber)
 	if recoverWorker && !attachmentRecoveryAllowed(b, chunks, c.ID) {
 		return "", "", "", ErrBuildConflict
 	}
@@ -256,6 +256,6 @@ func AttachmentMatches(owner string, c model.VanadisChunk, b model.VanadisBuild,
 	return matches && c.Status != statusCancelled && b.Status != statusCancelled && b.Status != statusCompleted && (!terminalChunk || c.PRNumber == req.PRNumber)
 }
 
-func firstWorkerFailure(c model.VanadisChunk) bool {
-	return c.Mode == "pr" && c.Status == statusFailed && c.PRNumber == 0 && c.CIFailCount == 0
+func firstWorkerFailure(c model.VanadisChunk, reqPRNumber ...int) bool {
+	return c.Mode == "pr" && c.Status == statusFailed && c.CIFailCount == 0 && (c.PRNumber == 0 || (len(reqPRNumber) > 0 && reqPRNumber[0] > 0 && c.PRNumber == reqPRNumber[0]))
 }

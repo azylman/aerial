@@ -253,6 +253,13 @@ func (g *Gate) ExpireDeadline(rt Runtime, req DeploymentDeadlineRequest) error {
 		rt.ScheduleDeadline(req, a.Deadline.Sub(now))
 		return nil
 	}
+	if g.exec != nil && g.exec.RateLimitDelay(now) > 0 {
+		a.Deadline = now.Add(g.exec.RateLimitDelay(now) + time.Minute)
+		attempts[req.ChunkID] = a
+		rt.SetAttempts(attempts)
+		rt.ScheduleDeadline(req, a.Deadline.Sub(now))
+		return nil
+	}
 	out, err := rt.RunStep("deployment-deadline-delivery", func(ctx context.Context) (StepOutput, error) {
 		return g.DeliverDeadline(ctx, rt.Key(), a)
 	})
@@ -278,7 +285,7 @@ func (g *Gate) RecordDeploymentStart(ctx context.Context, buildID, chunkID strin
 	if err != nil {
 		return false, "", err
 	}
-	if build == nil || build.Status != statusRunning {
+	if build == nil || (build.Status != statusRunning && build.Status != statusFailed) {
 		return false, "", nil
 	}
 	for _, c := range chunks {
@@ -288,7 +295,10 @@ func (g *Gate) RecordDeploymentStart(ctx context.Context, buildID, chunkID strin
 		if c.Status == statusDeployFailed {
 			return true, "", nil
 		}
-		if c.Status != statusMerged && c.Status != statusDeploying {
+		if c.Status == statusFailed && (c.Mode != "pr" || c.PRNumber <= 0) {
+			return false, "", nil
+		}
+		if c.Status != statusMerged && c.Status != statusDeploying && c.Status != statusFailed {
 			return false, "", nil
 		}
 		if ev.RolloutState == nil {
