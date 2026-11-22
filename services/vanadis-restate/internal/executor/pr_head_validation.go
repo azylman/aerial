@@ -98,6 +98,27 @@ func (e *Executor) ValidatePRHead(ctx context.Context, repo string, number int, 
 	return nil
 }
 
+// LivePRState reads GitHub's current head SHA and whether the PR is still open
+// and unmerged. A missing PR (404/410) reports closed without an error; other
+// API failures are returned for the caller to classify.
+func (e *Executor) LivePRState(ctx context.Context, repo string, number int) (string, bool, error) {
+	pr, _, _, err := e.fetchGitHubPullRequest(ctx, repo, number)
+	if errors.Is(err, store.ErrPRTransitionSkipped) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	open := pr.State == "open" && (pr.Merged == nil || !*pr.Merged)
+	return strings.TrimSpace(pr.Head.SHA), open, nil
+}
+
+// HasRoboRevOverride reports whether `aerial-pr.sh override-roborev` recorded
+// an override for headSHA on the PR.
+func (e *Executor) HasRoboRevOverride(ctx context.Context, repo string, number int, headSHA string) (bool, error) {
+	return e.ciClient().HasRoboRevOverrideChecked(ctx, repo, number, headSHA)
+}
+
 func isTrustedPRAuthor(login, association, owner string) bool {
 	if cleanLogin := strings.TrimSpace(login); cleanLogin != "" && strings.EqualFold(cleanLogin, owner) {
 		return true
