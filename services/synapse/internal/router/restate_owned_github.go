@@ -521,9 +521,8 @@ func (st restateBuildMetadataStore) RecordPRBuildMetadata(ctx context.Context, r
 }
 
 // ownedBuildConsumer builds the buildmeta consumer over the Restate store.
-// legacy_build_workflows config stays in synapse via the consumer config.
 func (s *RouterServer) ownedBuildConsumer(fact *pubsub.PRLifecycleEvent) *buildmeta.Consumer {
-	return buildmeta.NewConsumer(s, restateBuildMetadataStore{srv: s, fact: fact}, s.cfgSrc, s.resolveLegacyWorkflowRunImages)
+	return buildmeta.NewConsumer(s, restateBuildMetadataStore{srv: s, fact: fact})
 }
 
 // processOwnedBuildMetadataCheck ingests one transport check: the PR comes

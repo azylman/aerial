@@ -16,11 +16,7 @@ type metadataAPI struct {
 	checks                                   []GitHubMetadataCheck
 	paginate                                 bool
 	parents                                  []string
-	blob                                     string
-	logs                                     []byte
-	jobs                                     []GitHubWorkflowJobItem
-	runStatus, checksStatus, blobStatus, cmt int
-	listStatus, logsStatus                   int
+	runStatus, checksStatus, cmt, listStatus int
 }
 
 func (f metadataAPI) serve(w http.ResponseWriter, r *http.Request) {
@@ -32,22 +28,14 @@ func (f metadataAPI) serve(w http.ResponseWriter, r *http.Request) {
 		body, status = map[string]any{"workflow_runs": f.runs}, firstStatus(f.listStatus, status)
 	case len(parts) == 6 && parts[3] == "actions" && parts[4] == "runs":
 		body, status = f.runByID(parts[5])
-	case len(parts) == 7 && parts[6] == "jobs":
-		body = GitHubWorkflowJobsResponse{Jobs: f.jobs}
-	case len(parts) == 9 && parts[8] == "logs":
-		w.WriteHeader(firstStatus(f.logsStatus, http.StatusOK))
-		_, _ = w.Write(f.logs)
-		return
 	case len(parts) == 6 && parts[3] == "commits" && parts[5] == "check-runs":
 		body, status = GitHubCheckRunsResponse{CheckRuns: f.checkPage(r.URL.Query().Get("page"))}, firstStatus(f.checksStatus, status)
 	case len(parts) == 5 && parts[3] == "commits":
-		parents := []map[string]string{}
+		parents := make([]map[string]string, 0, len(f.parents))
 		for _, sha := range f.parents {
 			parents = append(parents, map[string]string{"sha": sha})
 		}
 		body, status = map[string]any{"sha": parts[4], "parents": parents}, firstStatus(f.cmt, status)
-	case len(parts) >= 5 && parts[3] == "contents":
-		body, status = map[string]string{"sha": f.blob}, firstStatus(f.blobStatus, status)
 	default:
 		status = http.StatusNotFound
 	}

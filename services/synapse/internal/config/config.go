@@ -28,7 +28,6 @@ type BotConfig struct {
 
 // Config holds runtime configuration for synapse.
 type Config struct {
-	LegacyBuildWorkflows []LegacyBuildWorkflow
 	Port                 string
 	KubeAPIServer        string
 	KubeToken            string
@@ -62,10 +61,9 @@ type CollaboratorCIAlertRule struct {
 
 // RouterYAMLConfig defines the declarative file schema for services/synapse/synapse.yaml.
 type RouterYAMLConfig struct {
-	LegacyBuildWorkflows []LegacyBuildWorkflow `yaml:"legacy_build_workflows"`
-	Port                 string                `yaml:"port"`
-	EriURL               string                `yaml:"eri_url"`
-	NATSURL              string                `yaml:"nats_url"`
+	Port    string `yaml:"port"`
+	EriURL  string `yaml:"eri_url"`
+	NATSURL string `yaml:"nats_url"`
 	// RestateURL is the Restate ingress synapse sends every PR lifecycle
 	// event to. Required: a config without it fails validation, and a hot
 	// reload without it keeps the last known good config.
@@ -109,13 +107,6 @@ func NormalizeGitHubCredential(raw string) (string, bool) {
 	}
 }
 
-// LegacyBuildWorkflow pins one immutable historical producer revision.
-type LegacyBuildWorkflow struct {
-	Repository   string `yaml:"repository"`
-	WorkflowPath string `yaml:"workflow_path"`
-	BlobSHA      string `yaml:"blob_sha"`
-}
-
 var (
 	SynapseFallbackConfigPath = "/config/synapse.yaml"
 	SynapseAerialConfigPath   = "/share/aerial-config/config.yaml"
@@ -143,9 +134,6 @@ func LoadConfig(configPath string) Config {
 func LoadConfigStrict(configPath string) (Config, error) {
 	fileCfg, err := readRouterYAML(configPath)
 	if err != nil {
-		return Config{}, err
-	}
-	if _, err := NormalizeLegacyBuildWorkflows(fileCfg.LegacyBuildWorkflows); err != nil {
 		return Config{}, err
 	}
 	if v, ok := NormalizeGitHubCredential(fileCfg.GitHubCredential); !ok {
@@ -317,24 +305,6 @@ func NormalizeCollaboratorCIAlerts(rules []CollaboratorCIAlertRule) []Collaborat
 	return out
 }
 
-func NormalizeLegacyBuildWorkflows(raw []LegacyBuildWorkflow) ([]LegacyBuildWorkflow, error) {
-	out := make([]LegacyBuildWorkflow, 0, len(raw))
-	seen := map[LegacyBuildWorkflow]bool{}
-	for _, v := range raw {
-		v.Repository = strings.ToLower(strings.TrimSpace(v.Repository))
-		v.WorkflowPath = strings.TrimSpace(v.WorkflowPath)
-		v.BlobSHA = strings.ToLower(strings.TrimSpace(v.BlobSHA))
-		if !model.MetadataRepo.MatchString(v.Repository) || !model.ValidWorkflowPath(v.WorkflowPath) || !model.MetadataSHA.MatchString(v.BlobSHA) {
-			return nil, fmt.Errorf("invalid legacy build workflow")
-		}
-		if !seen[v] {
-			out = append(out, v)
-			seen[v] = true
-		}
-	}
-	return out, nil
-}
-
 func resolveRouterYAMLPath(configPath string) string {
 	if targetPath := strings.TrimSpace(configPath); targetPath != "" {
 		if fi, err := os.Stat(targetPath); err == nil && fi.Size() > 0 {
@@ -469,10 +439,6 @@ func resolveK8sAuthConfig(fileCfg RouterYAMLConfig, kubeServer string) (bool, k8
 }
 
 func buildConfig(fileCfg RouterYAMLConfig) Config {
-	legacy, err := NormalizeLegacyBuildWorkflows(fileCfg.LegacyBuildWorkflows)
-	if err != nil {
-		log.Printf("[Synapse] invalid legacy workflows: %v", err)
-	}
 	autoUpdateAuthors := model.DedupeTrimmedStrings(fileCfg.AutoUpdatePRAuthors)
 	sysChan := strutil.FirstNonEmpty(fileCfg.SystemChannelID, fileCfg.SystemChannel)
 	collaboratorAlerts := NormalizeCollaboratorCIAlerts(fileCfg.CollaboratorCIAlerts)
@@ -515,7 +481,6 @@ func buildConfig(fileCfg RouterYAMLConfig) Config {
 	}
 
 	return Config{
-		LegacyBuildWorkflows: legacy,
 		Port:                 strutil.FirstNonEmpty(os.Getenv("PORT"), fileCfg.Port, "4020"),
 		KubeAPIServer:        strings.TrimRight(kubeServer, "/"),
 		KubeToken:            kubeToken,

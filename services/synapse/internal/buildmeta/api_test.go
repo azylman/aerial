@@ -1,8 +1,6 @@
 package buildmeta
 
 import (
-	"archive/zip"
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -16,32 +14,15 @@ import (
 	"testing"
 
 	"github.com/azylman/aerial/pkg/prwire"
-	"github.com/azylman/aerial/services/synapse/internal/config"
 	"github.com/azylman/aerial/services/synapse/internal/model"
 )
-
-const legacyFixtureBlob = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 
 type metadataAPI struct {
 	runs                                     []MetadataWorkflowRun
 	checks                                   []model.GitHubMetadataCheck
 	paginate                                 bool
 	parents                                  []string
-	blob                                     string
-	logs                                     []byte
-	jobs                                     []legacyJobItem
-	runStatus, checksStatus, blobStatus, cmt int
-	listStatus, logsStatus                   int
-}
-
-type legacyJobItem struct {
-	Name       string `json:"name"`
-	Status     string `json:"status"`
-	Conclusion string `json:"conclusion"`
-}
-
-type legacyJobsResponse struct {
-	Jobs []legacyJobItem `json:"jobs"`
+	runStatus, checksStatus, cmt, listStatus int
 }
 
 func (f metadataAPI) serve(w http.ResponseWriter, r *http.Request) {
@@ -53,22 +34,14 @@ func (f metadataAPI) serve(w http.ResponseWriter, r *http.Request) {
 		body, status = map[string]any{"workflow_runs": f.runs}, firstStatus(f.listStatus, status)
 	case len(parts) == 6 && parts[3] == "actions" && parts[4] == "runs":
 		body, status = f.runByID(parts[5])
-	case len(parts) == 7 && parts[6] == "jobs":
-		body = legacyJobsResponse{Jobs: f.jobs}
-	case len(parts) == 9 && parts[8] == "logs":
-		w.WriteHeader(firstStatus(f.logsStatus, http.StatusOK))
-		_, _ = w.Write(f.logs)
-		return
 	case len(parts) == 6 && parts[3] == "commits" && parts[5] == "check-runs":
 		body, status = model.GitHubCheckRunsResponse{CheckRuns: f.checkPage(r.URL.Query().Get("page"))}, firstStatus(f.checksStatus, status)
 	case len(parts) == 5 && parts[3] == "commits":
-		parents := []map[string]string{}
+		parents := make([]map[string]string, 0, len(f.parents))
 		for _, sha := range f.parents {
 			parents = append(parents, map[string]string{"sha": sha})
 		}
 		body, status = map[string]any{"sha": parts[4], "parents": parents}, firstStatus(f.cmt, status)
-	case len(parts) >= 5 && parts[3] == "contents":
-		body, status = map[string]string{"sha": f.blob}, firstStatus(f.blobStatus, status)
 	default:
 		status = http.StatusNotFound
 	}
@@ -124,30 +97,6 @@ func (g *testGitHubGetter) GetGitHubJSON(ctx context.Context, path string, maxBy
 	return json.NewDecoder(io.LimitReader(resp.Body, maxBytes)).Decode(out)
 }
 
-func (g *testGitHubGetter) FetchRunLogsArchive(ctx context.Context, repo string, runID int64, attempt int) ([]byte, error) {
-	path := fmt.Sprintf("/repos/%s/actions/runs/%d/attempts/%d/logs", repo, runID, attempt)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, g.baseURL+path, http.NoBody)
-	if err != nil {
-		return nil, err
-	}
-	resp, err := g.client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("historical execution logs unavailable: status %d", resp.StatusCode)
-	}
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, 16<<20+1))
-	if err != nil {
-		return nil, err
-	}
-	if len(raw) > 16<<20 {
-		return nil, fmt.Errorf("historical log archive too large")
-	}
-	return raw, nil
-}
-
 type testPRRegistry struct {
 	lifecycle model.PRBuildLifecycle
 	lifeErr   error
@@ -173,14 +122,6 @@ func (r *testPRRegistry) RecordPRBuildMetadata(ctx context.Context, repo string,
 
 func (r *testPRRegistry) LoadPRBuildMetadata(ctx context.Context, repo string, prNumber int) (prwire.BuildMetadata, bool, error) {
 	return r.metadata, r.hasMeta, r.lifeErr
-}
-
-type testConfigSource struct {
-	cfg config.Config
-}
-
-func (c *testConfigSource) Current() *config.Config {
-	return &c.cfg
 }
 
 func tRepoMeta(repo string, attempt int, svc, image string) prwire.BuildMetadata {
@@ -233,23 +174,6 @@ func withMetaEvent(m prwire.BuildMetadata, event string) prwire.BuildMetadata {
 
 func runs(rs ...MetadataWorkflowRun) []MetadataWorkflowRun { return rs }
 
-func legacyJobs() []legacyJobItem {
-	return []legacyJobItem{{Name: "Build & Push Images (engine)", Status: "completed", Conclusion: model.ConclusionSuccess}}
-}
-
-func tLegacyLogs(revision string) []byte {
-	var buf bytes.Buffer
-	w := zip.NewWriter(&buf)
-	f, err := w.Create("build/1_checkout.txt")
-	if err == nil {
-		_, err = f.Write([]byte("t [command]/usr/bin/git log -1 --format=%H\nt " + revision + "\n"))
-	}
-	if err != nil || w.Close() != nil {
-		panic("zip fixture")
-	}
-	return buf.Bytes()
-}
-
 func priorPRRun() MetadataWorkflowRun {
 	r := tPRRun(1, "completed", model.ConclusionSuccess)
 	r.ID, r.RunNumber = 70, 7
@@ -275,13 +199,10 @@ func TestResolveStructuredWorkflowImages(t *testing.T) {
 		{"sidecar service mapping", sidecars, metadataAPI{runs: runs(tRepoRun(sidecars, 1, model.BuildEventPush, "completed", model.ConclusionSuccess)), checks: tPublished(tRepoMeta(sidecars, 1, "engine", "aerial-sidecar-engine"))}, WorkflowRunEvent{tRunID, 1, tHead}, []string{"ghcr.io/example/engine:latest"}, nil, false, nil},
 		{"display service mapping", display, metadataAPI{runs: runs(tRepoRun(display, 1, model.BuildEventPush, "completed", model.ConclusionSuccess)), checks: tPublished(tRepoMeta(display, 1, "engine", "mirrormere-engine"))}, WorkflowRunEvent{tRunID, 1, tHead}, []string{"ghcr.io/example/engine:latest"}, nil, false, nil},
 		{"manual dispatch", tRepo, metadataAPI{runs: runs(withEvent(ok, model.BuildEventDispatch)), checks: tPublished(withMetaEvent(engine, model.BuildEventDispatch))}, WorkflowRunEvent{tRunID, 1, tHead}, []string{"ghcr.io/example/engine:latest"}, nil, false, nil},
-		{"renamed jobs and steps are irrelevant", tRepo, metadataAPI{runs: runs(ok), checks: tPublished(engine), jobs: []legacyJobItem{{Name: "Ship it (other)", Status: "completed", Conclusion: model.ConclusionSuccess}}}, WorkflowRunEvent{tRunID, 1, tHead}, []string{"ghcr.io/example/engine:latest"}, nil, false, nil},
 		{"paginated transport", tRepo, metadataAPI{runs: runs(ok), checks: tPublished(engine), paginate: true}, WorkflowRunEvent{tRunID, 1, tHead}, []string{"ghcr.io/example/engine:latest"}, nil, false, nil},
 		{"explicit empty selection", tRepo, metadataAPI{runs: runs(ok), checks: tPublished(tMeta(1))}, WorkflowRunEvent{tRunID, 1, tHead}, []string{}, nil, false, nil},
-		{"missing metadata never means no deploy", tRepo, metadataAPI{runs: runs(ok), blob: tOther, jobs: legacyJobs()}, WorkflowRunEvent{tRunID, 1, tHead}, nil, nil, true, nil},
-		{"inventoried historical run", tRepo, metadataAPI{runs: runs(ok), blob: legacyFixtureBlob, jobs: legacyJobs()}, WorkflowRunEvent{tRunID, 1, tHead}, []string{"ghcr.io/example/engine:latest"}, nil, false, nil},
-		{"blob lookup failure blocks fallback", tRepo, metadataAPI{runs: runs(ok), blobStatus: http.StatusBadGateway, jobs: legacyJobs()}, WorkflowRunEvent{tRunID, 1, tHead}, nil, nil, true, nil},
-		{"malformed record blocks inventoried fallback", tRepo, metadataAPI{runs: runs(ok), checks: checks(withText(tCheck(engine), "{")), blob: legacyFixtureBlob, jobs: legacyJobs()}, WorkflowRunEvent{tRunID, 1, tHead}, nil, nil, true, nil},
+		{"missing metadata never means no deploy", tRepo, metadataAPI{runs: runs(ok)}, WorkflowRunEvent{tRunID, 1, tHead}, nil, ErrBuildMetadataMissing, false, nil},
+		{"malformed record blocks promotion", tRepo, metadataAPI{runs: runs(ok), checks: checks(withText(tCheck(engine), "{"))}, WorkflowRunEvent{tRunID, 1, tHead}, nil, nil, true, nil},
 		{"manifest cannot promote", tRepo, metadataAPI{runs: runs(ok), checks: checks(tCheck(engine))}, WorkflowRunEvent{tRunID, 1, tHead}, nil, nil, true, nil},
 		{"failed separate promotion", tRepo, metadataAPI{runs: runs(tRun(1, "completed", model.BuildResultFailure)), checks: tPublished(engine)}, WorkflowRunEvent{tRunID, 1, tHead}, nil, nil, true, nil},
 		{"rerun of a finished run waits for its own final", tRepo, metadataAPI{runs: runs(tRun(2, "completed", model.ConclusionSuccess)), checks: tPublished(engine)}, WorkflowRunEvent{tRunID, 2, tHead}, nil, nil, true, nil},
@@ -303,19 +224,9 @@ func TestResolveStructuredWorkflowImages(t *testing.T) {
 			t.Parallel()
 			server := httptest.NewServer(http.HandlerFunc(tc.api.serve))
 			defer server.Close()
-			cfgSrc := &testConfigSource{
-				cfg: config.Config{
-					LegacyBuildWorkflows: []config.LegacyBuildWorkflow{
-						{Repository: "example/aerial", WorkflowPath: MetadataWorkflowPath("example/aerial"), BlobSHA: legacyFixtureBlob},
-					},
-				},
-			}
 			reg := &testPRRegistry{recordErr: tc.dbErr}
 			gh := &testGitHubGetter{client: server.Client(), baseURL: server.URL}
-			legacyResolver := func(ctx context.Context, repo string, runID int64) ([]string, error) {
-				return []string{"ghcr.io/example/engine:latest"}, nil
-			}
-			c := NewConsumer(gh, reg, cfgSrc, legacyResolver)
+			c := NewConsumer(gh, reg)
 
 			got, err := c.ResolveWorkflowRunImages(context.Background(), tc.repo, tc.event, 42)
 			if tc.wantErr != nil && !errors.Is(err, tc.wantErr) || tc.wantErr == nil && (err != nil) != tc.wantFail {
@@ -359,15 +270,10 @@ func TestRefreshPRBuildMetadata(t *testing.T) {
 		{"stale PR revision", model.PRBuildLifecycle{Status: "open", HeadSHA: tOther}, nil, nil, metadataAPI{runs: runs(prRun), checks: prChecks, parents: bound}, "", false, false},
 		{"merged PR follows main run", merged, nil, nil, metadataAPI{runs: runs(priorPRRun(), tRun(1, "completed", model.ConclusionSuccess)), checks: tPublished(tMeta(1, "engine"))}, prwire.BuildMetadataFinal, true, false},
 		{"newer pending run hides older success", open, nil, nil, metadataAPI{runs: runs(prRun, newer), checks: prChecks, parents: bound}, "", false, false},
-		{"newer failed run without metadata", open, nil, nil, metadataAPI{runs: runs(prRun, newerFailed), checks: prChecks, parents: bound, blob: tOther, logs: tLegacyLogs(tMerge)}, "", false, true},
+		{"newer failed run without metadata", open, nil, nil, metadataAPI{runs: runs(prRun, newerFailed), checks: prChecks, parents: bound}, "", false, true},
 		{"no eligible run yet", open, nil, nil, metadataAPI{}, "", false, false},
 		{"wrong PR number", open, nil, nil, metadataAPI{runs: runs(prRun), checks: checks(tCheck(withPRNumber(pr, &pr43))), parents: bound}, "", false, true},
-		{"inventoried historical PR revision", open, nil, nil, metadataAPI{runs: runs(prRun), parents: bound, blob: legacyFixtureBlob, logs: tLegacyLogs(tMerge)}, "", false, false},
-		{"historical checkout unbound to PR head", open, nil, nil, metadataAPI{runs: runs(prRun), parents: []string{tBase, tOther}, blob: legacyFixtureBlob, logs: tLegacyLogs(tMerge)}, "", false, true},
-		{"historical logs unavailable", open, nil, nil, metadataAPI{runs: runs(prRun), parents: bound, blob: legacyFixtureBlob, logsStatus: http.StatusGone}, "", false, true},
-		{"historical logs not an archive", open, nil, nil, metadataAPI{runs: runs(prRun), parents: bound, blob: legacyFixtureBlob, logs: []byte("x")}, "", false, true},
-		{"historical checkout is the source head", open, nil, nil, metadataAPI{runs: runs(prRun), parents: bound, blob: legacyFixtureBlob, logs: tLegacyLogs(tHead)}, "", false, true},
-		{"invalid workflow blob", open, nil, nil, metadataAPI{runs: runs(prRun), parents: bound, logs: tLegacyLogs(tMerge)}, "", false, true},
+		{"completed PR run without metadata", open, nil, nil, metadataAPI{runs: runs(prRun), parents: bound}, "", false, true},
 		{"run listing unavailable", open, nil, nil, metadataAPI{runs: runs(prRun), listStatus: http.StatusBadGateway}, "", false, true},
 		{"authoritative run unavailable", open, nil, nil, metadataAPI{runs: runs(prRun), runStatus: http.StatusBadGateway}, "", false, true},
 		{"authoritative run identity invalid", open, nil, nil, metadataAPI{runs: runs(tPRRun(0, "queued", ""))}, "", false, true},
@@ -379,16 +285,9 @@ func TestRefreshPRBuildMetadata(t *testing.T) {
 			t.Parallel()
 			server := httptest.NewServer(http.HandlerFunc(tc.api.serve))
 			defer server.Close()
-			cfgSrc := &testConfigSource{
-				cfg: config.Config{
-					LegacyBuildWorkflows: []config.LegacyBuildWorkflow{
-						{Repository: tRepo, WorkflowPath: tPath, BlobSHA: legacyFixtureBlob},
-					},
-				},
-			}
 			reg := &testPRRegistry{lifecycle: tc.lifecycle, lifeErr: tc.lifeErr, recordErr: tc.dbErr}
 			gh := &testGitHubGetter{client: server.Client(), baseURL: server.URL}
-			c := NewConsumer(gh, reg, cfgSrc, nil)
+			c := NewConsumer(gh, reg)
 
 			updated, err := c.RefreshPRBuildMetadata(context.Background(), tRepo, 42, tHead)
 			if (err != nil) != tc.wantErr || updated != tc.wantUpdated {
@@ -424,7 +323,7 @@ func TestSupersedeStaleBuildAttempt(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			reg := &testPRRegistry{metadata: stored, hasMeta: tc.hasMeta}
-			c := NewConsumer(nil, reg, nil, nil)
+			c := NewConsumer(nil, reg)
 			c.SupersedeStaleBuildAttempt(context.Background(), tRepo, 42, tc.event)
 			if (len(reg.recorded) > 0) != tc.wantWrite {
 				t.Fatalf("writes=%v", reg.recorded)
@@ -444,7 +343,7 @@ func TestConsumer_DirectEdgeCases(t *testing.T) {
 	ctx := context.Background()
 
 	// Consumer with nil dependencies
-	c := NewConsumer(nil, nil, nil, nil)
+	c := NewConsumer(nil, nil)
 	c.recordPRBuildSnapshot(ctx, "repo", 0, prwire.BuildMetadata{})
 	c.recordPRBuildSnapshot(ctx, "repo", 1, prwire.BuildMetadata{})
 
@@ -461,12 +360,7 @@ func TestConsumer_DirectEdgeCases(t *testing.T) {
 		t.Fatal("expected error for nil gh")
 	}
 
-	// LegacyWorkflowRevision non-PR run returns HeadSHA directly
 	nonPRRun := MetadataWorkflowRun{Event: model.BuildEventPush, HeadSHA: tHead, Path: MetadataWorkflowPath("example/aerial")}
-	rev, err := c.LegacyWorkflowRevision(ctx, "example/aerial", nonPRRun)
-	if err != nil || rev != tHead {
-		t.Fatalf("expected head SHA for non-PR run, got %q, err %v", rev, err)
-	}
 
 	// ValidateMetadataExecution branch build matching / mismatching head
 	if execErr := c.ValidateMetadataExecution(ctx, "example/aerial", nonPRRun, tHead); execErr != nil {
@@ -476,50 +370,7 @@ func TestConsumer_DirectEdgeCases(t *testing.T) {
 		t.Fatal("expected error for branch execution mismatch")
 	}
 
-	// Legacy resolver nil error and nil cfgSrc
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
-		if len(parts) == 6 && parts[3] == "actions" && parts[4] == "runs" {
-			_ = json.NewEncoder(w).Encode(tRun(1, "completed", model.ConclusionSuccess))
-			return
-		}
-		if len(parts) == 6 && parts[3] == "commits" && parts[5] == "check-runs" {
-			_ = json.NewEncoder(w).Encode(model.GitHubCheckRunsResponse{})
-			return
-		}
-		if len(parts) >= 5 && parts[3] == "contents" {
-			_ = json.NewEncoder(w).Encode(map[string]string{"sha": legacyFixtureBlob})
-			return
-		}
-		w.WriteHeader(http.StatusNotFound)
-	}))
-	defer server.Close()
-
-	// IsLegacyWorkflowRun with nil cfgSrc
-	mockBlobGH := &testGitHubGetter{
-		client:  server.Client(),
-		baseURL: server.URL,
-	}
-	cNilCfg := NewConsumer(mockBlobGH, nil, nil, nil)
-	isLegacy, err := cNilCfg.IsLegacyWorkflowRun(ctx, "example/aerial", nonPRRun)
-	if err != nil || isLegacy {
-		t.Fatalf("expected false, nil for nil cfgSrc, got %v, %v", isLegacy, err)
-	}
-
 	// SupersedeStaleBuildAttempt edge cases
 	c.SupersedeStaleBuildAttempt(ctx, "example/aerial", 0, WorkflowRunEvent{ID: 1})
 	c.SupersedeStaleBuildAttempt(ctx, "example/aerial", 42, WorkflowRunEvent{ID: 0})
-
-	cfgSrc := &testConfigSource{
-		cfg: config.Config{
-			LegacyBuildWorkflows: []config.LegacyBuildWorkflow{
-				{Repository: "example/aerial", WorkflowPath: MetadataWorkflowPath("example/aerial"), BlobSHA: legacyFixtureBlob},
-			},
-		},
-	}
-	gh := &testGitHubGetter{client: server.Client(), baseURL: server.URL}
-	cLegacyNoResolver := NewConsumer(gh, nil, cfgSrc, nil)
-	if _, err := cLegacyNoResolver.ResolveWorkflowRunImages(ctx, "example/aerial", WorkflowRunEvent{ID: 77, Attempt: 1, HeadSHA: tHead}, 42); err == nil {
-		t.Fatal("expected error when legacy resolver is nil")
-	}
 }
