@@ -75,6 +75,9 @@ type AttachChunkPRResponse struct {
 // ErrInvalidBuildInput reports malformed build or chunk input; see pkg/buildplan.
 var ErrInvalidBuildInput = buildplan.ErrInvalidBuildInput
 
+// IsTerminalBuildStatus reports whether a build status is terminal; see pkg/buildplan.
+var IsTerminalBuildStatus = buildplan.IsTerminalBuildStatus
+
 // ActionDispatchID identifies the launch turn dispatch for a chunk.
 func ActionDispatchID(chunk VanadisChunk) string {
 	return fmt.Sprintf("vanadis-%s-turn-%d", chunk.ID, chunk.StallNudges)
