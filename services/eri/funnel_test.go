@@ -119,14 +119,6 @@ func jsonHTTPResponse(status int, body string) *http.Response {
 	}
 }
 
-type errExistsStore struct {
-	db.Store
-}
-
-func (*errExistsStore) MessageExists(ctx context.Context, id string) (bool, error) {
-	return false, errors.New("simulated message exists error")
-}
-
 func TestFunnelHelpers(t *testing.T) {
 	setupTestConfig(t, `
 model: "gemini-2.5-flash"
@@ -1157,11 +1149,8 @@ channels:
 		channelID    string
 		guildID      string
 		msgID        string
-		preInsertMsg bool
-		errStore     bool
 		wantResult   string
-		wantErr      bool
-		wantEnqueued bool
+		wantEnqueued string
 	}{
 		{
 			name:       "IgnoredSelfPayloadBotUser",
@@ -1187,29 +1176,12 @@ channels:
 			wantResult: "ignored",
 		},
 		{
-			name:         "DuplicateInStore",
-			channelID:    "chan-main",
-			authorID:     "user-normal",
-			msgID:        "msg-dup-store",
-			preInsertMsg: true,
-			wantResult:   "duplicate",
-		},
-		{
-			name:       "StoreError",
-			channelID:  "chan-main",
-			authorID:   "user-normal",
-			msgID:      "msg-store-err",
-			errStore:   true,
-			wantResult: "",
-			wantErr:    true,
-		},
-		{
 			name:         "SuccessfulEnqueue",
 			channelID:    "chan-main",
 			authorID:     "user-normal",
 			msgID:        "msg-ok-enq",
 			wantResult:   "enqueued",
-			wantEnqueued: true,
+			wantEnqueued: "msg-ok-enq",
 		},
 		{
 			name:         "SeedSessionStateWithGuild",
@@ -1219,36 +1191,28 @@ channels:
 			guildID:      "g-seed-new",
 			msgID:        "msg-seed-ok",
 			wantResult:   "enqueued",
-			wantEnqueued: true,
+			wantEnqueued: "msg-seed-ok",
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			var store db.Store
-			fakeStore := dbtest.NewFakeStore()
-			if tc.errStore {
-				store = &errExistsStore{Store: fakeStore}
-			} else {
-				store = fakeStore
-			}
-
-			if tc.preInsertMsg {
-				_ = store.InsertMessage(context.Background(), db.Message{
-					ID:        tc.msgID,
-					ChannelID: tc.channelID,
-					Status:    db.StatusPending,
-					CreatedAt: time.Now().UTC(),
-					UpdatedAt: time.Now().UTC(),
-				})
-			}
+			var gotEnqueued string
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var req queue.ThreadEnqueueRequest
+				if err := json.NewDecoder(r.Body).Decode(&req); err == nil && req.Message != nil {
+					gotEnqueued = req.Message.ID
+				}
+				_, _ = w.Write([]byte(`{"status":"accepted"}`))
+			}))
+			defer ts.Close()
+			client := NewRestateIngressClient(ts.URL, "aerial", ts.Client())
 
 			s := newMockDiscordSession(t, nil)
 			if tc.sessionUser != "" {
 				s.State.User = &discordgo.User{ID: tc.sessionUser, Username: "AerialBot"}
 			}
 
-			pool := newTestWorkerPool(store)
 			m := &discordgo.Message{
 				ID:        tc.msgID,
 				ChannelID: tc.channelID,
@@ -1258,19 +1222,15 @@ channels:
 				Timestamp: time.Now().UTC(),
 			}
 
-			res, err := processFunnelMessageIngress(context.Background(), s, store, pool, m, tc.botUserID, nil)
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("processFunnelMessageIngress error = %v, wantErr = %v", err, tc.wantErr)
+			res, err := processFunnelMessageIngress(context.Background(), s, m, tc.botUserID, nil, client)
+			if err != nil {
+				t.Fatalf("processFunnelMessageIngress error = %v", err)
 			}
 			if res != tc.wantResult {
 				t.Fatalf("processFunnelMessageIngress result = %q, want %q", res, tc.wantResult)
 			}
-
-			if tc.wantEnqueued {
-				dbMsg, err := store.GetMessage(context.Background(), tc.msgID)
-				if err != nil || dbMsg == nil {
-					t.Fatalf("expected message %s to be persisted in store", tc.msgID)
-				}
+			if gotEnqueued != tc.wantEnqueued {
+				t.Fatalf("enqueued message ID = %q, want %q", gotEnqueued, tc.wantEnqueued)
 			}
 		})
 	}
@@ -1290,12 +1250,6 @@ func TestProcessFunnelMessageIngress_Restate(t *testing.T) {
 			serverResp: `{"status":"ok","message_id":"msg-restate-1"}`,
 			statusCode: http.StatusOK,
 			wantResult: "enqueued",
-		},
-		{
-			name:       "restate enqueue duplicate",
-			serverResp: `{"status":"already_exists","message_id":"msg-restate-2"}`,
-			statusCode: http.StatusOK,
-			wantResult: "duplicate",
 		},
 		{
 			name:       "restate enqueue error",
@@ -1335,7 +1289,7 @@ func TestProcessFunnelMessageIngress_Restate(t *testing.T) {
 				Timestamp: time.Now().UTC(),
 			}
 
-			res, err := processFunnelMessageIngress(context.Background(), s, nil, nil, m, "bot-123", nil, client)
+			res, err := processFunnelMessageIngress(context.Background(), s, m, "bot-123", nil, client)
 			if tc.wantErr {
 				if err == nil {
 					t.Fatal("expected error, got nil")
