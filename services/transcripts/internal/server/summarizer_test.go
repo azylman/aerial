@@ -188,7 +188,8 @@ func seedSummarizerRunCase(t *testing.T, tc summarizerRunCase) (*store.Store, *s
 	}
 	if tc.failStore {
 		if _, err := db.ExecContext(context.Background(),
-			`CREATE TRIGGER abort_summary_update BEFORE UPDATE ON session_summaries WHEN NEW.session_id = 'sess-1' BEGIN SELECT RAISE(ABORT, 'no summary'); END;`); err != nil {
+			`CREATE FUNCTION abort_write() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'no summary'; END $$;
+			 CREATE TRIGGER abort_summary_update BEFORE UPDATE ON session_summaries FOR EACH ROW WHEN (NEW.session_id = 'sess-1') EXECUTE FUNCTION abort_write();`); err != nil {
 			t.Fatalf("create trigger: %v", err)
 		}
 	}
