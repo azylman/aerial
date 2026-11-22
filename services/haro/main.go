@@ -7,13 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"log/slog"
 	"net/http"
-	"os"
-	"os/signal"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/azylman/aerial/pkg/httpkit"
@@ -192,24 +188,12 @@ var (
 )
 
 func main() {
-	slog.SetDefault(slog.New(tracing.SlogHandler(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
-		Level: slog.LevelInfo,
-	}))))
-
-	resolvedPath := config.ResolveConfigPath(configPath)
-	cfg, err := config.LoadConfig(resolvedPath)
-	if err != nil {
-		exitFn("Fatal configuration error: %v", err)
-		return
-	}
-
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer cancel()
-	_, flushTracing := tracing.Init(ctx, "haro", tracing.DefaultConfigPath)
-
-	err = runAppFn(ctx, cfg)
-	flushTracing()
-	if err != nil && !errors.Is(err, http.ErrServerClosed) {
-		exitFn("Server failure: %v", err)
-	}
+	httpkit.RunService(httpkit.ServiceSpec[*config.Config]{
+		Name:              "haro",
+		ConfigPath:        config.ResolveConfigPath(configPath),
+		TracingConfigPath: tracing.DefaultConfigPath,
+		Load:              config.LoadConfig,
+		Run:               runAppFn,
+		Exit:              exitFn,
+	})
 }
