@@ -154,28 +154,6 @@ func (c *RestateEriClient) effectiveAgent(ctx context.Context, explicit ...strin
 	return agent.Default
 }
 
-type dispatchAttemptKey struct{}
-
-// WithDispatchAttempt scopes a dispatch's Restate ingress Idempotency-Key to
-// one launch attempt (the launching invocation's ID). Without it every re-send
-// of a dispatch ID replays the first cached reply, e.g. skipped_active.
-func WithDispatchAttempt(ctx context.Context, attemptID string) context.Context {
-	clean := strings.TrimSpace(attemptID)
-	if clean == "" {
-		return ctx
-	}
-	return context.WithValue(ctx, dispatchAttemptKey{}, clean)
-}
-
-// dispatchIdempotencyKey is dispatchID, or dispatchID + ":" + attempt when the
-// context carries a launch attempt. Eri still dedupes rows by dispatch ID.
-func dispatchIdempotencyKey(ctx context.Context, dispatchID string) string {
-	if attempt, ok := ctx.Value(dispatchAttemptKey{}).(string); ok && dispatchID != "" {
-		return dispatchID + ":" + attempt
-	}
-	return dispatchID
-}
-
 func (c *RestateEriClient) executeRestateDispatch(ctx context.Context, req eriwire.BrainDispatchRequest) (restateDispatchResult, error) {
 	if c == nil {
 		return restateDispatchResult{}, errors.New("restate eri client is nil")
@@ -190,7 +168,7 @@ func (c *RestateEriClient) executeRestateDispatch(ctx context.Context, req eriwi
 	svc := DispatchSessionServiceName(dispatchAgent)
 	endpoint := fmt.Sprintf("%s/%s/%s/Enqueue", c.restateURL, svc, url.PathEscape(sessionKey))
 
-	respBytes, err := c.postRestateJSON(ctx, endpoint, dispatchIdempotencyKey(ctx, dispatchID), "dispatch", req)
+	respBytes, err := c.postRestateJSON(ctx, endpoint, dispatchID, "dispatch", req)
 	if err != nil {
 		return restateDispatchResult{}, err
 	}

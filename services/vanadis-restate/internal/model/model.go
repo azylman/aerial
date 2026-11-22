@@ -5,7 +5,6 @@ package model
 import (
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/azylman/aerial/pkg/buildplan"
 )
@@ -22,12 +21,6 @@ type BuildObjectState struct {
 	Build            VanadisBuild    `json:"build"`
 	Chunks           []VanadisChunk  `json:"chunks"`
 	Launched         map[string]bool `json:"launched,omitempty"`
-	// DispatchDeferrals tracks launches eri keeps answering skipped_active,
-	// keyed by launch key. Only the journaled reconcile step output writes it.
-	DispatchDeferrals map[string]DispatchDeferral `json:"dispatch_deferrals,omitempty"`
-	// DeferralReconcileSeq identifies the one pending delayed Reconcile that
-	// retries deferred launches; zero means none is pending.
-	DeferralReconcileSeq int `json:"deferral_reconcile_seq,omitempty"`
 	// FailureNotified records chunk failures (failureNotifyKey) that already
 	// woke the thread, so each failure wakes it exactly once.
 	FailureNotified map[string]bool `json:"failure_notified,omitempty"`
@@ -35,12 +28,6 @@ type BuildObjectState struct {
 	// failed chunk blocks only its dependents. Failed builds without it are
 	// legacy pauses that resume only through an explicit retry.
 	FailureIsolation bool `json:"failure_isolation,omitempty"`
-}
-
-// DispatchDeferral records continuous skipped_active deferral of one launch.
-type DispatchDeferral struct {
-	FirstDeferredAt time.Time `json:"first_deferred_at"`
-	Count           int       `json:"count"`
 }
 
 // FailChunkRequest carries the chunk and reason for failing a chunk.
