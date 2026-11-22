@@ -26,50 +26,34 @@ import (
 	"github.com/azylman/aerial/services/haro/internal/tools"
 )
 
+// TestMain_Execution checks main wires config.LoadConfig and its package vars
+// into httpkit.RunService; the bootstrap branches are covered by httpkit.
 func TestMain_Execution(t *testing.T) {
 	oldRun, oldExit, oldPath := runAppFn, exitFn, configPath
 	t.Cleanup(installTestTracing)
-	defer func() {
-		runAppFn, exitFn, configPath = oldRun, oldExit, oldPath
-	}()
+	t.Cleanup(func() { runAppFn, exitFn, configPath = oldRun, oldExit, oldPath })
 
-	tmpDir := t.TempDir()
-	testCfg := filepath.Join(tmpDir, "config.yaml")
-	_ = os.WriteFile(testCfg, []byte("port: \"4005\"\ntimezone: \"America/Los_Angeles\"\neri_url: \"http://127.0.0.1:59484\"\nvanadis_url: \"http://127.0.0.1:59485\"\n"), 0o644)
+	testCfg := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(testCfg, []byte("port: \"4005\"\ntimezone: \"America/Los_Angeles\"\neri_url: \"http://127.0.0.1:59484\"\nvanadis_url: \"http://127.0.0.1:59485\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	configPath = testCfg
 	t.Setenv("CONFIG_PATH", testCfg)
 	t.Setenv("DATABASE_URL", "postgres://user:pass@localhost:5432/db")
 
-	runCalled := false
-	runAppFn = func(ctx context.Context, cfg *config.Config) error {
-		runCalled = true
+	gotPort := ""
+	exitCalled := false
+	exitFn = func(string, ...any) { exitCalled = true }
+	runAppFn = func(_ context.Context, cfg *config.Config) error {
+		gotPort = cfg.Port
 		return nil
 	}
 	main()
-	if !runCalled {
-		t.Error("expected runAppFn called")
+	if gotPort != "4005" {
+		t.Errorf("runAppFn cfg.Port = %q, want %q", gotPort, "4005")
 	}
-
-	exitCalled := false
-	exitFn = func(string, ...any) { exitCalled = true }
-	runAppFn = func(ctx context.Context, cfg *config.Config) error { return http.ErrServerClosed }
-	main()
 	if exitCalled {
-		t.Error("did not expect exitFn on http.ErrServerClosed")
-	}
-
-	runAppFn = func(ctx context.Context, cfg *config.Config) error { return context.DeadlineExceeded }
-	main()
-	if !exitCalled {
-		t.Error("expected exitFn on server error")
-	}
-
-	exitCalled = false
-	configPath = filepath.Join(tmpDir, "nonexistent.yaml")
-	t.Setenv("CONFIG_PATH", configPath)
-	main()
-	if !exitCalled {
-		t.Error("expected exitFn on config load error")
+		t.Error("exitFn called on clean run")
 	}
 }
 
@@ -140,15 +124,24 @@ func TestRunApp_Lifecycle(t *testing.T) {
 	}
 }
 
+// TestRunApp_TickerFailurePropagated also routes NATS through a bus whose
+// Close fails, so the shutdown path logs the close error and still returns
+// the ticker failure.
 func TestRunApp_TickerFailurePropagated(t *testing.T) {
 	ctx := t.Context()
 	dsn := pgtest.NewDSN(t)
 	port := freeLoopbackPort(t)
+	oldBus := newBusFn
+	t.Cleanup(func() { newBusFn = oldBus })
+	newBusFn = func(context.Context, string) (pubsub.Bus, error) {
+		return &pubsubtest.FaultBus{Bus: pubsub.NewMemoryBus(), CloseErr: errors.New("close boom")}, nil
+	}
 
 	err := RunApp(ctx, &config.Config{
 		Port:        port,
 		DatabaseURL: dsn,
 		EriURL:      "http://127.0.0.1:59484",
+		NATSURL:     "nats://fault-bus",
 		RestatePort: "invalid-port-name",
 	})
 	if err == nil {
