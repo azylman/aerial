@@ -510,3 +510,71 @@ func TestHeartbeatTools_HandleUpdateHeartbeat(t *testing.T) {
 		})
 	}
 }
+
+func TestHeartbeatTools_RestateArming(t *testing.T) {
+	t.Parallel()
+	db := openToolsTestDB(t)
+	ctx := context.Background()
+
+	var capturedPaths []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		capturedPaths = append(capturedPaths, r.URL.Path)
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer srv.Close()
+
+	// 1. Create heartbeat with restateIngressURL
+	res, err := HandleScheduleHeartbeat(ctx, db, "UTC", map[string]any{
+		"channel_id": "1562847268833337999",
+		"cron_expr":  "*/15 * * * *",
+		"prompt":     "Check heartbeat restate",
+	}, srv.URL)
+	if err != nil || res == nil {
+		t.Fatalf("HandleScheduleHeartbeat error: %v", err)
+	}
+
+	var parsed map[string]any
+	txtContent, ok := res.Content[0].(*mcp.TextContent)
+	if !ok {
+		t.Fatal("expected *mcp.TextContent")
+	}
+	_ = json.Unmarshal([]byte(txtContent.Text), &parsed)
+	hbID, ok := parsed["schedule_id"].(string)
+	if !ok {
+		t.Fatal("expected schedule_id to be string")
+	}
+
+	// 2. Update heartbeat enabled=true with restateIngressURL
+	_, err = HandleUpdateHeartbeat(ctx, db, map[string]any{
+		"id":      hbID,
+		"prompt":  "Updated heartbeat",
+		"enabled": true,
+	}, srv.URL)
+	if err != nil {
+		t.Fatalf("HandleUpdateHeartbeat error: %v", err)
+	}
+
+	// 3. Update heartbeat enabled=false with restateIngressURL
+	_, err = HandleUpdateHeartbeat(ctx, db, map[string]any{
+		"id":      hbID,
+		"enabled": false,
+	}, srv.URL)
+	if err != nil {
+		t.Fatalf("HandleUpdateHeartbeat error: %v", err)
+	}
+
+	wantArmPath := "/HaroSchedule/" + hbID + "/Arm/send"
+	wantCancelPath := "/HaroSchedule/" + hbID + "/Cancel/send"
+	if len(capturedPaths) != 3 {
+		t.Fatalf("captured %d requests, want 3", len(capturedPaths))
+	}
+	if capturedPaths[0] != wantArmPath {
+		t.Errorf("req 0 path = %q, want %q", capturedPaths[0], wantArmPath)
+	}
+	if capturedPaths[1] != wantArmPath {
+		t.Errorf("req 1 path = %q, want %q", capturedPaths[1], wantArmPath)
+	}
+	if capturedPaths[2] != wantCancelPath {
+		t.Errorf("req 2 path = %q, want %q", capturedPaths[2], wantCancelPath)
+	}
+}
