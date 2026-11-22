@@ -169,7 +169,7 @@ func TestRepoEventAutoUpdateDecode(t *testing.T) {
 			name: "golden auto-update trigger",
 			raw:  fx.Event,
 			want: RepoEvent{
-				Repo: "azylman/mirrormere", PRNumber: 1010, HeadSHA: "def5678", EffectsOwner: EffectsOwnerRestate, CheckName: "CI Gate",
+				Repo: "azylman/mirrormere", PRNumber: 1010, HeadSHA: "def5678", CheckName: "CI Gate",
 				AutoUpdate: &AutoUpdatePolicy{
 					Authors: []string{"aerial-bot", "dependabot[bot]"}, DefaultOwner: true,
 					Collaborators: []CollaboratorAlert{{Author: "octo", ChannelID: "111111111111111111", Mention: "<@42>"}},

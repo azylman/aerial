@@ -11,9 +11,7 @@ package prstate
 //
 // The services bind beside BuildRouter so the Restate deployment discovers
 // PRObject and RepoObject; synapse sends every lifecycle event here and
-// keeps no registry. Every handler that takes a synapse-stamped event first
-// rejects an effects_owner=legacy stamp terminally (rejectLegacyOwner). Each
-// PRObject handler loads Restate K/V
+// keeps no registry. Each PRObject handler loads Restate K/V
 // state, applies the pure disposition guard (stale-drop, terminal-absorbing),
 // and persists on apply. After the commit it runs the effects the event
 // carries through journaled, generation-scoped EffectKeys: eri wakes and DMs
@@ -121,8 +119,8 @@ func (s *PRObjectService) loadPRState(ctx restate.ObjectSharedContext, ev PREven
 		st = NewPRState(ev.Repo, ev.PRNumber)
 	}
 	// Lifecycle events carry the agent only as a hint: it fills an empty
-	// owner slot but never overwrites a stored owner. Register, Hydrate, and
-	// PR-body metadata on opened claim ownership via ClaimOwner instead.
+	// owner slot but never overwrites a stored owner. Register and PR-body
+	// metadata on opened claim ownership via ClaimOwner instead.
 	st.ApplyAgentHint(ev.Agent)
 	return st, stored, nil
 }
@@ -131,7 +129,7 @@ func (s *PRObjectService) loadPRState(ctx restate.ObjectSharedContext, ev PREven
 // untracked (PRState.Untracked), by handler.
 var untrackedEventsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 	Name: "prstate_untracked_events_total",
-	Help: "Rollout events PRObject dropped because the PR never saw register, Hydrate, opened or merge (legacy keeps no row for it), by handler.",
+	Help: "Rollout events PRObject dropped because the PR never saw register, opened or merge (legacy keeps no row for it), by handler.",
 }, []string{"handler"})
 
 func init() {
@@ -152,7 +150,7 @@ func (s *PRObjectService) dropUntrackedRollout(ctx restate.ObjectContext, st *PR
 	pr := PRObjectKey(st.Repo, st.PRNumber)
 	_, _ = restate.Run(ctx, func(rc restate.RunContext) (restate.Void, error) {
 		untrackedEventsTotal.WithLabelValues(handler).Inc()
-		slog.InfoContext(rc, "[prstate] dropping rollout event for untracked PR (no register, Hydrate, opened or merge seen)",
+		slog.InfoContext(rc, "[prstate] dropping rollout event for untracked PR (no register, opened or merge seen)",
 			"pr", pr, "handler", handler, "stored", stored)
 		return restate.Void{}, nil
 	}, restate.WithName("untracked-"+handler))
@@ -411,9 +409,6 @@ func (s *PRObjectService) applyPREvent(ctx restate.ObjectContext, ev PREvent) er
 // HandleCheckFailed applies one check-failure event. Eri wakes the event
 // carries (EriEffects) fire to the stored owner after the commit.
 func (s *PRObjectService) HandleCheckFailed(ctx restate.ObjectContext, ev PREvent) error {
-	if err := rejectLegacyOwner(ctx, "HandleCheckFailed", ev.EffectsOwner); err != nil {
-		return err
-	}
 	return s.mutatePREvent(ctx, ev, func(st *PRState) {
 		if strings.TrimSpace(ev.CheckName) != "" {
 			st.RecordFailedCheckRunDetailed(ev.HeadSHA, ev.CheckName)
@@ -428,9 +423,6 @@ func (s *PRObjectService) HandleCheckFailed(ctx restate.ObjectContext, ev PREven
 
 // HandleCheckPassed applies one check-pass event dark.
 func (s *PRObjectService) HandleCheckPassed(ctx restate.ObjectContext, ev PREvent) error {
-	if err := rejectLegacyOwner(ctx, "HandleCheckPassed", ev.EffectsOwner); err != nil {
-		return err
-	}
 	return s.mutatePREvent(ctx, ev, func(st *PRState) {
 		if strings.TrimSpace(ev.CheckName) != "" {
 			st.ClearFailedCheckRun(ev.HeadSHA, ev.CheckName)
@@ -449,9 +441,6 @@ func (s *PRObjectService) HandleCheckPassed(ctx restate.ObjectContext, ev PREven
 
 // HandleCheckRerunRequested applies one check-rerun request dark.
 func (s *PRObjectService) HandleCheckRerunRequested(ctx restate.ObjectContext, ev PREvent) error {
-	if err := rejectLegacyOwner(ctx, "HandleCheckRerunRequested", ev.EffectsOwner); err != nil {
-		return err
-	}
 	return s.applyPREvent(ctx, ev)
 }
 
@@ -460,9 +449,6 @@ func (s *PRObjectService) HandleCheckRerunRequested(ctx restate.ObjectContext, e
 // generation-scoped EffectKey through the owner's Discord sender when
 // prstate owns the event's effects.
 func (s *PRObjectService) HandleCollaboratorAlert(ctx restate.ObjectContext, ev PREvent) error {
-	if err := rejectLegacyOwner(ctx, "HandleCollaboratorAlert", ev.EffectsOwner); err != nil {
-		return err
-	}
 	return s.mutatePREvent(ctx, ev, func(st *PRState) {
 		st.MarkCollaboratorAlerted(ev.HeadSHA)
 	})
@@ -473,9 +459,6 @@ func (s *PRObjectService) HandleCollaboratorAlert(ctx restate.ObjectContext, ev 
 // the conflict row status, then publishes the conflict facts the event
 // carries.
 func (s *PRObjectService) HandleConflict(ctx restate.ObjectContext, ev PREvent) (ConflictDispatchDecision, error) {
-	if err := rejectLegacyOwner(ctx, "HandleConflict", ev.EffectsOwner); err != nil {
-		return ConflictDispatchDecision{}, err
-	}
 	return runVerdict(s, ctx, ev, ResolveConflictDispatchDecision,
 		func(d ConflictDispatchDecision) bool { return d.ShouldPublish },
 		func(st *PRState) error {
@@ -526,9 +509,6 @@ func (s *PRObjectService) commitConflictPublished(ctx restate.ObjectContext, st 
 // pipeline still names it until r2 deletes that pipeline, so it stays
 // registered until r2b; like every handler it rejects a legacy stamp.
 func (s *PRObjectService) HandleConflictDetected(ctx restate.ObjectSharedContext, ev PREvent) (ConflictDispatchDecision, error) {
-	if err := rejectLegacyOwner(ctx, "HandleConflictDetected", ev.EffectsOwner); err != nil {
-		return ConflictDispatchDecision{}, err
-	}
 	st, err := s.loadOrCreatePRState(ctx, ev)
 	if err != nil {
 		return ConflictDispatchDecision{}, err
@@ -541,9 +521,6 @@ func (s *PRObjectService) HandleConflictDetected(ctx restate.ObjectSharedContext
 // pipeline still names it until r2 deletes that pipeline, so it stays
 // registered until r2b; like every handler it rejects a legacy stamp.
 func (s *PRObjectService) HandleConflictPublished(ctx restate.ObjectContext, ev PREvent) (ConflictPublishedOutcome, error) {
-	if err := rejectLegacyOwner(ctx, "HandleConflictPublished", ev.EffectsOwner); err != nil {
-		return ConflictPublishedOutcome{}, err
-	}
 	if NormalizeRepo(ev.Repo) == "" || ev.PRNumber <= 0 {
 		return ConflictPublishedOutcome{}, nil
 	}
@@ -565,9 +542,6 @@ func (s *PRObjectService) HandleConflictPublished(ctx restate.ObjectContext, ev 
 // reopens the ci_failed row, commits, then publishes the recovery facts the event carries. A PR that is not CI-failed
 // commits and publishes nothing.
 func (s *PRObjectService) HandleCIRecovered(ctx restate.ObjectContext, ev PREvent) (CIRecoveryDecision, error) {
-	if err := rejectLegacyOwner(ctx, "HandleCIRecovered", ev.EffectsOwner); err != nil {
-		return CIRecoveryDecision{}, err
-	}
 	return runVerdict(s, ctx, ev, ResolveCIRecovery,
 		func(d CIRecoveryDecision) bool { return d.CIFailed },
 		func(st *PRState) error {
@@ -589,7 +563,7 @@ func forwardRecoveredAutoUpdate(ctx restate.ObjectContext, st *PRState, ev PREve
 	}
 	restate.ObjectSend(ctx, RepoObjectServiceName, RepoObjectKey(st.Repo), RepoHandlerAutoUpdate).Send(RepoEvent{
 		Repo: st.Repo, PRNumber: st.PRNumber, HeadSHA: ev.HeadSHA, CheckName: ev.CheckName,
-		AutoUpdate: ev.AutoUpdate, EffectsOwner: ev.EffectsOwner,
+		AutoUpdate: ev.AutoUpdate,
 	})
 }
 
@@ -610,9 +584,6 @@ func applyCIRecovered(st *PRState, ev PREvent) {
 // pipeline still names it until r2 deletes that pipeline, so it stays
 // registered until r2b; like every handler it rejects a legacy stamp.
 func (s *PRObjectService) HandleCIRecovery(ctx restate.ObjectSharedContext, ev PREvent) (CIRecoveryDecision, error) {
-	if err := rejectLegacyOwner(ctx, "HandleCIRecovery", ev.EffectsOwner); err != nil {
-		return CIRecoveryDecision{}, err
-	}
 	st, err := s.loadOrCreatePRState(ctx, ev)
 	if err != nil {
 		return CIRecoveryDecision{}, err
@@ -622,9 +593,6 @@ func (s *PRObjectService) HandleCIRecovery(ctx restate.ObjectSharedContext, ev P
 
 // HandleConflictResolved applies one conflict-resolved event dark.
 func (s *PRObjectService) HandleConflictResolved(ctx restate.ObjectContext, ev PREvent) error {
-	if err := rejectLegacyOwner(ctx, "HandleConflictResolved", ev.EffectsOwner); err != nil {
-		return err
-	}
 	return s.mutatePREvent(ctx, ev, func(st *PRState) {
 		resolveConflict(st, ev.HeadSHA)
 	})
@@ -650,9 +618,6 @@ func resolveConflict(st *PRState, headSHA string) {
 // moved past it (MergeEventHead); synapse also sends it when a deploy
 // commit lookup proves a merge whose webhooks were lost.
 func (s *PRObjectService) HandleMerged(ctx restate.ObjectContext, ev PREvent) error {
-	if err := rejectLegacyOwner(ctx, "HandleMerged", ev.EffectsOwner); err != nil {
-		return err
-	}
 	if NormalizeRepo(ev.Repo) == "" || ev.PRNumber <= 0 {
 		return nil
 	}
@@ -726,9 +691,6 @@ func noteMergedHeadRecovered(ctx context.Context, st *PRState, prev string) {
 
 // HandleClosed applies one close event dark.
 func (s *PRObjectService) HandleClosed(ctx restate.ObjectContext, ev PREvent) error {
-	if err := rejectLegacyOwner(ctx, "HandleClosed", ev.EffectsOwner); err != nil {
-		return err
-	}
 	return s.mutatePREvent(ctx, ev, func(st *PRState) {
 		st.ClearFailedCISHA()
 		st.DisarmDeployFailure()
@@ -739,9 +701,6 @@ func (s *PRObjectService) HandleClosed(ctx restate.ObjectContext, ev PREvent) er
 
 // HandleReopened applies one reopen event dark.
 func (s *PRObjectService) HandleReopened(ctx restate.ObjectContext, ev PREvent) error {
-	if err := rejectLegacyOwner(ctx, "HandleReopened", ev.EffectsOwner); err != nil {
-		return err
-	}
 	return s.mutatePREvent(ctx, ev, func(st *PRState) {
 		st.Reopen()
 	})
@@ -752,9 +711,6 @@ func (s *PRObjectService) HandleReopened(ctx restate.ObjectContext, ev PREvent) 
 // ownership sources, so it claims the owner instead of acting as a hint.
 // The opened fact it carries publishes after the commit.
 func (s *PRObjectService) HandleOpened(ctx restate.ObjectContext, ev PREvent) error {
-	if err := rejectLegacyOwner(ctx, "HandleOpened", ev.EffectsOwner); err != nil {
-		return err
-	}
 	return s.mutatePREvent(ctx, ev, func(st *PRState) {
 		if agent := strings.TrimSpace(ev.Agent); agent != "" {
 			st.ClaimOwner(agent)
@@ -773,9 +729,6 @@ func (s *PRObjectService) HandleOpened(ctx restate.ObjectContext, ev PREvent) er
 // state). The agent is the insert's owner seed, not a lifecycle hint, so it
 // skips loadPRState's hint.
 func (s *PRObjectService) HandleSelfRegistered(ctx restate.ObjectContext, ev PREvent) error {
-	if err := rejectLegacyOwner(ctx, "HandleSelfRegistered", ev.EffectsOwner); err != nil {
-		return err
-	}
 	if NormalizeRepo(ev.Repo) == "" || ev.PRNumber <= 0 {
 		return nil
 	}
@@ -809,9 +762,6 @@ func (s *PRObjectService) HandleSelfRegistered(ctx restate.ObjectContext, ev PRE
 // deploying: once the last Kustomization flips the PR to deployed, the
 // deploy_success verdict publishes instead, exactly like the legacy watcher.
 func (s *PRObjectService) HandleRolloutProgress(ctx restate.ObjectContext, ev PREvent) error {
-	if err := rejectLegacyOwner(ctx, "HandleRolloutProgress", ev.EffectsOwner); err != nil {
-		return err
-	}
 	return s.mutateRolloutPhaseEvent(ctx, ev, PRHandlerRolloutProgress, func(st *PRState, ev *PREvent) {
 		st.MarkJobsDeployed(ev.DeployedJobs)
 		st.MarkKustomizationsDeployed(ev.DeployedKustomizations)
@@ -852,9 +802,6 @@ func init() {
 // SynchronizeDisposition) and applies the UpdatePRSync row transition. The
 // new head is indexed for RepoObject SHA routing.
 func (s *PRObjectService) HandleSynchronized(ctx restate.ObjectContext, ev PREvent) error {
-	if err := rejectLegacyOwner(ctx, "HandleSynchronized", ev.EffectsOwner); err != nil {
-		return err
-	}
 	if NormalizeRepo(ev.Repo) == "" || ev.PRNumber <= 0 {
 		return nil
 	}
@@ -897,9 +844,6 @@ func (s *PRObjectService) HandleSynchronized(ctx restate.ObjectContext, ev PREve
 // or, when Acknowledged, the confirmed deploy_failed publish
 // (AcknowledgeDeployFailedPublished). Merged PRs apply it.
 func (s *PRObjectService) HandleDeployFailed(ctx restate.ObjectContext, ev PREvent) error {
-	if err := rejectLegacyOwner(ctx, "HandleDeployFailed", ev.EffectsOwner); err != nil {
-		return err
-	}
 	return s.mutateRolloutEvent(ctx, ev, PRHandlerDeployFailed, func(st *PRState) {
 		st.DisarmDeployFailure()
 		if ev.Acknowledged {
@@ -914,9 +858,6 @@ func (s *PRObjectService) HandleDeployFailed(ctx restate.ObjectContext, ev PREve
 // RecordPRBuildMetadata revision and ordering fence. Merged PRs apply it,
 // since post-merge builds fence on the merge SHA.
 func (s *PRObjectService) HandleBuildMetadata(ctx restate.ObjectContext, ev PREvent) error {
-	if err := rejectLegacyOwner(ctx, "HandleBuildMetadata", ev.EffectsOwner); err != nil {
-		return err
-	}
 	return s.mutateDeployEvent(ctx, ev, func(st *PRState) {
 		st.RecordBuildMetadata(ev.BuildMetadata)
 	})
@@ -928,9 +869,6 @@ func (s *PRObjectService) HandleBuildMetadata(ctx restate.ObjectContext, ev PREv
 // status (pending and passed runs, never gate aggregators). Merged PRs
 // apply it; closed PRs absorb it.
 func (s *PRObjectService) HandleCheckStatus(ctx restate.ObjectContext, ev PREvent) error {
-	if err := rejectLegacyOwner(ctx, "HandleCheckStatus", ev.EffectsOwner); err != nil {
-		return err
-	}
 	return s.mutateDeployEvent(ctx, ev, func(st *PRState) {
 		st.RecordCheckState(ev.HeadSHA, ev.CheckName, ev.CheckState)
 	})
@@ -941,9 +879,6 @@ func (s *PRObjectService) HandleCheckStatus(ctx restate.ObjectContext, ev PREven
 // both dedup slots, commits them plus the deployed row status, then
 // publishes the deploy_success facts the event carries.
 func (s *PRObjectService) HandleDeploySuccess(ctx restate.ObjectContext, ev PREvent) (DeployDispatchDecision, error) {
-	if err := rejectLegacyOwner(ctx, "HandleDeploySuccess", ev.EffectsOwner); err != nil {
-		return DeployDispatchDecision{}, err
-	}
 	if dropped, err := s.dropUntrackedEvent(ctx, ev, PRHandlerDeploySuccess); dropped || err != nil {
 		return DeployDispatchDecision{}, err
 	}
@@ -993,9 +928,6 @@ func (s *PRObjectService) commitDeploySuccess(ctx restate.ObjectContext, st *PRS
 // pipeline still names it until r2 deletes that pipeline, so it stays
 // registered until r2b; like every handler it rejects a legacy stamp.
 func (s *PRObjectService) HandleDeployDispatched(ctx restate.ObjectSharedContext, ev PREvent) (DeployDispatchDecision, error) {
-	if err := rejectLegacyOwner(ctx, "HandleDeployDispatched", ev.EffectsOwner); err != nil {
-		return DeployDispatchDecision{}, err
-	}
 	st, err := s.loadOrCreatePRState(ctx, ev)
 	if err != nil {
 		return DeployDispatchDecision{}, err
@@ -1008,9 +940,6 @@ func (s *PRObjectService) HandleDeployDispatched(ctx restate.ObjectSharedContext
 // pipeline still names it until r2 deletes that pipeline, so it stays
 // registered until r2b; like every handler it rejects a legacy stamp.
 func (s *PRObjectService) HandleDeploySuccessPublished(ctx restate.ObjectContext, ev PREvent) (DeployPublishedOutcome, error) {
-	if err := rejectLegacyOwner(ctx, "HandleDeploySuccessPublished", ev.EffectsOwner); err != nil {
-		return DeployPublishedOutcome{}, err
-	}
 	if NormalizeRepo(ev.Repo) == "" || ev.PRNumber <= 0 {
 		return DeployPublishedOutcome{}, nil
 	}
@@ -1036,9 +965,6 @@ func (s *PRObjectService) HandleDeploySuccessPublished(ctx restate.ObjectContext
 // requests and bad targets fail terminally with 400, an owner mismatch
 // with 409, so no retry repeats them.
 func (s *PRObjectService) Register(ctx restate.ObjectContext, req RegisterRequest) (RegisterResponse, error) {
-	if err := rejectLegacyOwner(ctx, "Register", req.EffectsOwner); err != nil {
-		return RegisterResponse{}, err
-	}
 	repo := NormalizeRepo(req.Repo)
 	st, err := restate.Get[*PRState](ctx, s.stateKey)
 	if err != nil {
@@ -1096,9 +1022,6 @@ func (s *PRObjectService) GetBuildLifecycle(ctx restate.ObjectSharedContext, _ B
 // main push SHA, mirroring StateTracker.ClearUpdatedPRsForMainCommit. It is
 // the one-way target of RepoObject main-push fan-out.
 func (s *PRObjectService) HandleMainAdvanced(ctx restate.ObjectContext, ev PREvent) error {
-	if err := rejectLegacyOwner(ctx, "HandleMainAdvanced", ev.EffectsOwner); err != nil {
-		return err
-	}
 	return s.mutatePREvent(ctx, ev, func(st *PRState) {
 		st.ClearUpdatedForMain()
 	})
@@ -1127,9 +1050,15 @@ func (*RepoObjectService) ServiceName() string {
 	return RepoObjectServiceName
 }
 
+// handlers wires RepoHandlers to this object's K/V, one-way sends and
+// delayed self-sends. Every argument is a non-nil value, so
+// NewRepoHandlers cannot fail here; a failure is a wiring bug and panics.
 func (s *RepoObjectService) handlers(ctx restate.ObjectContext) *RepoHandlers {
-	return NewRepoHandlers(restateRepoStore{ctx: ctx, key: s.stateKey}, nil, restatePRSender{ctx: ctx}, restateSelfScheduler{ctx: ctx}).
-		WithGitHub(journaled(ctx, s.github)).WithKube(journaledKubeFor(ctx, s.kube))
+	h, err := NewRepoHandlers(restateRepoStore{ctx: ctx, key: s.stateKey}, restatePRSender{ctx: ctx}, restateSelfScheduler{ctx: ctx})
+	if err != nil {
+		panic(err)
+	}
+	return h.WithGitHub(journaled(ctx, s.github)).WithKube(journaledKubeFor(ctx, s.kube))
 }
 
 // terminalOnInvalid converts malformed-input errors to terminal errors so
@@ -1144,26 +1073,17 @@ func terminalOnInvalid(err error) error {
 // HandleMainPush records one main push SHA and fans a main-advanced send out
 // to every open PR. Duplicate pushes persist nothing.
 func (s *RepoObjectService) HandleMainPush(ctx restate.ObjectContext, ev RepoEvent) error {
-	if err := rejectLegacyOwner(ctx, "HandleMainPush", ev.EffectsOwner); err != nil {
-		return err
-	}
 	return terminalOnInvalid(s.handlers(ctx).HandleMainPush(ctx, ev))
 }
 
 // HandleFanout re-delivers the latest main push to every open PR.
 func (s *RepoObjectService) HandleFanout(ctx restate.ObjectContext, ev RepoEvent) error {
-	if err := rejectLegacyOwner(ctx, "HandleFanout", ev.EffectsOwner); err != nil {
-		return err
-	}
 	return terminalOnInvalid(s.handlers(ctx).HandleFanout(ctx, ev))
 }
 
 // HandleKustomizationStatus records one dispatched-SHA tombstone scoped to
 // its gate generation and forwards the status to every deploying PR.
 func (s *RepoObjectService) HandleKustomizationStatus(ctx restate.ObjectContext, ev RepoEvent) error {
-	if err := rejectLegacyOwner(ctx, "HandleKustomizationStatus", ev.EffectsOwner); err != nil {
-		return err
-	}
 	return terminalOnInvalid(s.handlers(ctx).HandleKustomizationStatus(ctx, ev))
 }
 
@@ -1174,34 +1094,22 @@ func (s *RepoObjectService) HandlePRIndex(ctx restate.ObjectContext, ev PRIndexE
 
 // HandleCheckRunBySHA routes one check_run event by head SHA.
 func (s *RepoObjectService) HandleCheckRunBySHA(ctx restate.ObjectContext, ev SHAEvent) error {
-	if err := rejectLegacyOwner(ctx, "HandleCheckRunBySHA", ev.Event.EffectsOwner); err != nil {
-		return err
-	}
 	return s.routeBySHA(ctx, SHAKindCheckRun, ev)
 }
 
 // HandleWorkflowRunBySHA routes one workflow_run event by head SHA.
 func (s *RepoObjectService) HandleWorkflowRunBySHA(ctx restate.ObjectContext, ev SHAEvent) error {
-	if err := rejectLegacyOwner(ctx, "HandleWorkflowRunBySHA", ev.Event.EffectsOwner); err != nil {
-		return err
-	}
 	return s.routeBySHA(ctx, SHAKindWorkflowRun, ev)
 }
 
 // HandlePushBySHA routes one push event by commit SHA (for example a
 // squash-merge push that carries no PR number).
 func (s *RepoObjectService) HandlePushBySHA(ctx restate.ObjectContext, ev SHAEvent) error {
-	if err := rejectLegacyOwner(ctx, "HandlePushBySHA", ev.Event.EffectsOwner); err != nil {
-		return err
-	}
 	return s.routeBySHA(ctx, SHAKindPush, ev)
 }
 
 // HandleImageReadyBySHA routes one image-ready event by commit SHA.
 func (s *RepoObjectService) HandleImageReadyBySHA(ctx restate.ObjectContext, ev SHAEvent) error {
-	if err := rejectLegacyOwner(ctx, "HandleImageReadyBySHA", ev.Event.EffectsOwner); err != nil {
-		return err
-	}
 	return s.routeBySHA(ctx, SHAKindImageReady, ev)
 }
 

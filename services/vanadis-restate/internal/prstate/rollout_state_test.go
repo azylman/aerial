@@ -91,11 +91,31 @@ func TestWithRolloutState(t *testing.T) {
 type rolloutRenderCase struct {
 	Name         string                 `json:"name"`
 	Fenced       bool                   `json:"build_metadata_fenced"`
-	Row          RegistryRow            `json:"row"`
+	Row          rolloutRow             `json:"row"`
 	RolloutState *pubsub.PRRolloutState `json:"rollout_state"`
 }
 
-// TestBuildPRRolloutStateLegacyParity hydrates PRState from each golden row
+// rolloutRow is the part of a golden pr_registry row the rollout render
+// reads; the fixture's other row keys are ignored.
+type rolloutRow struct {
+	Repo     string             `json:"repo"`
+	PRNumber int                `json:"pr_number"`
+	HeadSHA  string             `json:"head_sha"`
+	MergeSHA string             `json:"merge_sha"`
+	Status   string             `json:"status"`
+	Metadata ProjectionMetadata `json:"metadata"`
+}
+
+// state seeds a fresh PRState with the row's rollout inputs.
+func (r rolloutRow) state() *PRState {
+	st := NewPRState(r.Repo, r.PRNumber)
+	st.HeadSHA, st.MergeSHA, st.Status = r.HeadSHA, r.MergeSHA, r.Status
+	st.Jobs, st.StartedJobs, st.DeployedJobs = r.Metadata.Jobs, r.Metadata.StartedJobs, r.Metadata.DeployedJobs
+	st.JobStates, st.BuildMetadata = r.Metadata.JobStates, r.Metadata.BuildMetadata
+	return st
+}
+
+// TestBuildPRRolloutStateLegacyParity seeds PRState from each golden row
 // and asserts the render equals the hand-derived legacy rollout state.
 func TestBuildPRRolloutStateLegacyParity(t *testing.T) {
 	t.Parallel()
@@ -109,8 +129,7 @@ func TestBuildPRRolloutStateLegacyParity(t *testing.T) {
 	for _, tc := range doc.Cases {
 		t.Run(tc.Name, func(t *testing.T) {
 			t.Parallel()
-			st := NewPRState(tc.Row.Repo, tc.Row.PRNumber)
-			st.ApplyHydrate(tc.Row)
+			st := tc.Row.state()
 			require.Equal(t, tc.Fenced, st.renderableBuildMetadata() != nil, "fence")
 			require.Equal(t, tc.RolloutState, BuildPRRolloutState(st))
 		})

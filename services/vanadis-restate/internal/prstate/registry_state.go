@@ -129,9 +129,6 @@ type RegisterRequest struct {
 	// PR already owned by someone else is rejected.
 	EnforceOwner  bool   `json:"enforce_owner,omitempty"`
 	ExpectedOwner string `json:"expected_owner,omitempty"`
-	// EffectsOwner is the synapse stamp for this register; a legacy stamp
-	// is rejected terminally.
-	EffectsOwner EffectsOwner `json:"effects_owner,omitempty"`
 }
 
 // RegisterResponse is the PRObject.Register result.
@@ -296,9 +293,9 @@ func (s *PRState) ApplyIdentity(branch, title string) {
 // upsert it is fill-only: an invalid target writes nothing; otherwise the
 // branch is replaced when set, and head, target and title fill only when
 // empty. The owner is seeded only when the registration creates the row,
-// which for PRObject means no target was stored yet (Register and Hydrate
-// always store one): it is then claimed like a Hydrate of the inserted row
-// (hydrateOwner) and also fills BotID, the two keys the insert writes. The
+// which for PRObject means no target was stored yet (Register always
+// stores one): it is then claimed as the inserted row's owner
+// (claimRowOwner) and also fills BotID, the two keys the insert writes. The
 // status is untouched. Filling the target makes the PR tracked, so the
 // untracked guard stops applying and Project writes the row legacy writes.
 // Returns true when the state changed.
@@ -325,7 +322,7 @@ func (s *PRState) ApplySelfRegistration(branch, head, targetID, title, agent str
 	}
 	s.TargetID = targetID
 	if agent = strings.ToLower(strings.TrimSpace(agent)); agent != "" {
-		s.hydrateOwner(agent)
+		s.claimRowOwner(agent)
 		if strings.TrimSpace(s.BotID) == "" {
 			s.BotID = agent
 		}
@@ -507,10 +504,9 @@ func (s *PRState) RecordExpectedJobs(jobs []string) bool {
 }
 
 // Untracked reports whether st never saw any event that makes a PR exist
-// for the legacy registry: no register (Registered, TargetID), no Hydrate
-// (a pr_registry row always carries its head SHA), no opened (it carries
-// the head SHA, and PR-body bot metadata sets BotID), and no merge or close
-// (Terminal, MergeSHA). Such a state was built only from deploy-phase
+// for the legacy registry: no register or self-registration (Registered,
+// TargetID), no opened (it carries the head SHA, and PR-body bot metadata
+// sets BotID), and no merge or close (Terminal, MergeSHA). Such a state was built only from deploy-phase
 // events, for example an upstream Flux source commit resolved to a PR of a
 // repo nobody registers. The legacy registry has no row for it, so its
 // deploy transitions and request records are no-ops there; prstate must not
@@ -788,4 +784,13 @@ func (s *PRState) BuildLifecycleView() BuildLifecycle {
 		out.HasBuildMetadata = true
 	}
 	return out
+}
+
+// claimRowOwner claims owner for a newly inserted row unless Register
+// already claimed one, in which case it only fills an empty slot.
+func (s *PRState) claimRowOwner(owner string) bool {
+	if s.Registered {
+		return s.ApplyAgentHint(owner)
+	}
+	return s.ClaimOwner(owner)
 }

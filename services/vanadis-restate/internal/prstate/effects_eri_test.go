@@ -64,21 +64,19 @@ func TestPREventEriEffectsDecode(t *testing.T) {
 	tests := []struct {
 		name        string
 		raw         []byte
-		wantOwner   EffectsOwner
 		wantEffects []EriEffect
 	}{
 		{
-			name: "golden collaborator DM event", raw: fx.Event, wantOwner: EffectsOwnerRestate,
+			name: "golden collaborator DM event", raw: fx.Event,
 			wantEffects: []EriEffect{{Kind: EffectEriDirectMessage, ChannelID: "111111111111111111", Content: "<@42> CI check lint failed on mirrormere#1010"}},
 		},
-		{name: "event without effects", raw: []byte(`{"repo":"azylman/aerial","pr_number":1,"head_sha":"h1"}`), wantOwner: EffectsOwnerRestate},
+		{name: "event without effects", raw: []byte(`{"repo":"azylman/aerial","pr_number":1,"head_sha":"h1"}`)},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			var ev PREvent
 			require.NoError(t, json.Unmarshal(tc.raw, &ev))
-			require.Equal(t, tc.wantOwner, ev.EffectsOwner)
 			require.Equal(t, tc.wantEffects, ev.EriEffects)
 		})
 	}
@@ -227,8 +225,7 @@ var errFakeEri = errors.New("eri unavailable")
 // TestPRObjectServiceEriEffects pins effect ownership on the collaborator
 // alert handler: restate events deliver to the stored owner and commit the
 // key, a failed or unconfigured delivery schedules a delayed retry without
-// committing, a legacy-stamped event is rejected terminally before any
-// write, and a fired key never re-fires.
+// committing, and a fired key never re-fires.
 func TestPRObjectServiceEriEffects(t *testing.T) {
 	t.Parallel()
 	dispatched := func() *PRState {
@@ -240,7 +237,6 @@ func TestPRObjectServiceEriEffects(t *testing.T) {
 	tests := []struct {
 		name           string
 		state          *PRState
-		owner          EffectsOwner
 		eri            *fakeEriEffector
 		wantCalls      []eriCall
 		wantRun        bool
@@ -249,16 +245,15 @@ func TestPRObjectServiceEriEffects(t *testing.T) {
 		wantSends      []sentCall
 	}{
 		{
-			name: "restate owner delivers to the stored owner", state: effectPR(), owner: EffectsOwnerRestate, eri: &fakeEriEffector{},
+			name: "restate owner delivers to the stored owner", state: effectPR(), eri: &fakeEriEffector{},
 			wantCalls: []eriCall{{agent: "agent-alpha", key: testDMKey, eff: dmEffect()}}, wantRun: true, wantDispatched: true,
 		},
 		{
-			name: "failed delivery schedules a retry", state: effectPR(), owner: EffectsOwnerRestate, eri: &fakeEriEffector{err: errFakeEri},
+			name: "failed delivery schedules a retry", state: effectPR(), eri: &fakeEriEffector{err: errFakeEri},
 			wantCalls: []eriCall{{agent: "agent-alpha", key: testDMKey, eff: dmEffect()}}, wantRun: true, wantSends: retrySend,
 		},
-		{name: "unconfigured effector schedules a retry", state: effectPR(), owner: EffectsOwnerRestate, wantRun: true, wantSends: retrySend},
-		{name: "legacy owner is rejected", state: effectPR(), owner: EffectsOwnerLegacy, eri: &fakeEriEffector{}, wantErr: true},
-		{name: "fired key never re-fires", state: dispatched(), owner: EffectsOwnerRestate, eri: &fakeEriEffector{}, wantDispatched: true},
+		{name: "unconfigured effector schedules a retry", state: effectPR(), wantRun: true, wantSends: retrySend},
+		{name: "fired key never re-fires", state: dispatched(), eri: &fakeEriEffector{}, wantDispatched: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -269,7 +264,7 @@ func TestPRObjectServiceEriEffects(t *testing.T) {
 			if tc.eri != nil {
 				svc = svc.WithEriEffector(tc.eri)
 			}
-			err := svc.HandleCollaboratorAlert(restate.WithMockContext(mc), PREvent{Repo: "aerial", PRNumber: 101, HeadSHA: "h1", EffectsOwner: tc.owner, EriEffects: []EriEffect{dmEffect()}})
+			err := svc.HandleCollaboratorAlert(restate.WithMockContext(mc), PREvent{Repo: "aerial", PRNumber: 101, HeadSHA: "h1", EriEffects: []EriEffect{dmEffect()}})
 			require.Equal(t, tc.wantErr, restate.IsTerminalError(err), "err = %v", err)
 			require.Equal(t, !tc.wantErr, rec.setCalled)
 			if tc.eri != nil {

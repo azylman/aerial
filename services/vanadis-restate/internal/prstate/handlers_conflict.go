@@ -2,11 +2,9 @@ package prstate
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -47,65 +45,6 @@ type ConflictRescheduler interface {
 	ScheduleConflictRecheck(ctx context.Context, delay time.Duration, ev PREvent) error
 }
 
-type noopConflictChecker struct{}
-
-func (noopConflictChecker) CheckConflict(context.Context, string, int, string) (bool, error) {
-	return false, nil
-}
-
-type noopRescheduler struct{}
-
-func (noopRescheduler) ScheduleConflictRecheck(context.Context, time.Duration, PREvent) error {
-	return nil
-}
-
-// MemPRStore is an in-memory PRStateStore for hermetic tests. It stores
-// JSON snapshots, so every load returns a fresh copy exactly like Restate
-// K/V and an unsaved mutation never leaks into the store.
-type MemPRStore struct {
-	mu  sync.Mutex
-	prs map[string][]byte
-}
-
-// NewMemPRStore returns an empty in-memory PR store.
-func NewMemPRStore() *MemPRStore {
-	return &MemPRStore{prs: make(map[string][]byte)}
-}
-
-// LoadPR returns a copy of the PR state for a repo#prNumber key.
-func (s *MemPRStore) LoadPR(key string) (*PRState, bool) {
-	if s == nil {
-		return nil, false
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	raw, ok := s.prs[strings.TrimSpace(key)]
-	if !ok {
-		return nil, false
-	}
-	var st PRState
-	//nolint:musttag // PRState is Restate-owned state with intentionally untagged fields; the snapshot mirrors Restate K/V, not a wire format.
-	if err := json.Unmarshal(raw, &st); err != nil {
-		return nil, false
-	}
-	return &st, true
-}
-
-// SavePR commits a snapshot of the PR state under its repo#prNumber key.
-func (s *MemPRStore) SavePR(state *PRState) {
-	if s == nil || state == nil {
-		return
-	}
-	//nolint:musttag // PRState is Restate-owned state with intentionally untagged fields; the snapshot mirrors Restate K/V, not a wire format.
-	raw, err := json.Marshal(state)
-	if err != nil {
-		return
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.prs[PRObjectKey(state.Repo, state.PRNumber)] = raw
-}
-
 // ConflictHandlers runs the dark per-PR conflict check.
 type ConflictHandlers struct {
 	store      PRStateStore
@@ -113,19 +52,22 @@ type ConflictHandlers struct {
 	reschedule ConflictRescheduler
 }
 
-// NewConflictHandlers builds dark conflict handlers; nil dependencies fall
-// back to in-memory/no-op defaults so zero-value wiring never nil-panics.
-func NewConflictHandlers(store PRStateStore, conflicts ConflictChecker, reschedule ConflictRescheduler) *ConflictHandlers {
-	if store == nil {
-		store = NewMemPRStore()
+// errNilDependency is the cause a handler constructor returns when a
+// required dependency is nil.
+var errNilDependency = errors.New("prstate: required dependency is nil")
+
+// NewConflictHandlers builds conflict handlers. Every dependency is
+// required: a nil one returns errNilDependency.
+func NewConflictHandlers(store PRStateStore, conflicts ConflictChecker, reschedule ConflictRescheduler) (*ConflictHandlers, error) {
+	switch {
+	case store == nil:
+		return nil, fmt.Errorf("%w: conflict handlers PR store", errNilDependency)
+	case conflicts == nil:
+		return nil, fmt.Errorf("%w: conflict handlers conflict checker", errNilDependency)
+	case reschedule == nil:
+		return nil, fmt.Errorf("%w: conflict handlers rescheduler", errNilDependency)
 	}
-	if conflicts == nil {
-		conflicts = noopConflictChecker{}
-	}
-	if reschedule == nil {
-		reschedule = noopRescheduler{}
-	}
-	return &ConflictHandlers{store: store, conflicts: conflicts, reschedule: reschedule}
+	return &ConflictHandlers{store: store, conflicts: conflicts, reschedule: reschedule}, nil
 }
 
 // ConflictOutcome is the pure routing result of one conflict check.

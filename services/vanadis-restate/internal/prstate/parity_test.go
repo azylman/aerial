@@ -155,7 +155,6 @@ func newParitySim(t *testing.T) *paritySim {
 	repo := NewRepoObjectService().WithGitHub(sim).WithKube(sim)
 	sim.handlers = map[string]simHandler{
 		"PRObject/" + "Register":                      bindOut(pr.Register),
-		"PRObject/" + "Hydrate":                       bindOut(pr.Hydrate),
 		"PRObject/" + PRHandlerProject:                bindErr(pr.Project),
 		"PRObject/" + PRHandlerCheckFailed:            bindErr(pr.HandleCheckFailed),
 		"PRObject/" + PRHandlerCheckPassed:            bindErr(pr.HandleCheckPassed),
@@ -413,20 +412,6 @@ func TestRestateOwnershipParity(t *testing.T) {
 			t.Parallel()
 			sim := newParitySim(t)
 			for _, inv := range tc.Restate {
-				owner, err := decodeInput[struct {
-					EffectsOwner EffectsOwner `json:"effects_owner"`
-					// A RepoObject *BySHA envelope carries the owner on
-					// the wrapped PRObject event.
-					Event struct {
-						EffectsOwner EffectsOwner `json:"effects_owner"`
-					} `json:"event"`
-				}](inv.Event)
-				require.NoError(t, err)
-				got := owner.EffectsOwner
-				if strings.HasSuffix(inv.Handler, "BySHA") {
-					got = owner.Event.EffectsOwner
-				}
-				require.Equal(t, EffectsOwnerRestate, got, "every golden event is restate-owned")
 				sim.send(inv)
 			}
 			require.Equal(t, sortedEffects(tc.Effects), sortedEffects(sim.effects))

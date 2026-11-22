@@ -60,8 +60,8 @@ func TestRepoHandlersHandleGitPush(t *testing.T) {
 	t.Parallel()
 	pushKey := EffectKey{Repo: "azylman/aerial", PRNumber: 7, HeadSHA: "m1", Kind: EffectFluxGitPush}
 	pushKeyStr := "azylman/aerial#7@m1:gen0:flux_git_push"
-	push := func(owner EffectsOwner) RepoEvent {
-		return RepoEvent{Repo: "aerial", MainSHA: "m1", PRNumber: 7, Ref: "refs/heads/main", TargetID: "t1", EffectsOwner: owner}
+	push := func() RepoEvent {
+		return RepoEvent{Repo: "aerial", MainSHA: "m1", PRNumber: 7, Ref: "refs/heads/main", TargetID: "t1"}
 	}
 	tests := []struct {
 		name        string
@@ -75,37 +75,37 @@ func TestRepoHandlersHandleGitPush(t *testing.T) {
 		wantEffects []string
 	}{
 		{
-			name: "restate push dispatches once", ev: push(EffectsOwnerRestate), kube: &fakeKube{},
+			name: "restate push dispatches once", ev: push(), kube: &fakeKube{},
 			wantOutcome: RepoEffectOutcome{Key: pushKey, Executed: true},
 			wantCalls:   []string{"push azylman/aerial refs/heads/main m1 t1"},
 			wantEffects: []string{pushKeyStr},
 		},
 		{
-			name: "direct commit with no pr still dispatches", ev: RepoEvent{Repo: "aerial", MainSHA: "m2", Ref: "refs/heads/main", EffectsOwner: EffectsOwnerRestate}, kube: &fakeKube{},
+			name: "direct commit with no pr still dispatches", ev: RepoEvent{Repo: "aerial", MainSHA: "m2", Ref: "refs/heads/main"}, kube: &fakeKube{},
 			wantOutcome: RepoEffectOutcome{Key: EffectKey{Repo: "azylman/aerial", HeadSHA: "m2", Kind: EffectFluxGitPush}, Executed: true},
 			wantCalls:   []string{"push azylman/aerial refs/heads/main m2 "},
 			wantEffects: []string{"azylman/aerial#0@m2:gen0:flux_git_push"},
 		},
 		{
-			name: "dispatched push dedupes", ev: push(EffectsOwnerRestate), kube: &fakeKube{},
+			name: "dispatched push dedupes", ev: push(), kube: &fakeKube{},
 			seed:        &RepoState{Repo: "azylman/aerial", RepoEffects: []string{pushKeyStr}},
 			wantOutcome: RepoEffectOutcome{Key: pushKey, Deduped: true},
 			wantEffects: []string{pushKeyStr},
 		},
 		{
-			name: "retryable receiver failure leaves the key open", ev: push(EffectsOwnerRestate), kube: &fakeKube{pushErr: errKubeDown},
+			name: "retryable receiver failure leaves the key open", ev: push(), kube: &fakeKube{pushErr: errKubeDown},
 			wantOutcome: RepoEffectOutcome{Key: pushKey, Retry: true, Kube: errKubeDown},
 			wantCalls:   []string{"push azylman/aerial refs/heads/main m1 t1"},
 			wantEffects: []string{},
 		},
 		{
-			name: "terminal receiver failure commits", ev: push(EffectsOwnerRestate), kube: &fakeKube{pushErr: errKubeForbidden},
+			name: "terminal receiver failure commits", ev: push(), kube: &fakeKube{pushErr: errKubeForbidden},
 			wantOutcome: RepoEffectOutcome{Key: pushKey, Kube: errKubeForbidden},
 			wantCalls:   []string{"push azylman/aerial refs/heads/main m1 t1"},
 			wantEffects: []string{pushKeyStr},
 		},
 		{
-			name: "missing kube client retries", ev: push(EffectsOwnerRestate), noKube: true,
+			name: "missing kube client retries", ev: push(), noKube: true,
 			wantOutcome: RepoEffectOutcome{Key: pushKey, Retry: true, Kube: errKubeUnconfigured},
 			wantEffects: []string{},
 		},
@@ -119,7 +119,7 @@ func TestRepoHandlersHandleGitPush(t *testing.T) {
 			if tc.seed != nil {
 				store.SaveRepo(tc.seed)
 			}
-			h := NewRepoHandlers(store, nil, &fakePRSender{}, nil)
+			h := testRepoHandlers(t, store, &fakePRSender{}, nil)
 			if !tc.noKube {
 				h = h.WithKube(tc.kube)
 			}
@@ -146,16 +146,16 @@ var (
 )
 
 // prPromotion is a tracked PR #7 promotion of eri and haro at s1.
-func prPromotion(owner EffectsOwner) RepoEvent {
+func prPromotion() RepoEvent {
 	return RepoEvent{
 		Repo: "aerial", HeadSHA: "s1", PRNumber: 7, Branch: "feat", TargetID: "t9", Images: []string{"eri", "haro"}, Jobs: []string{"eri"},
-		KustomizationRequests: promotionRequests, Facts: []pubsub.PRLifecycleEvent{promotionStarted}, DeployFailedFacts: []pubsub.PRLifecycleEvent{promotionFailed}, EffectsOwner: owner,
+		KustomizationRequests: promotionRequests, Facts: []pubsub.PRLifecycleEvent{promotionStarted}, DeployFailedFacts: []pubsub.PRLifecycleEvent{promotionFailed},
 	}
 }
 
 // mainPromotion is an untracked direct-commit promotion of eri at s2.
-func mainPromotion(owner EffectsOwner) RepoEvent {
-	return RepoEvent{Repo: "aerial", HeadSHA: "s2", Images: []string{"eri"}, KustomizationRequests: promotionRequests, EffectsOwner: owner}
+func mainPromotion() RepoEvent {
+	return RepoEvent{Repo: "aerial", HeadSHA: "s2", Images: []string{"eri"}, KustomizationRequests: promotionRequests}
 }
 
 // promotionFailureForward is the HandleDeployAttemptFailed forward a failed
@@ -165,7 +165,7 @@ func promotionFailureForward(kerr *KubeError) sentPR {
 	fact.Details = kerr.Error()
 	return sentPR{handler: PRHandlerDeployAttemptFailed, ev: PREvent{
 		Event: "deploy_attempt_failed", Repo: "azylman/aerial", PRNumber: 7, HeadSHA: "s1", MergeSHA: "s1", Branch: "feat",
-		Banner: kerr.Error(), Facts: []pubsub.PRLifecycleEvent{fact}, EffectsOwner: EffectsOwnerRestate,
+		Banner: kerr.Error(), Facts: []pubsub.PRLifecycleEvent{fact},
 	}}
 }
 
@@ -179,7 +179,7 @@ func TestRepoHandlersHandleImagePromotion(t *testing.T) {
 	mainReconcileStr := "azylman/aerial#0@s2:gen0:flux_reconcile"
 	rolloutForward := sentPR{handler: PRHandlerKustomizationRequested, ev: PREvent{
 		Event: "kustomization_requested", Repo: "azylman/aerial", PRNumber: 7, HeadSHA: "s1", Branch: "feat", TargetID: "t9", Jobs: []string{"eri"},
-		KustomizationRequests: requests, Facts: []pubsub.PRLifecycleEvent{promotionStarted}, EffectsOwner: EffectsOwnerRestate,
+		KustomizationRequests: requests, Facts: []pubsub.PRLifecycleEvent{promotionStarted},
 	}}
 	failureForward := promotionFailureForward
 	tests := []struct {
@@ -195,71 +195,71 @@ func TestRepoHandlersHandleImagePromotion(t *testing.T) {
 		wantEffects []string
 	}{
 		{
-			name: "restate pr promotion writes every tag then forwards the rollout", ev: prPromotion(EffectsOwnerRestate), kube: &fakeKube{},
+			name: "restate pr promotion writes every tag then forwards the rollout", ev: prPromotion(), kube: &fakeKube{},
 			wantOutcome: RepoEffectOutcome{Key: prKey, Executed: true, Forwards: 1, Promoted: []string{"eri", "haro"}},
 			wantCalls:   []string{"promote eri@s1", "promote haro@s1"},
 			wantSent:    []sentPR{rolloutForward},
 			wantEffects: []string{prKeyStr},
 		},
 		{
-			name: "restate direct commit promotes and reconciles with no pr", ev: mainPromotion(EffectsOwnerRestate), kube: &fakeKube{},
+			name: "restate direct commit promotes and reconciles with no pr", ev: mainPromotion(), kube: &fakeKube{},
 			wantOutcome: RepoEffectOutcome{Key: mainKey, Executed: true, Promoted: []string{"eri"}},
 			wantCalls:   []string{"promote eri@s2", "reconcile flux-system/apps@t1", "reconcile flux-system/core@t1"},
 			wantEffects: []string{mainKeyStr, mainReconcileStr},
 		},
 		{
-			name: "retryable reconcile failure retries only the reconcile", ev: mainPromotion(EffectsOwnerRestate), kube: &fakeKube{reconcileErr: map[string]*KubeError{"apps": errKubeDown}},
+			name: "retryable reconcile failure retries only the reconcile", ev: mainPromotion(), kube: &fakeKube{reconcileErr: map[string]*KubeError{"apps": errKubeDown}},
 			wantOutcome: RepoEffectOutcome{Key: mainKey, Executed: true, Retry: true, Kube: errKubeDown, Promoted: []string{"eri"}},
 			wantCalls:   []string{"promote eri@s2", "reconcile flux-system/apps@t1", "reconcile flux-system/core@t1"},
 			wantEffects: []string{mainKeyStr},
 		},
 		{
-			name: "promotion retry after a promoted tag only reconciles", ev: mainPromotion(EffectsOwnerRestate), kube: &fakeKube{},
+			name: "promotion retry after a promoted tag only reconciles", ev: mainPromotion(), kube: &fakeKube{},
 			seed:        &RepoState{Repo: "azylman/aerial", RepoEffects: []string{mainKeyStr}},
 			wantOutcome: RepoEffectOutcome{Key: mainKey},
 			wantCalls:   []string{"reconcile flux-system/apps@t1", "reconcile flux-system/core@t1"},
 			wantEffects: []string{mainKeyStr, mainReconcileStr},
 		},
 		{
-			name: "terminal reconcile failure commits", ev: mainPromotion(EffectsOwnerRestate), kube: &fakeKube{reconcileErr: map[string]*KubeError{"core": errKubeForbidden}},
+			name: "terminal reconcile failure commits", ev: mainPromotion(), kube: &fakeKube{reconcileErr: map[string]*KubeError{"core": errKubeForbidden}},
 			wantOutcome: RepoEffectOutcome{Key: mainKey, Executed: true, Kube: errKubeForbidden, Promoted: []string{"eri"}},
 			wantCalls:   []string{"promote eri@s2", "reconcile flux-system/apps@t1", "reconcile flux-system/core@t1"},
 			wantEffects: []string{mainKeyStr, mainReconcileStr},
 		},
 		{
-			name: "mixed reconcile failures retry", ev: mainPromotion(EffectsOwnerRestate), kube: &fakeKube{reconcileErr: map[string]*KubeError{"apps": errKubeForbidden, "core": errKubeDown}},
+			name: "mixed reconcile failures retry", ev: mainPromotion(), kube: &fakeKube{reconcileErr: map[string]*KubeError{"apps": errKubeForbidden, "core": errKubeDown}},
 			wantOutcome: RepoEffectOutcome{Key: mainKey, Executed: true, Retry: true, Kube: &KubeError{Message: "forbidden"}, Promoted: []string{"eri"}},
 			wantCalls:   []string{"promote eri@s2", "reconcile flux-system/apps@t1", "reconcile flux-system/core@t1"},
 			wantEffects: []string{mainKeyStr},
 		},
 		{
-			name: "fully promoted and reconciled dedupes", ev: mainPromotion(EffectsOwnerRestate), kube: &fakeKube{},
+			name: "fully promoted and reconciled dedupes", ev: mainPromotion(), kube: &fakeKube{},
 			seed:        &RepoState{Repo: "azylman/aerial", RepoEffects: []string{mainKeyStr, mainReconcileStr}},
 			wantOutcome: RepoEffectOutcome{Key: mainKey, Deduped: true},
 			wantEffects: []string{mainKeyStr, mainReconcileStr},
 		},
 		{
-			name: "retryable promotion failure reports the attempt and retries", ev: prPromotion(EffectsOwnerRestate), kube: &fakeKube{promoteErrs: map[string]*KubeError{"eri": errKubeDown}},
+			name: "retryable promotion failure reports the attempt and retries", ev: prPromotion(), kube: &fakeKube{promoteErrs: map[string]*KubeError{"eri": errKubeDown}},
 			wantOutcome: RepoEffectOutcome{Key: prKey, Retry: true, Kube: errKubeDown, Forwards: 1, Promoted: []string{"haro"}},
 			wantCalls:   []string{"promote eri@s1", "promote haro@s1"},
 			wantSent:    []sentPR{failureForward(errKubeDown)},
 			wantEffects: []string{},
 		},
 		{
-			name: "terminal promotion failure commits and reports", ev: prPromotion(EffectsOwnerRestate), kube: &fakeKube{promoteErrs: map[string]*KubeError{"haro": errKubeForbidden}},
+			name: "terminal promotion failure commits and reports", ev: prPromotion(), kube: &fakeKube{promoteErrs: map[string]*KubeError{"haro": errKubeForbidden}},
 			wantOutcome: RepoEffectOutcome{Key: prKey, Kube: errKubeForbidden, Forwards: 1, Promoted: []string{"eri"}},
 			wantCalls:   []string{"promote eri@s1", "promote haro@s1"},
 			wantSent:    []sentPR{failureForward(errKubeForbidden)},
 			wantEffects: []string{prKeyStr},
 		},
 		{
-			name: "terminal untracked promotion failure commits the reconcile too", ev: mainPromotion(EffectsOwnerRestate), kube: &fakeKube{promoteErrs: map[string]*KubeError{"eri": errKubeForbidden}},
+			name: "terminal untracked promotion failure commits the reconcile too", ev: mainPromotion(), kube: &fakeKube{promoteErrs: map[string]*KubeError{"eri": errKubeForbidden}},
 			wantOutcome: RepoEffectOutcome{Key: mainKey, Kube: errKubeForbidden},
 			wantCalls:   []string{"promote eri@s2"},
 			wantEffects: []string{mainKeyStr, mainReconcileStr},
 		},
 		{
-			name: "missing kube client retries and reports the attempt", ev: prPromotion(EffectsOwnerRestate), noKube: true,
+			name: "missing kube client retries and reports the attempt", ev: prPromotion(), noKube: true,
 			wantOutcome: RepoEffectOutcome{Key: prKey, Retry: true, Kube: errKubeUnconfigured, Forwards: 1},
 			wantSent:    []sentPR{failureForward(errKubeUnconfigured)},
 			wantEffects: []string{},
@@ -275,7 +275,7 @@ func TestRepoHandlersHandleImagePromotion(t *testing.T) {
 				store.SaveRepo(tc.seed)
 			}
 			prs := &fakePRSender{}
-			h := NewRepoHandlers(store, nil, prs, nil)
+			h := testRepoHandlers(t, store, prs, nil)
 			if !tc.noKube {
 				h = h.WithKube(tc.kube)
 			}
@@ -305,7 +305,7 @@ func TestRepoHandlersHandleImagePromotionLoadFailure(t *testing.T) {
 			t.Parallel()
 			store := NewMemRepoStore()
 			store.FailLoads(tc.wantErr)
-			_, err := NewRepoHandlers(store, nil, nil, nil).HandleImagePromotion(context.Background(), RepoEvent{Repo: "aerial", HeadSHA: "s1", Images: []string{"eri"}})
+			_, err := testRepoHandlers(t, store, nil, nil).HandleImagePromotion(context.Background(), RepoEvent{Repo: "aerial", HeadSHA: "s1", Images: []string{"eri"}})
 			require.ErrorIs(t, err, tc.wantErr)
 		})
 	}

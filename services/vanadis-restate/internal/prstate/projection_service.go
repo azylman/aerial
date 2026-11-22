@@ -1,6 +1,6 @@
 package prstate
 
-// PRObject registry writer and hydrator.
+// PRObject registry writer.
 //
 // After every committed PRObject transition, afterCommit sends a one-way
 // self-send to PRObject.Project, which re-derives the snapshot from
@@ -20,8 +20,7 @@ import (
 
 // PRObject handler names for projection self-sends.
 const (
-	PRHandlerProject           = "Project"
-	PRHandlerCompareProjection = "CompareProjection"
+	PRHandlerProject = "Project"
 )
 
 // Projection timing defaults: the retry delay paces re-projection after a
@@ -77,7 +76,7 @@ type ProjectRequest struct{}
 // Project upserts the full pr_registry row from committed state. An
 // identical snapshot already projected is skipped, and so is an untracked
 // PR: synapse only keeps rows for registered PRs, which always carry a
-// target thread, so a PR no Register, Hydrate or target-carrying event
+// target thread, so a PR no Register or target-carrying event
 // reached gets no row until one does. A write that exhausts its
 // journaled retries schedules a delayed re-projection instead of failing, so
 // a database outage never gates later transitions for the PR.
@@ -110,60 +109,4 @@ func (s *PRObjectService) Project(ctx restate.ObjectContext, _ ProjectRequest) e
 	st.ProjectedKey = key
 	restate.Set(ctx, s.stateKey, st)
 	return nil
-}
-
-// CompareProjection was the shadow compare of a legacy-written row. PRObject
-// is now the only pr_registry writer, so it does nothing; it stays
-// registered only so delayed compare sends queued before this release drain
-// instead of failing. A later release deletes it.
-func (*PRObjectService) CompareProjection(_ restate.ObjectSharedContext, _ ShadowCompareRequest) error {
-	return nil
-}
-
-// Hydrate seeds state from one pr_registry row (exclusive, effect-free,
-// idempotent): it fills only empty fields, claims the row owner, and sends
-// the head/merge SHAs to the RepoObject index when they changed. A row
-// for another repo#pr fails terminally with 400.
-func (s *PRObjectService) Hydrate(ctx restate.ObjectContext, req HydrateRequest) (HydrateResponse, error) {
-	repo := NormalizeRepo(req.Row.Repo)
-	if repo == "" || req.Row.PRNumber <= 0 || restate.Key(ctx) != PRObjectKey(repo, req.Row.PRNumber) {
-		return HydrateResponse{}, restate.ToTerminalError(errHydrateKeyMismatch, restate.WithErrorCode(400))
-	}
-	st, err := restate.Get[*PRState](ctx, s.stateKey)
-	if err != nil {
-		return HydrateResponse{}, err
-	}
-	if st == nil {
-		st = NewPRState(repo, req.Row.PRNumber)
-	}
-	before := snapshotIndexView(st)
-	prevMerge := st.MergeSHA
-	if !st.ApplyHydrate(req.Row) {
-		return HydrateResponse{Agent: st.OwnerAgent(), Status: st.RegistryStatus()}, nil
-	}
-	restate.Set(ctx, s.stateKey, st)
-	if snapshotIndexView(st) != before || st.MergeSHA != prevMerge {
-		ev := PREvent{Repo: repo, PRNumber: st.PRNumber, Branch: st.Branch}
-		sendPRIndex(ctx, st, ev, hydrateIndexLifecycle(st))
-		if st.hydrateDeploying() {
-			sendPRIndex(ctx, st, ev, IndexDeploying)
-		}
-	}
-	s.syncRolloutIndex(ctx, st)
-	return HydrateResponse{Changed: true, Agent: st.OwnerAgent(), Status: st.RegistryStatus()}, nil
-}
-
-var errHydrateKeyMismatch = errors.New("prstate: hydrate row must name this object's repo and pr_number")
-
-// hydrateIndexLifecycle picks the index op for a hydrated PR from its
-// terminal state.
-func hydrateIndexLifecycle(st *PRState) string {
-	switch st.Terminal {
-	case TerminalMerged:
-		return IndexMerged
-	case TerminalClosed:
-		return IndexClosed
-	default:
-		return IndexActive
-	}
 }

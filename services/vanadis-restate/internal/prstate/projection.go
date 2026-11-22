@@ -80,23 +80,6 @@ type ProjectionSnapshot struct {
 	Metadata   ProjectionMetadata `json:"metadata"`
 }
 
-// RegistryRow is one pr_registry row as stored: the shadow compare reads it
-// and PRObject.Hydrate takes it as input. Ownership comes from
-// metadata.agent, then metadata.bot_id; the agent column is an owner source
-// only when it holds a non-default value (see RowOwner).
-type RegistryRow struct {
-	Repo     string             `json:"repo"`
-	PRNumber int                `json:"pr_number"`
-	Agent    string             `json:"agent"`
-	Branch   string             `json:"branch"`
-	HeadSHA  string             `json:"head_sha"`
-	MergeSHA string             `json:"merge_sha"`
-	TargetID string             `json:"target_id"`
-	Status   string             `json:"status"`
-	Title    string             `json:"title"`
-	Metadata ProjectionMetadata `json:"metadata"`
-}
-
 // OwnedMetadataKeys returns every metadata key prstate writes, sorted. The
 // upsert replaces exactly these keys; any other key in the blob survives.
 func OwnedMetadataKeys() []string {
@@ -111,9 +94,8 @@ func OwnedMetadataKeys() []string {
 // BuildProjection maps committed PRState to a full registry row write. It
 // reads only the state it is given and never consults the projection, so
 // the projection can never feed back into a transition decision. It always
-// writes metadata.agent from the stored owner, including for legacy-era
-// rows whose owner Hydrate took from the agent column: that write fills the
-// same owner the column names and matches the typed owner column the registry moves to.
+// writes metadata.agent from the stored owner, which matches the typed
+// owner column the registry moves to.
 func BuildProjection(s *PRState) ProjectionSnapshot {
 	snap := ProjectionSnapshot{Agent: s.OwnerAgent(), Status: s.RegistryStatus()}
 	if s == nil {
@@ -298,31 +280,12 @@ func ProjectRegistry(ctx context.Context, store ProjectionStore, snap Projection
 }
 
 // Tracked reports whether the snapshot is for a PR the registry tracks: one
-// that Register, Hydrate or a target-carrying event gave a target thread.
+// that Register or a target-carrying event gave a target thread.
 // Synapse writes a row only for registered PRs, and registration always
 // resolves a target, so an untracked PR has no row on either writer.
 func (s ProjectionSnapshot) Tracked() bool {
 	return strings.TrimSpace(s.TargetID) != ""
 }
-
-// ShadowConfirm is the confirming-pass evidence the retired shadow compare
-// carried. It survives only as part of the ShadowCompareRequest payload so
-// queued CompareProjection sends still decode.
-type ShadowConfirm struct {
-	RowDigest string   `json:"row_digest"`
-	Fields    []string `json:"fields"`
-}
-
-// ShadowCompareRequest is the CompareProjection input, kept unchanged so
-// delayed compare sends queued before the shadow compare retired still
-// decode; the handler ignores it.
-type ShadowCompareRequest struct {
-	ProjectionSnapshot
-
-	Confirm *ShadowConfirm `json:"confirm,omitempty"`
-}
-
-// Compile-time freeze: the loader must satisfy the interface.
 
 // Compile-time freeze: the Postgres store satisfies the write boundary.
 var _ ProjectionStore = (*PgProjectionStore)(nil)

@@ -2,10 +2,10 @@ package prstate
 
 // Shadow goldens, prstate side: testdata/prlifecycle/shadow/ pins the
 // legacy-owned wire synapse sent while it still wrote pr_registry. prstate
-// now owns every effect and rejects a legacy stamp (TestRejectLegacyOwner),
-// so each captured event stream replays under restate ownership
-// (restamped) and must still land on the hand-derived state and effects. synapse's restate_shadow_golden_test.go
-// asserts it sends exactly those events until its legacy path is deleted.
+// now owns every effect and ignores the retired effects_owner stamp the
+// captures still carry, so each captured event stream replays under
+// restate ownership and must still land on the hand-derived state and
+// effects.
 // The projection-compare fields the goldens carry (divergent, superseded,
 // intended_effects) belonged to the retired shadow compare and are ignored.
 
@@ -49,33 +49,6 @@ func loadShadowGolden(t *testing.T, name string) shadowGolden {
 	return g
 }
 
-// restamped returns invs with every legacy effects_owner stamp, top level
-// or nested in a SHA event, replaced by restate: prstate rejects legacy
-// stamps, so captured legacy streams replay under restate ownership.
-func restamped(t *testing.T, invs []parityInvocation) []parityInvocation {
-	t.Helper()
-	out := make([]parityInvocation, len(invs))
-	for i, inv := range invs {
-		var ev map[string]any
-		require.NoError(t, json.Unmarshal(inv.Event, &ev))
-		restampOwner(ev)
-		if nested, ok := ev["event"].(map[string]any); ok {
-			restampOwner(nested)
-		}
-		raw, err := json.Marshal(ev)
-		require.NoError(t, err)
-		out[i] = parityInvocation{Object: inv.Object, Handler: inv.Handler, Event: raw}
-	}
-	return out
-}
-
-// restampOwner replaces a legacy effects_owner stamp with restate.
-func restampOwner(ev map[string]any) {
-	if owner, ok := ev["effects_owner"].(string); ok && ParseEffectsOwner(owner) == EffectsOwnerLegacy {
-		ev["effects_owner"] = string(EffectsOwnerRestate)
-	}
-}
-
 // TestShadowRolloutReadyJobsGolden pins that the ready jobs synapse carries
 // on rollout completions land in PRObject's deployed_jobs exactly as the
 // legacy registry recorded them.
@@ -87,7 +60,7 @@ func TestShadowRolloutReadyJobsGolden(t *testing.T) {
 		t.Run(tc.Name, func(t *testing.T) {
 			t.Parallel()
 			sim := newParitySim(t)
-			for _, inv := range restamped(t, append(append([]parityInvocation(nil), g.Setup...), tc.Shadow...)) {
+			for _, inv := range append(append([]parityInvocation(nil), g.Setup...), tc.Shadow...) {
 				sim.send(inv)
 			}
 			key := tc.Shadow[0]
@@ -144,7 +117,7 @@ type untrackedGolden struct {
 // PRObject never saw register, Hydrate, opened or merge persist nothing,
 // index nothing and run no fact or reconcile, while a tracked merged PR
 // still records, reconciles once per generation and is tracked as a
-// rollout. Captured legacy streams replay restamped.
+// rollout. Captured legacy streams replay as captured.
 func TestShadowUntrackedUpstreamGolden(t *testing.T) {
 	t.Parallel()
 	raw, err := os.ReadFile(prlifecycleFixtureDir + "shadow/untracked-upstream-kustomization.json")
@@ -158,11 +131,11 @@ func TestShadowUntrackedUpstreamGolden(t *testing.T) {
 		t.Run(tc.Name, func(t *testing.T) {
 			t.Parallel()
 			sim := newParitySim(t)
-			for _, inv := range restamped(t, tc.Setup) {
+			for _, inv := range tc.Setup {
 				sim.send(inv)
 			}
 			sim.effects = nil
-			for _, inv := range restamped(t, tc.Stream) {
+			for _, inv := range tc.Stream {
 				sim.send(inv)
 			}
 			first := tc.Stream[0]
@@ -180,53 +153,6 @@ func TestShadowUntrackedUpstreamGolden(t *testing.T) {
 			addr := parityInvocation{Object: RepoObjectServiceName, Event: first.Event}
 			_, got.RepoIndexed = sim.kv[RepoObjectServiceName+"/"+objectKey(t, addr)+"/"+repoObjectStateKey]
 			require.Equal(t, tc.Want, got)
-		})
-	}
-}
-
-// legacyOwnerWant is the hand-derived outcome of one legacy-owner case.
-type legacyOwnerWant struct {
-	Owner  string `json:"owner"`
-	Status string `json:"status"`
-}
-
-// legacyOwnerCase hydrates PRObject from row, then replays stream.
-type legacyOwnerCase struct {
-	Name   string             `json:"name"`
-	Row    RegistryRow        `json:"row"`
-	Stream []parityInvocation `json:"stream"`
-	Want   legacyOwnerWant    `json:"want"`
-}
-
-// TestShadowLegacyAgentColumnOwnerGolden pins the owner PRObject keeps
-// after Hydrate and a main push: a legacy-era row whose owner lives only in
-// the agent column, or an explicit metadata.agent, names the stored owner.
-func TestShadowLegacyAgentColumnOwnerGolden(t *testing.T) {
-	t.Parallel()
-	raw, err := os.ReadFile(prlifecycleFixtureDir + "shadow/legacy-agent-column-owner.json")
-	require.NoError(t, err)
-	var g struct {
-		Cases []legacyOwnerCase `json:"cases"`
-	}
-	require.NoError(t, json.Unmarshal(raw, &g))
-	require.NotEmpty(t, g.Cases)
-	tests := g.Cases
-	for _, tc := range tests {
-		t.Run(tc.Name, func(t *testing.T) {
-			t.Parallel()
-			sim := newParitySim(t)
-			hydrate, err := json.Marshal(struct {
-				Repo     string      `json:"repo"`
-				PRNumber int         `json:"pr_number"`
-				Row      RegistryRow `json:"row"`
-			}{tc.Row.Repo, tc.Row.PRNumber, tc.Row})
-			require.NoError(t, err)
-			sim.send(parityInvocation{Object: PRObjectServiceName, Handler: "Hydrate", Event: hydrate})
-			for _, inv := range restamped(t, tc.Stream) {
-				sim.send(inv)
-			}
-			st := simPRState(t, sim, tc.Stream[0])
-			require.Equal(t, tc.Want, legacyOwnerWant{Owner: st.OwnerAgent(), Status: st.RegistryStatus()})
 		})
 	}
 }
@@ -265,7 +191,7 @@ func TestShadowSiblingBotSynchronizeGolden(t *testing.T) {
 		t.Run(tc.Name, func(t *testing.T) {
 			t.Parallel()
 			sim := newParitySim(t)
-			for _, inv := range restamped(t, append(append([]parityInvocation(nil), tc.Setup...), tc.Shadow...)) {
+			for _, inv := range append(append([]parityInvocation(nil), tc.Setup...), tc.Shadow...) {
 				sim.send(inv)
 			}
 			st := simPRState(t, sim, tc.Setup[0])
@@ -275,7 +201,7 @@ func TestShadowSiblingBotSynchronizeGolden(t *testing.T) {
 }
 
 // staleHeadWant is the hand-derived outcome of one stale-head case: the
-// PRObject state after the captured shadow sends (restamped), the RepoObject lookup
+// PRObject state after the captured shadow sends, the RepoObject lookup
 // of that head, the PR status once the check_run on it routes, and the
 // effects the restate-owned replay performs.
 type staleHeadWant struct {
@@ -289,7 +215,7 @@ type staleHeadWant struct {
 }
 
 // staleHeadCase replays setup plus the captured shadow sends (then an
-// optional SHA-only check_run), all restamped, and separately setup plus the
+// optional SHA-only check_run), and separately setup plus the
 // restate-owned stream; synapse-only fields are ignored.
 type staleHeadCase struct {
 	Name     string             `json:"name"`
@@ -342,7 +268,7 @@ func TestShadowStaleHeadSynchronizeGolden(t *testing.T) {
 		t.Run(tc.Name, func(t *testing.T) {
 			t.Parallel()
 			sim := newStaleHeadSim(t)
-			for _, inv := range restamped(t, append(append([]parityInvocation(nil), tc.Setup...), tc.Shadow...)) {
+			for _, inv := range append(append([]parityInvocation(nil), tc.Setup...), tc.Shadow...) {
 				sim.send(inv)
 			}
 			st := simPRState(t, sim, tc.Setup[0])
@@ -355,12 +281,12 @@ func TestShadowStaleHeadSynchronizeGolden(t *testing.T) {
 				got.ResolvedPR = entry.PRNumber
 			}
 			if tc.CheckRun != nil {
-				sim.send(restamped(t, []parityInvocation{*tc.CheckRun})[0])
+				sim.send(*tc.CheckRun)
 				after := simPRState(t, sim, tc.Setup[0])
 				got.StatusAfterCheck = after.RegistryStatus()
 			}
 			owned := newStaleHeadSim(t)
-			for _, inv := range restamped(t, tc.Setup) {
+			for _, inv := range tc.Setup {
 				owned.send(inv)
 			}
 			owned.effects = nil
@@ -374,9 +300,9 @@ func TestShadowStaleHeadSynchronizeGolden(t *testing.T) {
 }
 
 // mergedStaleHeadWant is the hand-derived outcome of one merged-stale-head
-// case: PRObject after the captured shadow sends (restamped), the
+// case: PRObject after the captured shadow sends, the
 // RepoObject lookup of its head, the active rollouts, and the
-// deploy_success effect, identical for the restamped capture and the
+// deploy_success effect, identical for the capture and the
 // restate-owned stream.
 type mergedStaleHeadWant struct {
 	Status                 string         `json:"status"`
@@ -390,7 +316,7 @@ type mergedStaleHeadWant struct {
 }
 
 // mergedStaleHeadCase replays setup plus the captured shadow sends, and
-// separately setup plus the restate-owned stream, both restamped;
+// separately setup plus the restate-owned stream;
 // synapse-only fields are ignored.
 type mergedStaleHeadCase struct {
 	Name    string              `json:"name"`
@@ -433,11 +359,11 @@ func TestShadowMergedStaleHeadDeployGolden(t *testing.T) {
 		t.Run(tc.Name, func(t *testing.T) {
 			t.Parallel()
 			sim := newParitySim(t)
-			for _, inv := range restamped(t, tc.Setup) {
+			for _, inv := range tc.Setup {
 				sim.send(inv)
 			}
 			sim.effects = nil
-			for _, inv := range restamped(t, tc.Shadow) {
+			for _, inv := range tc.Shadow {
 				sim.send(inv)
 			}
 			st := simPRState(t, sim, tc.Setup[0])
@@ -454,7 +380,7 @@ func TestShadowMergedStaleHeadDeployGolden(t *testing.T) {
 				got.ResolvedPR = entry.PRNumber
 			}
 			owned := newParitySim(t)
-			for _, inv := range restamped(t, tc.Setup) {
+			for _, inv := range tc.Setup {
 				owned.send(inv)
 			}
 			owned.effects = nil
@@ -483,7 +409,7 @@ type lostMergeWant struct {
 }
 
 // lostMergeCase replays setup, the recovered merge and the deploy stream
-// once from the captured shadow sends (restamped) and once from the
+// once from the captured shadow sends and once from the
 // restate-owned stream; synapse-only fields (lookup) are ignored.
 type lostMergeCase struct {
 	Name            string             `json:"name"`
@@ -515,12 +441,12 @@ func TestShadowLostMergeWebhooksGolden(t *testing.T) {
 		t.Run(tc.Name, func(t *testing.T) {
 			t.Parallel()
 			sim := newParitySim(t)
-			for _, inv := range restamped(t, tc.Setup) {
+			for _, inv := range tc.Setup {
 				sim.send(inv)
 			}
 			sim.effects = nil
 			var stages []string
-			for _, inv := range restamped(t, append(append([]parityInvocation(nil), tc.RecoveryShadow...), tc.DeployShadow...)) {
+			for _, inv := range append(append([]parityInvocation(nil), tc.RecoveryShadow...), tc.DeployShadow...) {
 				sim.send(inv)
 				st := simPRState(t, sim, tc.Setup[0])
 				stages = append(stages, st.RegistryStatus())
@@ -539,7 +465,7 @@ func TestShadowLostMergeWebhooksGolden(t *testing.T) {
 				got.ResolvedMergePR = entry.PRNumber
 			}
 			sim.effects = nil
-			for _, inv := range restamped(t, tc.Late) {
+			for _, inv := range tc.Late {
 				sim.send(inv)
 			}
 			late := simPRState(t, sim, tc.Setup[0])
@@ -547,7 +473,7 @@ func TestShadowLostMergeWebhooksGolden(t *testing.T) {
 			require.Empty(t, sim.effects, "late closed/push runs no effect")
 
 			owned := newParitySim(t)
-			for _, inv := range restamped(t, tc.Setup) {
+			for _, inv := range tc.Setup {
 				owned.send(inv)
 			}
 			owned.effects = nil
@@ -559,7 +485,7 @@ func TestShadowLostMergeWebhooksGolden(t *testing.T) {
 			require.Equal(t, got.Status, ownedSt.RegistryStatus(), "both streams land on the same status")
 			require.Equal(t, got.DeployedJobs, ownedSt.DeployedJobs, "both streams deploy the same jobs")
 			owned.effects = nil
-			for _, inv := range restamped(t, tc.Late) {
+			for _, inv := range tc.Late {
 				owned.send(inv)
 			}
 			require.Empty(t, owned.effects, "late closed/push runs no restate-owned effect")
@@ -581,7 +507,7 @@ type selfRegisteredWant struct {
 }
 
 // selfRegisteredCase replays the opened sends and the lifecycle once from
-// the captured shadow sends (restamped) and once from the restate-owned
+// the captured shadow sends and once from the restate-owned
 // stream; synapse-only fields (pull_request, legacy, row) are ignored.
 type selfRegisteredCase struct {
 	Name             string             `json:"name"`
@@ -638,7 +564,7 @@ func TestShadowDependabotOpenedGolden(t *testing.T) {
 		t.Run(tc.Name, func(t *testing.T) {
 			t.Parallel()
 			sim := newParitySim(t)
-			for _, inv := range restamped(t, append(append([]parityInvocation(nil), tc.OpenedShadow...), tc.LifecycleShadow...)) {
+			for _, inv := range append(append([]parityInvocation(nil), tc.OpenedShadow...), tc.LifecycleShadow...) {
 				sim.send(inv)
 			}
 			st := simSelfRegisteredState(t, sim, tc.PullRequest)

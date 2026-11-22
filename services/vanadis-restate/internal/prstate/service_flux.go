@@ -119,18 +119,12 @@ func (s *RepoObjectService) WithKube(k KubeEffector) *RepoObjectService {
 
 // HandleGitPush forwards one main push to the Flux receiver.
 func (s *RepoObjectService) HandleGitPush(ctx restate.ObjectContext, ev RepoEvent) error {
-	if err := rejectLegacyOwner(ctx, "HandleGitPush", ev.EffectsOwner); err != nil {
-		return err
-	}
 	out, err := s.handlers(ctx).HandleGitPush(ctx, ev)
 	return s.reportRepoEffect(ctx, RepoHandlerGitPush, ev, out, err)
 }
 
 // HandleImagePromotion promotes one commit's images and starts its rollout.
 func (s *RepoObjectService) HandleImagePromotion(ctx restate.ObjectContext, ev RepoEvent) error {
-	if err := rejectLegacyOwner(ctx, "HandleImagePromotion", ev.EffectsOwner); err != nil {
-		return err
-	}
 	out, err := s.handlers(ctx).HandleImagePromotion(ctx, ev)
 	return s.reportRepoEffect(ctx, RepoHandlerImagePromotion, ev, out, err)
 }
@@ -159,9 +153,6 @@ func (s *PRObjectService) WithKube(k KubeEffector) *PRObjectService {
 // resolved to a PR nobody registered) drops the request entirely, like the
 // legacy registry, which has no row to transition or record into.
 func (s *PRObjectService) HandleKustomizationRequested(ctx restate.ObjectContext, ev PREvent) error {
-	if err := rejectLegacyOwner(ctx, "HandleKustomizationRequested", ev.EffectsOwner); err != nil {
-		return err
-	}
 	started, rest := SplitDeployStartedFacts(ev.Facts)
 	ev.Facts = nil
 	var recorded, committed *PRState
@@ -188,16 +179,15 @@ func (s *PRObjectService) HandleKustomizationRequested(ctx restate.ObjectContext
 }
 
 // RetryReadinessRequest is the PRObject.RetryReadiness input: the merge SHA
-// the operator expects the gate at, the caller's agent hint, the effects
-// owner synapse stamped once for the request, and the existing-owner fence
+// the operator expects the gate at, the caller's agent hint, and the
+// existing-owner fence
 // (EnforceOwner: a stored owner must equal ExpectedOwner, the owner synapse
 // authorized the caller for), exactly like Register.
 type RetryReadinessRequest struct {
-	MergeSHA      string       `json:"merge_sha"`
-	Agent         string       `json:"agent,omitempty"`
-	EffectsOwner  EffectsOwner `json:"effects_owner,omitempty"`
-	EnforceOwner  bool         `json:"enforce_owner,omitempty"`
-	ExpectedOwner string       `json:"expected_owner,omitempty"`
+	MergeSHA      string `json:"merge_sha"`
+	Agent         string `json:"agent,omitempty"`
+	EnforceOwner  bool   `json:"enforce_owner,omitempty"`
+	ExpectedOwner string `json:"expected_owner,omitempty"`
 }
 
 // RetryReadinessResponse is the readiness decision synapse's
@@ -217,9 +207,6 @@ type RetryReadinessResponse struct {
 // schedules its delayed retry. A missing merge SHA fails terminally (400),
 // and a fenced caller not authorized for the stored owner with 409.
 func (s *PRObjectService) RetryReadiness(ctx restate.ObjectContext, req RetryReadinessRequest) (RetryReadinessResponse, error) {
-	if err := rejectLegacyOwner(ctx, "RetryReadiness", req.EffectsOwner); err != nil {
-		return RetryReadinessResponse{}, err
-	}
 	merge := strings.TrimSpace(req.MergeSHA)
 	if merge == "" {
 		return RetryReadinessResponse{}, restate.ToTerminalError(errReadinessInvalid, restate.WithErrorCode(http.StatusBadRequest))
@@ -248,9 +235,6 @@ var (
 // gate transition as RetryReadiness and re-requests the reconcile; retry never mints a generation and
 // never clears effect keys.
 func (s *PRObjectService) HandleReadinessRetry(ctx restate.ObjectContext, ev PREvent) error {
-	if err := rejectLegacyOwner(ctx, "HandleReadinessRetry", ev.EffectsOwner); err != nil {
-		return err
-	}
 	merge := strings.TrimSpace(ev.MergeSHA)
 	if NormalizeRepo(ev.Repo) == "" || ev.PRNumber <= 0 || merge == "" {
 		return nil

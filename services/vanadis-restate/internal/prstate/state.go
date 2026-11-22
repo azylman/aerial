@@ -113,8 +113,8 @@ func NewPRState(repo string, prNumber int) *PRState {
 	}
 }
 
-// ClaimOwner sets the owning agent from an authoritative source: register,
-// Hydrate from the registry row, or PR-body bot metadata on opened. A blank
+// ClaimOwner sets the owning agent from an authoritative source: register
+// or PR-body bot metadata on opened. A blank
 // agent never clears a stored owner. Returns true when the owner changed.
 func (s *PRState) ClaimOwner(agent string) bool {
 	agent = strings.TrimSpace(agent)

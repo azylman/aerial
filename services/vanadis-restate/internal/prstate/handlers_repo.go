@@ -2,12 +2,10 @@ package prstate
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/azylman/aerial/pkg/pubsub"
@@ -47,14 +45,6 @@ type RepoStateStore interface {
 	SaveRepo(state *RepoState)
 }
 
-// RepoProjector syncs Restate-owned repo metadata keys to the pr_registry
-// read-only projection. It runs AFTER the state commit as a fire-and-forget
-// one-way send: implementations must not propagate projection failures
-// because the committed state is authoritative and replays the projection.
-type RepoProjector interface {
-	SyncMainPush(ctx context.Context, repo, mainSHA string)
-}
-
 // PRSender delivers one one-way send to a PRObject handler keyed by the
 // event's repo#prNumber. Production binds it to restate.ObjectSend.
 type PRSender interface {
@@ -68,112 +58,29 @@ type RepoSelfScheduler interface {
 	ScheduleHeldExpiry(ctx context.Context, repo string, id uint64, delay time.Duration) error
 }
 
-// No-op defaults so a zero dependency never nil-panics.
-
-type noopProjector struct{}
-
-func (noopProjector) SyncMainPush(context.Context, string, string) {}
-
-type noopPRSender struct{}
-
-func (noopPRSender) SendPR(context.Context, string, PREvent) error { return nil }
-
-type noopSelfScheduler struct{}
-
-func (noopSelfScheduler) ScheduleHeldReplay(context.Context, string, string, time.Duration) error {
-	return nil
-}
-
-func (noopSelfScheduler) ScheduleHeldExpiry(context.Context, string, uint64, time.Duration) error {
-	return nil
-}
-
-// MemRepoStore is an in-memory RepoStateStore for hermetic tests. It stores
-// JSON snapshots, so every load returns a fresh copy exactly like Restate
-// K/V (including dropped unexported indexes) and an unsaved mutation never
-// leaks into the store.
-type MemRepoStore struct {
-	mu    sync.Mutex
-	repos map[string][]byte
-	err   error
-}
-
-// NewMemRepoStore returns an empty in-memory repo store.
-func NewMemRepoStore() *MemRepoStore {
-	return &MemRepoStore{repos: make(map[string][]byte)}
-}
-
-// FailLoads makes every later LoadRepo return err, standing in for a Restate
-// K/V failure.
-func (s *MemRepoStore) FailLoads(err error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.err = err
-}
-
-// LoadRepo returns a copy of the repo state, or nil when never saved.
-func (s *MemRepoStore) LoadRepo(repo string) (*RepoState, error) {
-	if s == nil {
-		return nil, nil //nolint:nilnil // a never-saved repo has no state, exactly like restate.Get on an empty slot.
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.err != nil {
-		return nil, s.err
-	}
-	raw, ok := s.repos[NormalizeRepo(repo)]
-	if !ok {
-		return nil, nil //nolint:nilnil // a never-saved repo has no state, exactly like restate.Get on an empty slot.
-	}
-	var st RepoState
-	//nolint:musttag // RepoState is Restate-owned state with intentionally untagged fields; the snapshot mirrors Restate K/V, not a wire format.
-	if err := json.Unmarshal(raw, &st); err != nil {
-		return nil, err
-	}
-	return &st, nil
-}
-
-// SaveRepo commits a snapshot of the repo state.
-func (s *MemRepoStore) SaveRepo(state *RepoState) {
-	if s == nil || state == nil {
-		return
-	}
-	//nolint:musttag // RepoState is Restate-owned state with intentionally untagged fields; the snapshot mirrors Restate K/V, not a wire format.
-	raw, err := json.Marshal(state)
-	if err != nil {
-		return
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.repos[NormalizeRepo(state.Repo)] = raw
-}
-
 // RepoHandlers implements the RepoObject logic surface.
 type RepoHandlers struct {
-	store   RepoStateStore
-	project RepoProjector
-	prs     PRSender
-	self    RepoSelfScheduler
-	github  GitHubEffector
-	kube    KubeEffector
+	store  RepoStateStore
+	prs    PRSender
+	self   RepoSelfScheduler
+	github GitHubEffector
+	kube   KubeEffector
 }
 
-// NewRepoHandlers builds RepoObject handlers; nil dependencies fall back to
-// in-memory/no-op defaults so zero-value wiring never nil-panics.
-func NewRepoHandlers(store RepoStateStore, project RepoProjector, prs PRSender, self RepoSelfScheduler) *RepoHandlers {
-	if store == nil {
-		store = NewMemRepoStore()
+// NewRepoHandlers builds RepoObject handlers. Every dependency is
+// required: a nil one returns errNilDependency. The GitHub and Kubernetes
+// boundaries attach through WithGitHub and WithKube; an unset one makes its
+// effects schedule retries.
+func NewRepoHandlers(store RepoStateStore, prs PRSender, self RepoSelfScheduler) (*RepoHandlers, error) {
+	switch {
+	case store == nil:
+		return nil, fmt.Errorf("%w: repo handlers store", errNilDependency)
+	case prs == nil:
+		return nil, fmt.Errorf("%w: repo handlers PR sender", errNilDependency)
+	case self == nil:
+		return nil, fmt.Errorf("%w: repo handlers self scheduler", errNilDependency)
 	}
-	if project == nil {
-		project = noopProjector{}
-	}
-	if prs == nil {
-		prs = noopPRSender{}
-	}
-	if self == nil {
-		self = noopSelfScheduler{}
-	}
-	return &RepoHandlers{store: store, project: project, prs: prs, self: self}
+	return &RepoHandlers{store: store, prs: prs, self: self}, nil
 }
 
 func (h *RepoHandlers) loadOrNew(repo string) (*RepoState, error) {
@@ -191,9 +98,7 @@ func (h *RepoHandlers) loadOrNew(repo string) (*RepoState, error) {
 // A newly seen SHA fans out one one-way HandleMainAdvanced send per open PR,
 // which clears updated-for-main inside each PRObject, mirroring
 // StateTracker.ClearUpdatedPRsForMainCommit. Duplicate SHAs are idempotent:
-// no fan-out, no projection, and nothing persisted unless the push touches
-// a new PR key. The registry projection syncs after the commit; its failure
-// never fails the push.
+// no fan-out and nothing persisted unless the push touches a new PR key.
 func (h *RepoHandlers) HandleMainPush(ctx context.Context, ev RepoEvent) error {
 	repo := NormalizeRepo(ev.Repo)
 	if repo == "" {
@@ -214,23 +119,19 @@ func (h *RepoHandlers) HandleMainPush(ctx context.Context, ev RepoEvent) error {
 	}
 	var errs []error
 	if recorded {
-		errs = append(errs, h.sendMainAdvanced(ctx, st, ev.EffectsOwner))
+		errs = append(errs, h.sendMainAdvanced(ctx, st))
 		st.FannedOutMainSHA = st.LatestMainSHA
 	}
 	h.store.SaveRepo(st)
-	if recorded {
-		// One-way projection send after the commit; never gates the transition.
-		h.project.SyncMainPush(ctx, repo, st.LatestMainSHA)
-	}
 	return errors.Join(errs...)
 }
 
 // sendMainAdvanced sends one HandleMainAdvanced per open PR. Every PR is
 // attempted: one failing send never starves the later PRs.
-func (h *RepoHandlers) sendMainAdvanced(ctx context.Context, st *RepoState, owner EffectsOwner) error {
+func (h *RepoHandlers) sendMainAdvanced(ctx context.Context, st *RepoState) error {
 	var errs []error
 	for _, pr := range st.OpenPRNumbers() {
-		ev := PREvent{Event: "main_advanced", Repo: st.Repo, PRNumber: pr, EffectsOwner: ParseEffectsOwner(string(owner))}
+		ev := PREvent{Event: "main_advanced", Repo: st.Repo, PRNumber: pr}
 		if err := h.prs.SendPR(ctx, PRHandlerMainAdvanced, ev); err != nil {
 			errs = append(errs, fmt.Errorf("main advanced %s: %w", PRObjectKey(st.Repo, pr), err))
 		}
@@ -254,7 +155,7 @@ func (h *RepoHandlers) HandleFanout(ctx context.Context, ev RepoEvent) error {
 	if st == nil || strings.TrimSpace(st.LatestMainSHA) == "" || st.FannedOutMainSHA == st.LatestMainSHA {
 		return nil
 	}
-	err = h.sendMainAdvanced(ctx, st, ev.EffectsOwner)
+	err = h.sendMainAdvanced(ctx, st)
 	st.FannedOutMainSHA = st.LatestMainSHA
 	h.store.SaveRepo(st)
 	return err
@@ -293,7 +194,6 @@ func (h *RepoHandlers) HandleKustomizationStatus(ctx context.Context, ev RepoEve
 			PRNumber:       pr,
 			Branch:         status.Branch,
 			GateGeneration: status.DeployGeneration,
-			EffectsOwner:   ParseEffectsOwner(string(ev.EffectsOwner)),
 			Kustomization:  strings.TrimSpace(ev.Kustomization),
 		}
 		if err := h.prs.SendPR(ctx, PRHandlerRolloutProgress, fwd); err != nil {
@@ -381,7 +281,6 @@ func forwardSHAEvent(kind, repo string, entry SHAIndexEntry, ev SHAEvent) PREven
 			out.HeadSHA = ev.SHA
 		}
 	}
-	out.EffectsOwner = ParseEffectsOwner(string(out.EffectsOwner))
 	return out
 }
 
@@ -647,7 +546,7 @@ func autoUpdateEligible(st *RepoState, policy *AutoUpdatePolicy, pr GitHubPR) bo
 func branchConflictEvent(policy *AutoUpdatePolicy, repo string, pr GitHubPR) PREvent {
 	ev := PREvent{
 		Event: "branch_conflict", Repo: repo, PRNumber: pr.Number, HeadSHA: strings.TrimSpace(pr.Head.SHA),
-		Branch: strings.TrimSpace(pr.Head.Ref), Title: strings.TrimSpace(pr.Title), EffectsOwner: EffectsOwnerRestate,
+		Branch: strings.TrimSpace(pr.Head.Ref), Title: strings.TrimSpace(pr.Title),
 	}
 	if dm, ok := collaboratorConflictDM(policy, repo, pr); ok {
 		ev.EriEffects = []EriEffect{dm}
@@ -665,7 +564,7 @@ func (h *RepoHandlers) staleCloseEvent(ctx context.Context, repo string, prNumbe
 	}
 	return PREvent{
 		Event: "head_ref_missing", Repo: repo, PRNumber: prNumber, HeadSHA: strings.TrimSpace(fetched.Head.SHA),
-		Branch: strings.TrimSpace(fetched.Head.Ref), EffectsOwner: EffectsOwnerRestate,
+		Branch: strings.TrimSpace(fetched.Head.Ref),
 	}, true
 }
 
@@ -908,7 +807,7 @@ func promotedRolloutEvent(repo string, ev RepoEvent) PREvent {
 	return PREvent{
 		Event: "kustomization_requested", Repo: repo, PRNumber: ev.PRNumber, HeadSHA: usableHeadSHA(ev.HeadSHA),
 		Branch: strings.TrimSpace(ev.Branch), TargetID: strings.TrimSpace(ev.TargetID), Jobs: cleanStrings(ev.Jobs),
-		KustomizationRequests: ev.KustomizationRequests, Facts: ev.Facts, EffectsOwner: EffectsOwnerRestate,
+		KustomizationRequests: ev.KustomizationRequests, Facts: ev.Facts,
 	}
 }
 
@@ -929,7 +828,7 @@ func (h *RepoHandlers) reportPromotionFailure(ctx context.Context, ev RepoEvent,
 	head := usableHeadSHA(ev.HeadSHA)
 	return h.forward(ctx, PRHandlerDeployAttemptFailed, PREvent{
 		Event: "deploy_attempt_failed", Repo: NormalizeRepo(ev.Repo), PRNumber: ev.PRNumber, HeadSHA: head, MergeSHA: head,
-		Branch: strings.TrimSpace(ev.Branch), Banner: msg, Facts: failed, EffectsOwner: EffectsOwnerRestate,
+		Branch: strings.TrimSpace(ev.Branch), Banner: msg, Facts: failed,
 	}, out)
 }
 

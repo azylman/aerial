@@ -111,7 +111,7 @@ func runConflictEffect(t *testing.T, store *MemPRStore, seedMark string, conflic
 	if nilScheduler {
 		schedulerArg = nil
 	}
-	h := NewConflictHandlers(store, checkerArg, schedulerArg)
+	h := testConflictHandlers(t, store, checkerArg, schedulerArg)
 	ev := PREvent{Repo: "aerial", PRNumber: 101, HeadSHA: "abc123", GateGeneration: 2}
 	out, err := h.HandleConflictCheck(ctx, key, ev)
 	return key, out, checker, scheduler, err
@@ -169,7 +169,7 @@ func TestHandleConflictCheckRoutes(t *testing.T) {
 				seedConflictPR(store, tc.seedHead, tc.seedGen, tc.seedEpoch, tc.seedTerminal, "", tc.seedDispatched)
 			}
 			checker := &fakeConflictChecker{}
-			h := NewConflictHandlers(store, checker, nil)
+			h := testConflictHandlers(t, store, checker, nil)
 			ev := PREvent{Repo: "aerial", PRNumber: 101, HeadSHA: tc.evHead, ReopenEpoch: tc.evEpoch, GateGeneration: tc.seedGen}
 			out, err := h.HandleConflictCheck(ctx, key, ev)
 			if (err != nil) != tc.wantErr {
@@ -259,7 +259,7 @@ func TestHandleConflictCheckConflictedRetry(t *testing.T) {
 			store := NewMemPRStore()
 			key := seedConflictPR(store, "abc123", 2, 0, TerminalNone, "", false)
 			scheduler := &fakeRescheduler{err: errFakeSchedule, failCalls: tc.failCalls}
-			h := NewConflictHandlers(store, &fakeConflictChecker{conflicted: true}, scheduler)
+			h := testConflictHandlers(t, store, &fakeConflictChecker{conflicted: true}, scheduler)
 			ev := PREvent{Repo: "aerial", PRNumber: 101, HeadSHA: "abc123", GateGeneration: 2}
 			first, err := h.HandleConflictCheck(ctx, key, ev)
 			if (err != nil) != tc.wantFirstErr {
@@ -284,6 +284,38 @@ func TestHandleConflictCheckConflictedRetry(t *testing.T) {
 			}
 			if ps.CollaboratorConflict != tc.wantMark {
 				t.Fatalf("conflict mark = %q, want %q", ps.CollaboratorConflict, tc.wantMark)
+			}
+		})
+	}
+}
+
+// TestNewConflictHandlers pins that every ConflictHandlers dependency is
+// required and the error names the missing one.
+func TestNewConflictHandlers(t *testing.T) {
+	t.Parallel()
+	store, checker, resched := NewMemPRStore(), &fakeConflictChecker{}, &fakeRescheduler{}
+	tests := []struct {
+		name       string
+		store      PRStateStore
+		conflicts  ConflictChecker
+		reschedule ConflictRescheduler
+		wantErr    string
+	}{
+		{name: "every dependency builds", store: store, conflicts: checker, reschedule: resched},
+		{name: "nil store fails", conflicts: checker, reschedule: resched, wantErr: "prstate: required dependency is nil: conflict handlers PR store"},
+		{name: "nil checker fails", store: store, reschedule: resched, wantErr: "prstate: required dependency is nil: conflict handlers conflict checker"},
+		{name: "nil rescheduler fails", store: store, conflicts: checker, wantErr: "prstate: required dependency is nil: conflict handlers rescheduler"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			h, err := NewConflictHandlers(tc.store, tc.conflicts, tc.reschedule)
+			gotErr := ""
+			if err != nil {
+				gotErr = err.Error()
+			}
+			if gotErr != tc.wantErr || (h != nil) != (tc.wantErr == "") {
+				t.Fatalf("NewConflictHandlers() = (%v, %q), want error %q", h, gotErr, tc.wantErr)
 			}
 		})
 	}

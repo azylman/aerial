@@ -142,18 +142,12 @@ func (s *RepoObjectService) WithGitHub(gh GitHubEffector) *RepoObjectService {
 
 // HandleAutoUpdate runs one open-PR auto-update cascade trigger.
 func (s *RepoObjectService) HandleAutoUpdate(ctx restate.ObjectContext, ev RepoEvent) error {
-	if err := rejectLegacyOwner(ctx, "HandleAutoUpdate", ev.EffectsOwner); err != nil {
-		return err
-	}
 	out, err := s.handlers(ctx).HandleAutoUpdate(ctx, ev)
 	return s.reportRepoEffect(ctx, RepoHandlerAutoUpdate, ev, out, err)
 }
 
 // HandleWorkflowRerun reruns the failed jobs of one workflow run.
 func (s *RepoObjectService) HandleWorkflowRerun(ctx restate.ObjectContext, ev RepoEvent) error {
-	if err := rejectLegacyOwner(ctx, "HandleWorkflowRerun", ev.EffectsOwner); err != nil {
-		return err
-	}
 	out, err := s.handlers(ctx).HandleWorkflowRerun(ctx, ev)
 	return s.reportRepoEffect(ctx, RepoHandlerWorkflowRerun, ev, out, err)
 }
@@ -255,14 +249,14 @@ func (s *PRObjectService) WithGitHub(gh GitHubEffector) *PRObjectService {
 // otherwise). A failed read never fails the invocation: the delayed recheck
 // is its retry.
 func (s *PRObjectService) HandleConflictCheck(ctx restate.ObjectContext, ev PREvent) error {
-	if err := rejectLegacyOwner(ctx, "HandleConflictCheck", ev.EffectsOwner); err != nil {
-		return err
-	}
 	if NormalizeRepo(ev.Repo) == "" || ev.PRNumber <= 0 || usableHeadSHA(ev.HeadSHA) == "" {
 		return nil
 	}
 	store := &restatePRStore{ctx: ctx, svc: s, ev: ev}
-	h := NewConflictHandlers(store, restateConflictChecker{gh: journaled(ctx, s.github)}, restateConflictRescheduler{ctx: ctx})
+	h, err := NewConflictHandlers(store, restateConflictChecker{gh: journaled(ctx, s.github)}, restateConflictRescheduler{ctx: ctx})
+	if err != nil {
+		return restate.ToTerminalError(err, restate.WithErrorCode(500))
+	}
 	out, err := h.HandleConflictCheck(ctx, PRObjectKey(ev.Repo, ev.PRNumber), ev)
 	if store.err != nil {
 		return store.err
@@ -285,9 +279,6 @@ func (s *PRObjectService) HandleConflictCheck(ctx restate.ObjectContext, ev PREv
 // collaborator PR marks the conflict and fires the collaborator DM the event
 // carries.
 func (s *PRObjectService) HandleBranchConflict(ctx restate.ObjectContext, ev PREvent) error {
-	if err := rejectLegacyOwner(ctx, "HandleBranchConflict", ev.EffectsOwner); err != nil {
-		return err
-	}
 	if NormalizeRepo(ev.Repo) == "" || ev.PRNumber <= 0 {
 		return nil
 	}
@@ -328,9 +319,6 @@ func (s *PRObjectService) HandleBranchConflict(ctx restate.ObjectContext, ev PRE
 // closed unmerged, mirroring synapse handleStaleOpenPR: the close transition
 // commits, then the closed_unmerged fact rendered here publishes. Like synapse's stale publish, the fact is not quiet.
 func (s *PRObjectService) HandleHeadRefMissing(ctx restate.ObjectContext, ev PREvent) error {
-	if err := rejectLegacyOwner(ctx, "HandleHeadRefMissing", ev.EffectsOwner); err != nil {
-		return err
-	}
 	if NormalizeRepo(ev.Repo) == "" || ev.PRNumber <= 0 {
 		return nil
 	}
