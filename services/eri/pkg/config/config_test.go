@@ -195,18 +195,8 @@ channels:
 `,
 			wantModel: DefaultConfigData().Model,
 		},
-		{
-			name:        "invalid yaml syntax",
-			content:     `model: [invalid {::`,
-			wantErr:     true,
-			errContains: "failed to parse",
-		},
-		{
-			name:        "missing channels section",
-			content:     `model: "gemini-flash"`,
-			wantErr:     true,
-			errContains: "channels.default is required",
-		},
+		{name: "invalid yaml syntax", content: `model: [invalid {::`, wantErr: true, errContains: "failed to parse"},
+		{name: "missing channels section", content: `model: "gemini-flash"`, wantErr: true, errContains: "channels.default is required"},
 		{
 			name: "minimal valid channels config",
 			content: `
@@ -367,18 +357,8 @@ func TestTranscriptsConfig_UnmarshalStaleDatabase(t *testing.T) {
 			json:      `{"stack": "alpha", "indexer_url": "http://indexer:4030/", "max_batch_bytes": 12345}`,
 			wantStack: "alpha",
 		},
-		{
-			name:        "yaml invalid syntax",
-			yaml:        "[invalid yaml",
-			wantErr:     true,
-			errContains: "did not find expected",
-		},
-		{
-			name:        "json invalid syntax",
-			json:        `{"database": invalid}`,
-			wantErr:     true,
-			errContains: "invalid character",
-		},
+		{name: "yaml invalid syntax", yaml: "[invalid yaml", wantErr: true, errContains: "did not find expected"},
+		{name: "json invalid syntax", json: `{"database": invalid}`, wantErr: true, errContains: "invalid character"},
 	}
 
 	for _, tc := range tests {
@@ -433,9 +413,7 @@ type loadConfigLKGCBootCase struct {
 	name          string
 	files         []string
 	wantModel     string
-	wantErr       bool
-	errSubstr     string
-	testReload    bool
+	wantErr       string
 	badReloadYAML string
 }
 
@@ -463,9 +441,6 @@ func assertReloadWithSupplierCases(t *testing.T) {
 
 func assertLoadConfigLKGCBootCase(t *testing.T, tc loadConfigLKGCBootCase) {
 	t.Helper()
-	t.Setenv("AGY_MODEL", "")
-	t.Setenv("DEFAULT_TIMEZONE", "")
-	t.Setenv("TZ", "")
 	tmpDir := t.TempDir()
 	paths := make([]string, 0, len(tc.files))
 	for _, f := range tc.files {
@@ -479,13 +454,12 @@ func assertLoadConfigLKGCBootCase(t *testing.T, tc loadConfigLKGCBootCase) {
 		paths = append(paths, p)
 	}
 
-	cfg, err := LoadConfigFromPaths(paths...)
-	if tc.wantErr {
-		if err == nil {
-			t.Fatalf("expected error containing %q, got nil", tc.errSubstr)
-		}
-		if !strings.Contains(err.Error(), tc.errSubstr) {
-			t.Fatalf("expected error containing %q, got: %v", tc.errSubstr, err)
+	// An empty map lookup keeps live POSTGRES_*, PORT and token vars out of the loaded config.
+	lookup := mapLookup(nil)
+	cfg, err := LoadConfigFromLookup(lookup, paths...)
+	if tc.wantErr != "" {
+		if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+			t.Fatalf("expected error containing %q, got: %v", tc.wantErr, err)
 		}
 		return
 	}
@@ -496,11 +470,11 @@ func assertLoadConfigLKGCBootCase(t *testing.T, tc loadConfigLKGCBootCase) {
 		t.Fatalf("got model %q, want %q", cfg.Current().Model, tc.wantModel)
 	}
 
-	if tc.testReload {
+	if tc.badReloadYAML != "" {
 		primaryPath := paths[0]
 		_ = os.WriteFile(primaryPath, []byte(tc.badReloadYAML), 0o600)
 		errReload := ReloadWithSupplier(cfg, func() (*Config, error) {
-			return LoadConfigFromPaths(primaryPath)
+			return LoadConfigFromLookup(lookup, primaryPath)
 		})
 		if errReload == nil {
 			t.Fatal("expected ReloadWithSupplier to fail on corrupted file")
@@ -517,50 +491,23 @@ func TestLoadConfig_LKGCAndColdBoot(t *testing.T) {
 		activeGlobalConfig.update(origGlobal)
 	})
 
+	threads := "channels:\n  default:\n    mode: threads\n"
 	tests := []loadConfigLKGCBootCase{
-		{
-			name:      "missing search paths fails",
-			files:     []string{"nonexistent.yaml"},
-			wantErr:   true,
-			errSubstr: "no configuration file found in search paths",
-		},
-		{
-			name:      "corrupted yaml fails fast",
-			files:     []string{"broken.yaml:model: [broken {::"},
-			wantErr:   true,
-			errSubstr: "failed to load configuration from any path",
-		},
-		{
-			name: "corrupted primary corrupted fallback fails",
-			files: []string{
-				"p1.yaml:model: [broken1",
-				"p2.yaml:model: [broken2",
-			},
-			wantErr:   true,
-			errSubstr: "failed to load configuration from any path",
-		},
+		{name: "missing search paths fails", files: []string{"nonexistent.yaml"}, wantErr: "no configuration file found in search paths"},
+		{name: "corrupted yaml fails fast", files: []string{"broken.yaml:model: [broken {::"}, wantErr: "failed to load configuration from any path"},
+		{name: "corrupted primary corrupted fallback fails", files: []string{"p1.yaml:model: [broken1", "p2.yaml:model: [broken2"}, wantErr: "failed to load configuration from any path"},
 		{
 			name: "stale openobserve keys are ignored",
 			files: []string{
-				"stale.yaml:model: gemini-stale-keys\nopenobserve_url: http://openobserve:5080/openobserve\nopenobserve_org: default\nopenobserve_user: root@example.com\nchannels:\n  default:\n    mode: threads\n",
+				"stale.yaml:model: gemini-stale-keys\nopenobserve_url: http://openobserve:5080/openobserve\nopenobserve_org: default\nopenobserve_user: root@example.com\n" + threads,
 			},
 			wantModel: "gemini-stale-keys",
 		},
+		{name: "corrupted primary on-disk lkgc fallback succeeds", files: []string{"primary.yaml:model: [broken", "lkgc.yaml:model: gemini-disk-lkgc\n" + threads}, wantModel: "gemini-disk-lkgc"},
 		{
-			name: "corrupted primary on-disk lkgc fallback succeeds",
-			files: []string{
-				"primary.yaml:model: [broken",
-				"lkgc.yaml:model: gemini-disk-lkgc\nchannels:\n  default:\n    mode: threads\n",
-			},
-			wantModel: "gemini-disk-lkgc",
-		},
-		{
-			name: "reload corrupt retains in-memory lkgc",
-			files: []string{
-				"active.yaml:model: gemini-retained\nsystem_channel: retained-alerts\nchannels:\n  default:\n    mode: threads\n",
-			},
+			name:          "reload corrupt retains in-memory lkgc",
+			files:         []string{"active.yaml:model: gemini-retained\nsystem_channel: retained-alerts\n" + threads},
 			wantModel:     "gemini-retained",
-			testReload:    true,
 			badReloadYAML: "corrupt: [broken:::",
 		},
 	}
@@ -675,11 +622,7 @@ type channelPolicyValidationCase struct {
 
 func channelPolicyValidationCases() []channelPolicyValidationCase {
 	return []channelPolicyValidationCase{
-		{
-			name:        "missing channels",
-			yaml:        `model: "gemini-flash"`,
-			expectedErr: "channels.default is required",
-		},
+		{name: "missing channels", yaml: `model: "gemini-flash"`, expectedErr: "channels.default is required"},
 		{
 			name: "missing default channel",
 			yaml: `
@@ -881,29 +824,9 @@ func channelPolicyResolutionCases(channels map[string]ChannelPolicy) []channelPo
 			wantThreshold: 0.75,
 			wantHasHook:   true,
 		},
-		{
-			channels:    channels,
-			channelID:   "77777",
-			channelName: "ignored-channel",
-			wantMode:    "ignore",
-			wantIgnore:  true,
-		},
-		{
-			channels:    channels,
-			channelID:   "66666",
-			channelName: "disabled-channel",
-			wantMode:    "disabled",
-			wantIgnore:  true,
-		},
-		{
-			channels:      nil,
-			channelID:     "",
-			channelName:   "any-chan",
-			wantMode:      "threads",
-			wantEffort:    "high",
-			wantBotIgn:    true,
-			wantThreshold: 0.0,
-		},
+		{channels: channels, channelID: "77777", channelName: "ignored-channel", wantMode: "ignore", wantIgnore: true},
+		{channels: channels, channelID: "66666", channelName: "disabled-channel", wantMode: "disabled", wantIgnore: true},
+		{channels: nil, channelID: "", channelName: "any-chan", wantMode: "threads", wantEffort: "high", wantBotIgn: true, wantThreshold: 0.0},
 	}
 }
 
@@ -1110,11 +1033,7 @@ func TestConfig_EnvironmentAndDSN(t *testing.T) {
 		envMap   map[string]string
 		expected string
 	}{
-		{
-			name:     "unset host returns empty",
-			envMap:   map[string]string{},
-			expected: "",
-		},
+		{name: "unset host returns empty", envMap: map[string]string{}, expected: ""},
 		{
 			name:     "host only uses defaults",
 			envMap:   map[string]string{"POSTGRES_HOST": "db.internal"},
