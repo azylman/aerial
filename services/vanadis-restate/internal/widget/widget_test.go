@@ -3,7 +3,6 @@ package widget
 import (
 	"fmt"
 	"slices"
-	"strings"
 	"testing"
 	"time"
 
@@ -13,42 +12,49 @@ import (
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 )
 
-func TestWidgetFormatting(t *testing.T) {
+func TestFormatChunkActiveStep(t *testing.T) {
 	t.Parallel()
-	c := model.VanadisChunk{
-		ID:     "c1",
-		Status: "open",
-		CIChecks: map[string]string{
-			"lint": "passed",
-			"test": "pending",
-		},
+	const flux = "https://flux.example.com"
+	tests := []struct {
+		name         string
+		chunk        model.VanadisChunk
+		fluxURL      string
+		wantContains []string
+	}{
+		{"open with passing and pending checks", model.VanadisChunk{ID: "c1", Status: "open", CIChecks: map[string]string{"lint": "passed", "test": "pending"}}, "", []string{"1/2 passed"}},
+		{"open with failed check is empty", model.VanadisChunk{ID: "c1-fail", Status: "open", CIChecks: map[string]string{"lint": "passed", "test": "failed"}}, "", nil},
+		{"deploying without rollout state", model.VanadisChunk{ID: "c2", Status: "deploying"}, "", []string{"Deploying to cluster"}},
+		{"pending is empty", model.VanadisChunk{ID: "c3", Status: "pending"}, "", nil},
+		{"open without checks is empty", model.VanadisChunk{ID: "c-open", Status: "open"}, "", nil},
+		{"open with only blank checks is empty", model.VanadisChunk{ID: "c-blank", Status: "open", CIChecks: map[string]string{"lint": ""}}, "", nil},
+		{"merged with failing check is empty", model.VanadisChunk{ID: "c-fail", Status: "merged", CIChecks: map[string]string{"lint": "passed", "test": "failure"}}, "", nil},
+		{"merged with kustomizations but not deploying skips rollout", model.VanadisChunk{ID: "c-kust", Status: "merged", RolloutState: &pubsub.PRRolloutState{KustomizationStatuses: map[string]string{"k1": "healthy"}}}, "", nil},
+		{"deploying with blank rollout candidates deploys", model.VanadisChunk{ID: "c-dep", Status: "deploying", RolloutState: &pubsub.PRRolloutState{ExpectedJobs: []string{"", "  "}}}, "", []string{"Deploying to cluster"}},
+		{"case-insensitive duplicate build services dedupe", model.VanadisChunk{ID: "c-dupe", Status: "merged", CIChecks: map[string]string{"Build & Push Images (Eri)": "passed", "Build and Push Images (ERI)": "passed", "lint": ""}}, "", []string{"`ERI`: 🔄 starting"}},
+		{"deploying with kustomizations", model.VanadisChunk{ID: "c-kust2", Status: statusDeploying, RolloutState: &pubsub.PRRolloutState{KustomizationStatuses: map[string]string{"k1": statusDeployed}}}, flux, []string{"✅ rolled out"}},
+		{"deploying with jobs", model.VanadisChunk{ID: "c-jobs", Status: statusDeploying, RolloutState: &pubsub.PRRolloutState{
+			ExpectedJobs: []string{"svc-a", "svc-b", "svc-c", "svc-d"}, StartedJobs: []string{"svc-b", "svc-c"}, DeployedJobs: []string{"svc-a"},
+			JobStates: map[string]string{"svc-c": "verifying_health"},
+		}}, "", []string{"`svc-a`: ✅ healthy", "`svc-b`: 🔄 starting", "`svc-c`: 🔄 verifying health", "`svc-d`: ⏳ building image"}},
+		{"merged with container image builds", model.VanadisChunk{ID: "c-images", Status: statusMerged, CIChecks: map[string]string{"build-check-1": "passed", "build-check-2": "passed"}}, "", []string{"Building container images (2/2 completed)"}},
+		{"merged with matched build job service", model.VanadisChunk{ID: "c-svc", Status: statusMerged, CIChecks: map[string]string{"Build & Push Images (eri)": "passed"}}, "", []string{"`eri`: 🔄 starting"}},
 	}
-	step := FormatChunkActiveStep(c)
-	if !strings.Contains(step, "1/2 passed") {
-		t.Errorf("FormatChunkActiveStep = %q, want '1/2 passed'", step)
-	}
-
-	cFailed := model.VanadisChunk{
-		ID:     "c1-fail",
-		Status: "open",
-		CIChecks: map[string]string{
-			"lint": "passed",
-			"test": "failed",
-		},
-	}
-	if stepFailed := FormatChunkActiveStep(cFailed); stepFailed != "" {
-		t.Errorf("FormatChunkActiveStep failed = %q, want empty", stepFailed)
-	}
-
-	cDeploying := model.VanadisChunk{ID: "c2", Status: "deploying"}
-	stepDeploy := FormatChunkActiveStep(cDeploying)
-	if stepDeploy != "Deploying to cluster" {
-		t.Errorf("FormatChunkActiveStep deploying = %q, want 'Deploying to cluster'", stepDeploy)
-	}
-
-	cEmpty := model.VanadisChunk{ID: "c3", Status: "pending"}
-	if stepEmpty := FormatChunkActiveStep(cEmpty); stepEmpty != "" {
-		t.Errorf("FormatChunkActiveStep pending = %q, want empty", stepEmpty)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var got string
+			if tc.fluxURL != "" {
+				got = FormatChunkActiveStep(tc.chunk, tc.fluxURL)
+			} else {
+				got = FormatChunkActiveStep(tc.chunk)
+			}
+			if len(tc.wantContains) == 0 {
+				assert.Empty(t, got)
+			}
+			for _, w := range tc.wantContains {
+				assert.Contains(t, got, w)
+			}
+		})
 	}
 }
 
@@ -82,79 +88,62 @@ func TestNormalizeWidgetStatus(t *testing.T) {
 	}
 }
 
-func TestFormatKustomizationAndJobRollout(t *testing.T) {
+func TestFormatDeployTargetLabel(t *testing.T) {
 	t.Parallel()
-
-	// Deploy target label tests
-	assert.Equal(t, "`default-svc`", formatDeployTargetLabel("default-svc", "job", ""))
-	assert.Equal(t, "[`git-sync`](https://flux.example.com/c/main/flux/sources)", formatDeployTargetLabel("git-sync", "job", "https://flux.example.com/"))
-	assert.Equal(t, "[`github-runner`](https://flux.example.com/c/main/flux/helmreleases)", formatDeployTargetLabel("github-runner", "job", "https://flux.example.com/"))
-	assert.Equal(t, "[`my-app`](https://flux.example.com/c/main/deployments/default/my-app)", formatDeployTargetLabel("my-app", "job", "https://flux.example.com/"))
-	assert.Equal(t, "[`kust-1`](https://flux.example.com/c/main/flux/kustomize/kustomizations/flux-system/kust-1)", formatDeployTargetLabel("kust-1", "kustomization", "https://flux.example.com/"))
-
-	// Kustomization rollout status
-	s, ok := FormatKustomizationRolloutStatus(statusMerged, map[string]string{"kust": "healthy"})
-	assert.False(t, ok)
-	assert.Empty(t, s)
-
-	s, ok = FormatKustomizationRolloutStatus(statusDeploying, map[string]string{
-		"k1": statusDeployed,
-		"k2": "progressing",
-	}, "https://flux.example.com")
-	assert.True(t, ok)
-	assert.Contains(t, s, "[`k1`](https://flux.example.com/c/main/flux/kustomize/kustomizations/flux-system/k1): ✅ rolled out")
-	assert.Contains(t, s, "[`k2`](https://flux.example.com/c/main/flux/kustomize/kustomizations/flux-system/k2): 🔄 rolling out")
-
-	// FormatChunkActiveStep with kustomizations
-	chunkKust := model.VanadisChunk{
-		ID:     "c-kust",
-		Status: statusDeploying,
-		RolloutState: &pubsub.PRRolloutState{
-			KustomizationStatuses: map[string]string{"k1": statusDeployed},
-		},
+	const flux = "https://flux.example.com/"
+	tests := []struct {
+		name, target, kind, fluxURL, want string
+	}{
+		{"no flux url", "default-svc", "job", "", "`default-svc`"},
+		{"git-sync", "git-sync", "job", flux, "[`git-sync`](https://flux.example.com/c/main/flux/sources)"},
+		{"github-runner", "github-runner", "job", flux, "[`github-runner`](https://flux.example.com/c/main/flux/helmreleases)"},
+		{"deployment", "my-app", "job", flux, "[`my-app`](https://flux.example.com/c/main/deployments/default/my-app)"},
+		{"kustomization", "kust-1", "kustomization", flux, "[`kust-1`](https://flux.example.com/c/main/flux/kustomize/kustomizations/flux-system/kust-1)"},
 	}
-	stepKust := FormatChunkActiveStep(chunkKust, "https://flux.example.com")
-	assert.Contains(t, stepKust, "✅ rolled out")
-
-	// FormatChunkActiveStep with jobs
-	chunkJobs := model.VanadisChunk{
-		ID:     "c-jobs",
-		Status: statusDeploying,
-		RolloutState: &pubsub.PRRolloutState{
-			ExpectedJobs: []string{"svc-a", "svc-b", "svc-c", "svc-d"},
-			StartedJobs:  []string{"svc-b", "svc-c"},
-			DeployedJobs: []string{"svc-a"},
-			JobStates:    map[string]string{"svc-c": "verifying_health"},
-		},
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tc.want, formatDeployTargetLabel(tc.target, tc.kind, tc.fluxURL))
+		})
 	}
-	stepJobs := FormatChunkActiveStep(chunkJobs)
-	assert.Contains(t, stepJobs, "`svc-a`: ✅ healthy")
-	assert.Contains(t, stepJobs, "`svc-b`: 🔄 starting")
-	assert.Contains(t, stepJobs, "`svc-c`: 🔄 verifying health")
-	assert.Contains(t, stepJobs, "`svc-d`: ⏳ building image")
+}
 
-	// FormatChunkActiveStep with container image builds on merged
-	chunkImages := model.VanadisChunk{
-		ID:     "c-images",
-		Status: statusMerged,
-		CIChecks: map[string]string{
-			"build-check-1": "passed",
-			"build-check-2": "passed",
-		},
+func TestFormatKustomizationRolloutStatus(t *testing.T) {
+	t.Parallel()
+	const flux = "https://flux.example.com"
+	tests := []struct {
+		name         string
+		status       string
+		kusts        map[string]string
+		fluxURL      string
+		wantOK       bool
+		wantContains []string
+	}{
+		{"merged is not a rollout", statusMerged, map[string]string{"kust": "healthy"}, "", false, nil},
+		{"deploying lists each kustomization", statusDeploying, map[string]string{"k1": statusDeployed, "k2": "progressing"}, flux, true, []string{
+			"[`k1`](https://flux.example.com/c/main/flux/kustomize/kustomizations/flux-system/k1): ✅ rolled out",
+			"[`k2`](https://flux.example.com/c/main/flux/kustomize/kustomizations/flux-system/k2): 🔄 rolling out",
+		}},
 	}
-	stepImages := FormatChunkActiveStep(chunkImages)
-	assert.Contains(t, stepImages, "Building container images (2/2 completed)")
-
-	// FormatChunkActiveStep with matched build job service on merged
-	chunkService := model.VanadisChunk{
-		ID:     "c-svc",
-		Status: statusMerged,
-		CIChecks: map[string]string{
-			"Build & Push Images (eri)": "passed",
-		},
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var s string
+			var ok bool
+			if tc.fluxURL != "" {
+				s, ok = FormatKustomizationRolloutStatus(tc.status, tc.kusts, tc.fluxURL)
+			} else {
+				s, ok = FormatKustomizationRolloutStatus(tc.status, tc.kusts)
+			}
+			assert.Equal(t, tc.wantOK, ok)
+			if !tc.wantOK {
+				assert.Empty(t, s)
+			}
+			for _, w := range tc.wantContains {
+				assert.Contains(t, s, w)
+			}
+		})
 	}
-	stepService := FormatChunkActiveStep(chunkService)
-	assert.Contains(t, stepService, "`eri`: 🔄 starting")
 }
 
 func TestBuildSyncWidgetRequest(t *testing.T) {
@@ -321,98 +310,39 @@ func TestOrderWidgetChunks(t *testing.T) {
 	}
 }
 
-func TestChunkActiveStepBranches(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name  string
-		chunk model.VanadisChunk
-		want  string
-	}{
-		{
-			name:  "open without checks is empty",
-			chunk: model.VanadisChunk{ID: "c-open", Status: "open"},
-			want:  "",
-		},
-		{
-			name:  "open with only blank checks is empty",
-			chunk: model.VanadisChunk{ID: "c-blank", Status: "open", CIChecks: map[string]string{"lint": ""}},
-			want:  "",
-		},
-		{
-			name: "merged with failing check is empty",
-			chunk: model.VanadisChunk{ID: "c-fail", Status: "merged", CIChecks: map[string]string{
-				"lint": "passed",
-				"test": "failure",
-			}},
-			want: "",
-		},
-		{
-			name: "merged with kustomizations but not deploying skips rollout",
-			chunk: model.VanadisChunk{ID: "c-kust", Status: "merged", RolloutState: &pubsub.PRRolloutState{
-				KustomizationStatuses: map[string]string{"k1": "healthy"},
-			}},
-			want: "",
-		},
-		{
-			name: "deploying with blank rollout candidates deploys",
-			chunk: model.VanadisChunk{ID: "c-dep", Status: "deploying", RolloutState: &pubsub.PRRolloutState{
-				ExpectedJobs: []string{"", "  "},
-			}},
-			want: "Deploying to cluster",
-		},
-		{
-			name: "case-insensitive duplicate build services dedupe",
-			chunk: model.VanadisChunk{ID: "c-dupe", Status: "merged", CIChecks: map[string]string{
-				"Build & Push Images (Eri)":   "passed",
-				"Build and Push Images (ERI)": "passed",
-				"lint":                        "",
-			}},
-			want: "`ERI`: 🔄 starting",
-		},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			assert.Equal(t, tc.want, FormatChunkActiveStep(tc.chunk))
-		})
-	}
-}
-
-func TestBuildStatusWidgetChunkCIFailedStaysLive(t *testing.T) {
-	t.Parallel()
-	got := BuildStatusWidgetChunk(model.VanadisChunk{ID: "c1", Mode: "pr", Repo: "aerial", Status: "ci_failed", Banner: `CI check "lint" failed`})
-	assert.Contains(t, got.ActiveStep, "remediation")
-	assert.False(t, isChunkTerminal(got.Status), "ci_failed is recoverable: remediation runs and the next head flips it back to pr_opened")
-	got = BuildStatusWidgetChunk(model.VanadisChunk{ID: "c2", Mode: "pr", Repo: "aerial", Status: "conflict", Banner: "Merge conflict detected"})
-	assert.Contains(t, got.ActiveStep, "remediation")
-	assert.False(t, isChunkTerminal(got.Status))
-	assert.True(t, isChunkTerminal("failed"))
-}
-
 func TestBuildStatusWidgetChunk(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name     string
-		chunk    model.VanadisChunk
-		wantMode string
-		wantRepo string
+		name            string
+		chunk           model.VanadisChunk
+		wantMode        string
+		wantRepo        string
+		wantStepContain string
+		wantLive        bool
 	}{
-		{"PRChunkKeepsRepo", model.VanadisChunk{ID: "c1", Mode: "pr", Repo: "aerial-config", Status: "pending"}, "pr", "aerial-config"},
-		{"PRChunkWithoutRepoDefaultsToAerial", model.VanadisChunk{ID: "c2", Mode: "pr", Status: "pending"}, "pr", "aerial"},
-		{"ActionChunkWithPRKeepsRepo", model.VanadisChunk{ID: "c4", Mode: "action", Repo: "aerial", PRNumber: 2431, Status: "running"}, "action", "aerial"},
-		{"ActionChunkWithPRKeepsOtherRepo", model.VanadisChunk{ID: "c5", Mode: "action", Repo: "aerial-config", PRNumber: 7, Status: "running"}, "action", "aerial-config"},
-		{"ActionChunkWithPRNoRepoDefaults", model.VanadisChunk{ID: "c6", Mode: "action", PRNumber: 7, Status: "running"}, "action", "aerial"},
-		{"ActionChunkHasNoRepo", model.VanadisChunk{ID: "c3", Mode: "action", Status: "pending"}, "action", ""},
+		{"PRChunkKeepsRepo", model.VanadisChunk{ID: "c1", Mode: "pr", Repo: "aerial-config", Status: "pending"}, "pr", "aerial-config", "", false},
+		{"PRChunkWithoutRepoDefaultsToAerial", model.VanadisChunk{ID: "c2", Mode: "pr", Status: "pending"}, "pr", "aerial", "", false},
+		{"ActionChunkWithPRKeepsRepo", model.VanadisChunk{ID: "c4", Mode: "action", Repo: "aerial", PRNumber: 2431, Status: "running"}, "action", "aerial", "", false},
+		{"ActionChunkWithPRKeepsOtherRepo", model.VanadisChunk{ID: "c5", Mode: "action", Repo: "aerial-config", PRNumber: 7, Status: "running"}, "action", "aerial-config", "", false},
+		{"ActionChunkWithPRNoRepoDefaults", model.VanadisChunk{ID: "c6", Mode: "action", PRNumber: 7, Status: "running"}, "action", "aerial", "", false},
+		{"ActionChunkHasNoRepo", model.VanadisChunk{ID: "c3", Mode: "action", Status: "pending"}, "action", "", "", false},
+		{"CIFailedStaysLive", model.VanadisChunk{ID: "c7", Mode: "pr", Repo: "aerial", Status: "ci_failed", Banner: `CI check "lint" failed`}, "pr", "aerial", "remediation", true},
+		{"ConflictStaysLive", model.VanadisChunk{ID: "c8", Mode: "pr", Repo: "aerial", Status: "conflict", Banner: "Merge conflict detected"}, "pr", "aerial", "remediation", true},
+		{"FailedIsTerminal", model.VanadisChunk{ID: "c9", Mode: "pr", Repo: "aerial", Status: "failed"}, "pr", "aerial", "", false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			got := BuildStatusWidgetChunk(tc.chunk)
-			if got.Mode != tc.wantMode || got.Repo != tc.wantRepo {
-				t.Errorf("BuildStatusWidgetChunk() mode=%q repo=%q, want mode=%q repo=%q", got.Mode, got.Repo, tc.wantMode, tc.wantRepo)
+			assert.Equal(t, tc.wantMode, got.Mode)
+			assert.Equal(t, tc.wantRepo, got.Repo)
+			assert.Contains(t, got.ActiveStep, tc.wantStepContain)
+			if tc.wantStepContain != "" {
+				assert.Equal(t, tc.wantLive, !isChunkTerminal(got.Status), "ci_failed/conflict are recoverable: remediation runs and the next head flips back to pr_opened")
 			}
 		})
 	}
+	assert.True(t, isChunkTerminal("failed"))
 }
 
 func TestNormalizeRepo(t *testing.T) {

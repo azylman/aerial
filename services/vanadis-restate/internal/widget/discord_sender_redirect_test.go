@@ -47,8 +47,16 @@ channels:
 		channelID     string
 		resolverSysID string
 		resolverErr   error
+		customPolicy  bool
+		policyNoBuild bool
+		policySysChan string
 		expectTarget  string
 	}{
+		{name: "custom policy no_build_updates false", cfgPath: nonexistentPath, channelID: "chan-normal", customPolicy: true, policySysChan: "sys-123", expectTarget: "chan-normal"},
+		{
+			name: "custom policy no_build_updates true with snowflake", cfgPath: nonexistentPath, channelID: "chan-quiet", customPolicy: true, policyNoBuild: true,
+			policySysChan: "1564150557705248879", expectTarget: "1564150557705248879",
+		},
 		{
 			name:         "regular channel without no_build_updates stays on target",
 			cfgPath:      configPath,
@@ -116,6 +124,10 @@ channels:
 				}
 			}
 
+			if tc.customPolicy {
+				d.channelPolicyResolver = func(_ string) (bool, string) { return tc.policyNoBuild, tc.policySysChan }
+			}
+
 			req := ericlient.StatusWidgetRequest{
 				ChannelID: tc.channelID,
 				Title:     "Build Title",
@@ -125,51 +137,6 @@ channels:
 			require.NoError(t, dErr)
 			assert.Equal(t, "msg-123", msgID)
 			assert.Equal(t, tc.expectTarget, mockSender.lastSendChannelID)
-		})
-	}
-}
-
-func TestDelivererChannelRedirectionCustomPolicy(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name          string
-		channelID     string
-		noBuild       bool
-		sysChan       string
-		expectChannel string
-	}{
-		{
-			name:          "custom resolver no_build_updates false",
-			channelID:     "chan-normal",
-			noBuild:       false,
-			sysChan:       "sys-123",
-			expectChannel: "chan-normal",
-		},
-		{
-			name:          "custom resolver no_build_updates true with snowflake",
-			channelID:     "chan-quiet",
-			noBuild:       true,
-			sysChan:       "1564150557705248879",
-			expectChannel: "1564150557705248879",
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			mockSender := &mockWidgetSender{sendMsg: &discordgo.Message{ID: "m-1"}}
-			d, err := NewDiscordWidgetDeliverer("", "", "azylman", nil, filepath.Join(t.TempDir(), "config.yaml"))
-			require.NoError(t, err)
-			d.agentSenders = map[string]DiscordWidgetSender{"aerial": mockSender}
-			d.channelPolicyResolver = func(_ string) (bool, string) {
-				return tc.noBuild, tc.sysChan
-			}
-
-			req := ericlient.StatusWidgetRequest{ChannelID: tc.channelID, Title: "Build"}
-			_, dErr := d.DeliverStatusWidget(context.Background(), req)
-			require.NoError(t, dErr)
-			assert.Equal(t, tc.expectChannel, mockSender.lastSendChannelID)
 		})
 	}
 }
