@@ -201,7 +201,7 @@ func TestEndTurnSpanContent(t *testing.T) {
 		{
 			name: "capture on records prompt and response", capture: true,
 			wantInput:  `[{"role":"user","parts":[{"type":"text","content":"what's the weather?"}]}]`,
-			wantOutput: `[{"role":"assistant","parts":[{"type":"text","content":"sunny"}]}]`,
+			wantOutput: `[{"role":"assistant","parts":[{"type":"text","content":"Hello from mock voice."}]}]`,
 		},
 		{name: "capture off records no content"},
 	}
@@ -210,18 +210,22 @@ func TestEndTurnSpanContent(t *testing.T) {
 			t.Parallel()
 			rec := tracetest.NewSpanRecorder()
 			tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(rec))
-			_, span := tp.Tracer("test").Start(context.Background(), "invoke_agent")
-			te := &turnExecution{
-				pool:     &WorkerPool{cfg: WorkerPoolConfig{TraceContent: tc.capture}},
-				turnSpan: span, sentPrompt: "what's the weather?", turnResponseText: "sunny",
-				turnStatus: "success", turnTokenUsage: runner.TokenUsage{InputTokens: 1},
+			pool := New(nil, WorkerPoolConfig{TraceContent: tc.capture, TracerProvider: tp})
+			pool.voiceProcessPool = &queueMockVoiceProcessPool{sessions: make(map[string]*queueMockVoiceSession)}
+			defer pool.Stop()
+			if _, _, err := pool.ExecuteVoiceTurn(context.Background(), "what's the weather?", "kiosk", nil); err != nil {
+				t.Fatalf("ExecuteVoiceTurn: %v", err)
 			}
-			te.endTurnSpan()
-			ended := rec.Ended()
-			if len(ended) != 1 {
-				t.Fatalf("ended spans = %d, want 1", len(ended))
+			var roots []sdktrace.ReadOnlySpan
+			for _, s := range rec.Ended() {
+				if s.Name() == runner.OperationInvokeAgent {
+					roots = append(roots, s)
+				}
 			}
-			have := attrMap(ended[0].Attributes())
+			if len(roots) != 1 {
+				t.Fatalf("ended invoke_agent spans = %d, want 1", len(roots))
+			}
+			have := attrMap(roots[0].Attributes())
 			if got := have[tracing.AttrGenAIInputMessages].AsString(); got != tc.wantInput {
 				t.Errorf("input = %q, want %q", got, tc.wantInput)
 			}
