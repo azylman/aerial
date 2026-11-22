@@ -628,22 +628,46 @@ func (p *WorkerPool) RecordDispatchOutcome(ctx context.Context, ids []string, su
 	return nil
 }
 
-// RunBurstPostTurn runs the post_turn hook (only when the turn attempted the agent) and the
-// turn-end thread summary refresh (only after a successful turn), rebuilt from the recorded rows.
-// hookMetadata is the journaled TurnPrep.HookMetadata.
+// RunBurstPostTurnHook runs the post_turn hook (post-turn-hook; only when the turn attempted the
+// agent), rebuilt from the recorded rows. hookMetadata is the journaled TurnPrep.HookMetadata.
 //
 //nolint:contextcheck,nolintlint // the reused legacy turn helpers own their contexts; store calls take ctx.
-func (p *WorkerPool) RunBurstPostTurn(ctx context.Context, threadID string, ids []string, attempted bool, outcome TurnOutcome, hookMetadata map[string]string) error {
+func (p *WorkerPool) RunBurstPostTurnHook(ctx context.Context, threadID string, ids []string, attempted bool, outcome TurnOutcome, hookMetadata map[string]string) error {
+	te, ok, err := p.postTurnExecution(ctx, threadID, ids, attempted, outcome, hookMetadata)
+	if err != nil || !ok {
+		return err
+	}
+	te.runPostTurnHook()
+	return nil
+}
+
+// RefreshBurstThreadSummary runs the turn-end thread summary refresh (refresh-thread-summary;
+// only after a successful turn), rebuilt from the recorded rows.
+//
+//nolint:contextcheck,nolintlint // the reused legacy turn helpers own their contexts; store calls take ctx.
+func (p *WorkerPool) RefreshBurstThreadSummary(ctx context.Context, threadID string, ids []string, outcome TurnOutcome) error {
+	te, ok, err := p.postTurnExecution(ctx, threadID, ids, true, outcome, nil)
+	if err != nil || !ok {
+		return err
+	}
+	te.refreshThreadSummaryAtTurnEnd(ctx)
+	return nil
+}
+
+// postTurnExecution rebuilds the post-turn state of a burst from its recorded rows; ok is false when no row exists.
+//
+//nolint:contextcheck,nolintlint // the reused legacy turn helpers own their contexts; store calls take ctx.
+func (p *WorkerPool) postTurnExecution(ctx context.Context, threadID string, ids []string, attempted bool, outcome TurnOutcome, hookMetadata map[string]string) (*turnExecution, bool, error) {
 	s, err := p.stepStore()
 	if err != nil {
-		return err
+		return nil, false, err
 	}
 	rows, err := messagesByIDOrdered(ctx, s, normalizeStepIDs(ids))
 	if err != nil {
-		return err
+		return nil, false, err
 	}
 	if len(rows) == 0 {
-		return nil
+		return nil, false, nil
 	}
 	te := p.newStepTurnExecution(ctx, threadID, rows)
 	te.turnAttempted = attempted
@@ -656,9 +680,7 @@ func (p *WorkerPool) RunBurstPostTurn(ctx context.Context, threadID string, ids 
 	}
 	snap, _ := resolveChannelSnapshot(p.getDiscordSession(), threadID)
 	te.summarizeThread = summarizesThread(snap, strings.EqualFold(te.policy.Mode, "channel"))
-	te.runPostTurnHook()
-	te.refreshThreadSummaryAtTurnEnd(ctx)
-	return nil
+	return te, true, nil
 }
 
 // applyRecordedTurnResult fills the post_turn fields from the rows the turn recorded.
@@ -719,4 +741,69 @@ func (p *WorkerPool) PublishDispatchOutcome(ctx context.Context, dispatchID stri
 	pubCtx, cancel := context.WithTimeout(ctx, turnStepStoreTimeout)
 	defer cancel()
 	return p.publishDispatchOutcome(pubCtx, *d, status, errMsg, startedAt, completedAt)
+}
+
+// StopBurstTurn is the stop-turn step of a cancelled burst: it stops the turn on this pod (killing
+// its agent process) and records its still-active rows FAILED "cancelled by operator", without a
+// failure notice. A replay finds the rows terminal and writes nothing.
+func (p *WorkerPool) StopBurstTurn(ctx context.Context, turnID string, ids []string) error {
+	s, err := p.stepStore()
+	if err != nil {
+		return err
+	}
+	p.turns.Stop(turnID, CancelledByOperatorReason)
+	return p.failActiveBurstRows(ctx, s, normalizeStepIDs(ids), AttemptSummary{Outcome: OutcomeCancelled})
+}
+
+// StopDispatchTurn is the stop-turn step of a cancelled dispatch; cancelled dispatches publish nothing.
+func (p *WorkerPool) StopDispatchTurn(ctx context.Context, turnID string, ids []string) error {
+	if _, err := p.stepStore(); err != nil {
+		return err
+	}
+	p.turns.Stop(turnID, CancelledByOperatorReason)
+	return p.RecordDispatchOutcome(ctx, ids, AttemptSummary{Outcome: OutcomeCancelled})
+}
+
+// FailBurstTurn is the fail-turn step of a burst that hit a terminal error: it stops the turn on
+// this pod, delivers the failure notice and records its still-active rows FAILED with reason. A
+// replay finds the rows terminal and sends no second notice.
+func (p *WorkerPool) FailBurstTurn(ctx context.Context, turnID string, ids []string, reason string) error {
+	s, err := p.stepStore()
+	if err != nil {
+		return err
+	}
+	p.turns.Stop(turnID, reason)
+	return p.failActiveBurstRows(ctx, s, normalizeStepIDs(ids), AttemptSummary{Outcome: OutcomeFailed, Reason: reason})
+}
+
+// FailDispatchTurn is the fail-turn step of a dispatch that hit a terminal error: it stops the
+// turn, records the row FAILED with reason and publishes the recorded outcome (failed, or
+// completed when the reply was already recorded).
+func (p *WorkerPool) FailDispatchTurn(ctx context.Context, turnID string, ids []string, reason string) error {
+	s, err := p.stepStore()
+	if err != nil {
+		return err
+	}
+	p.turns.Stop(turnID, reason)
+	ids = normalizeStepIDs(ids)
+	if err := p.RecordDispatchOutcome(ctx, ids, AttemptSummary{Outcome: OutcomeFailed, Reason: reason}); err != nil {
+		return err
+	}
+	for _, id := range ids {
+		d, err := storeCall(ctx, func(c context.Context) (*db.Dispatch, error) { return s.GetDispatch(c, id) })
+		if errors.Is(err, db.ErrRecordNotFound) || (err == nil && d == nil) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		outcome := OutcomeFailed
+		if d.Status == db.StatusCompleted {
+			outcome = OutcomeCompleted
+		}
+		if err := p.PublishDispatchOutcome(ctx, id, outcome); err != nil {
+			return err
+		}
+	}
+	return nil
 }
