@@ -155,8 +155,14 @@ func LoadConfig(getenv func(string) string) Config {
 // services and ignores them.
 func bindRestateServices(agentName string, restateObj *build.BuildObject, routerSvc *router.BuildRouterService, projection *prstate.PgProjectionStore, eri prstate.EriEffector, facts prstate.FactPublisher, gh *prstate.GitHubClient, kube *prstate.KubeClient) (*server.Restate, error) {
 	srv := server.NewRestate().
-		Bind(restate.Reflect(restateObj)).
-		Bind(restate.Reflect(routerSvc))
+		Bind(restate.Reflect(restateObj,
+			restate.WithInactivityTimeout(45*time.Second),
+			restate.WithAbortTimeout(15*time.Second),
+		)).
+		Bind(restate.Reflect(routerSvc,
+			restate.WithInactivityTimeout(45*time.Second),
+			restate.WithAbortTimeout(15*time.Second),
+		))
 	if ownsPRState(agentName) {
 		pr, repo, err := newPRStateServices(projection, eri, facts, gh, kube)
 		if err != nil {
