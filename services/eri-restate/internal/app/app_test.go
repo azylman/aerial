@@ -68,7 +68,7 @@ func TestNewEriRestateServer(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			srv := NewEriRestateServer(nil, "aerial", tc.mode)
+			srv := NewEriRestateServer(nil, "aerial", tc.mode, nil)
 			require.NotNil(t, srv)
 			h, err := srv.Handler()
 			require.NoError(t, err)
@@ -78,7 +78,7 @@ func TestNewEriRestateServer(t *testing.T) {
 			rec := httptest.NewRecorder()
 			h.ServeHTTP(rec, req)
 			assert.Equal(t, http.StatusOK, rec.Code)
-			for _, svc := range []string{`"ThreadSession"`, `"DispatchSession"`, `"VoiceSession"`, `"SessionManager"`, `"TurnRunner"`} {
+			for _, svc := range []string{`"ThreadSession"`, `"DispatchSession"`, `"VoiceSession"`, `"SessionManager"`, `"TurnRunner"`, `"LLM"`} {
 				assert.Contains(t, rec.Body.String(), svc)
 			}
 		})
@@ -121,6 +121,7 @@ func TestEriRestateDefinitions(t *testing.T) {
 			"VoiceSession" + suffix + " VIRTUAL_OBJECT": {"Ask": "EXCLUSIVE"},
 			"SessionManager" + suffix + " SERVICE":      {"CancelDispatch": "-"},
 			"TurnRunner" + suffix + " SERVICE":          {"RunBurst": "-", "RunDispatch": "-"},
+			"LLM" + suffix + " SERVICE":                 {"Complete": "-"},
 		}
 	}
 
@@ -138,7 +139,7 @@ func TestEriRestateDefinitions(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			assert.Equal(t, tc.want, boundHandlers(eriRestateDefinitions(nil, tc.agent, tc.mode)))
+			assert.Equal(t, tc.want, boundHandlers(eriRestateDefinitions(nil, tc.agent, tc.mode, nil)))
 		})
 	}
 }
@@ -236,7 +237,7 @@ func TestDiscoveryTimeoutReconciliationAndH2C(t *testing.T) {
 	h2cProtocols.SetHTTP1(true)
 	h2cProtocols.SetUnencryptedHTTP2(true)
 
-	srv := NewEriRestateServer(nil, "aerial", "legacy")
+	srv := NewEriRestateServer(nil, "aerial", "legacy", nil)
 	rawHandler, err := srv.Handler()
 	require.NoError(t, err)
 
@@ -273,7 +274,7 @@ func TestDiscoveryTimeoutReconciliationAndH2C(t *testing.T) {
 	require.Eventually(t, func() bool {
 		mu.Lock()
 		defer mu.Unlock()
-		return reconcileCount >= 4 // 4 services reconciled
+		return reconcileCount >= 5 // 5 services reconciled
 	}, 3*time.Second, 50*time.Millisecond)
 }
 
@@ -359,22 +360,24 @@ func TestReconcileRestateServiceTimeouts(t *testing.T) {
 
 	tests := []timeoutReconcileCase{
 		{
-			name:          "successful timeout reconciliation for all 4 services",
+			name:          "successful timeout reconciliation for all 5 services",
 			agent:         "aerial",
 			statusCode:    http.StatusOK,
 			returnBody:    `{"status":"ok"}`,
-			wantCallCount: 4,
+			wantCallCount: 5,
 			wantPaths: []string{
 				"/services/ThreadSession",
 				"/services/DispatchSession",
 				"/services/VoiceSession",
 				"/services/TurnRunner",
+				"/services/LLM",
 			},
 			wantBodies: []string{
 				`{"inactivity_timeout":"1h","abort_timeout":"1h"}`,
 				`{"inactivity_timeout":"1h","abort_timeout":"1h"}`,
 				`{"inactivity_timeout":"1h","abort_timeout":"1h"}`,
 				`{"inactivity_timeout":"75m","abort_timeout":"1h"}`,
+				`{"inactivity_timeout":"1h","abort_timeout":"1h"}`,
 			},
 		},
 		{
@@ -382,18 +385,20 @@ func TestReconcileRestateServiceTimeouts(t *testing.T) {
 			agent:         "agent-alpha",
 			statusCode:    http.StatusOK,
 			returnBody:    `{"status":"ok"}`,
-			wantCallCount: 4,
+			wantCallCount: 5,
 			wantPaths: []string{
 				"/services/ThreadSession-agent-alpha",
 				"/services/DispatchSession-agent-alpha",
 				"/services/VoiceSession-agent-alpha",
 				"/services/TurnRunner-agent-alpha",
+				"/services/LLM-agent-alpha",
 			},
 			wantBodies: []string{
 				`{"inactivity_timeout":"1h","abort_timeout":"1h"}`,
 				`{"inactivity_timeout":"1h","abort_timeout":"1h"}`,
 				`{"inactivity_timeout":"1h","abort_timeout":"1h"}`,
 				`{"inactivity_timeout":"75m","abort_timeout":"1h"}`,
+				`{"inactivity_timeout":"1h","abort_timeout":"1h"}`,
 			},
 		},
 		{

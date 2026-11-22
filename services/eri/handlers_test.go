@@ -1167,7 +1167,7 @@ func TestHandleInternalLLM(t *testing.T) {
 		{"invalid traversal attachment filename", http.MethodPost, okLLM, fmt.Sprintf(`{"prompt":"test","attachments":[{"url":"%s/file.txt","filename":"../test.txt"}]}`, attSrv.URL), http.StatusBadRequest},
 		{"eleven attachments accepted", http.MethodPost, okLLM, elevenAttsJSON, http.StatusOK},
 		{"exceeds max attachments", http.MethodPost, okLLM, tooManyAttsJSON, http.StatusBadRequest},
-		{"upstream 404 fetch error", http.MethodPost, okLLM, fmt.Sprintf(`{"prompt":"test","attachments":[{"url":"%s/notfound","filename":"nf.txt"}]}`, attSrv.URL), http.StatusBadGateway},
+		{"upstream 404 fetch error", http.MethodPost, okLLM, fmt.Sprintf(`{"prompt":"test","attachments":[{"url":"%s/notfound","filename":"nf.txt"}]}`, attSrv.URL), http.StatusBadRequest},
 		{"upstream 500 fetch error", http.MethodPost, okLLM, fmt.Sprintf(`{"prompt":"test","attachments":[{"url":"%s/servererror","filename":"err.txt"}]}`, attSrv.URL), http.StatusBadGateway},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
