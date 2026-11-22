@@ -1,331 +1,528 @@
 # Service Layout Standard
 
-**Date:** 2026-11-17  
-**Task:** 165 (Plan 1 — Layout Spec Only)  
-**Status:** Proposed standard for per-service conformance plans  
+**Date:** 2026-11-21  
+**Task:** 165 (Ratified Service Layout Standard & Internal Layer Architecture)  
+**Status:** Ratified monorepo architectural standard for service package layout and layer boundaries  
 **Scope:** Go services under `services/` and `mcp/`, shared libraries under `pkg/`  
 
 ---
 
 ## 1. Purpose and Reading Guide
 
-This document defines, per application archetype, the community-standard Go project layout and how that standard maps onto this repository. A reviewer should be able to place any new file or any new service without guessing, and later conformance plans should be able to cite a section here instead of re-arguing layout from scratch.
-
-This is a specification only. It does not rename files, move code, or change behavior. Migration, where recommended, happens in separate small plans (shared health helper, Restate extraction, and one conformance pass per service).
+This document defines, per application archetype, the canonical Go project layout and structural architecture for this repository. A developer or reviewer should be able to place any new file or new service without guessing, and conformance reviews cite the ratified sections here.
 
 The repository is a multi-module monorepo:
 
 - Each deployable Go binary lives in its own module: `services/<name>/go.mod` with module path `github.com/azylman/aerial/services/<name>`, or `mcp/<name>/go.mod` for MCP servers.
-- Shared libraries live in one additional module: `pkg/go.mod` with module path `github.com/azylman/aerial/pkg`, consumed through `replace` directives.
-- Every Go service Dockerfile builds the package at the module root with `go build .` (for example `services/haro/Dockerfile` runs `go build -cover ... -o /app/haro .` after `WORKDIR /src/services/haro`).
+- Shared libraries live in one additional module: `pkg/go.mod` with module path `github.com/azylman/aerial/pkg`, consumed across services through `replace` directives.
+- Every Go service Dockerfile builds the package at the module root with `go build .` (for example `services/haro/Dockerfile` runs `go build -cover ... -o /app/haro .` after `WORKDIR /src/services/haro`) or targets a thin entrypoint in `cmd/<binary>/` where multi-binary or entrypoint separation is used.
 
-Any layout that breaks that `go build .` contract, the Docker `COPY pkg/` plus `COPY services/<name>/` layering, or the `GOCOVERDIR` coverage flush paths must justify itself explicitly. None of the archetypes below require such a break.
+All Go services follow a standardized decomposition: single-binary service roots target a strict **3-file root ceiling** (`main.go`, `main_test.go`, and `goleak_test.go`), while all domain logic, persistence, and protocol routing are decomposed into layered packages under `internal/` governed by the `L0 -> L3` layer hierarchy.
 
 ---
 
-## 2. What the Community Standards Actually Say
+## 2. Architectural Precedents & Standards
 
-Three sources govern this standard. They were read directly for this spec.
+Three architectural standards govern this specification:
 
 ### 2.1 Go module layout (`go.dev/doc/modules/layout`)
 
-The Go documentation does not mandate a single layout. It describes a progression:
+The official Go documentation defines layout patterns based on program complexity:
 
-- **Basic command.** The simplest program is a single file defining `func main`. Larger programs split code across multiple files that all declare `package main` in the module root. This flat `package main` shape is fully official, not a shortcut.
-- **Command or package with supporting packages.** When code benefits from supporting packages, place them under `internal/`. The compiler enforces that only code inside the parent of `internal/` may import them, so internal APIs can change freely.
-- **Multiple commands.** Put each program in its own directory. The common convention is a `cmd/` directory holding `cmd/<binary>/main.go` for each binary.
-- **Server project.** Servers are usually self-contained binaries with no packages to export. The recommendation is to keep server logic in `internal/` and keep all commands together in `cmd/`, as in `cmd/api-server/main.go` plus `internal/auth/`, `internal/model/`, and similar packages.
+- **Basic command.** Single-file or flat-file tools for small utilities.
+- **Server project.** For long-running servers and background services, the Go standard places private service code under `internal/`, isolated from external modules. The compiler strictly prevents cross-module imports of `internal/`, ensuring modular boundaries and clear ownership.
+- **Multiple commands.** Multi-binary modules organize entrypoints under `cmd/<binary>/main.go` with shared internal packages beside them.
 
-The key judgment is therefore not "flat versus textbook." It is: *does this module contain one binary, several binaries, or importable packages?* The recommended layout follows from that answer.
+While flat `package main` modules were historically used for minimal binaries, monorepo scale, test maintainability, and domain isolation require formal package separation. Services decompose domain concerns into `internal/` subpackages to eliminate circular dependencies and isolate testing boundaries.
 
 ### 2.2 Restate Go SDK (`docs.restate.dev/develop/go/services`)
 
-Restate defines no directory standard. The documented shape is a single `package main` program:
+Restate Virtual Objects, workflows, and plain services require durable execution guarantees:
 
-- A struct holds exported handlers. For a Virtual Object, handlers take `restate.ObjectContext` (exclusive, read-write) or `restate.ObjectSharedContext` (shared, read-only). For a Workflow, a `Run` handler takes `restate.WorkflowContext` and must exist exactly once per workflow.
-- `restate.Reflect(MyObject{})` turns exported methods into handlers; unexported methods are skipped. The service is reachable as `<RESTATE_INGRESS_URL>/<StructName>/<HandlerName>`.
-- `server.NewRestate().Bind(restate.Reflect(...)).Start(ctx, "0.0.0.0:9080")` serves the bound services.
-
-Two consequences matter for layout. First, the struct name and handler names are wire-visible and therefore frozen once deployed. Second, nothing in Restate requires `cmd/` or `internal/`; splitting handlers, state types, and journal helpers across files in the same `package main` is the idiomatic reading of the examples.
+- A struct holds exported handlers taking `restate.ObjectContext` (exclusive, read-write), `restate.ObjectSharedContext` (shared, read-only), `restate.WorkflowContext`, or `restate.Context`.
+- `restate.Reflect(MyObject{})` dynamically reflects exported methods into RPC handlers reachable at `<RESTATE_INGRESS_URL>/<StructName>/<HandlerName>`.
+- Reflected services configure explicit lifecycle timeouts: `restate.WithInactivityTimeout(...)` and `restate.WithAbortTimeout(...)` to prevent zombie executions.
+- `server.NewRestate().Bind(restate.Reflect(...)).Start(ctx, "0.0.0.0:9080")` binds and serves reflected handlers.
+- Non-deterministic operations (PostgreSQL queries, HTTP calls, NATS events, Discord webhooks, wall-clock time, random generation, and UUIDs) must be wrapped inside journaled execution steps (`restate.Run(ctx, func(rc restate.RunContext) (T, error) { ... }, restate.WithName("<step>"))`).
+- Restate services isolate models (`internal/model`), persistence (`internal/store`), journaled domain execution (`internal/build` / `internal/workflow`), and server binding (`internal/app`).
 
 ### 2.3 NATS and JetStream (`docs.nats.io`)
 
-NATS publishes no NATS-specific directory standard. Official JetStream examples are ordinary Go programs: the consumer or handler lives in the same package as `func main`, durable consumer and stream setup happens through the JetStream API, and an HTTP health endpoint, when present, is an ordinary `net/http` server alongside. A NATS service therefore inherits the Go guidance for a basic command (Section 2.1) with no extra archetype rules.
+NATS JetStream consumers provide at-least-once message processing:
+
+- Stream subscriptions, consumer definitions, and shared reconnection lifecycles live in `pkg/pubsub`.
+- Consumers run as durable subscriptions on designated cluster streams (`AERIAL_EVENTS`, `AERIAL_JOBS`, `AERIAL_COALESCED`, `VISION_JOBS`).
+- Handlers translate stream events into idempotent domain actions or dispatch calls to Restate ingress before issuing `msg.Ack()`.
+- Services with NATS consumers encapsulate consumer loops in dedicated packages (such as `internal/bridge` or `internal/consumer`) rather than entangling them in root `main.go`.
 
 ---
 
-## 3. Core Mapping Rule
+## 3. Core Mapping Rule & The `L0 -> L3` Layer Architecture
 
-Because every service here is its own module, the community layouts map as follows.
+### 3.1 The 3-File Root `package main` Ceiling
 
-- A **single-binary module** maps to the Go "basic command" layout: flat `package main` at the module root (`services/<name>/main.go` plus sibling files). This is the community standard for this shape, not a deviation from it.
-- The Go **"server project"** layout (`cmd/<binary>/main.go` thin entrypoint plus `internal/...`) is the community standard for a module that contains several binaries or importable packages. It is adopted only where that condition actually holds (Section 8, the `eri` exception, and Section 7.2, the `vanadis-restate` user-approved exception). Applying it to a single-binary module adds a directory level, changes every Dockerfile `WORKDIR` and `go build` target, and moves coverage package paths, for no compiler or clarity gain.
-- **`internal/`** is adopted only when a package must be hidden from other modules, plus the single user-approved `vanadis-restate` exception (Section 7.2): `internal/model` (leaf shared types, imports no sibling `internal/` package), `internal/store` (owns `VanadisStore`, `PostgresVanadisStore`, and all its methods), `internal/executor` (owns `Executor` and `EriClient`, depends only on model/store contracts), `internal/build` (owns `BuildObject`, the transition engine, journal helpers, and metrics), `internal/router` (owns `BuildRouterService`, depends on the model/store/build-invoker contract without creating store or build cycles), and `internal/app` (owns `Config`, `LoadConfig(getenv)`, `RunApp` wiring, and the `loadConfigFn`/`runAppFn`/`exitFn`/`initTracingFn` seams), with `cmd/vanadis-restate/main.go` as a thin `package main` entrypoint holding only config load, tracing/signal setup, and app invocation. Inside any other single-binary `package main` module there is no cross-module importer to hide from, and code in `package main` cannot be imported at all, so `internal/` provides no additional privacy. Shared code that genuinely crosses services belongs in the repo-root `pkg/` module instead (Section 9).
-- **`pkg/` at the repo root** (`pkg/httpkit`, `pkg/pubsub`, `pkg/tracing`, `pkg/pgutil`, `pkg/ollama`, `pkg/sanitizer`) is the deliberate exception to `internal/`: these packages are intended for import by many service modules, so they must stay exportable.
+Every Go service module targets a strict **3-file root ceiling** for `package main`:
 
-Later conformance plans must state which archetype they cite (Sections 4–8) and must not introduce `cmd/` or `internal/` inside a single-binary service without recording why the mapping rule above does not apply. The sole recorded exception is `vanadis-restate` (Section 7.2), approved by user supersession.
+1. `main.go`: Thin application entrypoint. Responsible strictly for environment/flag parsing, configuration loading, signal handling, dependency wiring, and invoking the application runner or HTTP server. Contains zero business logic, zero raw SQL, and zero protocol routing.
+2. `main_test.go`: Top-level integration and lifecycle tests verifying wiring, flag parsing, graceful shutdown, and end-to-end component instantiation.
+3. `goleak_test.go`: Goroutine leak verification (`uber-go/goleak`) ensuring no lingering goroutines or leaked timers survive test execution.
+
+All additional code must be organized into domain-specific packages under `internal/`. Legacy services retaining flat files in `package main` are pending phased decomposition passes under Task #165.
+
+### 3.2 The `L0 -> L3` Layer Ratchet
+
+Subpackages under `internal/` must strictly respect the hierarchical layer model. Dependencies flow downward only (`L3 -> L2 -> L1 -> L0`). Upward imports and circular package dependencies are architectural violations prohibited by this specification.
+
+```
++-------------------------------------------------------------------------+
+| L3: Application Assembly, Ingress & Protocols                           |
+| internal/server, internal/router, internal/tools, internal/app          |
++-------------------------------------------------------------------------+
+                                    |
+                                    v
++-------------------------------------------------------------------------+
+| L2: Domain Logic, Engines, Workflows & Consumer Pipelines               |
+| internal/dispatch, internal/delivery, internal/ticker, internal/bridge, |
+| internal/effects, internal/workflow, internal/flux, internal/mediastream|
++-------------------------------------------------------------------------+
+                                    |
+                                    v
++-------------------------------------------------------------------------+
+| L1: Infrastructure, Persistence & Cluster Adapters                      |
+| internal/store, internal/db, internal/kube, internal/metrics            |
++-------------------------------------------------------------------------+
+                                    |
+                                    v
++-------------------------------------------------------------------------+
+| L0: Leaf Domain Models & Configuration Types                            |
+| internal/config, internal/model                                         |
++-------------------------------------------------------------------------+
+```
+
+#### Layer Responsibilities & Contracts:
+
+- **L0 (Foundational Leaves / Zero-Dependency Domain Types & Config):**
+  - **Packages:** `internal/config`, `internal/model`.
+  - **Responsibilities:** Define declarative configuration schemas, domain structs, entity models, request/response DTOs, and error types.
+  - **Import Constraints:** May import shared libraries (`pkg/*`) and standard library packages. **MUST NOT** import any sibling `internal/*` packages (`L1`, `L2`, or `L3`).
+- **L1 (Infrastructure, Persistence & Cluster Adapters):**
+  - **Packages:** `internal/store`, `internal/db`, `internal/kube`, `internal/metrics`.
+  - **Responsibilities:** Own database connections, SQL query execution, transaction lifecycles, Kubernetes API clients, and Prometheus metric registry declarations. Store interfaces define query contracts that higher layers consume. Handlers call store methods; store never calls handlers.
+  - **Import Constraints:** May import `L0` (`internal/config`, `internal/model`) and `pkg/*`. **MUST NOT** import `L2` or `L3` packages.
+- **L2 (Domain Logic, Engines, Workflows & Pipelines):**
+  - **Packages:** `internal/dispatch`, `internal/delivery`, `internal/ticker`, `internal/bridge`, `internal/effects`, `internal/workflow`, `internal/flux`, `internal/mediastream`, `internal/executor`, `internal/build`.
+  - **Responsibilities:** Core business logic, durable state machine transitions, cron and heartbeat evaluation loops, event dispatching, telephony stream processing, and NATS JetStream consumer worker loops.
+  - **Import Constraints:** May import `L0` and `L1` packages. **MUST NOT** import `L3` packages.
+- **L3 (Application Boundary, Ingress & Protocol Assembly):**
+  - **Packages:** `internal/server`, `internal/router`, `internal/tools`, `internal/app`.
+  - **Responsibilities:** HTTP router setup and middleware registration, MCP tool declarations and call dispatching, Restate `server.NewRestate().Bind(...)` service reflection, and top-level application runner orchestration (`RunApp`).
+  - **Import Constraints:** May import `L0`, `L1`, `L2`, and `pkg/*`.
 
 ---
 
 ## 4. Archetype A — HTTP API and Server Services
 
-### 4.1 Community standard
+### 4.1 Canonical Directory Layout
 
-A self-contained HTTP server with no importable packages. Per Section 2.1 ("server project"), the general recommendation is `cmd/` plus `internal/` when the module also carries multiple binaries or non-Go assets. For a single-binary module, the basic-command flat layout is the standard form.
+HTTP API services expose HTTP endpoints, Kubernetes probes, metrics, and MCP tools. They structure their packages as follows:
 
-### 4.2 Our mapping (adopted)
+```
+services/<name>/
+├── Dockerfile
+├── go.mod
+├── go.sum
+├── main.go                     # Entrypoint (<= 3 root files)
+├── main_test.go                # Lifecycle & integration tests
+├── goleak_test.go              # Goroutine leak checks
+└── internal/
+    ├── config/                 # L0: YAML & environment configuration
+    │   ├── config.go
+    │   └── config_test.go
+    ├── model/                  # L0: Pure domain types, DTOs
+    │   ├── model.go
+    │   └── model_test.go
+    ├── store/                  # L1: Persistence, SQL queries, transactions
+    │   ├── store.go
+    │   └── store_test.go
+    ├── dispatch/               # L2 (Optional): Orchestration & dispatching
+    │   ├── dispatcher.go
+    │   └── dispatcher_test.go
+    ├── ticker/                 # L2 (Optional): Scheduled evaluation loops
+    │   ├── ticker.go
+    │   └── ticker_test.go
+    ├── server/                 # L3: HTTP mux, route handlers, middleware
+    │   ├── routes.go
+    │   ├── handlers.go
+    │   └── server_test.go
+    └── tools/                  # L3 (Optional): MCP tool schemas & dispatch
+        ├── tools.go
+        └── tools_test.go
+```
 
-Flat `package main` at `services/<name>/`:
+### 4.2 Package Responsibilities
 
-- `main.go` — `func main`, config load, dependency wiring, server start, graceful shutdown. Keep it thin: wiring only, no business logic.
-- `config.go` — `Config` struct, `LoadConfig` and `LoadConfigFromEnv`, YAML file schema when the service reads `services/<name>.yaml` from `aerial-config`.
-- `server.go` — server struct (for example `RouterServer` in `services/synapse/`), `Routes()` or `SetupMux()` returning `http.Handler`, handler registration.
-- One file per domain concern, named for the concern: `handlers.go`, `db.go`, `store.go`, `tools.go`, `metrics.go`, `pure.go`.
-- `pure.go` — pure, deterministic helpers with no I/O, extracted so they can be tested with fast table-driven unit tests. Follow the local convention: same name for the test file (`pure_test.go`).
-- Tests beside the code they cover: `<concern>_test.go` in the same package, plus `goleak_test.go` at the module root for goroutine-leak detection and `main_test.go` for wiring-level coverage.
-- `Dockerfile` — multi-stage build that copies `pkg/` and `services/<name>/`, then `go build -cover -covermode=atomic -trimpath -ldflags="-s -w" -o /app/<name> .` A service that links another module's packages adds `-coverpkg` for them (eri-restate instruments `services/eri/...` and `pkg/...`) so that code reports coverage under the host service.
+- **`internal/config` (L0):** Parses YAML configuration from `aerial-config` and overrides from environment variables. Exposes validated configuration structures.
+- **`internal/model` (L0):** Pure data models. Free of side effects and I/O.
+- **`internal/store` (L1):** Owns database connection pools, SQL queries, and transactional helpers. Exposes interfaces for mocking in unit tests.
+- **`internal/server` or `internal/router` (L3):** Constructs HTTP muxes (`Routes()` or `NewServer()`), mounts domain endpoints, and binds health, metrics, and coverage endpoints (`pkg/httpkit.HandleCoverageFlush`).
+- **`internal/tools` (L3):** Implements MCP tools, parameter JSON schemas, and execution handlers.
+- **Root `main.go`:** Wires configuration, store, and server; starts the HTTP listener; and manages OS signal shutdown.
 
-### 4.3 File placement rules
+### 4.3 Current Examples
 
-- New HTTP handlers go in `server.go` or a concern file (`handlers.go`, `<domain>.go`), never in `main.go`.
-- New persistence goes in `db.go` or `store.go`. Raw SQL lives in the store file; handlers call store methods, never the reverse.
-- New pure logic (parsing, classification, ranking, formatting) goes in `pure.go` or a concern file as a pure function first; wire it from the server file second.
-- New configuration fields go in `config.go` and in the matching `aerial-config` YAML in a separate downstream change. Do not read operational settings from ad-hoc environment variables; environment variables are for secrets and for `PORT`, `CONFIG_PATH`, and connection URLs already established in `config.go`.
-- Health and observability: every HTTP service exposes `GET /health` and `GET /healthz` for the Dockerfile `HEALTHCHECK` and Kubernetes probes, `GET /metrics` via `promhttp` where metrics exist, and `GET /debug/coverage/flush` via `pkg/httpkit.HandleCoverageFlush` when built with `-cover`. Mount these on the same mux as the domain routes unless the service needs a separate admin port (Section 7).
-
-### 4.4 Current examples
-
-- `services/haro/` — `main.go`, `config.go`, `server.go`, `db.go`, `ticker.go`, `tools.go`, `metrics.go`, `pure.go`. Archetype A with a scheduler loop.
-- `services/coven/` — `main.go`, `config.go`, `server.go`, `db.go`, `extractor.go`, `scheduler.go`, `tools.go`, `metrics.go`. Archetype A.
-- `services/synapse/` — `main.go`, `config.go`, `db.go`, `discord.go`, `github.go`, `flux.go`. Archetype A plus Archetype B consumers (Section 5).
-- `services/vanadis/` — `main.go`, `chunks.go`, `dag.go`, `mcp.go`, `metrics.go`, `restate_proxy.go`. Archetype A plus a Restate client proxy; it is not itself a Restate service.
-- `services/prospera/` — `main.go`, `config.go`, `server.go`, `store.go`, `tools.go`, `twilio.go`, `gemini_live.go`. Archetype A (voice/telephony webhooks).
-- `services/console/` — `main.go`, `config.go`, `handlers.go`, `deployments.go`, `github.go`, `k8s.go`, plus `ui/` (React) and `static/`. Archetype A with a frontend asset pipeline; the `ui/` build in `services/console/Dockerfile` is part of this archetype, not a separate service.
-- `services/coverage-ingest/` — `main.go`, `server.go`, `ingest.go`. Archetype A (coverage collector; deliberately not built with `-cover`). Each loaded config prunes rows of services outside its `targets` and `push_services`; eri-restate rows are never pruned.
+- `services/haro`: Scheduler service with scheduler ticker (`internal/ticker`), event dispatcher (`internal/dispatch`), persistence (`internal/store`), MCP tools (`internal/tools`), and HTTP server (`internal/server`). Conforms to 3-file root ceiling.
+- `services/prospera`: Telephony webhook service with Twilio/Gemini media pipelines (`internal/mediastream`, `internal/twilio`, `internal/audio`, `internal/delivery`), database store (`internal/store`), tools (`internal/tools`), and HTTP server (`internal/server`). Conforms to 3-file root ceiling.
+- `services/vanadis`: Build orchestrator and MCP server with database store (`internal/store`), Restate client proxy (`internal/restate`), MCP tool definitions (`internal/mcp`), and HTTP server (`internal/server`). Conforms to 3-file root ceiling.
+- `services/synapse`: Event ingress gateway with Kubernetes watcher (`internal/kube`), GitHub webhook router (`internal/github`), Discord events (`internal/discord`), and Flux CD webhook dispatcher (`internal/flux`). Conforms to 3-file root ceiling.
+- Grandfathered services (`services/coven`, `services/console`, `services/coverage-ingest`): Tracked in `.code-health-baseline.json` pending decomposition passes.
 
 ---
 
 ## 5. Archetype B — NATS Consumer and Bridge Services
 
-### 5.1 Community standard
+### 5.1 Canonical Directory Layout
 
-No NATS-specific layout exists (Section 2.3). A NATS consumer is a basic Go command whose handlers run from JetStream subscriptions managed through `pkg/pubsub`.
+NATS consumer and bridge services consume events from JetStream streams and translate them into downstream actions or Restate invocations:
 
-### 5.2 Our mapping (adopted)
+```
+services/<name>/
+├── Dockerfile
+├── go.mod
+├── go.sum
+├── main.go                     # Entrypoint (<= 3 root files)
+├── main_test.go                # Lifecycle tests
+├── goleak_test.go              # Goroutine leak checks
+└── internal/
+    ├── config/                 # L0: Configuration loading
+    │   ├── config.go
+    │   └── config_test.go
+    ├── bridge/                 # L2: JetStream consumer & forwarder
+    │   ├── consumer.go
+    │   └── bridge_test.go
+    └── app/                    # L3: Runner, health mux & graceful shutdown
+        ├── app.go
+        └── app_test.go
+```
 
-Flat `package main` at the module root, extending Archetype A:
+### 5.2 Package Responsibilities
 
-- Consumer setup and subscription lifecycle live in the service's own files (`main.go` for a bridge, a concern file such as `build_metadata_consumer.go` in `services/synapse/` for an embedded consumer).
-- Subject names, stream names (`AERIAL_EVENTS`, `AERIAL_JOBS`, `AERIAL_COALESCED`, `VISION_JOBS`), and durable consumer names are constants in the consumer file, never string literals scattered across handlers.
-- Shared JetStream plumbing (stream reconciliation, consumer helpers, message types) lives in `pkg/pubsub` (`pkg/pubsub/pubsub.go`, `pkg/pubsub/memory.go`). Service files hold only service-specific subjects and handlers.
-- At-least-once semantics: handlers must be idempotent or deduplicated, must ack only after durable work completes, and must surface poison messages through the existing error and metrics path rather than ack-and-drop.
-- When a NATS service also serves HTTP (health, metrics, coverage flush), the HTTP surface follows Section 4.3 on a dedicated admin mux and port. A pure consumer with no HTTP surface still needs a health story: either the admin mux or an explicit note in the service README section of the conformance plan.
+- **`internal/bridge` or `internal/consumer` (L2):**
+  - Manages durable JetStream consumer subscriptions via `pkg/pubsub`.
+  - Constants for stream names (`AERIAL_EVENTS`, `AERIAL_JOBS`, `AERIAL_COALESCED`, `VISION_JOBS`) and subject patterns.
+  - Translates incoming NATS messages into Restate ingress invocations using `pkg/restateingress` (or domain store calls).
+  - Enforces at-least-once delivery semantics: issues `msg.Ack()` strictly after the durable call succeeds.
+  - Traps and logs poison messages or returns transient errors for NATS redelivery.
+- **`internal/app` (L3):**
+  - Owns process lifecycle (`RunApp`), consumer start/stop, and mounts `pkg/httpkit.SetupHealthMux` on the admin port for `GET /health`, `GET /healthz`, `GET /metrics`, and `/debug/coverage/flush`.
+- **Root `main.go`:** Thin entrypoint delegating directly to `app.RunApp`.
 
-### 5.3 Current examples
+### 5.3 Current Examples
 
-- `services/vanadis-nats/` — single-file bridge (`main.go`, 415 lines) from NATS JetStream to the Restate ingress. Archetype B plus Archetype A admin surface (`SetupHealthMux`).
-- `services/synapse/` — Archetype A service embedding JetStream consumers (`build_metadata_consumer.go`) through `pkg/pubsub`. Consumers stay in concern files inside the host service; do not split them into a new module.
-- `services/eri/` — embeds JetStream publishing and consuming in `jetstream.go` through `pkg/pubsub`. Archetype E host (Section 8) with Archetype B concerns in concern files.
-- `services/vanadis/` — Archetype A service consuming build events through `pkg/pubsub`. Same rule: consumer concern files inside the host module.
-
-Standalone NATS bridges (one module whose only job is bridging) keep the whole bridge in `main.go` plus `main_test.go` until an extraction trigger fires (Section 10). Embedded consumers never get their own `go.mod`.
+- `services/vanadis-nats`: Standalone JetStream-to-Restate bridge subscribing to `AERIAL_EVENTS`, translating build trigger events into Restate ingress calls via `pkg/restateingress`, and acknowledging messages upon Restate journal persistence. Root package conforms to the 3-file ceiling (`main.go`, `main_test.go`).
+- `services/synapse`: Embeds an internal consumer in `internal/buildmeta` subscribing to build completion events from `AERIAL_JOBS` alongside its HTTP router.
 
 ---
 
 ## 6. Archetype C — MCP Servers (Go)
 
-### 6.1 Community standard
+### 6.1 Canonical Directory Layout
 
-An MCP server is an HTTP (streamable) or stdio server. Layout follows the Go basic-command guidance; the MCP protocol adds handler-registration conventions, not directories.
+Go-based Model Context Protocol servers expose tool definitions and execution over HTTP or stdio:
 
-### 6.2 Our mapping (adopted)
+```
+mcp/<name>/
+├── Dockerfile
+├── go.mod
+├── go.sum
+├── main.go                     # Entrypoint (<= 3 root files)
+├── main_test.go                # Tool execution tests
+├── goleak_test.go              # Goroutine leak checks
+└── internal/
+    ├── config/                 # L0: Upstream client credentials
+    │   └── config.go
+    ├── model/                  # L0: Tool parameter & result types
+    │   └── model.go
+    ├── tools/                  # L3: MCP tool declarations & handlers
+    │   ├── search.go
+    │   └── tools_test.go
+    └── server/                 # L3: Stream transport & health
+        └── server.go
+```
 
-Flat `package main` at `mcp/<name>/`:
+### 6.2 Package Responsibilities
 
-- `main.go` — MCP server construction, tool registration, transport start (`pkg/httpkit.ServeMCPStream` where the shared stream helper applies).
-- One file per tool domain or upstream client: `search.go` and `vikunja.go` in `mcp/docket-mcp/`, `cdp.go` in `mcp/kernel-mcp/`.
-- `pure.go` plus `pure_test.go` for pure helpers, `goleak_test.go` at the root, following the same test convention as Archetype A.
-- `Dockerfile` — same multi-stage shape as Archetype A, building `mcp/<name>` with `go build .`
+- **`internal/config` (L0):** Loads configuration and upstream connection credentials.
+- **`internal/model` (L0):** Tool parameter schemas and structured response types.
+- **`internal/tools` (L3):** Implements tool registration and execution against upstream services (e.g. Vikunja, Chrome DevTools Protocol).
+- **`internal/server` (L3):** Exposes MCP streaming endpoints via `pkg/httpkit.ServeMCPStream` and standard health endpoints.
+- **Root `main.go`:** Wires configuration, client connections, and tool handlers into the MCP server transport.
 
-### 6.3 Current examples
+### 6.3 Current Examples
 
-- `mcp/docket-mcp/` — `main.go`, `pure.go`, `search.go`, `vikunja.go`. Archetype C.
-- `mcp/kernel-mcp/` — `main.go`, `cdp.go`, `pure.go`. Archetype C.
-- `mcp/discord-mcp/` and `mcp/infisical-mcp/` — upstream Node/TypeScript servers with Docker packaging only. Out of scope for Go layout; classified here so the inventory is complete.
+- `mcp/docket-mcp`: Go MCP server providing Vikunja issue and task management tools.
+- `mcp/kernel-mcp`: Go MCP server providing headless browser automation tools.
+- `mcp/discord-mcp` and `mcp/infisical-mcp`: Upstream Node/TypeScript implementations (out of scope for Go layout).
 
 ---
 
 ## 7. Archetype D — Restate Virtual Object and Workflow Services
 
-### 7.1 Community standard
+### 7.1 Canonical Directory Layout
 
-Per Section 2.2: exported handlers on a struct, bound with `restate.Reflect`, served with `server.NewRestate()`. No directory standard. Struct and handler names are the public wire contract.
+Restate services implement durable Virtual Objects, workflows, and plain RPC services using `github.com/restatedev/sdk-go`:
 
-### 7.2 Our mapping (adopted)
+```
+services/<name>/
+├── Dockerfile
+├── go.mod
+├── go.sum
+├── cmd/
+│   └── <name>/
+│       └── main.go             # Thin entrypoint (< 100 lines)
+└── internal/
+    ├── model/                  # L0: Frozen state types & DTOs
+    │   ├── state.go
+    │   └── requests.go
+    ├── store/                  # L1: PostgreSQL persistence & queries
+    │   ├── store.go
+    │   └── store_test.go
+    ├── executor/               # L2: Dispatcher & client invocation
+    │   ├── executor.go
+    │   └── executor_test.go
+    ├── build/                  # L2: Virtual Object transition engine
+    │   ├── object.go           # Handlers: Create, Mutate, Reconcile...
+    │   ├── journal.go          # restate.Run helpers
+    │   └── metrics.go
+    ├── router/                 # L3: Plain Restate service handlers
+    │   ├── router.go
+    │   └── router_test.go
+    └── app/                    # L3: Server binding & health admin mux
+        ├── app.go              # Bind(restate.Reflect(...)) with timeouts
+        └── app_test.go
+```
 
-`services/vanadis-restate/` follows the standard Go server-project layout by user supersession (the sole Section 3 exception besides `eri`); every other Restate service, if one is ever added, defaults to flat `package main` unless a future amendment says otherwise. The handler and state names below are frozen (Section 7.3), so this is a pure code move with no wire change:
+### 7.2 Package Responsibilities & Wire Contract
 
-- `cmd/vanadis-restate/main.go` — thin `package main` entrypoint holding only config load, tracing/signal setup, and app invocation. No business logic, no handlers, no state types.
-- `internal/model` — leaf shared-types package importing no sibling `internal/` package: `BuildObjectState`, `VanadisBuild`, `VanadisChunk`, and every `*Request`/`*Response` type keep their exact names and JSON field tags. State keys (`state`, `launched`) and the strings passed to `restate.Set`/`restate.Get` are frozen.
-- `internal/store` — owns `VanadisStore`, `PostgresVanadisStore`, and all its methods, including those today in `router.go` (moved verbatim with their tests). Raw SQL lives here; handlers call store methods, never the reverse.
-- `internal/executor` — owns `Executor` and `EriClient`, depending only on model/store contracts.
-- `internal/build` — owns the `BuildObject` Virtual Object (`ServiceName()` returns `Build`) with handlers `Create`, `UpdateBuild`, `Cancel`, `AppendChunks`, `UpdateChunk`, `RemoveChunk`, `FailChunk`, `AttachPR`, `Reconcile`, `Mutate`, `OnPREvent`, `OnDispatchOutcome`, `RetryActionChunk`, and `DeploymentDeadline`; plus the transition engine, journal helpers (`runJournaled`, `restate.Run` wrappers, `toTerminalErr`), and metrics. Every `restate.WithName` journal/step name is frozen. Never call non-deterministic APIs (wall clock, randomness, direct network or disk I/O) outside a journaled `restate.Run` step. Tests move with the production code into `package build` so unexported fields and helpers remain testable; `BuildObject.Create` keeps its exact signature and journal names.
-- `internal/router` — owns the companion `BuildRouterService` (`ServiceName()` returns `BuildRouter`) with plain-service handlers `RoutePREvent`, `RouteDispatchOutcome`, `RouteAttachPR`, and `RouteFailChunk` taking `restate.Context`. Depends on the model/store/build-invoker contract without creating store or build cycles. Tests move with the production code into `package router`.
-- `internal/app` — owns `Config`, `LoadConfig(getenv)`, and `RunApp` wiring (Restate server construction via `server.NewRestate().Bind(restate.Reflect(...))`, admin HTTP server start, shutdown), plus the `loadConfigFn`/`runAppFn`/`exitFn`/`initTracingFn` seams. Both services are bound in `RunApp`.
-- Admin surface on a separate port: the health mux serves `GET /health`, `GET /healthz`, `GET /metrics` (callers pass `promhttp.Handler()`), and `GET` plus `POST /debug/coverage/flush` on the admin port (`4026` for `services/vanadis-restate/`, health-checked by its Dockerfile), while the Restate SDK serves handlers on `9080`. Decision A2 is adopted and frozen: `pkg/httpkit.SetupHealthMux(service string, metrics http.Handler)` is an error-free mux builder, `pkg/go.mod` gains no Prometheus import, and both `vanadis-nats` and `vanadis-restate` get identical health/metrics/coverage-flush behavior through it.
-- Error taxonomy in `internal/build`: terminal versus retryable decisions go through `toTerminalErr` and the `recordReconcileError` metrics path (`reconcileErrorsTotal`, `clientErrorsTotal`). Handler labels (`labelCreate`, `labelUpdateBuild`, and the other `label*` constants) and the `vanadis_restate_*` counter names with the single `prometheus.Register` in `init` are part of the metrics contract and are frozen with the handler names.
+- **`cmd/<name>/main.go`:** Minimal entrypoint holding only configuration loading, tracing setup, signal handling, and invocation of `app.RunApp`.
+- **`internal/model` (L0):** Defines persistent state types (`BuildObjectState`, `VanadisBuild`, `VanadisChunk`) and request/response DTOs.
+  - **State Key Invariant:** Keys passed to `restate.Get` and `restate.Set` (`state`, `launched`) and JSON field tags are frozen wire contracts.
+- **`internal/store` (L1):** Implements SQL database queries and persistence routines called by journaled steps.
+- **`internal/build` / `internal/workflow` (L2):**
+  - Implements the durable Virtual Object struct (e.g. `BuildObject`).
+  - **Durable Step Isolation:** Non-deterministic operations (DB queries, HTTP requests, UUID generation, random selection, clock reads) MUST be executed within a named `restate.Run(ctx, func(rc restate.RunContext) (T, error) { ... }, restate.WithName("<step>"))` block.
+  - **Error Taxonomy:** Distinguishes terminal errors (`restate.ToTerminalError`) from retryable transient errors.
+- **`internal/app` (L3):**
+  - Restate service reflection and registration via `server.NewRestate()`.
+  - **Mandatory Timeout Configuration:** Service reflection MUST configure explicit service timeouts via `restate.WithInactivityTimeout(...)` and `restate.WithAbortTimeout(...)` on `restate.Reflect(...)`:
+    ```go
+    server.NewRestate().
+        Bind(restate.Reflect(
+            buildObject,
+            restate.WithInactivityTimeout(inactivityTimeout),
+            restate.WithAbortTimeout(abortTimeout),
+        )).
+        Bind(restate.Reflect(
+            routerService,
+            restate.WithInactivityTimeout(inactivityTimeout),
+            restate.WithAbortTimeout(abortTimeout),
+        ))
+    ```
+  - **Admin & Health Port Separation:** Restate protocol runs on `:9080`, while health, Prometheus metrics, and coverage flush endpoints run on an isolated admin port (e.g. `:4026`) via `pkg/httpkit.SetupHealthMux`.
+- **Ingress Callers:** External services invoking Restate handlers use `pkg/restateingress` (or a client package such as `internal/restateclient`) providing deterministic `Idempotency-Key` headers matched to the logical operation identity.
 
-### 7.3 Frozen contract (non-negotiable)
+### 7.3 Frozen Contract (Non-Negotiable)
 
-The following are deployed wire and state contracts. No conformance or extraction plan may rename them:
+The following aspects of deployed Restate services represent immutable wire contracts:
 
-- Restate service names returned by `ServiceName()` (`Build` for `BuildObject`, `BuildRouter` for `BuildRouterService`) and the struct names seen by `restate.Reflect`.
-- Every exported handler name: on `BuildObject`, `Create`, `UpdateBuild`, `Cancel`, `AppendChunks`, `UpdateChunk`, `RemoveChunk`, `FailChunk`, `AttachPR`, `Reconcile`, `Mutate`, `OnPREvent`, `OnDispatchOutcome`, `RetryActionChunk`, and `DeploymentDeadline`; on `BuildRouterService`, `RoutePREvent`, `RouteDispatchOutcome`, `RouteAttachPR`, and `RouteFailChunk`.
-- Every state type and field (`BuildObjectState`, `VanadisBuild`, `VanadisChunk`) and every request/response type name and JSON tag.
-- Metrics handler labels and the `vanadis_restate_*` counter names.
+- Restate service names returned by `ServiceName()` (`Build`, `BuildRouter`, `EriRestate`) and struct names passed to `restate.Reflect`.
+- Exported handler method names on Virtual Objects and workflows.
+- Serialized state types and JSON tags stored in Restate state storage.
+- Step names passed to `restate.WithName` inside `restate.Run` (changing step names breaks journal replay).
+- Prometheus metric counter names and label dimensions.
 
-Extraction under Plan 3 is a pure code move: same names, same signatures, same journal/step strings, verified by the existing handler and journal tests moving with their production code into the same `internal/` package (so unexported fields and helpers remain testable) and passing with only package-path updates. Never duplicate unexported helpers; export through `model` or a named `internal/` helper only where a real cross-package need exists.
+### 7.4 Current Examples
 
-### 7.4 Current examples
-
-- `services/vanadis-restate/` — the only Restate deployment today, binding two services (`Build` and `BuildRouter`). `main.go` is 1,470 lines and holds config, state types, most `BuildObject` handlers, journal helpers, the admin mux, and `main`. It is the one service that currently violates the "wiring only" rule for `main.go`, which is why it is being refactored into the Section 7.2 `cmd/` plus `internal/` layout (user supersession).
-- `services/vanadis/` consumes Restate through `restate_proxy.go` as a client. Client proxies follow Archetype A placement (a concern file in the client service), not this archetype.
+- `services/vanadis-restate`: Durable build queue Virtual Object (`Build`) and router service (`BuildRouter`). Structured under `cmd/vanadis-restate/main.go` and `internal/{model,store,executor,build,router,app,prompt,prflow,ericlient,prstate,deploygate,cilog,widget}`. Reflects services with explicit inactivity and abort timeouts.
+- `services/eri-restate`: Restate execution workflow service structured under `cmd/eri-restate/main.go` and `internal/app`. Reflects handlers with explicit timeouts.
 
 ---
 
 ## 8. Archetype E — Multi-Binary Modules (the `eri` Exception)
 
-### 8.1 Community standard
+`services/eri/` is the sole multi-binary module in the monorepo and constitutes a deliberate architectural exemption from the 3-file root ceiling and `internal/` layout:
 
-Per Section 2.1, a module with several programs keeps each program in its own directory, conventionally `cmd/<binary>/main.go`, with shared packages beside them. This is the "packages and commands in the same repository" and "server project" guidance.
-
-### 8.2 Our mapping (adopted, single exception)
-
-`services/eri/` is the sole multi-binary module and the sole exception to the flat standard:
-
-- `services/eri/main.go` plus flat concern files (`handlers.go`, `funnel.go`, `proxies.go`, `pure.go`, `jetstream.go`, `http_vocab.go`) form the main `eri` binary in `package main`.
-- `services/eri/cmd/hook-guard/main.go` and `services/eri/cmd/transcript-search/main.go` are auxiliary binaries. They follow the community `cmd/` convention exactly and must stay thin.
-- `services/eri/pkg/<concern>/` holds the main binary's supporting packages (`ambient`, `classifier`, `config`, `db`, `delivery`, `discord`, `env`, `guard`, `interactions`, `mcp`, `metrics`, `notifier`, `queue`, `runner`, `session`, `transcript`). New supporting code for `eri` goes in a new or existing `pkg/<concern>` package, never in a new top-level directory and never in `internal/`.
-
-Why `pkg/` and not `internal/` here: `cmd/hook-guard` and `cmd/transcript-search` import `services/eri/pkg/guard`, `pkg/config`, `pkg/metrics`, `pkg/session`, `pkg/db`, and `pkg/transcript` (see `services/eri/Dockerfile`, which builds the helpers from those packages before copying the full tree). All importers live inside the same module, so `internal/` would also work, but renaming `pkg/` to `internal/` would rewrite every import path, the Dockerfile's staged `COPY` lines, and coverage package paths across sixteen packages for a privacy property the module boundary already provides. The conformance decision is to keep `pkg/` and document it as a deliberate, frozen deviation. No other service may copy this shape without first becoming a genuine multi-binary module and recording the decision in an amendment to this spec.
-
-### 8.3 Placement rules
-
-- New `eri` domain logic goes in `services/eri/pkg/<concern>/`. The flat `package main` files are for HTTP wiring, Discord event handling, and startup only.
-- New auxiliary binaries are not created casually. Prefer a flag or subcommand on an existing binary; a new `cmd/<name>/` requires the same justification as a new service.
-- Database schema and migrations stay in `services/eri/pkg/db/` (`schema.sql`, `migrations/`). Declarative schema changes follow the Atlas migration rules; no imperative DDL in Go code.
+- `services/eri/main.go` plus flat concern files (`handlers.go`, `funnel.go`, `proxies.go`, `pure.go`, `jetstream.go`, `http_vocab.go`) form the primary `eri` execution engine binary in `package main`.
+- `services/eri/cmd/hook-guard/main.go` and `services/eri/cmd/transcript-search/main.go` are auxiliary binaries sharing supporting packages.
+- `services/eri/pkg/<concern>/` holds supporting packages (`ambient`, `classifier`, `config`, `db`, `delivery`, `discord`, `env`, `guard`, `interactions`, `mcp`, `metrics`, `notifier`, `queue`, `runner`, `session`, `transcript`).
+- Multi-binary helper imports share `services/eri/pkg/*` without duplicating code across separate modules.
 
 ---
 
 ## 9. Shared Libraries — Repo-Root `pkg/`
 
-The `pkg/` module (`module github.com/azylman/aerial/pkg`) holds code shared by two or more service modules:
+The `pkg/` module (`module github.com/azylman/aerial/pkg`) contains libraries shared across multiple service modules:
 
-- `pkg/httpkit` — HTTP helpers: `HandleCoverageFlush`, `WriteJSON`, `WriteResponse`, `ServeMCPStream`, config-path resolution, and the reloadable-config handler (`NewReloadable`, `LoopbackOnly`).
-- `pkg/pubsub` — JetStream bus abstraction, stream/consumer reconciliation, and the in-memory bus for tests.
-- `pkg/tracing` — OpenTelemetry tracing setup.
-- `pkg/pgutil` — PostgreSQL DSN and pool helpers.
-- `pkg/ollama`, `pkg/sanitizer` — inference client helpers and log/secret sanitizers.
+- `pkg/httpkit`: HTTP middleware, JSON writing, MCP streaming, coverage flushing (`HandleCoverageFlush`), and admin health mux (`SetupHealthMux`).
+- `pkg/pubsub`: NATS JetStream client wrappers, stream and consumer reconciliation, and in-memory message bus for tests.
+- `pkg/restateingress`: Client utilities for issuing idempotent HTTP calls to the Restate ingress.
+- `pkg/tracing`: OpenTelemetry distributed trace configuration.
+- `pkg/pgutil`: PostgreSQL connection pooling and DSN parsing.
+- `pkg/ollama`, `pkg/sanitizer`: Inference client wrappers and credential/token redaction sanitizers.
 
-Rules:
-
-- A helper moves to `pkg/` only when a second service needs it (see the extraction triggers in Section 10). The proven current case is the duplicated `SetupHealthMux` in `services/vanadis-nats/main.go` and `services/vanadis-restate/main.go` (same health, metrics, and coverage-flush mounting, differing only in the service label), which Plan 2 moves to `pkg/httpkit`.
-- `pkg/` packages must not import any `services/` package. Dependency direction is always service → `pkg/`.
-- `pkg/` APIs are consumed by many modules; changes there require running the tests of every consuming service, not just `pkg/`'s own tests.
-
----
-
-## 10. Extraction Triggers — When Flat Files Must Split
-
-Flat `package main` is the standard, but it has limits. Extract code into a new file in the same package (or, for `eri`, into `pkg/<concern>`) when any one of these three concrete triggers fires. `vanadis-restate` is exempt from this paragraph: by user supersession it extracts into the Section 7.2 `cmd/` plus `internal/` packages instead of same-package concern files:
-
-1. **Size trigger.** A single file exceeds roughly 500 lines, or `main.go` exceeds roughly 400 lines of wiring plus logic. `services/vanadis-restate/main.go` at 1,470 lines is the standing example (now resolved via the Section 7.2 `internal/` split, not a same-package split); `services/eri/main.go` at 1,221 lines is mitigated by the `pkg/` split in Section 8.
-2. **Reuse trigger.** The same logic appears in two files in one service, or in two services. The duplicated `SetupHealthMux` across `vanadis-nats` and `vanadis-restate` is the standing example and is handled by Plan 2 via decision A2 (`pkg/httpkit.SetupHealthMux`).
-3. **Testability trigger.** Logic cannot be unit-tested without starting a server, a NATS connection, a Restate runtime, or a database. Extract the pure part into `pure.go` (or a concern file) and test it with a table-driven test; keep the I/O shell in the original file. In `vanadis-restate`, tests move with their production code into the same `internal/` package so unexported fields and helpers remain testable.
-
-Extraction means a new file in the same package first. A new package (or a move to `pkg/`) requires trigger 2 across services, or, inside `eri`, a new concern boundary — except in `vanadis-restate`, where the Section 7.2 `internal/` packages are the approved target. Extraction never renames exported Restate handlers, state types, metrics labels, HTTP routes, or NATS subjects (Section 7.3).
-
-Test conventions that apply at extraction time: one unified table (`tests := []struct{...}`) with one `for _, tc := range tests` loop per function under test, hand-derived literal expectations, mocks only at external boundaries (NATS, Restate runtime, database, HTTP upstreams), `t.Parallel()` where the package supports it, no `time.Sleep` synchronization, and a `goleak_test.go` at the module root.
+**Rules:**
+- `pkg/` packages must never import any `services/` or `mcp/` packages (`services/* -> pkg/*` is strictly unidirectional).
+- Code moves to `pkg/` only when needed by two or more distinct service modules.
 
 ---
 
-## 11. Cross-Cutting Rules
+## 10. Structural Standards & Package Decomposition Triggers
 
-- **Configuration.** Declarative YAML in `aerial-config` (`config.yaml`, `services/<name>/<name>.yaml`), loaded in `config.go` with environment overrides limited to secrets, `PORT`, `CONFIG_PATH`, and connection URLs. Workers read config through `cfg.Current()` snapshots where a reloadable config exists (`pkg/httpkit.NewReloadable`); do not cache config scalars at startup.
-- **Health, metrics, coverage.** `GET /health` and `GET /healthz` return success only when the process can serve. `GET /metrics` uses `promhttp`. Coverage builds (`go build -cover`) mount `pkg/httpkit.HandleCoverageFlush` at `/debug/coverage/flush`; the handler writes counters with `coverage.WriteMetaDir` and `coverage.WriteCountersDir` so counters can be collected without restarting.
-- **Docker.** Every Go service keeps the two-stage shape: copy `pkg/go.mod` and the service `go.mod` first for module caching, then `COPY pkg/` and the service tree, then `go build .` from the service directory. Layout changes that alter `COPY` paths must update the Dockerfile in the same change.
-- **Naming.** Files are lowercase, named for their concern (`build_metadata_consumer.go`, not `consumer2.go`). Test files mirror source files. Package names are short lowercase words with no underscores.
-- **Non-Go services.** `services/docs-service/` (nginx plus Docsify assets), `services/homepage/` (Node config preparation), `services/grafana/` (dashboards and provisioning), `services/migrator/` (Atlas image carrying `services/eri/pkg/db/migrations/`), and `services/github-runner/` (CI runner image) have no Go layout. They are listed in Section 12 for inventory completeness and are out of scope for conformance plans.
+To prevent architectural degradation and ensure long-term codebase health, structural limits and targets are defined:
 
----
-
-## 12. Current Service Classification
-
-Every current deployable, classified by archetype. Conformance plans cite this section.
-
-- `services/console/` — Archetype A (HTTP) with frontend assets (`ui/`, `static/`).
-- `services/coven/` — Archetype A (HTTP).
-- `services/coverage-ingest/` — Archetype A (HTTP, coverage collector).
-- `services/docs-service/` — Non-Go (nginx/Docsify). Out of scope.
-- `services/eri/` — Archetype E (multi-binary exception: main binary plus `cmd/hook-guard`, `cmd/transcript-search`, and `pkg/<concern>` packages), embedding Archetype B concerns.
-- `services/github-runner/` — Non-Go (CI runner image). Out of scope.
-- `services/grafana/` — Non-Go (dashboards/provisioning). Out of scope.
-- `services/haro/` — Archetype A (HTTP) with scheduler loop.
-- `services/homepage/` — Non-Go (Node). Out of scope.
-- `services/migrator/` — Non-Go (Atlas; carries `services/eri/pkg/db/migrations/`). Out of scope.
-- `services/prospera/` — Archetype A (HTTP, telephony webhooks).
-- `services/synapse/` — Archetype A (HTTP) embedding Archetype B (JetStream consumers).
-- `services/vanadis/` — Archetype A (HTTP) embedding Archetype B, plus Restate client proxy.
-- `services/vanadis-nats/` — Archetype B (NATS bridge) with Archetype A admin mux.
-- `services/vanadis-restate/` — Archetype D (Restate Virtual Object). Frozen contract per Section 7.3.
-- `mcp/docket-mcp/` — Archetype C (MCP, Go).
-- `mcp/kernel-mcp/` — Archetype C (MCP, Go).
-- `mcp/discord-mcp/`, `mcp/infisical-mcp/` — Non-Go (upstream Node). Out of scope.
-- `pkg/` (`httpkit`, `pubsub`, `tracing`, `pgutil`, `ollama`, `sanitizer`) — Shared libraries per Section 9.
+1. **Target 3-File Root `package main` Ceiling:**  
+   Single-binary Go service module roots target at most 3 Go files: `main.go`, `main_test.go`, and `goleak_test.go`. All other domain logic and routing are factored into `internal/<layer>` subpackages as services undergo scheduled decomposition passes.
+2. **File Length Ceiling (`maxFileLines = 1500`):**  
+   Enforced mechanically by `scripts/code-health`: no Go source file may exceed 1,500 lines. Files approaching this limit must be factored by domain concern.
+3. **Nesting Depth Ceiling (`maxDepth = 5`):**  
+   Enforced mechanically by `scripts/code-health`: functions must not exceed a control flow nesting depth of 5. Deep branches must be factored into pure helper functions.
+4. **AST Clone & Similarity Ceilings:**  
+   Enforced mechanically by `scripts/code-health`: rejects copy-pasted functions or struct types sharing >= 80% similarity (`maxCloneSimilarity = 0.80`, `maxCloneEditSimilarity = 0.85`, `maxStructCloneSimilarity = 0.85`). Shared logic must be factored into pure functions or shared libraries.
+5. **Layer Boundary Hierarchy (`L0 -> L3`):**  
+   Target architecture standard: dependencies must flow strictly downward (`L3 -> L2 -> L1 -> L0`). Circular package dependencies and upward imports are prohibited.
+6. **Phased Task #165 Decomposition:**  
+   Existing services retaining legacy flat files remain operational and are migrated incrementally into `internal/` packages across dedicated decomposition chunks under Task #165.
 
 ---
 
-## 13. Migration Decisions and Costs
+## 11. Cross-Cutting Engineering Rules
 
-Decisions recorded here are the ones later plans execute. Each states the community standard, the adopted mapping, and the cost of the alternative.
-
-- **Single-binary HTTP, NATS-bridge, MCP, and Restate services: keep flat `package main`.** This adopts the Go basic-command standard (Section 2.1). The alternative — `cmd/<name>/main.go` plus `internal/` inside every `services/<name>/` module — would rewrite all Go Dockerfiles (`WORKDIR`, `COPY`, and `go build` target), shift coverage package paths, and touch every service's tests, for a privacy property that `package main` already provides. Cost of adopting the alternative: high, repo-wide. Benefit: none identified. Decision: do not adopt — except for the single `vanadis-restate` supersession below. Other single-binary services keep their existing layout unless a future amendment says otherwise.
-- **`eri`: keep `services/eri/pkg/`, do not move to `internal/`.** The community server-project layout would name these packages `internal/`. Renaming would rewrite imports across sixteen packages, the staged `COPY` lines in `services/eri/Dockerfile`, and coverage paths, while both shapes give identical import restrictions inside one module. Cost: high, single-service. Benefit: cosmetic alignment only. Decision: keep `pkg/`, documented as frozen in Section 8. Revisit only if `eri` is ever split into separately versioned modules.
-- **`vanadis-restate`: adopt the standard Go server-project layout (user supersession).** `cmd/vanadis-restate/main.go` becomes the thin `package main` entrypoint; production code moves into `internal/model`, `internal/store`, `internal/executor`, `internal/build`, `internal/router`, and `internal/app` per Section 7.2, with tests moving alongside their production code. Honest cost: a flat concern-file split inside `package main` (the Plan 3 shape this replaces) would be lower risk — fewer import rewrites, no package-cycle hazard, no Dockerfile `WORKDIR`/`go build` target change. What the `internal/` packages buy is compiler-enforced boundaries: `model` stays a leaf, `store`/`executor`/`build`/`router` dependencies flow one way, and future handlers cannot quietly reach across concerns. The frozen Restate contract (Section 7.3) and decision A2 (`pkg/httpkit.SetupHealthMux(service string, metrics http.Handler)`, error-free, no Prometheus import in `pkg/go.mod`) are unchanged by this move. Decision: adopt; this is the only approved `cmd/` plus `internal/` migration for a single-binary service.
-- **Shared health mux: adopt `pkg/httpkit` helper (Plan 2).** The `SetupHealthMux` duplication between `vanadis-nats` and `vanadis-restate` is the reuse trigger (Section 10). Cost: low (one helper, two call sites passing `promhttp.Handler()` with identical `GET /health`, `GET /healthz`, `GET /metrics`, `GET`/`POST /debug/coverage/flush` behavior). Decision: adopt in Plan 2; other services keep their existing muxes unless the same duplication is proven.
-
-No other layout migrations are approved by this spec. A future proposal that contradicts a decision here must amend this section with its cost analysis.
+- **Declarative Configuration:** Non-secret settings are defined in `aerial-config` YAML files (`services/<name>/<name>.yaml` or `config.yaml`) and loaded in `internal/config`. Ad-hoc `os.Getenv` calls for non-secret operational settings are prohibited. Environment variables are reserved for secrets, connection URLs, and container ports.
+- **Hermetic Testing:** Table-driven unit tests (`tests := []struct{...}`) with declarative expectations. Tests must not use `time.Sleep`, raw signals, or unmocked live daemon ports. Leak detection via `goleak` runs on all packages.
+- **Single-Pass Coverage:** Target 95% statement coverage. Missing branches are folded into canonical test tables rather than appended to separate catch-all test files.
+- **Docker Build Isolation:** Multi-stage Docker builds copy `pkg/go.mod` and service `go.mod` for layer caching, followed by `COPY pkg/` and `COPY services/<name>/`, compiling with `-trimpath -ldflags="-s -w"`. Services instrumented with coverage include `-cover -covermode=atomic`.
 
 ---
 
-## 14. Conformance Checklist (for Later Plans)
+## 12. Repository Service Inventory
 
-A per-service conformance plan is complete when it can answer yes to each item, citing the section above:
+The current inventory of services and MCP servers, categorized by archetype and internal package layout:
 
-- The service's archetype is named (Sections 4–8) and matches Section 12.
-- `main.go` (or, for `vanadis-restate`, `cmd/vanadis-restate/main.go`) contains wiring only, or an extraction trigger from Section 10 is open and scheduled.
-- Every new file follows the placement rules for its archetype; no business logic was added to the thin entrypoint.
-- No `cmd/` or `internal/` directory was introduced inside a single-binary module (Sections 3, 13) — except the approved `vanadis-restate` Section 7.2 layout.
-- Health, metrics, and coverage-flush mounts match Section 11 and the service Dockerfile `HEALTHCHECK`.
-- Shared code used by two or more services lives in `pkg/`; `pkg/` does not import `services/` (Section 9).
-- For Restate work: no handler, state, label, or metric name changed (Section 7.3), and journal/idempotency tests pass with their production code in the same `internal/` package (package-path updates only).
-- `git diff` for the plan touches only the files the plan named, and `./scripts/verify.sh --staged` passes in the scratch clone before submit.
+- **`services/eri-restate`** (Archetype D — Restate Service):
+  - Root Entrypoint: `cmd/eri-restate/main.go`
+  - Internal Packages: `internal/app` (L3)
+  - Responsibilities: Restate execution workflow service reflecting handlers with explicit inactivity and abort timeouts.
 
-Most services are expected to close their conformance pass as a no-op (already flat, already wired correctly). A no-op close still records the archetype and the checklist answers in the plan so the audit trail exists.
+- **`services/haro`** (Archetype A — HTTP API & Scheduler Service):
+  - Root Entrypoint: `main.go`, `main_test.go`, `goleak_test.go` (conforms to 3-file ceiling)
+  - Internal Packages: `internal/config` (L0), `internal/model` (L0), `internal/store` (L1), `internal/metrics` (L1), `internal/ticker` (L2), `internal/dispatch` (L2), `internal/tools` (L3), `internal/server` (L3), `internal/testutil`
+  - Responsibilities: Persistent scheduling, cron/heartbeat evaluation, event watches, and MCP tools.
+
+- **`services/prospera`** (Archetype A — HTTP API & Telephony Service):
+  - Root Entrypoint: `main.go`, `main_test.go`, `goleak_test.go` (conforms to 3-file ceiling)
+  - Internal Packages: `internal/config` (L0), `internal/model` (L0), `internal/store` (L1), `internal/delivery` (L2), `internal/gemini` (L2), `internal/mediastream` (L2), `internal/audio` (L2), `internal/twilio` (L2), `internal/tools` (L3), `internal/server` (L3), `internal/testutil`
+  - Responsibilities: Autonomous PSTN voice call and SMS interaction service with Twilio and Gemini Live pipelines.
+
+- **`services/synapse`** (Archetype A + B — HTTP API & NATS Consumer):
+  - Root Entrypoint: `main.go`, `main_test.go` (conforms to 3-file ceiling)
+  - Internal Packages: `internal/config` (L0), `internal/model` (L0), `internal/kube` (L1), `internal/alerts` (L1), `internal/flux` (L2), `internal/ericlient` (L2), `internal/discord` (L2), `internal/github` (L2), `internal/restateclient` (L2), `internal/buildmeta` (L2), `internal/metrics` (L2), `internal/router` (L3)
+  - Responsibilities: Edge ingestion, Discord Gateway WebSocket, GitHub push webhooks, Flux deployment notifications, and NATS metadata consumer.
+
+- **`services/vanadis`** (Archetype A + B — HTTP API & MCP Service):
+  - Root Entrypoint: `main.go`, `main_test.go`, `goleak_test.go` (conforms to 3-file ceiling)
+  - Internal Packages: `internal/config` (L0), `internal/model` (L0), `internal/store` (L1), `internal/metrics` (L1), `internal/restate` (L2), `internal/mcp` (L3), `internal/server` (L3)
+  - Responsibilities: Multi-chunk build queue HTTP API and MCP server with Restate proxy client.
+
+- **`services/vanadis-nats`** (Archetype B — NATS Consumer & Bridge Service):
+  - Root Entrypoint: `main.go`, `main_test.go` (conforms to 3-file ceiling)
+  - Internal Packages: `internal/config` (L0), `internal/bridge` (L2), `internal/app` (L3)
+  - Responsibilities: High-performance NATS JetStream consumer bridging build events to Restate ingress.
+
+- **`services/vanadis-restate`** (Archetype D — Restate Virtual Object & Workflow Service):
+  - Root Entrypoint: `cmd/vanadis-restate/main.go`
+  - Internal Packages: `internal/model` (L0), `internal/store` (L1), `internal/executor` (L2), `internal/build` (L2), `internal/prompt` (L2), `internal/prflow` (L2), `internal/ericlient` (L2), `internal/prstate` (L2), `internal/deploygate` (L2), `internal/cilog` (L2), `internal/widget` (L2), `internal/router` (L3), `internal/app` (L3)
+  - Responsibilities: Durable build DAG orchestrator implementing `Build` Virtual Object and `BuildRouter` plain service.
+
+- **`services/eri`** (Archetype E — Multi-Binary Module Exception):
+  - Root Entrypoint: `main.go`, `cmd/hook-guard/main.go`, `cmd/transcript-search/main.go`
+  - Supporting Packages: `pkg/<concern>` (16 internal packages: `ambient`, `classifier`, `config`, `db`, `delivery`, `discord`, `env`, `guard`, `interactions`, `mcp`, `metrics`, `notifier`, `queue`, `runner`, `session`, `transcript`)
+  - Responsibilities: Primary Antigravity execution engine; explicitly exempt from the single-binary 3-file root ceiling due to its multi-binary architecture and concern-file HTTP funnel.
+
+- **`services/coven`** (Archetype A — Flat Layout Pending Decomposition):
+  - Status: Legacy flat layout pending decomposition under Task #165.
+  - Responsibilities: ACT-R memory decay, semantic fact extraction, and procedural skill synthesis.
+
+- **`services/console`** (Archetype A — Flat Layout Pending Decomposition):
+  - Status: Legacy flat layout pending decomposition under Task #165.
+  - Responsibilities: System status HUD and web dashboard with embedded React frontend assets (`ui/`).
+
+- **`services/coverage-ingest`** (Archetype A — Flat Layout Pending Decomposition):
+  - Status: Legacy flat layout pending decomposition under Task #165.
+  - Responsibilities: Cluster-wide test coverage ingest collector.
+
+- **`services/transcripts`** (Archetype A — Flat Layout Pending Decomposition):
+  - Status: Legacy flat layout pending decomposition under Task #165.
+  - Responsibilities: Audio and turn transcript ingestion, vector embedding, and semantic search.
+
+- **`mcp/docket-mcp`** (Archetype C — Flat Layout Pending Decomposition):
+  - Status: Legacy flat layout pending decomposition under Task #165.
+  - Responsibilities: MCP server for Vikunja task management and issue tracking.
+
+- **`mcp/kernel-mcp`** (Archetype C — Flat Layout Pending Decomposition):
+  - Status: Legacy flat layout pending decomposition under Task #165.
+  - Responsibilities: MCP server for headless browser automation and CDP interactions.
+
+- **`mcp/discord-mcp`**, **`mcp/infisical-mcp`** (External MCP Servers):
+  - Status: Upstream Node / TypeScript implementations (out of scope for Go layout).
+
+- **`services/docs-service`**, **`services/homepage`**, **`services/grafana`**, **`services/migrator`**, **`services/github-runner`** (Non-Go Services):
+  - Status: Containerized auxiliary services without Go module layouts (out of scope for Go layout).
+
+---
+
+## 13. Migration Decisions & Ratification
+
+The architecture reflects key ratified engineering decisions:
+
+- **Ratification of the 3-File Root Ceiling & `internal/` Decomposition:**  
+  The prior practice of allowing unbounded flat `package main` files across single-binary services has been superseded. Migrated services adhere to the 3-file root ceiling (`main.go`, `main_test.go`, `goleak_test.go`) and structure code into `internal/<layer>` packages. This guarantees compiler-enforced privacy, prevents accidental cyclic dependencies, and simplifies unit testing.
+- **Adoption of the `L0 -> L3` Layer Ratchet:**  
+  Dependencies must flow strictly downward. Low-level models and configuration (`L0`) remain leaf packages. Infrastructure (`L1`) owns persistence and cluster clients. Domain logic and consumers (`L2`) own business workflows. Application assembly (`L3`) wires routes, tools, and Restate reflection.
+- **Restate Timeout Ratification:**  
+  Reflected services bind handlers with explicit timeouts (`restate.WithInactivityTimeout` and `restate.WithAbortTimeout`) to prevent orphaned workflows and ensure deterministic failure handling.
+- **Preservation of the `eri` Exception:**  
+  `services/eri/` remains the documented multi-binary exception utilizing `services/eri/pkg/*` and concern files to avoid mass import rewrites across its auxiliary binaries.
+- **Phased Service Migration:**  
+  Remaining flat services (`services/coven`, `services/console`, `services/coverage-ingest`, `services/transcripts`, `mcp/*`) remain fully operational and are scheduled for incremental decomposition under Task #165.
+
+---
+
+## 14. Conformance Checklist
+
+A service is compliant with this standard when:
+
+- [ ] Root package main conforms to the **3-file root ceiling** (`main.go`, `main_test.go`, `goleak_test.go`), is scheduled for decomposition under Task #165, or is an explicit exception (`services/eri`).
+- [ ] Subpackages live under `internal/` and conform to the **`L0 -> L3` layer hierarchy** with strictly downward-flowing imports.
+- [ ] No file exceeds 1,500 lines and no function exceeds a nesting depth of 5.
+- [ ] Persistence logic lives in `internal/store` or `internal/db`; handlers invoke store methods, never the reverse.
+- [ ] Restate Virtual Objects and services wrap non-deterministic I/O in named `restate.Run` blocks and declare explicit inactivity and abort timeouts on reflection.
+- [ ] NATS consumers encapsulate subscription loops in `internal/bridge` or `internal/consumer` and issue `msg.Ack()` only after durable processing succeeds.
+- [ ] Shared cross-service logic resides in `pkg/*`; `pkg/*` never imports service modules.
+- [ ] Health (`/health`, `/healthz`), metrics (`/metrics`), and coverage (`/debug/coverage/flush`) endpoints are mounted via `pkg/httpkit`.
+- [ ] All tests are table-driven, hermetic, use literal assertions, and pass `./scripts/verify.sh --staged`.
 
 ---
 
 ## 15. Non-Goals
 
-- No file renames, package moves, or code changes in this plan. This document is the only deliverable.
-- No renaming of Restate handlers, state types, metrics labels, HTTP routes, or NATS subjects anywhere in the follow-up plans.
-- No new services, no module splits, and no changes to `aerial-config` as part of the layout work. Config changes, if a conformance plan needs one, ship as a separate downstream change after the upstream code merges.
-- No adoption of `cmd/` plus `internal/` for single-binary services (Section 13) — except the user-approved `vanadis-restate` migration into `cmd/vanadis-restate/main.go` plus `internal/model`, `internal/store`, `internal/executor`, `internal/build`, `internal/router`, and `internal/app` (Sections 7.2, 13), with the frozen Restate contract and decision A2 unchanged.
+- No disruption to active deployment pipelines or container build boundaries (`go build .` remains supported at module root or targeted `cmd/*` entrypoints).
+- No modification of wire-frozen Restate handler names, state keys, or JSON field tags.
+- No cross-service SQL querying; database access remains strictly owned by single services.
+- No introduction of ad-hoc environment variables for non-secret operational configuration.
 
 ---
 
 ## Sources
 
 - Go module layout: https://go.dev/doc/modules/layout
-- Restate Go services: https://docs.restate.dev/develop/go/services
+- Restate Go SDK: https://docs.restate.dev/develop/go/services
 - NATS JetStream: https://docs.nats.io/learn/jetstream/
