@@ -46,10 +46,14 @@ type Server struct {
 	toolHandler   *tools.ToolHandler
 	mcpServer     *mcp.Server
 	streamHandler http.Handler
+	httpClient    *http.Client
 	busMu         sync.RWMutex
 	bus           pubsub.Bus
 	bgWg          sync.WaitGroup
 }
+
+// ServerOption configures Server.
+type ServerOption func(*Server)
 
 // SetEventBus sets the pubsub.Bus used for durable job queueing.
 func (s *Server) SetEventBus(b pubsub.Bus) {
@@ -79,6 +83,7 @@ func NewServer(
 	tokenMgr *twilio.StreamTokenManager,
 	sessionMgr *mediastream.CallSessionManager,
 	reporter *delivery.Reporter,
+	opts ...ServerOption,
 ) *Server {
 	if cfgSrc == nil {
 		panic("server: config source cannot be nil")
@@ -98,7 +103,7 @@ func NewServer(
 		JSONResponse: true,
 	})
 
-	return &Server{
+	s := &Server{
 		cfgSrc:        cfgSrc,
 		store:         st,
 		twilio:        tw,
@@ -108,7 +113,12 @@ func NewServer(
 		toolHandler:   toolHandler,
 		mcpServer:     mcpServer,
 		streamHandler: streamHandler,
+		httpClient:    tracing.Client(&http.Client{Timeout: 30 * time.Second}),
 	}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
 }
 
 // Routes builds and returns the HTTP serve mux for Prospera.
