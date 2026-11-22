@@ -112,6 +112,33 @@ func newStateErrorMock(t *testing.T) *mocks.MockContext {
 	return mc
 }
 
+// stateKV builds one row's K/V mock: noKV rows get a bare context (the
+// handler must reject the input before touching K/V), kvFail rows a failing
+// Get, the rest load existing (nil for first touch). The capture and its
+// send recorder are never nil, so rows assert them unconditionally.
+func stateKV[T any](t *testing.T, existing T, kvFail, noKV bool) (*mocks.MockContext, *stateCapture[T]) {
+	t.Helper()
+	switch {
+	case noKV:
+		return mocks.NewMockContext(t), &stateCapture[T]{sends: &sendCapture{}}
+	case kvFail:
+		return newStateErrorMock(t), &stateCapture[T]{sends: &sendCapture{}}
+	}
+	return newStateMock(t, existing)
+}
+
+// prKV is stateKV for PRObject rows.
+func prKV(t *testing.T, existing *PRState, kvFail, noKV bool) (*mocks.MockContext, *stateCapture[*PRState]) {
+	t.Helper()
+	return stateKV(t, existing, kvFail, noKV)
+}
+
+// repoKV is stateKV for RepoObject rows.
+func repoKV(t *testing.T, existing *RepoState, kvFail bool) (*mocks.MockContext, *stateCapture[*RepoState]) {
+	t.Helper()
+	return stateKV(t, existing, kvFail, false)
+}
+
 // sortedHandlerNames joins reflected handler names for exact surface pins.
 func sortedHandlerNames(def restate.ServiceDefinition) string {
 	names := make([]string, 0, len(def.Handlers()))
@@ -122,59 +149,18 @@ func sortedHandlerNames(def restate.ServiceDefinition) string {
 	return strings.Join(names, ",")
 }
 
-// TestRegisterPRStateServices pins dark registration: frozen service names
-// matching the synapse ingress invoker defaults, the exact 17-handler PR
-// surface and 11-handler repo surface, and nil-safe dark defaults.
+// TestRegisterPRStateServices pins registration with nil services: the
+// frozen service names the synapse ingress invoker defaults to and the exact
+// PRObject and RepoObject handler surfaces.
 func TestRegisterPRStateServices(t *testing.T) {
 	t.Parallel()
-	tests := []struct {
-		name            string
-		prNil           bool
-		repoNil         bool
-		wantPRName      string
-		wantRepoName    string
-		wantPRHandlers  string
-		wantRepoHandler string
-	}{
-		{
-			name:            "nil services get dark defaults",
-			prNil:           true,
-			repoNil:         true,
-			wantPRName:      "PRObject",
-			wantRepoName:    "RepoObject",
-			wantPRHandlers:  "DropUntracked,GetBuildLifecycle,GetDeployView,HandleBranchConflict,HandleBuildMetadata,HandleCIRecovered,HandleCIRecovery,HandleCheckFailed,HandleCheckPassed,HandleCheckRerunRequested,HandleCheckStatus,HandleClosed,HandleCollaboratorAlert,HandleConflict,HandleConflictCheck,HandleConflictDetected,HandleConflictPublished,HandleConflictResolved,HandleDeployAttemptFailed,HandleDeployDispatched,HandleDeployFailed,HandleDeployFailureDeadline,HandleDeployObserved,HandleDeploySuccess,HandleDeploySuccessPublished,HandleHeadRefMissing,HandleKustomizationRequested,HandleMainAdvanced,HandleMerged,HandleOpened,HandleReadinessRetry,HandleReconcileLost,HandleReopened,HandleRolloutProgress,HandleSelfRegistered,HandleSynchronized,Project,Register,RetryEriEffect,RetryFactEffect,RetryFluxReconcile,RetryReadiness",
-			wantRepoHandler: "HandleAutoUpdate,HandleCheckRunBySHA,HandleFanout,HandleGitPush,HandleHeldExpiry,HandleHeldReplay,HandleImagePromotion,HandleImageReadyBySHA,HandleKustomizationStatus,HandleMainPush,HandlePRIndex,HandlePushBySHA,HandleRolloutIndex,HandleWorkflowRerun,HandleWorkflowRunBySHA,ListRollouts,ResolvePRBySHA",
-		},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			var pr *PRObjectService
-			var repo *RepoObjectService
-			if !tc.prNil {
-				pr = NewPRObjectService()
-			}
-			if !tc.repoNil {
-				repo = NewRepoObjectService()
-			}
-			srv := server.NewRestate()
-			gotPR, gotRepo := RegisterPRStateServices(srv, pr, repo)
-			require.NotNil(t, gotPR)
-			require.NotNil(t, gotRepo)
-			if gotPR.ServiceName() != tc.wantPRName {
-				t.Fatalf("pr service name = %q, want %q", gotPR.ServiceName(), tc.wantPRName)
-			}
-			if gotRepo.ServiceName() != tc.wantRepoName {
-				t.Fatalf("repo service name = %q, want %q", gotRepo.ServiceName(), tc.wantRepoName)
-			}
-			if got := sortedHandlerNames(restate.Reflect(gotPR)); got != tc.wantPRHandlers {
-				t.Fatalf("pr handlers = %q, want %q", got, tc.wantPRHandlers)
-			}
-			if got := sortedHandlerNames(restate.Reflect(gotRepo)); got != tc.wantRepoHandler {
-				t.Fatalf("repo handlers = %q, want %q", got, tc.wantRepoHandler)
-			}
-		})
-	}
+	gotPR, gotRepo := RegisterPRStateServices(server.NewRestate(), nil, nil)
+	require.NotNil(t, gotPR)
+	require.NotNil(t, gotRepo)
+	assert.Equal(t, "PRObject", gotPR.ServiceName())
+	assert.Equal(t, "RepoObject", gotRepo.ServiceName())
+	assert.Equal(t, "DropUntracked,GetBuildLifecycle,GetDeployView,HandleBranchConflict,HandleBuildMetadata,HandleCIRecovered,HandleCIRecovery,HandleCheckFailed,HandleCheckPassed,HandleCheckRerunRequested,HandleCheckStatus,HandleClosed,HandleCollaboratorAlert,HandleConflict,HandleConflictCheck,HandleConflictDetected,HandleConflictPublished,HandleConflictResolved,HandleDeployAttemptFailed,HandleDeployDispatched,HandleDeployFailed,HandleDeployFailureDeadline,HandleDeployObserved,HandleDeploySuccess,HandleDeploySuccessPublished,HandleHeadRefMissing,HandleKustomizationRequested,HandleMainAdvanced,HandleMerged,HandleOpened,HandleReadinessRetry,HandleReconcileLost,HandleReopened,HandleRolloutProgress,HandleSelfRegistered,HandleSynchronized,Project,Register,RetryEriEffect,RetryFactEffect,RetryFluxReconcile,RetryReadiness", sortedHandlerNames(restate.Reflect(gotPR)))
+	assert.Equal(t, "HandleAutoUpdate,HandleCheckRunBySHA,HandleFanout,HandleGitPush,HandleHeldExpiry,HandleHeldReplay,HandleImagePromotion,HandleImageReadyBySHA,HandleKustomizationStatus,HandleMainPush,HandlePRIndex,HandlePushBySHA,HandleRolloutIndex,HandleWorkflowRerun,HandleWorkflowRunBySHA,ListRollouts,ResolvePRBySHA", sortedHandlerNames(restate.Reflect(gotRepo)))
 }
 
 // TestPRObjectService_DarkHandlers proves the forwarding and first-touch
@@ -404,16 +390,7 @@ func TestPRObjectService_DarkDispositions(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			var mc *mocks.MockContext
-			rec := &stateCapture[*PRState]{}
-			switch {
-			case tc.expectNoKV:
-				mc = mocks.NewMockContext(t)
-			case tc.failGet:
-				mc = newStateErrorMock(t)
-			default:
-				mc, rec = newStateMock(t, tc.existing)
-			}
+			mc, rec := prKV(t, tc.existing, tc.failGet, tc.expectNoKV)
 			err := NewPRObjectService().HandleCheckFailed(restate.WithMockContext(mc), tc.ev)
 			if tc.wantErr && err == nil {
 				t.Fatal("handler returned nil, want kv error")
@@ -455,13 +432,7 @@ func TestPRObjectService_ConflictResolve(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			var mc *mocks.MockContext
-			rec := &stateCapture[*PRState]{}
-			if tc.failGet {
-				mc = newStateErrorMock(t)
-			} else {
-				mc, rec = newStateMock(t, tc.existing)
-			}
+			mc, rec := prKV(t, tc.existing, tc.failGet, false)
 			ev := PREvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: tc.evHead, Event: "conflict_detected"}
 			got, err := NewPRObjectService().HandleConflictDetected(restate.WithMockContext(mc), ev)
 			if tc.wantErr && err == nil {
@@ -517,16 +488,7 @@ func TestPRObjectService_ConflictPublishedAck(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			var mc *mocks.MockContext
-			rec := &stateCapture[*PRState]{}
-			switch {
-			case tc.expectNoKV:
-				mc = mocks.NewMockContext(t)
-			case tc.failGet:
-				mc = newStateErrorMock(t)
-			default:
-				mc, rec = newStateMock(t, tc.existing)
-			}
+			mc, rec := prKV(t, tc.existing, tc.failGet, tc.expectNoKV)
 			ev := PREvent{Repo: tc.repo, PRNumber: tc.pr, HeadSHA: tc.evHead, Event: "conflict_detected"}
 			got, err := NewPRObjectService().HandleConflictPublished(restate.WithMockContext(mc), ev)
 			if tc.wantErr && err == nil {
@@ -548,15 +510,11 @@ func TestPRObjectService_ConflictPublishedAck(t *testing.T) {
 	}
 }
 
-// TestPRObjectService_DeployDispatched pins the deploy_success publish verdict wiring.
+// TestPRObjectService_DeployDispatched pins the deploy_success publish verdict
+// wiring: the decision never persists, so a failed publish resolves
+// should_publish again on the next invocation.
 func TestPRObjectService_DeployDispatched(t *testing.T) {
 	t.Parallel()
-	dispatchedState := NewPRState("azylman/aerial", 101)
-	dispatchedKey := dispatchedState.EffectKeyFor(prwire.EffectDeployDispatch, "abc123", "deploy-job", "")
-	dispatchedState.MarkEffectDispatched(dispatchedKey)
-	dispatchedState.RecordDeployedPR()
-	dispatchedState.RecordDeployedSHAJob("deploy-job", "abc123")
-
 	tests := []struct {
 		name              string
 		existing          *PRState
@@ -567,34 +525,27 @@ func TestPRObjectService_DeployDispatched(t *testing.T) {
 		wantErr           bool
 	}{
 		{name: "fresh dispatch publishes", evHead: "abc123", wantShouldPublish: true},
-		{name: "recorded dispatch dedupes", existing: dispatchedState, evHead: "abc123", wantDeduped: true},
+		{name: "recorded dispatch dedupes", existing: decisionState(101, "", 0, TerminalNone, true, true, true, "abc123", "deploy-job"), evHead: "abc123", wantDeduped: true},
 		{name: "state load error surfaces", failGet: true, evHead: "abc123", wantErr: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			var mc *mocks.MockContext
-			if tc.failGet {
-				mc = newStateErrorMock(t)
-			} else {
-				mc, _ = newStateMock(t, tc.existing)
-			}
+			mc, rec := prKV(t, tc.existing, tc.failGet, false)
 			ev := PREvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: tc.evHead, JobName: "deploy-job", Event: "deploy_dispatched"}
 			got, err := NewPRObjectService().HandleDeployDispatched(restate.WithMockContext(mc), ev)
-			if tc.wantErr && err == nil {
-				t.Fatal("HandleDeployDispatched err = nil, want kv error")
-			}
-			if !tc.wantErr && err != nil {
-				t.Fatalf("HandleDeployDispatched err = %v, want nil", err)
-			}
+			require.Equal(t, tc.wantErr, err != nil, "err = %v", err)
 			if !tc.wantErr && (got.ShouldPublish != tc.wantShouldPublish || got.Deduped != tc.wantDeduped) {
 				t.Fatalf("ShouldPublish/Deduped = %v/%v, want %v/%v", got.ShouldPublish, got.Deduped, tc.wantShouldPublish, tc.wantDeduped)
 			}
+			require.False(t, rec.setCalled, "decision persisted state")
 		})
 	}
 }
 
-// TestPRObjectService_DeploySuccessPublishedAck pins the deploy_success ack recording and input guards.
+// TestPRObjectService_DeploySuccessPublishedAck pins the deploy_success ack:
+// it persists once per applied publish, re-acks a recorded publish, and
+// drops stale heads, untracked PRs and malformed input without persisting.
 func TestPRObjectService_DeploySuccessPublishedAck(t *testing.T) {
 	t.Parallel()
 	terminalState := NewPRState("azylman/aerial", 101)
@@ -606,13 +557,17 @@ func TestPRObjectService_DeploySuccessPublishedAck(t *testing.T) {
 		pr           int
 		existing     *PRState
 		evHead       string
+		evGen        uint64
 		failGet      bool
 		expectNoKV   bool
 		wantRecorded bool
+		wantDeduped  bool
 		wantSet      bool
 		wantErr      bool
 	}{
 		{name: "fresh publish records and persists", repo: "azylman/aerial", pr: 101, existing: svcRow("abc123", "", RegistryStatusOpen, TerminalNone), evHead: "abc123", wantRecorded: true, wantSet: true},
+		{name: "recorded publish replays idempotent", repo: "azylman/aerial", pr: 101, existing: decisionState(101, "aaa111", 2, TerminalNone, true, true, true, "aaa111", "deploy-job"), evHead: "aaa111", evGen: 2, wantRecorded: true, wantDeduped: true, wantSet: true},
+		{name: "stale head drops without persisting", repo: "azylman/aerial", pr: 101, existing: decisionState(101, "aaa111", 2, TerminalNone, false, false, false, "zzz999", "deploy-job"), evHead: "zzz999", evGen: 2},
 		{name: "untracked pr drops without persisting", repo: "azylman/aerial", pr: 101, evHead: "abc123", wantSet: false},
 		{name: "empty repo drops before kv", repo: "", pr: 101, evHead: "abc123", expectNoKV: true, wantSet: false},
 		{name: "zero pr drops before kv", repo: "azylman/aerial", pr: 0, evHead: "abc123", expectNoKV: true, wantSet: false},
@@ -622,27 +577,13 @@ func TestPRObjectService_DeploySuccessPublishedAck(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			var mc *mocks.MockContext
-			rec := &stateCapture[*PRState]{}
-			switch {
-			case tc.expectNoKV:
-				mc = mocks.NewMockContext(t)
-			case tc.failGet:
-				mc = newStateErrorMock(t)
-			default:
-				mc, rec = newStateMock(t, tc.existing)
-				stubRunKeepTerminal(mc)
-			}
-			ev := PREvent{Repo: tc.repo, PRNumber: tc.pr, HeadSHA: tc.evHead, JobName: "deploy-job", Event: "deploy_success"}
+			mc, rec := prKV(t, tc.existing, tc.failGet, tc.expectNoKV)
+			stubRun(mc, true)
+			ev := PREvent{Repo: tc.repo, PRNumber: tc.pr, HeadSHA: tc.evHead, JobName: "deploy-job", GateGeneration: tc.evGen, Event: "deploy_success"}
 			got, err := NewPRObjectService().HandleDeploySuccessPublished(restate.WithMockContext(mc), ev)
-			if tc.wantErr && err == nil {
-				t.Fatal("HandleDeploySuccessPublished err = nil, want kv error")
-			}
-			if !tc.wantErr && err != nil {
-				t.Fatalf("HandleDeploySuccessPublished err = %v, want nil", err)
-			}
-			if !tc.wantErr && got.Recorded != tc.wantRecorded {
-				t.Fatalf("Recorded = %v, want %v", got.Recorded, tc.wantRecorded)
+			require.Equal(t, tc.wantErr, err != nil, "err = %v", err)
+			if !tc.wantErr && (got.Recorded != tc.wantRecorded || got.Deduped != tc.wantDeduped) {
+				t.Fatalf("Recorded/Deduped = %v/%v, want %v/%v", got.Recorded, got.Deduped, tc.wantRecorded, tc.wantDeduped)
 			}
 			if rec.setCalled != tc.wantSet {
 				t.Fatalf("setCalled = %v, want %v", rec.setCalled, tc.wantSet)
@@ -674,13 +615,7 @@ func TestPRObjectService_CIRecoveryResolve(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			var mc *mocks.MockContext
-			rec := &stateCapture[*PRState]{}
-			if tc.failGet {
-				mc = newStateErrorMock(t)
-			} else {
-				mc, rec = newStateMock(t, tc.existing)
-			}
+			mc, rec := prKV(t, tc.existing, tc.failGet, false)
 			ev := PREvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: tc.evHead, Event: "check_success"}
 			got, err := NewPRObjectService().HandleCIRecovery(restate.WithMockContext(mc), ev)
 			if tc.wantErr && err == nil {
@@ -846,14 +781,19 @@ func bareRepoMock(t *testing.T) (*mocks.MockContext, *stateCapture[*RepoState]) 
 	return mc, &stateCapture[*RepoState]{}
 }
 
+// seededRepo loads seed into a RepoState (nil for an empty seed).
+func seededRepo(t *testing.T, seed repoSeed) *RepoState {
+	t.Helper()
+	if seed.empty() {
+		return nil
+	}
+	return loadRepoForTest(t, seedRepoStore(seed, false))
+}
+
 // repoMock stubs one RepoObject invocation over a seeded RepoState.
 func repoMock(t *testing.T, seed repoSeed) (*mocks.MockContext, *stateCapture[*RepoState]) {
 	t.Helper()
-	var existing *RepoState
-	if !seed.empty() {
-		existing = loadRepoForTest(t, seedRepoStore(seed, false))
-	}
-	return newStateMock(t, existing)
+	return newStateMock(t, seededRepo(t, seed))
 }
 
 // TestRepoObjectService_Handlers proves the Restate binding of every
@@ -958,19 +898,13 @@ func TestRepoObjectService_ResolvePRBySHA(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			var mc *mocks.MockContext
-			var rec *stateCapture[*RepoState]
-			if tc.kvErr {
-				mc = newStateErrorMock(t)
-			} else {
-				mc, rec = repoMock(t, tc.seed)
-			}
+			mc, rec := repoKV(t, seededRepo(t, tc.seed), tc.kvErr)
 			got, err := NewRepoObjectService().ResolvePRBySHA(restate.WithMockContext(mc), ResolveSHARequest{Repo: "azylman/aerial", SHA: tc.sha})
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("ResolvePRBySHA err = %v, wantErr %v", err, tc.wantErr)
 			}
 			assert.Equal(t, tc.want, got)
-			if rec != nil && rec.setCalled {
+			if rec.setCalled {
 				t.Fatal("shared resolve persisted state")
 			}
 		})
@@ -1031,25 +965,22 @@ func TestPRObjectService_HandleSelfRegistered(t *testing.T) {
 			wantSends: []sentCall{prIndexSend(PRIndexEvent{Repo: "azylman/aerial", PRNumber: 2329, Branch: "dependabot/x", HeadSHA: "h1", Lifecycle: IndexActive})},
 		},
 		{
-			name: "agent seeds the owner, never as a lifecycle hint", existing: &PRState{Repo: "azylman/aerial", PRNumber: 2329, HeadSHA: "h1"}, ev: PREvent{Repo: "azylman/aerial", PRNumber: 2329, TargetID: "100000000000000002", Agent: "miorine"},
-			wantSet: true, wantTarget: "100000000000000002", wantAgent: "miorine",
+			name: "agent seeds the owner, never as a lifecycle hint", existing: &PRState{Repo: "azylman/aerial", PRNumber: 2329, HeadSHA: "h1"}, ev: PREvent{Repo: "azylman/aerial", PRNumber: 2329, TargetID: "100000000000000002", Agent: "agent-beta"},
+			wantSet: true, wantTarget: "100000000000000002", wantAgent: "agent-beta",
 		},
 		{name: "already registered PR commits nothing", existing: tracked, ev: PREvent{Repo: "azylman/aerial", PRNumber: 2329, HeadSHA: "h1", Title: "T", TargetID: "100000000000000009", Agent: "aerial"}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if tc.kvErr {
-				require.Error(t, NewPRObjectService().HandleSelfRegistered(restate.WithMockContext(newStateErrorMock(t)), tc.ev))
-				return
-			}
 			existing := tc.existing
 			if existing != nil {
 				clone := *existing
 				existing = &clone
 			}
-			mc, rec := newStateMock(t, existing)
-			require.NoError(t, NewPRObjectService().HandleSelfRegistered(restate.WithMockContext(mc), tc.ev))
+			mc, rec := prKV(t, existing, tc.kvErr, false)
+			err := NewPRObjectService().HandleSelfRegistered(restate.WithMockContext(mc), tc.ev)
+			require.Equal(t, tc.wantErr, err != nil, "err = %v", err)
 			require.Equal(t, tc.wantSet, rec.setCalled)
 			if tc.wantSet {
 				require.Equal(t, tc.wantTarget, rec.saved.TargetID)

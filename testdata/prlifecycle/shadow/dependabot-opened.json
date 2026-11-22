@@ -249,7 +249,6 @@
      "console"
     ],
     "rollouts": null,
-    "divergent": null,
     "effects": [
      {
       "kind": "flux_reconcile",
@@ -341,7 +340,6 @@
     "tracked": false,
     "deployed_jobs": null,
     "rollouts": null,
-    "divergent": null,
     "effects": null
    },
    "row": null

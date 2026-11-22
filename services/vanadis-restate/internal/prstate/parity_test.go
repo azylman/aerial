@@ -20,7 +20,6 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"reflect"
 	"sort"
 	"strings"
 	"testing"
@@ -235,7 +234,7 @@ func (s *paritySim) run(call simCall) error {
 	slot := call.service + "/" + call.key
 	mc := mocks.NewMockContext(s.t)
 	sends := captureSends(s.t, mc)
-	stubParityRun(mc)
+	stubRun(mc, false)
 	mc.On("Key").Return(call.key).Maybe()
 	// Each object key has one K/V slot per state key ("state", plus the
 	// rollout index slot on its RepoObject key).
@@ -264,29 +263,6 @@ func (s *paritySim) run(call simCall) error {
 		s.pending = append(s.pending, next)
 	}
 	return nil
-}
-
-// stubParityRun executes every journaled restate.Run once, whatever run
-// options the step passes; a step error returns as terminal, standing in for
-// retries exhausted.
-func stubParityRun(mc *mocks.MockContext) {
-	run := func(fn func(restate.RunContext) (any, error), output any, _ ...restate.RunOption) restate.TerminalError {
-		res, err := fn(projRunContext{Context: context.Background()})
-		if err != nil {
-			return restate.TerminalErrorf("%v", err)
-		}
-		if out := reflect.ValueOf(output); res != nil && out.Kind() == reflect.Pointer && !out.IsNil() {
-			out.Elem().Set(reflect.ValueOf(res))
-		}
-		return nil
-	}
-	for arity := 2; arity <= 6; arity++ {
-		args := make([]any, arity)
-		for i := range args {
-			args[i] = mock.Anything
-		}
-		mc.On("Run", args...).Return(run).Maybe()
-	}
 }
 
 // record appends one effect, once per key within an invocation: a

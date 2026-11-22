@@ -30,7 +30,7 @@ func TestJournalKube(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			mc := mocks.NewMockContext(t)
-			stubRunKeepTerminal(mc)
+			stubRun(mc, true)
 			j := journaledKubeFor(restate.WithMockContext(mc), tc.kube)
 			workload, kerr := j.PromoteImageTag(context.Background(), ImagePromotionRequest{Image: "eri", CommitSHA: "s1"})
 			require.Equal(t, tc.wantWorkload, workload)
@@ -49,10 +49,12 @@ func TestJournaledKubeCalls(t *testing.T) {
 	tests := []struct {
 		name      string
 		kube      *fakeKube
+		wantNil   bool
 		wantCalls []string
 		wantPush  bool
 		wantRecon bool
 	}{
+		{name: "nil client wires no journaled boundary", wantNil: true},
 		{name: "push and reconcile journal through the client", kube: &fakeKube{}, wantCalls: []string{"push azylman/aerial refs/heads/main m1 ", "reconcile flux-system/core@t1"}},
 		{name: "failures surface from both calls", kube: &fakeKube{pushErr: errKubeForbidden, reconcileErr: map[string]*KubeError{"core": errKubeForbidden}}, wantCalls: []string{"push azylman/aerial refs/heads/main m1 ", "reconcile flux-system/core@t1"}, wantPush: true, wantRecon: true},
 	}
@@ -60,28 +62,21 @@ func TestJournaledKubeCalls(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			mc := mocks.NewMockContext(t)
-			stubRunKeepTerminal(mc)
-			j := journaledKubeFor(restate.WithMockContext(mc), tc.kube)
+			stubRun(mc, true)
+			var kube KubeEffector // a nil *fakeKube would be a non-nil interface
+			if tc.kube != nil {
+				kube = tc.kube
+			}
+			j := journaledKubeFor(restate.WithMockContext(mc), kube)
+			require.Equal(t, tc.wantNil, j == nil)
+			if j == nil {
+				return
+			}
 			pushErr := j.DispatchGitPush(context.Background(), GitPushRequest{Repo: "azylman/aerial", Ref: "refs/heads/main", Commit: "m1"})
 			reconErr := j.ReconcileKustomization(context.Background(), "flux-system", "core", "t1")
 			require.Equal(t, tc.wantPush, pushErr != nil)
 			require.Equal(t, tc.wantRecon, reconErr != nil)
 			require.Equal(t, tc.wantCalls, tc.kube.Calls())
-		})
-	}
-}
-
-func TestJournaledKubeForNilClient(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name string
-	}{
-		{name: "no client wires no journaled boundary"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			require.Nil(t, journaledKubeFor(restate.WithMockContext(mocks.NewMockContext(t)), nil))
 		})
 	}
 }
@@ -134,7 +129,7 @@ func TestRepoObjectServiceHandleGitPush(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			mc, rec := newStateMock[*RepoState](t, nil)
-			run := stubRunKeepTerminal(mc)
+			run := stubRun(mc, true)
 			err := NewRepoObjectService().WithKube(tc.kube).HandleGitPush(restate.WithMockContext(mc), tc.ev)
 			require.Equal(t, tc.wantErr, err != nil)
 			require.Equal(t, tc.wantSet, rec.setCalled)
@@ -174,7 +169,7 @@ func TestRepoObjectServiceHandleImagePromotion(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			mc, rec := newStateMock[*RepoState](t, nil)
-			run := stubRunKeepTerminal(mc)
+			run := stubRun(mc, true)
 			err := NewRepoObjectService().WithKube(tc.kube).HandleImagePromotion(restate.WithMockContext(mc), tc.ev)
 			require.Equal(t, tc.wantErr, err != nil)
 			require.Equal(t, tc.wantSet, rec.setCalled)
@@ -233,7 +228,7 @@ func TestPRObjectServiceHandleKustomizationRequestedReconcile(t *testing.T) {
 			seed := svcRow("h1", "m1", RegistryStatusMerged, TerminalMerged)
 			seed.Agent = "agent-alpha"
 			mc, rec := newStateMock(t, seed)
-			stubRunKeepTerminal(mc)
+			stubRun(mc, true)
 			err := NewPRObjectService().WithKube(tc.kube).HandleKustomizationRequested(restate.WithMockContext(mc), tc.ev)
 			require.Equal(t, tc.wantErr, restate.IsTerminalError(err), "err = %v", err)
 			require.Equal(t, tc.wantCalls, tc.kube.Calls())
@@ -284,7 +279,7 @@ func TestPRObjectServiceRetryReadiness(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			mc, rec := newStateMock(t, tc.seed)
-			stubRunKeepTerminal(mc)
+			stubRun(mc, true)
 			got, err := NewPRObjectService().WithKube(tc.kube).RetryReadiness(restate.WithMockContext(mc), tc.req)
 			require.Equal(t, tc.wantErr, err != nil)
 			require.Equal(t, tc.want, got)
@@ -324,7 +319,7 @@ func TestPRObjectServiceHandleReadinessRetry(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			mc, rec := newStateMock(t, tc.seed)
-			stubRunKeepTerminal(mc)
+			stubRun(mc, true)
 			kube := &fakeKube{}
 			err := NewPRObjectService().WithKube(kube).HandleReadinessRetry(restate.WithMockContext(mc), tc.ev)
 			require.Equal(t, tc.wantErr, restate.IsTerminalError(err), "err = %v", err)
@@ -380,7 +375,7 @@ func TestPRObjectServiceRetryFluxReconcile(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			mc, rec := newStateMock(t, tc.seed)
-			stubRunKeepTerminal(mc)
+			stubRun(mc, true)
 			svc := NewPRObjectService()
 			if !tc.noKube {
 				svc = svc.WithKube(tc.kube)

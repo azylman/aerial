@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -27,21 +28,32 @@ type runCapture struct {
 	ran bool
 }
 
-// stubRun executes every restate.Run closure once. A closure error stands
-// in for retries exhausted and returns as a terminal error.
-func stubRun(mc *mocks.MockContext) *runCapture {
+// stubRun executes every restate.Run closure once, whatever run options the
+// step passes (the mock flattens them into arguments, arity 2-6). A closure
+// error stands in for exhausted retries and returns terminal; keepTerminal
+// keeps a terminal closure error's code, matching Restate, which never
+// retries a terminal error.
+func stubRun(mc *mocks.MockContext, keepTerminal bool) *runCapture {
 	rec := &runCapture{}
-	mc.On("Run", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(func(fn func(restate.RunContext) (any, error), output any, _ ...restate.RunOption) restate.TerminalError {
+	run := func(fn func(restate.RunContext) (any, error), output any, _ ...restate.RunOption) restate.TerminalError {
 		rec.ran = true
 		res, err := fn(projRunContext{Context: context.Background()})
-		if err != nil {
+		switch {
+		case err != nil && keepTerminal && restate.IsTerminalError(err):
+			return restate.AsTerminalError(err)
+		case err != nil && keepTerminal:
+			return restate.TerminalErrorf("retries exhausted: %v", err)
+		case err != nil:
 			return restate.TerminalErrorf("%v", err)
 		}
 		if out := reflect.ValueOf(output); res != nil && out.Kind() == reflect.Pointer && !out.IsNil() {
 			out.Elem().Set(reflect.ValueOf(res))
 		}
 		return nil
-	}).Maybe()
+	}
+	for arity := 2; arity <= 6; arity++ {
+		mc.On("Run", slices.Repeat([]any{mock.Anything}, arity)...).Return(run).Maybe()
+	}
 	return rec
 }
 
@@ -149,14 +161,8 @@ func TestPRObjectServiceProject(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			var mc *mocks.MockContext
-			var rec *stateCapture[*PRState]
-			if tc.failGet {
-				mc, rec = newStateErrorMock(t), &stateCapture[*PRState]{sends: &sendCapture{}}
-			} else {
-				mc, rec = newStateMock(t, tc.state)
-			}
-			run := stubRun(mc)
+			mc, rec := prKV(t, tc.state, tc.failGet, false)
+			run := stubRun(mc, false)
 			svc := NewPRObjectService()
 			if tc.store != nil {
 				svc = svc.WithProjection(tc.store)

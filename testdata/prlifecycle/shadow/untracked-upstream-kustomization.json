@@ -171,73 +171,6 @@
       }
     },
     {
-      "name": "tracked merged pr records requests and reconciles once per generation",
-      "setup": [
-        {
-          "object": "PRObject",
-          "handler": "Register",
-          "event": {
-            "repo": "azylman/aerial",
-            "pr_number": 2302,
-            "branch": "feat/prospera",
-            "head_sha": "h2302",
-            "target_id": "100000000000000001",
-            "title": "Prospera fix",
-            "agent": "miorine"
-          }
-        },
-        {
-          "object": "PRObject",
-          "handler": "HandleMerged",
-          "event": {
-            "repo": "azylman/aerial",
-            "pr_number": 2302,
-            "head_sha": "h2302",
-            "merge_sha": "m2302",
-            "branch": "feat/prospera"
-          }
-        }
-      ],
-      "stream": [
-        {
-          "object": "PRObject",
-          "handler": "HandleKustomizationRequested",
-          "event": {
-            "repo": "azylman/aerial",
-            "pr_number": 2302,
-            "jobs": ["aerial-core"],
-            "kustomization_requests": {
-              "aerial-core": {"namespace": "flux-system", "requested_at": "2026-11-21T04:55:46Z"}
-            }
-          }
-        },
-        {
-          "object": "PRObject",
-          "handler": "HandleKustomizationRequested",
-          "event": {
-            "repo": "azylman/aerial",
-            "pr_number": 2302,
-            "jobs": ["aerial-core"],
-            "kustomization_requests": {
-              "aerial-core": {"namespace": "flux-system", "requested_at": "2026-11-21T05:57:27Z"}
-            }
-          }
-        }
-      ],
-      "want": {
-        "persisted": true,
-        "status": "deploying",
-        "intended_effects": [
-          "azylman/aerial#2302@:gen1:flux_reconcile",
-          "azylman/aerial#2302@:gen2:flux_reconcile"
-        ],
-        "rollouts": [
-          {"repo": "azylman/aerial", "pr_number": 2302}
-        ],
-        "repo_indexed": true
-      }
-    },
-    {
       "name": "tracked restate-owned request patches once per generation",
       "setup": [
         {
@@ -250,7 +183,7 @@
             "head_sha": "h2302",
             "target_id": "100000000000000001",
             "title": "Prospera fix",
-            "agent": "miorine"
+            "agent": "alpha"
           }
         },
         {

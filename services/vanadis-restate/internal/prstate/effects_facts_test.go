@@ -79,7 +79,7 @@ func (f *fakeFactPublisher) Calls() []factCall {
 var errFakeBus = errors.New("nats unavailable")
 
 // TestFactEffectKeyMatchKey pins the generation-free fact key against the
-// shared golden fixture synapse's FactMatchKey test reads.
+// golden fixture fact_match_keys.json.
 func TestFactEffectKeyMatchKey(t *testing.T) {
 	t.Parallel()
 	var fx struct {
@@ -145,8 +145,8 @@ func TestPlanFacts(t *testing.T) {
 	}
 }
 
-// TestFactFingerprints pins the fact effect key and idempotency key against
-// externally computed sha256 literals.
+// TestFactFingerprints pins the eri and fact effect keys and their bounded
+// idempotency keys against externally computed sha256 literals.
 func TestFactFingerprints(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -155,6 +155,7 @@ func TestFactFingerprints(t *testing.T) {
 		wantKey  string
 		wantIdem string
 	}{
+		{name: "collaborator DM", key: dmKey("h1", 0, ""), wantKey: testDMKey, wantIdem: "prstate-54d500d389704715f4c085c744f8e1c8"},
 		{name: "conflict", key: factKey("pr_fact_conflict", "h1", ""), wantKey: testConflictKey, wantIdem: testConflictIdem},
 		{name: "deploy success", key: factKey("pr_fact_deploy_success", "m1", "eri"), wantKey: testDeployKey, wantIdem: testDeployIdem},
 	}
@@ -281,13 +282,8 @@ func TestPRObjectServiceHandleConflict(t *testing.T) {
 			if tc.pub != nil {
 				svc = svc.WithFactPublisher(tc.pub)
 			}
-			if tc.failGet {
-				_, err := svc.HandleConflict(restate.WithMockContext(newStateErrorMock(t)), tc.ev)
-				require.Error(t, err)
-				return
-			}
-			mc, rec := newStateMock(t, tc.state)
-			stubRun(mc)
+			mc, rec := prKV(t, tc.state, tc.failGet, false)
+			stubRun(mc, false)
 			got, err := svc.HandleConflict(restate.WithMockContext(mc), tc.ev)
 			require.Equal(t, tc.wantErr, err != nil)
 			require.Equal(t, tc.want, got)
@@ -368,13 +364,8 @@ func TestPRObjectServiceHandleDeploySuccess(t *testing.T) {
 			t.Parallel()
 			pub := &fakeFactPublisher{}
 			svc := NewPRObjectService().WithFactPublisher(pub)
-			if tc.failGet {
-				_, err := svc.HandleDeploySuccess(restate.WithMockContext(newStateErrorMock(t)), tc.ev)
-				require.Error(t, err)
-				return
-			}
-			mc, rec := newStateMock(t, tc.state)
-			stubRun(mc)
+			mc, rec := prKV(t, tc.state, tc.failGet, false)
+			stubRun(mc, false)
 			got, err := svc.HandleDeploySuccess(restate.WithMockContext(mc), tc.ev)
 			require.Equal(t, tc.wantErr, err != nil)
 			require.Equal(t, tc.want, got)
@@ -443,13 +434,8 @@ func TestPRObjectServiceHandleCIRecovered(t *testing.T) {
 			t.Parallel()
 			pub := &fakeFactPublisher{}
 			svc := NewPRObjectService().WithFactPublisher(pub)
-			if tc.failGet {
-				_, err := svc.HandleCIRecovered(restate.WithMockContext(newStateErrorMock(t)), tc.ev)
-				require.Error(t, err)
-				return
-			}
-			mc, rec := newStateMock(t, tc.state)
-			stubRun(mc)
+			mc, rec := prKV(t, tc.state, tc.failGet, false)
+			stubRun(mc, false)
 			got, err := svc.HandleCIRecovered(restate.WithMockContext(mc), tc.ev)
 			require.Equal(t, tc.wantErr, err != nil)
 			require.Equal(t, tc.want, got)
@@ -504,12 +490,8 @@ func TestPRObjectServiceRetryFactEffect(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			svc := NewPRObjectService().WithFactPublisher(tc.pub)
-			if tc.failGet {
-				require.Error(t, svc.RetryFactEffect(restate.WithMockContext(newStateErrorMock(t)), tc.req))
-				return
-			}
-			mc, rec := newStateMock(t, tc.state)
-			stubRun(mc)
+			mc, rec := prKV(t, tc.state, tc.failGet, false)
+			stubRun(mc, false)
 			err := svc.RetryFactEffect(restate.WithMockContext(mc), tc.req)
 			require.Equal(t, tc.wantErr, err != nil)
 			require.Len(t, tc.pub.Calls(), tc.wantCalls)
@@ -650,11 +632,7 @@ func TestPRObjectServiceHandleDeployAttemptFailed(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			svc := NewPRObjectService()
-			if tc.failGet {
-				require.Error(t, svc.HandleDeployAttemptFailed(restate.WithMockContext(newStateErrorMock(t)), tc.ev))
-				return
-			}
-			mc, rec := newStateMock(t, tc.state)
+			mc, rec := prKV(t, tc.state, tc.failGet, false)
 			err := svc.HandleDeployAttemptFailed(restate.WithMockContext(mc), tc.ev)
 			require.Equal(t, tc.wantErr, err != nil)
 			require.Equal(t, tc.wantSet, rec.setCalled)
@@ -711,12 +689,8 @@ func TestPRObjectServiceHandleDeployFailureDeadline(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			svc := NewPRObjectService().WithFactPublisher(tc.pub)
-			if tc.failGet {
-				require.Error(t, svc.HandleDeployFailureDeadline(restate.WithMockContext(newStateErrorMock(t)), DeployFailureDeadlineRequest{Seq: tc.seq}))
-				return
-			}
-			mc, rec := newStateMock(t, tc.state)
-			stubRun(mc)
+			mc, rec := prKV(t, tc.state, tc.failGet, false)
+			stubRun(mc, false)
 			err := svc.HandleDeployFailureDeadline(restate.WithMockContext(mc), DeployFailureDeadlineRequest{Seq: tc.seq})
 			require.Equal(t, tc.wantErr, err != nil)
 			require.Equal(t, tc.wantCalls, tc.pub.Calls())
@@ -755,7 +729,7 @@ func TestPRObjectServiceLifecycleFacts(t *testing.T) {
 			t.Parallel()
 			pub := &fakeFactPublisher{}
 			mc, _ := newStateMock(t, effectPR())
-			stubRun(mc)
+			stubRun(mc, false)
 			err := NewPRObjectService().WithFactPublisher(pub).HandleMerged(restate.WithMockContext(mc), tc.ev)
 			require.Equal(t, tc.wantErr, restate.IsTerminalError(err), "err = %v", err)
 			calls := pub.Calls()

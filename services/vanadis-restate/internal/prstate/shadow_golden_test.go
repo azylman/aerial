@@ -6,8 +6,6 @@ package prstate
 // captures), so each captured event stream replays under
 // restate ownership and must still land on the hand-derived state and
 // effects.
-// The projection-compare fields the goldens carry (divergent, superseded,
-// intended_effects) belonged to the retired shadow compare and are ignored.
 
 import (
 	"encoding/json"
@@ -35,17 +33,20 @@ type shadowCase struct {
 	WantState shadowWantState    `json:"want_state"`
 }
 
-// shadowGolden is one shadow golden file.
-type shadowGolden struct {
+// shadowGolden is one shadow golden file: optional shared setup and the
+// cases; synapse-only fields are ignored.
+type shadowGolden[C any] struct {
 	Setup []parityInvocation `json:"setup"`
-	Cases []shadowCase       `json:"cases"`
+	Cases []C                `json:"cases"`
 }
 
-func loadShadowGolden(t *testing.T, name string) shadowGolden {
+// loadGolden decodes testdata/prlifecycle/shadow/<name>; a golden without
+// cases fails the test.
+func loadGolden[C any](t *testing.T, name string) shadowGolden[C] {
 	t.Helper()
 	raw, err := os.ReadFile(prlifecycleFixtureDir + "shadow/" + name)
 	require.NoError(t, err)
-	var g shadowGolden
+	var g shadowGolden[C]
 	require.NoError(t, json.Unmarshal(raw, &g))
 	require.NotEmpty(t, g.Cases)
 	return g
@@ -56,7 +57,7 @@ func loadShadowGolden(t *testing.T, name string) shadowGolden {
 // legacy registry recorded them.
 func TestShadowRolloutReadyJobsGolden(t *testing.T) {
 	t.Parallel()
-	g := loadShadowGolden(t, "rollout-ready-jobs.json")
+	g := loadGolden[shadowCase](t, "rollout-ready-jobs.json")
 	tests := g.Cases
 	for _, tc := range tests {
 		t.Run(tc.Name, func(t *testing.T) {
@@ -77,15 +78,12 @@ func TestShadowRolloutReadyJobsGolden(t *testing.T) {
 }
 
 // untrackedWant is the hand-derived outcome of one untracked-upstream case.
-// IntendedEffects is set only on cases that pin legacy intent recording;
-// those no longer exist in prstate and are left out (restateOwnedCases).
 type untrackedWant struct {
-	Persisted       bool           `json:"persisted"`
-	Status          string         `json:"status"`
-	IntendedEffects []string       `json:"intended_effects"`
-	Effects         []parityEffect `json:"effects"`
-	Rollouts        []RolloutRef   `json:"rollouts"`
-	RepoIndexed     bool           `json:"repo_indexed"`
+	Persisted   bool           `json:"persisted"`
+	Status      string         `json:"status"`
+	Effects     []parityEffect `json:"effects"`
+	Rollouts    []RolloutRef   `json:"rollouts"`
+	RepoIndexed bool           `json:"repo_indexed"`
 }
 
 // untrackedCase is one untracked-upstream sequence: optional setup, the
@@ -97,24 +95,6 @@ type untrackedCase struct {
 	Want   untrackedWant      `json:"want"`
 }
 
-// restateOwnedCases drops the cases that pin legacy intended-effect
-// recording; their restate-owned twins stay in the golden.
-func restateOwnedCases(cases []untrackedCase) []untrackedCase {
-	var out []untrackedCase
-	for _, c := range cases {
-		if len(c.Want.IntendedEffects) == 0 {
-			out = append(out, c)
-		}
-	}
-	return out
-}
-
-// untrackedGolden is untracked-upstream-kustomization.json; synapse-only
-// fields are ignored here.
-type untrackedGolden struct {
-	Cases []untrackedCase `json:"cases"`
-}
-
 // TestShadowUntrackedUpstreamGolden pins that rollout events for a PR
 // PRObject never saw register, opened or merge persist nothing,
 // index nothing and run no fact or reconcile, while a tracked merged PR
@@ -122,12 +102,7 @@ type untrackedGolden struct {
 // rollout. Captured legacy streams replay as captured.
 func TestShadowUntrackedUpstreamGolden(t *testing.T) {
 	t.Parallel()
-	raw, err := os.ReadFile(prlifecycleFixtureDir + "shadow/untracked-upstream-kustomization.json")
-	require.NoError(t, err)
-	var g untrackedGolden
-	require.NoError(t, json.Unmarshal(raw, &g))
-	require.NotEmpty(t, g.Cases)
-	tests := restateOwnedCases(g.Cases)
+	tests := loadGolden[untrackedCase](t, "untracked-upstream-kustomization.json").Cases
 	require.Len(t, tests, 4)
 	for _, tc := range tests {
 		t.Run(tc.Name, func(t *testing.T) {
@@ -181,14 +156,7 @@ type siblingCase struct {
 // registered head.
 func TestShadowSiblingBotSynchronizeGolden(t *testing.T) {
 	t.Parallel()
-	raw, err := os.ReadFile(prlifecycleFixtureDir + "shadow/sibling-bot-synchronize.json")
-	require.NoError(t, err)
-	var g struct {
-		Cases []siblingCase `json:"cases"`
-	}
-	require.NoError(t, json.Unmarshal(raw, &g))
-	require.NotEmpty(t, g.Cases)
-	tests := g.Cases
+	tests := loadGolden[siblingCase](t, "sibling-bot-synchronize.json").Cases
 	for _, tc := range tests {
 		t.Run(tc.Name, func(t *testing.T) {
 			t.Parallel()
@@ -258,14 +226,7 @@ func simPRState(t *testing.T, sim *paritySim, inv parityInvocation) PRState {
 // before==stored synchronize is unchanged.
 func TestShadowStaleHeadSynchronizeGolden(t *testing.T) {
 	t.Parallel()
-	raw, err := os.ReadFile(prlifecycleFixtureDir + "shadow/stale-head-synchronize.json")
-	require.NoError(t, err)
-	var g struct {
-		Cases []staleHeadCase `json:"cases"`
-	}
-	require.NoError(t, json.Unmarshal(raw, &g))
-	require.NotEmpty(t, g.Cases)
-	tests := g.Cases
+	tests := loadGolden[staleHeadCase](t, "stale-head-synchronize.json").Cases
 	for _, tc := range tests {
 		t.Run(tc.Name, func(t *testing.T) {
 			t.Parallel()
@@ -349,14 +310,7 @@ func simActiveRollouts(t *testing.T, sim *paritySim) []RolloutRef {
 // head with no merge SHA still drop stale.
 func TestShadowMergedStaleHeadDeployGolden(t *testing.T) {
 	t.Parallel()
-	raw, err := os.ReadFile(prlifecycleFixtureDir + "shadow/merged-stale-head-deploy.json")
-	require.NoError(t, err)
-	var g struct {
-		Cases []mergedStaleHeadCase `json:"cases"`
-	}
-	require.NoError(t, json.Unmarshal(raw, &g))
-	require.NotEmpty(t, g.Cases)
-	tests := g.Cases
+	tests := loadGolden[mergedStaleHeadCase](t, "merged-stale-head-deploy.json").Cases
 	for _, tc := range tests {
 		t.Run(tc.Name, func(t *testing.T) {
 			t.Parallel()
@@ -431,14 +385,7 @@ type lostMergeCase struct {
 // that merge change nothing and run no effects.
 func TestShadowLostMergeWebhooksGolden(t *testing.T) {
 	t.Parallel()
-	raw, err := os.ReadFile(prlifecycleFixtureDir + "shadow/lost-merge-webhooks.json")
-	require.NoError(t, err)
-	var g struct {
-		Cases []lostMergeCase `json:"cases"`
-	}
-	require.NoError(t, json.Unmarshal(raw, &g))
-	require.NotEmpty(t, g.Cases)
-	tests := g.Cases
+	tests := loadGolden[lostMergeCase](t, "lost-merge-webhooks.json").Cases
 	for _, tc := range tests {
 		t.Run(tc.Name, func(t *testing.T) {
 			t.Parallel()
@@ -554,14 +501,7 @@ func deployEffects(effects []parityEffect) []parityEffect {
 // untracked.
 func TestShadowDependabotOpenedGolden(t *testing.T) {
 	t.Parallel()
-	raw, err := os.ReadFile(prlifecycleFixtureDir + "shadow/dependabot-opened.json")
-	require.NoError(t, err)
-	var g struct {
-		Cases []selfRegisteredCase `json:"cases"`
-	}
-	require.NoError(t, json.Unmarshal(raw, &g))
-	require.NotEmpty(t, g.Cases)
-	tests := g.Cases
+	tests := loadGolden[selfRegisteredCase](t, "dependabot-opened.json").Cases
 	for _, tc := range tests {
 		t.Run(tc.Name, func(t *testing.T) {
 			t.Parallel()

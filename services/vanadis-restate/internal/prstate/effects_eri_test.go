@@ -26,9 +26,9 @@ func readPRLifecycleFixture(t *testing.T, name string, out any) {
 	require.NoError(t, json.Unmarshal(raw, out))
 }
 
-// TestEffectKeyMatchKey pins the generation-free key against the shared
-// golden fixture synapse's EffectMatchKey test reads: the generation never
-// appears, whatever it is.
+// TestEffectKeyMatchKey pins the generation-free key against the golden
+// fixture eri_effect_match_keys.json: the generation never appears, whatever
+// it is.
 func TestEffectKeyMatchKey(t *testing.T) {
 	t.Parallel()
 	var fx struct {
@@ -174,26 +174,6 @@ func TestPlanEriEffects(t *testing.T) {
 	}
 }
 
-// TestEffectFingerprints pins the bounded idempotency key and payload
-// digest against externally computed sha256 literals.
-func TestEffectFingerprints(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name     string
-		key      EffectKey
-		wantIdem string
-	}{
-		{name: "collaborator DM", key: dmKey("h1", 0, ""), wantIdem: "prstate-54d500d389704715f4c085c744f8e1c8"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			require.Equal(t, testDMKey, tc.key.String())
-			require.Equal(t, tc.wantIdem, EffectIdempotencyKey(tc.key))
-		})
-	}
-}
-
 // eriCall is one recorded EriEffector delivery.
 type eriCall struct {
 	agent string
@@ -260,7 +240,7 @@ func TestPRObjectServiceEriEffects(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			mc, rec := newStateMock(t, tc.state)
-			run := stubRun(mc)
+			run := stubRun(mc, false)
 			svc := NewPRObjectService()
 			if tc.eri != nil {
 				svc = svc.WithEriEffector(tc.eri)
@@ -319,14 +299,8 @@ func TestPRObjectServiceRetryEriEffect(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if tc.failGet {
-				mc := newStateErrorMock(t)
-				err := NewPRObjectService().WithEriEffector(tc.eri).RetryEriEffect(restate.WithMockContext(mc), tc.req)
-				require.Error(t, err)
-				return
-			}
-			mc, rec := newStateMock(t, tc.state)
-			run := stubRun(mc)
+			mc, rec := prKV(t, tc.state, tc.failGet, false)
+			run := stubRun(mc, false)
 			err := NewPRObjectService().WithEriEffector(tc.eri).RetryEriEffect(restate.WithMockContext(mc), tc.req)
 			require.Equal(t, tc.wantErr, err != nil)
 			require.Len(t, tc.eri.Calls(), tc.wantCalls)
