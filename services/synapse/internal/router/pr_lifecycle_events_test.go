@@ -8,8 +8,6 @@ import (
 	"github.com/azylman/aerial/pkg/pubsub"
 )
 
-const lifecycleTargetID = "123456789012345678"
-
 // wantPREvent is the declarative projection of a published PR lifecycle event.
 type wantPREvent struct {
 	Event      string
@@ -31,8 +29,6 @@ func newLifecycleServer(cfg Config, bus *mockEventBus, disp *mockOutboundDispatc
 	}
 	return srv
 }
-
-func lifecycleCfg() Config { return Config{SystemChannelID: lifecycleTargetID} }
 
 func assertPREvents(t *testing.T, bus *mockEventBus, want []wantPREvent) {
 	t.Helper()

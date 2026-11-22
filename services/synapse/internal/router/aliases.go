@@ -14,7 +14,6 @@ type (
 	CollaboratorCIAlertRule      = config.CollaboratorCIAlertRule
 	OutboundDispatcher           = model.OutboundDispatcher
 	ConsumerStatsQuerier         = metrics.ConsumerStatsQuerier
-	consumerStatsQuerier         = metrics.ConsumerStatsQuerier
 	workloadRollout              = model.WorkloadRollout
 	configMapChange              = model.ConfigMapChange
 	fluxCondition                = model.FluxCondition
