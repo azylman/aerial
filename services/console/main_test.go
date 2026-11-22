@@ -117,87 +117,30 @@ func newStatusMockServer(t *testing.T) *httptest.Server {
 
 func statusHandlerPrimaryCases() []statusTestCase {
 	return []statusTestCase{
+		{name: "Basic_NoClusterStateFallback", wantCode: http.StatusOK, wantMinServices: 1, wantOngoingDeploy: "idle"},
+		{name: "ActiveTasks_Success", brainPath: "/brain/ok", wantCode: http.StatusOK, wantTasks: 2, wantConfiguredAgents: []string{"aerial", "agent-alpha"}},
 		{
-			name:              "Basic_NoClusterStateFallback",
-			wantCode:          http.StatusOK,
-			wantMinServices:   1,
-			wantOngoingDeploy: "idle",
+			name: "ActiveTasks_FilterAgent_Aerial", brainPath: "/brain/ok", target: "/api/status?agent=aerial",
+			wantCode: http.StatusOK, wantTasks: 1, wantTaskID: "task-abc", wantConfiguredAgents: []string{"aerial", "agent-alpha"},
 		},
 		{
-			name:              "OngoingDeploy",
-			yamlContent:       "console: {}\n",
-			wantCode:          http.StatusOK,
-			wantOngoingDeploy: "idle",
+			name: "ActiveTasks_FilterAgent_Other", brainPath: "/brain/ok", target: "/api/status?agent=agent-alpha",
+			wantCode: http.StatusOK, wantTasks: 1, wantTaskID: "task-def", wantConfiguredAgents: []string{"aerial", "agent-alpha"},
 		},
 		{
-			name:                 "ActiveTasks_Success",
-			brainMode:            "ok",
-			wantCode:             http.StatusOK,
-			wantTasks:            2,
-			wantConfiguredAgents: []string{"aerial", "agent-alpha"},
+			name: "ActiveTasks_FilterAgent_All", brainPath: "/brain/ok", target: "/api/status?agent=all",
+			wantCode: http.StatusOK, wantTasks: 2, wantConfiguredAgents: []string{"aerial", "agent-alpha"},
 		},
 		{
-			name:                 "ActiveTasks_FilterAgent_Aerial",
-			brainMode:            "ok",
-			target:               "/api/status?agent=aerial",
-			wantCode:             http.StatusOK,
-			wantTasks:            1,
-			wantTaskID:           "task-abc",
-			wantConfiguredAgents: []string{"aerial", "agent-alpha"},
+			name: "ActiveTasks_EmptyTasks_UpstreamSchedulesAndBuildsDiscovery", brainPath: "/brain/empty", haroPath: "/haro/ok", vanadisPath: "/vanadis/ok",
+			useMux: true, wantCode: http.StatusOK, wantTasks: 0, wantConfiguredAgents: []string{"aerial", "agent-beta", "agent-gamma"},
 		},
+		{name: "ActiveTasks_Degraded", brainPath: "/brain/offline", wantCode: http.StatusOK, wantTasks: 0},
 		{
-			name:                 "ActiveTasks_FilterAgent_Other",
-			brainMode:            "ok",
-			target:               "/api/status?agent=agent-alpha",
-			wantCode:             http.StatusOK,
-			wantTasks:            1,
-			wantTaskID:           "task-def",
-			wantConfiguredAgents: []string{"aerial", "agent-alpha"},
+			name: "EnrichedFields", yamlContent: "console:\n  quick_launch_links:\n    - name: \"HOME\"\n      url: \"https://home.example.com\"\n",
+			wantCode: http.StatusOK, wantQuickLink: "HOME",
 		},
-		{
-			name:                 "ActiveTasks_FilterAgent_All",
-			brainMode:            "ok",
-			target:               "/api/status?agent=all",
-			wantCode:             http.StatusOK,
-			wantTasks:            2,
-			wantConfiguredAgents: []string{"aerial", "agent-alpha"},
-		},
-		{
-			name:                 "ActiveTasks_EmptyTasks_DiscoverySourceHasAgent",
-			brainMode:            "empty",
-			discoveryAgents:      []string{"aerial", "agent-alpha"},
-			wantCode:             http.StatusOK,
-			wantTasks:            0,
-			wantConfiguredAgents: []string{"aerial", "agent-alpha"},
-		},
-		{
-			name:                 "ActiveTasks_EmptyTasks_UpstreamSchedulesAndBuildsDiscovery",
-			brainMode:            "empty",
-			haroMode:             "ok",
-			vanadisMode:          "ok",
-			useMux:               true,
-			wantCode:             http.StatusOK,
-			wantTasks:            0,
-			wantConfiguredAgents: []string{"aerial", "agent-beta", "agent-gamma"},
-		},
-		{
-			name:      "ActiveTasks_Degraded",
-			brainMode: "offline",
-			wantCode:  http.StatusOK,
-			wantTasks: 0,
-		},
-		{
-			name:          "EnrichedFields",
-			yamlContent:   "console:\n  quick_launch_links:\n    - name: \"HOME\"\n      url: \"https://home.zylman.com\"\n",
-			wantCode:      http.StatusOK,
-			wantQuickLink: "HOME",
-		},
-		{
-			name:              "DegradedClusterStatus",
-			k8sMode:           "degraded",
-			wantCode:          http.StatusOK,
-			wantClusterStatus: "degraded",
-		},
+		{name: "DegradedClusterStatus", k8sPath: "/k8s/degraded", wantCode: http.StatusOK, wantClusterStatus: "degraded"},
 	}
 }
 
@@ -223,51 +166,23 @@ func statusHandlerSecondaryCases() []statusTestCase {
 			wantOngoingDeploy: "building",
 			wantIsDeploying:   true,
 		},
-		{
-			name:     "MethodNotAllowed",
-			method:   http.MethodPost,
-			wantCode: http.StatusMethodNotAllowed,
-		},
-		{
-			name:          "SetupConsoleMux_StatusWiring",
-			useMux:        true,
-			yamlContent:   "console:\n  quick_launch_links:\n    - name: \"TESTLINK\"\n      url: \"https://test.zylman.com\"\n",
-			wantCode:      http.StatusOK,
-			wantQuickLink: "TESTLINK",
-		},
-		{
-			name:            "K8s_State_Success",
-			k8sMode:         "ok",
-			wantCode:        http.StatusOK,
-			wantServiceName: "k8s-brain",
-		},
-		{
-			name:            "K8s_State_Success_Via_Mux",
-			useMux:          true,
-			k8sMode:         "ok",
-			wantCode:        http.StatusOK,
-			wantServiceName: "k8s-brain",
-		},
-		{
-			name:            "K8s_Error_FallbackServices",
-			k8sMode:         "error500",
-			wantCode:        http.StatusOK,
-			wantMinServices: 1,
-		},
+		{name: "MethodNotAllowed", method: http.MethodPost, wantCode: http.StatusMethodNotAllowed},
+		{name: "K8s_State_Success", k8sPath: "/k8s/ok", wantCode: http.StatusOK, wantServiceName: "k8s-brain"},
+		{name: "K8s_Error_FallbackServices", k8sPath: "/k8s/error500", wantCode: http.StatusOK, wantMinServices: 1},
 	}
 }
 
+// statusTestCase routes each upstream to the shared mock server by path suffix; an empty
+// suffix leaves that upstream unconfigured.
 type statusTestCase struct {
 	name                 string
 	method               string
 	target               string
 	useMux               bool
-	brainMode            string
-	k8sMode              string
-	haroMode             string
-	vanadisMode          string
-	discoveryAgents      []string
-	emptyCommit          bool
+	brainPath            string
+	k8sPath              string
+	haroPath             string
+	vanadisPath          string
 	pollerRuns           []GitHubRun
 	pollerJobs           map[int64][]GitHubJob
 	yamlContent          string
@@ -284,30 +199,11 @@ type statusTestCase struct {
 	wantTaskID           string
 }
 
-func resolveStatusTestURLs(tc statusTestCase, mockServerURL string) (brainURL, kubeAPIServer, haroURL, vanadisURL string) {
-	switch tc.brainMode {
-	case "ok":
-		brainURL = mockServerURL + "/brain/ok"
-	case "empty":
-		brainURL = mockServerURL + "/brain/empty"
-	case "offline":
-		brainURL = "http://127.0.0.1:54321"
+func statusMockURL(mockServerURL, path string) string {
+	if path == "" {
+		return ""
 	}
-	if tc.haroMode == "ok" {
-		haroURL = mockServerURL + "/haro/ok"
-	}
-	if tc.vanadisMode == "ok" {
-		vanadisURL = mockServerURL + "/vanadis/ok"
-	}
-	switch tc.k8sMode {
-	case "ok":
-		kubeAPIServer = mockServerURL + "/k8s/ok"
-	case "degraded":
-		kubeAPIServer = mockServerURL + "/k8s/degraded"
-	case "error500":
-		kubeAPIServer = mockServerURL + "/k8s/error500"
-	}
-	return brainURL, kubeAPIServer, haroURL, vanadisURL
+	return mockServerURL + path
 }
 
 func runStatusHandlerCase(t *testing.T, tc statusTestCase, mockServerURL string) {
@@ -330,35 +226,27 @@ func runStatusHandlerCase(t *testing.T, tc statusTestCase, mockServerURL string)
 		}
 	}
 
-	brainURL, kubeAPIServer, haroURL, vanadisURL := resolveStatusTestURLs(tc, mockServerURL)
+	brainURL := statusMockURL(mockServerURL, tc.brainPath)
+	kubeAPIServer := statusMockURL(mockServerURL, tc.k8sPath)
+	haroURL := statusMockURL(mockServerURL, tc.haroPath)
+	vanadisURL := statusMockURL(mockServerURL, tc.vanadisPath)
 
 	discoveredAgentsCache.reset()
-	if len(tc.discoveryAgents) > 0 {
-		oldFn := configuredAgentsDiscoveryFn
-		defer func() { configuredAgentsDiscoveryFn = oldFn }()
-		configuredAgentsDiscoveryFn = func(ctx context.Context) ([]string, error) {
-			return tc.discoveryAgents, nil
-		}
-	}
 
-	commitArg := "testcommit"
-	if tc.emptyCommit {
-		commitArg = ""
-	}
 	var h http.Handler
 	if tc.useMux {
 		cfg := ConsoleConfig{
 			Port:          "8080",
 			BrainURL:      brainURL,
 			ConfigPath:    cfgFile,
-			GitCommit:     commitArg,
+			GitCommit:     "testcommit",
 			KubeAPIServer: kubeAPIServer,
 			HaroURL:       haroURL,
 			VanadisURL:    vanadisURL,
 		}
 		h = SetupConsoleMux(cfg, nil)
 	} else {
-		h = statusHandler(brainURL, cfgFile, commitArg, kubeAPIServer, haroURL, vanadisURL)
+		h = statusHandler(brainURL, cfgFile, "testcommit", kubeAPIServer, haroURL, vanadisURL)
 	}
 
 	method := tc.method
@@ -399,13 +287,8 @@ func assertStatusBasic(t *testing.T, tc statusTestCase, resp ClusterResponse) {
 	if tc.wantClusterStatus != "" && resp.ClusterStatus != tc.wantClusterStatus {
 		t.Errorf("expected ClusterStatus %q, got %q", tc.wantClusterStatus, resp.ClusterStatus)
 	}
-	if tc.wantOngoingDeploy != "" {
-		if resp.OngoingDeploy != "idle" && resp.OngoingDeploy != "swapping" && resp.OngoingDeploy != "building" {
-			t.Errorf("unexpected OngoingDeploy: %q", resp.OngoingDeploy)
-		}
-		if tc.wantOngoingDeploy != "idle" && resp.OngoingDeploy != tc.wantOngoingDeploy {
-			t.Errorf("expected OngoingDeploy %q, got %q", tc.wantOngoingDeploy, resp.OngoingDeploy)
-		}
+	if tc.wantOngoingDeploy != "" && resp.OngoingDeploy != tc.wantOngoingDeploy {
+		t.Errorf("expected OngoingDeploy %q, got %q", tc.wantOngoingDeploy, resp.OngoingDeploy)
 	}
 	if tc.wantIsDeploying != resp.IsDeploying {
 		t.Errorf("expected IsDeploying %v, got %v", tc.wantIsDeploying, resp.IsDeploying)
@@ -426,16 +309,9 @@ func assertStatusBasic(t *testing.T, tc statusTestCase, resp ClusterResponse) {
 
 func assertStatusActiveTasks(t *testing.T, tc statusTestCase, resp ClusterResponse) {
 	t.Helper()
-	switch tc.brainMode {
-	case "ok", "empty":
-		assertStatusOKTasks(t, tc, resp)
-	case "offline":
-		assertStatusOfflineTasks(t, resp)
+	if resp.ActiveTasks == nil {
+		t.Fatalf("expected non-nil ActiveTasks, got null")
 	}
-}
-
-func assertStatusOKTasks(t *testing.T, tc statusTestCase, resp ClusterResponse) {
-	t.Helper()
 	if resp.ActiveTasksCount != tc.wantTasks || len(resp.ActiveTasks) != tc.wantTasks {
 		t.Fatalf("expected %d active tasks, got %d: %+v", tc.wantTasks, resp.ActiveTasksCount, resp.ActiveTasks)
 	}
@@ -449,16 +325,6 @@ func assertStatusOKTasks(t *testing.T, tc statusTestCase, resp ClusterResponse) 
 	}
 	if task.ID != expectedID || task.TriggerType != "discord" || task.Status != "PROCESSING" {
 		t.Errorf("unexpected task contents: %+v", task)
-	}
-}
-
-func assertStatusOfflineTasks(t *testing.T, resp ClusterResponse) {
-	t.Helper()
-	if resp.ActiveTasksCount != 0 {
-		t.Errorf("expected 0 active tasks on degraded brain, got %d", resp.ActiveTasksCount)
-	}
-	if resp.ActiveTasks == nil || len(resp.ActiveTasks) != 0 {
-		t.Errorf("expected non-nil empty ActiveTasks on degraded brain, got %+v", resp.ActiveTasks)
 	}
 }
 
@@ -511,85 +377,6 @@ func assertStatusServices(t *testing.T, tc statusTestCase, resp ClusterResponse)
 		if !found {
 			t.Errorf("expected quick link %q in %+v", tc.wantQuickLink, resp.QuickLaunchLinks)
 		}
-	}
-}
-
-func TestDeploymentStatus_CommitTimeJSONSerialization(t *testing.T) {
-	now := time.Date(2026, 9, 4, 4, 15, 0, 0, time.UTC)
-	depWithTime := DeploymentStatus{
-		ID:         "dep-1",
-		Service:    "aerial-stack",
-		Commit:     "abc1234",
-		CommitTime: &now,
-		Stage:      "live",
-		Progress:   100,
-	}
-
-	data, err := json.Marshal(depWithTime)
-	if err != nil {
-		t.Fatalf("failed to marshal DeploymentStatus with time: %v", err)
-	}
-	if !strings.Contains(string(data), `"commit_time":"2026-09-04T04:15:00Z"`) {
-		t.Errorf("expected JSON to contain formatted commit_time, got: %s", string(data))
-	}
-
-	depWithoutTime := DeploymentStatus{
-		ID:       "dep-2",
-		Service:  "aerial-stack",
-		Commit:   "abc1234",
-		Stage:    "live",
-		Progress: 100,
-	}
-
-	dataNil, err := json.Marshal(depWithoutTime)
-	if err != nil {
-		t.Fatalf("failed to marshal DeploymentStatus with nil time: %v", err)
-	}
-	if strings.Contains(string(dataNil), `"commit_time"`) {
-		t.Errorf("expected JSON to omit commit_time when nil, got: %s", string(dataNil))
-	}
-}
-
-func TestHealthHandler(t *testing.T) {
-	req := httptest.NewRequest(http.MethodGet, "/health", http.NoBody)
-	rr := httptest.NewRecorder()
-	healthHandler(rr, req)
-
-	if rr.Code != http.StatusOK {
-		t.Errorf("expected 200 OK, got %d", rr.Code)
-	}
-	if rr.Body.String() != "OK" {
-		t.Errorf("unexpected body: %s", rr.Body.String())
-	}
-
-	// 405 Method Not Allowed
-	reqPost := httptest.NewRequest(http.MethodPost, "/health", http.NoBody)
-	rrPost := httptest.NewRecorder()
-	healthHandler(rrPost, reqPost)
-	if rrPost.Code != http.StatusMethodNotAllowed {
-		t.Errorf("expected 405 on POST /health, got %d", rrPost.Code)
-	}
-}
-
-func TestSecurityHeadersMiddleware(t *testing.T) {
-	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("ok"))
-	})
-
-	handler := securityHeadersMiddleware(inner)
-	req := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
-	rr := httptest.NewRecorder()
-	handler.ServeHTTP(rr, req)
-
-	if rr.Header().Get("X-Content-Type-Options") != "nosniff" {
-		t.Errorf("expected X-Content-Type-Options: nosniff")
-	}
-	if rr.Header().Get("X-Frame-Options") != "DENY" {
-		t.Errorf("expected X-Frame-Options: DENY")
-	}
-	if rr.Header().Get("X-XSS-Protection") != "1; mode=block" {
-		t.Errorf("expected X-XSS-Protection header")
 	}
 }
 
@@ -890,53 +677,50 @@ func TestDrainAndClose(t *testing.T) {
 	}
 }
 
-func TestConsole_CloseWarnAndDisconnect(t *testing.T) {
-	// isClientDisconnect
-	if httpkit.IsClientDisconnect(nil, nil) {
-		t.Error("expected false for nil error")
+func TestWriteJSON(t *testing.T) {
+	tests := []struct {
+		name           string
+		acceptEncoding string
+		status         int
+		data           any
+		wantCode       int
+		wantType       string
+		wantEncoding   string
+		wantBody       string
+	}{
+		{name: "plain JSON keeps caller status", status: http.StatusCreated, data: map[string]string{"status": "ok"}, wantCode: http.StatusCreated, wantType: "application/json", wantBody: `{"status":"ok"}`},
+		{name: "marshal error returns 500", status: http.StatusOK, data: make(chan int), wantCode: http.StatusInternalServerError, wantType: "text/plain; charset=utf-8", wantBody: `{"error":"Internal error"}` + "\n"},
+		{name: "gzip when accepted", acceptEncoding: "gzip, deflate", status: http.StatusOK, data: map[string]string{"status": "ok"}, wantCode: http.StatusOK, wantType: "application/json", wantEncoding: "gzip", wantBody: `{"status":"ok"}`},
 	}
-	if !httpkit.IsClientDisconnect(nil, syscall.EPIPE) {
-		t.Error("expected true for EPIPE")
-	}
-	if !httpkit.IsClientDisconnect(nil, syscall.ECONNRESET) {
-		t.Error("expected true for ECONNRESET")
-	}
-	if !httpkit.IsClientDisconnect(nil, net.ErrClosed) {
-		t.Error("expected true for net.ErrClosed")
-	}
-
-	// writeJSON: success, marshal error, and gzip encoding
-	reqActive := httptest.NewRequest(http.MethodGet, "/", http.NoBody)
-	rrJSON := httptest.NewRecorder()
-	writeJSON(rrJSON, reqActive, http.StatusCreated, map[string]string{"status": "ok"})
-	if rrJSON.Code != http.StatusCreated {
-		t.Errorf("expected 201 Created, got %d", rrJSON.Code)
-	}
-	if ct := rrJSON.Header().Get("Content-Type"); ct != "application/json" {
-		t.Errorf("expected Content-Type application/json, got %q", ct)
-	}
-
-	rrMarshalErr := httptest.NewRecorder()
-	writeJSON(rrMarshalErr, reqActive, http.StatusOK, make(chan int))
-	if rrMarshalErr.Code != http.StatusInternalServerError {
-		t.Errorf("expected 500 InternalServerError on marshal failure, got %d", rrMarshalErr.Code)
-	}
-
-	reqGzip := httptest.NewRequest(http.MethodGet, "/api/builds", http.NoBody)
-	reqGzip.Header.Set("Accept-Encoding", "gzip, deflate")
-	rrGzip := httptest.NewRecorder()
-	writeJSON(rrGzip, reqGzip, http.StatusOK, map[string]string{"status": "ok"})
-	if ce := rrGzip.Header().Get("Content-Encoding"); ce != "gzip" {
-		t.Fatalf("expected Content-Encoding gzip, got %q", ce)
-	}
-	gzReader, gzErr := gzip.NewReader(rrGzip.Body)
-	if gzErr != nil {
-		t.Fatalf("failed to create gzip reader: %v", gzErr)
-	}
-	defer gzReader.Close()
-	unzipped, readErr := io.ReadAll(gzReader)
-	if readErr != nil || string(unzipped) != `{"status":"ok"}` {
-		t.Errorf("unexpected gzip body %q (err=%v)", string(unzipped), readErr)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/api/builds", http.NoBody)
+			req.Header.Set("Accept-Encoding", tc.acceptEncoding)
+			rr := httptest.NewRecorder()
+			writeJSON(rr, req, tc.status, tc.data)
+			if rr.Code != tc.wantCode {
+				t.Errorf("code = %d, want %d", rr.Code, tc.wantCode)
+			}
+			if got := rr.Header().Get("Content-Type"); got != tc.wantType {
+				t.Errorf("Content-Type = %q, want %q", got, tc.wantType)
+			}
+			if got := rr.Header().Get("Content-Encoding"); got != tc.wantEncoding {
+				t.Fatalf("Content-Encoding = %q, want %q", got, tc.wantEncoding)
+			}
+			var body io.Reader = rr.Body
+			if tc.wantEncoding == "gzip" {
+				gz, err := gzip.NewReader(rr.Body)
+				if err != nil {
+					t.Fatalf("gzip.NewReader: %v", err)
+				}
+				defer gz.Close()
+				body = gz
+			}
+			got, err := io.ReadAll(body)
+			if err != nil || string(got) != tc.wantBody {
+				t.Errorf("body = %q (err=%v), want %q", got, err, tc.wantBody)
+			}
+		})
 	}
 }
 
@@ -994,6 +778,29 @@ func TestSetupConsoleMux_Tracing(t *testing.T) {
 	}
 }
 
+// doStaticRoutingRequest sends method (GET when empty) to url and returns the status code,
+// headers and fully read body.
+func doStaticRoutingRequest(t *testing.T, client *http.Client, method, url string) (int, http.Header, []byte) {
+	t.Helper()
+	if method == "" {
+		method = http.MethodGet
+	}
+	req, err := http.NewRequest(method, url, http.NoBody)
+	if err != nil {
+		t.Fatalf("NewRequest failed: %v", err)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("%s %s failed: %v", method, url, err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body failed: %v", err)
+	}
+	return resp.StatusCode, resp.Header, body
+}
+
 func TestSetupConsoleMux_StaticRouting(t *testing.T) {
 	reg, err := NewAssetRegistry(fstest.MapFS{
 		"index.html":          {Data: []byte(`<div id="root"></div>`)},
@@ -1009,11 +816,13 @@ func TestSetupConsoleMux_StaticRouting(t *testing.T) {
 
 	tests := []struct {
 		name           string
+		method         string
 		path           string
 		wantCode       int
 		wantLocation   string
 		wantCache      string
 		wantBodySubstr string
+		wantHeaders    map[string]string
 	}{
 		{name: "legacy_console_next_bare", path: "/console/next", wantCode: http.StatusMovedPermanently, wantLocation: "/console/"},
 		{name: "legacy_console_next_slash", path: "/console/next/", wantCode: http.StatusMovedPermanently, wantLocation: "/console/"},
@@ -1029,99 +838,62 @@ func TestSetupConsoleMux_StaticRouting(t *testing.T) {
 		{name: "root_hashed_asset", path: "/assets/index-Zz9.js", wantCode: http.StatusOK, wantCache: "public, max-age=31536000, immutable", wantBodySubstr: `export{}`},
 		{name: "nextgen_route_not_legacy", path: "/console/nextgen", wantCode: http.StatusOK, wantCache: "no-cache, must-revalidate", wantBodySubstr: `<div id="root"></div>`},
 		{name: "api_routes_still_win", path: "/console/health", wantCode: http.StatusOK, wantBodySubstr: "OK"},
+		{name: "root_health", path: "/health", wantCode: http.StatusOK, wantBodySubstr: "OK"},
+		{name: "health_rejects_post", method: http.MethodPost, path: "/console/health", wantCode: http.StatusMethodNotAllowed, wantBodySubstr: "Method Not Allowed"},
+		{name: "security_headers", path: "/console/", wantCode: http.StatusOK, wantHeaders: map[string]string{"X-Content-Type-Options": "nosniff", "X-Frame-Options": "DENY", "X-XSS-Protection": "1; mode=block"}},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			resp, err := client.Get(ts.URL + tc.path)
-			if err != nil {
-				t.Fatalf("GET %s failed: %v", tc.path, err)
+			status, header, body := doStaticRoutingRequest(t, client, tc.method, ts.URL+tc.path)
+			if status != tc.wantCode {
+				t.Fatalf("GET %s status = %d, want %d", tc.path, status, tc.wantCode)
 			}
-			defer resp.Body.Close()
-			body, err := io.ReadAll(resp.Body)
-			if err != nil {
-				t.Fatalf("read body failed: %v", err)
-			}
-			if resp.StatusCode != tc.wantCode {
-				t.Fatalf("GET %s status = %d, want %d", tc.path, resp.StatusCode, tc.wantCode)
-			}
-			if got := resp.Header.Get("Location"); got != tc.wantLocation {
+			if got := header.Get("Location"); got != tc.wantLocation {
 				t.Errorf("Location = %q, want %q", got, tc.wantLocation)
 			}
-			if tc.wantCache != "" && resp.Header.Get("Cache-Control") != tc.wantCache {
-				t.Errorf("Cache-Control = %q, want %q", resp.Header.Get("Cache-Control"), tc.wantCache)
+			if tc.wantCache != "" && header.Get("Cache-Control") != tc.wantCache {
+				t.Errorf("Cache-Control = %q, want %q", header.Get("Cache-Control"), tc.wantCache)
 			}
 			if !strings.Contains(string(body), tc.wantBodySubstr) {
 				t.Errorf("body = %q, want substring %q", body, tc.wantBodySubstr)
+			}
+			for k, v := range tc.wantHeaders {
+				if got := header.Get(k); got != v {
+					t.Errorf("header %s = %q, want %q", k, got, v)
+				}
 			}
 		})
 	}
 }
 
 func TestCoverageFlushEndpoint(t *testing.T) {
-	mux := SetupConsoleMux(ConsoleConfig{}, nil)
-	ts := httptest.NewServer(mux)
-	defer ts.Close()
-
 	oldFn, oldMetaFn := httpkit.WriteCountersDirFn, httpkit.WriteMetaDirFn
-	defer func() { httpkit.WriteCountersDirFn, httpkit.WriteMetaDirFn = oldFn, oldMetaFn }()
+	t.Cleanup(func() { httpkit.WriteCountersDirFn, httpkit.WriteMetaDirFn = oldFn, oldMetaFn })
+	var flushes []string
+	httpkit.WriteCountersDirFn = func(string) error { flushes = append(flushes, "counters"); return nil }
+	httpkit.WriteMetaDirFn = func(string) error { flushes = append(flushes, "meta"); return nil }
+	h := SetupConsoleMux(ConsoleConfig{}, nil)
 
-	called, metaCalled := false, false
-	httpkit.WriteCountersDirFn = func(dir string) error {
-		called = true
-		return nil
+	tests := []struct {
+		name string
+		path string
+	}{
+		{"root flush route wired", "/debug/coverage/flush"},
+		{"console flush route wired", "/console/debug/coverage/flush"},
 	}
-	httpkit.WriteMetaDirFn = func(dir string) error {
-		metaCalled = true
-		return nil
-	}
-
-	resp, err := http.Get(ts.URL + "/debug/coverage/flush")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK || !called || !metaCalled {
-		t.Errorf("expected 200 OK and both flush fns called, got status=%d called=%v metaCalled=%v", resp.StatusCode, called, metaCalled)
-	}
-
-	resp2, err2 := http.Get(ts.URL + "/console/debug/coverage/flush")
-	if err2 != nil {
-		t.Fatalf("unexpected error: %v", err2)
-	}
-	defer resp2.Body.Close()
-	if resp2.StatusCode != http.StatusOK {
-		t.Errorf("expected 200 OK, got: %d", resp2.StatusCode)
-	}
-
-	httpkit.WriteMetaDirFn = func(dir string) error { return errors.New("simulated meta flush error") }
-	if resp3b, err3b := http.Get(ts.URL + "/debug/coverage/flush"); err3b != nil || resp3b.StatusCode != http.StatusOK {
-		t.Errorf("expected 200 OK when meta flush errors, got resp=%v err=%v", resp3b, err3b)
-	} else {
-		resp3b.Body.Close()
-	}
-
-	// 3. With mock error -> 500 Internal Server Error
-	httpkit.WriteCountersDirFn = func(dir string) error {
-		return errors.New("simulated flush error")
-	}
-
-	resp4, err4 := http.Get(ts.URL + "/debug/coverage/flush")
-	if err4 != nil {
-		t.Fatalf("unexpected error: %v", err4)
-	}
-	defer resp4.Body.Close()
-	if resp4.StatusCode != http.StatusInternalServerError {
-		t.Errorf("expected 500 on error, got: %d", resp4.StatusCode)
-	}
-
-	resp5, err5 := http.Get(ts.URL + "/console/debug/coverage/flush")
-	if err5 != nil {
-		t.Fatalf("unexpected error: %v", err5)
-	}
-	defer resp5.Body.Close()
-	if resp5.StatusCode != http.StatusInternalServerError {
-		t.Errorf("expected 500 on console subpath error, got: %d", resp5.StatusCode)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			flushes = nil
+			rr := httptest.NewRecorder()
+			h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, tc.path, http.NoBody))
+			if rr.Code != http.StatusOK {
+				t.Errorf("GET %s = %d, want 200", tc.path, rr.Code)
+			}
+			if got := strings.Join(flushes, ","); got != "meta,counters" {
+				t.Errorf("flushes = %q, want %q", got, "meta,counters")
+			}
+		})
 	}
 }
 

@@ -112,10 +112,11 @@ func containerChipStatusAndDuration(c DockerContainerJSON, now time.Time) (statu
 	return status, conclusion, duration
 }
 
-// buildDeploymentSteps constructs the standard 5-step Permet HUD deployment pipeline.
-func buildDeploymentSteps(s1, s2, s3, s4, s5 string) []DeploymentStep {
+// buildDeploymentSteps constructs the standard 5-step Permet HUD deployment pipeline. The
+// commit trigger step is always completed by the time a deployment card exists.
+func buildDeploymentSteps(s2, s3, s4, s5 string) []DeploymentStep {
 	return []DeploymentStep{
-		{Name: "Commit Trigger", Icon: "📦", Status: s1},
+		{Name: "Commit Trigger", Icon: "📦", Status: "completed"},
 		{Name: "CI Build & GHCR", Icon: "⚙️", Status: s2},
 		{Name: "Flux Sync", Icon: "⬇️", Status: s3},
 		{Name: "Container Swap", Icon: "🔄", Status: s4},

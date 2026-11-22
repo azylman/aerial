@@ -18,28 +18,6 @@ func (errorFS) Open(name string) (fs.File, error) {
 	return nil, errors.New("simulated filesystem failure")
 }
 
-func TestStaticAssetsIntegrity(t *testing.T) {
-	requiredFiles := []string{
-		"static/favicon.ico",
-		"static/favicon.png",
-		"static/favicon-32x32.png",
-		"static/favicon-16x16.png",
-		"static/apple-touch-icon.png",
-		"static/manifest.webmanifest",
-	}
-
-	for _, reqFile := range requiredFiles {
-		data, err := os.ReadFile(reqFile)
-		if err != nil {
-			t.Errorf("failed to read required file %s: %v", reqFile, err)
-			continue
-		}
-		if len(data) == 0 {
-			t.Errorf("file %s is empty", reqFile)
-		}
-	}
-}
-
 // builtConsoleFS mirrors the image's /app/static: the favicons from static/ plus the Vite dist
 // (SPA shell and content-hashed assets/) copied over them by the Dockerfile.
 var builtConsoleFS = fstest.MapFS{

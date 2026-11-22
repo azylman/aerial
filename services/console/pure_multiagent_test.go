@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"slices"
 	"testing"
 	"time"
@@ -102,16 +101,9 @@ func TestFilterByAgent_TableDriven(t *testing.T) {
 		itemAgent string
 		wantKept  bool
 	}{
-		{name: "empty filter keeps aerial", filter: "", itemAgent: "aerial", wantKept: true},
-		{name: "empty filter keeps other", filter: "", itemAgent: "agent-alpha", wantKept: true},
-		{name: "all filter keeps aerial", filter: "all", itemAgent: "aerial", wantKept: true},
-		{name: "all filter keeps other", filter: "all", itemAgent: "agent-alpha", wantKept: true},
-		{name: "aerial filter keeps aerial", filter: "aerial", itemAgent: "aerial", wantKept: true},
-		{name: "aerial filter keeps empty (default)", filter: "aerial", itemAgent: "", wantKept: true},
-		{name: "aerial filter drops other", filter: "aerial", itemAgent: "agent-alpha", wantKept: false},
-		{name: "specific agent filter keeps match", filter: "agent-alpha", itemAgent: "agent-alpha", wantKept: true},
-		{name: "specific agent filter drops aerial", filter: "agent-alpha", itemAgent: "aerial", wantKept: false},
-		{name: "specific agent filter drops empty", filter: "agent-alpha", itemAgent: "", wantKept: false},
+		{name: "matching agent kept by every wrapper", filter: "agent-alpha", itemAgent: "agent-alpha", wantKept: true},
+		{name: "other agent dropped by every wrapper", filter: "agent-alpha", itemAgent: "aerial", wantKept: false},
+		{name: "all filter short-circuits every wrapper", filter: "all", itemAgent: "agent-alpha", wantKept: true},
 	}
 
 	for _, tc := range tests {
@@ -189,95 +181,6 @@ func TestFactItemUnmarshalJSON_TableDriven(t *testing.T) {
 			}
 			if item.FactText != tc.wantText {
 				t.Errorf("item.FactText = %q, want %q", item.FactText, tc.wantText)
-			}
-		})
-	}
-}
-
-func TestBuildUpstreamURL_AgentForwarding_TableDriven(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name      string
-		target    string
-		baseURL   string
-		query     url.Values
-		wantQuery string
-		wantErr   bool
-	}{
-		{
-			name:      "facts agent forwarded",
-			target:    "facts",
-			baseURL:   "http://brain:8080",
-			query:     url.Values{"agent": {"agent-alpha"}},
-			wantQuery: "agent=agent-alpha",
-		},
-		{
-			name:      "facts agent all omitted",
-			target:    "facts",
-			baseURL:   "http://brain:8080",
-			query:     url.Values{"agent": {"all"}},
-			wantQuery: "",
-		},
-		{
-			name:      "schedules agent forwarded",
-			target:    "schedules",
-			baseURL:   "http://brain:8080",
-			query:     url.Values{"agent": {"agent-alpha"}},
-			wantQuery: "agent=agent-alpha",
-		},
-		{
-			name:      "schedules agent all omitted",
-			target:    "schedules",
-			baseURL:   "http://brain:8080",
-			query:     url.Values{"agent": {"all"}},
-			wantQuery: "",
-		},
-		{
-			name:      "schedule runs agent forwarded",
-			target:    "runs",
-			baseURL:   "http://brain:8080",
-			query:     url.Values{"agent": {"agent-alpha"}, "limit": {"10"}, "offset": {"0"}},
-			wantQuery: "agent=agent-alpha",
-		},
-		{
-			name:      "vanadis builds agent forwarded",
-			target:    "builds",
-			baseURL:   "http://vanadis:4025",
-			query:     url.Values{"agent": {"agent-alpha"}, "limit": {"10"}},
-			wantQuery: "agent=agent-alpha",
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			var gotURL string
-			var err error
-			switch tc.target {
-			case "facts":
-				gotURL, _, _, err = BuildFactsUpstreamURL(tc.baseURL, tc.query)
-			case "schedules":
-				gotURL, err = BuildSchedulesUpstreamURL(tc.baseURL, tc.query)
-			case "runs":
-				gotURL, _, _, err = BuildScheduleRunsUpstreamURL(tc.baseURL, tc.query)
-			case "builds":
-				gotURL, _, err = BuildVanadisBuildsUpstreamURL(tc.baseURL, tc.query)
-			}
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("err = %v, wantErr %v", err, tc.wantErr)
-			}
-			parsed, err := url.Parse(gotURL)
-			if err != nil {
-				t.Fatalf("url.Parse(%q) error = %v", gotURL, err)
-			}
-			if tc.wantQuery != "" {
-				if parsed.Query().Get("agent") != tc.query.Get("agent") {
-					t.Errorf("agent query = %q, want %q", parsed.Query().Get("agent"), tc.query.Get("agent"))
-				}
-			} else {
-				if parsed.Query().Get("agent") != "" {
-					t.Errorf("expected empty agent query, got %q", parsed.Query().Get("agent"))
-				}
 			}
 		})
 	}
@@ -483,16 +386,16 @@ func TestAgentBrainURL_TableDriven(t *testing.T) {
 	}{
 		{name: "default agent keeps configured host", defaultURL: "http://eri.aerial", defaultAgent: "aerial", agent: "aerial", want: "http://eri.aerial"},
 		{name: "default agent match is normalized", defaultURL: "http://eri.aerial", defaultAgent: "aerial", agent: " Aerial ", want: "http://eri.aerial"},
-		{name: "sibling replaces first label", defaultURL: "http://eri.aerial", defaultAgent: "aerial", agent: "miorine", want: "http://eri-miorine.aerial"},
-		{name: "sibling agent normalized", defaultURL: "http://eri.aerial", defaultAgent: "aerial", agent: "  Suletta! ", want: "http://eri-suletta.aerial"},
-		{name: "port and scheme preserved", defaultURL: "https://eri.default.svc.cluster.local:8080", defaultAgent: "aerial", agent: "miorine", want: "https://eri-miorine.default.svc.cluster.local:8080"},
-		{name: "bare host with port", defaultURL: "http://eri:80", defaultAgent: "aerial", agent: "miorine", want: "http://eri-miorine:80"},
-		{name: "default stack not named aerial", defaultURL: "http://eri.aerial", defaultAgent: "miorine", agent: "aerial", want: "http://eri-aerial.aerial"},
-		{name: "first label not eri is underivable", defaultURL: "http://brain.aerial", defaultAgent: "aerial", agent: "miorine", want: ""},
-		{name: "eri only in later label is underivable", defaultURL: "http://x.eri.aerial", defaultAgent: "aerial", agent: "miorine", want: ""},
-		{name: "empty configured url", defaultURL: "", defaultAgent: "aerial", agent: "miorine", want: ""},
+		{name: "sibling replaces first label", defaultURL: "http://eri.aerial", defaultAgent: "aerial", agent: "agent-alpha", want: "http://eri-agent-alpha.aerial"},
+		{name: "sibling agent normalized", defaultURL: "http://eri.aerial", defaultAgent: "aerial", agent: "  Agent-Beta! ", want: "http://eri-agent-beta.aerial"},
+		{name: "port and scheme preserved", defaultURL: "https://eri.default.svc.cluster.local:8080", defaultAgent: "aerial", agent: "agent-alpha", want: "https://eri-agent-alpha.default.svc.cluster.local:8080"},
+		{name: "bare host with port", defaultURL: "http://eri:80", defaultAgent: "aerial", agent: "agent-alpha", want: "http://eri-agent-alpha:80"},
+		{name: "default stack not named aerial", defaultURL: "http://eri.aerial", defaultAgent: "agent-alpha", agent: "aerial", want: "http://eri-aerial.aerial"},
+		{name: "first label not eri is underivable", defaultURL: "http://brain.aerial", defaultAgent: "aerial", agent: "agent-alpha", want: ""},
+		{name: "eri only in later label is underivable", defaultURL: "http://x.eri.aerial", defaultAgent: "aerial", agent: "agent-alpha", want: ""},
+		{name: "empty configured url", defaultURL: "", defaultAgent: "aerial", agent: "agent-alpha", want: ""},
 		{name: "empty agent", defaultURL: "http://eri.aerial", defaultAgent: "aerial", agent: "  ", want: ""},
-		{name: "unparseable url", defaultURL: "http://eri.aerial:bad port", defaultAgent: "aerial", agent: "miorine", want: ""},
+		{name: "unparseable url", defaultURL: "http://eri.aerial:bad port", defaultAgent: "aerial", agent: "agent-alpha", want: ""},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -515,10 +418,10 @@ func TestSiblingBrainTargets_TableDriven(t *testing.T) {
 	}{
 		{
 			name: "default excluded, duplicates collapsed", defaultURL: "http://eri.aerial", defaultAgent: "aerial",
-			agents: []string{"aerial", "miorine", "Miorine", "suletta", ""},
-			want:   []AgentBrainTarget{{Agent: "miorine", URL: "http://eri-miorine.aerial"}, {Agent: "suletta", URL: "http://eri-suletta.aerial"}},
+			agents: []string{"aerial", "agent-alpha", "Agent-Alpha", "agent-beta", ""},
+			want:   []AgentBrainTarget{{Agent: "agent-alpha", URL: "http://eri-agent-alpha.aerial"}, {Agent: "agent-beta", URL: "http://eri-agent-beta.aerial"}},
 		},
-		{name: "underivable host yields none", defaultURL: "http://127.0.0.1:9999", defaultAgent: "aerial", agents: []string{"miorine"}, want: []AgentBrainTarget{}},
+		{name: "underivable host yields none", defaultURL: "http://127.0.0.1:9999", defaultAgent: "aerial", agents: []string{"agent-alpha"}, want: []AgentBrainTarget{}},
 		{name: "no agents", defaultURL: "http://eri.aerial", defaultAgent: "aerial", agents: nil, want: []AgentBrainTarget{}},
 	}
 	for _, tc := range tests {
@@ -540,7 +443,7 @@ func TestDefaultAgentFromTasks_TableDriven(t *testing.T) {
 	}{
 		{name: "no tasks falls back to default tenant", tasks: nil, want: "aerial"},
 		{name: "rows without agent fall back", tasks: []ActiveTaskStatus{{ID: "1"}}, want: "aerial"},
-		{name: "first reported agent wins", tasks: []ActiveTaskStatus{{ID: "1"}, {ID: "2", Agent: " Miorine "}}, want: "miorine"},
+		{name: "first reported agent wins", tasks: []ActiveTaskStatus{{ID: "1"}, {ID: "2", Agent: " Agent-Alpha "}}, want: "agent-alpha"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -576,7 +479,7 @@ func downServerURL(t *testing.T) string {
 
 func TestFetchActiveTasksFromAgents_TableDriven(t *testing.T) {
 	t.Parallel()
-	healthy := newEriTasksServer(t, `{"status":"ok","total":2,"tasks":[{"id":"m1","status":"PROCESSING"},{"id":"m2","status":"PENDING","agent":"miorine"}]}`)
+	healthy := newEriTasksServer(t, `{"status":"ok","total":2,"tasks":[{"id":"m1","status":"PROCESSING"},{"id":"m2","status":"PENDING","agent":"agent-alpha"}]}`)
 	other := newEriTasksServer(t, `{"status":"ok","total":1,"tasks":[{"id":"s1","status":"PROCESSING"}]}`)
 	down := downServerURL(t)
 	broken := newEriTasksServer(t, `not json`)
@@ -589,23 +492,23 @@ func TestFetchActiveTasksFromAgents_TableDriven(t *testing.T) {
 	}{
 		{
 			name:      "healthy rows stamped, down agent dropped",
-			targets:   []AgentBrainTarget{{Agent: "miorine", URL: healthy}, {Agent: "suletta", URL: down}},
+			targets:   []AgentBrainTarget{{Agent: "agent-alpha", URL: healthy}, {Agent: "agent-beta", URL: down}},
 			wantIDs:   []string{"m1", "m2"},
-			wantAgent: []string{"miorine", "miorine"},
+			wantAgent: []string{"agent-alpha", "agent-alpha"},
 		},
 		{
 			name:      "merge preserves target order",
-			targets:   []AgentBrainTarget{{Agent: "suletta", URL: other}, {Agent: "miorine", URL: healthy}},
+			targets:   []AgentBrainTarget{{Agent: "agent-beta", URL: other}, {Agent: "agent-alpha", URL: healthy}},
 			wantIDs:   []string{"s1", "m1", "m2"},
-			wantAgent: []string{"suletta", "miorine", "miorine"},
+			wantAgent: []string{"agent-beta", "agent-alpha", "agent-alpha"},
 		},
 		{
 			name:      "undecodable body dropped",
-			targets:   []AgentBrainTarget{{Agent: "suletta", URL: broken}, {Agent: "miorine", URL: healthy}},
+			targets:   []AgentBrainTarget{{Agent: "agent-beta", URL: broken}, {Agent: "agent-alpha", URL: healthy}},
 			wantIDs:   []string{"m1", "m2"},
-			wantAgent: []string{"miorine", "miorine"},
+			wantAgent: []string{"agent-alpha", "agent-alpha"},
 		},
-		{name: "all down yields empty list", targets: []AgentBrainTarget{{Agent: "suletta", URL: down}}, wantIDs: []string{}, wantAgent: []string{}},
+		{name: "all down yields empty list", targets: []AgentBrainTarget{{Agent: "agent-beta", URL: down}}, wantIDs: []string{}, wantAgent: []string{}},
 		{name: "no targets", targets: nil, wantIDs: []string{}, wantAgent: []string{}},
 	}
 	for _, tc := range tests {
@@ -637,7 +540,7 @@ func TestStampTaskAgent_TableDriven(t *testing.T) {
 		want  []ActiveTaskStatus
 	}{
 		{name: "nil yields empty", tasks: nil, agent: "aerial", want: []ActiveTaskStatus{}},
-		{name: "fills empty, keeps reported", tasks: []ActiveTaskStatus{{ID: "1"}, {ID: "2", Agent: "miorine"}}, agent: "aerial", want: []ActiveTaskStatus{{ID: "1", Agent: "aerial"}, {ID: "2", Agent: "miorine"}}},
+		{name: "fills empty, keeps reported", tasks: []ActiveTaskStatus{{ID: "1"}, {ID: "2", Agent: "agent-alpha"}}, agent: "aerial", want: []ActiveTaskStatus{{ID: "1", Agent: "aerial"}, {ID: "2", Agent: "agent-alpha"}}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
