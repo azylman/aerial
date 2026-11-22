@@ -740,6 +740,10 @@ func verifyUpdaterStep(t *testing.T, u *StatusUpdater, cmd string, expectDirty b
 	if cmd == "" {
 		return
 	}
+	// The constructor auto-starts the background flush loop, which would race this
+	// explicit flush (a failed send re-marks dirty, so both goroutines could forward the
+	// step). Stop it first so this flush is the only one; cleanup's Stop is idempotent.
+	u.Stop()
 	u.HandleStep(&runner.StepUpdateEvent{
 		StepType: "tool",
 		ToolName: "run_command",

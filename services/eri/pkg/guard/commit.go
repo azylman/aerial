@@ -1,11 +1,15 @@
 package guard
 
 import (
+	"cmp"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/azylman/aerial/pkg/sanitizer"
@@ -239,76 +243,191 @@ func unwrapShellScriptCommand(tokens []string) (string, bool) {
 }
 
 // FormatCommitDenyReason constructs a human-readable explanation of detected violations.
+// Samples are masked so a matched token is never echoed back into the transcript.
 func FormatCommitDenyReason(violations []Violation) string {
 	var sb strings.Builder
 	sb.WriteString("Commit blocked by commit-safety-guard: sensitive pattern violations detected:\n")
 	for _, v := range violations {
 		fmt.Fprintf(&sb, "- %s:%d [%s] matches '%s' (sample: %s)\n",
-			v.File, v.LineNum, v.Category, v.Pattern, v.Sample)
+			v.File, v.LineNum, v.Category, v.Pattern, maskSampleOnce(v.Sample))
 	}
 	sb.WriteString("Please remove secrets, tokens, or PII before committing. ")
 	sb.WriteString("If this is a configuration change intended for aerial-config, author changes in aerial-config where this guard is disabled.")
 	return sb.String()
 }
 
-// CheckOutboundSecrets inspects run_command (args.CommandLine) and call_mcp_tool / mcp_*
-// (marshaling args.Arguments/Extra + args.CommandLine) against registered Infisical secrets and pattern rules.
-// getenv resolves the custom pattern sources (HOME, AERIAL_COMMIT_GUARD_PATTERNS).
-func CheckOutboundSecrets(toolName string, args ToolArgs, getenv func(string) string) *Decision {
-	rawLower := strings.ToLower(strings.TrimSpace(toolName))
-	cleanName := normalizeToolName(toolName)
-	if isInfisicalMCPCall(toolName, args) {
-		return &Decision{Decision: DecisionAllow}
+// maskSampleOnce masks sample unless it already is a masked sample (first2***last2 or [REDACTED]).
+func maskSampleOnce(sample string) string {
+	if sample == "[REDACTED]" || strings.Contains(sample, "***") {
+		return sample
 	}
-	var textToScan string
+	return sanitizer.MaskTokenSample(sample)
+}
 
+// toolExec is Codex's code-mode custom tool; MCP calls are made from the JavaScript it runs.
+const toolExec = "exec"
+
+// codexMCPRefPattern matches mcp__<server>__<tool> identifiers referenced from Codex exec code
+// (tools.mcp__a__b(...), tools["mcp__a__b"], destructuring). Every reference counts, not only
+// call sites, so aliasing a tool before calling it is still scanned.
+var codexMCPRefPattern = regexp.MustCompile(`\bmcp__[A-Za-z0-9_$-]+`)
+
+// resolveMCPCall derives the MCP destination (Server is empty when the shape cannot be parsed) from every engine's PreToolUse shape: Claude and
+// muse mcp__<server>__<tool>, Codex namespace="mcp__<server>" + name=<tool>, muse/Codex
+// mcp:<server>:<tool> and agy call_mcp_tool (canonical fields, then lowercase fallbacks).
+// ok is false when the call is not an MCP call at all.
+func resolveMCPCall(toolName string, raw json.RawMessage, args ToolArgs) (EgressScanRequest, bool) {
+	trimmed := strings.TrimSpace(toolName)
+	lower := strings.ToLower(trimmed)
+	switch {
+	case isClaudeMCPToolName(trimmed):
+		parts := strings.Split(trimmed, "__")
+		return EgressScanRequest{Server: strings.Join(parts[1:len(parts)-1], "__"), Tool: parts[len(parts)-1], Arguments: raw}, true
+	case strings.HasPrefix(strings.ToLower(strings.TrimSpace(args.Namespace)), "mcp__"):
+		return EgressScanRequest{Server: strings.TrimSpace(args.Namespace)[len("mcp__"):], Tool: trimmed, Arguments: raw}, true
+	case strings.HasPrefix(lower, "mcp:"):
+		parts := strings.Split(trimmed, ":")
+		if len(parts) < 3 {
+			return EgressScanRequest{Tool: trimmed, Arguments: raw}, true
+		}
+		return EgressScanRequest{Server: strings.Join(parts[1:len(parts)-1], ":"), Tool: parts[len(parts)-1], Arguments: raw}, true
+	case normalizeToolName(trimmed) == toolCallMCPTool:
+		call := EgressScanRequest{
+			Server:    cmp.Or(strings.TrimSpace(args.ServerName), strings.TrimSpace(args.ServerNameLower)),
+			Tool:      cmp.Or(strings.TrimSpace(args.ToolName), strings.TrimSpace(args.ToolNameLower)),
+			Arguments: args.Arguments,
+		}
+		if len(call.Arguments) == 0 {
+			call.Arguments = args.ArgumentsLower
+		}
+		return call, true
+	case strings.HasPrefix(lower, "mcp_"):
+		return EgressScanRequest{Arguments: raw}, true
+	default:
+		return EgressScanRequest{}, false
+	}
+}
+
+// codexExecMCPCalls returns the distinct non-Infisical MCP destinations referenced by a Codex
+// exec input, each carrying the full exec input encoded as a JSON string, sorted by server/tool.
+func codexExecMCPCalls(raw json.RawMessage, args ToolArgs) []EgressScanRequest {
+	text := args.Input
+	if text == "" {
+		if err := json.Unmarshal(raw, &text); err != nil {
+			text = string(raw)
+		}
+	}
+	encoded, err := json.Marshal(text)
+	if err != nil {
+		return nil
+	}
+	seen := make(map[string]bool)
+	var calls []EgressScanRequest
+	for _, ref := range codexMCPRefPattern.FindAllString(text, -1) {
+		parts := strings.Split(ref[len("mcp__"):], "__")
+		if len(parts) < 2 {
+			continue
+		}
+		server, tool := strings.Join(parts[:len(parts)-1], "__"), parts[len(parts)-1]
+		key := strings.ToLower(server + "/" + tool)
+		if server == "" || tool == "" || isInfisicalMCPCall(server) || seen[key] {
+			continue
+		}
+		seen[key] = true
+		calls = append(calls, EgressScanRequest{Server: server, Tool: tool, Arguments: encoded})
+	}
+	slices.SortFunc(calls, func(a, b EgressScanRequest) int {
+		return cmp.Or(cmp.Compare(a.Server, b.Server), cmp.Compare(a.Tool, b.Tool))
+	})
+	return calls
+}
+
+// CheckOutboundSecrets guards outbound tool calls. Shell commands (run_command / Bash) are
+// regex-scanned locally. MCP calls (every engine shape, including Codex exec code referencing
+// mcp__ tools) are sent to the eri-restate egress scan endpoint, which scans only blocklisted
+// destinations against registered secret values and the pattern rules. Infisical MCP calls
+// pass unscanned. A missing or failing scanner, or an MCP call whose server cannot be derived,
+// denies (fail closed). raw is the payload's tool input; getenv resolves the custom pattern
+// sources for the local shell scan.
+func CheckOutboundSecrets(toolName string, raw json.RawMessage, args ToolArgs, getenv func(string) string, scanner EgressScanner) *Decision {
+	cleanName := normalizeToolName(toolName)
 	switch {
 	case cleanName == toolRunCommand || cleanName == toolBash:
-		textToScan = args.CommandLine
-	case cleanName == toolCallMCPTool || strings.HasPrefix(cleanName, "mcp_") || strings.HasPrefix(rawLower, "mcp_") || strings.HasPrefix(rawLower, "mcp:"):
-		parts := []string{
-			args.CommandLine,
-			string(args.Arguments),
-			string(args.ArgumentsLower),
-			args.ToolName,
-			args.ToolNameLower,
-			args.ServerName,
-			args.ServerNameLower,
-		}
-		textToScan = strings.TrimSpace(strings.Join(parts, "\n"))
-	default:
+		return checkShellSecrets(args.CommandLine, cleanName, getenv)
+	case cleanName == toolExec && args.Namespace == "":
+		return checkEgress(codexExecMCPCalls(raw, args), scanner)
+	}
+	call, ok := resolveMCPCall(toolName, raw, args)
+	if !ok {
 		return &Decision{Decision: DecisionAllow}
 	}
-
-	if textToScan == "" {
-		return &Decision{Decision: DecisionAllow}
-	}
-
-	violations := scanLocal(textToScan, cleanName, getenv)
-	if len(violations) > 0 {
+	if call.Server == "" || call.Tool == "" {
 		return &Decision{
 			Decision: DecisionDeny,
-			Reason:   FormatCommitDenyReason(violations),
+			Reason: fmt.Sprintf("Outbound secret guard: could not derive the MCP server and tool from tool name %q, "+
+				"so the MCP call was blocked (unrecognized MCP call shape; teach guard.resolveMCPCall this engine's format).", toolName),
 		}
 	}
+	if isInfisicalMCPCall(call.Server) {
+		return &Decision{Decision: DecisionAllow}
+	}
+	return checkEgress([]EgressScanRequest{call}, scanner)
+}
 
+// checkShellSecrets regex-scans a shell command line in-process.
+func checkShellSecrets(commandLine, label string, getenv func(string) string) *Decision {
+	if strings.TrimSpace(commandLine) == "" {
+		return &Decision{Decision: DecisionAllow}
+	}
+	if violations := scanLocal(commandLine, label, getenv); len(violations) > 0 {
+		return &Decision{Decision: DecisionDeny, Reason: FormatCommitDenyReason(violations)}
+	}
 	return &Decision{Decision: DecisionAllow}
+}
+
+// checkEgress asks scanner about each MCP destination and denies on the first blocked result or
+// scan error. A nil scanner counts as unavailable.
+func checkEgress(calls []EgressScanRequest, scanner EgressScanner) *Decision {
+	for _, call := range calls {
+		if scanner == nil {
+			return egressUnavailableDecision(call, errors.New("no egress scanner configured"))
+		}
+		result, err := scanner.Scan(context.Background(), call)
+		if err != nil {
+			return egressUnavailableDecision(call, err)
+		}
+		if result.Blocked {
+			return &Decision{Decision: DecisionDeny, Reason: formatEgressDenyReason(call, result.Violations)}
+		}
+	}
+	return &Decision{Decision: DecisionAllow}
+}
+
+func egressUnavailableDecision(call EgressScanRequest, err error) *Decision {
+	return &Decision{
+		Decision: DecisionDeny,
+		Reason: fmt.Sprintf("Outbound secret guard: the egress scan is unavailable (%v), so the MCP call to %s/%s was blocked. "+
+			"Retry once eri-restate's egress scan endpoint is healthy.", err, call.Server, call.Tool),
+	}
+}
+
+// formatEgressDenyReason lists category and masked sample of each violation, never raw values.
+func formatEgressDenyReason(call EgressScanRequest, violations []EgressViolation) string {
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "Outbound secret guard: MCP call to %s/%s blocked because its arguments carry secrets:\n", call.Server, call.Tool)
+	for _, v := range violations {
+		fmt.Fprintf(&sb, "- [%s] sample: %s\n", v.Category, maskSampleOnce(v.Sample))
+	}
+	sb.WriteString("This destination never legitimately receives secrets; remove the secret from the arguments.")
+	return sb.String()
 }
 
 // infisicalMCPServer is the server name the Infisical MCP is registered under on both stacks.
 const infisicalMCPServer = "infisical"
 
-// isInfisicalMCPCall reports whether a tool call targets the Infisical MCP server, whose whole
-// purpose is reading and writing secrets (every call carries the registered project ID), so the
-// outbound secret scan would deny all of them. The server segment must match exactly.
-func isInfisicalMCPCall(toolName string, args ToolArgs) bool {
-	if isClaudeMCPToolName(toolName) {
-		parts := strings.Split(strings.TrimSpace(toolName), "__")
-		return strings.EqualFold(strings.Join(parts[1:len(parts)-1], "__"), infisicalMCPServer)
-	}
-	if normalizeToolName(toolName) != toolCallMCPTool {
-		return false
-	}
-	return strings.EqualFold(strings.TrimSpace(args.ServerName), infisicalMCPServer) ||
-		strings.EqualFold(strings.TrimSpace(args.ServerNameLower), infisicalMCPServer)
+// isInfisicalMCPCall reports whether server is the Infisical MCP server, whose whole purpose is
+// reading and writing secrets (every call carries the registered project ID), so the outbound
+// secret scan would deny all of them. The server must match exactly (case-insensitive).
+func isInfisicalMCPCall(server string) bool {
+	return strings.EqualFold(strings.TrimSpace(server), infisicalMCPServer)
 }
