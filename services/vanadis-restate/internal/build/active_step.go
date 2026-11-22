@@ -125,6 +125,14 @@ func (b *BuildObject) syncSingleActiveStepIteration(rc restate.RunContext, build
 		return
 	}
 
+	if bld != nil && model.IsTerminalBuildStatus(bld.Status) {
+		if b.executor != nil {
+			b.executor.ClearActiveSteps(buildID)
+		}
+		b.activeStepSyncs.Delete(buildID)
+		return
+	}
+
 	state.mu.Lock()
 	currentSteps := maps.Clone(state.activeSteps)
 	isAuthoritative := req.ActiveSteps != nil || req.ClearAll

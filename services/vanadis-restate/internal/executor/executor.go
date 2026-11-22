@@ -401,7 +401,11 @@ func (e *Executor) SyncBuildWidget(ctx context.Context, st store.VanadisStore, b
 			build.StatusMessageID = latest
 		}
 	}
-	e.OverlayActiveSteps(build.ID, chunks)
+	if model.IsTerminalBuildStatus(build.Status) {
+		e.ClearActiveSteps(build.ID)
+	} else {
+		e.OverlayActiveSteps(build.ID, chunks)
+	}
 	widgetReq := widget.BuildSyncWidgetRequest(build, chunks, e.deployUIURL)
 	if notice != "" {
 		widgetReq.Banner = notice

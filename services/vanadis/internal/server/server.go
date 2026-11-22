@@ -117,7 +117,6 @@ type VanadisServer struct {
 	auth                  *k8sauth.Authenticator
 	activeStepMu          sync.Mutex
 	stepsByBuild          map[string]map[string]string
-	stepSeqByBuild        map[string]uint64
 	inFlightBuilds        map[string]bool
 	lastForwardedAt       map[string]time.Time
 	dirtyBuilds           map[string]bool

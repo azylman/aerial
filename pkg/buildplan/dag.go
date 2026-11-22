@@ -264,6 +264,16 @@ func IsTerminalChunkStatus(status string) bool {
 	}
 }
 
+// IsTerminalBuildStatus reports whether a build status is terminal (completed, failed, cancelled).
+func IsTerminalBuildStatus(status string) bool {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case dagStatusCompleted, dagStatusFailed, dagStatusCancelled:
+		return true
+	default:
+		return false
+	}
+}
+
 // IsPRDependencyCodeReady reports whether a chunk's code is available to
 // dependent PR chunks (completed code, or merged/deploying PRs).
 func IsPRDependencyCodeReady(other VanadisChunk) bool {

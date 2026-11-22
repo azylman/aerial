@@ -116,9 +116,6 @@ func TestNewExecutor(t *testing.T) {
 			exec := NewExecutor(tc.shareRoot, nil, nil, "tok", "example-owner", nil, tc.deployUIURL...)
 			assert.Equal(t, tc.wantShare, exec.shareRoot)
 			assert.Equal(t, tc.wantDeploy, exec.deployUIURL)
-			assert.Equal(t, "example-owner", exec.GitHubOwner())
-			var nilExec *Executor
-			assert.Empty(t, nilExec.GitHubOwner())
 		})
 	}
 }
@@ -492,29 +489,34 @@ func TestExecutor_ActiveSteps(t *testing.T) {
 		buildID       string
 		initialSteps  map[string]string
 		setSteps      map[string]string
+		callClear     bool
 		clearBuildID  string
 		inputChunks   []model.VanadisChunk
 		expectOverlay map[string]string
 	}{
 		{
-			name:         "nil executor noop",
-			nilExec:      true,
-			buildID:      "b1",
-			setSteps:     map[string]string{"c1": "step 1"},
-			clearBuildID: "b1",
-			inputChunks:  []model.VanadisChunk{{ID: "c1"}},
+			name:          "nil executor noop",
+			nilExec:       true,
+			buildID:       "b1",
+			setSteps:      map[string]string{"c1": "step 1"},
+			callClear:     true,
+			clearBuildID:  "b1",
+			inputChunks:   []model.VanadisChunk{{ID: "c1", ActiveStep: "original"}},
+			expectOverlay: map[string]string{"c1": "original"},
 		},
 		{
-			name:        "empty build id noop",
-			buildID:     "",
-			setSteps:    map[string]string{"c1": "step 1"},
-			inputChunks: []model.VanadisChunk{{ID: "c1"}},
+			name:          "empty build id noop",
+			buildID:       "",
+			setSteps:      map[string]string{"c1": "step 1"},
+			inputChunks:   []model.VanadisChunk{{ID: "c1", ActiveStep: "original"}},
+			expectOverlay: map[string]string{"c1": "original"},
 		},
 		{
-			name:        "empty input chunks noop",
-			buildID:     "b1",
-			setSteps:    map[string]string{"c1": "step 1"},
-			inputChunks: nil,
+			name:          "empty input chunks noop",
+			buildID:       "b1",
+			setSteps:      map[string]string{"c1": "step 1"},
+			inputChunks:   nil,
+			expectOverlay: map[string]string{},
 		},
 		{
 			name:     "all empty steps clears map",
@@ -523,6 +525,7 @@ func TestExecutor_ActiveSteps(t *testing.T) {
 			inputChunks: []model.VanadisChunk{
 				{ID: "c1", ActiveStep: ""},
 			},
+			expectOverlay: map[string]string{"c1": ""},
 		},
 		{
 			name:    "set and overlay active steps",
@@ -546,6 +549,7 @@ func TestExecutor_ActiveSteps(t *testing.T) {
 			name:         "clear active steps removes overlay",
 			buildID:      "b1",
 			initialSteps: map[string]string{"c1": "step 1"},
+			callClear:    true,
 			clearBuildID: "b1",
 			inputChunks:  []model.VanadisChunk{{ID: "c1"}},
 			expectOverlay: map[string]string{
@@ -556,6 +560,7 @@ func TestExecutor_ActiveSteps(t *testing.T) {
 			name:         "clear active steps with empty buildID noop",
 			buildID:      "b1",
 			initialSteps: map[string]string{"c1": "step 1"},
+			callClear:    true,
 			clearBuildID: "",
 			inputChunks:  []model.VanadisChunk{{ID: "c1"}},
 			expectOverlay: map[string]string{
@@ -577,7 +582,7 @@ func TestExecutor_ActiveSteps(t *testing.T) {
 				if tc.setSteps != nil {
 					exec.SetActiveSteps(tc.buildID, tc.setSteps)
 				}
-				if tc.clearBuildID != "" || tc.name == "clear active steps with empty buildID noop" {
+				if tc.callClear {
 					exec.ClearActiveSteps(tc.clearBuildID)
 				}
 			}
@@ -587,10 +592,48 @@ func TestExecutor_ActiveSteps(t *testing.T) {
 
 			exec.OverlayActiveSteps(tc.buildID, chunks)
 
+			if len(tc.inputChunks) == 0 {
+				assert.Empty(t, chunks)
+			}
 			for _, ch := range chunks {
-				if tc.expectOverlay != nil {
-					assert.Equal(t, tc.expectOverlay[ch.ID], ch.ActiveStep)
-				}
+				assert.Equal(t, tc.expectOverlay[ch.ID], ch.ActiveStep)
+			}
+		})
+	}
+}
+
+func TestExecutor_SyncBuildWidget_ClearsTerminalBuildActiveSteps(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		status      string
+		expectClear bool
+	}{
+		{name: "running build preserves active steps", status: "running", expectClear: false},
+		{name: "completed build clears active steps", status: "completed", expectClear: true},
+		{name: "failed build clears active steps", status: "failed", expectClear: true},
+		{name: "cancelled build clears active steps", status: "cancelled", expectClear: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			eri := &mintingEriClient{}
+			exec := NewExecutor("", eri, nil, "tok", "owner", nil)
+			exec.SetActiveSteps("b1", map[string]string{"c1": "step 1"})
+
+			bld := model.VanadisBuild{ID: "b1", Status: tc.status}
+			chunks := []model.VanadisChunk{{ID: "c1"}}
+
+			_, err := exec.SyncBuildWidget(context.Background(), nil, bld, chunks, "")
+			assert.NoError(t, err)
+
+			val, ok := exec.activeSteps.Load("b1")
+			if tc.expectClear {
+				assert.False(t, ok)
+				assert.Nil(t, val)
+			} else {
+				assert.True(t, ok)
+				assert.NotNil(t, val)
 			}
 		})
 	}
