@@ -1010,6 +1010,25 @@ spec:
       path: /metrics
       interval: 15s
 ---
+# Scrapes the Restate server (not the SDK runner pods) on its metrics port.
+# Discovery is label-based across all namespaces so a blue/green RestateCluster
+# rename keeps being scraped without editing this object.
+apiVersion: operator.victoriametrics.com/v1beta1
+kind: VMPodScrape
+metadata:
+  name: restate
+  namespace: default
+spec:
+  namespaceSelector:
+    any: true
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: restate
+  podMetricsEndpoints:
+    - port: metrics
+      path: /metrics
+      interval: 30s
+---
 apiVersion: operator.victoriametrics.com/v1beta1
 kind: VMSingle
 metadata:
