@@ -10,7 +10,6 @@ import (
 	"log"
 	"net/http"
 	"net/url"
-	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -25,7 +24,6 @@ import (
 	"github.com/azylman/aerial/pkg/k8sauth"
 	"github.com/azylman/aerial/pkg/restateingress"
 	"github.com/azylman/aerial/pkg/sanitizer"
-	"github.com/azylman/aerial/pkg/tracing"
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
 	"github.com/azylman/aerial/services/eri/pkg/delivery"
@@ -65,13 +63,6 @@ func validateSnowflakeID(w http.ResponseWriter, id, field string) bool {
 		return false
 	}
 	return true
-}
-
-func checkPromptActiveTurn(ctx context.Context, store db.Store, skipIfActive bool, channelID string) (bool, error) {
-	if !skipIfActive || store == nil {
-		return false, nil
-	}
-	return store.HasActiveThreadTurn(ctx, channelID)
 }
 
 func resolvePromptChannelID(channelID string, pool *queue.WorkerPool) string {
@@ -173,74 +164,7 @@ func handlePrompt(store db.Store, pool *queue.WorkerPool) http.HandlerFunc {
 			return
 		}
 
-		if client := resolveRestateClient(); client != nil {
-			handleRestatePrompt(r.Context(), w, client, req, channelID)
-			return
-		}
-
-		active, err := checkPromptActiveTurn(r.Context(), store, req.SkipIfActive, channelID)
-		if err != nil {
-			log.Printf("[HTTP] Failed to check active turn for %s: %v", channelID, err)
-			writeErr(w, http.StatusInternalServerError, "Failed to check active turn")
-			return
-		}
-		if active {
-			httpkit.WriteJSON(w, http.StatusOK, map[string]string{
-				jsonKeyStatus:    "skipped_active",
-				jsonKeyChannelID: channelID,
-				jsonKeySessionID: channelID,
-			})
-			return
-		}
-
-		msgID := strings.TrimSpace(req.MessageID)
-		if msgID == "" {
-			msgID = uuid.New().String()
-		}
-
-		msg := db.Message{
-			ID:          msgID,
-			ThreadID:    channelID,
-			GuildID:     "",
-			AuthorID:    "http-client",
-			AuthorName:  "HTTP Client",
-			IsAdmin:     true,
-			Content:     req.Prompt,
-			Summary:     db.CleanTaskSummary(req.Prompt),
-			Status:      db.StatusPending,
-			Effort:      effort,
-			ChannelID:   channelID,
-			Model:       model,
-			Traceparent: tracing.Traceparent(r.Context()),
-			CreatedAt:   time.Now().UTC(),
-			UpdatedAt:   time.Now().UTC(),
-		}
-
-		if store == nil {
-			writeErr(w, http.StatusInternalServerError, "Database store not configured")
-			return
-		}
-
-		insertCtx, insertCancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Second) // persists even if the caller disconnects
-		if err := store.InsertMessage(insertCtx, msg); err != nil {
-			insertCancel()
-			log.Printf("Failed to insert HTTP prompt message %s to DB: %v", msgID, err)
-			writeErr(w, http.StatusInternalServerError, fmt.Sprintf("Failed to persist prompt message: %v", err))
-			return
-		}
-		insertCancel()
-
-		if pool != nil {
-			pool.Enqueue(msg)
-		}
-
-		httpkit.WriteJSON(w, http.StatusAccepted, map[string]string{
-			jsonKeyStatus:    "accepted",
-			jsonKeyChannelID: channelID,
-			jsonKeySessionID: channelID,
-			jsonKeyMessageID: msgID,
-			"message":        "Prompt execution enqueued in background",
-		})
+		handleRestatePrompt(r.Context(), w, resolveRestateClient(), req, channelID)
 	}
 }
 
@@ -274,27 +198,6 @@ func checkDuplicateDispatch(ctx context.Context, store db.Store, dispatchID stri
 	return existing != nil, nil
 }
 
-func handleSkipActiveDispatch(ctx context.Context, w http.ResponseWriter, store db.Store, req *DispatchRequest, sessionID, dispatchID string) bool {
-	if !req.SkipIfActive || store == nil {
-		return false
-	}
-	active, err := store.HasActiveDispatchTurn(ctx, sessionID, dispatchID)
-	if err != nil {
-		log.Printf("[HTTP] Failed to check active turn for %s: %v", sessionID, err)
-		writeErr(w, http.StatusInternalServerError, "Failed to check active turn")
-		return true
-	}
-	if active {
-		httpkit.WriteJSON(w, http.StatusOK, map[string]string{
-			jsonKeyStatus:     "skipped_active",
-			jsonKeyDispatchID: dispatchID,
-			jsonKeySessionID:  sessionID,
-		})
-		return true
-	}
-	return false
-}
-
 func handleDuplicateDispatch(ctx context.Context, w http.ResponseWriter, store db.Store, rawID, dispatchID, sessionID string) bool {
 	if strings.TrimSpace(rawID) == "" || store == nil {
 		return false
@@ -313,24 +216,6 @@ func handleDuplicateDispatch(ctx context.Context, w http.ResponseWriter, store d
 		return true
 	}
 	return false
-}
-
-func buildDispatchRecord(req DispatchRequest, dispatchID, sessionID, traceparent string) db.Dispatch {
-	return db.Dispatch{
-		ID:             dispatchID,
-		Source:         strings.ToLower(strings.TrimSpace(req.Source)),
-		SessionID:      sessionID,
-		TargetID:       req.TargetID,
-		VanadisChunkID: req.VanadisChunkID,
-		Prompt:         req.Prompt,
-		Summary:        db.CleanTaskSummary(req.Prompt),
-		Effort:         strings.ToLower(strings.TrimSpace(req.Effort)),
-		Model:          strings.TrimSpace(req.Model),
-		Status:         db.StatusPending,
-		Traceparent:    traceparent,
-		CreatedAt:      time.Now().UTC(),
-		UpdatedAt:      time.Now().UTC(),
-	}
 }
 
 func handleRestateDispatch(ctx context.Context, w http.ResponseWriter, client *RestateIngressClient, req DispatchRequest, sessionID, dispatchID string) {
@@ -360,7 +245,7 @@ func handleRestateDispatch(ctx context.Context, w http.ResponseWriter, client *R
 	})
 }
 
-func handleDispatch(store db.Store, pool *queue.WorkerPool) http.HandlerFunc {
+func handleDispatch(store db.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, `{"error":"Method not allowed"}`, http.StatusMethodNotAllowed)
@@ -387,52 +272,7 @@ func handleDispatch(store db.Store, pool *queue.WorkerPool) http.HandlerFunc {
 			return
 		}
 
-		if client := resolveRestateClient(); client != nil {
-			handleRestateDispatch(r.Context(), w, client, req, sessionID, dispatchID)
-			return
-		}
-
-		if handleSkipActiveDispatch(r.Context(), w, store, &req, sessionID, dispatchID) {
-			return
-		}
-
-		if store == nil {
-			writeErr(w, http.StatusInternalServerError, "Database store not configured")
-			return
-		}
-
-		d := buildDispatchRecord(req, dispatchID, sessionID, tracing.Traceparent(r.Context()))
-
-		insertCtx, insertCancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Second) // persists even if the caller disconnects
-		inserted, err := store.InsertDispatch(insertCtx, d)
-		if err != nil {
-			insertCancel()
-			log.Printf("Failed to insert dispatch %s to DB: %v", dispatchID, err)
-			writeErr(w, http.StatusInternalServerError, fmt.Sprintf("Failed to persist dispatch: %v", err))
-			return
-		}
-		insertCancel()
-
-		if !inserted {
-			httpkit.WriteJSON(w, http.StatusOK, map[string]string{
-				jsonKeyStatus:     eriwire.StatusAlreadyExists,
-				jsonKeyDispatchID: dispatchID,
-				jsonKeyMessageID:  dispatchID,
-				jsonKeySessionID:  sessionID,
-			})
-			return
-		}
-
-		if pool != nil {
-			pool.EnqueueDispatch(d)
-		}
-
-		httpkit.WriteJSON(w, http.StatusAccepted, map[string]string{
-			jsonKeyStatus:     "accepted",
-			jsonKeyDispatchID: dispatchID,
-			jsonKeyMessageID:  dispatchID,
-			jsonKeySessionID:  sessionID,
-		})
+		handleRestateDispatch(r.Context(), w, resolveRestateClient(), req, sessionID, dispatchID)
 	}
 }
 
@@ -444,7 +284,7 @@ type CancelDispatchRequest struct {
 	Reason     string `json:"reason,omitempty"`
 }
 
-func handleCancelDispatch(store db.Store, pools ...*queue.WorkerPool) http.HandlerFunc {
+func handleCancelDispatch() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			w.Header().Set("Allow", "POST")
@@ -469,33 +309,13 @@ func handleCancelDispatch(store db.Store, pools ...*queue.WorkerPool) http.Handl
 			return
 		}
 		reason := resolveCancelReason(req.Reason, buildID, dispatchID)
-		if client := resolveRestateClient(); client != nil {
-			count, ids, err := handleCancelDispatchViaRestate(r.Context(), client, dispatchID, buildID, reason)
-			if err != nil {
-				log.Printf("[HTTP] Failed to cancel dispatch via restate: %v", err)
-				writeErr(w, http.StatusInternalServerError, "Failed to cancel dispatch: "+err.Error())
-				return
-			}
-			httpkit.WriteJSON(w, http.StatusOK, map[string]any{jsonKeyStatus: "ok", "cancelled_count": count, "cancelled_ids": ids})
-			return
-		}
-		if store == nil {
-			writeErr(w, http.StatusInternalServerError, "Database store not configured")
-			return
-		}
-		cancelledIDs, err := store.CancelPendingDispatches(r.Context(), dispatchID, buildID, reason)
+		count, ids, err := handleCancelDispatchViaRestate(r.Context(), resolveRestateClient(), dispatchID, buildID, reason)
 		if err != nil {
-			writeStoreErr(w, "cancelling dispatches", err)
+			log.Printf("[HTTP] Failed to cancel dispatch via restate: %v", err)
+			writeErr(w, http.StatusInternalServerError, "Failed to cancel dispatch: "+err.Error())
 			return
 		}
-		if len(pools) > 0 && pools[0] != nil {
-			for _, pid := range pools[0].CancelDispatches(dispatchID, buildID, reason) {
-				if !slices.Contains(cancelledIDs, pid) {
-					cancelledIDs = append(cancelledIDs, pid)
-				}
-			}
-		}
-		httpkit.WriteJSON(w, http.StatusOK, map[string]any{jsonKeyStatus: "ok", "cancelled_count": len(cancelledIDs), "cancelled_ids": cancelledIDs})
+		httpkit.WriteJSON(w, http.StatusOK, map[string]any{jsonKeyStatus: "ok", "cancelled_count": count, "cancelled_ids": ids})
 	}
 }
 
@@ -1063,7 +883,7 @@ func handleTasks(store db.Store, poolOpt ...*queue.WorkerPool) http.HandlerFunc 
 	}
 }
 
-func handleInternalDiscordMessage(store db.Store, pool *queue.WorkerPool) http.HandlerFunc {
+func handleInternalDiscordMessage(pool *queue.WorkerPool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeErr(w, http.StatusMethodNotAllowed, "Method not allowed")
@@ -1083,7 +903,7 @@ func handleInternalDiscordMessage(store db.Store, pool *queue.WorkerPool) http.H
 		if pool != nil {
 			s = pool.DiscordSession()
 		}
-		status, err := processFunnelMessageIngress(r.Context(), s, store, pool, req.Message, req.BotUserID, req.RoleNames)
+		status, err := processFunnelMessageIngress(r.Context(), s, req.Message, req.BotUserID, req.RoleNames)
 		if err != nil {
 			log.Printf("[Internal Ingress] Error processing message %s: %v", req.Message.ID, err)
 			writeErr(w, http.StatusInternalServerError, "Failed to process message: "+err.Error())
@@ -1215,10 +1035,10 @@ func SetupBrainMuxWithEmbedder(store db.Store, txStore db.TranscriptStore, pool 
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", metrics.Handler())
 	mux.HandleFunc("/prompt", handlePrompt(store, pool))
-	mux.HandleFunc("/dispatch", handleDispatch(store, pool))
-	mux.HandleFunc("/dispatch/cancel", handleCancelDispatch(store, pool))
+	mux.HandleFunc("/dispatch", handleDispatch(store))
+	mux.HandleFunc("/dispatch/cancel", handleCancelDispatch())
 	mux.HandleFunc("/discord/message", handleDirectMessage(pool))
-	mux.HandleFunc("/internal/discord/message", handleInternalDiscordMessage(store, pool))
+	mux.HandleFunc("/internal/discord/message", handleInternalDiscordMessage(pool))
 	mux.HandleFunc("/internal/discord/interaction", handleInternalDiscordInteraction(store, pool))
 
 	var cfg *config.Config
