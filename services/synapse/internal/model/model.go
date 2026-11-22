@@ -19,6 +19,7 @@ type DeployingPR struct {
 	HeadSHA  string         `json:"head_sha"`
 	MergeSHA string         `json:"merge_sha"`
 	TargetID string         `json:"target_id"`
+	Jobs     []string       `json:"jobs,omitempty"`
 	Metadata map[string]any `json:"metadata"`
 }
 
