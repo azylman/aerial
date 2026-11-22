@@ -34,14 +34,6 @@ type fakeObjectRuntime struct {
 	cleared            bool
 	reconcileScheduled bool
 	reconcilesSent     []sentCrossBuildDeploySuccess
-	invocationID       string
-	deferredSends      []deferredSend
-}
-
-// deferredSend records one delayed deferral Reconcile.
-type deferredSend struct {
-	Delay time.Duration
-	Seq   int
 }
 
 // sentCrossBuildDeploySuccess records one cross-build Mutate(chunk_deploy_success) send.
@@ -444,13 +436,6 @@ func TestBuildObject_HandlersWithAuthorityAndMockContext(t *testing.T) {
 }
 
 func (f *fakeObjectRuntime) ScheduleReconcile() { f.reconcileScheduled = true }
-
-func (f *fakeObjectRuntime) ScheduleDeferredReconcile(delay time.Duration, seq int) {
-	f.reconcileScheduled = true
-	f.deferredSends = append(f.deferredSends, deferredSend{Delay: delay, Seq: seq})
-}
-
-func (f *fakeObjectRuntime) InvocationID() string { return f.invocationID }
 
 func (f *fakeObjectRuntime) SendCrossBuildDeploySuccess(service, buildID, chunkID string) {
 	f.reconcilesSent = append(f.reconcilesSent, sentCrossBuildDeploySuccess{Service: service, BuildID: buildID, ChunkID: chunkID})

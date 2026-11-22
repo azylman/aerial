@@ -163,8 +163,6 @@ const (
 // ReconcileBuildRequest is the input payload for the Restate Build Virtual Object.
 type ReconcileBuildRequest struct {
 	Reason string `json:"reason,omitempty"`
-	// DeferralSeq marks the delayed Reconcile that retries deferred launches.
-	DeferralSeq int `json:"deferral_seq,omitempty"`
 }
 
 // ReconcileBuildResult is the output of the Restate Build Virtual Object.
@@ -216,8 +214,6 @@ type objectRuntime interface {
 	SetState(state model.BuildObjectState)
 	ClearState()
 	ScheduleReconcile()
-	ScheduleDeferredReconcile(delay time.Duration, seq int)
-	InvocationID() string
 	SendCrossBuildDeploySuccess(service, buildID, chunkID string)
 	RunReconcileStep(name string, fn func(ctx context.Context) (reconcileStepOutput, error)) (reconcileStepOutput, error)
 }
@@ -254,7 +250,8 @@ func (r restateObjectRuntime) GetState() (*model.BuildObjectState, error) {
 }
 
 func (r restateObjectRuntime) SetState(state model.BuildObjectState) {
-	restate.Set(r.ctx, "state", &state)
+	compacted := compactStateForStorage(state)
+	restate.Set(r.ctx, "state", &compacted)
 }
 
 func (r restateObjectRuntime) ClearState() {
@@ -273,18 +270,6 @@ func (r restateObjectRuntime) RunReconcileStep(name string, fn func(ctx context.
 // probes, allowing completion and cancellation handlers to acquire the object.
 func (r restateObjectRuntime) ScheduleReconcile() {
 	_ = restate.ObjectSend(r.ctx, r.serviceName(), restate.Key(r.ctx), "Reconcile").Send(ReconcileBuildRequest{Reason: "active dispatch recovery"}, restate.WithDelay(time.Second))
-}
-
-// ScheduleDeferredReconcile sends the single delayed Reconcile that retries
-// launches eri deferred; seq identifies it as the build's pending retry.
-func (r restateObjectRuntime) ScheduleDeferredReconcile(delay time.Duration, seq int) {
-	_ = restate.ObjectSend(r.ctx, r.serviceName(), restate.Key(r.ctx), "Reconcile").Send(ReconcileBuildRequest{Reason: "active dispatch recovery", DeferralSeq: seq}, restate.WithDelay(delay))
-}
-
-// InvocationID returns the current invocation ID: stable across replays of
-// one invocation and fresh for every new invocation.
-func (r restateObjectRuntime) InvocationID() string {
-	return r.ctx.Request().ID
 }
 
 // SendCrossBuildDeploySuccess sends a one-way Mutate(chunk_deploy_success) to another build's Build object.
