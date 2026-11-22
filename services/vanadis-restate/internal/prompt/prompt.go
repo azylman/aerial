@@ -26,7 +26,8 @@ const chunkModeAction = "action"
 var declKeywordPrefixes = []string{"func ", "type ", "var ", "const ", "export ", "function ", "class "}
 
 // FormatCIFailurePrompt formats the failure prompt when a CI check fails.
-func FormatCIFailurePrompt(ev pubsub.PRLifecycleEvent, details string) string {
+func FormatCIFailurePrompt(ev pubsub.PRLifecycleEvent, details, chunkID, dispatchID string) string {
+	failChunk := fmt.Sprintf("call fail_chunk(chunk_id=%s, dispatch_id=%s, reason=\"BLOCKED: <reason and the decision needed>\") and then end the turn", chunkID, dispatchID)
 	var extraParts []string
 	cleanBranch := strings.TrimPrefix(strings.TrimSpace(ev.Branch), "refs/heads/")
 	if cleanBranch != "" {
@@ -42,13 +43,14 @@ func FormatCIFailurePrompt(ev pubsub.PRLifecycleEvent, details string) string {
 	checkoutAndSubmit := fmt.Sprintf("Check out the existing PR branch via '/share/aerial/scripts/aerial-pr.sh init %s --branch %s' and push updates via '/share/aerial/scripts/aerial-pr.sh submit <scratch_dir> \"<commit_msg>\"' (PR_DESCRIPTION.md is not required when updating an existing PR; never run bare 'git push').", shortRepo, branchArg)
 
 	directive := "[VANADIS CI REMEDIATION — MANDATORY]\n" +
-		"Investigate the failing logs, diagnose the root cause, verify locally, and remediate this turn. This turn must end in exactly one machine-visible outcome: (1) a fix pushed to the existing PR branch, or (2) a final line in the form REMEDIATION BLOCKED: <reason and the decision needed> when genuinely blocked. " + checkoutAndSubmit + "\n" +
-		"Ending this turn with neither a commit nor that blocked final line is a failed remediation, not a completed one. A recommendation, waiver request, or \"no legitimate fix\" conclusion written only in your final response is invisible to the thread and counts as no outcome.\n" +
+		"Investigate the failing logs, diagnose the root cause, verify locally, and remediate this turn. This turn must end in exactly one machine-visible outcome: (1) a fix pushed to the existing PR branch, or (2) when genuinely blocked, " + failChunk + ". " + checkoutAndSubmit + "\n" +
+		"If the details above lack the failing log, list the run's jobs via curl http://127.0.0.1:4028/internal/github-api/repos/<owner>/<repo>/actions/runs/<run_id>/jobs and fetch failed job logs from .../actions/jobs/<job_id>/logs (gh is not installed; github.com job pages need sign-in).\n" +
+		"Ending this turn with none of these outcomes pauses the chunk for human review automatically and is a failed remediation, not a completed one. A recommendation, waiver request, or \"no legitimate fix\" conclusion written only in your final response is invisible to the thread and counts as no outcome.\n" +
 		"If the correct fix conflicts with the chunk's stated boundaries, do not silently stop: apply the smallest boundary-crossing fix that makes the gate pass, note the scope change in the commit and PR description, and let the next chunk absorb it."
 	if prwire.IsRoboRevCheck(ev.CheckName) {
 		directive = "[VANADIS CI REMEDIATION — MANDATORY]\n" +
-			fmt.Sprintf("Please critically evaluate each RoboRev finding against codebase reality and architectural intent. This turn must end in exactly one machine-visible outcome: (1) a verified fix pushed to the existing PR branch, (2) a technical rebuttal recorded via '/share/aerial/scripts/aerial-pr.sh --repo %s override-roborev %d '<technical_rebuttal>'', or (3) a final line in the form REMEDIATION BLOCKED: <reason and the decision needed> when genuinely blocked. %s\n", shortRepo, ev.PRNumber, checkoutAndSubmit) +
-			"Ending this turn with no commit, no override, and no blocked final line is a failed remediation, not a completed one. A recommendation, waiver request, or \"no legitimate fix\" conclusion written only in your final response is invisible to the thread and counts as no outcome.\n" +
+			fmt.Sprintf("Please critically evaluate each RoboRev finding against codebase reality and architectural intent. This turn must end in exactly one machine-visible outcome: (1) a verified fix pushed to the existing PR branch, (2) a technical rebuttal recorded via '/share/aerial/scripts/aerial-pr.sh --repo %s override-roborev %d '<technical_rebuttal>'', or (3) when genuinely blocked, %s. %s\n", shortRepo, ev.PRNumber, failChunk, checkoutAndSubmit) +
+			"Ending this turn with none of these outcomes pauses the chunk for human review automatically and is a failed remediation, not a completed one. A recommendation, waiver request, or \"no legitimate fix\" conclusion written only in your final response is invisible to the thread and counts as no outcome.\n" +
 			"If the correct fix conflicts with the chunk's stated boundaries, do not silently stop: apply the smallest boundary-crossing fix that makes the gate pass, note the scope change in the commit and PR description, and let the next chunk absorb it."
 	}
 	return formatErrorDetailsBlock(
