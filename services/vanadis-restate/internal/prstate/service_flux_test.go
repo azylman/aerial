@@ -8,6 +8,8 @@ import (
 	restate "github.com/restatedev/sdk-go"
 	"github.com/restatedev/sdk-go/x/mocks"
 	"github.com/stretchr/testify/require"
+
+	"github.com/azylman/aerial/pkg/prwire"
 )
 
 func TestJournalKube(t *testing.T) {
@@ -124,7 +126,7 @@ func TestRepoObjectServiceHandleGitPush(t *testing.T) {
 		{name: "restate push dispatches", ev: push(0), kube: &fakeKube{}, wantSet: true, wantRun: true},
 		{
 			name: "retryable failure schedules a delayed retry", ev: push(1), kube: &fakeKube{pushErr: errKubeDown}, wantRun: true,
-			wantSends: []sentCall{{service: "RepoObject", key: "azylman/aerial", method: RepoHandlerGitPush, input: push(2), delayed: true}},
+			wantSends: []sentCall{{service: "RepoObject", key: "azylman/aerial", method: prwire.RepoHandlerGitPush, input: push(2), delayed: true}},
 		},
 		{name: "non-main ref fails terminally", ev: RepoEvent{Repo: "aerial", MainSHA: "m1", Ref: "refs/tags/v1"}, kube: &fakeKube{}, wantErr: true},
 	}
@@ -162,7 +164,7 @@ func TestRepoObjectServiceHandleImagePromotion(t *testing.T) {
 		{
 			name: "restate pr promotion forwards the rollout", ev: RepoEvent{Repo: "aerial", HeadSHA: "s1", PRNumber: 7, Images: []string{"eri"}, KustomizationRequests: requests},
 			kube: &fakeKube{}, wantSet: true, wantRun: true, wantCalls: []string{"promote eri@s1"},
-			wantSends: []sentCall{{service: "PRObject", key: "azylman/aerial#7", method: PRHandlerKustomizationRequested, input: PREvent{
+			wantSends: []sentCall{{service: "PRObject", key: "azylman/aerial#7", method: prwire.PRHandlerKustomizationRequested, input: PREvent{
 				Event: "kustomization_requested", Repo: "azylman/aerial", PRNumber: 7, HeadSHA: "s1", KustomizationRequests: requests,
 			}}},
 		},
@@ -200,9 +202,9 @@ func deployedRollout() *PRState {
 
 func TestPRObjectServiceHandleKustomizationRequestedReconcile(t *testing.T) {
 	t.Parallel()
-	gen1Key := EffectKey{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "m1", GateGeneration: 1, Kind: EffectFluxReconcile}
+	gen1Key := EffectKey{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "m1", GateGeneration: 1, Kind: prwire.EffectFluxReconcile}
 	indexSend := prIndexSend(PRIndexEvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "h1", MergeSHA: "m1", Generation: 1, Lifecycle: IndexDeploying})
-	retrySend := sentCall{service: "PRObject", key: "azylman/aerial#101", method: PRHandlerRetryFluxReconcile, input: FluxReconcileRetryRequest{Generation: 1, HeadSHA: "m1", Attempt: 1}, delayed: true}
+	retrySend := sentCall{service: "PRObject", key: "azylman/aerial#101", method: prwire.PRHandlerRetryFluxReconcile, input: FluxReconcileRetryRequest{Generation: 1, HeadSHA: "m1", Attempt: 1}, delayed: true}
 	ev := func(requests map[string]KustomizationRequest) PREvent {
 		return PREvent{Repo: "aerial", PRNumber: 101, HeadSHA: "m1", KustomizationRequests: requests}
 	}
@@ -295,7 +297,7 @@ func TestPRObjectServiceRetryReadiness(t *testing.T) {
 			require.Equal(t, tc.wantStatus, rec.saved.Status)
 			require.Empty(t, rec.saved.DeployedKustomizations)
 			require.Equal(t, uint64(2), rec.saved.GateGeneration)
-			require.Equal(t, tc.wantDispatched, rec.saved.WasEffectDispatched(EffectKey{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "m1", GateGeneration: 2, Kind: EffectFluxReconcile, JobName: "readiness-1"}))
+			require.Equal(t, tc.wantDispatched, rec.saved.WasEffectDispatched(EffectKey{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "m1", GateGeneration: 2, Kind: prwire.EffectFluxReconcile, JobName: "readiness-1"}))
 		})
 	}
 }
@@ -367,7 +369,7 @@ func TestPRObjectServiceRetryFluxReconcile(t *testing.T) {
 		},
 		{
 			name: "missing kube client reschedules", seed: deploying(), req: FluxReconcileRetryRequest{Generation: 2, HeadSHA: "m1", JobName: "readiness-1", Attempt: 1}, noKube: true,
-			wantSends: []sentCall{{service: "PRObject", key: "azylman/aerial#101", method: PRHandlerRetryFluxReconcile, input: FluxReconcileRetryRequest{Generation: 2, HeadSHA: "m1", JobName: "readiness-1", Attempt: 2}, delayed: true}},
+			wantSends: []sentCall{{service: "PRObject", key: "azylman/aerial#101", method: prwire.PRHandlerRetryFluxReconcile, input: FluxReconcileRetryRequest{Generation: 2, HeadSHA: "m1", JobName: "readiness-1", Attempt: 2}, delayed: true}},
 		},
 		{
 			name: "terminal failure commits", seed: deploying(), req: FluxReconcileRetryRequest{Generation: 2, HeadSHA: "m1", JobName: "readiness-1", Attempt: 1},
@@ -390,7 +392,7 @@ func TestPRObjectServiceRetryFluxReconcile(t *testing.T) {
 			require.Equal(t, tc.wantSet, rec.setCalled)
 			require.Equal(t, tc.wantSends, rec.sends.snapshot())
 			if tc.seed != nil {
-				require.Equal(t, tc.wantDispatched, tc.seed.WasEffectDispatched(EffectKey{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "m1", GateGeneration: 2, Kind: EffectFluxReconcile, JobName: "readiness-1"}))
+				require.Equal(t, tc.wantDispatched, tc.seed.WasEffectDispatched(EffectKey{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "m1", GateGeneration: 2, Kind: prwire.EffectFluxReconcile, JobName: "readiness-1"}))
 			}
 		})
 	}

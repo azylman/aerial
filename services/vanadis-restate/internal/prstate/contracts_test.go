@@ -2,6 +2,8 @@ package prstate
 
 import (
 	"testing"
+
+	"github.com/azylman/aerial/pkg/prwire"
 )
 
 // TestPRStateContracts freezes the key formats. Any rename here is a
@@ -19,9 +21,9 @@ func TestPRStateContracts(t *testing.T) {
 		{name: "deploy sha job key", got: DeploySHAJobKey("aerial", "eri", "abc123"), want: "sha:azylman/aerial:eri:abc123"},
 		{name: "canonical roborev", got: CanonicalFailedCheckKey("RoboRev Code Review"), want: "roborev"},
 		{name: "canonical trims and lowers", got: CanonicalFailedCheckKey("  Lint  "), want: "lint"},
-		{name: "effect key string", got: EffectKey{Repo: "aerial", PRNumber: 101, HeadSHA: "abc123", GateGeneration: 3, Kind: EffectDiscordAlert}.String(), want: "azylman/aerial#101@abc123:gen3:discord_alert"},
-		{name: "effect key deploy carries job", got: EffectKey{Repo: "aerial", PRNumber: 101, HeadSHA: "abc123", GateGeneration: 1, Kind: EffectDeployDispatch, JobName: "eri"}.String(), want: "azylman/aerial#101@abc123:gen1:deploy_dispatch:job=eri"},
-		{name: "effect key ci carries check", got: EffectKey{Repo: "aerial", PRNumber: 101, HeadSHA: "abc123", GateGeneration: 1, Kind: EffectGitHubRerun, CheckName: "Lint"}.String(), want: "azylman/aerial#101@abc123:gen1:github_rerun:check=lint"},
+		{name: "effect key string", got: EffectKey{Repo: "aerial", PRNumber: 101, HeadSHA: "abc123", GateGeneration: 3, Kind: prwire.EffectDiscordAlert}.String(), want: "azylman/aerial#101@abc123:gen3:discord_alert"},
+		{name: "effect key deploy carries job", got: EffectKey{Repo: "aerial", PRNumber: 101, HeadSHA: "abc123", GateGeneration: 1, Kind: prwire.EffectDeployDispatch, JobName: "eri"}.String(), want: "azylman/aerial#101@abc123:gen1:deploy_dispatch:job=eri"},
+		{name: "effect key ci carries check", got: EffectKey{Repo: "aerial", PRNumber: 101, HeadSHA: "abc123", GateGeneration: 1, Kind: prwire.EffectGitHubRerun, CheckName: "Lint"}.String(), want: "azylman/aerial#101@abc123:gen1:github_rerun:check=lint"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

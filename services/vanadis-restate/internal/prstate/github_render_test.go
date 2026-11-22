@@ -7,6 +7,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/azylman/aerial/pkg/prwire"
 	"github.com/azylman/aerial/pkg/pubsub"
 )
 
@@ -73,7 +74,7 @@ func TestCollaboratorConflictDM(t *testing.T) {
 		return GitHubPR{Number: 7, Title: "T", Body: body, State: state, Merged: merged, User: GitHubUser{Login: login}, Head: GitHubPRRef{Ref: "b7", SHA: "h7"}}
 	}
 	wantDM := EriEffect{
-		Kind: EffectEriDirectMessage, ChannelID: "111111111111111111",
+		Kind: prwire.EffectEriDirectMessage, ChannelID: "111111111111111111",
 		Content: "<@42> Merge conflict with `main` detected on [azylman/aerial#7](https://github.com/azylman/aerial/pull/7) (\"T\", branch: b7, commit: h7) — automatic branch update could not resolve conflicts. Please rebase or merge `origin/main` and push.",
 	}
 	tests := []struct {
@@ -118,7 +119,7 @@ func TestAutoUpdatePolicyAuthorAllowed(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			require.Equal(t, tc.want, tc.policy.authorAllowed(tc.author))
+			require.Equal(t, tc.want, authorAllowed(tc.policy, tc.author))
 		})
 	}
 }
@@ -183,7 +184,7 @@ func TestRepoEventAutoUpdateDecode(t *testing.T) {
 			var got RepoEvent
 			require.NoError(t, json.Unmarshal(tc.raw, &got))
 			require.Equal(t, tc.want, got)
-			require.Equal(t, "azylman/mirrormere#1010@def5678:github_auto_update:check=ci gate", RepoEffectKey(EffectGitHubAutoUpdate, got).MatchKey())
+			require.Equal(t, "azylman/mirrormere#1010@def5678:github_auto_update:check=ci gate", RepoEffectKey(prwire.EffectGitHubAutoUpdate, got).MatchKey())
 		})
 	}
 }

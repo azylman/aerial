@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/azylman/aerial/pkg/eriwire"
+	"github.com/azylman/aerial/pkg/prwire"
 )
 
 // prlifecycleFixtureDir is the shared cross-module golden fixture directory
@@ -68,7 +69,7 @@ func TestPREventEriEffectsDecode(t *testing.T) {
 	}{
 		{
 			name: "golden collaborator DM event", raw: fx.Event,
-			wantEffects: []EriEffect{{Kind: EffectEriDirectMessage, ChannelID: "111111111111111111", Content: "<@42> CI check lint failed on mirrormere#1010"}},
+			wantEffects: []EriEffect{{Kind: prwire.EffectEriDirectMessage, ChannelID: "111111111111111111", Content: "<@42> CI check lint failed on mirrormere#1010"}},
 		},
 		{name: "event without effects", raw: []byte(`{"repo":"azylman/aerial","pr_number":1,"head_sha":"h1"}`)},
 	}
@@ -97,11 +98,11 @@ func effectPR() *PRState {
 }
 
 func dmEffect() EriEffect {
-	return EriEffect{Kind: EffectEriDirectMessage, ChannelID: testChannel, Content: "hello"}
+	return EriEffect{Kind: prwire.EffectEriDirectMessage, ChannelID: testChannel, Content: "hello"}
 }
 
 func dmKey(head string, gen uint64, check string) EffectKey {
-	return EffectKey{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: head, GateGeneration: gen, Kind: EffectEriDirectMessage, CheckName: check}
+	return EffectKey{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: head, GateGeneration: gen, Kind: prwire.EffectEriDirectMessage, CheckName: check}
 }
 
 // TestPlanEriEffects pins effect normalization, keying, owner addressing,
@@ -134,28 +135,28 @@ func TestPlanEriEffects(t *testing.T) {
 		},
 		{
 			name: "prompt without channel lands in the stored target", state: effectPR(),
-			ev: PREvent{HeadSHA: "h1", JobName: "eri", EriEffects: []EriEffect{{Kind: EffectEriPrompt, Content: "wake"}}},
+			ev: PREvent{HeadSHA: "h1", JobName: "eri", EriEffects: []EriEffect{{Kind: prwire.EffectEriPrompt, Content: "wake"}}},
 			want: []PlannedEriEffect{{
-				Effect: EriEffect{Kind: EffectEriPrompt, ChannelID: testTarget, Content: "wake"},
-				Key:    EffectKey{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "h1", Kind: EffectEriPrompt, JobName: "eri"},
+				Effect: EriEffect{Kind: prwire.EffectEriPrompt, ChannelID: testTarget, Content: "wake"},
+				Key:    EffectKey{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "h1", Kind: prwire.EffectEriPrompt, JobName: "eri"},
 				Agent:  "agent-alpha",
 			}},
 		},
-		{name: "prompt with no channel and no target is dropped", state: untargeted, ev: PREvent{HeadSHA: "h1", EriEffects: []EriEffect{{Kind: EffectEriPrompt, Content: "wake"}}}},
+		{name: "prompt with no channel and no target is dropped", state: untargeted, ev: PREvent{HeadSHA: "h1", EriEffects: []EriEffect{{Kind: prwire.EffectEriPrompt, Content: "wake"}}}},
 		{
 			name: "headless background dispatch is kept", state: untargeted,
-			ev: PREvent{HeadSHA: "h1", EriEffects: []EriEffect{{Kind: EffectEriBackground, Content: "fix", Effort: " medium ", SkipIfActive: true}}},
+			ev: PREvent{HeadSHA: "h1", EriEffects: []EriEffect{{Kind: prwire.EffectEriBackground, Content: "fix", Effort: " medium ", SkipIfActive: true}}},
 			want: []PlannedEriEffect{{
-				Effect: EriEffect{Kind: EffectEriBackground, Content: "fix", Effort: "medium", SkipIfActive: true},
-				Key:    EffectKey{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "h1", Kind: EffectEriBackground},
+				Effect: EriEffect{Kind: prwire.EffectEriBackground, Content: "fix", Effort: "medium", SkipIfActive: true},
+				Key:    EffectKey{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "h1", Kind: prwire.EffectEriBackground},
 				Agent:  "agent-alpha",
 			}},
 		},
 		{name: "unknown kind is dropped", state: effectPR(), ev: PREvent{HeadSHA: "h1", EriEffects: []EriEffect{{Kind: "discord_alert", ChannelID: testChannel, Content: "x"}}}},
-		{name: "empty content is dropped", state: effectPR(), ev: PREvent{HeadSHA: "h1", EriEffects: []EriEffect{{Kind: EffectEriDirectMessage, ChannelID: testChannel, Content: "  "}}}},
+		{name: "empty content is dropped", state: effectPR(), ev: PREvent{HeadSHA: "h1", EriEffects: []EriEffect{{Kind: prwire.EffectEriDirectMessage, ChannelID: testChannel, Content: "  "}}}},
 		{
 			name: "same-key duplicates collapse to the first", state: effectPR(),
-			ev:   PREvent{HeadSHA: "h1", EriEffects: []EriEffect{dmEffect(), {Kind: EffectEriDirectMessage, ChannelID: testChannel, Content: "again"}}},
+			ev:   PREvent{HeadSHA: "h1", EriEffects: []EriEffect{dmEffect(), {Kind: prwire.EffectEriDirectMessage, ChannelID: testChannel, Content: "again"}}},
 			want: []PlannedEriEffect{{Effect: dmEffect(), Key: dmKey("h1", 0, ""), Agent: "agent-alpha"}},
 		},
 		{name: "already fired key is skipped", state: dispatched, ev: PREvent{HeadSHA: "h1", EriEffects: []EriEffect{dmEffect()}}},
@@ -307,7 +308,7 @@ func TestPRObjectServiceRetryEriEffect(t *testing.T) {
 		{name: "gone PR drops", state: nil, req: retry(1), eri: &fakeEriEffector{}},
 		{name: "moved generation drops", state: moved, req: retry(1), eri: &fakeEriEffector{}},
 		{name: "fired key drops", state: fired, req: retry(1), eri: &fakeEriEffector{}},
-		{name: "unusable effect drops", state: effectPR(), req: EriEffectRetry{Effect: EriEffect{Kind: EffectEriDirectMessage}, HeadSHA: "h1"}, eri: &fakeEriEffector{}},
+		{name: "unusable effect drops", state: effectPR(), req: EriEffectRetry{Effect: EriEffect{Kind: prwire.EffectEriDirectMessage}, HeadSHA: "h1"}, eri: &fakeEriEffector{}},
 		{name: "delivery commits the key", state: effectPR(), req: retry(1), eri: &fakeEriEffector{}, wantCalls: 1, wantRun: true, wantSet: true, wantDispatched: true},
 		{
 			name: "failure re-schedules the next attempt", state: effectPR(), req: retry(2), eri: &fakeEriEffector{err: errFakeEri}, wantCalls: 1, wantRun: true,
@@ -392,19 +393,19 @@ func TestSessionEriEffectorDeliverEri(t *testing.T) {
 		wantCalls []sessionCall
 	}{
 		{
-			name: "prompt enqueues the owner thread turn", eff: EriEffect{Kind: EffectEriPrompt, ChannelID: testTarget, Content: "wake"},
+			name: "prompt enqueues the owner thread turn", eff: EriEffect{Kind: prwire.EffectEriPrompt, ChannelID: testTarget, Content: "wake"},
 			wantCalls: []sessionCall{{method: "prompt", agent: "agent-alpha", channel: testTarget, content: "wake", key: idem}},
 		},
 		{
-			name: "background dispatches on the owner session", eff: EriEffect{Kind: EffectEriBackground, ChannelID: testTarget, Content: "fix", Effort: "medium", SkipIfActive: true},
+			name: "background dispatches on the owner session", eff: EriEffect{Kind: prwire.EffectEriBackground, ChannelID: testTarget, Content: "fix", Effort: "medium", SkipIfActive: true},
 			wantCalls: []sessionCall{{method: "dispatch", dispatch: eriwire.BrainDispatchRequest{ID: idem, Agent: "agent-alpha", Source: "prstate", TargetID: testTarget, Prompt: "fix", Effort: "medium", SkipIfActive: true}}},
 		},
 		{
-			name: "busy skip-if-active dispatch counts as delivered", clientErr: eriwire.ErrDispatchActive, eff: EriEffect{Kind: EffectEriBackground, Content: "fix", SkipIfActive: true},
+			name: "busy skip-if-active dispatch counts as delivered", clientErr: eriwire.ErrDispatchActive, eff: EriEffect{Kind: prwire.EffectEriBackground, Content: "fix", SkipIfActive: true},
 			wantCalls: []sessionCall{{method: "dispatch", dispatch: eriwire.BrainDispatchRequest{ID: idem, Agent: "agent-alpha", Source: "prstate", Prompt: "fix", SkipIfActive: true}}},
 		},
 		{
-			name: "dispatch failure surfaces", clientErr: errFakeEri, eff: EriEffect{Kind: EffectEriBackground, Content: "fix"}, wantErr: true,
+			name: "dispatch failure surfaces", clientErr: errFakeEri, eff: EriEffect{Kind: prwire.EffectEriBackground, Content: "fix"}, wantErr: true,
 			wantCalls: []sessionCall{{method: "dispatch", dispatch: eriwire.BrainDispatchRequest{ID: idem, Agent: "agent-alpha", Source: "prstate", Prompt: "fix"}}},
 		},
 		{

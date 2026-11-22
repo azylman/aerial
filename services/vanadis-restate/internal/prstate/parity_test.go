@@ -30,6 +30,7 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
+	"github.com/azylman/aerial/pkg/prwire"
 	"github.com/azylman/aerial/pkg/pubsub"
 )
 
@@ -154,40 +155,40 @@ func newParitySim(t *testing.T) *paritySim {
 	pr := NewPRObjectService().WithProjection(sim).WithFactPublisher(sim).WithEriEffector(sim).WithGitHub(sim).WithKube(sim)
 	repo := NewRepoObjectService().WithGitHub(sim).WithKube(sim)
 	sim.handlers = map[string]simHandler{
-		"PRObject/" + "Register":                      bindOut(pr.Register),
-		"PRObject/" + PRHandlerProject:                bindErr(pr.Project),
-		"PRObject/" + PRHandlerCheckFailed:            bindErr(pr.HandleCheckFailed),
-		"PRObject/" + PRHandlerCheckPassed:            bindErr(pr.HandleCheckPassed),
-		"PRObject/" + PRHandlerCIRecovered:            bindOut(pr.HandleCIRecovered),
-		"PRObject/" + PRHandlerCheckStatus:            bindErr(pr.HandleCheckStatus),
-		"PRObject/" + PRHandlerConflict:               bindOut(pr.HandleConflict),
-		"PRObject/" + "HandleConflictResolved":        bindErr(pr.HandleConflictResolved),
-		"PRObject/" + PRHandlerSynchronized:           bindErr(pr.HandleSynchronized),
-		"PRObject/" + PRHandlerMerged:                 bindErr(pr.HandleMerged),
-		"PRObject/" + "HandleClosed":                  bindErr(pr.HandleClosed),
-		"PRObject/" + "HandleReopened":                bindErr(pr.HandleReopened),
-		"PRObject/" + PRHandlerOpened:                 bindErr(pr.HandleOpened),
-		"PRObject/" + PRHandlerSelfRegistered:         bindErr(pr.HandleSelfRegistered),
-		"PRObject/" + PRHandlerMainAdvanced:           bindErr(pr.HandleMainAdvanced),
-		"PRObject/" + PRHandlerKustomizationRequested: bindErr(pr.HandleKustomizationRequested),
-		"PRObject/" + PRHandlerRolloutProgress:        bindErr(pr.HandleRolloutProgress),
-		"PRObject/" + PRHandlerDeploySuccess:          bindOut(pr.HandleDeploySuccess),
-		"PRObject/" + PRHandlerDeployAttemptFailed:    bindErr(pr.HandleDeployAttemptFailed),
-		"PRObject/" + PRHandlerDeployFailureDeadline:  bindErr(pr.HandleDeployFailureDeadline),
-		"PRObject/" + PRHandlerDeployFailed:           bindErr(pr.HandleDeployFailed),
-		"PRObject/" + "HandleDeployObserved":          bindErr(pr.HandleDeployObserved),
-		"PRObject/" + "HandleReadinessRetry":          bindErr(pr.HandleReadinessRetry),
-		"PRObject/" + "HandleDeploySuccessPublished":  bindOut(pr.HandleDeploySuccessPublished),
-		"RepoObject/" + RepoHandlerPRIndex:            bindErr(repo.HandlePRIndex),
-		"RepoObject/" + "HandleMainPush":              bindErr(repo.HandleMainPush),
-		"RepoObject/" + RepoHandlerAutoUpdate:         bindErr(repo.HandleAutoUpdate),
-		"RepoObject/" + RepoHandlerGitPush:            bindErr(repo.HandleGitPush),
-		"RepoObject/" + RepoHandlerImagePromotion:     bindErr(repo.HandleImagePromotion),
-		"RepoObject/" + "HandleKustomizationStatus":   bindErr(repo.HandleKustomizationStatus),
-		"RepoObject/" + RepoHandlerRolloutIndex:       bindErr(repo.HandleRolloutIndex),
-		"RepoObject/" + "HandlePushBySHA":             bindErr(repo.HandlePushBySHA),
-		"RepoObject/" + "HandleHeldReplay":            bindErr(repo.HandleHeldReplay),
-		"RepoObject/" + "HandleHeldExpiry":            bindErr(repo.HandleHeldExpiry),
+		"PRObject/" + "Register":                             bindOut(pr.Register),
+		"PRObject/" + PRHandlerProject:                       bindErr(pr.Project),
+		"PRObject/" + prwire.PRHandlerCheckFailed:            bindErr(pr.HandleCheckFailed),
+		"PRObject/" + prwire.PRHandlerCheckPassed:            bindErr(pr.HandleCheckPassed),
+		"PRObject/" + prwire.PRHandlerCIRecovered:            bindOut(pr.HandleCIRecovered),
+		"PRObject/" + prwire.PRHandlerCheckStatus:            bindErr(pr.HandleCheckStatus),
+		"PRObject/" + prwire.PRHandlerConflict:               bindOut(pr.HandleConflict),
+		"PRObject/" + "HandleConflictResolved":               bindErr(pr.HandleConflictResolved),
+		"PRObject/" + prwire.PRHandlerSynchronized:           bindErr(pr.HandleSynchronized),
+		"PRObject/" + prwire.PRHandlerMerged:                 bindErr(pr.HandleMerged),
+		"PRObject/" + "HandleClosed":                         bindErr(pr.HandleClosed),
+		"PRObject/" + "HandleReopened":                       bindErr(pr.HandleReopened),
+		"PRObject/" + prwire.PRHandlerOpened:                 bindErr(pr.HandleOpened),
+		"PRObject/" + prwire.PRHandlerSelfRegistered:         bindErr(pr.HandleSelfRegistered),
+		"PRObject/" + prwire.PRHandlerMainAdvanced:           bindErr(pr.HandleMainAdvanced),
+		"PRObject/" + prwire.PRHandlerKustomizationRequested: bindErr(pr.HandleKustomizationRequested),
+		"PRObject/" + prwire.PRHandlerRolloutProgress:        bindErr(pr.HandleRolloutProgress),
+		"PRObject/" + prwire.PRHandlerDeploySuccess:          bindOut(pr.HandleDeploySuccess),
+		"PRObject/" + prwire.PRHandlerDeployAttemptFailed:    bindErr(pr.HandleDeployAttemptFailed),
+		"PRObject/" + prwire.PRHandlerDeployFailureDeadline:  bindErr(pr.HandleDeployFailureDeadline),
+		"PRObject/" + prwire.PRHandlerDeployFailed:           bindErr(pr.HandleDeployFailed),
+		"PRObject/" + "HandleDeployObserved":                 bindErr(pr.HandleDeployObserved),
+		"PRObject/" + "HandleReadinessRetry":                 bindErr(pr.HandleReadinessRetry),
+		"PRObject/" + "HandleDeploySuccessPublished":         bindOut(pr.HandleDeploySuccessPublished),
+		"RepoObject/" + prwire.RepoHandlerPRIndex:            bindErr(repo.HandlePRIndex),
+		"RepoObject/" + "HandleMainPush":                     bindErr(repo.HandleMainPush),
+		"RepoObject/" + prwire.RepoHandlerAutoUpdate:         bindErr(repo.HandleAutoUpdate),
+		"RepoObject/" + prwire.RepoHandlerGitPush:            bindErr(repo.HandleGitPush),
+		"RepoObject/" + prwire.RepoHandlerImagePromotion:     bindErr(repo.HandleImagePromotion),
+		"RepoObject/" + "HandleKustomizationStatus":          bindErr(repo.HandleKustomizationStatus),
+		"RepoObject/" + prwire.RepoHandlerRolloutIndex:       bindErr(repo.HandleRolloutIndex),
+		"RepoObject/" + "HandlePushBySHA":                    bindErr(repo.HandlePushBySHA),
+		"RepoObject/" + "HandleHeldReplay":                   bindErr(repo.HandleHeldReplay),
+		"RepoObject/" + "HandleHeldExpiry":                   bindErr(repo.HandleHeldExpiry),
 	}
 	return sim
 }
@@ -200,7 +201,7 @@ func objectKey(t *testing.T, inv parityInvocation) string {
 		PRNumber int    `json:"pr_number"`
 	}
 	require.NoError(t, json.Unmarshal(inv.Event, &addr))
-	if inv.Object == RepoObjectServiceName {
+	if inv.Object == prwire.RepoObjectServiceName {
 		return RepoObjectKey(addr.Repo)
 	}
 	return PRObjectKey(addr.Repo, addr.PRNumber)
@@ -335,7 +336,7 @@ func (s *paritySim) UpsertProjection(_ context.Context, snap ProjectionSnapshot)
 }
 
 func (s *paritySim) ListOpenPRs(context.Context, string) ([]GitHubPR, *GitHubError) {
-	s.record(EffectGitHubAutoUpdate, s.currentRepoKey(EffectGitHubAutoUpdate))
+	s.record(prwire.EffectGitHubAutoUpdate, s.currentRepoKey(prwire.EffectGitHubAutoUpdate))
 	return nil, nil
 }
 
@@ -352,31 +353,31 @@ func (s *paritySim) FetchPR(context.Context, string, int) (GitHubPR, *GitHubErro
 }
 
 func (s *paritySim) FetchPRMergeability(context.Context, string, int) (GitHubPR, *GitHubError) {
-	s.record(EffectGitHubConflictCheck, s.currentPRKey(EffectGitHubConflictCheck))
+	s.record(prwire.EffectGitHubConflictCheck, s.currentPRKey(prwire.EffectGitHubConflictCheck))
 	return GitHubPR{}, nil
 }
 
 func (s *paritySim) RerunFailedJobs(context.Context, string, int64) *GitHubError {
-	s.record(EffectGitHubRerun, s.currentRepoKey(EffectGitHubRerun))
+	s.record(prwire.EffectGitHubRerun, s.currentRepoKey(prwire.EffectGitHubRerun))
 	return nil
 }
 
 func (s *paritySim) DispatchGitPush(context.Context, GitPushRequest) *KubeError {
-	s.record(EffectFluxGitPush, s.currentRepoKey(EffectFluxGitPush))
+	s.record(prwire.EffectFluxGitPush, s.currentRepoKey(prwire.EffectFluxGitPush))
 	return nil
 }
 
 func (s *paritySim) PromoteImageTag(context.Context, ImagePromotionRequest) (string, *KubeError) {
-	s.record(EffectImagePromote, s.currentRepoKey(EffectImagePromote))
+	s.record(prwire.EffectImagePromote, s.currentRepoKey(prwire.EffectImagePromote))
 	return "", nil
 }
 
 func (s *paritySim) ReconcileKustomization(context.Context, string, string, string) *KubeError {
-	if s.current.service == RepoObjectServiceName {
-		s.record(EffectFluxReconcile, s.currentRepoKey(EffectFluxReconcile))
+	if s.current.service == prwire.RepoObjectServiceName {
+		s.record(prwire.EffectFluxReconcile, s.currentRepoKey(prwire.EffectFluxReconcile))
 		return nil
 	}
-	s.record(EffectFluxReconcile, s.currentPRKey(EffectFluxReconcile))
+	s.record(prwire.EffectFluxReconcile, s.currentPRKey(prwire.EffectFluxReconcile))
 	return nil
 }
 

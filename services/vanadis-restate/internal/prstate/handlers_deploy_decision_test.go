@@ -11,6 +11,8 @@ import (
 
 	restate "github.com/restatedev/sdk-go"
 	"github.com/restatedev/sdk-go/x/mocks"
+
+	"github.com/azylman/aerial/pkg/prwire"
 )
 
 func decisionState(pr int, head string, gen uint64, terminal TerminalState, recordDispatch, recordPRSlot, recordSHASlot bool, evHead, evJob string) *PRState {
@@ -21,7 +23,7 @@ func decisionState(pr int, head string, gen uint64, terminal TerminalState, reco
 		s.MarkTerminal(terminal)
 	}
 	if recordDispatch {
-		s.MarkEffectDispatched(s.EffectKeyFor(EffectDeployDispatch, evHead, evJob, ""))
+		s.MarkEffectDispatched(s.EffectKeyFor(prwire.EffectDeployDispatch, evHead, evJob, ""))
 	}
 	if recordPRSlot {
 		s.RecordDeployedPR()
@@ -83,7 +85,7 @@ func TestResolveDeployDispatchDecision(t *testing.T) {
 			if got.ShouldPublish != tc.wantShouldPublish || got.Deduped != tc.wantDeduped {
 				t.Fatalf("ShouldPublish/Deduped = %v/%v, want %v/%v", got.ShouldPublish, got.Deduped, tc.wantShouldPublish, tc.wantDeduped)
 			}
-			if !tc.nilState && s.WasEffectDispatched(s.EffectKeyFor(EffectDeployDispatch, tc.evHead, tc.evJob, "")) != tc.wantKeyRecorded {
+			if !tc.nilState && s.WasEffectDispatched(s.EffectKeyFor(prwire.EffectDeployDispatch, tc.evHead, tc.evJob, "")) != tc.wantKeyRecorded {
 				t.Fatalf("dispatch key recorded = %v, want %v", !tc.wantKeyRecorded, tc.wantKeyRecorded)
 			}
 		})
@@ -161,7 +163,7 @@ func assertDeployPublished(t *testing.T, got DeployPublishedOutcome, wantDisposi
 // slots, and the synced head SHA after a publish-recorded ack.
 func assertDeployPublishedState(t *testing.T, s *PRState, evHead, evJob string, wantKeyRecorded, wantPRSlot, wantSHASlot bool, wantHead string) {
 	t.Helper()
-	key := s.EffectKeyFor(EffectDeployDispatch, evHead, evJob, "")
+	key := s.EffectKeyFor(prwire.EffectDeployDispatch, evHead, evJob, "")
 	if s.WasEffectDispatched(key) != wantKeyRecorded {
 		t.Fatalf("dispatch key recorded = %v, want %v", !wantKeyRecorded, wantKeyRecorded)
 	}

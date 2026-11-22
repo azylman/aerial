@@ -5,13 +5,15 @@ package prstate
 
 import (
 	"strings"
+
+	"github.com/azylman/aerial/pkg/prwire"
 )
 
 // usableHeadSHA returns the trimmed head SHA, or "" when it cannot anchor a
 // failure record or an effect key.
 func usableHeadSHA(headSHA string) string {
 	clean := strings.TrimSpace(headSHA)
-	if clean == "" || IsZeroSHA(clean) {
+	if clean == "" || prwire.IsZeroSHA(clean) {
 		return ""
 	}
 	return clean

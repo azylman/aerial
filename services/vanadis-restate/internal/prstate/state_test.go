@@ -3,6 +3,8 @@ package prstate
 import (
 	"encoding/json"
 	"testing"
+
+	"github.com/azylman/aerial/pkg/prwire"
 )
 
 func TestPRStateRecordFailedCISHA(t *testing.T) {
@@ -366,8 +368,8 @@ func TestPRStateGenerationGating(t *testing.T) {
 		wantGen2   uint64
 		wantOldKey bool
 	}{
-		{name: "discord alert keyed to generation", kind: EffectDiscordAlert, wantGen1: 1, wantGen2: 2, wantOldKey: false},
-		{name: "deploy dispatch keyed to generation", kind: EffectDeployDispatch, wantGen1: 1, wantGen2: 2, wantOldKey: false},
+		{name: "discord alert keyed to generation", kind: prwire.EffectDiscordAlert, wantGen1: 1, wantGen2: 2, wantOldKey: false},
+		{name: "deploy dispatch keyed to generation", kind: prwire.EffectDeployDispatch, wantGen1: 1, wantGen2: 2, wantOldKey: false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -410,7 +412,7 @@ func TestPRStateRetryNeverMintsGeneration(t *testing.T) {
 			t.Parallel()
 			s := NewPRState("aerial", 101)
 			gen := s.RecordKustomizationRequests()
-			k := s.EffectKeyFor(EffectDiscordAlert, tc.sha, "", "")
+			k := s.EffectKeyFor(prwire.EffectDiscordAlert, tc.sha, "", "")
 			s.MarkEffectDispatched(k)
 			s.RetryPRReadiness()
 			if s.GateGeneration != gen {
@@ -840,11 +842,11 @@ func TestPRStateMiscSlots(t *testing.T) {
 func checkZeroValuePRState(t *testing.T) {
 	t.Helper()
 	zero := &PRState{}
-	zero.MarkEffectDispatched(zero.EffectKeyFor(EffectDiscordAlert, "abc123", "", ""))
-	if !zero.WasEffectDispatched(zero.EffectKeyFor(EffectDiscordAlert, "abc123", "", "")) {
+	zero.MarkEffectDispatched(zero.EffectKeyFor(prwire.EffectDiscordAlert, "abc123", "", ""))
+	if !zero.WasEffectDispatched(zero.EffectKeyFor(prwire.EffectDiscordAlert, "abc123", "", "")) {
 		t.Fatalf("zero-value effect must dispatch")
 	}
-	if zero.WasEffectDispatched(zero.EffectKeyFor(EffectFluxForward, "abc123", "", "")) {
+	if zero.WasEffectDispatched(zero.EffectKeyFor(prwire.EffectFluxForward, "abc123", "", "")) {
 		t.Fatalf("zero-value other effect must be undispatched")
 	}
 	zero.RecordDeployedSHAJob("eri", "abc123")
@@ -914,14 +916,14 @@ func checkNilPRMutations(t *testing.T, nilState *PRState) {
 	if nilState.RecordKustomizationRequests() != 0 {
 		t.Fatalf("nil generation must stay zero")
 	}
-	if nilState.WasEffectDispatched(nilState.EffectKeyFor(EffectDiscordAlert, "abc123", "", "")) {
+	if nilState.WasEffectDispatched(nilState.EffectKeyFor(prwire.EffectDiscordAlert, "abc123", "", "")) {
 		t.Fatalf("nil effect must be undispatched")
 	}
 	if nilState.WasDeployedPR() || nilState.WasDeployedSHAJob("eri", "abc123") {
 		t.Fatalf("nil deploy dedup must miss")
 	}
 	checkZeroValuePRState(t)
-	if k := nilState.EffectKeyFor(EffectDiscordAlert, "abc123", "", ""); k.String() == "" {
+	if k := nilState.EffectKeyFor(prwire.EffectDiscordAlert, "abc123", "", ""); k.String() == "" {
 		t.Fatalf("nil EffectKeyFor must still render")
 	}
 	nilState.ClearFailedCISHA()
@@ -934,7 +936,7 @@ func checkNilPRMutations(t *testing.T, nilState *PRState) {
 	nilState.MarkTerminal(TerminalMerged)
 	nilState.Reopen()
 	nilState.RetryPRReadiness()
-	nilState.MarkEffectDispatched(nilState.EffectKeyFor(EffectDiscordAlert, "abc123", "", ""))
+	nilState.MarkEffectDispatched(nilState.EffectKeyFor(prwire.EffectDiscordAlert, "abc123", "", ""))
 	nilState.RecordDeployedPR()
 	nilState.RecordDeployedSHAJob("eri", "abc123")
 	if nilState.ApplyEvent(PREvent{}) != DispositionDropStale {

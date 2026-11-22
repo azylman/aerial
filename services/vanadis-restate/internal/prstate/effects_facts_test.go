@@ -9,6 +9,7 @@ import (
 	restate "github.com/restatedev/sdk-go"
 	"github.com/stretchr/testify/require"
 
+	"github.com/azylman/aerial/pkg/prwire"
 	"github.com/azylman/aerial/pkg/pubsub"
 )
 
@@ -325,14 +326,14 @@ func TestPRObjectServiceHandleDeploySuccess(t *testing.T) {
 	}
 	deduped := func() *PRState {
 		st := deployingMergedPR()
-		st.MarkEffectDispatched(st.EffectKeyFor(EffectDeployDispatch, "", "eri", ""))
+		st.MarkEffectDispatched(st.EffectKeyFor(prwire.EffectDeployDispatch, "", "eri", ""))
 		st.RecordDeployedPR()
 		return st
 	}
 	ev := func() PREvent {
 		return PREvent{Repo: "aerial", PRNumber: 101, MergeSHA: "m1", JobName: "eri", Facts: []pubsub.PRLifecycleEvent{deployFact()}}
 	}
-	indexed := []sentCall{{service: "RepoObject", key: "azylman/aerial", method: RepoHandlerPRIndex, input: PRIndexEvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "h1", MergeSHA: "m1", Lifecycle: IndexDeployed}}}
+	indexed := []sentCall{{service: "RepoObject", key: "azylman/aerial", method: prwire.RepoHandlerPRIndex, input: PRIndexEvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "h1", MergeSHA: "m1", Lifecycle: IndexDeployed}}}
 	applied := DeployDispatchDecision{Disposition: DispositionApply, ShouldPublish: true, EffectKey: "azylman/aerial#101@:gen0:deploy_dispatch:job=eri"}
 	tests := []struct {
 		name           string
@@ -628,7 +629,7 @@ func TestPRObjectServiceHandleDeployAttemptFailed(t *testing.T) {
 	}{
 		{
 			name: "first restate failure arms the deadline", state: deployingMergedPR(), ev: attempt("m1"), wantSet: true, wantBanner: "boom",
-			wantSends: []sentCall{{service: "PRObject", key: "azylman/aerial#101", method: PRHandlerDeployFailureDeadline, input: DeployFailureDeadlineRequest{Seq: 1}, delayed: true}},
+			wantSends: []sentCall{{service: "PRObject", key: "azylman/aerial#101", method: prwire.PRHandlerDeployFailureDeadline, input: DeployFailureDeadlineRequest{Seq: 1}, delayed: true}},
 		},
 		{name: "repeat failure refreshes without a second timer", state: armed(), ev: attempt("m1"), wantSet: true, wantBanner: "boom"},
 		{name: "stale sha drops", state: deployingMergedPR(), ev: attempt("m9")},

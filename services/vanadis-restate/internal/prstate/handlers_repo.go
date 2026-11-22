@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/azylman/aerial/pkg/prwire"
 	"github.com/azylman/aerial/pkg/pubsub"
 )
 
@@ -105,7 +106,7 @@ func (h *RepoHandlers) HandleMainPush(ctx context.Context, ev RepoEvent) error {
 		return fmt.Errorf("%w: repo is required for main push", ErrInvalidRepoEvent)
 	}
 	mainSHA := strings.TrimSpace(ev.MainSHA)
-	if mainSHA == "" || IsZeroSHA(mainSHA) {
+	if mainSHA == "" || prwire.IsZeroSHA(mainSHA) {
 		return fmt.Errorf("%w: main SHA is required for main push", ErrInvalidRepoEvent)
 	}
 	st, err := h.loadOrNew(repo)
@@ -132,7 +133,7 @@ func (h *RepoHandlers) sendMainAdvanced(ctx context.Context, st *RepoState) erro
 	var errs []error
 	for _, pr := range st.OpenPRNumbers() {
 		ev := PREvent{Event: "main_advanced", Repo: st.Repo, PRNumber: pr}
-		if err := h.prs.SendPR(ctx, PRHandlerMainAdvanced, ev); err != nil {
+		if err := h.prs.SendPR(ctx, prwire.PRHandlerMainAdvanced, ev); err != nil {
 			errs = append(errs, fmt.Errorf("main advanced %s: %w", PRObjectKey(st.Repo, pr), err))
 		}
 	}
@@ -177,7 +178,7 @@ func (h *RepoHandlers) HandleKustomizationStatus(ctx context.Context, ev RepoEve
 		return err
 	}
 	changed := false
-	if sha := strings.TrimSpace(ev.HeadSHA); sha != "" && !IsZeroSHA(sha) {
+	if sha := strings.TrimSpace(ev.HeadSHA); sha != "" && !prwire.IsZeroSHA(sha) {
 		if st == nil {
 			st = NewRepoState(repo)
 		}
@@ -196,7 +197,7 @@ func (h *RepoHandlers) HandleKustomizationStatus(ctx context.Context, ev RepoEve
 			GateGeneration: status.DeployGeneration,
 			Kustomization:  strings.TrimSpace(ev.Kustomization),
 		}
-		if err := h.prs.SendPR(ctx, PRHandlerRolloutProgress, fwd); err != nil {
+		if err := h.prs.SendPR(ctx, prwire.PRHandlerRolloutProgress, fwd); err != nil {
 			errs = append(errs, fmt.Errorf("kustomization status %s: %w", PRObjectKey(repo, pr), err))
 		}
 	}
@@ -456,7 +457,7 @@ func (h *RepoHandlers) beginRepoEffect(kind string, ev RepoEvent) (*RepoState, R
 // rate limit or retryable list failure stops without committing the key so
 // the binding retries; other per-PR failures are skipped.
 func (h *RepoHandlers) HandleAutoUpdate(ctx context.Context, ev RepoEvent) (RepoEffectOutcome, error) {
-	st, out, done, err := h.beginRepoEffect(EffectGitHubAutoUpdate, ev)
+	st, out, done, err := h.beginRepoEffect(prwire.EffectGitHubAutoUpdate, ev)
 	if done || err != nil {
 		return out, err
 	}
@@ -504,11 +505,11 @@ func (h *RepoHandlers) runAutoUpdate(ctx context.Context, st *RepoState, policy 
 		out.Updates = append(out.Updates, BranchUpdate{PRNumber: pr.Number, HeadSHA: strings.TrimSpace(pr.Head.SHA), Outcome: outcome})
 		switch outcome {
 		case UpdateBranchConflict:
-			errs = append(errs, h.forward(ctx, PRHandlerBranchConflict, branchConflictEvent(policy, repo, pr), out))
+			errs = append(errs, h.forward(ctx, prwire.PRHandlerBranchConflict, branchConflictEvent(policy, repo, pr), out))
 			continue
 		case UpdateBranchHeadMissing:
 			if ev, ok := h.staleCloseEvent(ctx, repo, pr.Number); ok {
-				errs = append(errs, h.forward(ctx, PRHandlerHeadRefMissing, ev, out))
+				errs = append(errs, h.forward(ctx, prwire.PRHandlerHeadRefMissing, ev, out))
 			}
 			continue
 		case UpdateBranchUpdated, UpdateBranchUpToDate:
@@ -531,7 +532,7 @@ func (h *RepoHandlers) forward(ctx context.Context, handler string, ev PREvent, 
 // an allowlisted author, and owned here (default owner, or a PR this repo
 // object has indexed).
 func autoUpdateEligible(st *RepoState, policy *AutoUpdatePolicy, pr GitHubPR) bool {
-	if pr.Draft || pr.Number <= 0 || !policy.authorAllowed(pr.User.Login) {
+	if pr.Draft || pr.Number <= 0 || !authorAllowed(policy, pr.User.Login) {
 		return false
 	}
 	if policy.DefaultOwner {
@@ -576,7 +577,7 @@ func (h *RepoHandlers) HandleWorkflowRerun(ctx context.Context, ev RepoEvent) (R
 	if ev.RunID <= 0 {
 		return RepoEffectOutcome{}, fmt.Errorf("%w: run id is required for workflow rerun", ErrInvalidRepoEvent)
 	}
-	st, out, done, err := h.beginRepoEffect(EffectGitHubRerun, ev)
+	st, out, done, err := h.beginRepoEffect(prwire.EffectGitHubRerun, ev)
 	if done || err != nil {
 		return out, err
 	}
@@ -635,7 +636,7 @@ func (h *RepoHandlers) HandleGitPush(ctx context.Context, ev RepoEvent) (RepoEff
 	if !strings.HasPrefix(ref, "refs/heads/main") {
 		return RepoEffectOutcome{}, fmt.Errorf("%w: git push dispatch requires a main ref, got %q", ErrInvalidRepoEvent, ref)
 	}
-	st, out, done, err := h.beginRepoEffect(EffectFluxGitPush, ev)
+	st, out, done, err := h.beginRepoEffect(prwire.EffectFluxGitPush, ev)
 	if done || err != nil {
 		return out, err
 	}
@@ -684,10 +685,10 @@ func (h *RepoHandlers) HandleImagePromotion(ctx context.Context, ev RepoEvent) (
 		return RepoEffectOutcome{}, err
 	}
 	ev = resolvePromotionPR(st, ev)
-	out := RepoEffectOutcome{Key: RepoEffectKey(EffectImagePromote, ev)}
+	out := RepoEffectOutcome{Key: RepoEffectKey(prwire.EffectImagePromote, ev)}
 	var reconcileKey EffectKey
 	if ev.PRNumber <= 0 && len(sortedRequestNames(ev.KustomizationRequests)) > 0 {
-		reconcileKey = RepoEffectKey(EffectFluxReconcile, ev)
+		reconcileKey = RepoEffectKey(prwire.EffectFluxReconcile, ev)
 	}
 	promoteDone := st.WasRepoEffect(out.Key)
 	reconcileDone := reconcileKey.Kind == "" || st.WasRepoEffect(reconcileKey)
@@ -795,7 +796,7 @@ func (h *RepoHandlers) promoteImages(ctx context.Context, st *RepoState, ev Repo
 	st.MarkRepoEffect(out.Key)
 	h.store.SaveRepo(st)
 	if ev.PRNumber > 0 && len(sortedRequestNames(ev.KustomizationRequests)) > 0 {
-		return false, h.forward(ctx, PRHandlerKustomizationRequested, promotedRolloutEvent(st.Repo, ev), out)
+		return false, h.forward(ctx, prwire.PRHandlerKustomizationRequested, promotedRolloutEvent(st.Repo, ev), out)
 	}
 	return false, nil
 }
@@ -826,7 +827,7 @@ func (h *RepoHandlers) reportPromotionFailure(ctx context.Context, ev RepoEvent,
 		failed = append(failed, f)
 	}
 	head := usableHeadSHA(ev.HeadSHA)
-	return h.forward(ctx, PRHandlerDeployAttemptFailed, PREvent{
+	return h.forward(ctx, prwire.PRHandlerDeployAttemptFailed, PREvent{
 		Event: "deploy_attempt_failed", Repo: NormalizeRepo(ev.Repo), PRNumber: ev.PRNumber, HeadSHA: head, MergeSHA: head,
 		Branch: strings.TrimSpace(ev.Branch), Banner: msg, Facts: failed,
 	}, out)

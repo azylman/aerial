@@ -28,6 +28,8 @@ import (
 	"strings"
 
 	restate "github.com/restatedev/sdk-go"
+
+	"github.com/azylman/aerial/pkg/prwire"
 )
 
 // Kube step policy; the delayed retry reuses the repo-effect bound and
@@ -116,13 +118,13 @@ func (s *RepoObjectService) WithKube(k KubeEffector) *RepoObjectService {
 // HandleGitPush forwards one main push to the Flux receiver.
 func (s *RepoObjectService) HandleGitPush(ctx restate.ObjectContext, ev RepoEvent) error {
 	out, err := s.handlers(ctx).HandleGitPush(ctx, ev)
-	return s.reportRepoEffect(ctx, RepoHandlerGitPush, ev, out, err)
+	return s.reportRepoEffect(ctx, prwire.RepoHandlerGitPush, ev, out, err)
 }
 
 // HandleImagePromotion promotes one commit's images and starts its rollout.
 func (s *RepoObjectService) HandleImagePromotion(ctx restate.ObjectContext, ev RepoEvent) error {
 	out, err := s.handlers(ctx).HandleImagePromotion(ctx, ev)
-	return s.reportRepoEffect(ctx, RepoHandlerImagePromotion, ev, out, err)
+	return s.reportRepoEffect(ctx, prwire.RepoHandlerImagePromotion, ev, out, err)
 }
 
 // WithKube injects the Kubernetes/Flux boundary and returns s. Without it
@@ -153,7 +155,7 @@ func (s *PRObjectService) HandleKustomizationRequested(ctx restate.ObjectContext
 	ev.Facts = nil
 	var recorded, committed *PRState
 	var transitioned bool
-	if err := s.mutateRolloutEvent(ctx, ev, PRHandlerKustomizationRequested, func(st *PRState) {
+	if err := s.mutateRolloutEvent(ctx, ev, prwire.PRHandlerKustomizationRequested, func(st *PRState) {
 		st.DisarmDeployFailure()
 		transitioned = st.TransitionDeploying(ev.Jobs)
 		if st.RecordKustomizationRequestSet(ev.KustomizationRequests) {
@@ -172,27 +174,6 @@ func (s *PRObjectService) HandleKustomizationRequested(ctx restate.ObjectContext
 	key := RolloutReconcileKey(st, ev.HeadSHA)
 	s.runReconcile(ctx, st, reconcileRun{key: key, match: key.MatchKey()})
 	return nil
-}
-
-// RetryReadinessRequest is the PRObject.RetryReadiness input: the merge SHA
-// the operator expects the gate at, the caller's agent hint, and the
-// existing-owner fence
-// (EnforceOwner: a stored owner must equal ExpectedOwner, the owner synapse
-// authorized the caller for), exactly like Register.
-type RetryReadinessRequest struct {
-	MergeSHA      string `json:"merge_sha"`
-	Agent         string `json:"agent,omitempty"`
-	EnforceOwner  bool   `json:"enforce_owner,omitempty"`
-	ExpectedOwner string `json:"expected_owner,omitempty"`
-}
-
-// RetryReadinessResponse is the readiness decision synapse's
-// /internal/pr/retry-readiness returns: 202 with the re-requested
-// Kustomizations when a matching merged rollout gate exists, 409 otherwise.
-type RetryReadinessResponse struct {
-	Status    int                             `json:"status"`
-	Requests  map[string]KustomizationRequest `json:"kustomization_requests,omitempty"`
-	EffectKey string                          `json:"effect_key,omitempty"`
 }
 
 // RetryReadiness is the request-response readiness retry. It makes the
@@ -299,7 +280,7 @@ func (s *PRObjectService) RetryFluxReconcile(ctx restate.ObjectContext, req Flux
 	if err != nil || st == nil {
 		return err
 	}
-	key := st.EffectKeyFor(EffectFluxReconcile, req.HeadSHA, req.JobName, "")
+	key := st.EffectKeyFor(prwire.EffectFluxReconcile, req.HeadSHA, req.JobName, "")
 	s.runReconcile(ctx, st, reconcileRun{key: key, match: key.MatchKey(), attempt: req.Attempt})
 	return nil
 }
@@ -328,16 +309,16 @@ func (s *PRObjectService) runReconcile(ctx restate.ObjectContext, st *PRState, r
 func logReconcile(ctx restate.ObjectContext, run reconcileRun, kerr *KubeError) {
 	failure := kerr.Error()
 	_, _ = restate.Run(ctx, func(rc restate.RunContext) (restate.Void, error) {
-		attrs := []any{"pr", PRObjectKey(run.key.Repo, run.key.PRNumber), metricLabelKind, EffectFluxReconcile, "effect_key", run.key.String(), "match_key", run.match}
+		attrs := []any{"pr", PRObjectKey(run.key.Repo, run.key.PRNumber), metricLabelKind, prwire.EffectFluxReconcile, "effect_key", run.key.String(), "match_key", run.match}
 		if failure != "" {
-			effectsTotal.WithLabelValues(EffectFluxReconcile, effectResultError).Inc()
+			effectsTotal.WithLabelValues(prwire.EffectFluxReconcile, effectResultError).Inc()
 			slog.ErrorContext(rc, "[prstate] effect failed terminally", append(attrs, "error", failure)...)
 		} else {
-			effectsTotal.WithLabelValues(EffectFluxReconcile, effectResultOK).Inc()
+			effectsTotal.WithLabelValues(prwire.EffectFluxReconcile, effectResultOK).Inc()
 			slog.InfoContext(rc, "[prstate] effect executed", attrs...)
 		}
 		return restate.Void{}, nil
-	}, restate.WithName("report-"+EffectFluxReconcile))
+	}, restate.WithName("report-"+prwire.EffectFluxReconcile))
 }
 
 // scheduleReconcileRetry sends a delayed RetryFluxReconcile, or drops the
@@ -348,14 +329,14 @@ func (s *PRObjectService) scheduleReconcileRetry(ctx restate.ObjectContext, st *
 		result, msg = effectResultDropped, "[prstate] effect dropped after retries"
 	}
 	_, _ = restate.Run(ctx, func(rc restate.RunContext) (restate.Void, error) {
-		effectsTotal.WithLabelValues(EffectFluxReconcile, result).Inc()
-		slog.WarnContext(rc, msg, "pr", PRObjectKey(st.Repo, st.PRNumber), metricLabelKind, EffectFluxReconcile,
+		effectsTotal.WithLabelValues(prwire.EffectFluxReconcile, result).Inc()
+		slog.WarnContext(rc, msg, "pr", PRObjectKey(st.Repo, st.PRNumber), metricLabelKind, prwire.EffectFluxReconcile,
 			"effect_key", run.key.String(), "attempt", run.attempt, "error", kerr.Error())
 		return restate.Void{}, nil
-	}, restate.WithName(result+"-"+EffectFluxReconcile))
+	}, restate.WithName(result+"-"+prwire.EffectFluxReconcile))
 	if result == effectResultDropped {
 		return
 	}
-	restate.ObjectSend(ctx, PRObjectServiceName, PRObjectKey(st.Repo, st.PRNumber), PRHandlerRetryFluxReconcile).
+	restate.ObjectSend(ctx, prwire.PRObjectServiceName, PRObjectKey(st.Repo, st.PRNumber), prwire.PRHandlerRetryFluxReconcile).
 		Send(FluxReconcileRetryRequest{Generation: run.key.GateGeneration, HeadSHA: run.key.HeadSHA, JobName: run.key.JobName, Attempt: run.attempt + 1}, restate.WithDelay(s.reconcileRetryDelay))
 }

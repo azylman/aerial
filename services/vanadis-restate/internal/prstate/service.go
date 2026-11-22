@@ -47,17 +47,8 @@ import (
 	restate "github.com/restatedev/sdk-go"
 	"github.com/restatedev/sdk-go/server"
 
+	"github.com/azylman/aerial/pkg/prwire"
 	"github.com/azylman/aerial/pkg/pubsub"
-)
-
-// Frozen Restate service names. They match the synapse ingress invoker
-// defaults (DefaultPRService/DefaultRepoService) exactly; any rename is a
-// cross-module breaking change caught by TestRegisterPRStateServices. Every
-// agent's PRs live in these single objects: the owning agent is PRState
-// data, never part of the service name.
-const (
-	PRObjectServiceName   = "PRObject"
-	RepoObjectServiceName = "RepoObject"
 )
 
 // Restate K/V state keys. One slot per object key; the object key itself
@@ -100,7 +91,7 @@ func NewPRObjectService() *PRObjectService {
 // ServiceName returns the single PRObject service name for every agent.
 // Nil-safe so the registrar never panics on a zero service.
 func (*PRObjectService) ServiceName() string {
-	return PRObjectServiceName
+	return prwire.PRObjectServiceName
 }
 
 func (s *PRObjectService) loadOrCreatePRState(ctx restate.ObjectSharedContext, ev PREvent) (*PRState, error) {
@@ -188,7 +179,7 @@ func (s *PRObjectService) cleanUntrackedResidue(ctx restate.ObjectContext, st *P
 	restate.Set(ctx, s.stateKey, st)
 	s.syncRolloutIndex(ctx, st)
 	if st.GateGeneration > 0 {
-		restate.ObjectSend(ctx, RepoObjectServiceName, RepoObjectKey(st.Repo), RepoHandlerPRIndex).Send(PRIndexEvent{
+		restate.ObjectSend(ctx, prwire.RepoObjectServiceName, RepoObjectKey(st.Repo), prwire.RepoHandlerPRIndex).Send(PRIndexEvent{
 			Repo: st.Repo, PRNumber: st.PRNumber, ReopenEpoch: st.ReopenEpoch, Generation: st.GateGeneration, Lifecycle: IndexDeployed,
 		})
 	}
@@ -321,7 +312,7 @@ func dispositionFor(st *PRState, ev PREvent, phase eventPhase) EventDisposition 
 // changes arrive through HandleSynchronized or Register), branch/title
 // identity, and a missing target ID.
 func applyEventRow(st *PRState, ev PREvent) {
-	if head := strings.TrimSpace(ev.HeadSHA); head != "" && !IsZeroSHA(head) && st.Terminal != TerminalMerged &&
+	if head := strings.TrimSpace(ev.HeadSHA); head != "" && !prwire.IsZeroSHA(head) && st.Terminal != TerminalMerged &&
 		(st.HeadSHA == "" || !IsMergeOnlyRef(head, ev.MergeSHA)) {
 		st.SetHead(head)
 	}
@@ -387,17 +378,17 @@ func sendPRIndex(ctx restate.ObjectContext, st *PRState, ev PREvent, lifecycle s
 	}
 	if lifecycle == IndexMerged || lifecycle == IndexDeploying || lifecycle == IndexDeployed {
 		merge := strings.TrimSpace(ev.MergeSHA)
-		if merge == "" || IsZeroSHA(merge) {
+		if merge == "" || prwire.IsZeroSHA(merge) {
 			merge = strings.TrimSpace(st.MergeSHA)
 		}
-		if merge != "" && !IsZeroSHA(merge) {
+		if merge != "" && !prwire.IsZeroSHA(merge) {
 			idx.MergeSHA = merge
 		}
 	}
 	if idx.Branch == "" {
 		idx.Branch = st.Branch
 	}
-	restate.ObjectSend(ctx, RepoObjectServiceName, RepoObjectKey(st.Repo), RepoHandlerPRIndex).Send(idx)
+	restate.ObjectSend(ctx, prwire.RepoObjectServiceName, RepoObjectKey(st.Repo), prwire.RepoHandlerPRIndex).Send(idx)
 }
 
 // applyPREvent loads the PR state, drops stale and same-epoch terminal
@@ -562,7 +553,7 @@ func forwardRecoveredAutoUpdate(ctx restate.ObjectContext, st *PRState, ev PREve
 	if ev.AutoUpdate == nil {
 		return
 	}
-	restate.ObjectSend(ctx, RepoObjectServiceName, RepoObjectKey(st.Repo), RepoHandlerAutoUpdate).Send(RepoEvent{
+	restate.ObjectSend(ctx, prwire.RepoObjectServiceName, RepoObjectKey(st.Repo), prwire.RepoHandlerAutoUpdate).Send(RepoEvent{
 		Repo: st.Repo, PRNumber: st.PRNumber, HeadSHA: ev.HeadSHA, CheckName: ev.CheckName,
 		AutoUpdate: ev.AutoUpdate,
 	})
@@ -763,7 +754,7 @@ func (s *PRObjectService) HandleSelfRegistered(ctx restate.ObjectContext, ev PRE
 // deploying: once the last Kustomization flips the PR to deployed, the
 // deploy_success verdict publishes instead, exactly like the legacy watcher.
 func (s *PRObjectService) HandleRolloutProgress(ctx restate.ObjectContext, ev PREvent) error {
-	return s.mutateRolloutPhaseEvent(ctx, ev, PRHandlerRolloutProgress, func(st *PRState, ev *PREvent) {
+	return s.mutateRolloutPhaseEvent(ctx, ev, prwire.PRHandlerRolloutProgress, func(st *PRState, ev *PREvent) {
 		st.MarkJobsDeployed(ev.DeployedJobs)
 		st.MarkKustomizationsDeployed(ev.DeployedKustomizations)
 		st.RecordJobState(ev.JobName, ev.JobState)
@@ -845,7 +836,7 @@ func (s *PRObjectService) HandleSynchronized(ctx restate.ObjectContext, ev PREve
 // or, when Acknowledged, the confirmed deploy_failed publish
 // (AcknowledgeDeployFailedPublished). Merged PRs apply it.
 func (s *PRObjectService) HandleDeployFailed(ctx restate.ObjectContext, ev PREvent) error {
-	return s.mutateRolloutEvent(ctx, ev, PRHandlerDeployFailed, func(st *PRState) {
+	return s.mutateRolloutEvent(ctx, ev, prwire.PRHandlerDeployFailed, func(st *PRState) {
 		st.DisarmDeployFailure()
 		if ev.Acknowledged {
 			st.AckDeployFailedPublished()
@@ -880,7 +871,7 @@ func (s *PRObjectService) HandleCheckStatus(ctx restate.ObjectContext, ev PREven
 // both dedup slots, commits them plus the deployed row status, then
 // publishes the deploy_success facts the event carries.
 func (s *PRObjectService) HandleDeploySuccess(ctx restate.ObjectContext, ev PREvent) (DeployDispatchDecision, error) {
-	if dropped, err := s.dropUntrackedEvent(ctx, ev, PRHandlerDeploySuccess); dropped || err != nil {
+	if dropped, err := s.dropUntrackedEvent(ctx, ev, prwire.PRHandlerDeploySuccess); dropped || err != nil {
 		return DeployDispatchDecision{}, err
 	}
 	return runVerdict(s, ctx, ev, ResolveDeployDispatchDecision,
@@ -1048,7 +1039,7 @@ func NewRepoObjectService() *RepoObjectService {
 // ServiceName returns the single RepoObject service name for every agent.
 // Nil-safe so the registrar never panics on a zero service.
 func (*RepoObjectService) ServiceName() string {
-	return RepoObjectServiceName
+	return prwire.RepoObjectServiceName
 }
 
 // handlers wires RepoHandlers to this object's K/V, one-way sends and
@@ -1155,13 +1146,6 @@ type ResolveSHARequest struct {
 	SHA  string `json:"sha"`
 }
 
-// ResolveSHAResponse is the SHA lookup result.
-type ResolveSHAResponse struct {
-	PRNumber int    `json:"pr_number"`
-	Branch   string `json:"branch"`
-	Found    bool   `json:"found"`
-}
-
 // ResolvePRBySHA resolves a commit SHA through the durable RepoObject index
 // (newest claim wins). It is a shared, read-only handler: it never takes the
 // exclusive lock and never writes.
@@ -1202,7 +1186,7 @@ type restatePRSender struct {
 }
 
 func (s restatePRSender) SendPR(_ context.Context, handler string, ev PREvent) error {
-	restate.ObjectSend(s.ctx, PRObjectServiceName, PRObjectKey(ev.Repo, ev.PRNumber), handler).Send(ev)
+	restate.ObjectSend(s.ctx, prwire.PRObjectServiceName, PRObjectKey(ev.Repo, ev.PRNumber), handler).Send(ev)
 	return nil
 }
 
@@ -1213,12 +1197,12 @@ type restateSelfScheduler struct {
 }
 
 func (s restateSelfScheduler) ScheduleHeldReplay(_ context.Context, repo, sha string, delay time.Duration) error {
-	restate.ObjectSend(s.ctx, RepoObjectServiceName, RepoObjectKey(repo), RepoHandlerHeldReplay).Send(HeldReplayRequest{SHA: sha}, restate.WithDelay(delay))
+	restate.ObjectSend(s.ctx, prwire.RepoObjectServiceName, RepoObjectKey(repo), prwire.RepoHandlerHeldReplay).Send(HeldReplayRequest{SHA: sha}, restate.WithDelay(delay))
 	return nil
 }
 
 func (s restateSelfScheduler) ScheduleHeldExpiry(_ context.Context, repo string, id uint64, delay time.Duration) error {
-	restate.ObjectSend(s.ctx, RepoObjectServiceName, RepoObjectKey(repo), RepoHandlerHeldExpiry).Send(HeldExpiryRequest{ID: id}, restate.WithDelay(delay))
+	restate.ObjectSend(s.ctx, prwire.RepoObjectServiceName, RepoObjectKey(repo), prwire.RepoHandlerHeldExpiry).Send(HeldExpiryRequest{ID: id}, restate.WithDelay(delay))
 	return nil
 }
 

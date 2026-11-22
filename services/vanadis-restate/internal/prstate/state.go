@@ -15,6 +15,8 @@ import (
 	"slices"
 	"sort"
 	"strings"
+
+	"github.com/azylman/aerial/pkg/prwire"
 )
 
 // FailedCheckState is the frozen nested per-SHA check failure shape:
@@ -148,7 +150,7 @@ func (s *PRState) OwnerAgent() string {
 // is newly recorded or changed.
 func (s *PRState) RecordFailedCISHA(headSHA string) bool {
 	headSHA = strings.TrimSpace(headSHA)
-	if s == nil || s.Repo == "" || s.PRNumber <= 0 || headSHA == "" || IsZeroSHA(headSHA) {
+	if s == nil || s.Repo == "" || s.PRNumber <= 0 || headSHA == "" || prwire.IsZeroSHA(headSHA) {
 		return false
 	}
 	if strings.EqualFold(s.FailedCISHA, headSHA) {
@@ -218,7 +220,7 @@ func (s *PRState) IsCIFailedForSHA(headSHA string) bool {
 		return false
 	}
 	if clean := strings.TrimSpace(headSHA); clean != "" {
-		if IsZeroSHA(clean) {
+		if prwire.IsZeroSHA(clean) {
 			return false
 		}
 		if s.HasFailedCISHA(clean) {
@@ -252,7 +254,7 @@ func (s *PRState) ClearFailedCISHA() {
 // RecordNonRoboRevFailedSHA caches a non-roborev check failure head SHA.
 func (s *PRState) RecordNonRoboRevFailedSHA(headSHA string) {
 	headSHA = strings.TrimSpace(headSHA)
-	if s == nil || s.PRNumber <= 0 || headSHA == "" || IsZeroSHA(headSHA) {
+	if s == nil || s.PRNumber <= 0 || headSHA == "" || prwire.IsZeroSHA(headSHA) {
 		return
 	}
 	s.NonRoboRevSHA = headSHA
@@ -281,7 +283,7 @@ func (s *PRState) HasNonRoboRevFailedSHA(headSHA string) bool {
 // RecordCancelledCheckSHA caches a cancelled check run SHA.
 func (s *PRState) RecordCancelledCheckSHA(headSHA string) {
 	headSHA = strings.TrimSpace(headSHA)
-	if s == nil || s.PRNumber <= 0 || headSHA == "" || IsZeroSHA(headSHA) {
+	if s == nil || s.PRNumber <= 0 || headSHA == "" || prwire.IsZeroSHA(headSHA) {
 		return
 	}
 	s.CancelledSHA = headSHA
@@ -308,7 +310,7 @@ func (s *PRState) HasCancelledCheckSHA(headSHA string) bool {
 // non-roborev, or cancelled SHA slots.
 func (s *PRState) IsCachedFailedCISHA(headSHA string) bool {
 	headSHA = strings.TrimSpace(headSHA)
-	if s == nil || s.Repo == "" || s.PRNumber <= 0 || headSHA == "" || IsZeroSHA(headSHA) {
+	if s == nil || s.Repo == "" || s.PRNumber <= 0 || headSHA == "" || prwire.IsZeroSHA(headSHA) {
 		return false
 	}
 	for _, v := range []string{s.FailedCISHA, s.NonRoboRevSHA, s.CancelledSHA} {
@@ -325,7 +327,7 @@ func (s *PRState) IsCachedFailedCISHA(headSHA string) bool {
 func (s *PRState) RecordFailedCheckRunDetailed(headSHA, checkName string) (emitAdditional, wasActive, hadPriorEverFailed bool) {
 	normHeadSHA := strings.TrimSpace(headSHA)
 	normCheck := CanonicalFailedCheckKey(checkName)
-	if s == nil || s.PRNumber <= 0 || normHeadSHA == "" || IsZeroSHA(normHeadSHA) || normCheck == "" {
+	if s == nil || s.PRNumber <= 0 || normHeadSHA == "" || prwire.IsZeroSHA(normHeadSHA) || normCheck == "" {
 		return false, false, false
 	}
 	if s.Checks.EverFailed == nil {
@@ -422,7 +424,7 @@ func (s *PRState) ClearFailedCheckRun(headSHA, checkName string) bool {
 // HasActiveFailedCheckRuns reports whether any check failure is active for headSHA.
 func (s *PRState) HasActiveFailedCheckRuns(headSHA string) bool {
 	normHeadSHA := strings.TrimSpace(headSHA)
-	if s == nil || s.PRNumber <= 0 || normHeadSHA == "" || IsZeroSHA(normHeadSHA) {
+	if s == nil || s.PRNumber <= 0 || normHeadSHA == "" || prwire.IsZeroSHA(normHeadSHA) {
 		return false
 	}
 	if !strings.EqualFold(s.Checks.HeadSHA, normHeadSHA) {
@@ -434,7 +436,7 @@ func (s *PRState) HasActiveFailedCheckRuns(headSHA string) bool {
 // HasActiveNonRoboRevFailures reports whether any non-roborev failure is active.
 func (s *PRState) HasActiveNonRoboRevFailures(headSHA string) bool {
 	normHeadSHA := strings.TrimSpace(headSHA)
-	if s == nil || s.PRNumber <= 0 || normHeadSHA == "" || IsZeroSHA(normHeadSHA) {
+	if s == nil || s.PRNumber <= 0 || normHeadSHA == "" || prwire.IsZeroSHA(normHeadSHA) {
 		return false
 	}
 	if !strings.EqualFold(s.Checks.HeadSHA, normHeadSHA) {
@@ -446,7 +448,7 @@ func (s *PRState) HasActiveNonRoboRevFailures(headSHA string) bool {
 // HasActiveRoboRevFailure reports whether a roborev failure is active.
 func (s *PRState) HasActiveRoboRevFailure(headSHA string) bool {
 	normHeadSHA := strings.TrimSpace(headSHA)
-	if s == nil || s.PRNumber <= 0 || normHeadSHA == "" || IsZeroSHA(normHeadSHA) {
+	if s == nil || s.PRNumber <= 0 || normHeadSHA == "" || prwire.IsZeroSHA(normHeadSHA) {
 		return false
 	}
 	if !strings.EqualFold(s.Checks.HeadSHA, normHeadSHA) {
@@ -473,7 +475,7 @@ func (s *PRState) HasActiveCheckRun(headSHA, checkName string) bool {
 func (s *PRState) HasEverFailedCheckRun(headSHA, checkName string) bool {
 	normHeadSHA := strings.TrimSpace(headSHA)
 	normCheck := CanonicalFailedCheckKey(checkName)
-	if s == nil || s.PRNumber <= 0 || normHeadSHA == "" || IsZeroSHA(normHeadSHA) || normCheck == "" {
+	if s == nil || s.PRNumber <= 0 || normHeadSHA == "" || prwire.IsZeroSHA(normHeadSHA) || normCheck == "" {
 		return false
 	}
 	if !strings.EqualFold(s.Checks.HeadSHA, normHeadSHA) {
@@ -506,7 +508,7 @@ func (s *PRState) CanRecoverNonGateCheckSuccess(checkName, headSHA string) bool 
 // Returns true when newly recorded or changed.
 func (s *PRState) MarkCollaboratorAlerted(headSHA string) bool {
 	headSHA = strings.TrimSpace(headSHA)
-	if s == nil || s.PRNumber <= 0 || headSHA == "" || IsZeroSHA(headSHA) {
+	if s == nil || s.PRNumber <= 0 || headSHA == "" || prwire.IsZeroSHA(headSHA) {
 		return false
 	}
 	if strings.EqualFold(s.CollaboratorAlerted, headSHA) {
@@ -545,7 +547,7 @@ func (s *PRState) ClearCollaboratorAlerted(headSHA string) {
 // MarkCollaboratorConflict records a collaborator merge-conflict alert.
 func (s *PRState) MarkCollaboratorConflict(headSHA string) bool {
 	headSHA = strings.TrimSpace(headSHA)
-	if s == nil || s.PRNumber <= 0 || headSHA == "" || IsZeroSHA(headSHA) {
+	if s == nil || s.PRNumber <= 0 || headSHA == "" || prwire.IsZeroSHA(headSHA) {
 		return false
 	}
 	if strings.EqualFold(s.CollaboratorConflict, headSHA) {
@@ -771,7 +773,7 @@ func (s *PRState) ApplyDeployEvent(ev PREvent) EventDisposition {
 // liveSHA trims sha and blanks the all-zero SHA.
 func liveSHA(sha string) string {
 	clean := strings.TrimSpace(sha)
-	if IsZeroSHA(clean) {
+	if prwire.IsZeroSHA(clean) {
 		return ""
 	}
 	return clean
@@ -817,7 +819,7 @@ func (s *PRState) ApplyEvent(ev PREvent) EventDisposition {
 		// head: judge it against the stored merge SHA, and apply while no
 		// merge SHA is known yet.
 		merge := strings.TrimSpace(ev.MergeSHA)
-		if merge != "" && !IsZeroSHA(merge) && s.MergeSHA != "" && !strings.EqualFold(s.MergeSHA, merge) && !strings.EqualFold(s.HeadSHA, merge) {
+		if merge != "" && !prwire.IsZeroSHA(merge) && s.MergeSHA != "" && !strings.EqualFold(s.MergeSHA, merge) && !strings.EqualFold(s.HeadSHA, merge) {
 			return DispositionDropStale
 		}
 		return DispositionApply
@@ -870,7 +872,7 @@ func (s *PRState) MergeEventHead(ev PREvent) (PREvent, bool) {
 // the pushed commit as both).
 func IsMergeOnlyRef(headSHA, mergeSHA string) bool {
 	head, merge := strings.TrimSpace(headSHA), strings.TrimSpace(mergeSHA)
-	return head != "" && !IsZeroSHA(head) && strings.EqualFold(head, merge)
+	return head != "" && !prwire.IsZeroSHA(head) && strings.EqualFold(head, merge)
 }
 
 // RepoState is the Restate-owned per-repo state: the bounded main-push
@@ -941,7 +943,7 @@ func NewRepoState(repo string) *RepoState {
 // MaxMainPushIndex entries; LatestMainSHA tracks the newest push.
 func (s *RepoState) RecordMainPushSHA(sha string) bool {
 	cleanSHA := strings.ToLower(strings.TrimSpace(sha))
-	if s == nil || s.Repo == "" || cleanSHA == "" || IsZeroSHA(cleanSHA) {
+	if s == nil || s.Repo == "" || cleanSHA == "" || prwire.IsZeroSHA(cleanSHA) {
 		return false
 	}
 	if slices.Contains(s.MainPushIndex, cleanSHA) {
@@ -1059,7 +1061,7 @@ type HeldSHAEvent struct {
 
 func normalizeIndexSHA(sha string) string {
 	clean := strings.ToLower(strings.TrimSpace(sha))
-	if clean == "" || IsZeroSHA(clean) {
+	if clean == "" || prwire.IsZeroSHA(clean) {
 		return ""
 	}
 	return clean

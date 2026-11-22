@@ -30,6 +30,7 @@ import (
 
 	restate "github.com/restatedev/sdk-go"
 
+	"github.com/azylman/aerial/pkg/prwire"
 	"github.com/azylman/aerial/pkg/pubsub"
 )
 
@@ -48,27 +49,6 @@ const MaxRolloutIndexEntries = 512
 // DeployViewRequest is the empty GetDeployView input; the object key names
 // the PR.
 type DeployViewRequest struct{}
-
-// DeployView is the per-PR deploy read model. Found is false for a PR
-// Restate has never seen and for an untracked PR (PRState.Untracked), for
-// which the legacy registry keeps no row either.
-type DeployView struct {
-	Found                  bool                            `json:"found"`
-	Repo                   string                          `json:"repo"`
-	PRNumber               int                             `json:"pr_number"`
-	Status                 string                          `json:"status"`
-	Branch                 string                          `json:"branch"`
-	HeadSHA                string                          `json:"head_sha"`
-	MergeSHA               string                          `json:"merge_sha"`
-	TargetID               string                          `json:"target_id"`
-	Agent                  string                          `json:"agent,omitempty"`
-	Jobs                   []string                        `json:"jobs,omitempty"`
-	DeployedJobs           []string                        `json:"deployed_jobs,omitempty"`
-	KustomizationRequests  map[string]KustomizationRequest `json:"kustomization_requests,omitempty"`
-	DeployedKustomizations []string                        `json:"deployed_kustomizations,omitempty"`
-	DeploySuccessPending   bool                            `json:"deploy_success_pending,omitempty"`
-	HasExpectedDeployJobs  bool                            `json:"has_expected_deploy_jobs,omitempty"`
-}
 
 // DeployViewOf renders the deploy read model of st. HasExpectedDeployJobs
 // mirrors the registry HasExpectedDeployJobs query: recorded jobs, deployed
@@ -137,7 +117,7 @@ func (s *PRObjectService) syncRolloutIndex(ctx restate.ObjectContext, st *PRStat
 		return
 	}
 	restate.Set(ctx, s.stateKey, st)
-	restate.ObjectSend(ctx, RepoObjectServiceName, RolloutIndexKey, RepoHandlerRolloutIndex).Send(ev)
+	restate.ObjectSend(ctx, prwire.RepoObjectServiceName, RolloutIndexKey, prwire.RepoHandlerRolloutIndex).Send(ev)
 }
 
 // RolloutIndexEvent is one PRObject rollout-index membership update.
@@ -146,12 +126,6 @@ type RolloutIndexEvent struct {
 	PRNumber int    `json:"pr_number"`
 	Seq      uint64 `json:"seq"`
 	Active   bool   `json:"active"`
-}
-
-// RolloutRef names one indexed rollout.
-type RolloutRef struct {
-	Repo     string `json:"repo"`
-	PRNumber int    `json:"pr_number"`
 }
 
 // RolloutIndexEntry is one indexed PR: its last applied sequence, whether it
@@ -341,7 +315,7 @@ func gatedStartedFacts(started, rest []pubsub.PRLifecycleEvent, transitioned boo
 // the observed lastHandledReconcileAt, in the current generation, so each
 // distinct lost observation re-patches once.
 func ReconcileLostKey(s *PRState, name, observedAt string) EffectKey {
-	return s.EffectKeyFor(EffectFluxReconcile, "", "repatch:"+strings.TrimSpace(name)+"@"+strings.TrimSpace(observedAt), "")
+	return s.EffectKeyFor(prwire.EffectFluxReconcile, "", "repatch:"+strings.TrimSpace(name)+"@"+strings.TrimSpace(observedAt), "")
 }
 
 // HandleReconcileLost re-patches one recorded reconcile request whose

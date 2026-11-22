@@ -30,6 +30,7 @@ import (
 
 	restate "github.com/restatedev/sdk-go"
 
+	"github.com/azylman/aerial/pkg/prwire"
 	"github.com/azylman/aerial/pkg/pubsub"
 )
 
@@ -211,7 +212,7 @@ func (s *PRObjectService) scheduleFactRetry(ctx restate.ObjectContext, req FactE
 	}, restate.WithName("retry-fact-"+kind))
 	next := req
 	next.Attempt++
-	restate.ObjectSend(ctx, PRObjectServiceName, pr, PRHandlerRetryFactEffect).Send(next, restate.WithDelay(s.factRetryDelay))
+	restate.ObjectSend(ctx, prwire.PRObjectServiceName, pr, PRHandlerRetryFactEffect).Send(next, restate.WithDelay(s.factRetryDelay))
 }
 
 // RetryFactEffect re-publishes one restate-owned fact. It drops the retry

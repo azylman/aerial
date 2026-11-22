@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"slices"
 	"testing"
+
+	"github.com/azylman/aerial/pkg/prwire"
 )
 
 // Positional fixture constructors for RepoObject routing index rows.
@@ -50,7 +52,7 @@ func closedPRs(from, to int) []PRIndexEvent {
 func seededRepoState(index []PRIndexEvent, heldSHAs []string) *RepoState {
 	st := NewRepoState("aerial")
 	for _, sha := range heldSHAs {
-		st.HoldSHAEvent(SHAKindCheckRun, SHAEvent{Repo: "aerial", SHA: sha, Handler: PRHandlerCheckFailed})
+		st.HoldSHAEvent(SHAKindCheckRun, SHAEvent{Repo: "aerial", SHA: sha, Handler: prwire.PRHandlerCheckFailed})
 	}
 	for _, ev := range index {
 		st.ApplyPRIndex(ev)
@@ -283,7 +285,7 @@ func TestRepoState_HoldSHAEvent(t *testing.T) {
 			if tc.nilState {
 				st = nil
 			}
-			held, evicted := st.HoldSHAEvent(SHAKindPush, SHAEvent{Repo: "aerial", SHA: tc.sha, Handler: PRHandlerMerged})
+			held, evicted := st.HoldSHAEvent(SHAKindPush, SHAEvent{Repo: "aerial", SHA: tc.sha, Handler: prwire.PRHandlerMerged})
 			if held.ID != tc.wantID {
 				t.Fatalf("held id = %d, want %d", held.ID, tc.wantID)
 			}

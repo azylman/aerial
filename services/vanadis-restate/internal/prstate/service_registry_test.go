@@ -6,6 +6,8 @@ import (
 	restate "github.com/restatedev/sdk-go"
 	"github.com/restatedev/sdk-go/x/mocks"
 	"github.com/stretchr/testify/require"
+
+	"github.com/azylman/aerial/pkg/prwire"
 )
 
 // registryRowView is the slice of PRState a pr_registry row projects.
@@ -299,25 +301,25 @@ func TestPRObjectService_HandleSynchronized(t *testing.T) {
 			name: "before matches stored head", stored: "c00b710c",
 			ev:      PREvent{Repo: "azylman/aerial", PRNumber: 2308, HeadSHA: "79e9dfc2", BeforeSHA: "c00b710c", Branch: "feat/x"},
 			wantSet: true, wantHead: "79e9dfc2", wantPrior: []string{"c00b710c"},
-			wantSends: []sentCall{{service: RepoObjectServiceName, key: "azylman/aerial", method: RepoHandlerPRIndex, input: PRIndexEvent{Repo: "azylman/aerial", PRNumber: 2308, Branch: "feat/x", HeadSHA: "79e9dfc2", Lifecycle: IndexActive}}},
+			wantSends: []sentCall{{service: prwire.RepoObjectServiceName, key: "azylman/aerial", method: prwire.RepoHandlerPRIndex, input: PRIndexEvent{Repo: "azylman/aerial", PRNumber: 2308, Branch: "feat/x", HeadSHA: "79e9dfc2", Lifecycle: IndexActive}}},
 		},
 		{
 			name: "missed synchronize recovers and indexes the new head", stored: "c00b710c",
 			ev:      PREvent{Repo: "azylman/aerial", PRNumber: 2308, HeadSHA: "701c341c", BeforeSHA: "79e9dfc2", Branch: "feat/x"},
 			wantSet: true, wantHead: "701c341c", wantPrior: []string{"c00b710c"},
-			wantSends: []sentCall{{service: RepoObjectServiceName, key: "azylman/aerial", method: RepoHandlerPRIndex, input: PRIndexEvent{Repo: "azylman/aerial", PRNumber: 2308, Branch: "feat/x", HeadSHA: "701c341c", Lifecycle: IndexActive}}},
+			wantSends: []sentCall{{service: prwire.RepoObjectServiceName, key: "azylman/aerial", method: prwire.RepoHandlerPRIndex, input: PRIndexEvent{Repo: "azylman/aerial", PRNumber: 2308, Branch: "feat/x", HeadSHA: "701c341c", Lifecycle: IndexActive}}},
 		},
 		{
 			name: "synchronize resolves a stored conflict", stored: "c00b710c", status: RegistryStatusConflict, conflictSHA: "c00b710c",
 			ev:      PREvent{Repo: "azylman/aerial", PRNumber: 2308, HeadSHA: "79e9dfc2", BeforeSHA: "c00b710c", Branch: "feat/x"},
 			wantSet: true, wantHead: "79e9dfc2", wantPrior: []string{"c00b710c"}, wantStatus: RegistryStatusOpen,
-			wantSends: []sentCall{{service: RepoObjectServiceName, key: "azylman/aerial", method: RepoHandlerPRIndex, input: PRIndexEvent{Repo: "azylman/aerial", PRNumber: 2308, Branch: "feat/x", HeadSHA: "79e9dfc2", Lifecycle: IndexActive}}},
+			wantSends: []sentCall{{service: prwire.RepoObjectServiceName, key: "azylman/aerial", method: prwire.RepoHandlerPRIndex, input: PRIndexEvent{Repo: "azylman/aerial", PRNumber: 2308, Branch: "feat/x", HeadSHA: "79e9dfc2", Lifecycle: IndexActive}}},
 		},
 		{
 			name: "synchronize of an open row keeps its published conflict record", stored: "c00b710c", conflictSHA: "c00b710c",
 			ev:      PREvent{Repo: "azylman/aerial", PRNumber: 2308, HeadSHA: "79e9dfc2", BeforeSHA: "c00b710c", Branch: "feat/x"},
 			wantSet: true, wantHead: "79e9dfc2", wantPrior: []string{"c00b710c"}, wantStatus: RegistryStatusOpen, wantConflicts: "c00b710c",
-			wantSends: []sentCall{{service: RepoObjectServiceName, key: "azylman/aerial", method: RepoHandlerPRIndex, input: PRIndexEvent{Repo: "azylman/aerial", PRNumber: 2308, Branch: "feat/x", HeadSHA: "79e9dfc2", Lifecycle: IndexActive}}},
+			wantSends: []sentCall{{service: prwire.RepoObjectServiceName, key: "azylman/aerial", method: prwire.RepoHandlerPRIndex, input: PRIndexEvent{Repo: "azylman/aerial", PRNumber: 2308, Branch: "feat/x", HeadSHA: "79e9dfc2", Lifecycle: IndexActive}}},
 		},
 		{
 			name: "late redelivery of a prior head drops", stored: "701c341c", prior: []string{"c00b710c", "79e9dfc2"},
@@ -368,7 +370,7 @@ func TestPRObjectService_HandleMergedStaleHead(t *testing.T) {
 			name:    "same-merge closed event recovers and indexes the real head",
 			ev:      PREvent{Repo: "azylman/aerial", PRNumber: 2308, HeadSHA: "701c341c", MergeSHA: "913c2325", Branch: "feat/x"},
 			wantSet: true, wantHead: "701c341c", wantPrior: []string{"c00b710c"},
-			wantSends: []sentCall{{service: RepoObjectServiceName, key: "azylman/aerial", method: RepoHandlerPRIndex, input: PRIndexEvent{Repo: "azylman/aerial", PRNumber: 2308, Branch: "feat/x", HeadSHA: "701c341c", Lifecycle: IndexActive}}},
+			wantSends: []sentCall{{service: prwire.RepoObjectServiceName, key: "azylman/aerial", method: prwire.RepoHandlerPRIndex, input: PRIndexEvent{Repo: "azylman/aerial", PRNumber: 2308, Branch: "feat/x", HeadSHA: "701c341c", Lifecycle: IndexActive}}},
 		},
 		{
 			name:     "merge-only ref never overwrites the head",
@@ -412,14 +414,14 @@ func TestPRObjectService_DeploySuccessPublishedMergedStaleHead(t *testing.T) {
 		{
 			name:    "first record indexes the repaired head as deployed",
 			wantOut: DeployPublishedOutcome{Disposition: DispositionApply, EffectKey: "azylman/aerial#2308@701c341c:gen0:deploy_dispatch:job=aerial-config", Recorded: true},
-			wantSends: []sentCall{{service: RepoObjectServiceName, key: "azylman/aerial", method: RepoHandlerPRIndex, input: PRIndexEvent{
+			wantSends: []sentCall{{service: prwire.RepoObjectServiceName, key: "azylman/aerial", method: prwire.RepoHandlerPRIndex, input: PRIndexEvent{
 				Repo: "azylman/aerial", PRNumber: 2308, Branch: "feat/x", HeadSHA: "701c341c", MergeSHA: "913c2325", Lifecycle: IndexDeployed,
 			}}},
 		},
 		{
 			name: "deduped record indexes the repaired head as active", dispatched: true,
 			wantOut: DeployPublishedOutcome{Disposition: DispositionApply, EffectKey: "azylman/aerial#2308@701c341c:gen0:deploy_dispatch:job=aerial-config", Recorded: true, Deduped: true},
-			wantSends: []sentCall{{service: RepoObjectServiceName, key: "azylman/aerial", method: RepoHandlerPRIndex, input: PRIndexEvent{
+			wantSends: []sentCall{{service: prwire.RepoObjectServiceName, key: "azylman/aerial", method: prwire.RepoHandlerPRIndex, input: PRIndexEvent{
 				Repo: "azylman/aerial", PRNumber: 2308, Branch: "feat/x", HeadSHA: "701c341c", Lifecycle: IndexActive,
 			}}},
 		},
@@ -431,7 +433,7 @@ func TestPRObjectService_DeploySuccessPublishedMergedStaleHead(t *testing.T) {
 			seed.HeadSHA, seed.MergeSHA, seed.Branch = "c00b710c", "913c2325", "feat/x"
 			seed.Status, seed.Terminal = RegistryStatusMerged, TerminalMerged
 			if tc.dispatched {
-				seed.MarkEffectDispatched(seed.EffectKeyFor(EffectDeployDispatch, "701c341c", "aerial-config", ""))
+				seed.MarkEffectDispatched(seed.EffectKeyFor(prwire.EffectDeployDispatch, "701c341c", "aerial-config", ""))
 			}
 			mc, rec := newStateMock(t, seed)
 			out, err := NewPRObjectService().HandleDeploySuccessPublished(restate.WithMockContext(mc), PREvent{
