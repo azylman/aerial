@@ -1458,3 +1458,37 @@ func TestPushScanConfig_PrefixesFor(t *testing.T) {
 		})
 	}
 }
+
+func TestEgressScanConfig_Blocks(t *testing.T) {
+	t.Parallel()
+	const blocklist = "egress_scan:\n  blocked_mcp:\n    - \" Discord \"\n    - \"github/Add_Issue_Comment\"\n    - \"\"\n    - \"/orphan_tool\"\n"
+	tests := []struct {
+		name   string
+		yaml   string
+		server string
+		tool   string
+		want   bool
+	}{
+		{name: "absent key blocks nothing", yaml: "model: m\n", server: "discord", tool: "send"},
+		{name: "server entry blocks every tool", yaml: blocklist, server: "discord", tool: "discord_send_message", want: true},
+		{name: "server entry matches case and whitespace", yaml: blocklist, server: " DISCORD ", tool: "anything", want: true},
+		{name: "server/tool entry blocks that tool", yaml: blocklist, server: "GitHub", tool: "add_issue_comment", want: true},
+		{name: "server/tool entry leaves sibling tool", yaml: blocklist, server: "github", tool: "get_file_contents"},
+		{name: "unlisted server passes", yaml: blocklist, server: "kernel", tool: "browser_type"},
+		{name: "empty server never blocked", yaml: blocklist, server: "", tool: "orphan_tool"},
+		{name: "server prefix is not a match", yaml: blocklist, server: "discord-mcp", tool: "send"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var cd ConfigData
+			if err := yaml.Unmarshal([]byte(tc.yaml), &cd); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			cloned := cloneConfigData(&cd)
+			if got := cloned.EgressScan.Blocks(tc.server, tc.tool); got != tc.want {
+				t.Fatalf("Blocks(%q, %q) = %t, want %t", tc.server, tc.tool, got, tc.want)
+			}
+		})
+	}
+}

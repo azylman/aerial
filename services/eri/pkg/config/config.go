@@ -362,6 +362,7 @@ type ConfigData struct {
 	NATSURL                   string                   `yaml:"nats_url"                               json:"nats_url"`
 	Transcripts               TranscriptsConfig        `yaml:"transcripts,omitempty"                  json:"transcripts,omitempty"`
 	PushScan                  PushScanConfig           `yaml:"push_scan,omitempty"                    json:"push_scan,omitempty"`
+	EgressScan                EgressScanConfig         `yaml:"egress_scan,omitempty"                  json:"egress_scan,omitempty"`
 	// TurnQueue is only cross-checked by eri-restate against its pod annotation, which alone
 	// selects the bound handler set ("" or "legacy" -> legacy, "coordinator" -> coordinator).
 	TurnQueue string `yaml:"turn_queue,omitempty" json:"turn_queue,omitempty"`
@@ -405,6 +406,47 @@ func (p PushScanConfig) PrefixesFor(owner, repo string) []string {
 		prefix = strings.TrimPrefix(strings.TrimSpace(prefix), "/")
 		if ok && prefix != "" && strings.ToLower(strings.TrimSpace(target)) == want {
 			out = append(out, prefix)
+		}
+	}
+	return out
+}
+
+// EgressScanConfig lists MCP destinations that are never a legitimate place
+// for a secret. Tool arguments bound for a listed destination are scanned for
+// registered secret values and token patterns; every other MCP call is not.
+type EgressScanConfig struct {
+	// BlockedMCP entries are either "server" (every tool on that server) or
+	// "server/tool" (one tool), matched case-insensitively.
+	BlockedMCP []string `yaml:"blocked_mcp,omitempty" json:"blocked_mcp,omitempty"`
+}
+
+// Blocks reports whether the MCP call server/tool is on the blocklist.
+func (e EgressScanConfig) Blocks(server, tool string) bool {
+	server = strings.TrimSpace(server)
+	tool = strings.TrimSpace(tool)
+	if server == "" {
+		return false
+	}
+	for _, entry := range e.BlockedMCP {
+		entryServer, entryTool, hasTool := strings.Cut(strings.TrimSpace(entry), "/")
+		entryServer = strings.TrimSpace(entryServer)
+		entryTool = strings.TrimSpace(entryTool)
+		if entryServer == "" || !strings.EqualFold(entryServer, server) {
+			continue
+		}
+		if !hasTool || entryTool == "" || strings.EqualFold(entryTool, tool) {
+			return true
+		}
+	}
+	return false
+}
+
+// normalizeBlockedMCP trims entries and drops empty ones.
+func normalizeBlockedMCP(entries []string) []string {
+	var out []string
+	for _, entry := range entries {
+		if trimmed := strings.TrimSpace(entry); trimmed != "" {
+			out = append(out, trimmed)
 		}
 	}
 	return out
@@ -546,6 +588,7 @@ func (c *ConfigData) UnmarshalYAML(value *yaml.Node) error {
 		NATSURL                   string                   `yaml:"nats_url"`
 		Transcripts               TranscriptsConfig        `yaml:"transcripts"`
 		PushScan                  PushScanConfig           `yaml:"push_scan"`
+		EgressScan                EgressScanConfig         `yaml:"egress_scan"`
 		TurnQueue                 string                   `yaml:"turn_queue"`
 	}
 
@@ -582,6 +625,7 @@ func (c *ConfigData) UnmarshalYAML(value *yaml.Node) error {
 		MaxBatchBytes: raw.Transcripts.MaxBatchBytes,
 	}
 	c.PushScan = PushScanConfig{RegexAllowlist: cloneStringSlice(raw.PushScan.RegexAllowlist)}
+	c.EgressScan = EgressScanConfig{BlockedMCP: normalizeBlockedMCP(raw.EgressScan.BlockedMCP)}
 	if _, err := ParseTurnQueueMode(raw.TurnQueue); err != nil {
 		return err
 	}
@@ -715,6 +759,7 @@ func cloneConfigData(src *ConfigData) *ConfigData {
 	dst := *src
 	dst.AdminUsers = cloneStringSlice(src.AdminUsers)
 	dst.PushScan.RegexAllowlist = cloneStringSlice(src.PushScan.RegexAllowlist)
+	dst.EgressScan.BlockedMCP = cloneStringSlice(src.EgressScan.BlockedMCP)
 	if src.Channels != nil {
 		dst.Channels = make(map[string]ChannelPolicy, len(src.Channels))
 		for k, v := range src.Channels {
