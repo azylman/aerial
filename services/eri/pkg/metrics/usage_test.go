@@ -249,7 +249,7 @@ func TestRecordCodexUsageJSON(t *testing.T) {
 					t.Fatalf("record error = %v, wantErr %v", err, wantErr)
 				}
 			}
-			if got := LatestQuotaGroups(); !reflect.DeepEqual(got, tc.want) {
+			if got := LatestQuotaSnapshot().Groups; !reflect.DeepEqual(got, tc.want) {
 				t.Errorf("latest = %+v, want %+v", got, tc.want)
 			}
 			rec := httptest.NewRecorder()
@@ -383,11 +383,8 @@ func TestRecordUsageJSON(t *testing.T) {
 			if !strings.Contains(rec.Body.String(), tc.wantCheck) {
 				t.Errorf("%s: missing %q in:\n%s", tc.name, tc.wantCheck, rec.Body.String())
 			}
-			if len(LatestQuotaGroups()) == 0 {
-				t.Errorf("%s: expected LatestQuotaGroups() to be populated", tc.name)
-			}
-			if LatestQuotaUpdatedAt().IsZero() {
-				t.Errorf("%s: expected LatestQuotaUpdatedAt() to be populated", tc.name)
+			if snap := LatestQuotaSnapshot(); len(snap.Groups) == 0 || snap.UpdatedAt.IsZero() {
+				t.Errorf("%s: expected LatestQuotaSnapshot() to be populated, got %+v", tc.name, snap)
 			}
 		}
 	}

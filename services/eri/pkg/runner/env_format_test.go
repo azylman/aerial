@@ -466,68 +466,6 @@ func TestTraceCarrierEnv(t *testing.T) {
 	}
 }
 
-func TestFormatTurnEnvFileContent(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name           string
-		targetID       string
-		vanadisChunkID string
-		wantContains   []string
-	}{
-		{
-			name:           "populated target and chunk",
-			targetID:       "discord-123456",
-			vanadisChunkID: "build-1-chunk-2",
-			wantContains: []string{
-				"unset BASH_ENV\n",
-				"export AERIAL_TARGET_ID='123456'\n",
-				"export AERIAL_VANADIS_CHUNK_ID='build-1-chunk-2'\n",
-			},
-		},
-		{
-			name:           "empty target and chunk",
-			targetID:       "",
-			vanadisChunkID: "",
-			wantContains: []string{
-				"unset BASH_ENV\n",
-				"unset AERIAL_TARGET_ID\n",
-				"unset AERIAL_VANADIS_CHUNK_ID\n",
-			},
-		},
-		{
-			name:           "headless worker target normalized to unset",
-			targetID:       "dispatch-999",
-			vanadisChunkID: "",
-			wantContains: []string{
-				"unset BASH_ENV\n",
-				"unset AERIAL_TARGET_ID\n",
-				"unset AERIAL_VANADIS_CHUNK_ID\n",
-			},
-		},
-		{
-			name:           "escaping single quotes",
-			targetID:       "foo'bar",
-			vanadisChunkID: "chunk'escaped'test",
-			wantContains: []string{
-				"unset BASH_ENV\n",
-				"export AERIAL_TARGET_ID='foo'\\''bar'\n",
-				"export AERIAL_VANADIS_CHUNK_ID='chunk'\\''escaped'\\''test'\n",
-			},
-		},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			got := FormatTurnEnvFileContent(tc.targetID, tc.vanadisChunkID)
-			for _, exp := range tc.wantContains {
-				if !strings.Contains(got, exp) {
-					t.Errorf("FormatTurnEnvFileContent(%q, %q) missing %q; got:\n%s", tc.targetID, tc.vanadisChunkID, exp, got)
-				}
-			}
-		})
-	}
-}
-
 func TestParseInitEvent(t *testing.T) {
 	t.Parallel()
 	vID := "11111111-2222-3333-4444-555555555555"

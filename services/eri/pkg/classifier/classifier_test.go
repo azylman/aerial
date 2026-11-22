@@ -21,19 +21,6 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/runner"
 )
 
-// WithModel sets the LLM model identifier.
-func WithModel(model string) Option { return func(c *Classifier) { c.Model = model } }
-
-// WithLLMFunc sets the LLM invocation function.
-func WithLLMFunc(fn func(ctx context.Context, model, prompt string) (string, error)) Option {
-	return func(c *Classifier) { c.LLMFunc = fn }
-}
-
-// NewClassifier constructs a Classifier with defaults (compatibility wrapper for New).
-func NewClassifier(opts ...Option) *Classifier {
-	return New(nil, opts...)
-}
-
 type classifierMockProcessHandle struct{ pid int }
 
 func (m *classifierMockProcessHandle) Pid() int  { return m.pid }
@@ -81,16 +68,15 @@ func TestClassifier_DefaultsAndOptions(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			var opts []Option
+			c := New(tc.cfg)
 			if tc.customModel != "" {
-				opts = append(opts, WithModel(tc.customModel))
+				c.Model = tc.customModel
 			}
 			if tc.llmOut != "" {
-				opts = append(opts, WithLLMFunc(func(ctx context.Context, model, prompt string) (string, error) {
+				c.LLMFunc = func(ctx context.Context, model, prompt string) (string, error) {
 					return tc.llmOut, nil
-				}))
+				}
 			}
-			c := New(tc.cfg, opts...)
 			if tc.customThresh > 0 {
 				c.FailureThreshold = tc.customThresh
 				c.CooldownDuration = tc.customCooldown
@@ -114,11 +100,6 @@ func TestClassifier_DefaultsAndOptions(t *testing.T) {
 				t.Fatalf("TitleLLMFunc got (%q, %v), want (%q, %v)", tOut, tErr, tc.wantTitle, tc.wantErr)
 			}
 		})
-	}
-
-	compat := NewClassifier()
-	if compat == nil || compat.Model != DefaultAGYClassifierModel {
-		t.Fatalf("NewClassifier() = %+v", compat)
 	}
 }
 
@@ -289,13 +270,15 @@ func TestClassify_LLM(t *testing.T) {
 			case tc.blankModel:
 				cls = &Classifier{Model: "   ", cfg: config.NewFromData(&config.ConfigData{LowEffortModel: "   "}), LLMFunc: func(ctx context.Context, model, prompt string) (string, error) { return "", nil }}
 			case tc.timeoutWait:
-				cls = NewClassifier(WithLLMFunc(func(ctx context.Context, model, prompt string) (string, error) {
+				cls = New(nil)
+				cls.LLMFunc = func(ctx context.Context, model, prompt string) (string, error) {
 					<-ctx.Done()
 					return "", ctx.Err()
-				}))
+				}
 				cls.Timeout = 10 * time.Millisecond
 			default:
-				cls = NewClassifier(WithLLMFunc(func(ctx context.Context, model, prompt string) (string, error) { return tc.llmOut, nil }))
+				cls = New(nil)
+				cls.LLMFunc = func(ctx context.Context, model, prompt string) (string, error) { return tc.llmOut, nil }
 			}
 
 			if tc.checkParse {
@@ -374,15 +357,14 @@ func TestCircuitBreaker(t *testing.T) {
 	var callCount, shouldFail int32
 	atomic.StoreInt32(&shouldFail, 1)
 
-	c := NewClassifier(
-		WithLLMFunc(func(ctx context.Context, model, prompt string) (string, error) {
-			atomic.AddInt32(&callCount, 1)
-			if atomic.LoadInt32(&shouldFail) == 1 {
-				return "", errors.New("simulated failure")
-			}
-			return `{"confidence": 0.88, "reason": "healthy now"}`, nil
-		}),
-	)
+	c := New(nil)
+	c.LLMFunc = func(ctx context.Context, model, prompt string) (string, error) {
+		atomic.AddInt32(&callCount, 1)
+		if atomic.LoadInt32(&shouldFail) == 1 {
+			return "", errors.New("simulated failure")
+		}
+		return `{"confidence": 0.88, "reason": "healthy now"}`, nil
+	}
 	c.FailureThreshold = 3
 	c.CooldownDuration = 60 * time.Second
 	c.Clock = getTime
@@ -415,14 +397,15 @@ func TestCircuitBreaker(t *testing.T) {
 	}
 	assertClassifierState(t, c, 0, false, "call 5 recovery")
 
-	cParse := NewClassifier(WithLLMFunc(func(ctx context.Context, model, prompt string) (string, error) { return "bad-json", nil }))
+	cParse := New(nil)
+	cParse.LLMFunc = func(ctx context.Context, model, prompt string) (string, error) { return "bad-json", nil }
 	cParse.FailureThreshold = 2
 	cParse.CooldownDuration = 60 * time.Second
 	cParse.Classify(context.Background(), target, nil)
 	cParse.Classify(context.Background(), target, nil)
 	assertClassifierState(t, cParse, 2, true, "parse failure circuit")
 
-	cConc := NewClassifier()
+	cConc := New(nil)
 	cConc.FailureThreshold = 5
 	var wg sync.WaitGroup
 	for i := range 20 {

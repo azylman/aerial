@@ -405,7 +405,7 @@ func (d *StreamingDaemon) syncTurnEnvFile(turnCtx *TurnContext) error {
 	if syncErr != nil {
 		log.Printf("[StreamingDaemon] Warning: failed syncing SA token file %q: %v", saTokenDest, syncErr)
 	}
-	content := FormatTurnEnvFileContent(targetID, vanadisChunkID, syncedTokenPath)
+	content := session.FormatTurnEnvFileContent(targetID, vanadisChunkID, syncedTokenPath)
 	if err := os.WriteFile(turnEnvFile, []byte(content), 0o644); err != nil {
 		return fmt.Errorf("failed writing turn env file: %w", err)
 	}

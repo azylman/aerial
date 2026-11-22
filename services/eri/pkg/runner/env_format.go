@@ -314,12 +314,6 @@ func SanitizeDaemonTargetKey(targetKey string) string {
 	return out
 }
 
-// FormatTurnEnvFileContent formats the per-daemon turn environment file sourced by BASH_ENV.
-// It delegates to session.FormatTurnEnvFileContent.
-func FormatTurnEnvFileContent(targetID, vanadisChunkID string, saTokenPath ...string) string {
-	return session.FormatTurnEnvFileContent(targetID, vanadisChunkID, saTokenPath...)
-}
-
 // ParseInitEvent extracts conversation ID from an NDJSON line containing {"event":"init"}.
 // Note: agy --output-format stream-json emits strict NDJSON lines on stdout (diagnostics go to stderr),
 // so ParseInitEvent intentionally uses direct json.Unmarshal without manual '{' prefix-scanning.

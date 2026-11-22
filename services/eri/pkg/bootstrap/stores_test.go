@@ -13,21 +13,21 @@ func openLazyPostgres(*config.Config) (*sql.DB, error) {
 	return sql.Open("pgx", "postgres://localhost/test")
 }
 
-func failOpen(*config.Config) (*sql.DB, error) {
-	return nil, errors.New("dial refused")
+func failOpen(err error) func(*config.Config) (*sql.DB, error) {
+	return func(*config.Config) (*sql.DB, error) { return nil, err }
 }
 
 func TestInitDefaultStores(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name     string
-		failOpen bool
-		dbURL    string
-		stack    string
-		wantErr  string
+		name    string
+		openErr error
+		dbURL   string
+		stack   string
+		wantErr string
 	}{
-		{name: "open error", failOpen: true, wantErr: "failed to initialize database: dial refused"},
+		{name: "open error", openErr: errors.New("dial refused"), wantErr: "failed to initialize database: dial refused"},
 		{name: "transcript stack error", wantErr: "failed to resolve transcript stack"},
 		{name: "success", dbURL: "postgres://localhost/test", stack: "aerial-test"},
 	}
@@ -35,8 +35,8 @@ func TestInitDefaultStores(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			open := openLazyPostgres
-			if tc.failOpen {
-				open = failOpen
+			if tc.openErr != nil {
+				open = failOpen(tc.openErr)
 			}
 			cfg := config.NewFromData(&config.ConfigData{
 				DatabaseURL: tc.dbURL,
