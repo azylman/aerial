@@ -16,7 +16,9 @@ func TestMain_Execution(t *testing.T) {
 	t.Cleanup(func() {
 		loadConfigFn, runAppFn, exitFn, initTracingFn, readFileFn = origLoad, origRun, origExit, origTracing, origRead
 	})
-	readFileFn = func(string) ([]byte, error) { return []byte("vanadis_restate:\n  github_owner: acme\n"), nil }
+	readFileFn = func(string) ([]byte, error) {
+		return []byte("vanadis_restate:\n  github_owner: acme\n  github_app_id: \"1111\"\n"), nil
+	}
 	var tracedService string
 	flushes := 0
 	initTracingFn = func(_ context.Context, service, _ string) (tracing.Config, func()) {
@@ -25,13 +27,13 @@ func TestMain_Execution(t *testing.T) {
 	}
 
 	loadConfigFn = func(func(string) string) app.Config {
-		return app.Config{HealthPort: "4026", RestatePort: "9080", VanadisURL: "http://vanadis.aerial:4025"}
+		return app.Config{HealthPort: "4026", RestatePort: "9080", VanadisURL: "http://vanadis.aerial:4025", GitHubAppID: "9991", GitHubAppInstallationID: "9992"}
 	}
 
-	// 1. Success case: the owner read at startup reaches RunApp
-	var gotOwner string
+	// 1. Success case: the owner and App IDs read at startup reach RunApp
+	var got app.Config
 	runAppFn = func(ctx context.Context, cfg app.Config) error {
-		gotOwner = cfg.GitHubOwner
+		got = cfg
 		return nil
 	}
 	exited := false
@@ -42,7 +44,9 @@ func TestMain_Execution(t *testing.T) {
 	assert.False(t, exited)
 	assert.Equal(t, "vanadis-restate", tracedService)
 	assert.Equal(t, 1, flushes)
-	assert.Equal(t, "acme", gotOwner)
+	assert.Equal(t, "acme", got.GitHubOwner)
+	assert.Equal(t, "1111", got.GitHubAppID)
+	assert.Equal(t, "9992", got.GitHubAppInstallationID)
 
 	// 2. Error case
 	runAppFn = func(ctx context.Context, cfg app.Config) error {

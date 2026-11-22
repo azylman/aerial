@@ -1,10 +1,10 @@
 package router
 
 // GitHub REST credential selection for synapse: RunServer reads the App
-// secrets once from env and builds a selector that asks the live config's
+// private key once from env and builds a selector that asks the live config's
 // github_credential (app|pat) on every Token call, so an aerial-config PR
 // moves traffic without a restart. The PEM never enters the hot-reloadable
-// Config.
+// Config; the App IDs (non-secret) come from the startup config snapshot.
 
 import (
 	"context"
@@ -19,7 +19,9 @@ import (
 	"github.com/azylman/aerial/services/synapse/internal/metrics"
 )
 
-// gitHubAppEnv holds the GITHUB_APP_* secret values read once at startup.
+// gitHubAppEnv holds the GitHub App inputs read once at startup: the IDs
+// from the startup config snapshot (service YAML, env fallback) and the
+// GITHUB_APP_PRIVATE_KEY secret from env.
 type gitHubAppEnv struct {
 	AppID          string
 	InstallationID string

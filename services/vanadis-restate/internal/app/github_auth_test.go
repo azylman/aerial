@@ -58,32 +58,65 @@ type staticConfigFile struct {
 
 func (f staticConfigFile) read(string) ([]byte, error) { return []byte(f.data), f.err }
 
-func TestReadGitHubOwner(t *testing.T) {
+func TestReadServiceSettings(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name    string
 		file    staticConfigFile
-		want    string
+		want    ServiceSettings
 		wantErr string
 	}{
-		{name: "owner set", file: staticConfigFile{data: "vanadis_restate:\n  github_owner: acme\n"}, want: "acme"},
-		{name: "owner trimmed", file: staticConfigFile{data: "vanadis_restate:\n  github_owner: \" acme/ \"\n"}, want: "acme"},
-		{name: "owner beside credential", file: staticConfigFile{data: "vanadis_restate:\n  github_credential: pat\n  github_owner: agent-alpha\n"}, want: "agent-alpha"},
-		{name: "owner unset", file: staticConfigFile{data: "vanadis_restate:\n  github_credential: app\n"}, wantErr: "vanadis_restate.github_owner is not set in /cfg/vanadis.yaml"},
+		{name: "owner set", file: staticConfigFile{data: "vanadis_restate:\n  github_owner: acme\n"}, want: ServiceSettings{GitHubOwner: "acme"}},
+		{name: "owner trimmed", file: staticConfigFile{data: "vanadis_restate:\n  github_owner: \" acme/ \"\n"}, want: ServiceSettings{GitHubOwner: "acme"}},
+		{name: "owner beside credential", file: staticConfigFile{data: "vanadis_restate:\n  github_credential: pat\n  github_owner: agent-alpha\n"}, want: ServiceSettings{GitHubOwner: "agent-alpha"}},
+		{name: "app ids as yaml ints", file: staticConfigFile{data: "vanadis_restate:\n  github_owner: acme\n  github_app_id: 1111\n  github_app_installation_id: 2222\n"}, want: ServiceSettings{GitHubOwner: "acme", GitHubAppID: "1111", GitHubAppInstallationID: "2222"}},
+		{name: "app ids as trimmed strings", file: staticConfigFile{data: "vanadis_restate:\n  github_owner: acme\n  github_app_id: \" 1111 \"\n  github_app_installation_id: \"2222\"\n"}, want: ServiceSettings{GitHubOwner: "acme", GitHubAppID: "1111", GitHubAppInstallationID: "2222"}},
+		{name: "non-integer app id passes through", file: staticConfigFile{data: "vanadis_restate:\n  github_owner: acme\n  github_app_id: not-a-number\n"}, want: ServiceSettings{GitHubOwner: "acme", GitHubAppID: "not-a-number"}},
+		{name: "owner unset", file: staticConfigFile{data: "vanadis_restate:\n  github_credential: app\n  github_app_id: 1111\n"}, wantErr: "vanadis_restate.github_owner is not set in /cfg/vanadis.yaml"},
 		{name: "owner blank", file: staticConfigFile{data: "vanadis_restate:\n  github_owner: \" / \"\n"}, wantErr: "vanadis_restate.github_owner is not set in /cfg/vanadis.yaml"},
-		{name: "missing file", file: staticConfigFile{err: fs.ErrNotExist}, wantErr: "read github_owner config /cfg/vanadis.yaml: file does not exist"},
-		{name: "bad yaml", file: staticConfigFile{data: "vanadis_restate: [\n"}, wantErr: "parse github_owner config /cfg/vanadis.yaml: yaml: line 1: did not find expected node content"},
+		{name: "missing file", file: staticConfigFile{err: fs.ErrNotExist}, wantErr: "read service config /cfg/vanadis.yaml: file does not exist"},
+		{name: "bad yaml", file: staticConfigFile{data: "vanadis_restate: [\n"}, wantErr: "parse service config /cfg/vanadis.yaml: yaml: line 1: did not find expected node content"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got, err := ReadGitHubOwner("/cfg/vanadis.yaml", tc.file.read)
+			got, err := ReadServiceSettings("/cfg/vanadis.yaml", tc.file.read)
 			require.Equal(t, tc.want, got)
 			if tc.wantErr == "" {
 				require.NoError(t, err)
 				return
 			}
 			require.EqualError(t, err, tc.wantErr)
+		})
+	}
+}
+
+func TestConfigWithServiceSettings(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name               string
+		envAppID           string
+		envInstallationID  string
+		settings           ServiceSettings
+		wantAppID          string
+		wantInstallationID string
+	}{
+		{name: "yaml wins over env", envAppID: "9991", envInstallationID: "9992", settings: ServiceSettings{GitHubOwner: "acme", GitHubAppID: "1111", GitHubAppInstallationID: "2222"}, wantAppID: "1111", wantInstallationID: "2222"},
+		{name: "empty yaml falls back to env", envAppID: "9991", envInstallationID: "9992", settings: ServiceSettings{GitHubOwner: "acme"}, wantAppID: "9991", wantInstallationID: "9992"},
+		{name: "mixed sources per key", envAppID: "9991", envInstallationID: "9992", settings: ServiceSettings{GitHubOwner: "acme", GitHubAppInstallationID: "2222"}, wantAppID: "9991", wantInstallationID: "2222"},
+		{name: "both empty stay empty", settings: ServiceSettings{GitHubOwner: "acme"}},
+		{name: "non-integer yaml wins verbatim", envAppID: "9991", settings: ServiceSettings{GitHubOwner: "acme", GitHubAppID: "not-a-number"}, wantAppID: "not-a-number"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			base := Config{GitHubAppID: tc.envAppID, GitHubAppInstallationID: tc.envInstallationID, GitHubAppPrivateKey: "pem-text", GitHubToken: "pat-x"}
+			got := base.WithServiceSettings(tc.settings)
+			want := base
+			want.GitHubOwner = "acme"
+			want.GitHubAppID = tc.wantAppID
+			want.GitHubAppInstallationID = tc.wantInstallationID
+			require.Equal(t, want, got)
 		})
 	}
 }
@@ -160,8 +193,10 @@ func TestGitHubHTTPClientCredential(t *testing.T) {
 		mintStatus int
 		choice     string
 		target     string
-		wantAuth   string
-		wantMints  int
+		// appID overrides the App ID (default 12345) when appEnv is set.
+		appID     string
+		wantAuth  string
+		wantMints int
 	}{
 		{name: "app env unset with app setting uses the pat", pat: "pat-1", choice: "app", target: "https://api.github.com/repos/o/r", wantAuth: "Bearer pat-1"},
 		{name: "app env unset with pat setting uses the pat", pat: "pat-1", choice: "pat", target: "https://api.github.com/repos/o/r", wantAuth: "Bearer pat-1"},
@@ -169,6 +204,7 @@ func TestGitHubHTTPClientCredential(t *testing.T) {
 		{name: "app setting uses the minted installation token", appEnv: true, pat: "pat-1", mintStatus: 201, choice: "app", target: "https://api.github.com/repos/o/r", wantAuth: "Bearer ghs_minted", wantMints: 1},
 		{name: "pat setting skips the app", appEnv: true, pat: "pat-1", mintStatus: 201, choice: "pat", target: "https://api.github.com/repos/o/r", wantAuth: "Bearer pat-1"},
 		{name: "failed mint falls back to the pat", appEnv: true, pat: "pat-1", mintStatus: 500, choice: "app", target: "https://api.github.com/repos/o/r", wantAuth: "Bearer pat-1", wantMints: 1},
+		{name: "non-integer app id falls back to the pat", appEnv: true, appID: "not-a-number", pat: "pat-1", mintStatus: 201, choice: "app", target: "https://api.github.com/repos/o/r", wantAuth: "Bearer pat-1"},
 		{name: "other hosts never carry a credential", appEnv: true, pat: "pat-1", mintStatus: 201, choice: "app", target: "https://blob.example.com/log"},
 	}
 	for _, tc := range tests {
@@ -189,6 +225,9 @@ func TestGitHubHTTPClientCredential(t *testing.T) {
 			vals := gitHubAuthValues{PAT: tc.pat}
 			if tc.appEnv {
 				vals.AppID, vals.InstallationID, vals.PrivateKeyPEM = "12345", "678", keyPEM
+				if tc.appID != "" {
+					vals.AppID = tc.appID
+				}
 			}
 			choice := tc.choice
 			src := newGitHubTokenSource(vals, func() string { return choice }, mintClient, slog.New(slog.DiscardHandler))
