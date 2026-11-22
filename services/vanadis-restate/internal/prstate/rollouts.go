@@ -1,7 +1,7 @@
 package prstate
 
 // Restate-owned deploy path support: the read model and observation handlers
-// synapse's deploy paths use once an event is stamped effects_owner=restate,
+// synapse's deploy paths use,
 // so the Flux/Kustomization watcher, deploy alerts and main-branch workflow
 // runs never touch pr_registry.
 //

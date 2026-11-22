@@ -133,18 +133,14 @@ func (e *acceptEdge) synapseEffects() int {
 }
 
 // ownedHandlers counts the Restate writes by handler (one-way sends plus
-// the request-response Register) and reports any send still carrying an
-// effects_owner stamp (prstate reads a missing stamp as restate).
+// the request-response Register).
 func (e *acceptEdge) ownedHandlers(t *testing.T) map[string]int {
 	t.Helper()
 	got := map[string]int{}
-	paths, bodies := e.ingress.sends()
-	for i, p := range paths {
+	paths, _ := e.ingress.sends()
+	for _, p := range paths {
 		trimmed := strings.TrimSuffix(p, "/send")
 		got[trimmed[strings.LastIndex(trimmed, "/")+1:]]++
-		if strings.Contains(bodies[i], `"effects_owner"`) {
-			t.Errorf("send %s body %s still carries an effects_owner stamp", p, bodies[i])
-		}
 	}
 	for _, c := range e.ingress.calls() {
 		if strings.HasSuffix(c, "/Register") {

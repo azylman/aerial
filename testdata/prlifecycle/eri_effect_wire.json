@@ -9,7 +9,6 @@
     "title": "Fix lint",
     "unmanaged": true,
     "agent": "aerial",
-    "effects_owner": "restate",
     "channel_id": "111111111111111111",
     "content": "<@42> CI check lint failed on mirrormere#1010"
   },
@@ -28,7 +27,6 @@
     "unmanaged": true,
     "build_id": "",
     "agent": "aerial",
-    "effects_owner": "restate",
     "eri_effects": [
       {
         "kind": "eri_direct_message",

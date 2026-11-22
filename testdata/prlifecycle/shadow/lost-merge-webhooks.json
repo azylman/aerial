@@ -52,8 +52,7 @@
       "metadata": {
        "agent": "aerial",
        "bot_id": "aerial"
-      },
-      "effects_owner": "restate"
+      }
      }
     },
     {
@@ -66,8 +65,7 @@
       "before_sha": "7a1e232700000000000000000000000000002327",
       "branch": "feat/redaction-purge",
       "title": "Purge in-process redaction",
-      "agent": "aerial",
-      "effects_owner": "legacy"
+      "agent": "aerial"
      }
     },
     {
@@ -78,8 +76,7 @@
       "pr_number": 2327,
       "head_sha": "c0de232700000000000000000000000000002327",
       "check_name": "ci",
-      "agent": "aerial",
-      "effects_owner": "legacy"
+      "agent": "aerial"
      }
     }
    ],
@@ -93,7 +90,6 @@
       "head_sha": "c0de232700000000000000000000000000002327",
       "merge_sha": "353b1b0500000000000000000000000000002327",
       "branch": "feat/redaction-purge",
-      "effects_owner": "legacy",
       "agent": "aerial"
      }
     }
@@ -107,8 +103,7 @@
       "pr_number": 2327,
       "head_sha": "c0de232700000000000000000000000000002327",
       "merge_sha": "353b1b0500000000000000000000000000002327",
-      "branch": "feat/redaction-purge",
-      "effects_owner": "restate"
+      "branch": "feat/redaction-purge"
      }
     }
    ],
@@ -122,7 +117,6 @@
       "head_sha": "353b1b0500000000000000000000000000002327",
       "branch": "main",
       "agent": "aerial",
-      "effects_owner": "legacy",
       "jobs": [
        "eri"
       ],
@@ -143,7 +137,6 @@
       "head_sha": "c0de232700000000000000000000000000002327",
       "merge_sha": "353b1b0500000000000000000000000000002327",
       "job_name": "aerial-core",
-      "effects_owner": "legacy",
       "deployed_jobs": [
        "eri",
        "aerial-core"
@@ -162,7 +155,6 @@
       "head_sha": "c0de232700000000000000000000000000002327",
       "merge_sha": "353b1b0500000000000000000000000000002327",
       "job_name": "aerial-core",
-      "effects_owner": "legacy",
       "facts": [
        {
         "event": "deploy_success",
@@ -188,7 +180,6 @@
       "head_sha": "353b1b0500000000000000000000000000002327",
       "branch": "main",
       "agent": "aerial",
-      "effects_owner": "restate",
       "jobs": [
        "eri"
       ],
@@ -209,7 +200,6 @@
       "head_sha": "c0de232700000000000000000000000000002327",
       "merge_sha": "353b1b0500000000000000000000000000002327",
       "job_name": "aerial-core",
-      "effects_owner": "restate",
       "deployed_jobs": [
        "eri",
        "aerial-core"
@@ -228,7 +218,6 @@
       "head_sha": "c0de232700000000000000000000000000002327",
       "merge_sha": "353b1b0500000000000000000000000000002327",
       "job_name": "aerial-core",
-      "effects_owner": "restate",
       "facts": [
        {
         "event": "deploy_success",
@@ -254,8 +243,7 @@
       "head_sha": "c0de232700000000000000000000000000002327",
       "merge_sha": "353b1b0500000000000000000000000000002327",
       "branch": "feat/redaction-purge",
-      "agent": "aerial",
-      "effects_owner": "legacy"
+      "agent": "aerial"
      }
     },
     {
@@ -267,8 +255,7 @@
       "head_sha": "353b1b0500000000000000000000000000002327",
       "merge_sha": "353b1b0500000000000000000000000000002327",
       "branch": "main",
-      "agent": "aerial",
-      "effects_owner": "legacy"
+      "agent": "aerial"
      }
     }
    ],
@@ -388,8 +375,7 @@
       "metadata": {
        "agent": "aerial",
        "bot_id": "aerial"
-      },
-      "effects_owner": "restate"
+      }
      }
     }
    ],
@@ -403,7 +389,6 @@
       "head_sha": "c0de232700000000000000000000000000002327",
       "merge_sha": "353b1b0500000000000000000000000000002327",
       "branch": "feat/redaction-purge",
-      "effects_owner": "legacy",
       "agent": "aerial"
      }
     }
@@ -417,8 +402,7 @@
       "pr_number": 2327,
       "head_sha": "c0de232700000000000000000000000000002327",
       "merge_sha": "353b1b0500000000000000000000000000002327",
-      "branch": "feat/redaction-purge",
-      "effects_owner": "restate"
+      "branch": "feat/redaction-purge"
      }
     }
    ],
@@ -432,7 +416,6 @@
       "head_sha": "353b1b0500000000000000000000000000002327",
       "branch": "main",
       "agent": "aerial",
-      "effects_owner": "legacy",
       "jobs": [
        "eri"
       ],
@@ -453,7 +436,6 @@
       "head_sha": "c0de232700000000000000000000000000002327",
       "merge_sha": "353b1b0500000000000000000000000000002327",
       "job_name": "aerial-core",
-      "effects_owner": "legacy",
       "deployed_jobs": [
        "eri",
        "aerial-core"
@@ -472,7 +454,6 @@
       "head_sha": "c0de232700000000000000000000000000002327",
       "merge_sha": "353b1b0500000000000000000000000000002327",
       "job_name": "aerial-core",
-      "effects_owner": "legacy",
       "facts": [
        {
         "event": "deploy_success",
@@ -498,7 +479,6 @@
       "head_sha": "353b1b0500000000000000000000000000002327",
       "branch": "main",
       "agent": "aerial",
-      "effects_owner": "restate",
       "jobs": [
        "eri"
       ],
@@ -519,7 +499,6 @@
       "head_sha": "c0de232700000000000000000000000000002327",
       "merge_sha": "353b1b0500000000000000000000000000002327",
       "job_name": "aerial-core",
-      "effects_owner": "restate",
       "deployed_jobs": [
        "eri",
        "aerial-core"
@@ -538,7 +517,6 @@
       "head_sha": "c0de232700000000000000000000000000002327",
       "merge_sha": "353b1b0500000000000000000000000000002327",
       "job_name": "aerial-core",
-      "effects_owner": "restate",
       "facts": [
        {
         "event": "deploy_success",
@@ -564,8 +542,7 @@
       "head_sha": "c0de232700000000000000000000000000002327",
       "merge_sha": "353b1b0500000000000000000000000000002327",
       "branch": "feat/redaction-purge",
-      "agent": "aerial",
-      "effects_owner": "legacy"
+      "agent": "aerial"
      }
     },
     {
@@ -577,8 +554,7 @@
       "head_sha": "353b1b0500000000000000000000000000002327",
       "merge_sha": "353b1b0500000000000000000000000000002327",
       "branch": "main",
-      "agent": "aerial",
-      "effects_owner": "legacy"
+      "agent": "aerial"
      }
     }
    ],

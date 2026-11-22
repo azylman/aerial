@@ -2,7 +2,7 @@ package prstate
 
 // Cross-module parity goldens: every scenario under
 // testdata/prlifecycle/parity/ holds one PR lifecycle as the event stream
-// synapse sends Restate with effects_owner=restate, the effect multiset
+// synapse sends Restate, the effect multiset
 // legacy synapse performs for the same lifecycle (by kind and
 // generation-free match key), and the hand-derived final pr_registry rows.
 // This test replays the stream through the real PRObject and RepoObject
@@ -400,8 +400,7 @@ func rowOf(snap ProjectionSnapshot) parityRow {
 	}
 }
 
-// TestRestateOwnershipParity replays every golden lifecycle with
-// effects_owner=restate and asserts PRObject/RepoObject perform exactly the
+// TestRestateOwnershipParity replays every golden lifecycle and asserts PRObject/RepoObject perform exactly the
 // legacy effect multiset, publish facts with the legacy rollout states and
 // write exactly the legacy final rows.
 func TestRestateOwnershipParity(t *testing.T) {

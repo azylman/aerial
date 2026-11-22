@@ -21,7 +21,6 @@ func TestLoadConfig_RestateInvoker(t *testing.T) {
 		{name: "absent keys stay dark with frozen defaults", yaml: "port: \"4020\"\n", wantURL: "", wantPRService: "PRObject", wantRepoService: "RepoObject"},
 		{name: "blank service names fall back to frozen defaults", yaml: "restate_url: \"http://restate.aerial:8080\"\nrestate_pr_service: \"   \"\nrestate_repo_service: \"\"\n", wantURL: "http://restate.aerial:8080", wantPRService: "PRObject", wantRepoService: "RepoObject"},
 		{name: "no env var injects restate endpoint", yaml: "port: \"4020\"\n", env: map[string]string{"RESTATE_URL": "http://evil:8080"}, wantURL: "", wantPRService: "PRObject", wantRepoService: "RepoObject"},
-		{name: "obsolete restate_authoritative key is ignored", yaml: "restate_url: \"http://restate.aerial:8080\"\nrestate_authoritative: true\n", wantURL: "http://restate.aerial:8080", wantPRService: "PRObject", wantRepoService: "RepoObject"},
 		{name: "agent-alpha bot_id still targets the single services", yaml: "restate_url: \"http://restate.aerial:8080\"\nbot_id: \"agent-alpha\"\n", wantURL: "http://restate.aerial:8080", wantPRService: "PRObject", wantRepoService: "RepoObject"},
 		{name: "explicit overrides win over a non-default bot_id", yaml: "restate_url: \"http://restate.aerial:8080\"\nbot_id: \"agent-alpha\"\nrestate_pr_service: \"PRObject-green\"\nrestate_repo_service: \"RepoObject-green\"\n", wantURL: "http://restate.aerial:8080", wantPRService: "PRObject-green", wantRepoService: "RepoObject-green"},
 	}

@@ -53,10 +53,6 @@ func TestPREventEriEffectsWire(t *testing.T) {
 	}
 	withoutEffect := withEffect
 	withoutEffect.EriEffects = nil
-	// The shared golden event still carries the effects_owner stamp for
-	// prstate's decode test; synapse no longer sends it (prstate reads a
-	// missing stamp as restate).
-	delete(fx.Event, "effects_owner")
 	wantWithout := make(map[string]any, len(fx.Event))
 	for k, v := range fx.Event {
 		if k != "eri_effects" {
@@ -98,9 +94,6 @@ func TestRepoEventAutoUpdateWire(t *testing.T) {
 		Event map[string]any `json:"event"`
 	}
 	readFixture(t, "github_effect_wire.json", &fx)
-	// Synapse no longer sends the effects_owner stamp the shared golden
-	// event keeps for prstate.
-	delete(fx.Event, "effects_owner")
 	tests := []struct {
 		name string
 		ev   RepoEvent

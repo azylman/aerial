@@ -103,8 +103,7 @@
         "metadata": {
           "agent": "aerial",
           "bot_id": "aerial"
-        },
-        "effects_owner": "restate"
+        }
       }
     },
     {
@@ -124,8 +123,7 @@
             "merge_sha": "m106"
           }
         ],
-        "repo": "azylman/aerial",
-        "effects_owner": "restate"
+        "repo": "azylman/aerial"
       }
     },
     {
@@ -157,8 +155,7 @@
             "head_sha": "m106"
           }
         ],
-        "repo": "azylman/aerial",
-        "effects_owner": "restate"
+        "repo": "azylman/aerial"
       }
     },
     {
@@ -185,8 +182,7 @@
             "job_name": "apps"
           }
         ],
-        "repo": "azylman/aerial",
-        "effects_owner": "restate"
+        "repo": "azylman/aerial"
       }
     },
     {
@@ -207,8 +203,7 @@
             "job_name": "apps"
           }
         ],
-        "repo": "azylman/aerial",
-        "effects_owner": "restate"
+        "repo": "azylman/aerial"
       }
     },
     {
@@ -235,8 +230,7 @@
             "job_name": "core"
           }
         ],
-        "repo": "azylman/aerial",
-        "effects_owner": "restate"
+        "repo": "azylman/aerial"
       }
     },
     {
@@ -257,8 +251,7 @@
             "job_name": "core"
           }
         ],
-        "repo": "azylman/aerial",
-        "effects_owner": "restate"
+        "repo": "azylman/aerial"
       }
     }
   ],

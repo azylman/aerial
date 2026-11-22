@@ -79,8 +79,7 @@
         "metadata": {
           "agent": "aerial",
           "bot_id": "aerial"
-        },
-        "effects_owner": "restate"
+        }
       }
     },
     {
@@ -98,8 +97,7 @@
             "head_sha": "h104"
           }
         ],
-        "repo": "azylman/aerial",
-        "effects_owner": "restate"
+        "repo": "azylman/aerial"
       }
     },
     {
@@ -110,8 +108,7 @@
         "head_sha": "h104",
         "branch": "feat/reopen",
         "title": "Reopen PR",
-        "repo": "azylman/aerial",
-        "effects_owner": "restate"
+        "repo": "azylman/aerial"
       }
     }
   ],

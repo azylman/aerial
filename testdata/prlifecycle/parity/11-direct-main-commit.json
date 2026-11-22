@@ -28,8 +28,7 @@
       "handler": "HandleMainPush",
       "event": {
         "main_sha": "c111",
-        "repo": "azylman/aerial",
-        "effects_owner": "restate"
+        "repo": "azylman/aerial"
       }
     },
     {
@@ -49,8 +48,7 @@
               "head_sha": "c111"
             }
           ],
-          "repo": "azylman/aerial",
-          "effects_owner": "restate"
+          "repo": "azylman/aerial"
         }
       }
     },
@@ -65,8 +63,7 @@
           ],
           "default_owner": true
         },
-        "repo": "azylman/aerial",
-        "effects_owner": "restate"
+        "repo": "azylman/aerial"
       }
     },
     {
@@ -75,8 +72,7 @@
       "event": {
         "main_sha": "c111",
         "ref": "refs/heads/main",
-        "repo": "azylman/aerial",
-        "effects_owner": "restate"
+        "repo": "azylman/aerial"
       }
     }
   ],
