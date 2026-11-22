@@ -1,4 +1,4 @@
-package main
+package store
 
 import (
 	"context"
@@ -100,11 +100,31 @@ func NewStore(database *sql.DB, stack string) *Store {
 	return &Store{db: database, stack: strings.TrimSpace(stack)}
 }
 
+// DB returns the underlying sql.DB handle.
+func (s *Store) DB() *sql.DB {
+	return s.db
+}
+
+// Stack returns the configured stack identifier.
+func (s *Store) Stack() string {
+	return s.stack
+}
+
+// CheckDB validates the underlying database connection.
+func (s *Store) CheckDB() error {
+	return s.checkDB()
+}
+
 func (s *Store) checkDB() error {
 	if s == nil || s.db == nil {
 		return fmt.Errorf("transcripts store database is nil")
 	}
 	return nil
+}
+
+// CheckWriter validates that the store has a valid database and writable stack.
+func (s *Store) CheckWriter() error {
+	return s.checkWriter()
 }
 
 func (s *Store) checkWriter() error {
@@ -208,9 +228,9 @@ func lockSessionCursor(ctx context.Context, tx *sql.Tx, db *sql.DB, stack, sessi
 	switch scanErr := row.Scan(&rawMtime, &lastStep, &isSettled); {
 	case scanErr == nil:
 		cur.found = true
-		// any-typed scan plus parseDBTime keeps NULL and driver-specific
+		// any-typed scan plus ParseDBTime keeps NULL and driver-specific
 		// time encodings portable across PostgreSQL and SQLite fixtures.
-		if t, ok := parseDBTime(rawMtime); ok {
+		if t, ok := ParseDBTime(rawMtime); ok {
 			cur.lastMtime = t
 		}
 		if lastStep.Valid {
@@ -346,23 +366,6 @@ func insertBatchSteps(ctx context.Context, tx *sql.Tx, stack, sessionID string, 
 func summaryLockKey(threadID string) string {
 	return "transcripts-summary:" + strings.TrimSpace(threadID)
 }
-
-// darkTranscriptsAnchor keeps the per-thread idle-summarizer lock reachable in
-// the production call graph until the idle-summarizer chunk wires its loop to
-// AcquireThreadSummaryLock. Every call below is a validated no-op: the empty
-// thread ID returns before any connection is opened, so this performs no
-// network or database work and changes no behavior. The summarizer chunk
-// removes this anchor when it wires the live lock holder.
-var _ = func() bool {
-	_ = summaryLockKey("")
-	store := NewStore(nil, DefaultStack)
-	release, errLock := store.AcquireThreadSummaryLock(context.Background(), "")
-	if release != nil {
-		release()
-	}
-	_ = []error{errLock}
-	return true
-}()
 
 // AcquireThreadSummaryLock takes a session-level PostgreSQL advisory lock for
 // one thread's idle summarization and returns an idempotent release closure.

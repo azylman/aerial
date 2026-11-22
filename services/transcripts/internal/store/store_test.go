@@ -1,14 +1,17 @@
-package main
+package store
 
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
+	"errors"
 	"fmt"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/stdlib"
 	_ "modernc.org/sqlite"
 
 	"github.com/azylman/aerial/pkg/transcriptwire"
@@ -352,8 +355,8 @@ func TestParseDBTime(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if _, ok := parseDBTime(tc.value); ok != tc.want {
-				t.Errorf("parseDBTime(%v) ok = %v, want %v", tc.value, ok, tc.want)
+			if _, ok := ParseDBTime(tc.value); ok != tc.want {
+				t.Errorf("ParseDBTime(%v) ok = %v, want %v", tc.value, ok, tc.want)
 			}
 		})
 	}
@@ -607,4 +610,118 @@ func TestApplyBatchMultiAgent(t *testing.T) {
 	if len(steps) != 3 {
 		t.Fatalf("got %d steps, want 3", len(steps))
 	}
+}
+
+func TestStoreAccessors(t *testing.T) {
+	t.Parallel()
+	store := newTestStore(t, "aerial")
+	if store.DB() == nil {
+		t.Errorf("DB() is nil")
+	}
+	if store.Stack() != "aerial" {
+		t.Errorf("Stack() = %q, want aerial", store.Stack())
+	}
+	if err := store.CheckDB(); err != nil {
+		t.Errorf("CheckDB() err = %v", err)
+	}
+	if err := store.CheckWriter(); err != nil {
+		t.Errorf("CheckWriter() err = %v", err)
+	}
+}
+
+func TestStoreClosedDBErrors(t *testing.T) {
+	t.Parallel()
+	store := newTestStore(t, "aerial")
+	_ = store.db.Close()
+	epoch := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
+	batch := testBatch("sess-closed", epoch, 0, 1, false, false)
+
+	if _, err := store.ApplyBatch(context.Background(), batch); err == nil {
+		t.Errorf("expected ApplyBatch error on closed db")
+	}
+	if _, err := store.AcquireThreadSummaryLock(context.Background(), "thread-closed"); err == nil {
+		t.Errorf("expected AcquireThreadSummaryLock error on closed db")
+	}
+}
+
+type mockLockConnector struct {
+	d       driver.Driver
+	connErr error
+	conn    *mockLockConn
+}
+
+func (m mockLockConnector) Connect(context.Context) (driver.Conn, error) {
+	if m.connErr != nil {
+		return nil, m.connErr
+	}
+	if m.conn != nil {
+		return m.conn, nil
+	}
+	return &mockLockConn{}, nil
+}
+
+func (m mockLockConnector) Driver() driver.Driver {
+	return m.d
+}
+
+type mockLockConn struct {
+	execErr error
+}
+
+func (*mockLockConn) Prepare(string) (driver.Stmt, error) {
+	return nil, errors.New("not implemented")
+}
+
+func (*mockLockConn) Close() error { return nil }
+
+func (*mockLockConn) Begin() (driver.Tx, error) {
+	return nil, errors.New("not implemented")
+}
+
+func (c *mockLockConn) ExecContext(_ context.Context, _ string, _ []driver.NamedValue) (driver.Result, error) {
+	if c.execErr != nil {
+		return nil, c.execErr
+	}
+	return driver.RowsAffected(1), nil
+}
+
+func TestAcquireThreadSummaryLockPostgresDriver(t *testing.T) {
+	t.Parallel()
+	pgDriver := stdlib.GetDefaultDriver()
+
+	t.Run("lock failure returns error", func(t *testing.T) {
+		t.Parallel()
+		db := sql.OpenDB(mockLockConnector{d: pgDriver, connErr: errors.New("advisory lock fail")})
+		t.Cleanup(func() { _ = db.Close() })
+		store := NewStore(db, "aerial")
+		if _, err := store.AcquireThreadSummaryLock(context.Background(), "thread-1"); err == nil {
+			t.Errorf("expected error on failed advisory lock")
+		}
+	})
+
+	t.Run("lock and unlock success", func(t *testing.T) {
+		t.Parallel()
+		db := sql.OpenDB(mockLockConnector{d: pgDriver})
+		t.Cleanup(func() { _ = db.Close() })
+		store := NewStore(db, "aerial")
+		release, err := store.AcquireThreadSummaryLock(context.Background(), "thread-1")
+		if err != nil {
+			t.Fatalf("AcquireThreadSummaryLock err = %v", err)
+		}
+		release()
+	})
+
+	t.Run("unlock failure destroys connection", func(t *testing.T) {
+		t.Parallel()
+		conn := &mockLockConn{}
+		db := sql.OpenDB(mockLockConnector{d: pgDriver, conn: conn})
+		t.Cleanup(func() { _ = db.Close() })
+		store := NewStore(db, "aerial")
+		release, err := store.AcquireThreadSummaryLock(context.Background(), "thread-1")
+		if err != nil {
+			t.Fatalf("AcquireThreadSummaryLock err = %v", err)
+		}
+		conn.execErr = errors.New("unlock fail")
+		release()
+	})
 }

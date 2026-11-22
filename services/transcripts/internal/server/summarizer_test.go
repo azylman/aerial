@@ -1,4 +1,4 @@
-package main
+package server
 
 import (
 	"context"
@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/azylman/aerial/pkg/transcriptwire"
+	"github.com/azylman/aerial/services/transcripts/internal/config"
+	"github.com/azylman/aerial/services/transcripts/internal/store"
 )
 
 func decodeJSONBody(r *http.Request, v any) error {
@@ -51,7 +53,7 @@ func (f *fakeSummaryEmbedder) GenerateEmbedding(_ context.Context, _ string) ([]
 	return f.vector, nil
 }
 
-func seedSummarizerSession(t *testing.T, store *Store, session, thread string, first, last int, final bool) {
+func seedSummarizerSession(t *testing.T, st *store.Store, session, thread string, first, last int, final bool) {
 	t.Helper()
 	epoch := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
 	steps := make([]transcriptwire.TranscriptStep, 0, last-first+1)
@@ -63,23 +65,23 @@ func seedSummarizerSession(t *testing.T, store *Store, session, thread string, f
 		FileMtime: epoch, BaseStep: first, FirstStep: first, LastStep: last,
 		Final: final, Steps: steps,
 	}
-	if _, err := store.ApplyBatch(context.Background(), batch); err != nil {
+	if _, err := st.ApplyBatch(context.Background(), batch); err != nil {
 		t.Fatalf("seed ApplyBatch: %v", err)
 	}
 }
 
-func presetSummaryWatermark(t *testing.T, store *Store, session string, watermark int, summary string) {
+func presetSummaryWatermark(t *testing.T, st *store.Store, session string, watermark int, summary string) {
 	t.Helper()
-	if _, err := store.db.ExecContext(context.Background(),
+	if _, err := st.DB().ExecContext(context.Background(),
 		`UPDATE session_summaries SET summary_step_watermark = $1, summary = $2 WHERE agent = 'aerial' AND session_id = $3`,
 		watermark, summary, session); err != nil {
 		t.Fatalf("preset watermark: %v", err)
 	}
 }
 
-func readSummaryRow(t *testing.T, store *Store, session string) (summary string, watermark int, settled bool) {
+func readSummaryRow(t *testing.T, st *store.Store, session string) (summary string, watermark int, settled bool) {
 	t.Helper()
-	if err := store.db.QueryRowContext(context.Background(),
+	if err := st.DB().QueryRowContext(context.Background(),
 		`SELECT summary, summary_step_watermark, is_settled FROM session_summaries WHERE agent = 'aerial' AND session_id = $1`,
 		session).Scan(&summary, &watermark, &settled); err != nil {
 		t.Fatalf("read summary row: %v", err)
@@ -112,9 +114,9 @@ func TestBuildSummaryPrompt(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			var steps []StepResult
+			var steps []store.StepResult
 			for range tc.stepCount {
-				steps = append(steps, StepResult{SessionID: tc.session, StepIndex: tc.stepIndex, StepType: tc.stepType, ToolName: tc.toolName, Content: tc.content})
+				steps = append(steps, store.StepResult{SessionID: tc.session, StepIndex: tc.stepIndex, StepType: tc.stepType, ToolName: tc.toolName, Content: tc.content})
 			}
 			got := buildSummaryPrompt(tc.session, tc.priorSummary, steps)
 			if !strings.Contains(got, tc.wantFrag) {
@@ -155,44 +157,44 @@ type summarizerRunCase struct {
 	wantPromptFrag  string
 }
 
-func seedSummarizerRunCase(t *testing.T, tc summarizerRunCase) *Store {
+func seedSummarizerRunCase(t *testing.T, tc summarizerRunCase) *store.Store {
 	t.Helper()
-	store := newTestStore(t, "aerial")
+	st := newTestStore(t, "aerial")
 	thread := "thread-1"
 	if tc.emptyThread {
 		thread = ""
 	}
-	seedSummarizerSession(t, store, "sess-1", thread, tc.first, tc.last, false)
+	seedSummarizerSession(t, st, "sess-1", thread, tc.first, tc.last, false)
 	for i := range tc.extraSessions {
-		seedSummarizerSession(t, store, fmt.Sprintf("sess-extra-%d", i), "thread-1", 0, 1, false)
+		seedSummarizerSession(t, st, fmt.Sprintf("sess-extra-%d", i), "thread-1", 0, 1, false)
 	}
 	if tc.applyPreset {
-		presetSummaryWatermark(t, store, "sess-1", tc.presetWatermark, tc.presetSummary)
+		presetSummaryWatermark(t, st, "sess-1", tc.presetWatermark, tc.presetSummary)
 	}
 	if tc.recentMtime {
 		testNow := time.Date(2026, 11, 18, 13, 0, 0, 0, time.UTC)
-		if _, err := store.db.ExecContext(context.Background(),
+		if _, err := st.DB().ExecContext(context.Background(),
 			`UPDATE session_summaries SET last_mtime = $1 WHERE agent = 'aerial' AND session_id = 'sess-1'`,
 			testNow.Add(-5*time.Minute)); err != nil {
 			t.Fatalf("preset recent mtime: %v", err)
 		}
 	}
 	if tc.deleteSteps {
-		if _, err := store.db.ExecContext(context.Background(),
+		if _, err := st.DB().ExecContext(context.Background(),
 			`DELETE FROM transcript_steps WHERE agent = 'aerial' AND session_id = 'sess-1'`); err != nil {
 			t.Fatalf("delete steps: %v", err)
 		}
 	}
 	if tc.failStore {
-		if _, err := store.db.ExecContext(context.Background(),
+		if _, err := st.DB().ExecContext(context.Background(),
 			`CREATE TRIGGER abort_summary_update BEFORE UPDATE ON session_summaries WHEN NEW.session_id = 'sess-1' BEGIN SELECT RAISE(ABORT, 'no summary'); END;`); err != nil {
 			t.Fatalf("create trigger: %v", err)
 		}
 	}
-	return store
+	return st
 }
 
-func runSummarizerSweep(t *testing.T, store *Store, tc summarizerRunCase) (int, *fakeSummaryLLM, *fakeSummaryEmbedder, error) {
+func runSummarizerSweep(t *testing.T, st *store.Store, tc summarizerRunCase) (int, *fakeSummaryLLM, *fakeSummaryEmbedder, error) {
 	t.Helper()
 	llm := &fakeSummaryLLM{response: "fresh summary"}
 	if tc.llmErr {
@@ -205,8 +207,8 @@ func runSummarizerSweep(t *testing.T, store *Store, tc summarizerRunCase) (int, 
 	if tc.embedErr {
 		embedder.err = errors.New("senses down")
 	}
-	cfg := SummarizerConfig{Enabled: true, BatchLimit: tc.batchLimit, MaxSteps: tc.maxSteps}.withDefaults()
-	sum := NewSummarizer(store, llm, embedder, cfg)
+	cfg := config.SummarizerConfig{Enabled: true, BatchLimit: tc.batchLimit, MaxSteps: tc.maxSteps}.WithDefaults()
+	sum := NewSummarizer(st, llm, embedder, cfg)
 	testNow := time.Date(2026, 11, 18, 13, 0, 0, 0, time.UTC)
 	sum.now = func() time.Time { return testNow }
 	if tc.lockBusy {
@@ -235,18 +237,18 @@ func TestStartSummarizerLoopEnabled(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			store := newTestStore(t, "aerial")
+			st := newTestStore(t, "aerial")
 			if tc.seed {
-				seedSummarizerSession(t, store, "sess-1", "thread-1", 0, 1, false)
+				seedSummarizerSession(t, st, "sess-1", "thread-1", 0, 1, false)
 			}
-			cfg := &Config{Port: "4017", Stack: "aerial", Summarizer: SummarizerConfig{Enabled: true}}
-			stop := startSummarizerLoop(context.Background(), store, cfg)
+			cfg := &config.Config{Port: "4017", Stack: "aerial", Summarizer: config.SummarizerConfig{Enabled: true}}
+			stop := startSummarizerLoop(context.Background(), st, cfg)
 			stop()
 		})
 	}
 }
 
-func assertSummarizerSweep(t *testing.T, store *Store, tc summarizerRunCase, got int, err error, llm *fakeSummaryLLM, embedder *fakeSummaryEmbedder) {
+func assertSummarizerSweep(t *testing.T, st *store.Store, tc summarizerRunCase, got int, err error, llm *fakeSummaryLLM, embedder *fakeSummaryEmbedder) {
 	t.Helper()
 	if (err != nil) != tc.wantErr {
 		t.Fatalf("RunOnce() err = %v, wantErr = %v", err, tc.wantErr)
@@ -266,7 +268,7 @@ func assertSummarizerSweep(t *testing.T, store *Store, tc summarizerRunCase, got
 	if tc.wantWatermark == -2 {
 		return
 	}
-	summary, watermark, settled := readSummaryRow(t, store, "sess-1")
+	summary, watermark, settled := readSummaryRow(t, st, "sess-1")
 	if watermark != tc.wantWatermark {
 		t.Errorf("watermark = %d, want %d", watermark, tc.wantWatermark)
 	}
@@ -301,61 +303,9 @@ func TestSummarizerRunOnce(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			store := seedSummarizerRunCase(t, tc)
-			got, llm, embedder, err := runSummarizerSweep(t, store, tc)
-			assertSummarizerSweep(t, store, tc, got, err, llm, embedder)
-		})
-	}
-}
-
-func TestSummarizerConfigWithDefaults(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name              string
-		input             SummarizerConfig
-		wantBatchLimit    int
-		wantMaxSteps      int
-		wantIdleThreshold time.Duration
-		wantMinStepDelta  int
-	}{
-		{
-			name:              "zero values fill defaults",
-			input:             SummarizerConfig{},
-			wantBatchLimit:    DefaultSummarizerBatchLimit,
-			wantMaxSteps:      DefaultSummarizerMaxSteps,
-			wantIdleThreshold: DefaultSummarizerIdleThreshold,
-			wantMinStepDelta:  DefaultSummarizerMinStepDelta,
-		},
-		{
-			name: "custom values preserved",
-			input: SummarizerConfig{
-				BatchLimit:    5,
-				MaxSteps:      100,
-				IdleThreshold: 30 * time.Minute,
-				MinStepDelta:  50,
-			},
-			wantBatchLimit:    5,
-			wantMaxSteps:      100,
-			wantIdleThreshold: 30 * time.Minute,
-			wantMinStepDelta:  50,
-		},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			got := tc.input.withDefaults()
-			if got.BatchLimit != tc.wantBatchLimit {
-				t.Errorf("BatchLimit = %d, want %d", got.BatchLimit, tc.wantBatchLimit)
-			}
-			if got.MaxSteps != tc.wantMaxSteps {
-				t.Errorf("MaxSteps = %d, want %d", got.MaxSteps, tc.wantMaxSteps)
-			}
-			if got.IdleThreshold != tc.wantIdleThreshold {
-				t.Errorf("IdleThreshold = %v, want %v", got.IdleThreshold, tc.wantIdleThreshold)
-			}
-			if got.MinStepDelta != tc.wantMinStepDelta {
-				t.Errorf("MinStepDelta = %d, want %d", got.MinStepDelta, tc.wantMinStepDelta)
-			}
+			st := seedSummarizerRunCase(t, tc)
+			got, llm, embedder, err := runSummarizerSweep(t, st, tc)
+			assertSummarizerSweep(t, st, tc, got, err, llm, embedder)
 		})
 	}
 }
@@ -372,11 +322,11 @@ func TestSummarizerRunOnceDisabled(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			store := newTestStore(t, "aerial")
+			st := newTestStore(t, "aerial")
 			if tc.seed {
-				seedSummarizerSession(t, store, "sess-1", "thread-1", 0, 2, false)
+				seedSummarizerSession(t, st, "sess-1", "thread-1", 0, 2, false)
 			}
-			sum := NewSummarizer(store, &fakeSummaryLLM{response: "x"}, &fakeSummaryEmbedder{}, SummarizerConfig{})
+			sum := NewSummarizer(st, &fakeSummaryLLM{response: "x"}, &fakeSummaryEmbedder{}, config.SummarizerConfig{})
 			got, err := sum.RunOnce(context.Background())
 			if err != nil {
 				t.Fatalf("RunOnce() err = %v", err)
@@ -408,18 +358,18 @@ func TestSummarizerRunOnceNilDeps(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			store := newTestStore(t, "aerial")
-			s := store
+			st := newTestStore(t, "aerial")
+			s := st
 			if tc.nilStore {
 				s = nil
 			}
 			if tc.closedDB {
-				if err := store.db.Close(); err != nil {
+				if err := st.DB().Close(); err != nil {
 					t.Fatalf("close: %v", err)
 				}
 			}
 			if tc.emptyStack {
-				s = NewStore(store.db, "")
+				s = store.NewStore(st.DB(), "")
 			}
 			var llm LLMClient = &fakeSummaryLLM{response: "x"}
 			if tc.nilLLM {
@@ -429,7 +379,7 @@ func TestSummarizerRunOnceNilDeps(t *testing.T) {
 			if tc.nilEmbed {
 				embedder = nil
 			}
-			sum := NewSummarizer(s, llm, embedder, SummarizerConfig{Enabled: true})
+			sum := NewSummarizer(s, llm, embedder, config.SummarizerConfig{Enabled: true})
 			if _, err := sum.RunOnce(context.Background()); err == nil || !strings.Contains(err.Error(), tc.wantSub) {
 				t.Errorf("RunOnce() err = %v, want substring %q", err, tc.wantSub)
 			}
@@ -553,23 +503,23 @@ func TestEmbedderGenerate(t *testing.T) {
 
 func TestSummarizerMultiAgentSweep(t *testing.T) {
 	t.Parallel()
-	store := newTestStore(t, "aerial")
+	st := newTestStore(t, "aerial")
 	epoch := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
 
 	// Seed session 1 for aerial
-	seedSummarizerSession(t, store, "sess-aerial", "th-1", 0, 2, false)
+	seedSummarizerSession(t, st, "sess-aerial", "th-1", 0, 2, false)
 
 	// Seed session 2 for agent-alpha
 	batchAlpha := testBatch("sess-alpha", epoch, 0, 2, false, false)
 	batchAlpha.Agent = "agent-alpha"
 	batchAlpha.Stack = "agent-alpha"
-	if _, err := store.ApplyBatch(context.Background(), batchAlpha); err != nil {
+	if _, err := st.ApplyBatch(context.Background(), batchAlpha); err != nil {
 		t.Fatalf("seed agent-alpha batch: %v", err)
 	}
 
 	llm := &fakeSummaryLLM{response: "multi-agent summary"}
 	embedder := &fakeSummaryEmbedder{vector: []float32{0.5}}
-	sum := NewSummarizer(store, llm, embedder, SummarizerConfig{Enabled: true, BatchLimit: 10})
+	sum := NewSummarizer(st, llm, embedder, config.SummarizerConfig{Enabled: true, BatchLimit: 10})
 	testNow := time.Date(2026, 11, 18, 13, 0, 0, 0, time.UTC)
 	sum.now = func() time.Time { return testNow }
 
@@ -582,7 +532,7 @@ func TestSummarizerMultiAgentSweep(t *testing.T) {
 	}
 
 	// Verify aerial summary
-	sumAerial, markAerial, _ := readSummaryRow(t, store, "sess-aerial")
+	sumAerial, markAerial, _ := readSummaryRow(t, st, "sess-aerial")
 	if markAerial != 2 || sumAerial != "multi-agent summary" {
 		t.Errorf("aerial session: watermark = %d, summary = %q", markAerial, sumAerial)
 	}
@@ -590,7 +540,7 @@ func TestSummarizerMultiAgentSweep(t *testing.T) {
 	// Verify agent-alpha summary
 	var sumAlpha string
 	var markAlpha int
-	if err := store.db.QueryRowContext(context.Background(),
+	if err := st.DB().QueryRowContext(context.Background(),
 		`SELECT summary, summary_step_watermark FROM session_summaries WHERE agent = 'agent-alpha' AND session_id = 'sess-alpha'`).Scan(&sumAlpha, &markAlpha); err != nil {
 		t.Fatalf("read agent-alpha summary: %v", err)
 	}

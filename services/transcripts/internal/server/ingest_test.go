@@ -1,4 +1,4 @@
-package main
+package server
 
 import (
 	"context"
@@ -80,15 +80,15 @@ func TestHandleBatchMessage(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			store := newTestStore(t, "aerial")
+			st := newTestStore(t, "aerial")
 			ctx := context.Background()
 			for _, s := range tc.seed {
-				if _, err := store.ApplyBatch(ctx, s); err != nil {
+				if _, err := st.ApplyBatch(ctx, s); err != nil {
 					t.Fatalf("seed ApplyBatch: %v", err)
 				}
 			}
 			var published []pubsub.TranscriptsIndexedEvent
-			ingester := NewIngester(store, func(_ context.Context, _ string, _ string, data any) error {
+			ingester := NewIngester(st, func(_ context.Context, _ string, _ string, data any) error {
 				if tc.publishErr != nil {
 					return tc.publishErr
 				}
@@ -119,10 +119,10 @@ func TestHandleBatchMessage(t *testing.T) {
 
 func TestHandleBatchMessageFirstBatch(t *testing.T) {
 	t.Parallel()
-	store := newTestStore(t, "aerial")
+	st := newTestStore(t, "aerial")
 	var published []pubsub.TranscriptsIndexedEvent
 	var publishedSubject, publishedMsgID string
-	ingester := NewIngester(store, func(_ context.Context, subject string, msgID string, data any) error {
+	ingester := NewIngester(st, func(_ context.Context, subject string, msgID string, data any) error {
 		publishedSubject = subject
 		publishedMsgID = msgID
 		ev, ok := data.(pubsub.TranscriptsIndexedEvent)
@@ -180,8 +180,8 @@ func TestHandleBatchMessageTermErrors(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			store := newTestStore(t, "aerial")
-			ingester := NewIngester(store, nil)
+			st := newTestStore(t, "aerial")
+			ingester := NewIngester(st, nil)
 			msg := &fakeBatchMessage{data: tc.payload, termErr: tc.termErr}
 			err := ingester.HandleBatchMessage(context.Background(), msg)
 			if err == nil || !strings.Contains(err.Error(), tc.wantSub) {
@@ -193,8 +193,8 @@ func TestHandleBatchMessageTermErrors(t *testing.T) {
 
 func TestHandleBatchMessageNilPublish(t *testing.T) {
 	t.Parallel()
-	store := newTestStore(t, "aerial")
-	ingester := NewIngester(store, nil)
+	st := newTestStore(t, "aerial")
+	ingester := NewIngester(st, nil)
 	epoch := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
 	msg := &fakeBatchMessage{data: marshalBatch(t, testBatch("sess-nilpub", epoch, 0, 1, false, false))}
 	if err := ingester.HandleBatchMessage(context.Background(), msg); err != nil {
@@ -204,8 +204,8 @@ func TestHandleBatchMessageNilPublish(t *testing.T) {
 
 func TestHandleBatchMessageNil(t *testing.T) {
 	t.Parallel()
-	store := newTestStore(t, "aerial")
-	ingester := NewIngester(store, nil)
+	st := newTestStore(t, "aerial")
+	ingester := NewIngester(st, nil)
 	if err := ingester.HandleBatchMessage(context.Background(), nil); err == nil {
 		t.Errorf("expected error for nil message")
 	}
@@ -213,11 +213,11 @@ func TestHandleBatchMessageNil(t *testing.T) {
 
 func TestHandleBatchMessageApplyError(t *testing.T) {
 	t.Parallel()
-	store := newTestStore(t, "aerial")
-	if err := store.db.Close(); err != nil {
+	st := newTestStore(t, "aerial")
+	if err := st.DB().Close(); err != nil {
 		t.Fatalf("close: %v", err)
 	}
-	ingester := NewIngester(store, nil)
+	ingester := NewIngester(st, nil)
 	epoch := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
 	msg := &fakeBatchMessage{data: marshalBatch(t, testBatch("sess-err", epoch, 0, 1, false, false))}
 	if err := ingester.HandleBatchMessage(context.Background(), msg); err == nil {
@@ -252,9 +252,9 @@ func TestHandleBatchMessageMultiAgentAndInvalidSlug(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			store := newTestStore(t, "aerial")
+			st := newTestStore(t, "aerial")
 			var published []pubsub.TranscriptsIndexedEvent
-			ingester := NewIngester(store, func(_ context.Context, _ string, _ string, data any) error {
+			ingester := NewIngester(st, func(_ context.Context, _ string, _ string, data any) error {
 				if ev, ok := data.(pubsub.TranscriptsIndexedEvent); ok {
 					published = append(published, ev)
 				}

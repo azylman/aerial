@@ -1,4 +1,4 @@
-package main
+package server
 
 import (
 	"context"
@@ -7,19 +7,10 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/azylman/aerial/services/transcripts/internal/config"
+	"github.com/azylman/aerial/services/transcripts/internal/store"
 )
-
-// DefaultSummarizerBatchLimit caps sessions summarized per RunOnce sweep.
-const DefaultSummarizerBatchLimit = 10
-
-// DefaultSummarizerMaxSteps caps stored steps folded into one summary prompt.
-const DefaultSummarizerMaxSteps = 50
-
-// DefaultSummarizerIdleThreshold bounds how recently a session must have been updated to be considered active.
-const DefaultSummarizerIdleThreshold = 10 * time.Minute
-
-// DefaultSummarizerMinStepDelta is the minimum number of new steps required before re-summarizing an already-summarized session.
-const DefaultSummarizerMinStepDelta = 20
 
 // maxSummaryPromptChars bounds one step's contribution to the summary prompt.
 const maxSummaryPromptChars = 2000
@@ -27,37 +18,6 @@ const maxSummaryPromptChars = 2000
 // ErrSummaryLockBusy reports a per-thread summary lock held by another worker.
 // RunOnce skips the session without error so a busy thread never blocks the sweep.
 var ErrSummaryLockBusy = errors.New("transcripts summary lock busy")
-
-// SummarizerConfig tunes the dark-by-default per-stack idle summarizer.
-// Enabled defaults to false; the indexer ships dark until the summaries
-// cutover chunk flips it on.
-type SummarizerConfig struct {
-	Enabled       bool          `yaml:"enabled"`
-	BatchLimit    int           `yaml:"batch_limit"`
-	MaxSteps      int           `yaml:"max_steps"`
-	IdleThreshold time.Duration `yaml:"idle_threshold"`
-	MinStepDelta  int           `yaml:"min_step_delta"`
-	EriLLMURL     string        `yaml:"eri_llm_url"`
-	SensesURL     string        `yaml:"senses_url"`
-	SensesModel   string        `yaml:"senses_model"`
-}
-
-// withDefaults fills non-positive sweep bounds; Enabled stays as configured.
-func (c SummarizerConfig) withDefaults() SummarizerConfig {
-	if c.BatchLimit <= 0 {
-		c.BatchLimit = DefaultSummarizerBatchLimit
-	}
-	if c.MaxSteps <= 0 {
-		c.MaxSteps = DefaultSummarizerMaxSteps
-	}
-	if c.IdleThreshold <= 0 {
-		c.IdleThreshold = DefaultSummarizerIdleThreshold
-	}
-	if c.MinStepDelta <= 0 {
-		c.MinStepDelta = DefaultSummarizerMinStepDelta
-	}
-	return c
-}
 
 // summaryCandidate is one session whose indexed steps outran its summary watermark.
 type summaryCandidate struct {
@@ -73,10 +33,10 @@ type summaryCandidate struct {
 // It never marks a session settled and never advances the summary watermark on
 // any failure; failures leave the row untouched for a later retry.
 type Summarizer struct {
-	store    *Store
+	store    *store.Store
 	llm      LLMClient
 	embedder Embedder
-	cfg      SummarizerConfig
+	cfg      config.SummarizerConfig
 	now      func() time.Time
 	acquire  func(ctx context.Context, threadID string) (func(), error)
 }
@@ -84,11 +44,11 @@ type Summarizer struct {
 // NewSummarizer binds a per-stack idle summarizer with constructor injection.
 // A nil llm or embedder surfaces on RunOnce; the advisory release stays
 // leak-safe through Store.AcquireThreadSummaryLock.
-func NewSummarizer(store *Store, llm LLMClient, embedder Embedder, cfg SummarizerConfig) *Summarizer {
-	cfg = cfg.withDefaults()
-	s := &Summarizer{store: store, llm: llm, embedder: embedder, cfg: cfg, now: time.Now}
+func NewSummarizer(st *store.Store, llm LLMClient, embedder Embedder, cfg config.SummarizerConfig) *Summarizer {
+	cfg = cfg.WithDefaults()
+	s := &Summarizer{store: st, llm: llm, embedder: embedder, cfg: cfg, now: time.Now}
 	s.acquire = func(ctx context.Context, threadID string) (func(), error) {
-		return store.AcquireThreadSummaryLock(ctx, threadID)
+		return st.AcquireThreadSummaryLock(ctx, threadID)
 	}
 	return s
 }
@@ -96,7 +56,7 @@ func NewSummarizer(store *Store, llm LLMClient, embedder Embedder, cfg Summarize
 // buildSummaryPrompt renders the LLM prompt from one session's stored steps.
 // The prompt carries the session id plus the step indexes, types, tool names,
 // and clipped contents the summarizer actually read.
-func buildSummaryPrompt(sessionID, priorSummary string, steps []StepResult) string {
+func buildSummaryPrompt(sessionID, priorSummary string, steps []store.StepResult) string {
 	var b strings.Builder
 	b.WriteString("Summarize the following indexed transcript steps for session ")
 	b.WriteString(strings.TrimSpace(sessionID))
@@ -173,7 +133,7 @@ func (s *Summarizer) RunOnce(ctx context.Context) (int, error) {
 // selectDueSessions lists sessions whose indexed steps outran the summary
 // watermark, oldest first, bounded by the configured batch limit.
 func (s *Summarizer) selectDueSessions(ctx context.Context) ([]summaryCandidate, error) {
-	if err := s.store.checkWriter(); err != nil {
+	if err := s.store.CheckWriter(); err != nil {
 		return nil, err
 	}
 	queryCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
@@ -184,7 +144,7 @@ func (s *Summarizer) selectDueSessions(ctx context.Context) ([]summaryCandidate,
 	}
 	cutoff := nowFn().UTC().Add(-s.cfg.IdleThreshold)
 	scanLimit := s.cfg.BatchLimit * 4
-	rows, err := s.store.db.QueryContext(queryCtx,
+	rows, err := s.store.DB().QueryContext(queryCtx,
 		`SELECT agent, session_id, thread_id, summary, last_indexed_step, summary_step_watermark, last_mtime, is_settled FROM session_summaries
 		 WHERE summary_step_watermark < last_indexed_step
 		   AND (summary = '' OR (summary_step_watermark > 0 AND last_indexed_step - summary_step_watermark >= $1))
@@ -209,7 +169,7 @@ func (s *Summarizer) selectDueSessions(ctx context.Context) ([]summaryCandidate,
 			continue
 		}
 		var lastMtime time.Time
-		if t, ok := parseDBTime(rawMtime); ok {
+		if t, ok := store.ParseDBTime(rawMtime); ok {
 			lastMtime = t
 		}
 		settled := isSettled.Valid && isSettled.Bool
@@ -272,7 +232,7 @@ func (s *Summarizer) summarizeSession(ctx context.Context, cand summaryCandidate
 func (s *Summarizer) storeSummary(ctx context.Context, cand summaryCandidate, summary string) error {
 	queryCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	if _, err := s.store.db.ExecContext(queryCtx,
+	if _, err := s.store.DB().ExecContext(queryCtx,
 		`UPDATE session_summaries SET summary = $1, summary_step_watermark = $2, updated_at = CURRENT_TIMESTAMP
 		 WHERE agent = $3 AND session_id = $4`,
 		summary, cand.lastIndexed, cand.agent, cand.sessionID); err != nil {
