@@ -71,19 +71,23 @@ func (m *casWidgetStore) CompareAndSwapBuildStatusMessageID(_ context.Context, _
 	return true, nil
 }
 
-// mintingEriClient is a concurrency-safe fake whose Widget posts a new card
-// with a unique id on every call and records deleted card ids.
+// mintingEriClient is a concurrency-safe fake whose Widget sinks when the
+// request carries staleID (posting a new card) and edits fresh cards in place.
 type mintingEriClient struct {
 	eritest.Client
 
 	mu      sync.Mutex
+	staleID string
 	minted  int
 	deleted []string
 }
 
-func (m *mintingEriClient) Widget(context.Context, StatusWidgetRequest) (string, error) {
+func (m *mintingEriClient) Widget(_ context.Context, req StatusWidgetRequest) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if req.MessageID != "" && req.MessageID != m.staleID {
+		return req.MessageID, nil
+	}
 	m.minted++
 	return fmt.Sprintf("new-%d", m.minted), nil
 }
@@ -346,13 +350,14 @@ func TestExecutor_SyncBuildWidget(t *testing.T) {
 	}
 }
 
-// TestExecutor_SyncBuildWidgetConcurrentSinks races N syncs that all re-post
-// the card from the same stale id: exactly one new card is stored and every
-// other new card is deleted.
+// TestExecutor_SyncBuildWidgetConcurrentSinks races N syncs from the same stale
+// ID: the first racer sinks and stores the new card, while concurrent racers
+// have their ID forwarded to the new card and edit in place without deleting or
+// re-posting duplicate cards.
 func TestExecutor_SyncBuildWidgetConcurrentSinks(t *testing.T) {
 	t.Parallel()
 	const racers = 8
-	eri := &mintingEriClient{}
+	eri := &mintingEriClient{staleID: "stale"}
 	exec := NewExecutor("", eri, nil, "", "example-owner", nil)
 	st := &casWidgetStore{stored: "stale"}
 	b := model.VanadisBuild{ID: "b1", Title: "Build 1", Status: "running", ThreadID: "th-1", StatusMessageID: "stale"}
@@ -361,20 +366,17 @@ func TestExecutor_SyncBuildWidgetConcurrentSinks(t *testing.T) {
 	var wg sync.WaitGroup
 	for range racers {
 		wg.Go(func() {
-			_, err := exec.SyncBuildWidget(context.Background(), st, b, chunks, "")
+			id, err := exec.SyncBuildWidget(context.Background(), st, b, chunks, "")
 			assert.NoError(t, err)
+			assert.Equal(t, "new-1", id)
 		})
 	}
 	wg.Wait()
 
 	assert.Equal(t, 1, st.writes)
-	require.Len(t, eri.deleted, racers-1)
-	all := append([]string{st.stored}, eri.deleted...)
-	want := make([]string, 0, racers)
-	for i := 1; i <= racers; i++ {
-		want = append(want, fmt.Sprintf("new-%d", i))
-	}
-	assert.ElementsMatch(t, want, all)
+	assert.Equal(t, "new-1", st.stored)
+	assert.Empty(t, eri.deleted)
+	assert.Equal(t, 1, eri.minted)
 }
 
 func TestDispatchSilentWakePrompt_OccurrenceDistinguishesFailures(t *testing.T) {
