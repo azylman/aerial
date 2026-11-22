@@ -40,10 +40,10 @@ const (
 )
 
 // InsertChunkSQL inserts one chunk row.
-const InsertChunkSQL = `INSERT INTO vanadis_chunks (id, build_id, chunk_index, mode, repo, title, instructions, target_files, target_symbols, effort, acceptance_criteria, status, pr_number, stall_nudges, depends_on, ci_fail_count, ci_checks, rollout_state, banner, merge_awakeable_id, deploy_awakeable_id, started_at, completed_at, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);`
+const InsertChunkSQL = `INSERT INTO vanadis_chunks (id, build_id, chunk_index, mode, repo, title, instructions, target_files, target_symbols, effort, acceptance_criteria, status, pr_number, stall_nudges, depends_on, ci_fail_count, ci_checks, rollout_state, banner, started_at, completed_at, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);`
 
 // SelectChunksForUpdateSQL locks a build's chunks in index order.
-const SelectChunksForUpdateSQL = `SELECT id, build_id, chunk_index, mode, repo, title, instructions, target_files, target_symbols, COALESCE(effort, 'medium'), acceptance_criteria, status, COALESCE(pr_number, 0), COALESCE(stall_nudges, 0), depends_on, ci_fail_count, ci_checks, rollout_state, banner, merge_awakeable_id, deploy_awakeable_id, started_at, completed_at, created_at, updated_at FROM vanadis_chunks WHERE build_id = $1 ORDER BY chunk_index ASC FOR UPDATE;`
+const SelectChunksForUpdateSQL = `SELECT id, build_id, chunk_index, mode, repo, title, instructions, target_files, target_symbols, COALESCE(effort, 'medium'), acceptance_criteria, status, COALESCE(pr_number, 0), COALESCE(stall_nudges, 0), depends_on, ci_fail_count, ci_checks, rollout_state, banner, started_at, completed_at, created_at, updated_at FROM vanadis_chunks WHERE build_id = $1 ORDER BY chunk_index ASC FOR UPDATE;`
 
 var (
 	ErrBuildNotFound = errors.New("vanadis build not found")
@@ -134,7 +134,7 @@ func (s *Store) GetBuild(ctx context.Context, buildID string) (*model.VanadisBui
 		}
 		return nil, nil, fmt.Errorf("query build %s: %w", buildID, err)
 	}
-	cQ := `SELECT id, build_id, chunk_index, mode, repo, title, instructions, target_files, target_symbols, COALESCE(effort, 'medium'), acceptance_criteria, status, COALESCE(pr_number, 0), COALESCE(stall_nudges, 0), depends_on, ci_fail_count, ci_checks, rollout_state, banner, merge_awakeable_id, deploy_awakeable_id, started_at, completed_at, created_at, updated_at FROM vanadis_chunks WHERE build_id = $1 ORDER BY chunk_index ASC;`
+	cQ := `SELECT id, build_id, chunk_index, mode, repo, title, instructions, target_files, target_symbols, COALESCE(effort, 'medium'), acceptance_criteria, status, COALESCE(pr_number, 0), COALESCE(stall_nudges, 0), depends_on, ci_fail_count, ci_checks, rollout_state, banner, started_at, completed_at, created_at, updated_at FROM vanadis_chunks WHERE build_id = $1 ORDER BY chunk_index ASC;`
 	rows, err := s.db.Query(ctx, cQ, buildID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("query chunks for build %s: %w", buildID, err)
@@ -195,8 +195,7 @@ func InsertBuildChunk(ctx context.Context, tx pgx.Tx, buildID string, c model.Va
 		buildplan.NonNilSlice(c.TargetFiles), buildplan.NonNilSlice(c.TargetSymbols), cEffort,
 		buildplan.NonNilSlice(c.AcceptanceCriteria), cStatus, prNum, c.StallNudges,
 		buildplan.NonNilSlice(c.DependsOn), c.CIFailCount, ciChecksJSON, rolloutStateJSON,
-		strings.TrimSpace(c.Banner), strings.TrimSpace(c.MergeAwakeableID),
-		strings.TrimSpace(c.DeployAwakeableID), startedAt, completedAt,
+		strings.TrimSpace(c.Banner), startedAt, completedAt,
 	); err != nil {
 		if knownCreationConflict(err, "vanadis_chunks_pkey", "uq_vanadis_chunks_build_index") {
 			return fmt.Errorf("%w: chunk %q in build %q already exists", ErrBuildConflict, c.ID, buildID)

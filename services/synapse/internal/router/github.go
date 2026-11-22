@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -16,6 +17,8 @@ import (
 	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/pkg/prwire"
 	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/pkg/strutil"
+	"github.com/azylman/aerial/services/synapse/internal/buildmeta"
 	"github.com/azylman/aerial/services/synapse/internal/github"
 	"github.com/azylman/aerial/services/synapse/internal/model"
 )
@@ -362,4 +365,262 @@ func (s *RouterServer) ProcessGitHubEvent(ctx context.Context, event, delivery s
 
 	// Normalize and send to Restate; synapse performs no lifecycle effect.
 	return s.processRestateOwnedGitHubEvent(ctx, event, delivery, body, res)
+}
+
+// autoUpdatePolicy renders the stateless auto-update config RepoObject's
+// cascade needs for repo: the allowlisted authors, the default-owner flag,
+// and the repo's collaborator alert rules sorted by author.
+func (s *RouterServer) autoUpdatePolicy(repo string) *prwire.AutoUpdatePolicy {
+	cfg := s.currentConfig()
+	policy := &prwire.AutoUpdatePolicy{Authors: slices.Clone(cfg.AutoUpdatePRAuthors), DefaultOwner: cfg.DefaultOwner}
+	for _, rule := range cfg.CollaboratorCIAlerts {
+		if !strings.EqualFold(rule.Repo, repo) {
+			continue
+		}
+		authors := make([]string, 0, len(rule.Authors))
+		for author := range rule.Authors {
+			authors = append(authors, author)
+		}
+		slices.Sort(authors)
+		for _, author := range authors {
+			if mention := strings.TrimSpace(rule.Authors[author]); mention != "" {
+				policy.Collaborators = append(policy.Collaborators, prwire.CollaboratorAlert{Author: author, ChannelID: rule.ChannelID, Mention: mention})
+			}
+		}
+	}
+	return policy
+}
+
+func isDependabotBranch(branch string) bool {
+	return strings.HasPrefix(strings.TrimSpace(branch), "dependabot/")
+}
+
+func isDependabotPR(p GitHubPullRequestPayload) bool {
+	return isDependabotBranch(p.PullRequest.Head.Ref) &&
+		(strings.EqualFold(strings.TrimSpace(p.PullRequest.User.Login), "dependabot[bot]") ||
+			strings.EqualFold(strings.TrimSpace(p.Sender.Login), "dependabot[bot]"))
+}
+
+func isMainBranch(branch string) bool {
+	clean := strings.TrimSpace(branch)
+	return clean == "main" || strings.HasPrefix(clean, "refs/heads/main")
+}
+
+func resolveImagesWorkloadsAndNames(repo string, images []string) ([]string, []string) {
+	var imageNames, workloads []string
+	for _, img := range images {
+		if _, imageName, workload := prwire.ResolveImageTag(repo, img); workload != "" {
+			imageNames = append(imageNames, imageName)
+			workloads = append(workloads, workload)
+		}
+	}
+	return model.DedupeTrimmedStrings(imageNames), model.DedupeTrimmedStrings(workloads)
+}
+
+type GitHubWorkflowRunPayload struct {
+	Action      string `json:"action"`
+	WorkflowRun struct {
+		ID           int64              `json:"id"`
+		Name         string             `json:"name"`
+		Path         string             `json:"path"`
+		Event        string             `json:"event"`
+		HeadSHA      string             `json:"head_sha"`
+		HeadBranch   string             `json:"head_branch"`
+		RunAttempt   int                `json:"run_attempt"`
+		Status       string             `json:"status"`
+		Conclusion   string             `json:"conclusion"`
+		HTMLURL      string             `json:"html_url"`
+		PullRequests []GitHubCheckRunPR `json:"pull_requests"`
+	} `json:"workflow_run"`
+	Repository struct {
+		FullName string `json:"full_name"`
+	} `json:"repository"`
+}
+
+type (
+	workflowRunEvent = buildmeta.WorkflowRunEvent
+)
+
+var (
+	errStaleWorkflowEvent = buildmeta.ErrStaleWorkflowEvent
+	errNotImageWorkflow   = buildmeta.ErrNotImageWorkflow
+)
+
+func logBuildMetadataWarning(ctx context.Context, msg, repo string, pr int, err error) {
+	slog.WarnContext(ctx, "[synapse] [build_metadata] "+msg, "repo", repo, "pr", pr, "error", err)
+}
+
+const (
+	statusFailed       = github.StatusFailed
+	statusPassed       = github.StatusPassed
+	statusPending      = github.StatusPending
+	ghStatusCompleted  = github.GHStatusCompleted
+	conclusionSuccess  = github.ConclusionSuccess
+	conclusionFailure  = github.ConclusionFailure
+	conclusionTimedOut = github.ConclusionTimedOut
+)
+
+func (s *RouterServer) fetchLatestRoboRevComment(ctx context.Context, repo string, prNumber int, headSHA string) string {
+	repo = githubapi.QualifyRepo(s.currentConfig().GitHubOwner, repo)
+	if s == nil || repo == "" || prNumber <= 0 {
+		return ""
+	}
+	var comments []GitHubIssueComment
+	path := fmt.Sprintf("/repos/%s/issues/%d/comments?per_page=100", repo, prNumber)
+	if err := s.getGitHubJSON(ctx, path, 2<<20, &comments); err != nil {
+		slog.WarnContext(ctx, "[synapse] [github] error fetching roborev comments", "repo", repo, "pr", prNumber, "error", err)
+		return ""
+	}
+	shortSHA := strings.TrimSpace(headSHA)
+	if len(shortSHA) > 7 {
+		shortSHA = shortSHA[:7]
+	}
+	for _, comment := range slices.Backward(comments) {
+		body := strings.TrimSpace(comment.Body)
+		if !strings.Contains(body, "## roborev:") && !strings.Contains(body, "## roborev-override") {
+			continue
+		}
+		if shortSHA != "" && !strings.Contains(body, "`"+shortSHA) && !strings.Contains(body, headSHA) {
+			continue
+		}
+		return strutil.TruncateRunes(body, maxRoboRevCommentRunes)
+	}
+	return ""
+}
+
+func formatCollaboratorCIFailureMessage(mention, repo string, prNumber int, prTitle, branch, headSHA, checkName, checkURL string) string {
+	return github.BuildCollaboratorAlertMessage(mention, repo, prNumber, prTitle, branch, headSHA, checkName, checkURL)
+}
+
+func formatCollaboratorConflictMessage(mention, repo string, prNumber int, prTitle, branch, headSHA string) string {
+	return github.BuildCollaboratorConflictMessage(mention, repo, prNumber, prTitle, branch, headSHA)
+}
+
+func (s *RouterServer) resolveCollaboratorAlertTarget(ctx context.Context, repo string, prNumber int, expectedSHA string, pr GitHubPullRequest) (GitHubPullRequest, string, string, bool, error) {
+	if s == nil || prNumber <= 0 {
+		return pr, "", "", false, nil
+	}
+	if strings.TrimSpace(pr.User.Login) == "" {
+		var fetched GitHubPullRequest
+		path := fmt.Sprintf("/repos/%s/pulls/%d", githubapi.QualifyRepo(s.currentConfig().GitHubOwner, repo), prNumber)
+		if err := s.getGitHubJSON(ctx, path, 2<<20, &fetched); err != nil {
+			return pr, "", "", false, err
+		}
+		pr = fetched
+	}
+	expectedSHA = strings.TrimSpace(expectedSHA)
+	if pr.Merged {
+		return pr, "", "", false, nil
+	}
+	if pr.State != "" && !strings.EqualFold(pr.State, "open") {
+		return pr, "", "", false, nil
+	}
+	if expectedSHA != "" && pr.Head.SHA != "" && !strings.EqualFold(pr.Head.SHA, expectedSHA) {
+		return pr, "", "", false, nil
+	}
+	if ParseAerialPRMetadata(pr.GetBody()).OK() {
+		return pr, "", "", false, nil
+	}
+	channelID, mention, ok := s.lookupCollaboratorCIAlert(repo, pr.User.Login)
+	if !ok || channelID == "" {
+		return pr, "", "", false, nil
+	}
+	return pr, channelID, mention, true, nil
+}
+
+// collaboratorDMEffect renders the collaborator DM as the eri effect the
+// HandleCollaboratorAlert event carries to PRObject.
+func collaboratorDMEffect(channelID, msg string) []prwire.EriEffect {
+	return []prwire.EriEffect{{Kind: prwire.EffectEriDirectMessage, ChannelID: channelID, Content: msg}}
+}
+
+func (s *RouterServer) notifyCollaboratorConflict(ctx context.Context, repo string, pr GitHubPullRequest) error {
+	if s == nil || !s.hasCollaboratorCIAlertsForRepo(repo) {
+		return nil
+	}
+	resolvedPR, channelID, mention, ok, err := s.resolveCollaboratorAlertTarget(ctx, repo, pr.Number, pr.Head.SHA, pr)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return nil
+	}
+	sha := pr.Head.SHA
+	if resolvedPR.Head.SHA != "" {
+		sha = resolvedPR.Head.SHA
+	}
+	prNum := resolvedPR.Number
+	branch := pr.Head.Ref
+	if resolvedPR.Head.Ref != "" {
+		branch = resolvedPR.Head.Ref
+	}
+	msg := formatCollaboratorConflictMessage(mention, repo, prNum, resolvedPR.Title, branch, sha)
+	// The event carries the rendered DM; PRObject owns alert dedup and
+	// sends it.
+	return s.sendOwnedPR(ctx, prwire.PRHandlerCollaboratorAlert, prwire.PREvent{
+		Repo: repo, PRNumber: prNum, HeadSHA: sha, Branch: branch,
+		Title: resolvedPR.Title, Unmanaged: true,
+		EriEffects: collaboratorDMEffect(channelID, msg),
+	})
+}
+
+func (s *RouterServer) notifyCollaboratorCIFailure(ctx context.Context, res *ResolvedGitHubEvent, checkURL string) error {
+	if s == nil || res == nil || res.TargetID != "" || res.PRNumber <= 0 || res.HeadSHA == "" || prwire.IsZeroSHA(res.HeadSHA) || !s.hasCollaboratorCIAlertsForRepo(res.Repo) {
+		return nil
+	}
+	resolvedPR, channelID, mention, ok, err := s.resolveCollaboratorAlertTarget(ctx, res.Repo, res.PRNumber, res.HeadSHA, GitHubPullRequest{
+		Number: res.PRNumber,
+		Head:   GitHubPRRef{Ref: res.Branch, SHA: res.HeadSHA},
+	})
+	if err != nil || !ok {
+		return err
+	}
+	branch := strutil.FirstNonEmpty(resolvedPR.Head.Ref, res.Branch)
+	sha := strutil.FirstNonEmpty(resolvedPR.Head.SHA, res.HeadSHA)
+	msg := formatCollaboratorCIFailureMessage(mention, res.Repo, resolvedPR.Number, resolvedPR.Title, branch, sha, res.CheckName, checkURL)
+	return s.sendOwnedPR(ctx, prwire.PRHandlerCollaboratorAlert, prwire.PREvent{
+		Repo: res.Repo, PRNumber: resolvedPR.Number, HeadSHA: sha, MergeSHA: res.MergeSHA,
+		CheckName: res.CheckName, Branch: branch, Title: resolvedPR.Title, Unmanaged: true,
+		EriEffects: collaboratorDMEffect(channelID, msg),
+	})
+}
+
+func syncPRFallbackFields(res *ResolvedGitHubEvent, pr GitHubPullRequest) GitHubPullRequest {
+	if res == nil {
+		return pr
+	}
+	if pr.Number == 0 && res.PRNumber > 0 {
+		pr.Number = res.PRNumber
+	}
+	if pr.Head.Ref == "" && res.Branch != "" {
+		pr.Head.Ref = res.Branch
+	}
+	if pr.Head.SHA == "" && res.HeadSHA != "" {
+		pr.Head.SHA = res.HeadSHA
+	}
+	return pr
+}
+
+func (s *RouterServer) resolveAutoMergeDisabledPR(ctx context.Context, res *ResolvedGitHubEvent, pr GitHubPullRequest) (GitHubPullRequest, bool, error) {
+	if !isPRMergeabilityUnknown(pr) || res.PRNumber <= 0 || strings.TrimSpace(res.Repo) == "" {
+		return pr, true, nil
+	}
+	fetchedModel, err := github.FetchSinglePRWithMergeabilityRetry(ctx, s.ghClient(), res.Repo, res.PRNumber, 3)
+	if err != nil {
+		return pr, false, err
+	}
+	if fetchedModel.Merged || (fetchedModel.State != "" && !strings.EqualFold(fetchedModel.State, "open")) {
+		return pr, false, nil
+	}
+	if res.HeadSHA != "" && fetchedModel.Head.SHA != "" && !strings.EqualFold(fetchedModel.Head.SHA, strings.TrimSpace(res.HeadSHA)) {
+		return pr, false, nil
+	}
+	fetched := fetchedModel
+	return syncPRFallbackFields(res, fetched), true, nil
+}
+
+// resolvePRFromCommitSHA discovers the PR for a commit SHA via the GitHub
+// API, the stateless fallback when the RepoObject SHA index has no answer.
+func (s *RouterServer) resolvePRFromCommitSHA(ctx context.Context, repo, sha string) (int, string, error) {
+	return github.ResolvePRFromCommitSHA(ctx, s.ghClient(), repo, sha)
 }

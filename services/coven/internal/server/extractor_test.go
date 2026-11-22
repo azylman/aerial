@@ -10,12 +10,11 @@ import (
 	"net/http/httptest"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
-	"time"
 
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/azylman/aerial/pkg/pgtest"
 	"github.com/azylman/aerial/services/coven/internal/config"
 	"github.com/azylman/aerial/services/coven/internal/store"
 )
@@ -152,32 +151,6 @@ func readExtractWatermark(t *testing.T, db store.DBTX, agent, thread string) int
 	return wm
 }
 
-// heldAdvisoryLocks counts advisory locks currently held in the test's own database.
-func heldAdvisoryLocks(t *testing.T, db store.DBTX) int {
-	t.Helper()
-	var n int
-	if err := db.QueryRowContext(context.Background(), `SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND granted AND database = (SELECT oid FROM pg_database WHERE datname = current_database())`).Scan(&n); err != nil {
-		t.Fatalf("count advisory locks: %v", err)
-	}
-	return n
-}
-
-// holdAdvisoryLock pins a second real connection holding the session
-// advisory lock for key until the returned release runs.
-func holdAdvisoryLock(t *testing.T, db *sql.DB, key string) func() {
-	t.Helper()
-	conn, err := db.Conn(context.Background())
-	if err != nil {
-		t.Fatalf("holder conn: %v", err)
-	}
-	execSQL(t, conn, `SELECT pg_advisory_lock(hashtext($1))`, key)
-	return func() {
-		// sql.Conn.Close returns the session to the pool, so unlock explicitly.
-		execSQL(t, conn, `SELECT pg_advisory_unlock(hashtext($1))`, key)
-		_ = conn.Close()
-	}
-}
-
 // adminTurnRange builds completed admin turns first..last of thread.
 func adminTurnRange(thread string, first, last int64) []testTurn {
 	var turns []testTurn
@@ -281,178 +254,6 @@ func TestExtractThreadFacts_BatchingAndHalving(t *testing.T) {
 			t.Parallel()
 			runBatchingAndHalvingCase(t, tc)
 		})
-	}
-}
-
-// unpinnedStore hides SQLStore's Conn/DB methods: a Store that is not a
-// connProvider, so extraction runs without a pinned connection or thread lock.
-type unpinnedStore struct {
-	store.Store
-}
-
-// pinningTestDBs returns two pools over one private database: db for the code
-// under test and observer for seeding, lock holders and assertions. sabotage
-// runs before db opens, so database-level settings reach every db session.
-func pinningTestDBs(t *testing.T, sabotage string) (db, observer *sql.DB) {
-	t.Helper()
-	dsn := pgtest.NewDSN(t)
-	open := func() *sql.DB {
-		h, err := store.OpenDB(context.Background(), &config.Config{DatabaseURL: dsn})
-		if err != nil {
-			t.Fatalf("open test database: %v", err)
-		}
-		t.Cleanup(func() { _ = h.Close() })
-		return h
-	}
-	observer = open()
-	execSQL(t, observer, sabotage)
-	return open(), observer
-}
-
-// pinningStore builds the store fixture named by handle over db and returns a
-// release func that proves caller-owned handles are still usable.
-func pinningStore(t *testing.T, db *sql.DB, handle string) (store.Store, func()) {
-	t.Helper()
-	ctx := context.Background()
-	switch handle {
-	case "closed":
-		_ = db.Close()
-	case "unpinned":
-		return unpinnedStore{store.NewSQLStore(db)}, func() {}
-	case "conn":
-		conn, err := db.Conn(ctx)
-		if err != nil {
-			t.Fatalf("db.Conn() err = %v", err)
-		}
-		return store.NewSQLStore(conn), func() {
-			execSQL(t, conn, `SELECT 1`)
-			if err := conn.Close(); err != nil {
-				t.Errorf("caller conn close err = %v, want nil (still owned by caller)", err)
-			}
-		}
-	case "tx":
-		tx, err := db.BeginTx(ctx, nil)
-		if err != nil {
-			t.Fatalf("db.BeginTx() err = %v", err)
-		}
-		return store.NewSQLStore(tx), func() {
-			if err := tx.Commit(); err != nil {
-				t.Errorf("caller tx commit err = %v", err)
-			}
-		}
-	}
-	return store.NewSQLStore(db), func() {}
-}
-
-// sabotageThreadUnlock makes the thread lock's pg_advisory_unlock call fail
-// for every session opened afterwards (public shadows pg_catalog).
-const sabotageThreadUnlock = `CREATE FUNCTION public.pg_advisory_unlock(bigint) RETURNS boolean LANGUAGE plpgsql AS $$BEGIN RAISE EXCEPTION 'sabotaged unlock'; END$$;
-DO $$BEGIN EXECUTE format('ALTER DATABASE %I SET search_path = public, pg_catalog', current_database()); END$$;`
-
-func TestExtractThreadFacts_ConnectionPinning(t *testing.T) {
-	t.Parallel()
-	const threadID = "th-pin-test"
-
-	tests := []struct {
-		name          string
-		handle        string
-		holdLock      bool
-		sabotage      string
-		errSubstr     string
-		wantWatermark int64
-		wantLocks     int
-	}{
-		{name: "PoolPinsAndReleasesConnection", handle: "pool", wantWatermark: 1},
-		{name: "PrePinnedConnStaysOpenForCaller", handle: "conn", wantWatermark: 1},
-		{name: "TxHandleLocksWithoutPinning", handle: "tx", wantWatermark: 1},
-		{name: "NonConnProviderSkipsThreadLock", handle: "unpinned", wantWatermark: 1},
-		{name: "ClosedPoolFailsFast", handle: "closed", errSubstr: "failed to pin connection for thread extraction"},
-		// wantLocks 1 is the holder's own lock, still held during assertions.
-		{name: "HeldThreadLockReleasesPinnedConn", handle: "pool", holdLock: true, errSubstr: "failed to acquire thread lock", wantLocks: 1},
-		// KNOWN BUG: the failed-unlock cleanup "destroys" the pinned conn with
-		// sql.Conn.Close, which returns the session to the pool still holding
-		// the thread lock. Expect wantLocks 0 once the conn is really discarded.
-		{name: "UnlockFailureStillSucceeds", handle: "pool", sabotage: sabotageThreadUnlock, wantWatermark: 1, wantLocks: 1},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			db, observer := pinningTestDBs(t, tc.sabotage)
-			seedTurns(t, observer, adminTurn(threadID, 1, "Turn 1", "Resp 1"))
-			if tc.holdLock {
-				// Released only after the assertions: the timed-out waiter's
-				// backend may still be queued on the lock until it notices the
-				// cancelled client.
-				defer holdAdvisoryLock(t, observer, threadID)()
-			}
-			pinnedStore, release := pinningStore(t, db, tc.handle)
-			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-			defer cancel()
-
-			err := ExtractThreadFacts(ctx, pinnedStore, &MockOllamaClient{embedding: testEmbedding(1.0)}, extractLLM(`{"facts": []}`), threadID)
-			if tc.errSubstr == "" && err != nil {
-				t.Fatalf("ExtractThreadFacts() err = %v, want nil", err)
-			}
-			if tc.errSubstr != "" && (err == nil || !strings.Contains(err.Error(), tc.errSubstr)) {
-				t.Fatalf("ExtractThreadFacts() err = %v, want substring %q", err, tc.errSubstr)
-			}
-			release()
-			if inUse := db.Stats().InUse; inUse != 0 {
-				t.Errorf("pool connections in use = %d, want 0 (pinned conn released)", inUse)
-			}
-			if wm := readExtractWatermark(t, observer, config.DefaultStack, threadID); wm != tc.wantWatermark {
-				t.Errorf("watermark = %d, want %d", wm, tc.wantWatermark)
-			}
-			if locks := heldAdvisoryLocks(t, observer); locks != tc.wantLocks {
-				t.Errorf("held advisory locks = %d, want %d", locks, tc.wantLocks)
-			}
-		})
-	}
-}
-
-func TestResolvePinnedStore_PrePinnedConnNotClosed(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-	db := newTestDB(t)
-	conn, err := db.Conn(ctx)
-	if err != nil {
-		t.Fatalf("failed to open conn: %v", err)
-	}
-	defer func() {
-		if closeErr := conn.Close(); closeErr != nil {
-			t.Logf("close conn: %v", closeErr)
-		}
-	}()
-
-	sqlStore := store.NewSQLStore(conn)
-
-	updatedStore, lockDB, ownedConn, err := resolvePinnedStore(ctx, sqlStore)
-	if err != nil {
-		t.Fatalf("resolvePinnedStore err = %v", err)
-	}
-	if lockDB != conn {
-		t.Errorf("lockDB = %v, want %v", lockDB, conn)
-	}
-	if ownedConn != nil {
-		t.Errorf("ownedConn = %v, want nil for pre-pinned connection", ownedConn)
-	}
-	if updatedStore == nil {
-		t.Errorf("expected updatedStore non-nil")
-	}
-
-	// For a store backed by *sql.DB, ownedConn should be populated
-	dbStore := store.NewSQLStore(db)
-	_, _, ownedFromDB, err := resolvePinnedStore(ctx, dbStore)
-	if err != nil {
-		t.Fatalf("resolvePinnedStore(dbStore) err = %v", err)
-	}
-	if ownedFromDB == nil {
-		t.Errorf("expected ownedFromDB to be non-nil for *sql.DB store")
-	} else {
-		if closeErr := ownedFromDB.Close(); closeErr != nil {
-			t.Logf("close ownedFromDB: %v", closeErr)
-		}
 	}
 }
 
@@ -569,7 +370,7 @@ func TestProcessTurnBatch_EmptyTranscript(t *testing.T) {
 			turns := []store.Message{{RowID: 15, ThreadID: threadID, Status: "COMPLETED", IsAdmin: true}}
 
 			// An empty LLM reply fails parsing, so any LLM call would surface as an error.
-			err := processTurnBatch(context.Background(), store.NewSQLStore(db), &MockOllamaClient{embedding: testEmbedding(1.0)}, extractLLM(""), threadID, turns, 15, nil)
+			err := processTurnBatch(context.Background(), store.NewSQLStore(db), &MockOllamaClient{embedding: testEmbedding(1.0)}, extractLLM(""), threadID, turns, 15)
 			if tc.errSubstr != "" {
 				if err == nil || !strings.Contains(err.Error(), tc.errSubstr) {
 					t.Fatalf("err = %v, want substring %q", err, tc.errSubstr)
@@ -615,21 +416,19 @@ func readExtractFacts(t *testing.T, db store.DBTX) []extractFactRow {
 	return got
 }
 
-func TestReconcileCandidateFact_WithLockDB(t *testing.T) {
+func TestReconcileCandidateFact_Postgres(t *testing.T) {
 	t.Parallel()
 	const factText = "User loves dark mode strictly"
 
 	tests := []struct {
 		name      string
-		holdLock  bool
 		sabotage  string
-		wantErr   error
+		wantErr   bool
 		errSubstr string
 		wantFacts []extractFactRow
 	}{
-		{name: "CommitsInsertUnderXactLock", wantFacts: []extractFactRow{{1, factText, 1}}},
-		{name: "BusyFactLockRollsBack", holdLock: true, wantErr: store.ErrAdvisoryLockBusy},
-		{name: "FailedWriteRollsBack", sabotage: sabotageInsertFact, errSubstr: "sabotaged"},
+		{name: "CommitsInsertUnderFactWriteLock", wantFacts: []extractFactRow{{1, factText, 1}}},
+		{name: "FailedWriteRollsBack", sabotage: sabotageInsertFact, wantErr: true, errSubstr: "sabotaged"},
 	}
 
 	for _, tc := range tests {
@@ -638,29 +437,17 @@ func TestReconcileCandidateFact_WithLockDB(t *testing.T) {
 			ctx := context.Background()
 			db := newTestDB(t)
 			execSQL(t, db, tc.sabotage)
-			if tc.holdLock {
-				defer holdAdvisoryLock(t, db, "coven:facts")()
-			}
-			conn, err := db.Conn(ctx)
-			if err != nil {
-				t.Fatalf("db.Conn() err = %v", err)
-			}
-			defer conn.Close()
 
 			item := ExtractedFactItem{FactText: factText, Action: "ADD"}
-			err = reconcileCandidateFact(ctx, store.NewSQLStore(conn), &MockOllamaClient{embedding: testEmbedding(1.0)}, nil, item, conn, "")
-			switch {
-			case tc.wantErr != nil && !errors.Is(err, tc.wantErr):
-				t.Fatalf("reconcileCandidateFact() err = %v, want %v", err, tc.wantErr)
-			case tc.errSubstr != "" && (err == nil || !strings.Contains(err.Error(), tc.errSubstr)):
-				t.Fatalf("reconcileCandidateFact() err = %v, want substring %q", err, tc.errSubstr)
-			case tc.wantErr == nil && tc.errSubstr == "" && err != nil:
-				t.Fatalf("reconcileCandidateFact() err = %v, want nil", err)
+			err := reconcileCandidateFact(ctx, store.NewSQLStore(db), &MockOllamaClient{embedding: testEmbedding(1.0)}, nil, item, "")
+			if tc.wantErr {
+				if err == nil || (tc.errSubstr != "" && !strings.Contains(err.Error(), tc.errSubstr)) {
+					t.Fatalf("reconcileCandidateFact() err = %v, want substring %q", err, tc.errSubstr)
+				}
+				return
 			}
-			// The pinned conn must be back outside any transaction: a SAVEPOINT
-			// outside a transaction block is rejected.
-			if _, spErr := conn.ExecContext(ctx, `SAVEPOINT probe`); spErr == nil {
-				t.Errorf("pinned conn still inside a transaction after reconcile")
+			if err != nil {
+				t.Fatalf("reconcileCandidateFact() err = %v, want nil", err)
 			}
 			// Read through the pool: only committed rows are visible.
 			if got := readExtractFacts(t, db); !slices.Equal(got, tc.wantFacts) {
@@ -830,5 +617,272 @@ func TestHash16(t *testing.T) {
 	// sha256("abc") = ba7816bf8f01cfea...
 	if got := hash16("abc"); got != "ba7816bf8f01cfea" {
 		t.Errorf("hash16(abc) = %q", got)
+	}
+}
+
+// unpinnedFactStore wraps Store but hides factConnProvider so withFactWriteLock falls back to factWriteMutex.
+type unpinnedFactStore struct {
+	store.Store
+}
+
+func TestWithFactWriteLock(t *testing.T) {
+	db := newTestDB(t)
+	sqlStore := store.NewSQLStore(db)
+	pinnedConn, err := db.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = pinnedConn.Close() })
+	pinnedStore := sqlStore.WithPinnedConn(pinnedConn)
+
+	unpinnedStore := unpinnedFactStore{Store: sqlStore}
+	nilDBStore := &store.SQLStore{}
+	testErr := errors.New("write failed")
+
+	tests := []struct {
+		name         string
+		store        store.Store
+		canceledCtx  bool
+		fnErr        error
+		wantCalled   bool
+		wantErr      bool
+		wantConnOpen bool
+	}{
+		{
+			name:       "nil store executes without error",
+			store:      nil,
+			wantCalled: true,
+			wantErr:    false,
+		},
+		{
+			name:       "unpinned store propagates error via mutex",
+			store:      unpinnedStore,
+			fnErr:      testErr,
+			wantCalled: true,
+			wantErr:    true,
+		},
+		{
+			name:       "unpinned store falls back to mutex without error",
+			store:      unpinnedStore,
+			wantCalled: true,
+			wantErr:    false,
+		},
+		{
+			name:       "uninitialized sql store returns conn error",
+			store:      nilDBStore,
+			wantCalled: false,
+			wantErr:    true,
+		},
+		{
+			name:       "sql store executes with pinned connection lock",
+			store:      sqlStore,
+			wantCalled: true,
+			wantErr:    false,
+		},
+		{
+			name:         "pre-pinned sql store keeps connection open after lock",
+			store:        pinnedStore,
+			wantCalled:   true,
+			wantErr:      false,
+			wantConnOpen: true,
+		},
+		{
+			name:       "sql store rolls back and propagates callback error",
+			store:      sqlStore,
+			fnErr:      testErr,
+			wantCalled: true,
+			wantErr:    true,
+		},
+		{
+			name:        "canceled context fails to acquire lock",
+			store:       sqlStore,
+			canceledCtx: true,
+			wantCalled:  false,
+			wantErr:     true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			if tc.canceledCtx {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithCancel(ctx)
+				cancel()
+			}
+			called := false
+			err := withFactWriteLock(ctx, tc.store, func(ctx context.Context, lockedStore store.Store) error {
+				called = true
+				if tc.store != nil && lockedStore == nil {
+					t.Error("expected non-nil lockedStore when store is non-nil")
+				}
+				return tc.fnErr
+			})
+			if called != tc.wantCalled {
+				t.Fatalf("called = %v, want %v (err = %v)", called, tc.wantCalled, err)
+			}
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("withFactWriteLock() err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			if tc.wantConnOpen {
+				if pingErr := pinnedConn.PingContext(context.Background()); pingErr != nil {
+					t.Fatalf("expected pre-pinned connection to remain open, got: %v", pingErr)
+				}
+			}
+		})
+	}
+}
+
+func TestReconcileCandidateFact_ConcurrentExtraction(t *testing.T) {
+	t.Parallel()
+	db := newTestDB(t)
+	s := store.NewSQLStore(db)
+
+	item := ExtractedFactItem{
+		Action:   "ADD",
+		FactText: "Alex prefers single-origin espresso in the morning",
+	}
+
+	const concurrency = 2
+	errCh := make(chan error, concurrency)
+	var wg sync.WaitGroup
+	wg.Add(concurrency)
+
+	for range concurrency {
+		client := &MockOllamaClient{embedding: testEmbedding(1.0)}
+		go func() {
+			defer wg.Done()
+			errCh <- reconcileCandidateFact(context.Background(), s, client, nil, item, "aerial")
+		}()
+	}
+	wg.Wait()
+	close(errCh)
+
+	for err := range errCh {
+		if err != nil {
+			t.Fatalf("reconcileCandidateFact error: %v", err)
+		}
+	}
+
+	res, err := s.GetFactsPaginated(context.Background(), store.FactsFilter{})
+	if err != nil {
+		t.Fatalf("GetFactsPaginated error: %v", err)
+	}
+	if len(res.Facts) != 1 {
+		t.Fatalf("expected 1 fact stored after concurrent extraction, got %d", len(res.Facts))
+	}
+	if res.Facts[0].ReinforceCount != 2 {
+		t.Fatalf("expected fact to be reinforced once (reinforce_count=2), got %d", res.Facts[0].ReinforceCount)
+	}
+}
+
+func TestDecisionMatchesNeighbors(t *testing.T) {
+	t.Parallel()
+
+	neighbors := []store.ScoredFact{
+		{Fact: store.Fact{ID: 10, FactText: "fact 10"}},
+		{Fact: store.Fact{ID: 20, FactText: "fact 20"}},
+	}
+
+	tests := []struct {
+		name      string
+		dec       ExtractedFactItem
+		neighbors []store.ScoredFact
+		want      bool
+	}{
+		{
+			name:      "ADD always matches",
+			dec:       ExtractedFactItem{Action: "ADD"},
+			neighbors: neighbors,
+			want:      true,
+		},
+		{
+			name:      "DELETE matching delete_id",
+			dec:       ExtractedFactItem{Action: "DELETE", DeleteID: 10},
+			neighbors: neighbors,
+			want:      true,
+		},
+		{
+			name:      "DELETE matching supersedes_id fallback",
+			dec:       ExtractedFactItem{Action: "DELETE", SupersedesID: 20},
+			neighbors: neighbors,
+			want:      true,
+		},
+		{
+			name:      "DELETE missing target",
+			dec:       ExtractedFactItem{Action: "DELETE", DeleteID: 99},
+			neighbors: neighbors,
+			want:      false,
+		},
+		{
+			name:      "DELETE non-positive target",
+			dec:       ExtractedFactItem{Action: "DELETE", DeleteID: 0},
+			neighbors: neighbors,
+			want:      false,
+		},
+		{
+			name:      "UPDATE matching supersedes_id",
+			dec:       ExtractedFactItem{Action: "UPDATE", SupersedesID: 20},
+			neighbors: neighbors,
+			want:      true,
+		},
+		{
+			name:      "UPDATE matching delete_id fallback",
+			dec:       ExtractedFactItem{Action: "UPDATE", DeleteID: 10},
+			neighbors: neighbors,
+			want:      true,
+		},
+		{
+			name:      "UPDATE missing target",
+			dec:       ExtractedFactItem{Action: "UPDATE", SupersedesID: 99},
+			neighbors: neighbors,
+			want:      false,
+		},
+		{
+			name:      "UPDATE non-positive target",
+			dec:       ExtractedFactItem{Action: "UPDATE", SupersedesID: 0},
+			neighbors: neighbors,
+			want:      false,
+		},
+		{
+			name:      "NOOP matching supersedes_id",
+			dec:       ExtractedFactItem{Action: "NOOP", SupersedesID: 10},
+			neighbors: neighbors,
+			want:      true,
+		},
+		{
+			name:      "NOOP missing target",
+			dec:       ExtractedFactItem{Action: "NOOP", SupersedesID: 99},
+			neighbors: neighbors,
+			want:      false,
+		},
+		{
+			name:      "NOOP non-positive target with non-empty neighbors",
+			dec:       ExtractedFactItem{Action: "NOOP", SupersedesID: 0},
+			neighbors: neighbors,
+			want:      true,
+		},
+		{
+			name:      "NOOP non-positive target with empty neighbors",
+			dec:       ExtractedFactItem{Action: "NOOP", SupersedesID: 0},
+			neighbors: nil,
+			want:      false,
+		},
+		{
+			name:      "unknown action returns false",
+			dec:       ExtractedFactItem{Action: "UNKNOWN"},
+			neighbors: neighbors,
+			want:      false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := decisionMatchesNeighbors(tc.dec, tc.neighbors)
+			if got != tc.want {
+				t.Fatalf("decisionMatchesNeighbors(%+v) = %v, want %v", tc.dec, got, tc.want)
+			}
+		})
 	}
 }

@@ -227,7 +227,7 @@ type retryDispatchFixture struct {
 }
 
 func (f *retryDispatchFixture) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != "/dispatch" {
+	if !strings.HasSuffix(r.URL.Path, "/Enqueue") {
 		_, _ = w.Write([]byte(`{}`))
 		return
 	}
@@ -263,7 +263,7 @@ func TestRetryActionDispatchRecovery(t *testing.T) {
 			ts := httptest.NewServer(f)
 			defer ts.Close()
 			rt := &retryJournalRuntime{fakeObjectRuntime: newFakeObjectRuntime("b1"), journal: map[string]reconcileStepOutput{}, loseReconcile: tc.loseJournal}
-			bo := NewBuildObject("", nil, func(restate.ObjectContext) objectRuntime { return rt }).WithAuthority(st, executor.NewExecutor(t.TempDir(), executor.NewHTTPEriClient(ts.URL, ts.Client()), nil, "", "example-owner", nil))
+			bo := NewBuildObject("", nil, func(restate.ObjectContext) objectRuntime { return rt }).WithAuthority(st, executor.NewExecutor(t.TempDir(), executor.NewRestateEriClient(ts.URL, "", "aerial", ts.Client()), nil, "", "example-owner", nil))
 			req := store.RetryActionChunkRequest{BuildID: "b1", ChunkID: "c1", ExpectedDispatchID: "vanadis-c1-turn-0", Reason: "retry", ExpectedInstructions: tc.expected, ReplacementInstructions: tc.replacement}
 			got, err := bo.RetryActionChunk(nil, req)
 			if tc.loseJournal {

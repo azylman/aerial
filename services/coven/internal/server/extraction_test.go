@@ -326,9 +326,12 @@ func TestReconcileCandidateFact_Tiers(t *testing.T) {
 		{name: "Tier3_ParseError_FallbackInsert", item: valid, neighborEmb: tier3Emb, llmResp: "invalid json", wantFacts: insertedBeside},
 		{name: "Tier3_EmptyFacts_FallbackInsert", item: valid, neighborEmb: tier3Emb, llmResp: `{"facts":[]}`, wantFacts: insertedBeside},
 		{name: "Tier3_ValidUpdate", item: valid, neighborEmb: tier3Emb, llmResp: update10, wantFacts: []extractFactRow{{reconcileNeighborID, "Updated text here", 2}}},
+		{name: "Tier3_Update_WithDeleteID", item: valid, neighborEmb: tier3Emb, llmResp: `{"facts":[{"action":"UPDATE","delete_id":10,"fact_text":"Updated via delete_id"}]}`, wantFacts: []extractFactRow{{reconcileNeighborID, "Updated via delete_id", 2}}},
+		{name: "Tier3_Update_EmptyFactTextFallback", item: valid, neighborEmb: tier3Emb, llmResp: `{"facts":[{"action":"UPDATE","supersedes_id":10,"fact_text":""}]}`, wantFacts: []extractFactRow{{reconcileNeighborID, "Valid candidate fact text", 2}}},
 		{name: "Tier3_UnwhitelistedUpdate_FallbackInsert", item: valid, neighborEmb: tier3Emb, llmResp: `{"facts":[{"action":"UPDATE","supersedes_id":999,"fact_text":"Updated text here"}]}`, wantFacts: insertedBeside},
 		{name: "Tier3_UpdateStoreErrorLogged", item: valid, neighborEmb: tier3Emb, llmResp: update10, sabotage: sabotageUpdateFact, wantErr: true, wantFacts: untouched},
 		{name: "Tier3_ValidDelete", item: valid, neighborEmb: tier3Emb, llmResp: delete10},
+		{name: "Tier3_Delete_WithSupersedesID", item: valid, neighborEmb: tier3Emb, llmResp: `{"facts":[{"action":"DELETE","supersedes_id":10}]}`},
 		{name: "Tier3_UnwhitelistedDelete_NOOP", item: valid, neighborEmb: tier3Emb, llmResp: `{"facts":[{"action":"DELETE","delete_id":999}]}`, wantFacts: untouched},
 		{name: "Tier3_DeleteStoreErrorLogged", item: valid, neighborEmb: tier3Emb, llmResp: delete10, sabotage: sabotageDeleteFact, wantErr: true, wantFacts: untouched},
 		{name: "Tier3_NOOP", item: valid, neighborEmb: tier3Emb, llmResp: `{"facts":[{"action":"NOOP"}]}`, wantFacts: []extractFactRow{reinforced}},
@@ -373,7 +376,7 @@ func runReconcileCandidateFactTierCase(t *testing.T, tc reconcileCandidateFactTi
 		}
 	}
 
-	err := reconcileCandidateFact(ctx, s, client, llm, tc.item, nil, "")
+	err := reconcileCandidateFact(ctx, s, client, llm, tc.item, "")
 	if (err != nil) != tc.wantErr {
 		t.Fatalf("reconcileCandidateFact() err = %v, wantErr = %v", err, tc.wantErr)
 	}

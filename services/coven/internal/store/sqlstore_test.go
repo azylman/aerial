@@ -143,6 +143,42 @@ func TestSQLStore_ConstructorsAndSetters(t *testing.T) {
 	}
 }
 
+func TestSQLStore_WithPinnedConn(t *testing.T) {
+	t.Parallel()
+	db := newTestDB(t)
+	s := NewSQLStore(db)
+
+	// nil receiver
+	var nilStore *SQLStore
+	if got := nilStore.WithPinnedConn(nil); got != nil {
+		t.Errorf("nilStore.WithPinnedConn(nil) = %v, want nil", got)
+	}
+
+	// with nil conn
+	if got := s.WithPinnedConn(nil); got != s {
+		t.Errorf("s.WithPinnedConn(nil) = %v, want %v", got, s)
+	}
+
+	// with real pinned conn
+	conn, err := db.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+
+	withConn := s.WithPinnedConn(conn)
+	if withConn == nil || withConn == s {
+		t.Fatalf("expected non-nil cloned store")
+	}
+	sqlStore, ok := withConn.(*SQLStore)
+	if !ok {
+		t.Fatalf("expected *SQLStore, got %T", withConn)
+	}
+	if sqlStore.DB() != conn {
+		t.Errorf("DB() = %v, want %v", sqlStore.DB(), conn)
+	}
+}
+
 // sqlstoreHandle builds the DBTX fixture for TestSQLStore_Conn.
 func sqlstoreHandle(t *testing.T, kind string) (DBTX, *sql.Conn) {
 	t.Helper()

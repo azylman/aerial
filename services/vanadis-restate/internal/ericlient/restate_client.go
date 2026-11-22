@@ -40,13 +40,11 @@ type DirectMessageDeliverer interface {
 	DeliverDirectMessage(ctx context.Context, channelID, content string) error
 }
 
-// RestateEriClient implements EriClient against Restate Virtual Objects, falling back to HTTP Eri when unconfigured.
+// RestateEriClient implements EriClient against Restate Virtual Objects.
 type RestateEriClient struct {
-	restateURL   string
-	eriURL       string
-	agentName    string
-	httpClient   *http.Client
-	httpFallback *HTTPEriClient
+	restateURL string
+	agentName  string
+	httpClient *http.Client
 
 	widgetMu        sync.RWMutex
 	hasDiscordAuth  bool
@@ -54,20 +52,14 @@ type RestateEriClient struct {
 }
 
 // NewRestateEriClient constructs a RestateEriClient.
-func NewRestateEriClient(restateURL, eriURL, agentName string, httpClient *http.Client, widgetDeliverer ...StatusWidgetDeliverer) *RestateEriClient {
+func NewRestateEriClient(restateURL, _ string, agentName string, httpClient *http.Client, widgetDeliverer ...StatusWidgetDeliverer) *RestateEriClient {
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: 30 * time.Second}
 	}
 	trimmedRestate := strings.TrimRight(strings.TrimSpace(restateURL), "/")
-	trimmedEri := strings.TrimRight(strings.TrimSpace(eriURL), "/")
 	agentName = agent.Normalize(agentName)
 	if agentName == "" {
 		agentName = agent.Default
-	}
-
-	var fallback *HTTPEriClient
-	if trimmedEri != "" {
-		fallback = NewHTTPEriClient(trimmedEri, httpClient)
 	}
 
 	var wd StatusWidgetDeliverer
@@ -79,11 +71,9 @@ func NewRestateEriClient(restateURL, eriURL, agentName string, httpClient *http.
 
 	return &RestateEriClient{
 		restateURL:      trimmedRestate,
-		eriURL:          trimmedEri,
 		agentName:       agentName,
 		hasDiscordAuth:  hasDiscord,
 		httpClient:      httpClient,
-		httpFallback:    fallback,
 		widgetDeliverer: wd,
 	}
 }
@@ -180,10 +170,7 @@ func (c *RestateEriClient) Dispatch(ctx context.Context, req eriwire.BrainDispat
 		return errors.New("restate eri client is nil")
 	}
 	if c.restateURL == "" {
-		if c.httpFallback != nil {
-			return c.httpFallback.Dispatch(ctx, req)
-		}
-		return errors.New("neither restate url nor eri url configured")
+		return errors.New("restate url not configured")
 	}
 
 	res, err := c.executeRestateDispatch(ctx, req)
@@ -206,10 +193,7 @@ func (c *RestateEriClient) DispatchAccepted(ctx context.Context, req eriwire.Bra
 		return errors.New("restate eri client is nil")
 	}
 	if c.restateURL == "" {
-		if c.httpFallback != nil {
-			return c.httpFallback.DispatchAccepted(ctx, req)
-		}
-		return errors.New("neither restate url nor eri url configured")
+		return errors.New("restate url not configured")
 	}
 
 	res, err := c.executeRestateDispatch(ctx, req)
@@ -239,16 +223,13 @@ func (c *RestateEriClient) CancelDispatch(ctx context.Context, chunkID string) e
 	if targetChunk == "" {
 		return nil
 	}
-	if c.restateURL != "" {
-		key := "vanadis-" + targetChunk
-		actionURL := fmt.Sprintf("%s/%s/%s/Cancel", c.restateURL, DispatchSessionServiceName(c.effectiveAgent(ctx)), url.PathEscape(key))
-		_, err := c.postRestateJSON(ctx, actionURL, "", "cancel dispatch", map[string]string{"chunk_id": targetChunk})
-		return err
+	if c.restateURL == "" {
+		return errors.New("restate url not configured")
 	}
-	if c.httpFallback != nil {
-		return c.httpFallback.CancelDispatch(ctx, targetChunk)
-	}
-	return errors.New("neither restate url nor eri url configured")
+	key := "vanadis-" + targetChunk
+	actionURL := fmt.Sprintf("%s/%s/%s/Cancel", c.restateURL, DispatchSessionServiceName(c.effectiveAgent(ctx)), url.PathEscape(key))
+	_, err := c.postRestateJSON(ctx, actionURL, "", "cancel dispatch", map[string]string{"chunk_id": targetChunk})
+	return err
 }
 
 func (c *RestateEriClient) Prompt(ctx context.Context, threadID, prompt string) error {
@@ -260,10 +241,7 @@ func (c *RestateEriClient) Prompt(ctx context.Context, threadID, prompt string) 
 		return nil
 	}
 	if c.restateURL == "" {
-		if c.httpFallback != nil {
-			return c.httpFallback.Prompt(ctx, cleanThreadID, cleanPrompt)
-		}
-		return errors.New("neither restate url nor eri url configured")
+		return errors.New("restate url not configured")
 	}
 
 	msgID := deterministicPromptMessageID(cleanThreadID, cleanPrompt)
@@ -364,26 +342,22 @@ func (c *RestateEriClient) Widget(ctx context.Context, req StatusWidgetRequest) 
 	if c == nil {
 		return "", errors.New("restate eri client is nil")
 	}
+	if c.restateURL == "" {
+		return "", errors.New("restate url not configured")
+	}
 	if strings.TrimSpace(req.Agent) == "" {
 		req.Agent = c.effectiveAgent(ctx)
 	}
-	// Direct widget delivery takes priority when widgetDeliverer is configured, or falls back to HTTPEriClient
-	// when Discord authentication or RESTATE_INGRESS_URL is unconfigured.
 	c.widgetMu.RLock()
 	deliverer := c.widgetDeliverer
 	hasDiscordToken := c.hasDiscordAuth
 	c.widgetMu.RUnlock()
 
-	hasRestateURL := c.restateURL != ""
-
-	if deliverer != nil && hasDiscordToken && hasRestateURL {
-		return deliverer.DeliverStatusWidget(ctx, req)
+	if deliverer == nil || !hasDiscordToken {
+		return "", errors.New("direct widget delivery is unconfigured")
 	}
 
-	if c.httpFallback != nil {
-		return c.httpFallback.Widget(ctx, req)
-	}
-	return "", errors.New("neither widget deliverer nor eri url configured for widget delivery")
+	return deliverer.DeliverStatusWidget(ctx, req)
 }
 
 // DeleteWidget removes a status widget through the direct deliverer under the
@@ -415,23 +389,25 @@ func (c *RestateEriClient) Message(ctx context.Context, channelID, content strin
 	if cleanChannelID == "" || cleanContent == "" {
 		return nil
 	}
+	if c.restateURL == "" {
+		return errors.New("restate url not configured")
+	}
 
 	c.widgetMu.RLock()
 	deliverer := c.widgetDeliverer
 	hasDiscordAuth := c.hasDiscordAuth
 	c.widgetMu.RUnlock()
 
-	if c.restateURL != "" && hasDiscordAuth {
-		if mda, ok := deliverer.(agentMessageDeliverer); ok && mda != nil {
-			return mda.DeliverDirectMessageWithAgent(ctx, c.effectiveAgent(ctx), cleanChannelID, cleanContent)
-		}
-		if md, ok := deliverer.(DirectMessageDeliverer); ok && md != nil {
-			return md.DeliverDirectMessage(ctx, cleanChannelID, cleanContent)
-		}
+	if !hasDiscordAuth || deliverer == nil {
+		return errors.New("direct message delivery is unconfigured")
 	}
 
-	if c.httpFallback != nil {
-		return c.httpFallback.Message(ctx, cleanChannelID, cleanContent)
+	if mda, ok := deliverer.(agentMessageDeliverer); ok && mda != nil {
+		return mda.DeliverDirectMessageWithAgent(ctx, c.effectiveAgent(ctx), cleanChannelID, cleanContent)
 	}
-	return errors.New("neither direct message deliverer nor http fallback configured for message delivery")
+	if md, ok := deliverer.(DirectMessageDeliverer); ok && md != nil {
+		return md.DeliverDirectMessage(ctx, cleanChannelID, cleanContent)
+	}
+
+	return errors.New("direct message delivery is unconfigured")
 }
