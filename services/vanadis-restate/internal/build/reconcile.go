@@ -245,7 +245,7 @@ func isLaunchCandidate(chunk model.VanadisChunk, chunks []model.VanadisChunk, la
 	s := strings.ToLower(strings.TrimSpace(chunk.Status))
 	res := s == statusRunning && chunk.Mode == chunkModeAction && chunk.StallNudges > 0
 	unlaunched := s == statusRunning && !launchedMap[actionLaunchKey(chunk)] && chunk.PRNumber == 0
-	if s != statusPending && s != "queued" && !res && !unlaunched {
+	if s != statusPending && s != statusQueued && !res && !unlaunched {
 		return false, false
 	}
 	if buildplan.CheckChunkDependenciesReady(chunk, chunks) != nil {
@@ -422,7 +422,113 @@ func widgetStateEqual(prior *model.BuildObjectState, build model.VanadisBuild, c
 	return true
 }
 
-func (b *BuildObject) evaluateBuildTerminalStatus(ctx context.Context, build *model.VanadisBuild, chunks []model.VanadisChunk, skipWidgetSync ...bool) (string, error) {
+const statusQueued = "queued"
+
+// buildQuiesced reports whether nothing in the build can still move without
+// an explicit retry: no chunk is in flight (anything outside completed, failed,
+// cancelled, pending and queued, so deploy_failed counts) and no pending or
+// queued chunk has its dependencies ready.
+func buildQuiesced(chunks []model.VanadisChunk) bool {
+	for _, c := range chunks {
+		switch strings.ToLower(strings.TrimSpace(c.Status)) {
+		case statusCompleted, statusFailed, statusCancelled:
+		case statusPending, statusQueued:
+			if buildplan.CheckChunkDependenciesReady(c, chunks) == nil {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// failureNotifyKey identifies one failure of a chunk: a retried chunk that
+// fails again gets a new completion time and so a new key.
+func failureNotifyKey(c model.VanadisChunk) string {
+	return c.ID + "@" + c.CompletedAt.UTC().Format(time.RFC3339Nano)
+}
+
+// seedFailureNotified returns the failure-wake ledger for this transition.
+// Saved state from before the ledger existed counts every chunk it already
+// recorded as failed as notified, so in-flight builds get no burst of wakes.
+func seedFailureNotified(prior *model.BuildObjectState) map[string]bool {
+	notified := map[string]bool{}
+	if prior == nil {
+		return notified
+	}
+	if prior.FailureNotified != nil {
+		maps.Copy(notified, prior.FailureNotified)
+		return notified
+	}
+	for _, c := range prior.Chunks {
+		if strings.ToLower(strings.TrimSpace(c.Status)) == statusFailed {
+			notified[failureNotifyKey(c)] = true
+		}
+	}
+	return notified
+}
+
+// pendingFailureWakes returns failed chunks whose failure has not woken the
+// thread yet and prunes ledger keys of chunks no longer failed.
+func pendingFailureWakes(chunks []model.VanadisChunk, notified map[string]bool) []model.VanadisChunk {
+	current := make(map[string]bool, len(notified))
+	var pending []model.VanadisChunk
+	for _, c := range chunks {
+		if strings.ToLower(strings.TrimSpace(c.Status)) != statusFailed {
+			continue
+		}
+		key := failureNotifyKey(c)
+		current[key] = true
+		if !notified[key] {
+			pending = append(pending, c)
+		}
+	}
+	maps.DeleteFunc(notified, func(k string, _ bool) bool { return !current[k] })
+	return pending
+}
+
+func chunkFailureLine(c model.VanadisChunk) string {
+	if banner := strings.TrimSpace(c.Banner); banner != "" {
+		return banner + " [" + c.ID + "]"
+	}
+	return fmt.Sprintf("Chunk %d failed [%s]", c.ChunkIndex+1, c.ID)
+}
+
+// notifyChunkFailures wakes the build's thread once per newly failed chunk and
+// publishes its vanadis_chunk failed event, recording each in notified. A
+// failed wake returns its error so the journaled step retries: a retry may
+// duplicate a wake but never loses one.
+func (b *BuildObject) notifyChunkFailures(ctx context.Context, build *model.VanadisBuild, failures []model.VanadisChunk, notified map[string]bool) error {
+	if b.executor != nil && strings.TrimSpace(build.Agent) != "" {
+		ctx = ericlient.WithAgent(ctx, build.Agent)
+	}
+	for _, c := range failures {
+		if b.executor != nil {
+			if !build.Quiet {
+				prompt := fmt.Sprintf("[VANADIS CHUNK FAILED]\nBuild ID: %s\nObjective: %s\n\n%s\nOther chunks continue; only this chunk's dependents wait. Repair in place with retry_action_chunk.", build.ID, build.Objective, chunkFailureLine(c))
+				if err := b.executor.DispatchWakePrompt(ctx, build.ThreadID, prompt); err != nil {
+					slog.WarnContext(ctx, "[vanadis-restate] chunk failure wake warning", "chunk_id", c.ID, "error", err)
+					return err
+				}
+			}
+			b.publishChunkFailed(ctx, c)
+		}
+		notified[failureNotifyKey(c)] = true
+	}
+	return nil
+}
+
+func (b *BuildObject) publishChunkFailed(ctx context.Context, c model.VanadisChunk) {
+	if err := b.executor.PublishExternalEvent(ctx, "vanadis_chunk", statusFailed, []string{c.ID}, strutil.FirstNonEmpty(strings.TrimSpace(c.Banner), "chunk failed")); err != nil {
+		slog.WarnContext(ctx, "[vanadis-restate] publish event warning", "error", err)
+	}
+}
+
+// evaluateBuildTerminalStatus decides the build status after a transition. A
+// failed chunk fails the build only once the build has quiesced; until then
+// independent chunks keep running and each failure wakes the thread once.
+func (b *BuildObject) evaluateBuildTerminalStatus(ctx context.Context, build *model.VanadisBuild, chunks []model.VanadisChunk, notified map[string]bool, skipWidgetSync bool) (string, error) {
 	allDone := true
 	hasFailed := false
 	for _, c := range chunks {
@@ -434,18 +540,11 @@ func (b *BuildObject) evaluateBuildTerminalStatus(ctx context.Context, build *mo
 			allDone = false
 		}
 	}
+	failures := pendingFailureWakes(chunks, notified)
 
 	switch {
-	case hasFailed:
-		build.Status = statusFailed
-		if err := b.notifyBuildTerminal(ctx, build, chunks, statusFailed, "chunk failed", "VANADIS BUILD FAILED", "Build encountered failures."); err != nil {
-			return "", err
-		}
-		if err := b.store.UpdateBuildStatus(ctx, build.ID, statusFailed); err != nil {
-			slog.ErrorContext(ctx, "[vanadis-restate] update build status failed", "error", err)
-			return "", err
-		}
-		return statusFailed, nil
+	case hasFailed && buildQuiesced(chunks):
+		return b.settleFailedBuild(ctx, build, chunks, failures, notified)
 	case allDone && len(chunks) > 0:
 		build.Status = statusCompleted
 		if err := b.notifyBuildTerminal(ctx, build, chunks, statusCompleted, "", "VANADIS BUILD COMPLETED", "All chunks completed successfully."); err != nil {
@@ -457,14 +556,93 @@ func (b *BuildObject) evaluateBuildTerminalStatus(ctx context.Context, build *mo
 		}
 		return statusCompleted, nil
 	default:
-		skip := len(skipWidgetSync) > 0 && skipWidgetSync[0]
-		if !skip && b.executor != nil {
-			if _, err := b.executor.SyncBuildWidget(ctx, b.store, *build, chunks, ""); err != nil {
-				slog.WarnContext(ctx, "[vanadis-restate] sync widget warning", "error", err)
-			}
-		}
-		return statusRunning, nil
+		return b.settleRunningBuild(ctx, build, chunks, failures, notified, skipWidgetSync)
 	}
+}
+
+// settleFailedBuild fails a quiesced build. Only the running->failed edge
+// sends the combined build-failed wake, before the status write, so a step
+// retry may duplicate a wake but never loses one.
+func (b *BuildObject) settleFailedBuild(ctx context.Context, build *model.VanadisBuild, chunks, failures []model.VanadisChunk, notified map[string]bool) (string, error) {
+	wasFailed := strings.ToLower(strings.TrimSpace(build.Status)) == statusFailed
+	build.Status = statusFailed
+	if wasFailed {
+		if err := b.notifyChunkFailures(ctx, build, failures, notified); err != nil {
+			return "", err
+		}
+	} else {
+		lines := []string{"Build encountered failures."}
+		for _, c := range failures {
+			lines = append(lines, chunkFailureLine(c))
+		}
+		if err := b.notifyBuildTerminal(ctx, build, chunks, statusFailed, "chunk failed", "VANADIS BUILD FAILED", strings.Join(lines, "\n")); err != nil {
+			return "", err
+		}
+		for _, c := range failures {
+			if b.executor != nil {
+				b.publishChunkFailed(ctx, c)
+			}
+			notified[failureNotifyKey(c)] = true
+		}
+	}
+	if err := b.store.UpdateBuildStatus(ctx, build.ID, statusFailed); err != nil {
+		slog.ErrorContext(ctx, "[vanadis-restate] update build status failed", "error", err)
+		return "", err
+	}
+	return statusFailed, nil
+}
+
+// settleRunningBuild keeps (or puts) a build running while chunks are in
+// flight or launchable, waking the thread once per new chunk failure.
+func (b *BuildObject) settleRunningBuild(ctx context.Context, build *model.VanadisBuild, chunks, failures []model.VanadisChunk, notified map[string]bool, skipWidgetSync bool) (string, error) {
+	if err := b.notifyChunkFailures(ctx, build, failures, notified); err != nil {
+		return "", err
+	}
+	if strings.ToLower(strings.TrimSpace(build.Status)) == statusFailed {
+		build.Status = statusRunning
+		if err := b.store.UpdateBuildStatus(ctx, build.ID, statusRunning); err != nil {
+			slog.ErrorContext(ctx, "[vanadis-restate] update build status running", "error", err)
+			return "", err
+		}
+		skipWidgetSync = false
+	}
+	if !skipWidgetSync && b.executor != nil {
+		if _, err := b.executor.SyncBuildWidget(ctx, b.store, *build, chunks, ""); err != nil {
+			slog.WarnContext(ctx, "[vanadis-restate] sync widget warning", "error", err)
+		}
+	}
+	return statusRunning, nil
+}
+
+// transitionHalted reports whether a transition must not launch anything.
+// Completed and cancelled builds never launch. A failed build launches only
+// when it failed under failure isolation; legacy failed builds resume only
+// through an explicit retry, so no superseded work relaunches.
+func transitionHalted(status string, isolated bool) bool {
+	return status == statusCompleted || status == statusCancelled || (status == statusFailed && !isolated)
+}
+
+// haltedTransitionOutput keeps a halted build's state; a legacy failed build
+// still wakes the thread once per new chunk failure.
+func (b *BuildObject) haltedTransitionOutput(ctx context.Context, build *model.VanadisBuild, chunks []model.VanadisChunk, priorLaunched map[string]bool, terminalNotified bool, notified map[string]bool, isolated bool) (reconcileStepOutput, error) {
+	if build.Status == statusFailed {
+		if err := b.notifyChunkFailures(ctx, build, pendingFailureWakes(chunks, notified), notified); err != nil {
+			return reconcileStepOutput{}, err
+		}
+	}
+	launchedMap := cloneLaunchedMap(priorLaunched)
+	return reconcileStepOutput{
+		BuildStatus: build.Status,
+		LaunchedMap: launchedMap,
+		State: &model.BuildObjectState{
+			Build:            *build,
+			Chunks:           chunks,
+			Launched:         launchedMap,
+			TerminalNotified: terminalNotified,
+			FailureNotified:  notified,
+			FailureIsolation: isolated,
+		},
+	}, nil
 }
 
 func cloneLaunchedMap(priorLaunched map[string]bool) map[string]bool {
@@ -483,12 +661,6 @@ func (b *BuildObject) replayTerminalMutationEffects(ctx context.Context, build *
 	}
 	if build.Status == statusCompleted && isActionCompletionMutation(mutation, chunks) {
 		if nErr := b.notifyBuildTerminal(ctx, build, chunks, statusCompleted, "", "VANADIS BUILD COMPLETED", "All chunks completed successfully."); nErr != nil {
-			return false, nErr
-		}
-		return true, nil
-	}
-	if build.Status == statusFailed && isFailureCompletionMutation(mutation, chunks) {
-		if nErr := b.notifyBuildTerminal(ctx, build, chunks, statusFailed, strutil.FirstNonEmpty(mutation.Reason, "chunk failed"), "VANADIS BUILD FAILED", "Build encountered failures."); nErr != nil {
 			return false, nErr
 		}
 		return true, nil
@@ -523,18 +695,10 @@ func (b *BuildObject) executeAuthoritativeTransition(ctx context.Context, buildI
 	if nErr != nil {
 		return reconcileStepOutput{}, nErr
 	}
-	if build.Status == statusCompleted || build.Status == statusFailed || build.Status == statusCancelled {
-		launchedMap := cloneLaunchedMap(priorLaunched)
-		return reconcileStepOutput{
-			BuildStatus: build.Status,
-			LaunchedMap: launchedMap,
-			State: &model.BuildObjectState{
-				Build:            *build,
-				Chunks:           chunks,
-				Launched:         launchedMap,
-				TerminalNotified: terminalNotified,
-			},
-		}, nil
+	notified := seedFailureNotified(priorState)
+	isolated := priorState != nil && priorState.FailureIsolation
+	if transitionHalted(build.Status, isolated) {
+		return b.haltedTransitionOutput(ctx, build, chunks, priorLaunched, terminalNotified, notified, isolated)
 	}
 
 	launchedMap := cloneLaunchedMap(priorLaunched)
@@ -551,7 +715,7 @@ func (b *BuildObject) executeAuthoritativeTransition(ctx context.Context, buildI
 		recoveryReason = eriwire.ErrDispatchActive.Error()
 	}
 	skipSync := len(launchedChunks) == 0 && widgetStateEqual(priorState, *build, chunks)
-	finalStatus, err := b.evaluateBuildTerminalStatus(ctx, build, chunks, skipSync)
+	finalStatus, err := b.evaluateBuildTerminalStatus(ctx, build, chunks, notified, skipSync)
 	if err != nil {
 		return reconcileStepOutput{}, err
 	}
@@ -573,6 +737,8 @@ func (b *BuildObject) executeAuthoritativeTransition(ctx context.Context, buildI
 			TerminalNotified:     finalStatus == statusCompleted || finalStatus == statusFailed,
 			DispatchDeferrals:    deferrals,
 			DeferralReconcileSeq: seq,
+			FailureNotified:      notified,
+			FailureIsolation:     true,
 		},
 	}, nil
 }
@@ -684,6 +850,7 @@ func (b *BuildObject) skippedCompletionOutput(ctx context.Context, buildID strin
 	skipped := &model.BuildObjectState{Build: *build, Chunks: chunks, Launched: priorLaunched}
 	if priorState != nil {
 		skipped.DispatchDeferrals, skipped.DeferralReconcileSeq = priorState.DispatchDeferrals, priorState.DeferralReconcileSeq
+		skipped.FailureNotified, skipped.FailureIsolation = priorState.FailureNotified, priorState.FailureIsolation
 	}
 	return reconcileStepOutput{BuildStatus: build.Status, State: skipped}, nil
 }
@@ -708,7 +875,7 @@ func (b *BuildObject) failNeverAcceptedLaunches(ctx context.Context, buildID str
 			if actionLaunchKey(chunk) != key {
 				continue
 			}
-			if s := strings.ToLower(strings.TrimSpace(chunk.Status)); s == statusPending || s == "queued" {
+			if s := strings.ToLower(strings.TrimSpace(chunk.Status)); s == statusPending || s == statusQueued {
 				if err := b.store.ReserveChunkForLaunch(ctx, chunk.ID); err != nil && !errors.Is(err, store.ErrChunkNotFound) {
 					return err
 				}

@@ -92,14 +92,10 @@ func retryActionGraphReady(c model.VanadisChunk, chunks []model.VanadisChunk) bo
 			}
 		}
 	}
+	// Siblings outside the chunk's descendants may keep running: a failed
+	// chunk blocks only its dependents.
 	for _, other := range chunks {
-		if other.ID == c.ID {
-			continue
-		}
-		if other.Status != statusCompleted && other.Status != statusPending {
-			return false
-		}
-		if descendants[other.ID] && other.Status != statusPending {
+		if other.ID != c.ID && descendants[other.ID] && other.Status != statusPending {
 			return false
 		}
 	}
@@ -126,8 +122,8 @@ func retryActionCandidate(b model.VanadisBuild, chunks []model.VanadisChunk, req
 	}
 	previous := c
 	previous.StallNudges--
-	replay := c.StallNudges > 0 && req.ExpectedDispatchID == model.ActionDispatchID(previous) && b.Status == statusRunning && (c.Status == statusPending || c.Status == statusRunning)
-	if !replay && (b.Status != statusFailed || c.Status != statusFailed || req.ExpectedDispatchID != model.ActionDispatchID(c)) {
+	replay := c.StallNudges > 0 && req.ExpectedDispatchID == model.ActionDispatchID(previous) && buildActive(b.Status) && (c.Status == statusPending || c.Status == statusRunning)
+	if !replay && (!buildActive(b.Status) || c.Status != statusFailed || req.ExpectedDispatchID != model.ActionDispatchID(c)) {
 		return conflict()
 	}
 	if !replay && !retryInstructionsMatch(req, c) {

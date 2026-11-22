@@ -39,8 +39,8 @@ const (
 // still learn build/chunk lifecycle rules and ID provenance.
 const ServerInstructions = `Read state first: get_build (by build_id, or by thread_id which resolves to that thread's latest running build, else its most recent build) returns status and chunk IDs; get_chunk returns full instructions by chunk_id or build_id + chunk_ref (chunk ID or 0-based index).
 update_chunk and remove_chunk only work on chunks still pending; running, completed or failed chunks are rejected with a conflict. append_chunk adds pending chunks to the end of a build; update_build replaces the build title, objective or shared_context.
-An action chunk passes only by calling complete_chunk with its dispatch_id and a summary of the PASS evidence; a turn that ends without it is resumed automatically, then paused as failed.
-fail_chunk fails the chunk and pauses the build for a resumable retry (retry_action_chunk). Use it for blockers, not for fixable test, lint or CI failures; fix forward instead.`
+An action chunk passes only by calling complete_chunk with its dispatch_id and a summary of the PASS evidence; a turn that ends without it is resumed automatically, then failed (blocking only its dependents).
+fail_chunk fails the chunk and blocks only its dependents; other chunks keep running and retry_action_chunk repairs it in place. Use it for blockers, not for fixable test, lint or CI failures; fix forward instead.`
 
 // MCPChunkBrief captures the concise chunk fields exposed in MCP build listings.
 type MCPChunkBrief struct {
@@ -833,7 +833,7 @@ func (h *Handler) RegisterTools(mcpServer *mcp.Server) {
 
 	mcp.AddTool(mcpServer, &mcp.Tool{
 		Name:        "fail_chunk",
-		Description: "Fail an action chunk and pause the build for a resumable retry (retry_action_chunk). Use for blockers, not for fixable test, lint or CI failures.",
+		Description: "Fail an action chunk. Only its dependents are blocked; other chunks keep running, and retry_action_chunk repairs it in place. Use for blockers, not for fixable test, lint or CI failures.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args MCPFailChunkArgs) (*mcp.CallToolResult, MCPFailChunkOutput, error) {
 		out, err := h.handleMCPFailChunk(ctx, args)
 		return nil, out, err
@@ -841,7 +841,7 @@ func (h *Handler) RegisterTools(mcpServer *mcp.Server) {
 
 	mcp.AddTool(mcpServer, &mcp.Tool{
 		Name:        "complete_chunk",
-		Description: "Complete an action chunk with an explicit verdict. An action chunk passes only by calling complete_chunk with its dispatch_id and a summary of the PASS evidence; a turn that ends without it is resumed automatically, then paused as failed.",
+		Description: "Complete an action chunk with an explicit verdict. An action chunk passes only by calling complete_chunk with its dispatch_id and a summary of the PASS evidence; a turn that ends without it is resumed automatically, then failed (blocking only its dependents).",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, args MCPCompleteChunkArgs) (*mcp.CallToolResult, MCPCompleteChunkOutput, error) {
 		out, err := h.handleMCPCompleteChunk(ctx, args)
 		return nil, out, err

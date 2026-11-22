@@ -858,7 +858,7 @@ func TestBuildObject_AuthorityHandlerOperations(t *testing.T) {
 			t.Parallel()
 			boTerm, _ := openAuthorityHandlerHarness(t)
 			bTerm := model.VanadisBuild{ID: tc.buildID, Status: "running", ThreadID: "th-1"}
-			termStatus, err := boTerm.evaluateBuildTerminalStatus(context.Background(), &bTerm, []model.VanadisChunk{{ID: "c1", Status: tc.chunkStatus}})
+			termStatus, err := boTerm.evaluateBuildTerminalStatus(context.Background(), &bTerm, []model.VanadisChunk{{ID: "c1", Status: tc.chunkStatus}}, map[string]bool{}, false)
 			assert.NoError(t, err)
 			assert.Equal(t, tc.wantStatus, termStatus)
 		})
@@ -945,8 +945,8 @@ func TestBuildObject_ReconcileErrorBranches(t *testing.T) {
 	}{
 		{name: "completed action completion notifies", buildStatus: statusCompleted, action: "action_completed", chunkID: "c1", chunkMode: "action", reason: "test", wantNotified: true},
 		{name: "completed action completion notify failure", buildStatus: statusCompleted, action: "action_completed", chunkID: "c1", chunkMode: "action", reason: "test", failNotify: true, wantErr: true},
-		{name: "failed chunk failure notifies", buildStatus: statusFailed, action: "chunk_failed", chunkID: "c1", chunkMode: "pr", reason: "boom", wantNotified: true},
-		{name: "failed chunk failure notify failure", buildStatus: statusFailed, action: "chunk_failed", chunkID: "c1", chunkMode: "pr", reason: "boom", failNotify: true, wantErr: true},
+		{name: "failed chunk failure leaves the wake to reconcile", buildStatus: statusFailed, action: "chunk_failed", chunkID: "c1", chunkMode: "pr", reason: "boom"},
+		{name: "failed chunk failure ignores wake failures", buildStatus: statusFailed, action: "chunk_failed", chunkID: "c1", chunkMode: "pr", reason: "boom", failNotify: true},
 	}
 	for _, tc := range replays {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1360,7 +1360,7 @@ func TestBuildObject_EvaluateBuildTerminalStatus_SkipWidgetSync(t *testing.T) {
 			bld := model.VanadisBuild{ID: "b-test", Status: "running", StatusMessageID: "msg-123", ThreadID: "th-1"}
 			chunks := []model.VanadisChunk{{ID: "c1", Status: "running"}}
 
-			status, err := bo.evaluateBuildTerminalStatus(context.Background(), &bld, chunks, tc.skipSync)
+			status, err := bo.evaluateBuildTerminalStatus(context.Background(), &bld, chunks, map[string]bool{}, tc.skipSync)
 			require.NoError(t, err)
 			assert.Equal(t, "running", status)
 			assert.Equal(t, tc.wantCalls, int(widgetCalls.Load()))

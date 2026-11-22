@@ -3,10 +3,10 @@ package restateingress
 import (
 	"context"
 	"errors"
-	"io"
 	"net/http"
-	"net/http/httptest"
 	"testing"
+
+	"github.com/azylman/aerial/pkg/restateingresstest"
 )
 
 type errBody struct{}
@@ -28,27 +28,8 @@ var (
 	})}
 )
 
-// recordingServer echoes a fixed response and records the last request it saw.
-type recordingServer struct {
-	status    int
-	respBody  string
-	gotBody   string
-	gotKey    string
-	gotKeySet bool
-	gotType   string
-	gotMethod string
-}
-
-func (s *recordingServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	raw, _ := io.ReadAll(r.Body)
-	s.gotBody = string(raw)
-	s.gotKey = r.Header.Get("Idempotency-Key")
-	_, s.gotKeySet = r.Header["Idempotency-Key"]
-	s.gotType = r.Header.Get("Content-Type")
-	s.gotMethod = r.Method
-	w.WriteHeader(s.status)
-	_, _ = w.Write([]byte(s.respBody))
-}
+// postPath is the ingress path every TestPost row posts to.
+const postPath = "/Svc/key/Enqueue"
 
 func TestPost(t *testing.T) {
 	t.Parallel()
@@ -84,12 +65,11 @@ func TestPost(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			rec := &recordingServer{status: tc.status, respBody: tc.respBody}
-			srv := httptest.NewServer(rec)
-			t.Cleanup(srv.Close)
+			ingress := restateingresstest.New(t)
+			ingress.Routes = map[string]restateingresstest.Response{postPath: {Status: tc.status, Body: tc.respBody}}
 			endpoint := tc.endpoint
 			if endpoint == "" {
-				endpoint = srv.URL + "/Svc/key/Enqueue"
+				endpoint = ingress.URL() + postPath
 			}
 			got, err := Post(context.Background(), tc.client, endpoint, tc.key, tc.payload, tc.maxBody)
 			if tc.wantErr != "" {
@@ -102,7 +82,7 @@ func TestPost(t *testing.T) {
 			if string(got) != tc.wantBody {
 				t.Errorf("Post() body = %q, want %q", got, tc.wantBody)
 			}
-			assertRecorded(t, rec, tc.wantSent, tc.wantKey, tc.wantKeySet)
+			assertRecorded(t, ingress.Calls(), tc.wantSent, tc.wantKey, tc.wantKeySet)
 		})
 	}
 }
@@ -121,16 +101,21 @@ func assertPostError(t *testing.T, err error, wantErr string, wantStatus int) {
 	}
 }
 
-func assertRecorded(t *testing.T, rec *recordingServer, wantSent, wantKey string, wantKeySet bool) {
+func assertRecorded(t *testing.T, calls []restateingresstest.Call, wantSent, wantKey string, wantKeySet bool) {
 	t.Helper()
-	if rec.gotMethod != http.MethodPost || rec.gotType != "application/json" {
-		t.Errorf("request method/type = %q/%q, want POST/application/json", rec.gotMethod, rec.gotType)
+	if len(calls) != 1 {
+		t.Fatalf("ingress calls = %d, want 1", len(calls))
 	}
-	if rec.gotBody != wantSent {
-		t.Errorf("sent body = %q, want %q", rec.gotBody, wantSent)
+	c := calls[0]
+	if c.Method != http.MethodPost || c.ContentType != "application/json" || c.Path != postPath {
+		t.Errorf("request method/type/path = %q/%q/%q, want POST/application/json/%s", c.Method, c.ContentType, c.Path, postPath)
 	}
-	if rec.gotKey != wantKey || rec.gotKeySet != wantKeySet {
-		t.Errorf("Idempotency-Key = %q (set=%v), want %q (set=%v)", rec.gotKey, rec.gotKeySet, wantKey, wantKeySet)
+	if string(c.Body) != wantSent {
+		t.Errorf("sent body = %q, want %q", c.Body, wantSent)
+	}
+	_, keySet := c.Header["Idempotency-Key"]
+	if c.IdempotencyKey != wantKey || keySet != wantKeySet {
+		t.Errorf("Idempotency-Key = %q (set=%v), want %q (set=%v)", c.IdempotencyKey, keySet, wantKey, wantKeySet)
 	}
 }
 

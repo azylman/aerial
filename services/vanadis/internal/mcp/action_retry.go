@@ -162,7 +162,7 @@ func (h *Handler) ValidateRetryEligibility(ctx context.Context, req RetryActionC
 	if parseErr == nil && generation >= 0 && generation < c.StallNudges && req.ExpectedDispatchID == fmt.Sprintf("vanadis-%s-turn-%d", c.ID, generation) {
 		return nil
 	}
-	if b.Status != statusFailed || c.Status != statusFailed || c.StallNudges >= 2147483647 || req.ExpectedDispatchID != fmt.Sprintf("vanadis-%s-turn-%d", c.ID, c.StallNudges) {
+	if (b.Status != statusRunning && b.Status != statusFailed) || c.Status != statusFailed || c.StallNudges >= 2147483647 || req.ExpectedDispatchID != fmt.Sprintf("vanadis-%s-turn-%d", c.ID, c.StallNudges) {
 		return model.ErrBuildConflict
 	}
 	if !retryInstructionsMatch(req, c) {
@@ -175,11 +175,6 @@ func validateRetrySiblings(c model.VanadisChunk, chunks []model.VanadisChunk) er
 	descendants := retryDescendants(c.ID, chunks)
 	for _, other := range chunks {
 		if other.ID != c.ID && descendants[other.ID] && other.Status != statusPending {
-			return model.ErrBuildConflict
-		}
-	}
-	for _, other := range chunks {
-		if other.ID != c.ID && other.Status != statusCompleted && other.Status != statusPending {
 			return model.ErrBuildConflict
 		}
 	}
