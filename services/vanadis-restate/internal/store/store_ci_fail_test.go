@@ -267,32 +267,85 @@ func TestActionRepairInFlight(t *testing.T) {
 
 func TestPostgresVanadisStore_RecordPRCheckStatus(t *testing.T) {
 	t.Parallel()
+	tests := []struct {
+		name                  string
+		chunkID, headSHA      string
+		checkName, checkState string
+		nilDB, execFailure    bool
+		rejected              bool
+		wantErr, wantSkipped  bool
+	}{
+		{name: "nil database", chunkID: "c1", headSHA: "sha-1", checkName: "test", checkState: "passed", nilDB: true, wantErr: true},
+		{name: "empty chunk id", chunkID: "", headSHA: "sha-1", checkName: "test", checkState: "passed", wantErr: true},
+		{name: "empty check name", chunkID: "c1", headSHA: "sha-1", checkName: "", checkState: "passed", wantErr: true},
+		{name: "record passed status", chunkID: "c1", headSHA: "sha-1", checkName: "test", checkState: "passed"},
+		{name: "skipped transition rejected", chunkID: "c1", headSHA: "sha-1", checkName: "test", checkState: "passed", rejected: true, wantErr: true, wantSkipped: true},
+		{name: "persistence failure", chunkID: "c1", headSHA: "sha-1", checkName: "test", checkState: "passed", execFailure: true, wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			st := New(sqltest.DB{ExecFn: func(_ context.Context, _ string, _ ...any) (pgconn.CommandTag, error) {
+				if tc.execFailure {
+					return pgconn.CommandTag{}, errors.New("database unavailable")
+				}
+				if tc.rejected {
+					return pgconn.NewCommandTag("UPDATE 0"), nil
+				}
+				return pgconn.NewCommandTag("UPDATE 1"), nil
+			}}, "example-org")
+			if tc.nilDB {
+				st = &Store{}
+			}
+			err := st.RecordPRCheckStatus(context.Background(), tc.chunkID, tc.headSHA, tc.checkName, tc.checkState)
+			assert.Equal(t, tc.wantErr, err != nil)
+			assert.Equal(t, tc.wantSkipped, errors.Is(err, ErrPRTransitionSkipped))
+		})
+	}
+}
 
-	// Nil store
-	sNil := &Store{}
-	assert.Error(t, sNil.RecordPRCheckStatus(context.Background(), "c1", "sha-1", "test", "passed"))
-	assert.Error(t, sNil.ResetPRCheckState(context.Background(), "c1", "sha-1", ""))
-
-	// Empty arguments
-	st, _ := open(dbScript{ExecTag: "UPDATE 1"})
-	assert.Error(t, st.RecordPRCheckStatus(context.Background(), "", "sha-1", "test", "passed"))
-	assert.Error(t, st.RecordPRCheckStatus(context.Background(), "c1", "sha-1", "", "passed"))
-	assert.Error(t, st.ResetPRCheckState(context.Background(), "", "sha-1", ""))
-
-	// Success
-	assert.NoError(t, st.RecordPRCheckStatus(context.Background(), "c1", "sha-1", "test", "passed"))
-	assert.NoError(t, st.ResetPRCheckState(context.Background(), "c1", "sha-2", ""))
-	assert.NoError(t, st.ResetPRCheckState(context.Background(), "c1", "sha-2", "merge-sha-1"))
-
-	// Skipped transition (0 rows affected)
-	storeZero, _ := open(dbScript{ExecTag: "UPDATE 0", Row: sqltest.ErrRow(pgx.ErrNoRows)})
-	assert.ErrorIs(t, storeZero.RecordPRCheckStatus(context.Background(), "c1", "sha-1", "test", "passed"), ErrPRTransitionSkipped)
-	assert.ErrorIs(t, storeZero.ResetPRCheckState(context.Background(), "c1", "sha-2", ""), ErrPRTransitionSkipped)
-	assert.ErrorIs(t, storeZero.ResetPRCheckState(context.Background(), "c1", "sha-2", "merge-sha-1"), ErrPRTransitionSkipped)
-
-	// DB Exec error
-	storeErr, _ := open(dbScript{ExecErr: errors.New("db error")})
-	assert.Error(t, storeErr.RecordPRCheckStatus(context.Background(), "c1", "sha-1", "test", "passed"))
-	assert.Error(t, storeErr.ResetPRCheckState(context.Background(), "c1", "sha-2", ""))
-	assert.Error(t, storeErr.ResetPRCheckState(context.Background(), "c1", "sha-2", "merge-sha-1"))
+func TestPostgresVanadisStore_ResetPRCheckState(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name                 string
+		chunkID, headSHA     string
+		mergeSHA             string
+		nilDB, execFailure   bool
+		rejected             bool
+		wantErr, wantSkipped bool
+	}{
+		{name: "nil database", chunkID: "c1", headSHA: "sha-1", nilDB: true, wantErr: true},
+		{name: "empty chunk id", chunkID: "", headSHA: "sha-1", wantErr: true},
+		{name: "reset sync check state", chunkID: "c1", headSHA: "sha-2"},
+		{name: "reset merge check state", chunkID: "c1", headSHA: "sha-2", mergeSHA: "merge-sha-1"},
+		{name: "rejected sync check state", chunkID: "c1", headSHA: "sha-2", rejected: true, wantErr: true, wantSkipped: true},
+		{name: "rejected merge check state", chunkID: "c1", headSHA: "sha-2", mergeSHA: "merge-sha-1", rejected: true, wantErr: true, wantSkipped: true},
+		{name: "sync check state failure", chunkID: "c1", headSHA: "sha-2", execFailure: true, wantErr: true},
+		{name: "merge check state failure", chunkID: "c1", headSHA: "sha-2", mergeSHA: "merge-sha-1", execFailure: true, wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			st := New(sqltest.DB{
+				ExecFn: func(_ context.Context, _ string, _ ...any) (pgconn.CommandTag, error) {
+					if tc.execFailure {
+						return pgconn.CommandTag{}, errors.New("database unavailable")
+					}
+					if tc.rejected {
+						return pgconn.NewCommandTag("UPDATE 0"), nil
+					}
+					return pgconn.NewCommandTag("UPDATE 1"), nil
+				},
+				QueryRowFn: func(_ context.Context, _ string, _ ...any) pgx.Row {
+					return sqltest.ErrRow(pgx.ErrNoRows)
+				},
+			}, "example-org")
+			if tc.nilDB {
+				st = &Store{}
+			}
+			err := st.ResetPRCheckState(context.Background(), tc.chunkID, tc.headSHA, tc.mergeSHA)
+			assert.Equal(t, tc.wantErr, err != nil)
+			assert.Equal(t, tc.wantSkipped, errors.Is(err, ErrPRTransitionSkipped))
+		})
+	}
 }

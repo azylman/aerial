@@ -270,6 +270,16 @@ func TestEarlierDeploymentSweepIDs(t *testing.T) {
 	}{
 		{"earlier merged same repo completes", mutateChunks(pr("earlier", 0, "merged", base), dep(1, later)), []string{"earlier"}},
 		{
+			"earlier deploy_failed same repo completes",
+			mutateChunks(pr("early-failed", 0, "deploy_failed", base), dep(1, later)),
+			[]string{"early-failed"},
+		},
+		{
+			"earlier deploy_failed without merge stamp stays untouched",
+			mutateChunks(pr("early-failed", 0, "deploy_failed", time.Time{}), dep(1, later)),
+			nil,
+		},
+		{
 			"earlier deploying and synced same repo complete",
 			mutateChunks(pr("early-deploying", 0, "deploying", base), pr("early-synced", 1, "synced", base), dep(2, later)),
 			[]string{"early-deploying", "early-synced"},
@@ -333,6 +343,14 @@ func TestCrossBuildDeploymentSweepIDs(t *testing.T) {
 		want       []SweptChunk
 	}{
 		{"earlier merged foreign build with shared job completes", deploying, mutateChunks(cand("b2", "merged", base, eri, nil)), f1},
+		{
+			"earlier deploy_failed foreign build with shared job completes", deploying,
+			mutateChunks(cand("b2", "deploy_failed", base, eri, nil)), f1,
+		},
+		{
+			"earlier deploy_failed foreign build without merge stamp stays untouched", deploying,
+			mutateChunks(cand("b2", "deploy_failed", time.Time{}, eri, nil)), nil,
+		},
 		{
 			"earlier deploying and synced foreign builds with shared job complete", deploying,
 			mutateChunks(cand("b2", "deploying", base, eri, nil), xbuildChunk("f2", "b3", 1, "pr", "aerial", "synced", 6, base, eri, nil)),
