@@ -10,11 +10,11 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
 	"github.com/azylman/aerial/pkg/eriwire"
+	"github.com/azylman/aerial/pkg/pgtest"
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/pkg/pubsubtest"
 	"github.com/azylman/aerial/services/haro/internal/config"
@@ -74,24 +74,15 @@ func TestMain_Execution(t *testing.T) {
 }
 
 func TestRunApp_Lifecycle(t *testing.T) {
-	origOpenDBFn := openDBFn
-	openDBFn = func(ctx context.Context, cfg *config.Config) (*sql.DB, error) {
-		if cfg == nil {
-			return nil, context.DeadlineExceeded
-		}
-		return testutil.OpenSQLiteTestDB(cfg.DatabaseURL) //nolint:contextcheck // test sqlite opener takes no ctx (frozen testutil seam); wrapper must match the openDBFn signature.
-	}
-	defer func() { openDBFn = origOpenDBFn }()
-
 	ctx, cancel := context.WithCancel(context.Background())
-	tempDB := filepath.Join(t.TempDir(), "runapp.db")
+	dsn := pgtest.NewDSN(t)
 	port := freeLoopbackPort(t)
 
 	errCh := make(chan error, 1)
 	go func() {
 		errCh <- RunApp(ctx, &config.Config{
 			Port:        port,
-			DatabaseURL: tempDB,
+			DatabaseURL: dsn,
 			EriURL:      "http://127.0.0.1:59484",
 			VanadisURL:  "http://127.0.0.1:59485",
 		})
@@ -123,43 +114,40 @@ func TestRunApp_Lifecycle(t *testing.T) {
 		t.Fatal("timed out waiting for RunApp shutdown")
 	}
 
-	realOpenDBFn := openDBFn
-	openDBFn = func(ctx context.Context, cfg *config.Config) (*sql.DB, error) {
-		if cfg != nil && strings.HasPrefix(strings.TrimSpace(cfg.DatabaseURL), "postgres://") {
-			return nil, context.DeadlineExceeded
-		}
-		return realOpenDBFn(ctx, cfg)
+	// A cancelled context makes store.OpenDB give up after its first
+	// failed attempt instead of retrying an unreachable server.
+	cancelledCtx, cancelOpen := context.WithCancel(context.Background())
+	cancelOpen()
+	failures := []struct {
+		name      string
+		cancelled bool
+		cfg       *config.Config
+	}{
+		{"unreachable postgres", true, &config.Config{Port: "9999", DatabaseURL: "postgres://invalid:pass@127.0.0.1:59996/db?sslmode=disable", EriURL: "http://127.0.0.1:59484"}},
+		{"nil config", false, nil},
+		{"empty port", false, &config.Config{Port: "", DatabaseURL: dsn, EriURL: "http://127.0.0.1:59484"}},
+		{"listen failure on invalid port", false, &config.Config{Port: "-1", DatabaseURL: pgtest.NewDSN(t), EriURL: "http://127.0.0.1:59484"}},
+		{"empty eri url", false, &config.Config{Port: "8080", DatabaseURL: dsn, EriURL: ""}},
 	}
-	defer func() { openDBFn = origOpenDBFn }()
-
-	for _, cfg := range []*config.Config{
-		{Port: "9999", DatabaseURL: "postgres://invalid:pass@127.0.0.1:59996/db?sslmode=disable", EriURL: "http://127.0.0.1:59484"},
-		nil,
-		{Port: "", DatabaseURL: ":memory:", EriURL: "http://127.0.0.1:59484"},
-		{Port: "-1", DatabaseURL: ":memory:", EriURL: "http://127.0.0.1:59484"},
-		{Port: "8080", DatabaseURL: ":memory:", EriURL: ""},
-	} {
-		if err := RunApp(context.Background(), cfg); err == nil {
-			t.Errorf("expected error running app with %v", cfg)
+	for _, tc := range failures {
+		runCtx := context.Background()
+		if tc.cancelled {
+			runCtx = cancelledCtx
+		}
+		if err := RunApp(runCtx, tc.cfg); err == nil {
+			t.Errorf("%s: expected error running app with %v", tc.name, tc.cfg)
 		}
 	}
 }
 
 func TestRunApp_TickerFailurePropagated(t *testing.T) {
-	origOpenDBFn := openDBFn
-	openDBFn = func(ctx context.Context, cfg *config.Config) (*sql.DB, error) {
-		return testutil.OpenSQLiteTestDB(cfg.DatabaseURL) //nolint:contextcheck // test sqlite opener takes no ctx (frozen testutil seam); wrapper must match the openDBFn signature.
-	}
-	defer func() { openDBFn = origOpenDBFn }()
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	tempDB := filepath.Join(t.TempDir(), "runapp_ticker_err.db")
+	ctx := t.Context()
+	dsn := pgtest.NewDSN(t)
 	port := freeLoopbackPort(t)
 
 	err := RunApp(ctx, &config.Config{
 		Port:        port,
-		DatabaseURL: tempDB,
+		DatabaseURL: dsn,
 		EriURL:      "http://127.0.0.1:59484",
 		RestatePort: "invalid-port-name",
 	})
@@ -188,7 +176,7 @@ func TestNewBusFn_FastFailure(t *testing.T) {
 }
 
 func TestHaro_EventsConsumerIntegration(t *testing.T) {
-	db := setupTestDB(t.Context(), t)
+	db := testutil.NewDB(t)
 	ctx := context.Background()
 
 	_ = store.InsertEventTrigger(ctx, db, model.EventTrigger{
@@ -235,7 +223,7 @@ func TestHaro_EventsConsumerIntegration(t *testing.T) {
 }
 
 func TestHaro_EventsConsumerIntegration_RestateIngress(t *testing.T) {
-	db := setupTestDB(t.Context(), t)
+	db := testutil.NewDB(t)
 	ctx := context.Background()
 
 	_ = store.InsertEventTrigger(ctx, db, model.EventTrigger{
@@ -330,7 +318,7 @@ func verifyTriggerState(ctx context.Context, t *testing.T, db *sql.DB, ev pubsub
 
 func TestHaro_MemoryBusIntegration(t *testing.T) {
 	t.Parallel()
-	db := setupTestDB(t.Context(), t)
+	db := testutil.NewDB(t)
 	ctx := context.Background()
 	now := time.Date(2026, 11, 14, 1, 0, 0, 0, time.UTC)
 
@@ -448,7 +436,7 @@ func TestInitHaroJetStreamWithFactory(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			db := setupTestDB(t.Context(), t)
+			db := testutil.NewDB(t)
 			memBus := pubsub.NewMemoryBus()
 			t.Cleanup(func() { _ = memBus.Close() })
 			fb := &pubsubtest.FaultBus{Bus: memBus, EnsureErr: tc.ensureErr, ConsumeErr: tc.queueErr, SubscribeErr: tc.subErr}
@@ -473,11 +461,7 @@ func TestInitHaroJetStreamWithFactory(t *testing.T) {
 func TestHaro_InitJetStreamEdgeCases(t *testing.T) {
 	memBus := pubsub.NewMemoryBus()
 	t.Cleanup(func() { _ = memBus.Close() })
-	closedDB, err := testutil.OpenSQLiteTestDB(":memory:")
-	if err != nil {
-		t.Fatalf("OpenSQLiteTestDB failed: %v", err)
-	}
-	_ = closedDB.Close()
+	closedDB := testutil.NewClosedDB(t)
 	serverClosed := server.NewServer(tools.NewToolHandler(&config.Config{DatabaseURL: ":memory:"}, closedDB))
 	captureBus := &handlerCaptureBus{Bus: memBus}
 	if bus := initHaroJetStreamWithFactory(t.Context(), serverClosed, nil, "nats://mock", func(context.Context, string) (pubsub.Bus, error) {
@@ -520,16 +504,6 @@ type handlerCaptureBus struct {
 func (c *handlerCaptureBus) Subscribe(ctx context.Context, subject, durable string, handler pubsub.Handler) (pubsub.Subscription, error) {
 	c.captured = handler
 	return c.Bus.Subscribe(ctx, subject, durable, handler)
-}
-
-func setupTestDB(_ context.Context, t *testing.T) *sql.DB {
-	t.Helper()
-	db, err := testutil.OpenSQLiteTestDB(filepath.Join(t.TempDir(), "haro.db")) //nolint:contextcheck // testutil seam takes no ctx by design
-	if err != nil {
-		t.Fatalf("setupTestDB OpenSQLiteTestDB failed: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-	return db
 }
 
 type mockDispatcher struct {

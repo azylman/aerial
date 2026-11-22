@@ -76,6 +76,60 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y \
     rm -rf /usr/local/rustup/toolchains/*/share/doc && \
     chmod -R a+rX /usr/local/rustup /usr/local/cargo
 
+# --- Node / npm global tools stage ----------------------------------------
+FROM node:22-bookworm-slim AS npm-tools
+
+ENV NPM_CONFIG_PREFIX=/opt/npm-global
+
+RUN npm install -g @anthropic-ai/claude-code @openai/codex && npm cache clean --force
+
+# --- CLI tools builder stage ----------------------------------------------
+FROM ubuntu:24.04 AS cli-tools
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+ARG KUBECTL_VERSION=v1.32.2
+ARG KUBECTL_SHA256=4f6a959dcc5b702135f8354cc7109b542a2933c46b808b248a214c1f69f817ea
+ARG HELM_VERSION=v3.17.1
+ARG HELM_SHA256=3b66f3cd28409f29832b1b35b43d9922959a32d795003149707fea84cbcd4469
+ARG FLUX_VERSION=2.5.1
+ARG FLUX_SHA256=f64c85db4b94aefcdf6e0f2825c32573fc2bd234e5489ff332fee62776973ec3
+ARG AGY_VERSION=1.5.9
+ARG AGY_SHA256=8b1f5e56779f2434a0af36f1b715a8392a084de550f8c68bc79821f95fabf3fa
+ARG MUSE_VERSION=1.4.23-R8977.1
+ARG MUSE_SHA256=7ca9e16659f759eab3ae6c4b61c6f1e70f5f3fea1ca961ebd49044a1146956f4
+ARG LINK_CLI_VERSION=1.0.0
+ARG LINK_CLI_SHA256=40fa5fbade72cc9fde4014312fa5b7a3eeb6b7b151e0a97539991100f3e9943f
+
+RUN mkdir -p /out/usr/local/bin && \
+    curl -fsSL https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl -o /out/usr/local/bin/kubectl && \
+    echo "${KUBECTL_SHA256}  /out/usr/local/bin/kubectl" | sha256sum -c - && \
+    chmod 0755 /out/usr/local/bin/kubectl && \
+    curl -fsSL https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz -o /tmp/helm.tar.gz && \
+    echo "${HELM_SHA256}  /tmp/helm.tar.gz" | sha256sum -c - && \
+    tar -xzf /tmp/helm.tar.gz --strip-components=1 -C /out/usr/local/bin linux-amd64/helm && \
+    rm -f /tmp/helm.tar.gz && \
+    chmod 0755 /out/usr/local/bin/helm && \
+    curl -fsSL https://github.com/fluxcd/flux2/releases/download/v${FLUX_VERSION}/flux_${FLUX_VERSION}_linux_amd64.tar.gz -o /tmp/flux.tar.gz && \
+    echo "${FLUX_SHA256}  /tmp/flux.tar.gz" | sha256sum -c - && \
+    tar -xzf /tmp/flux.tar.gz -C /out/usr/local/bin flux && \
+    rm -f /tmp/flux.tar.gz && \
+    chmod 0755 /out/usr/local/bin/flux && \
+    curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 "https://github.com/google-antigravity/antigravity-cli/releases/download/${AGY_VERSION}/agy_cli_linux_x64.tar.gz" -o /tmp/agy.tar.gz && \
+    echo "${AGY_SHA256}  /tmp/agy.tar.gz" | sha256sum -c - && \
+    tar -xzf /tmp/agy.tar.gz -O antigravity > /out/usr/local/bin/agy && \
+    rm -f /tmp/agy.tar.gz && \
+    chmod 0755 /out/usr/local/bin/agy && \
+    curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 "https://lookaside.facebook.com/lookaside/muse/download/?channel=muse&version=${MUSE_VERSION}&file=muse-x86-linux" -o /out/usr/local/bin/muse && \
+    echo "${MUSE_SHA256}  /out/usr/local/bin/muse" | sha256sum -c - && \
+    chmod 0755 /out/usr/local/bin/muse && \
+    curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 "https://github.com/stripe/link-cli/releases/download/%40stripe/link-cli%40${LINK_CLI_VERSION}/link-cli-linux-x64" -o /out/usr/local/bin/link-cli && \
+    echo "${LINK_CLI_SHA256}  /out/usr/local/bin/link-cli" | sha256sum -c - && \
+    chmod 0755 /out/usr/local/bin/link-cli
+
 # --- Runtime stage -------------------------------------------------------
 FROM ubuntu:24.04
 
@@ -169,48 +223,16 @@ RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm && \
     ln -s ../lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx && \
     ln -s ../lib/node_modules/corepack/dist/corepack.js /usr/local/bin/corepack && \
     node --version && \
-    npm --version && \
-    npm install -g @anthropic-ai/claude-code @openai/codex && \
-    claude --version
+    npm --version
+COPY --link --from=npm-tools /opt/npm-global /opt/npm-global
 COPY --link --from=arigaio/atlas:1.3.4 /atlas /usr/local/bin/atlas
 COPY --link --from=1password/op:2 /usr/local/bin/op /usr/local/bin/op
-RUN curl -fsSL https://dl.k8s.io/release/v1.32.2/bin/linux/amd64/kubectl -o /usr/local/bin/kubectl && \
-    echo "4f6a959dcc5b702135f8354cc7109b542a2933c46b808b248a214c1f69f817ea  /usr/local/bin/kubectl" | sha256sum -c - && \
-    chmod 0755 /usr/local/bin/kubectl && \
-    curl -fsSL https://get.helm.sh/helm-v3.17.1-linux-amd64.tar.gz -o /tmp/helm.tar.gz && \
-    echo "3b66f3cd28409f29832b1b35b43d9922959a32d795003149707fea84cbcd4469  /tmp/helm.tar.gz" | sha256sum -c - && \
-    tar -xzf /tmp/helm.tar.gz --strip-components=1 -C /usr/local/bin linux-amd64/helm && \
-    rm -f /tmp/helm.tar.gz && \
-    chmod 0755 /usr/local/bin/helm && \
-    curl -fsSL https://github.com/fluxcd/flux2/releases/download/v2.5.1/flux_2.5.1_linux_amd64.tar.gz -o /tmp/flux.tar.gz && \
-    echo "f64c85db4b94aefcdf6e0f2825c32573fc2bd234e5489ff332fee62776973ec3  /tmp/flux.tar.gz" | sha256sum -c - && \
-    tar -xzf /tmp/flux.tar.gz -C /usr/local/bin flux && \
-    rm -f /tmp/flux.tar.gz && \
-    chmod 0755 /usr/local/bin/flux && \
-    kubectl version --client && helm version --short && flux --version
+COPY --link --from=cli-tools /out/usr/local/bin/ /usr/local/bin/
+
 ENV RUSTUP_HOME="/usr/local/rustup" \
     CARGO_HOME="/usr/local/cargo" \
-    PATH="/usr/local/cargo/bin:/usr/local/go/bin:/root/go/bin:${PATH}"
-
-# Install the Antigravity CLI from a pinned, sha256-verified GitHub release
-ARG AGY_VERSION=1.5.9
-ARG AGY_SHA256=8b1f5e56779f2434a0af36f1b715a8392a084de550f8c68bc79821f95fabf3fa
-RUN curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 "https://github.com/google-antigravity/antigravity-cli/releases/download/${AGY_VERSION}/agy_cli_linux_x64.tar.gz" -o /tmp/agy.tar.gz && \
-    echo "${AGY_SHA256}  /tmp/agy.tar.gz" | sha256sum -c - && \
-    tar -xzf /tmp/agy.tar.gz -O antigravity > /usr/local/bin/agy && \
-    chmod 0755 /usr/local/bin/agy && \
-    rm /tmp/agy.tar.gz && \
-    /usr/local/bin/agy --version
+    PATH="/opt/npm-global/bin:/usr/local/cargo/bin:/usr/local/go/bin:/root/go/bin:${PATH}"
 ENV AGY_CLI_DISABLE_AUTO_UPDATE=true
-
-ARG MUSE_VERSION=1.4.23-R8977.1
-ARG MUSE_SHA256=7ca9e16659f759eab3ae6c4b61c6f1e70f5f3fea1ca961ebd49044a1146956f4
-RUN curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 "https://lookaside.facebook.com/lookaside/muse/download/?channel=muse&version=${MUSE_VERSION}&file=muse-x86-linux" -o /usr/local/bin/muse && echo "${MUSE_SHA256}  /usr/local/bin/muse" | sha256sum -c - && chmod 0755 /usr/local/bin/muse && /usr/local/bin/muse --version
-
-# Install Stripe Link CLI (@stripe/link-cli v0.29.0) standalone binary
-RUN curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 https://github.com/stripe/link-cli/releases/download/%40stripe/link-cli%401.0.0/link-cli-linux-x64 -o /usr/local/bin/link-cli && \
-    echo "40fa5fbade72cc9fde4014312fa5b7a3eeb6b7b151e0a97539991100f3e9943f  /usr/local/bin/link-cli" | sha256sum -c - && \
-    chmod 0755 /usr/local/bin/link-cli
 ENV LINK_AUTH_FILE="/data/runtimes/discord/.config/link-cli-nodejs/config.json"
 
 # Copy decoupled superpowers skills

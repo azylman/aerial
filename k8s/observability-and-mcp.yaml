@@ -809,6 +809,14 @@ spec:
             severity: warning
           annotations:
             summary: Eri processed turns on a session exceeding the unrotated turn threshold without rotation
+        - alert: EriTurnCapHit
+          expr: |
+            sum by (job) (increase(aerial_brain_turn_timeouts_total{reason="turn_cap"}[30m])) > 0
+          for: 0m
+          labels:
+            severity: warning
+          annotations:
+            summary: "{{ $labels.job }}: a turn hit the turn_timeout_minutes cap and was retried"
 ---
 apiVersion: v1
 kind: ServiceAccount

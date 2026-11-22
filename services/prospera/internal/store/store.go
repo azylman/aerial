@@ -49,34 +49,20 @@ type Store interface {
 	Close() error
 }
 
-// PGStore implements Store backed by PostgreSQL (or SQLite in tests).
+// PGStore implements Store backed by PostgreSQL.
 type PGStore struct {
-	db       *sql.DB
-	isSQLite bool
+	db *sql.DB
 }
 
 // NewPGStore constructs a new PGStore wrapping a sql.DB instance.
 func NewPGStore(db *sql.DB) *PGStore {
-	var isSQLite bool
-	if db != nil && db.Driver() != nil {
-		driverName := fmt.Sprintf("%T", db.Driver())
-		if strings.Contains(strings.ToLower(driverName), "sqlite") {
-			isSQLite = true
-		}
-	}
-	return &PGStore{db: db, isSQLite: isSQLite}
+	return &PGStore{db: db}
 }
 
-// OpenDB opens a database connection from a connection string: sqlite://,
-// file: and :memory: URLs open SQLite, everything else goes through
-// pgutil.OpenSQL (postgres:// or postgresql:// only, pinged at open).
+// OpenDB opens a PostgreSQL connection from a postgres:// or postgresql://
+// connection string via pgutil.OpenSQL (pinged at open).
 func OpenDB(ctx context.Context, databaseURL string) (*sql.DB, error) {
-	trimmed := strings.TrimSpace(databaseURL)
-	if strings.HasPrefix(trimmed, "sqlite://") || strings.HasPrefix(trimmed, "file:") || strings.Contains(trimmed, ":memory:") {
-		sqlitePath := strings.TrimPrefix(trimmed, "sqlite://")
-		return sql.Open("sqlite", sqlitePath)
-	}
-	return pgutil.OpenSQL(ctx, trimmed, pgutil.SQLOptions{})
+	return pgutil.OpenSQL(ctx, strings.TrimSpace(databaseURL), pgutil.SQLOptions{})
 }
 
 const selectCallFields = `call_id, provider_call_sid, direction, state, end_reason,

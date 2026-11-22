@@ -30,6 +30,8 @@ func TestClassifyAttempt(t *testing.T) {
 		name string
 		in   attemptClassInput
 		want attemptClass
+		// wantReason is the timeout reason a classTimeout row records.
+		wantReason string
 	}{
 		{name: "Success", in: attemptClassInput{Ordinal: 1, MaxAttempts: 3}, want: classSuccess},
 		{name: "SuccessErrTerminal", in: attemptClassInput{SuccessErr: "agent produced empty response", Ordinal: 1, MaxAttempts: 3}, want: classTerminal},
@@ -38,8 +40,9 @@ func TestClassifyAttempt(t *testing.T) {
 		{name: "ParentCancelledAborted", in: attemptClassInput{Failed: true, ErrDetail: attemptTransientErr, Transient: true, ParentCancelled: true, Ordinal: 1, MaxAttempts: 3}, want: classAborted},
 		{name: "InterruptedAbortedEvenOnSuccess", in: attemptClassInput{Interrupted: true, Ordinal: 1, MaxAttempts: 3}, want: classAborted},
 		{name: "InterruptedBeatsDeadline", in: attemptClassInput{Failed: true, Interrupted: true, RunDeadline: true, Ordinal: 1, MaxAttempts: 3}, want: classAborted},
-		{name: "RunDeadlineTimeout", in: attemptClassInput{Failed: true, ErrDetail: "context deadline exceeded", Transient: true, RunDeadline: true, Ordinal: 1, MaxAttempts: 3}, want: classTimeout},
-		{name: "WatchdogTimeoutNeverRetried", in: attemptClassInput{Failed: true, ErrDetail: attemptWatchdogErr, Transient: true, Ordinal: 1, MaxAttempts: 3}, want: classTimeout},
+		{name: "RunDeadlineTimeout", in: attemptClassInput{Failed: true, ErrDetail: "context deadline exceeded", Transient: true, RunDeadline: true, Ordinal: 1, MaxAttempts: 3}, want: classTimeout, wantReason: "turn_cap"},
+		{name: "RunDeadlineBeatsWatchdog", in: attemptClassInput{Failed: true, ErrDetail: attemptWatchdogErr, Transient: true, RunDeadline: true, Ordinal: 1, MaxAttempts: 3}, want: classTimeout, wantReason: "turn_cap"},
+		{name: "WatchdogTimeoutNeverRetried", in: attemptClassInput{Failed: true, ErrDetail: attemptWatchdogErr, Transient: true, Ordinal: 1, MaxAttempts: 3}, want: classTimeout, wantReason: "watchdog"},
 		{name: "QuotaPause", in: attemptClassInput{Failed: true, ErrDetail: attemptQuotaErr, Transient: true, Ordinal: 1, MaxAttempts: 3}, want: classQuotaPause},
 		{name: "CapacityBlipRetry", in: attemptClassInput{Failed: true, ErrDetail: attemptCapacityErr, Transient: true, Ordinal: 1, MaxAttempts: 3}, want: classCapacityRetry},
 		{name: "CapacityBlipLastAttemptExhausted", in: attemptClassInput{Failed: true, ErrDetail: attemptCapacityErr, Transient: true, Ordinal: 3, MaxAttempts: 3}, want: classCapacityExhausted},
@@ -52,8 +55,14 @@ func TestClassifyAttempt(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if got := classifyAttempt(tc.in); got != tc.want {
+			got := classifyAttempt(tc.in)
+			if got != tc.want {
 				t.Errorf("classifyAttempt(%+v) = %d, want %d", tc.in, got, tc.want)
+			}
+			if got == classTimeout {
+				if reason := timeoutReason(tc.in); reason != tc.wantReason {
+					t.Errorf("timeoutReason(%+v) = %q, want %q", tc.in, reason, tc.wantReason)
+				}
 			}
 		})
 	}
