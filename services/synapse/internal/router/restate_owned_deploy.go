@@ -55,7 +55,7 @@ func (s *RouterServer) ownedDeployView(ctx context.Context, repo string, prNumbe
 	}
 	view, err := c.GetDeployView(ctx, repo, prNumber)
 	if err != nil {
-		return prwire.DeployView{}, fmt.Errorf("restate deploy view %s#%d: %w", model.NormalizeRepo(repo), prNumber, err)
+		return prwire.DeployView{}, fmt.Errorf("restate deploy view %s#%d: %w", strings.TrimSpace(repo), prNumber, err)
 	}
 	return view, nil
 }
@@ -223,7 +223,7 @@ func (s *RouterServer) ownedDeferPRToWatcher(ctx context.Context, repo string, p
 // webhooks) is sent to PRObject before the caller forwards its event.
 func (s *RouterServer) resolveOwnedSHAPR(ctx context.Context, repo, sha string) (int, string) {
 	sha = strings.TrimSpace(sha)
-	if model.NormalizeRepo(repo) == "" || sha == "" || prwire.IsZeroSHA(sha) {
+	if strings.TrimSpace(repo) == "" || sha == "" || prwire.IsZeroSHA(sha) {
 		return 0, ""
 	}
 	if c, err := s.restateClient(); err == nil {
@@ -358,7 +358,7 @@ func (s *RouterServer) ownedDeployEventWatcherOwnership(ctx context.Context, evt
 // no reconcile requests, and whose final build metadata is missing or still
 // selects images. A failed lifecycle read waits.
 func (s *RouterServer) ownedWaitingForImageBuild(ctx context.Context, repo string, prNumber int, view prwire.DeployView) bool {
-	repo = model.NormalizeRepo(repo)
+	repo = strings.TrimSpace(repo)
 	if repo == "" || prNumber <= 0 || buildmeta.MetadataWorkflowPath(repo) == "" {
 		return false
 	}
@@ -453,7 +453,7 @@ func (s *RouterServer) processOwnedMainWorkflowRun(ctx context.Context, p GitHub
 	}
 	switch res.Conclusion {
 	case conclusionFailure, conclusionTimedOut:
-		if isGateAggregatorCheck(res.CheckName) || res.HeadSHA == "" || prwire.IsZeroSHA(res.HeadSHA) {
+		if prwire.IsGateAggregatorCheck(res.CheckName) || res.HeadSHA == "" || prwire.IsZeroSHA(res.HeadSHA) {
 			return nil
 		}
 		if p.WorkflowRun.RunAttempt == 1 && p.WorkflowRun.ID > 0 {

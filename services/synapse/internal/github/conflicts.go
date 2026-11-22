@@ -12,7 +12,7 @@ import (
 
 // FetchSinglePR retrieves a single pull request by number.
 func FetchSinglePR(ctx context.Context, client *Client, repo string, prNumber int) (model.GitHubPullRequest, error) {
-	normRepo := model.NormalizeRepo(repo)
+	normRepo := strings.TrimSpace(repo)
 	if normRepo == "" || prNumber <= 0 || client == nil {
 		return model.GitHubPullRequest{}, fmt.Errorf("invalid arguments for fetch single pr")
 	}
@@ -85,7 +85,7 @@ func ResolvePRFromCommitSHA(ctx context.Context, client *Client, repo, sha strin
 // ResolveCommitPR is ResolvePRFromCommitSHA with the selected PR's head SHA
 // and merge state.
 func ResolveCommitPR(ctx context.Context, client *Client, repo, sha string) (CommitPR, error) {
-	repo = model.NormalizeRepo(repo)
+	repo = strings.TrimSpace(repo)
 	if repo == "" || sha == "" || prwire.IsZeroSHA(sha) {
 		return CommitPR{}, fmt.Errorf("invalid repo or sha for pr resolution")
 	}

@@ -297,7 +297,7 @@ func (s *RouterServer) sendOwnedCheckOutcome(ctx context.Context, res *ResolvedG
 	case prwire.PRHandlerCheckPassed:
 		return s.sendOwnedCheckPassed(ctx, res, action, shaHandler, base)
 	case prwire.PRHandlerCheckFailed:
-		if isGateAggregatorCheck(res.CheckName) {
+		if prwire.IsGateAggregatorCheck(res.CheckName) {
 			return nil
 		}
 		// Dependabot self-registration goes ahead of the failure.
@@ -337,7 +337,7 @@ func (s *RouterServer) sendOwnedCheckPassed(ctx context.Context, res *ResolvedGi
 		recovered := base
 		recovered.Facts = facts(ownedFact(res, ghActionSynchronize, prOpen))
 		if res.Event == ghEventCheckRun && !gateTrigger {
-			recovered.AutoUpdate = s.autoUpdatePolicy(model.NormalizeRepo(res.Repo))
+			recovered.AutoUpdate = s.autoUpdatePolicy(strings.TrimSpace(res.Repo))
 		}
 		if err := s.sendOwnedPR(ctx, prwire.PRHandlerCIRecovered, recovered); err != nil {
 			return err
@@ -357,14 +357,14 @@ func (s *RouterServer) sendOwnedCheckPassed(ctx context.Context, res *ResolvedGi
 // aggregator or RoboRev check_run on a known PR.
 func ownedGateSuccessTrigger(res *ResolvedGitHubEvent, action string) bool {
 	return res.Event == ghEventCheckRun && action == ghStatusCompleted && res.Conclusion == conclusionSuccess &&
-		res.PRNumber > 0 && (isGateAggregatorCheck(res.CheckName) || isRoboRevCheck(res.CheckName))
+		res.PRNumber > 0 && (prwire.IsGateAggregatorCheck(res.CheckName) || prwire.IsRoboRevCheck(res.CheckName))
 }
 
 // sendOwnedAutoUpdate sends one open-PR auto-update cascade trigger (a main
 // push, a CI failure or a gate success) to RepoObject with the rendered
 // policy; RepoObject runs the cascade and its update-branch calls.
 func (s *RouterServer) sendOwnedAutoUpdate(ctx context.Context, repo string, prNumber int, headSHA, mainSHA, checkName string) error {
-	normRepo := model.NormalizeRepo(repo)
+	normRepo := strings.TrimSpace(repo)
 	return s.sendOwnedRepo(ctx, prwire.RepoHandlerAutoUpdate, prwire.RepoEvent{
 		Repo: normRepo, PRNumber: prNumber, HeadSHA: headSHA, MainSHA: mainSHA, CheckName: checkName, AutoUpdate: s.autoUpdatePolicy(normRepo),
 	})
@@ -373,10 +373,10 @@ func (s *RouterServer) sendOwnedAutoUpdate(ctx context.Context, repo string, prN
 // sendOwnedCheckStatus records one pending or passed non-gate check_run on
 // a known, non-dependabot PR (workflow runs record no ci_checks).
 func (s *RouterServer) sendOwnedCheckStatus(ctx context.Context, res *ResolvedGitHubEvent) error {
-	if res.Event != ghEventCheckRun || res.PRNumber <= 0 || isGateAggregatorCheck(res.CheckName) || model.IsBuildMetadataCheck(res.CheckName) || isDependabotBranch(res.Branch) {
+	if res.Event != ghEventCheckRun || res.PRNumber <= 0 || prwire.IsGateAggregatorCheck(res.CheckName) || model.IsBuildMetadataCheck(res.CheckName) || isDependabotBranch(res.Branch) {
 		return nil
 	}
-	checkState := classifyCheckState(res.Status, res.Conclusion)
+	checkState := prwire.ClassifyCheckState(res.Status, res.Conclusion)
 	if checkState == "" || checkState == statusFailed {
 		return nil
 	}
@@ -394,7 +394,7 @@ func (s *RouterServer) sendOwnedCheckStatus(ctx context.Context, res *ResolvedGi
 // rollout state when it publishes.
 func (s *RouterServer) ownedCIFailedFact(ctx context.Context, res *ResolvedGitHubEvent, details, checkURL string) pubsub.PRLifecycleEvent {
 	if strings.TrimSpace(details) == "" {
-		if isRoboRevCheck(res.CheckName) {
+		if prwire.IsRoboRevCheck(res.CheckName) {
 			details = github.FormatRoboRevPrompt(res.Repo, res.PRNumber, res.HeadSHA, s.fetchLatestRoboRevComment(ctx, res.Repo, res.PRNumber, res.HeadSHA))
 		} else {
 			details = github.FormatCheckFailurePrompt(res.Repo, res.PRNumber, res.HeadSHA, res.CheckName, details, checkURL)
@@ -529,7 +529,7 @@ func (s *RouterServer) ownedBuildConsumer(fact *pubsub.PRLifecycleEvent) *buildm
 // from the payload or the commits API, the snapshot from GitHub, and the
 // check_updated fact rides the HandleBuildMetadata event.
 func (s *RouterServer) processOwnedBuildMetadataCheck(ctx context.Context, p GitHubCheckRunPayload, res *ResolvedGitHubEvent) error {
-	if buildmeta.MetadataWorkflowPath(model.NormalizeRepo(res.Repo)) == "" {
+	if buildmeta.MetadataWorkflowPath(strings.TrimSpace(res.Repo)) == "" {
 		return nil
 	}
 	resolveOwnedPayloadPR(res, p.CheckRun.PullRequests, "build_metadata")
@@ -547,7 +547,7 @@ func (s *RouterServer) processOwnedBuildMetadataCheck(ctx context.Context, p Git
 // refreshOwnedWorkflowRunBuildMetadata supersedes a stale attempt and
 // refreshes the snapshot for one producer workflow run of a known PR.
 func (s *RouterServer) refreshOwnedWorkflowRunBuildMetadata(ctx context.Context, p GitHubWorkflowRunPayload, res *ResolvedGitHubEvent) error {
-	repo := model.NormalizeRepo(res.Repo)
+	repo := strings.TrimSpace(res.Repo)
 	if res.PRNumber <= 0 || buildmeta.MetadataWorkflowPath(repo) == "" || (p.WorkflowRun.Path != "" && p.WorkflowRun.Path != buildmeta.MetadataWorkflowPath(repo)) {
 		return nil
 	}

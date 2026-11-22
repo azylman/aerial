@@ -506,7 +506,7 @@ func (c *Consumer) ResolveRunMetadata(ctx context.Context, repo string, r Metada
 // ResolveWorkflowRunImages returns the images a successful main-branch producer
 // run published, bound to the exact webhook attempt.
 func (c *Consumer) ResolveWorkflowRunImages(ctx context.Context, repo string, ev WorkflowRunEvent, prNum int) ([]string, error) {
-	repo = model.NormalizeRepo(repo)
+	repo = strings.TrimSpace(repo)
 	if MetadataWorkflowPath(repo) == "" {
 		return nil, nil
 	}
@@ -552,7 +552,7 @@ func (c *Consumer) ResolveWorkflowRunImages(ctx context.Context, repo string, ev
 // PR's current revision and atomically records its snapshot. Stale revisions,
 // and runs that have not published yet record nothing.
 func (c *Consumer) RefreshPRBuildMetadata(ctx context.Context, repo string, pr int, sha string) (bool, error) {
-	repo = model.NormalizeRepo(repo)
+	repo = strings.TrimSpace(repo)
 	if c.registry == nil || pr <= 0 || MetadataWorkflowPath(repo) == "" || !model.MetadataSHA.MatchString(sha) {
 		return false, nil
 	}

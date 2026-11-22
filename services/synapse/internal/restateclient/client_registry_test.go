@@ -94,7 +94,7 @@ func TestClientRegister(t *testing.T) {
 			if !tc.unconfigured {
 				baseURL = newRegistryServer(t, tc.status, tc.body, &calls, &mu)
 			}
-			got, err := NewClient(baseURL, "", "", nil).Register(t.Context(), tc.req)
+			got, err := NewClient(baseURL, testOwner, "", "", nil).Register(t.Context(), tc.req)
 			assertErrSub(t, "Register", err, tc.wantErrSub)
 			if tc.wantErrSub != "" && IsTerminal(err) != tc.wantTerminal {
 				t.Fatalf("IsTerminal = %v, want %v", IsTerminal(err), tc.wantTerminal)
@@ -136,7 +136,7 @@ func TestClientGetBuildLifecycle(t *testing.T) {
 			if !tc.unconfigured {
 				baseURL = newRegistryServer(t, tc.status, tc.body, &calls, &mu)
 			}
-			got, err := NewClient(baseURL, "", "", nil).GetBuildLifecycle(t.Context(), tc.repo, tc.pr)
+			got, err := NewClient(baseURL, testOwner, "", "", nil).GetBuildLifecycle(t.Context(), tc.repo, tc.pr)
 			assertErrSub(t, "GetBuildLifecycle", err, tc.wantErrSub)
 			if got.Found != tc.want.Found || got.Status != tc.want.Status || got.HeadSHA != tc.want.HeadSHA || got.MergeSHA != tc.want.MergeSHA || got.Started != tc.want.Started || got.HasBuildMetadata != tc.want.HasBuildMetadata {
 				t.Fatalf("GetBuildLifecycle() = %+v, want %+v", got, tc.want)
@@ -180,7 +180,7 @@ func TestClientRetryReadiness(t *testing.T) {
 			if !tc.unconfigured {
 				baseURL = newRegistryServer(t, tc.status, tc.body, &calls, &mu)
 			}
-			got, err := NewClient(baseURL, "", "", nil).RetryReadiness(t.Context(), tc.repo, tc.pr, req)
+			got, err := NewClient(baseURL, testOwner, "", "", nil).RetryReadiness(t.Context(), tc.repo, tc.pr, req)
 			assertErrSub(t, "RetryReadiness", err, tc.wantErrSub)
 			if got.Status != tc.wantStatus || len(got.Requests) != tc.wantRequests {
 				t.Fatalf("RetryReadiness() = %+v, want status %d with %d requests", got, tc.wantStatus, tc.wantRequests)
@@ -290,7 +290,7 @@ func TestClientSendSHAEvent(t *testing.T) {
 			if !tc.unconfigured {
 				baseURL = newRegistryServer(t, tc.status, "", &calls, &mu)
 			}
-			err := NewClient(baseURL, "", "", nil).SendSHAEvent(t.Context(), tc.handler, tc.ev)
+			err := NewClient(baseURL, testOwner, "", "", nil).SendSHAEvent(t.Context(), tc.handler, tc.ev)
 			assertErrSub(t, "SendSHAEvent", err, tc.wantErrSub)
 			if tc.wantErrSub != "" && IsTerminal(err) != tc.wantTerminal {
 				t.Fatalf("IsTerminal = %v, want %v", IsTerminal(err), tc.wantTerminal)
@@ -335,7 +335,7 @@ func TestClientResolvePRBySHA(t *testing.T) {
 			if !tc.unconfigured {
 				baseURL = newRegistryServer(t, tc.status, tc.body, &calls, &mu)
 			}
-			got, err := NewClient(baseURL, "", "", nil).ResolvePRBySHA(t.Context(), tc.repo, tc.sha)
+			got, err := NewClient(baseURL, testOwner, "", "", nil).ResolvePRBySHA(t.Context(), tc.repo, tc.sha)
 			assertErrSub(t, "ResolvePRBySHA", err, tc.wantErrSub)
 			if got != tc.want {
 				t.Fatalf("ResolvePRBySHA() = %+v, want %+v", got, tc.want)
@@ -379,7 +379,7 @@ func TestClientGetDeployView(t *testing.T) {
 			if !tc.unconfigured {
 				baseURL = newRegistryServer(t, tc.status, tc.body, &calls, &mu)
 			}
-			got, err := NewClient(baseURL, "", "", nil).GetDeployView(t.Context(), tc.repo, tc.pr)
+			got, err := NewClient(baseURL, testOwner, "", "", nil).GetDeployView(t.Context(), tc.repo, tc.pr)
 			assertErrSub(t, "GetDeployView", err, tc.wantErrSub)
 			if !reflect.DeepEqual(got, tc.want) {
 				t.Fatalf("GetDeployView() = %+v, want %+v", got, tc.want)
@@ -414,7 +414,7 @@ func TestClientListRollouts(t *testing.T) {
 			if !tc.unconfigured {
 				baseURL = newRegistryServer(t, tc.status, tc.body, &calls, &mu)
 			}
-			got, err := NewClient(baseURL, "", "", nil).ListRollouts(t.Context())
+			got, err := NewClient(baseURL, testOwner, "", "", nil).ListRollouts(t.Context())
 			assertErrSub(t, "ListRollouts", err, tc.wantErrSub)
 			if !reflect.DeepEqual(got, tc.want) {
 				t.Fatalf("ListRollouts() = %+v, want %+v", got, tc.want)

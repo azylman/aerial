@@ -404,7 +404,7 @@ func TestClient_DiscoverRepoKustomizations(t *testing.T) {
 	c := NewClient(ts.Client())
 	c.SetKubeConfig(ts.URL, "token")
 
-	refs, err := c.DiscoverRepoKustomizations(ctx, "aerial")
+	refs, err := c.DiscoverRepoKustomizations(ctx, "azylman/aerial")
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}

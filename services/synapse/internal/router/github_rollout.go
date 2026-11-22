@@ -7,10 +7,10 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/azylman/aerial/pkg/githubapi"
 	"github.com/azylman/aerial/pkg/prwire"
 	"github.com/azylman/aerial/pkg/strutil"
 	"github.com/azylman/aerial/services/synapse/internal/github"
-	"github.com/azylman/aerial/services/synapse/internal/model"
 )
 
 const (
@@ -23,20 +23,8 @@ const (
 	conclusionTimedOut = github.ConclusionTimedOut
 )
 
-func isRoboRevCheck(checkName string) bool {
-	return github.IsRoboRevCheck(checkName)
-}
-
-func isGateAggregatorCheck(checkName string) bool {
-	return github.IsGateAggregatorCheck(checkName)
-}
-
-func classifyCheckState(status, conclusion string) string {
-	return github.ClassifyCheckState(status, conclusion)
-}
-
 func (s *RouterServer) fetchLatestRoboRevComment(ctx context.Context, repo string, prNumber int, headSHA string) string {
-	repo = model.NormalizeRepo(repo)
+	repo = githubapi.QualifyRepo(s.currentConfig().GitHubOwner, repo)
 	if s == nil || repo == "" || prNumber <= 0 {
 		return ""
 	}
@@ -77,7 +65,7 @@ func (s *RouterServer) resolveCollaboratorAlertTarget(ctx context.Context, repo 
 	}
 	if strings.TrimSpace(pr.User.Login) == "" {
 		var fetched GitHubPullRequest
-		path := fmt.Sprintf("/repos/%s/pulls/%d", model.NormalizeRepo(repo), prNumber)
+		path := fmt.Sprintf("/repos/%s/pulls/%d", githubapi.QualifyRepo(s.currentConfig().GitHubOwner, repo), prNumber)
 		if err := s.getGitHubJSON(ctx, path, 2<<20, &fetched); err != nil {
 			return pr, "", "", false, err
 		}
@@ -177,7 +165,7 @@ func syncPRFallbackFields(res *ResolvedGitHubEvent, pr GitHubPullRequest) GitHub
 }
 
 func (s *RouterServer) resolveAutoMergeDisabledPR(ctx context.Context, res *ResolvedGitHubEvent, pr GitHubPullRequest) (GitHubPullRequest, bool, error) {
-	if !isPRMergeabilityUnknown(pr) || res.PRNumber <= 0 || model.NormalizeRepo(res.Repo) == "" {
+	if !isPRMergeabilityUnknown(pr) || res.PRNumber <= 0 || strings.TrimSpace(res.Repo) == "" {
 		return pr, true, nil
 	}
 	fetchedModel, err := github.FetchSinglePRWithMergeabilityRetry(ctx, s.ghClient(), res.Repo, res.PRNumber, 3)
