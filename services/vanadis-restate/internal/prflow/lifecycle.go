@@ -26,6 +26,9 @@ const (
 	statusConflict     = "conflict"
 	statusCIFailed     = "ci_failed"
 	statusDeployFailed = "deploy_failed"
+	statusSynced       = "synced"
+	statusDeploying    = "deploying"
+	statusDeployed     = "deployed"
 
 	chunkModeAction = "action"
 	effortMedium    = "medium"
@@ -305,7 +308,7 @@ func (f *Flow) HandleConflictEvent(ctx context.Context, buildID, chunkID string,
 		return ErrPRTransitionSkipped
 	}
 	switch strings.TrimSpace(chunk.Status) {
-	case statusMerged, "synced", "deploying", "deployed", statusDeployFailed, "completed", "failed", "cancelled":
+	case statusMerged, statusSynced, statusDeploying, statusDeployed, statusDeployFailed, "completed", statusFailed, "cancelled":
 		return ErrPRTransitionSkipped
 	}
 	if head := strings.TrimSpace(ev.HeadSHA); head != "" && chunk.HeadSHA != "" && !strings.EqualFold(chunk.HeadSHA, head) {
@@ -369,6 +372,16 @@ func (f *Flow) HandleCIFailureEvent(ctx context.Context, buildID, chunkID, event
 	bld, chunk, err := f.LookupBuildChunk(ctx, buildID, chunkID)
 	if err != nil {
 		return err
+	}
+	if strings.TrimSpace(chunk.MergeSHA) != "" {
+		return ErrPRTransitionSkipped
+	}
+	switch strings.TrimSpace(chunk.Status) {
+	case statusMerged, statusSynced, statusDeploying, statusDeployed, statusDeployFailed, "completed", statusFailed, "cancelled":
+		return ErrPRTransitionSkipped
+	}
+	if head := strings.TrimSpace(ev.HeadSHA); head != "" && chunk.HeadSHA != "" && !strings.EqualFold(chunk.HeadSHA, head) {
+		return ErrPRTransitionSkipped
 	}
 	cleanHead := strings.TrimSpace(ev.HeadSHA)
 	if chunk.CIFailCount >= executor.MaxCIRemediationAttempts {
@@ -637,7 +650,7 @@ var ActionResumeFailureReason = fmt.Sprintf("RESUMABLE: action turn ended withou
 // while a repair PR it submitted moves toward deployment.
 var actionRepairPRStatuses = map[string]bool{
 	"pr_opened": true, statusCIFailed: true, statusConflict: true, statusMerged: true,
-	"synced": true, "deploying": true, "deployed": true, statusDeployFailed: true,
+	statusSynced: true, statusDeploying: true, statusDeployed: true, statusDeployFailed: true,
 }
 
 // NoPRFailureReason is the failure reason recorded when a PR chunk turn ends
