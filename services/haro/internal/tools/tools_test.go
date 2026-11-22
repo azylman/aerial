@@ -273,6 +273,12 @@ func testToolHandlerList(ctx context.Context, t *testing.T, h *ToolHandler, db *
 	if listFiltered.Recurring[0].Prompt != "" || listFiltered.OneShot[0].Prompt != "" || strings.Contains(listFiltered.Summary, "Prompt:") {
 		t.Fatalf("expected ListSchedules to omit prompt from structs and summary, got %+v", listFiltered)
 	}
+
+	_ = store.InsertHeartbeatSchedule(ctx, db, model.HeartbeatSchedule{ID: "hb-list", TargetID: "ch-hb-list", CronExpr: "0 0 * * *", Prompt: "hb-p", NextRunAt: now, Enabled: true})
+	listHB, err := h.ListSchedules(ctx, ListSchedulesArgs{TargetID: "ch-hb-list"})
+	if err != nil || len(listHB.Heartbeats) != 1 || listHB.Heartbeats[0].Prompt != "" {
+		t.Fatalf("expected one prompt-less heartbeat for ch-hb-list, got %+v, err: %v", listHB, err)
+	}
 }
 
 func testToolHandlerGet(ctx context.Context, t *testing.T, h *ToolHandler, db *sql.DB, now time.Time) {
