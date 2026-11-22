@@ -2,9 +2,11 @@ package server
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -175,7 +177,8 @@ func (s *VanadisServer) mutateBuildObject(ctx context.Context, build *VanadisBui
 
 func (s *VanadisServer) forwardActiveStep(ctx context.Context, build *VanadisBuild, req UpdateActiveStepRequest) error {
 	path := s.restateObjectPath("", build.ID, "UpdateActiveStep") + "/send"
-	return s.callRestateIngress(ctx, path, req, nil)
+	idempotencyKey := fmt.Sprintf("active-step:%s:%s:%x", build.ID, strings.TrimSpace(req.ChunkID), sha256.Sum256([]byte(strutil.FirstNonEmpty(strings.TrimSpace(req.ActiveStep), strings.TrimSpace(req.Step)))))
+	return s.callRestateIngressKeyed(ctx, path, idempotencyKey, req, nil)
 }
 
 func (s *VanadisServer) processActiveStepUpdate(w http.ResponseWriter, r *http.Request, build *VanadisBuild, req UpdateActiveStepRequest) {
@@ -312,8 +315,14 @@ func (s *VanadisServer) handleAttachChunkPR(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	req.Agent = attachAgent
+	if req.ChunkID != "" && req.PRNumber > 0 && s.store != nil {
+		if err := s.store.PreRecordChunkPR(r.Context(), req.ChunkID, req.Repo, req.PRNumber); err != nil {
+			slog.WarnContext(r.Context(), "[vanadis] prerecord chunk pr failed", "chunk_id", req.ChunkID, "repo", req.Repo, "pr_number", req.PRNumber, "error", err)
+		}
+	}
 	var resp AttachChunkPRResponse
-	if err := s.callRestateIngress(r.Context(), s.restateRouterPath("RouteAttachPR"), req, &resp); err != nil {
+	idempotencyKey := fmt.Sprintf("attach-pr:%s:%s:%d", req.ChunkID, req.Repo, req.PRNumber)
+	if err := s.callRestateIngressKeyed(r.Context(), s.restateRouterPath("RouteAttachPR"), idempotencyKey, req, &resp); err != nil {
 		writeStoreErr(r.Context(), w, err)
 		return
 	}

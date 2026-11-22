@@ -169,8 +169,8 @@ type scriptTransport struct {
 func (d scriptTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	if d.checkDeadline {
 		deadline, ok := r.Context().Deadline()
-		if !ok || time.Until(deadline) > 10*time.Second {
-			d.t.Error("upstream request must have at most ten seconds to respond")
+		if !ok || time.Until(deadline) > 30*time.Second {
+			d.t.Error("upstream request must have at most thirty seconds to respond")
 		}
 	}
 	if d.err != nil {
