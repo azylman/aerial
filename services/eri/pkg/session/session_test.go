@@ -104,109 +104,154 @@ func TestManager_Init(t *testing.T) {
 	}
 }
 
-type ensureSessionDirCase struct {
-	name       string
-	isNilMgr   bool
-	emptyRoots bool
-	sessionID  string
-	preExist   bool
-	wantErr    bool
-}
-
-func runEnsureSessionDirCase(t *testing.T, tc ensureSessionDirCase) {
+// writeEnsureSessionFixtures creates dirs and files relative to root.
+func writeEnsureSessionFixtures(t *testing.T, root string, dirs []string, files map[string]string) {
 	t.Helper()
-	tmp := t.TempDir()
-	var mgr *Manager
-	if tc.emptyRoots {
-		mgr = &Manager{}
-	} else if !tc.isNilMgr {
-		mgr = New(filepath.Join(tmp, "home"), filepath.Join(tmp, "data"))
-		if tc.preExist {
-			dir, _ := mgr.EnsureSessionDir(tc.sessionID)
-			_ = os.MkdirAll(dir, 0o755)
+	for _, rel := range dirs {
+		if err := os.MkdirAll(filepath.Join(root, rel), 0o755); err != nil {
+			t.Fatal(err)
 		}
 	}
-	dir, err := mgr.EnsureSessionDir(tc.sessionID)
-	if (err != nil) != tc.wantErr {
-		t.Fatalf("EnsureSessionDir error=%v, wantErr=%v", err, tc.wantErr)
-	}
-	if !tc.wantErr && dir == "" {
-		t.Fatalf("expected non-empty dir")
-	}
-}
-
-func testResolveBaseDirBranches(t *testing.T) {
-	t.Helper()
-	tmp := t.TempDir()
-	mgr := New(filepath.Join(tmp, "nonexistent-root-1"), filepath.Join(tmp, "nonexistent-root-2"))
-	if base := mgr.resolveBaseDir("s1"); base == "" {
-		t.Fatalf("expected fallback root")
-	}
-	var nilMgr *Manager
-	if nilMgr.resolveBaseDir("s1") != "" {
-		t.Fatalf("expected empty for nil manager")
-	}
-	existingRoot := filepath.Join(tmp, "home", ".gemini", "antigravity-cli", "brain")
-	_ = os.MkdirAll(existingRoot, 0o755)
-	mgrWithExisting := New(filepath.Join(tmp, "home"), "")
-	preDir := filepath.Join(existingRoot, "sess-pre")
-	_ = os.MkdirAll(preDir, 0o755)
-	if base := mgrWithExisting.resolveBaseDir("sess-pre"); base != existingRoot {
-		t.Fatalf("expected existing parent %q, got %q", existingRoot, base)
-	}
-	if base := mgrWithExisting.resolveBaseDir("s1"); base != existingRoot {
-		t.Fatalf("expected existing root %q, got %q", existingRoot, base)
-	}
-	blockMgr := New(filepath.Join(tmp, "home"), filepath.Join(tmp, "data"))
-	sessDir := filepath.Join(existingRoot, "sess-block")
-	_ = os.MkdirAll(filepath.Join(sessDir, ".system_generated", "logs", "transcript.jsonl"), 0o755)
-	if _, err := blockMgr.EnsureSessionDir("sess-block"); err == nil {
-		t.Fatalf("expected OpenFile error when transcript.jsonl is a directory")
-	}
-	mkdirBlockDir := filepath.Join(existingRoot, "sess-mkdir-block")
-	_ = os.MkdirAll(mkdirBlockDir, 0o755)
-	_ = os.WriteFile(filepath.Join(mkdirBlockDir, ".system_generated"), []byte("file"), 0o644)
-	if _, err := blockMgr.EnsureSessionDir("sess-mkdir-block"); err == nil {
-		t.Fatalf("expected MkdirAll error when .system_generated is a file")
+	for rel, content := range files {
+		if err := os.MkdirAll(filepath.Dir(filepath.Join(root, rel)), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, rel), []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 
-func TestEnsureSessionDirAndBaseDir(t *testing.T) {
-	tests := []ensureSessionDirCase{
+func TestEnsureSessionDir(t *testing.T) {
+	t.Parallel()
+	const brain = "home/.gemini/antigravity-cli/brain"
+	tests := []struct {
+		name       string
+		isNilMgr   bool
+		emptyRoots bool
+		sessionID  string
+		preExist   bool
+		mkdirs     []string          // created under the temp root before the call
+		files      map[string]string // written under the temp root before the call
+		wantErr    bool
+	}{
 		{name: "nil manager", isNilMgr: true, sessionID: "sess-1", wantErr: true},
 		{name: "empty session ID", sessionID: "", wantErr: true},
 		{name: "path traversal", sessionID: "../bad", wantErr: true},
 		{name: "empty roots manager", emptyRoots: true, sessionID: "sess-no-roots", wantErr: true},
-		{name: "valid new session", sessionID: "sess-valid", wantErr: false},
-		{name: "preexisting session", sessionID: "sess-pre", preExist: true, wantErr: false},
+		{name: "valid new session", sessionID: "sess-valid"},
+		{name: "preexisting session", sessionID: "sess-pre", preExist: true},
+		{
+			name: "transcript.jsonl is a directory fails OpenFile", sessionID: "sess-block",
+			mkdirs: []string{brain + "/sess-block/.system_generated/logs/transcript.jsonl"}, wantErr: true,
+		},
+		{
+			name: ".system_generated is a file fails MkdirAll", sessionID: "sess-mkdir-block",
+			files: map[string]string{brain + "/sess-mkdir-block/.system_generated": "file"}, wantErr: true,
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			runEnsureSessionDirCase(t, tc)
+			t.Parallel()
+			tmp := t.TempDir()
+			writeEnsureSessionFixtures(t, tmp, tc.mkdirs, tc.files)
+			var mgr *Manager
+			if tc.emptyRoots {
+				mgr = &Manager{}
+			} else if !tc.isNilMgr {
+				mgr = New(filepath.Join(tmp, "home"), filepath.Join(tmp, "data"))
+			}
+			if tc.preExist {
+				if _, err := mgr.EnsureSessionDir(tc.sessionID); err != nil {
+					t.Fatalf("pre-create EnsureSessionDir: %v", err)
+				}
+			}
+			dir, err := mgr.EnsureSessionDir(tc.sessionID)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("EnsureSessionDir error=%v, wantErr=%v", err, tc.wantErr)
+			}
+			if !tc.wantErr && dir == "" {
+				t.Fatalf("expected non-empty dir")
+			}
 		})
 	}
+}
 
-	t.Run("getTargetDirs branches", func(t *testing.T) {
-		tmp := t.TempDir()
-		mgr := New(filepath.Join(tmp, "home"), filepath.Join(tmp, "data"))
-		_ = os.MkdirAll(filepath.Join(tmp, "home", ".gemini", "antigravity-cli", "brain", "session-latest"), 0o755)
-		dirsWithID := mgr.getTargetDirs("test-conv")
-		if len(dirsWithID) == 0 {
-			t.Fatalf("expected target dirs for test-conv")
-		}
-		dirsEmpty := mgr.getTargetDirs("")
-		if len(dirsEmpty) == 0 {
-			t.Fatalf("expected target dirs for empty convID")
-		}
-		var nilMgr *Manager
-		if len(nilMgr.getTargetDirs("test")) != 0 {
-			t.Fatalf("expected nil target dirs for nil manager")
-		}
-	})
+func TestResolveBaseDir(t *testing.T) {
+	t.Parallel()
+	const brain = "home/.gemini/antigravity-cli/brain"
+	tests := []struct {
+		name      string
+		isNilMgr  bool
+		home      string // relative to the temp root
+		data      string // relative to the temp root; "" = no data dir
+		mkdirs    []string
+		sessionID string
+		want      string // relative to the temp root; "" = empty result
+	}{
+		{name: "nil manager", isNilMgr: true, sessionID: "s1"},
+		{
+			name: "no existing root falls back to the first root", home: "nonexistent-root-1", data: "nonexistent-root-2", sessionID: "s1",
+			want: "nonexistent-root-2/brain",
+		},
+		{
+			name: "existing session dir returns its parent root", home: "home", mkdirs: []string{brain + "/sess-pre"}, sessionID: "sess-pre",
+			want: brain,
+		},
+		{name: "first existing root wins", home: "home", mkdirs: []string{brain}, sessionID: "s1", want: brain},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			tmp := t.TempDir()
+			writeEnsureSessionFixtures(t, tmp, tc.mkdirs, nil)
+			var mgr *Manager
+			if !tc.isNilMgr {
+				data := ""
+				if tc.data != "" {
+					data = filepath.Join(tmp, tc.data)
+				}
+				mgr = New(filepath.Join(tmp, tc.home), data)
+			}
+			want := ""
+			if tc.want != "" {
+				want = filepath.Join(tmp, tc.want)
+			}
+			if got := mgr.resolveBaseDir(tc.sessionID); got != want {
+				t.Fatalf("resolveBaseDir(%q) = %q, want %q", tc.sessionID, got, want)
+			}
+		})
+	}
+}
 
-	t.Run("resolveBaseDir and EnsureSessionDir branches", func(t *testing.T) {
-		testResolveBaseDirBranches(t)
-	})
+func TestGetTargetDirs(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name         string
+		isNilMgr     bool
+		convID       string
+		wantNonEmpty bool
+	}{
+		{"conversation id lists per-root dirs", false, "test-conv", true},
+		{"empty conversation id finds the latest dir", false, "", true},
+		{"nil manager", true, "test", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			tmp := t.TempDir()
+			if err := os.MkdirAll(filepath.Join(tmp, "home", ".gemini", "antigravity-cli", "brain", "session-latest"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			var mgr *Manager
+			if !tc.isNilMgr {
+				mgr = New(filepath.Join(tmp, "home"), filepath.Join(tmp, "data"))
+			}
+			if got := mgr.getTargetDirs(tc.convID); (len(got) > 0) != tc.wantNonEmpty {
+				t.Fatalf("getTargetDirs(%q) = %v, want non-empty %v", tc.convID, got, tc.wantNonEmpty)
+			}
+		})
+	}
 }
 
 func TestGetLastStepIndex(t *testing.T) {
@@ -799,11 +844,13 @@ type sessionStorageMetricsCase struct {
 	turnCount   int
 	rtDir       bool
 	statErrFile bool
-	wantDBSize  int64
-	wantTrSize  int64
-	wantSteps   int
-	wantTurns   int
-	wantExists  bool
+	// zeroByteFiles writes empty .db, .pb and transcript files.
+	zeroByteFiles bool
+	wantDBSize    int64
+	wantTrSize    int64
+	wantSteps     int
+	wantTurns     int
+	wantExists    bool
 }
 
 func setupSessionStorageMetrics(t *testing.T, mgr *Manager, tc sessionStorageMetricsCase, tmp string) {
@@ -819,10 +866,10 @@ func setupSessionStorageMetrics(t *testing.T, mgr *Manager, tc sessionStorageMet
 		rtDir := filepath.Join(tmp, "runtimes", "discord", ".gemini", "antigravity-cli", "conversations")
 		writeConversationFile(t, rtDir, tc.sessionID, ".db", 200)
 	}
-	if tc.dbSize > 0 || (tc.name == "0-byte files do not exist") {
+	if tc.dbSize > 0 || tc.zeroByteFiles {
 		writeConversationFile(t, convDir, tc.sessionID, ".db", tc.dbSize)
 	}
-	if tc.pbSize > 0 || (tc.name == "0-byte files do not exist") {
+	if tc.pbSize > 0 || tc.zeroByteFiles {
 		writeConversationFile(t, convDir, tc.sessionID, ".pb", tc.pbSize)
 	}
 	setupSessionStorageTranscript(t, mgr, tc)
@@ -830,7 +877,7 @@ func setupSessionStorageMetrics(t *testing.T, mgr *Manager, tc sessionStorageMet
 
 func setupSessionStorageTranscript(t *testing.T, mgr *Manager, tc sessionStorageMetricsCase) {
 	t.Helper()
-	if tc.transSize > 0 || (tc.name == "0-byte files do not exist") {
+	if tc.transSize > 0 || tc.zeroByteFiles {
 		sessDir, _ := mgr.EnsureSessionDir(tc.sessionID)
 		var content string
 		if tc.stepCount > 0 {
@@ -906,41 +953,11 @@ func TestSessionStorageAndRotationMetrics(t *testing.T) {
 			wantTurns:  2,
 			wantExists: true,
 		},
-		{
-			name:       "pb only exists",
-			sessionID:  "s-pb-only",
-			pbSize:     350,
-			wantDBSize: 350,
-			wantExists: true,
-		},
-		{
-			name:       "transcript only exists",
-			sessionID:  "s-tr-only",
-			transSize:  200,
-			wantTrSize: 200,
-			wantExists: true,
-		},
-		{
-			name:       "runtime candidate directory match",
-			sessionID:  "s-runtime",
-			rtDir:      true,
-			wantDBSize: 200,
-			wantExists: true,
-		},
-		{
-			name:       "0-byte files do not exist",
-			sessionID:  "s-zero-byte",
-			dbSize:     0,
-			pbSize:     0,
-			transSize:  0,
-			wantExists: false,
-		},
-		{
-			name:        "stat non-not-exist error when candidate dir is a file",
-			sessionID:   "s-stat-err",
-			statErrFile: true,
-			wantExists:  false,
-		},
+		{name: "pb only exists", sessionID: "s-pb-only", pbSize: 350, wantDBSize: 350, wantExists: true},
+		{name: "transcript only exists", sessionID: "s-tr-only", transSize: 200, wantTrSize: 200, wantExists: true},
+		{name: "runtime candidate directory match", sessionID: "s-runtime", rtDir: true, wantDBSize: 200, wantExists: true},
+		{name: "0-byte files do not exist", sessionID: "s-zero-byte", zeroByteFiles: true, wantExists: false},
+		{name: "stat non-not-exist error when candidate dir is a file", sessionID: "s-stat-err", statErrFile: true, wantExists: false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -992,8 +1009,9 @@ func TestSanitizeClaudeProjectPath(t *testing.T) {
 	}
 }
 
-type claudeSessionLifecycleCase struct {
+type sessionLifecycleCase struct {
 	name       string
+	engine     string
 	isNilMgr   bool
 	sessionID  string
 	location   string
@@ -1002,239 +1020,282 @@ type claudeSessionLifecycleCase struct {
 	age        time.Duration
 	wantExists bool
 	wantPaths  int
-	wantSize   int64
 	wantSteps  int
 	wantTurns  int
 }
 
-func resolveClaudeWriteDir(location, homeDir, dataDir string) string {
-	switch location {
-	case "data_claude":
-		return filepath.Join(dataDir, "claude", "projects", "-data-proj")
-	case "data_runtime":
-		return filepath.Join(dataDir, "runtimes", "discord", ".claude", "projects", "-runtime-proj")
-	case "home_claude":
-		return filepath.Join(homeDir, ".claude", "projects", "-home-proj")
-	case "direct_claude":
-		return filepath.Join(dataDir, "claude", "projects")
+// sessionEngineProbe holds the engine-specific transcript lookups exercised by TestSessionLifecycle.
+type sessionEngineProbe struct {
+	paths  func(*Manager, string) []string
+	exists func(*Manager, string) bool
+}
+
+var sessionEngineProbes = map[string]sessionEngineProbe{
+	"claude": {(*Manager).claudeTranscriptPaths, (*Manager).ClaudeSessionExistsOnDisk},
+	"codex":  {(*Manager).codexTranscriptPaths, (*Manager).CodexSessionExistsOnDisk},
+	"muse":   {(*Manager).museTranscriptPaths, (*Manager).MuseSessionExistsOnDisk},
+}
+
+// sessionLayout returns the transcript path an engine writes for a session at a storage location ("" = none).
+func sessionLayout(engine, location, homeDir, dataDir, sessionID string) string {
+	switch engine + "/" + location {
+	case "claude/data":
+		return filepath.Join(dataDir, "claude", "projects", "-data-proj", sessionID+".jsonl")
+	case "claude/runtime":
+		return filepath.Join(dataDir, "runtimes", "discord", ".claude", "projects", "-runtime-proj", sessionID+".jsonl")
+	case "claude/home":
+		return filepath.Join(homeDir, ".claude", "projects", "-home-proj", sessionID+".jsonl")
+	case "claude/direct":
+		return filepath.Join(dataDir, "claude", "projects", sessionID+".jsonl")
+	case "codex/data":
+		return filepath.Join(dataDir, "codex", "sessions", "2026", "11", "15", "rollout-test-"+sessionID+".jsonl")
+	case "codex/runtime":
+		return filepath.Join(dataDir, "runtimes", "discord", ".codex", "sessions", sessionID+".jsonl")
+	case "codex/home":
+		return filepath.Join(homeDir, ".codex", "sessions", "rollout-"+sessionID+".jsonl")
+	case "codex/direct":
+		return filepath.Join(dataDir, "codex", "sessions", sessionID+".jsonl")
+	case "codex/direct_dated":
+		return filepath.Join(dataDir, "codex", "sessions", "rollout-2026-11-07T10-00-00-"+sessionID+".jsonl")
+	case "muse/data":
+		return filepath.Join(dataDir, "muse", "sessions", "2026", "11", "15", sessionID, "session.jsonl")
+	case "muse/runtime":
+		return filepath.Join(dataDir, "runtimes", "discord", ".local", "share", "muse", "sessions", sessionID+".jsonl")
+	case "muse/home":
+		return filepath.Join(homeDir, ".local", "share", "muse", "sessions", sessionID, "session.jsonl")
+	case "muse/direct":
+		return filepath.Join(dataDir, "muse", "sessions", sessionID+".jsonl")
 	default:
 		return ""
 	}
 }
 
-func setupClaudeSessionFile(tc claudeSessionLifecycleCase, homeDir, dataDir string, t0 time.Time) {
-	writeDir := resolveClaudeWriteDir(tc.location, homeDir, dataDir)
-	if writeDir == "" {
+func writeLifecycleSessionFile(t *testing.T, tc sessionLifecycleCase, homeDir, dataDir string, t0 time.Time) {
+	t.Helper()
+	filePath := sessionLayout(tc.engine, tc.location, homeDir, dataDir, tc.sessionID)
+	if filePath == "" || (!tc.zeroByte && tc.content == "") {
 		return
 	}
-	_ = os.MkdirAll(writeDir, 0o755)
-	filePath := filepath.Join(writeDir, tc.sessionID+".jsonl")
+	if err := os.MkdirAll(filepath.Dir(filePath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filePath, []byte(tc.content), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	if tc.zeroByte {
-		_ = os.WriteFile(filePath, nil, 0o644)
 		return
 	}
-	if tc.content == "" {
-		return
-	}
-	_ = os.WriteFile(filePath, []byte(tc.content), 0o644)
 	mtime := t0
 	if tc.age > 0 {
 		mtime = time.Now().Add(-tc.age)
 	}
-	_ = os.Chtimes(filePath, mtime, mtime)
-}
-
-func assertClaudeSessionMetrics(t *testing.T, mgr *Manager, tc claudeSessionLifecycleCase, dataDir string) {
-	t.Helper()
-	paths := mgr.claudeTranscriptPaths(tc.sessionID)
-	if len(paths) != tc.wantPaths {
-		t.Errorf("claudeTranscriptPaths count=%d, want %d", len(paths), tc.wantPaths)
-	}
-
-	exists := mgr.ClaudeSessionExistsOnDisk(tc.sessionID)
-	if exists != tc.wantExists {
-		t.Errorf("ClaudeSessionExistsOnDisk=%v, want %v", exists, tc.wantExists)
-	}
-
-	sessExists := mgr.SessionExistsOnDisk(tc.sessionID)
-	if sessExists != tc.wantExists {
-		t.Errorf("SessionExistsOnDisk=%v, want %v", sessExists, tc.wantExists)
-	}
-
-	size := mgr.GetTranscriptSize(tc.sessionID)
-	if tc.wantSize > 0 && size != tc.wantSize {
-		t.Errorf("GetTranscriptSize=%d, want %d", size, tc.wantSize)
-	} else if tc.content != "" && size == 0 {
-		t.Errorf("GetTranscriptSize expected non-zero, got 0")
-	}
-
-	steps := mgr.CountTranscriptSteps(tc.sessionID)
-	if steps != tc.wantSteps {
-		t.Errorf("CountTranscriptSteps=%d, want %d", steps, tc.wantSteps)
-	}
-
-	turns := mgr.CountTranscriptTurns(tc.sessionID)
-	if turns != tc.wantTurns {
-		t.Errorf("CountTranscriptTurns=%d, want %d", turns, tc.wantTurns)
+	if err := os.Chtimes(filePath, mtime, mtime); err != nil {
+		t.Fatal(err)
 	}
 }
 
-func runClaudeSessionLifecycleCase(t *testing.T, tc claudeSessionLifecycleCase, t0 time.Time) {
-	t.Helper()
-	tmp := t.TempDir()
-	var mgr *Manager
-	var dataDir string
-	if !tc.isNilMgr {
-		homeDir := filepath.Join(tmp, "home")
-		dataDir = filepath.Join(tmp, "data")
-		mgr = New(homeDir, dataDir)
-		setupClaudeSessionFile(tc, homeDir, dataDir, t0)
-	}
-	assertClaudeSessionMetrics(t, mgr, tc, dataDir)
+// jsonl joins transcript lines with a trailing newline.
+func jsonl(lines ...string) string { return strings.Join(lines, "\n") + "\n" }
+
+func lifecycleClaudeUser(ts, text string) string {
+	return `{"type":"user","timestamp":"2026-11-07T10:00:` + ts + `Z","message":{"role":"user","content":"` + text + `"}}`
 }
 
-func TestClaudeSessionLifecycle(t *testing.T) {
+func lifecycleClaudeText(ts, text string) string {
+	return `{"type":"assistant","timestamp":"2026-11-07T10:00:` + ts + `Z","message":{"role":"assistant","content":[{"type":"text","text":"` + text + `"}]}}`
+}
+
+func lifecycleCodexMsg(ts, role, text string) string {
+	return `{"type":"response_item","timestamp":"2026-11-07T10:00:` + ts +
+		`Z","payload":{"type":"message","role":"` + role + `","content":[{"type":"text","text":"` + text + `"}]}}`
+}
+
+func lifecycleMuseRun(sec, event string) string {
+	return `{"payload_type":"runtime.session","recorded_at":176251000` + sec + `000000,"payload":{"kind":"run","event":` + event + `}}`
+}
+
+func TestSessionLifecycle(t *testing.T) {
+	t.Parallel()
 	t0 := time.Date(2026, 11, 7, 10, 0, 0, 0, time.UTC)
 
-	tests := []claudeSessionLifecycleCase{
+	tests := []sessionLifecycleCase{
+		{name: "claude nil manager", engine: "claude", isNilMgr: true, sessionID: "sess-claude-nil"},
+		{name: "claude empty session ID", engine: "claude"},
+		{name: "claude path traversal session ID", engine: "claude", sessionID: "../bad-id"},
 		{
-			name:      "nil manager",
-			isNilMgr:  true,
-			sessionID: "sess-claude-nil",
+			name: "claude data projects standard session", engine: "claude", sessionID: "sess-claude-data", location: "data",
+			content: jsonl(lifecycleClaudeUser("00", "Initial prompt"), lifecycleClaudeText("02", "Done")),
+			age:     10 * time.Minute, wantExists: true, wantPaths: 1, wantSteps: 1, wantTurns: 1,
 		},
 		{
-			name:      "empty session ID",
-			sessionID: "",
-		},
-		{
-			name:      "path traversal session ID",
-			sessionID: "../bad-id",
-		},
-		{
-			name:      "data claude projects standard session",
-			sessionID: "sess-claude-data",
-			location:  "data_claude",
-			content: strings.Join([]string{
-				`{"type":"user","timestamp":"2026-11-07T10:00:00Z","message":{"role":"user","content":"Initial prompt"}}`,
-				`{"type":"assistant","timestamp":"2026-11-07T10:00:02Z","message":{"role":"assistant","content":[{"type":"text","text":"Done"}]}}`,
-			}, "\n") + "\n",
-			age:        10 * time.Minute,
-			wantExists: true,
-			wantPaths:  1,
-			wantSteps:  1,
-			wantTurns:  1,
-		},
-		{
-			name:      "data runtime claude projects session with tool results and ambient",
-			sessionID: "sess-claude-runtime",
-			location:  "data_runtime",
-			content: strings.Join([]string{
-				`{"type":"user","timestamp":"2026-11-07T10:00:00Z","message":{"role":"user","content":"Prompt 1"}}`,
+			name: "claude data runtime session with tool results and ambient", engine: "claude", sessionID: "sess-claude-runtime", location: "runtime",
+			content: jsonl(
+				lifecycleClaudeUser("00", "Prompt 1"),
 				`{"type":"assistant","timestamp":"2026-11-07T10:00:02Z","message":{"role":"assistant","content":[{"type":"tool_use","name":"Read","input":{}}]}}`,
 				`{"type":"user","timestamp":"2026-11-07T10:00:04Z","message":{"role":"user","content":[{"type":"tool_result","content":"file contents"}]}}`,
-				`{"type":"user","timestamp":"2026-11-07T10:00:05Z","message":{"role":"user","content":"[Chat ambient message]"}}`,
-				`{"type":"assistant","timestamp":"2026-11-07T10:00:06Z","message":{"role":"assistant","content":[{"type":"text","text":"Final answer"}]}}`,
+				lifecycleClaudeUser("05", "[Chat ambient message]"),
+				lifecycleClaudeText("06", "Final answer"),
 				`{"type":"tool_result","timestamp":"2026-11-07T10:00:07Z","content":"extra tool"}`,
-			}, "\n") + "\n",
-			wantExists: true,
-			wantPaths:  1,
-			wantSteps:  4,
-			wantTurns:  1,
+			),
+			wantExists: true, wantPaths: 1, wantSteps: 4, wantTurns: 1,
 		},
 		{
-			name:      "home claude projects session",
-			sessionID: "sess-claude-home",
-			location:  "home_claude",
-			content: strings.Join([]string{
-				`{"type":"user","timestamp":"2026-11-07T10:00:00Z","message":{"role":"user","content":"Home prompt"}}`,
-			}, "\n") + "\n",
-			wantExists: true,
-			wantPaths:  1,
-			wantSteps:  0,
-			wantTurns:  1,
+			name: "claude home projects session", engine: "claude", sessionID: "sess-claude-home", location: "home",
+			content: jsonl(lifecycleClaudeUser("00", "Home prompt")), wantExists: true, wantPaths: 1, wantTurns: 1,
 		},
 		{
-			name:      "direct in claude projects base directory",
-			sessionID: "sess-claude-direct",
-			location:  "direct_claude",
-			content: strings.Join([]string{
-				`{"type":"user","timestamp":"2026-11-07T10:00:00Z","message":{"role":"user","content":"Direct prompt"}}`,
-			}, "\n") + "\n",
-			wantExists: true,
-			wantPaths:  1,
-			wantTurns:  1,
+			name: "claude direct in projects base directory", engine: "claude", sessionID: "sess-claude-direct", location: "direct",
+			content: jsonl(lifecycleClaudeUser("00", "Direct prompt")), wantExists: true, wantPaths: 1, wantTurns: 1,
 		},
 		{
-			name:       "zero byte file does not exist",
-			sessionID:  "sess-claude-zero",
-			location:   "data_claude",
-			zeroByte:   true,
-			wantExists: false,
-			wantPaths:  1,
-			wantSize:   0,
+			name: "claude zero byte file does not exist", engine: "claude", sessionID: "sess-claude-zero", location: "data", zeroByte: true,
+			wantPaths: 1,
 		},
 		{
-			name:      "claude transcript with empty lines and invalid lines",
-			sessionID: "sess-claude-empty-lines",
-			location:  "data_claude",
-			content: strings.Join([]string{
-				"",
-				"invalid-json",
-				`{"type":"user","timestamp":"2026-11-07T10:00:00Z","message":{"role":"user","content":"Valid prompt"}}`,
-				"",
-				`{"type":"assistant","timestamp":"2026-11-07T10:00:02Z","message":{"role":"assistant","content":[{"type":"text","text":"Valid reply"}]}}`,
-				"",
-			}, "\n") + "\n",
-			wantExists: true,
-			wantPaths:  1,
-			wantSteps:  1,
-			wantTurns:  1,
+			name: "claude transcript with empty lines and invalid lines", engine: "claude", sessionID: "sess-claude-empty-lines", location: "data",
+			content:    jsonl("", "invalid-json", lifecycleClaudeUser("00", "Valid prompt"), "", lifecycleClaudeText("02", "Valid reply"), ""),
+			wantExists: true, wantPaths: 1, wantSteps: 1, wantTurns: 1,
 		},
+		{name: "codex nil manager", engine: "codex", isNilMgr: true, sessionID: "sess-codex-nil"},
+		{name: "codex empty session ID", engine: "codex"},
+		{name: "codex path traversal session ID", engine: "codex", sessionID: "../bad-id"},
+		{
+			name: "codex direct timestamped rollout session", engine: "codex", sessionID: "sess-codex-dated", location: "direct_dated",
+			content:    jsonl(lifecycleCodexMsg("00", "user", "Initial prompt"), lifecycleCodexMsg("02", "assistant", "Done")),
+			wantExists: true, wantPaths: 1, wantSteps: 1, wantTurns: 1,
+		},
+		{
+			name: "codex data nested rollout session", engine: "codex", sessionID: "sess-codex-data", location: "data",
+			content: jsonl(lifecycleCodexMsg("00", "user", "Initial prompt"), lifecycleCodexMsg("02", "assistant", "Done")),
+			age:     10 * time.Minute, wantExists: true, wantPaths: 1, wantSteps: 1, wantTurns: 1,
+		},
+		{
+			name: "codex data runtime session with tool calls and ambient", engine: "codex", sessionID: "sess-codex-runtime", location: "runtime",
+			content: jsonl(
+				lifecycleCodexMsg("00", "user", "Prompt 1"),
+				`{"type":"response_item","timestamp":"2026-11-07T10:00:02Z","payload":{"type":"function_call","name":"Read","arguments":"{}"}}`,
+				`{"type":"response_item","timestamp":"2026-11-07T10:00:04Z","payload":{"type":"function_call_output","output":"file contents"}}`,
+				lifecycleCodexMsg("05", "user", "[Chat ambient message]"),
+				lifecycleCodexMsg("06", "assistant", "Final answer"),
+			),
+			wantExists: true, wantPaths: 1, wantSteps: 3, wantTurns: 1,
+		},
+		{
+			name: "codex home rollout session", engine: "codex", sessionID: "sess-codex-home", location: "home",
+			content: jsonl(lifecycleCodexMsg("00", "user", "Home prompt")), wantExists: true, wantPaths: 1, wantTurns: 1,
+		},
+		{
+			name: "codex direct in base directory", engine: "codex", sessionID: "sess-codex-direct", location: "direct",
+			content: jsonl(lifecycleCodexMsg("00", "user", "Direct prompt")), wantExists: true, wantPaths: 1, wantTurns: 1,
+		},
+		{name: "codex zero byte file does not exist", engine: "codex", sessionID: "sess-codex-zero", location: "data", zeroByte: true, wantPaths: 1},
+		{
+			name: "codex transcript with empty lines and invalid lines", engine: "codex", sessionID: "sess-codex-empty-lines", location: "data",
+			content:    jsonl("", "invalid-json", lifecycleCodexMsg("00", "user", "Valid prompt"), "", lifecycleCodexMsg("02", "assistant", "Valid reply"), ""),
+			wantExists: true, wantPaths: 1, wantSteps: 1, wantTurns: 1,
+		},
+		{name: "muse nil manager", engine: "muse", isNilMgr: true, sessionID: "sess-muse-nil"},
+		{name: "muse empty session ID", engine: "muse"},
+		{name: "muse path traversal session ID", engine: "muse", sessionID: "../bad-id"},
+		{
+			name: "muse data nested session.jsonl", engine: "muse", sessionID: "sess-muse-data", location: "data",
+			content: jsonl(
+				lifecycleMuseRun("0", `{"kind":"started","prompt":"Initial prompt"}`),
+				lifecycleMuseRun("2", `{"kind":"assistant_message_committed","text":"Done"}`),
+			),
+			age: 10 * time.Minute, wantExists: true, wantPaths: 1, wantSteps: 1, wantTurns: 1,
+		},
+		{
+			name: "muse data runtime discord session.jsonl direct", engine: "muse", sessionID: "sess-muse-runtime", location: "runtime",
+			content: jsonl(
+				lifecycleMuseRun("0", `{"kind":"started","prompt":"User msg"}`),
+				lifecycleMuseRun("1", `{"kind":"assistant_message_committed","text":"Assistant msg"}`),
+				lifecycleMuseRun("2", `{"kind":"assistant_tool_calls_committed","tool_calls":[{"name":"bash","call_id":"call_1"}]}`),
+				lifecycleMuseRun("3", `{"kind":"tool_result_batch_committed","results":[{"call_id":"call_1","output":"ok"}]}`),
+			),
+			wantExists: true, wantPaths: 1, wantSteps: 3, wantTurns: 1,
+		},
+		{
+			name: "muse home session.jsonl", engine: "muse", sessionID: "sess-muse-home", location: "home",
+			content: jsonl(
+				lifecycleMuseRun("0", `{"kind":"started","prompt":"[Chat alpha]: ambient message"}`),
+				lifecycleMuseRun("1", `{"kind":"assistant_message_committed","text":"model output"}`),
+			),
+			wantExists: true, wantPaths: 1, wantSteps: 1,
+		},
+		{name: "muse zero byte session", engine: "muse", sessionID: "sess-muse-zero", location: "direct", zeroByte: true, wantPaths: 1},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			runClaudeSessionLifecycleCase(t, tc, t0)
+			t.Parallel()
+			probe := sessionEngineProbes[tc.engine]
+			var mgr *Manager
+			if !tc.isNilMgr {
+				tmp := t.TempDir()
+				homeDir, dataDir := filepath.Join(tmp, "home"), filepath.Join(tmp, "data")
+				mgr = New(homeDir, dataDir)
+				writeLifecycleSessionFile(t, tc, homeDir, dataDir, t0)
+			}
+			if got := len(probe.paths(mgr, tc.sessionID)); got != tc.wantPaths {
+				t.Errorf("%s transcript paths count = %d, want %d", tc.engine, got, tc.wantPaths)
+			}
+			if got := probe.exists(mgr, tc.sessionID); got != tc.wantExists {
+				t.Errorf("%s SessionExistsOnDisk = %v, want %v", tc.engine, got, tc.wantExists)
+			}
+			if got := mgr.SessionExistsOnDisk(tc.sessionID); got != tc.wantExists {
+				t.Errorf("SessionExistsOnDisk = %v, want %v", got, tc.wantExists)
+			}
+			if size := mgr.GetTranscriptSize(tc.sessionID); (size > 0) != (tc.content != "") {
+				t.Errorf("GetTranscriptSize = %d, want non-zero only with content (hasContent=%v)", size, tc.content != "")
+			}
+			if got := mgr.CountTranscriptSteps(tc.sessionID); got != tc.wantSteps {
+				t.Errorf("CountTranscriptSteps = %d, want %d", got, tc.wantSteps)
+			}
+			if got := mgr.CountTranscriptTurns(tc.sessionID); got != tc.wantTurns {
+				t.Errorf("CountTranscriptTurns = %d, want %d", got, tc.wantTurns)
+			}
 		})
 	}
 }
 
-func testClaudeToolResultContent(t *testing.T) {
-	t.Helper()
+func TestIsClaudeToolResultContent(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name       string
 		content    string
 		wantResult bool
 	}{
-		{name: "empty content", content: "", wantResult: false},
-		{name: "invalid json content", content: "not-json", wantResult: false},
-		{name: "empty json array", content: "[]", wantResult: false},
-		{name: "non-tool-result array", content: `[{"type":"text","text":"hello"}]`, wantResult: false},
-		{name: "tool-result array", content: `[{"type":"tool_result","content":"output"}]`, wantResult: true},
+		{"empty content", "", false},
+		{"invalid json content", "not-json", false},
+		{"empty json array", "[]", false},
+		{"non-tool-result array", `[{"type":"text","text":"hello"}]`, false},
+		{"tool-result array", `[{"type":"tool_result","content":"output"}]`, true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := isClaudeToolResultContent(json.RawMessage(tc.content))
-			if got != tc.wantResult {
+			t.Parallel()
+			if got := isClaudeToolResultContent(json.RawMessage(tc.content)); got != tc.wantResult {
 				t.Fatalf("isClaudeToolResultContent(%q) = %v, want %v", tc.content, got, tc.wantResult)
 			}
 		})
 	}
 }
 
-func testClaudeMissingFiles(t *testing.T) {
-	t.Helper()
-	missingFileTests := []struct {
+func TestClaudeTranscriptFileReaders(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
 		name      string
 		filePath  string
 		wantSteps int
 		wantTurns int
 		wantResp  string
 	}{
-		{name: "nonexistent file", filePath: "/nonexistent/path/file.jsonl", wantSteps: 0, wantTurns: 0, wantResp: ""},
+		{name: "nonexistent file", filePath: "/nonexistent/path/file.jsonl"},
 	}
-	for _, tc := range missingFileTests {
+	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			if steps := countStepsInClaudeTranscript(tc.filePath); steps != tc.wantSteps {
 				t.Fatalf("countStepsInClaudeTranscript = %d, want %d", steps, tc.wantSteps)
 			}
@@ -1248,28 +1309,33 @@ func testClaudeMissingFiles(t *testing.T) {
 	}
 }
 
-func testClaudeTargetProjects(t *testing.T) {
-	t.Helper()
-	targetTests := []struct {
+func TestCheckClaudeTargetProject(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
 		name       string
 		cwd        string
 		createFile bool
 		prePopSeen bool
 		wantFound  bool
 	}{
-		{name: "empty cwd", cwd: "", createFile: true, prePopSeen: false, wantFound: false},
-		{name: "missing file", cwd: "/missing/cwd", createFile: false, prePopSeen: false, wantFound: false},
-		{name: "file found and not seen", cwd: "/found/cwd", createFile: true, prePopSeen: false, wantFound: true},
-		{name: "file already seen", cwd: "/seen/cwd", createFile: true, prePopSeen: true, wantFound: false},
+		{name: "empty cwd", cwd: "", createFile: true},
+		{name: "missing file", cwd: "/missing/cwd"},
+		{name: "file found and not seen", cwd: "/found/cwd", createFile: true, wantFound: true},
+		{name: "file already seen", cwd: "/seen/cwd", createFile: true, prePopSeen: true},
 	}
-	for _, tc := range targetTests {
-		t.Run("checkClaudeTargetProject_"+tc.name, func(t *testing.T) {
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			tmpDir := t.TempDir()
 			cleanID := "sess-target"
 			cand := filepath.Join(tmpDir, SanitizeClaudeProjectPath(tc.cwd), cleanID+".jsonl")
 			if tc.createFile && tc.cwd != "" {
-				_ = os.MkdirAll(filepath.Dir(cand), 0o755)
-				_ = os.WriteFile(cand, []byte("data\n"), 0o644)
+				if err := os.MkdirAll(filepath.Dir(cand), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(cand, []byte("data\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
 			}
 			seen := make(map[string]bool)
 			if tc.prePopSeen {
@@ -1286,47 +1352,43 @@ func testClaudeTargetProjects(t *testing.T) {
 	}
 }
 
-func testClaudeAssistantAndErrors(t *testing.T) {
-	t.Helper()
-	assistantTests := []struct {
+func TestExtractAssistantText(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
 		name     string
 		content  string
 		wantText string
 	}{
-		{name: "invalid json object", content: `{"invalid":true}`, wantText: ""},
-		{name: "string content", content: `"hello world"`, wantText: "hello world"},
-		{name: "blocks content", content: `[{"type":"text","text":"block text"}]`, wantText: "block text"},
+		{"invalid json object", `{"invalid":true}`, ""},
+		{"string content", `"hello world"`, "hello world"},
+		{"blocks content", `[{"type":"text","text":"block text"}]`, "block text"},
 	}
-	for _, tc := range assistantTests {
-		t.Run("extractAssistantText_"+tc.name, func(t *testing.T) {
-			got := extractAssistantText(json.RawMessage(tc.content))
-			if got != tc.wantText {
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := extractAssistantText(json.RawMessage(tc.content)); got != tc.wantText {
 				t.Fatalf("extractAssistantText = %q, want %q", got, tc.wantText)
-			}
-		})
-	}
-
-	errorLineTests := []struct {
-		name      string
-		line      string
-		wantError string
-	}{
-		{name: "direct error type", line: `{"type":"error","message":{"role":"assistant","content":"direct error"}}`, wantError: "direct error"},
-		{name: "status error text", line: `{"status":"error","message":{"role":"assistant","content":"status err"}}`, wantError: "status err"},
-	}
-	for _, tc := range errorLineTests {
-		t.Run("extractClaudeErrorFromLine_"+tc.name, func(t *testing.T) {
-			got, _ := extractClaudeErrorFromLine(tc.line, time.Time{})
-			if got != tc.wantError {
-				t.Fatalf("extractClaudeErrorFromLine = %q, want %q", got, tc.wantError)
 			}
 		})
 	}
 }
 
-func TestClaudeInternalHelpers(t *testing.T) {
-	testClaudeToolResultContent(t)
-	testClaudeMissingFiles(t)
-	testClaudeTargetProjects(t)
-	testClaudeAssistantAndErrors(t)
+func TestExtractClaudeErrorFromLine(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		line      string
+		wantError string
+	}{
+		{"direct error type", `{"type":"error","message":{"role":"assistant","content":"direct error"}}`, "direct error"},
+		{"status error text", `{"status":"error","message":{"role":"assistant","content":"status err"}}`, "status err"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got, _ := extractClaudeErrorFromLine(tc.line, time.Time{}); got != tc.wantError {
+				t.Fatalf("extractClaudeErrorFromLine = %q, want %q", got, tc.wantError)
+			}
+		})
+	}
 }
