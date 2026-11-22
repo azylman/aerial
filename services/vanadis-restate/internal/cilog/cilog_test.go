@@ -439,6 +439,41 @@ func TestFetchLatestRoboRevCommentChecked(t *testing.T) {
 	}
 }
 
+func TestHasRoboRevOverrideChecked(t *testing.T) {
+	t.Parallel()
+	comments := func(body string) ciLogEnv {
+		return ciLogEnv{routes: map[string][]githubapitest.Response{ciCommentsPath: ciResp(http.StatusOK, body)}}
+	}
+	tests := []struct {
+		name      string
+		env       ciLogEnv
+		sha       string
+		want      bool
+		wantErr   string
+		wantPaths []string
+	}{
+		{name: "override on head", env: comments(`[{"id":1,"body":"## roborev-override (` + "`abcdef1`" + `)\n\n**Commit:** ` + "`abcdef1234567`" + `"}]`), sha: "ABCDEF1234567", want: true, wantPaths: []string{ciCommentsPath}},
+		{name: "override on older head", env: comments(`[{"id":1,"body":"## roborev-override (` + "`1234567`" + `)"}]`), sha: "abcdef1234567", wantPaths: []string{ciCommentsPath}},
+		{name: "review comment is not an override", env: comments(`[{"id":1,"body":"` + "## roborev: findings for `abcdef1`" + `"}]`), sha: "abcdef1234567", wantPaths: []string{ciCommentsPath}},
+		{name: "empty head never looks up comments", sha: " "},
+		{name: "missing comments read as none", sha: "abcdef1", wantPaths: []string{ciCommentsPath}},
+		{
+			name: "retryable status", env: ciLogEnv{routes: map[string][]githubapitest.Response{ciCommentsPath: ciResp(http.StatusBadGateway, "")}},
+			sha: "abcdef1", wantErr: "github api error (502): Bad Gateway", wantPaths: []string{ciCommentsPath},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			c, srv := newCILogClient(t, tc.env)
+			got, err := c.HasRoboRevOverrideChecked(context.Background(), "aerial", 10, tc.sha)
+			assertCILogErr(t, err, tc.wantErr)
+			assert.Equal(t, tc.want, got)
+			assertCILogRequests(t, srv, tc.env, tc.wantPaths)
+		})
+	}
+}
+
 func TestResolveCIFailureDetailsChecked(t *testing.T) {
 	t.Parallel()
 	roboRev := ciResp(http.StatusOK, `[{"id":1,"body":"some regular comment"},{"id":2,"body":"`+strings.ReplaceAll(ciRoboRevBody, "\n", `\n`)+`"}]`)
