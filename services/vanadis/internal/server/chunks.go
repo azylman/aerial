@@ -179,18 +179,18 @@ func (s *VanadisServer) mutateBuildObject(ctx context.Context, build *VanadisBui
 
 const maxTrackedActiveStepBuilds = 256
 
-func activeStepIdempotencyKey(buildID string, req UpdateActiveStepRequest) string {
+func activeStepIdempotencyKey(buildID string, seq uint64, req UpdateActiveStepRequest) string {
 	buildID = strings.TrimSpace(buildID)
 	chunkID := strings.TrimSpace(req.ChunkID)
 	stepText := strutil.FirstNonEmpty(strings.TrimSpace(req.ActiveStep), strings.TrimSpace(req.Step))
 	if chunkID != "" && (stepText != "" || req.ActiveSteps == nil) {
 		h := sha256.Sum256([]byte(stepText))
-		return fmt.Sprintf("active-step:%s:%s:%x", buildID, chunkID, h)
+		return fmt.Sprintf("active-step:%s:%s:%d:%x", buildID, chunkID, seq, h)
 	}
 	if len(req.ActiveSteps) == 1 {
 		for cID, sText := range req.ActiveSteps {
 			h := sha256.Sum256([]byte(sText))
-			return fmt.Sprintf("active-step:%s:%s:%x", buildID, cID, h)
+			return fmt.Sprintf("active-step:%s:%s:%d:%x", buildID, cID, seq, h)
 		}
 	}
 	if len(req.ActiveSteps) > 1 {
@@ -207,19 +207,19 @@ func activeStepIdempotencyKey(buildID string, req UpdateActiveStepRequest) strin
 			b.WriteString(";")
 		}
 		h := sha256.Sum256([]byte(b.String()))
-		return fmt.Sprintf("active-step:%s:batch:%x", buildID, h)
+		return fmt.Sprintf("active-step:%s:batch:%d:%x", buildID, seq, h)
 	}
 	if req.ClearAll || len(req.ActiveSteps) == 0 {
 		h := sha256.Sum256([]byte("clear-all"))
-		return fmt.Sprintf("active-step:%s:clear:%x", buildID, h)
+		return fmt.Sprintf("active-step:%s:clear:%d:%x", buildID, seq, h)
 	}
 	h := sha256.Sum256([]byte(stepText))
-	return fmt.Sprintf("active-step:%s:unknown:%x", buildID, h)
+	return fmt.Sprintf("active-step:%s:unknown:%d:%x", buildID, seq, h)
 }
 
-func (s *VanadisServer) forwardActiveStep(ctx context.Context, build *VanadisBuild, req UpdateActiveStepRequest) error {
+func (s *VanadisServer) forwardActiveStep(ctx context.Context, build *VanadisBuild, req UpdateActiveStepRequest, seq uint64) error {
 	path := s.restateObjectPath("", build.ID, "UpdateActiveStep")
-	idempotencyKey := activeStepIdempotencyKey(build.ID, req)
+	idempotencyKey := activeStepIdempotencyKey(build.ID, seq, req)
 	return s.callRestateIngressKeyed(ctx, path, idempotencyKey, req, nil)
 }
 
@@ -261,14 +261,16 @@ func (s *VanadisServer) pruneStaleBuildsLocked(now time.Time) {
 		return
 	}
 	for bID, ts := range s.lastForwardedAt {
-		if !s.inFlightBuilds[bID] && (now.Sub(ts) > time.Hour || len(s.lastForwardedAt) > maxTrackedActiveStepBuilds) {
-			delete(s.lastForwardedAt, bID)
-			delete(s.stepsByBuild, bID)
-			delete(s.dirtyBuilds, bID)
-			if tm := s.trailingTimer[bID]; tm != nil {
-				tm.Stop()
-				delete(s.trailingTimer, bID)
-			}
+		if s.inFlightBuilds[bID] || (now.Sub(ts) <= time.Hour && len(s.lastForwardedAt) <= maxTrackedActiveStepBuilds) {
+			continue
+		}
+		delete(s.lastForwardedAt, bID)
+		delete(s.stepsByBuild, bID)
+		delete(s.dirtyBuilds, bID)
+		delete(s.stepSeqByBuild, bID)
+		if tm := s.trailingTimer[bID]; tm != nil {
+			tm.Stop()
+			delete(s.trailingTimer, bID)
 		}
 	}
 }
@@ -300,13 +302,18 @@ func (s *VanadisServer) forwardActiveStepLoop(ctx context.Context, build *Vanadi
 		delete(s.dirtyBuilds, build.ID)
 		activeSteps := s.stepsByBuild[build.ID]
 		isClearAll := len(activeSteps) == 0
+		if s.stepSeqByBuild == nil {
+			s.stepSeqByBuild = make(map[string]uint64)
+		}
+		s.stepSeqByBuild[build.ID]++
+		seq := s.stepSeqByBuild[build.ID]
 		req := UpdateActiveStepRequest{
 			ActiveSteps: maps.Clone(activeSteps),
 			ClearAll:    isClearAll,
 		}
 		s.activeStepMu.Unlock()
 
-		if err := s.forwardActiveStep(ctx, build, req); err != nil {
+		if err := s.forwardActiveStep(ctx, build, req, seq); err != nil {
 			s.activeStepMu.Lock()
 			delete(s.inFlightBuilds, build.ID)
 			delete(s.dirtyBuilds, build.ID)

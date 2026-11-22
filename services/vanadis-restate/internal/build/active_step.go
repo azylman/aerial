@@ -12,6 +12,7 @@ import (
 
 	restate "github.com/restatedev/sdk-go"
 
+	"github.com/azylman/aerial/services/vanadis-restate/internal/executor"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
 )
@@ -53,7 +54,7 @@ func (s *activeStepSyncState) recordUpdateLocked(req UpdateActiveStepRequest, st
 	}
 }
 
-func (s *activeStepSyncState) cleanupLocked(buildID string, activeStepSyncs *sync.Map) {
+func (s *activeStepSyncState) cleanupLocked(buildID string, activeStepSyncs *sync.Map, exec *executor.Executor) {
 	s.inFlight = false
 	s.dirty = false
 	allEmpty := true
@@ -65,6 +66,9 @@ func (s *activeStepSyncState) cleanupLocked(buildID string, activeStepSyncs *syn
 	}
 	if allEmpty {
 		activeStepSyncs.Delete(buildID)
+		if exec != nil {
+			exec.ClearActiveSteps(buildID)
+		}
 	}
 }
 
@@ -126,6 +130,14 @@ func (b *BuildObject) syncSingleActiveStepIteration(rc restate.RunContext, build
 	isAuthoritative := req.ActiveSteps != nil || req.ClearAll
 	state.mu.Unlock()
 
+	if b.executor != nil {
+		if req.ClearAll || len(currentSteps) == 0 {
+			b.executor.ClearActiveSteps(buildID)
+		} else {
+			b.executor.SetActiveSteps(buildID, currentSteps)
+		}
+	}
+
 	applyActiveStepsToChunks(chunks, currentSteps, isAuthoritative)
 
 	if bld == nil || bld.Quiet {
@@ -159,7 +171,7 @@ func (b *BuildObject) coalesceActiveStepSync(rc restate.RunContext, buildID stri
 
 	defer func() {
 		state.mu.Lock()
-		state.cleanupLocked(buildID, &b.activeStepSyncs)
+		state.cleanupLocked(buildID, &b.activeStepSyncs, b.executor)
 		state.mu.Unlock()
 	}()
 

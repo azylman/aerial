@@ -727,14 +727,14 @@ func TestServerIngressIdempotencyKeys(t *testing.T) {
 			method:  http.MethodPost,
 			path:    "/chunks/active-step",
 			body:    `{"chunk_id":"c1","active_step":"running tests"}`,
-			wantKey: fmt.Sprintf("active-step:b1:c1:%x", sha256.Sum256([]byte("running tests"))),
+			wantKey: fmt.Sprintf("active-step:b1:c1:1:%x", sha256.Sum256([]byte("running tests"))),
 		},
 		{
 			name:    "active step with step fallback sets key",
 			method:  http.MethodPost,
 			path:    "/chunks/active-step",
 			body:    `{"chunk_id":"c1","step":"compiling code"}`,
-			wantKey: fmt.Sprintf("active-step:b1:c1:%x", sha256.Sum256([]byte("compiling code"))),
+			wantKey: fmt.Sprintf("active-step:b1:c1:1:%x", sha256.Sum256([]byte("compiling code"))),
 		},
 	}
 	for _, tc := range tests {

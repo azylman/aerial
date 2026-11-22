@@ -69,6 +69,7 @@ type updateActiveStepTestCase struct {
 	expectErrSub    string
 	expectStep      string
 	expectOtherStep string
+	expectCleared   bool
 	expectWidget    bool
 }
 
@@ -114,14 +115,20 @@ func executeUpdateActiveStepTestCase(t *testing.T, tc updateActiveStepTestCase) 
 	}
 	require.NoError(t, err)
 	assert.Equal(t, AckResponse{Status: "ok"}, resp)
-	if tc.expectStep != "" && len(tc.storeChunks) > 0 {
-		assert.Equal(t, tc.expectStep, tc.storeChunks[0].ActiveStep)
-	}
-	if tc.expectOtherStep != "" && len(tc.storeChunks) > 1 {
-		assert.Equal(t, tc.expectOtherStep, tc.storeChunks[1].ActiveStep)
+	if tc.expectCleared {
+		for i := range tc.storeChunks {
+			assert.Empty(t, tc.storeChunks[i].ActiveStep)
+		}
+	} else {
+		if tc.expectStep != "" && len(tc.storeChunks) > 0 {
+			assert.Equal(t, tc.expectStep, tc.storeChunks[0].ActiveStep)
+		}
+		if tc.expectOtherStep != "" && len(tc.storeChunks) > 1 {
+			assert.Equal(t, tc.expectOtherStep, tc.storeChunks[1].ActiveStep)
+		}
 	}
 	if tc.expectWidget {
-		assertSyncedWidgetStep(t, eri, tc.req.ChunkID, tc.expectStep)
+		assertSyncedWidgetStep(t, eri, tc.req.ChunkID, tc.expectStep, tc.expectCleared)
 		assert.True(t, widgetTimedOut, "expected bounded context timeout on widget sync")
 		assert.LessOrEqual(t, remainingTimeout, 3*time.Second)
 		assert.Positive(t, remainingTimeout)
@@ -241,8 +248,9 @@ func TestUpdateActiveStep(t *testing.T) {
 				{ID: "chunk-1", BuildID: "b-active", Title: "Chunk 1", Status: "running", ActiveStep: "old-1"},
 				{ID: "chunk-2", BuildID: "b-active", Title: "Chunk 2", Status: "running", ActiveStep: "old-2"},
 			},
-			expectStep:   "",
-			expectWidget: true,
+			expectStep:    "",
+			expectCleared: true,
+			expectWidget:  true,
 		},
 		{
 			name:       "empty chunk_id with empty active_steps map clears active steps",
@@ -252,8 +260,9 @@ func TestUpdateActiveStep(t *testing.T) {
 			storeChunks: []model.VanadisChunk{
 				{ID: "chunk-1", BuildID: "b-active", Title: "Chunk 1", Status: "running", ActiveStep: "old-1"},
 			},
-			expectStep:   "",
-			expectWidget: true,
+			expectStep:    "",
+			expectCleared: true,
+			expectWidget:  true,
 		},
 		{
 			name:       "single-chunk fallback update preserves other chunk active steps",
@@ -390,10 +399,16 @@ func TestUpdateActiveStep_ConcurrentCoalesce(t *testing.T) {
 	}
 }
 
-func assertSyncedWidgetStep(t *testing.T, eri *mockEriClient, chunkID, expectStep string) {
+func assertSyncedWidgetStep(t *testing.T, eri *mockEriClient, chunkID, expectStep string, expectCleared ...bool) {
 	t.Helper()
 	require.NotNil(t, eri.LastWidget)
 	assert.True(t, eri.LastWidget.SkipSink, "active step widget sync must set SkipSink = true")
+	if len(expectCleared) > 0 && expectCleared[0] {
+		for _, ch := range eri.LastWidget.Chunks {
+			assert.Empty(t, ch.ActiveStep, "expected chunk %s active step to be cleared", ch.ID)
+		}
+		return
+	}
 	if chunkID == "" || expectStep == "" {
 		return
 	}
@@ -404,4 +419,33 @@ func assertSyncedWidgetStep(t *testing.T, eri *mockEriClient, chunkID, expectSte
 		}
 	}
 	t.Fatalf("expected chunk %s in synced widget chunks", chunkID)
+}
+
+func TestSyncBuildWidget_PreservesActiveStep(t *testing.T) {
+	t.Parallel()
+
+	var lastWidget executor.StatusWidgetRequest
+	eri := &mockEriClient{
+		widgetFn: func(_ context.Context, req executor.StatusWidgetRequest) (string, error) {
+			lastWidget = req
+			return "msg-123", nil
+		},
+	}
+	exec := executor.NewExecutor("", eri, nil, "", "azylman", nil)
+	exec.SetActiveSteps("b-test", map[string]string{
+		"c-running": "⚡ Compiling packages...",
+	})
+
+	bld := model.VanadisBuild{ID: "b-test", Title: "Build", Status: "running"}
+	// Non-active-step widget sync: caller passes chunks with empty ActiveStep (e.g. loaded fresh from DB)
+	chunks := []model.VanadisChunk{
+		{ID: "c-running", BuildID: "b-test", Title: "Chunk 1", Status: "running", ActiveStep: ""},
+		{ID: "c-other", BuildID: "b-test", Title: "Chunk 2", Status: "pending", ActiveStep: ""},
+	}
+
+	_, err := exec.SyncBuildWidget(context.Background(), nil, bld, chunks, "Status changed")
+	require.NoError(t, err)
+	require.Len(t, lastWidget.Chunks, 2)
+	assert.Equal(t, "⚡ Compiling packages...", lastWidget.Chunks[0].ActiveStep, "non-active-step widget sync must preserve active step from executor overlay")
+	assert.Empty(t, lastWidget.Chunks[1].ActiveStep)
 }
