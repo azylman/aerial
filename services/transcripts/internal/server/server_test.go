@@ -46,7 +46,10 @@ func newTestStoreWithDB(t *testing.T, stack string) (*store.Store, *sql.DB) {
 
 func newTestStore(t *testing.T, stack string) *store.Store {
 	t.Helper()
-	st, _ := newTestStoreWithDB(t, stack)
+	st, db := newTestStoreWithDB(t, stack)
+	if db == nil {
+		t.Fatal("expected non-nil db")
+	}
 	return st
 }
 
@@ -266,7 +269,10 @@ func newK8sAuthMock(t *testing.T) *httptest.Server {
 					Token string `json:"token"`
 				} `json:"spec"`
 			}
-			_ = json.NewDecoder(r.Body).Decode(&tr)
+			if err := json.NewDecoder(r.Body).Decode(&tr); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
 			switch tr.Spec.Token {
 			case "valid-token":
 				_, _ = w.Write([]byte(`{"apiVersion":"authentication.k8s.io/v1","kind":"TokenReview","status":{"authenticated":true,"user":{"username":"system:serviceaccount:default:eri-aerial"}}}`))
@@ -290,7 +296,10 @@ func newK8sAuthMock(t *testing.T) *httptest.Server {
 					} `json:"resourceAttributes"`
 				} `json:"spec"`
 			}
-			_ = json.NewDecoder(r.Body).Decode(&sar)
+			if err := json.NewDecoder(r.Body).Decode(&sar); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
 			switch sar.Spec.User {
 			case "system:serviceaccount:default:eri-error":
 				http.Error(w, "internal sar error", http.StatusInternalServerError)
@@ -317,7 +326,9 @@ func TestServerAuth_RBAC(t *testing.T) {
 	t.Parallel()
 
 	tokenFile := t.TempDir() + "/token"
-	_ = os.WriteFile(tokenFile, []byte("host-token"), 0o600)
+	if err := os.WriteFile(tokenFile, []byte("host-token"), 0o600); err != nil {
+		t.Fatalf("failed to write token file: %v", err)
+	}
 
 	k8sMock := newK8sAuthMock(t)
 

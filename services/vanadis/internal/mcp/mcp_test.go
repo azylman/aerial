@@ -58,7 +58,10 @@ func TestMCP_HTTPTransport(t *testing.T) {
 				t.Fatalf("request failed: %v", err)
 			}
 			defer resp.Body.Close()
-			bodyBytes, _ := io.ReadAll(resp.Body)
+			bodyBytes, err := io.ReadAll(resp.Body)
+			if err != nil {
+				t.Fatalf("failed to read response body: %v", err)
+			}
 			if resp.StatusCode != tc.wantStatus {
 				t.Fatalf("status = %d, want %d (body: %s)", resp.StatusCode, tc.wantStatus, string(bodyBytes))
 			}
@@ -144,7 +147,10 @@ func newMCPToolsStore(listErr, getErr error) *storetest.Store {
 
 func handleMCPMockFailChunk(w http.ResponseWriter, r *http.Request, action bool) {
 	var failReq failChunkPayload
-	_ = json.NewDecoder(r.Body).Decode(&failReq)
+	if err := json.NewDecoder(r.Body).Decode(&failReq); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
 	if failReq.ChunkID == "nonexistent-chunk" {
 		w.WriteHeader(http.StatusNotFound)
 		_, _ = w.Write([]byte(`{"message":"chunk not found"}`))
@@ -163,7 +169,10 @@ func handleMCPMockFailChunk(w http.ResponseWriter, r *http.Request, action bool)
 
 func handleMCPMockCompleteChunk(w http.ResponseWriter, r *http.Request, body []byte) {
 	var req completeChunkPayload
-	_ = json.Unmarshal(body, &req)
+	if err := json.Unmarshal(body, &req); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
 	if req.DispatchID == "stale-dispatch" {
 		w.WriteHeader(http.StatusConflict)
 		_, _ = w.Write([]byte(`{"message":"vanadis build state conflict"}`))
@@ -183,7 +192,12 @@ func mockMCPRestateHandler(action bool) http.HandlerFunc {
 		path := r.URL.Path
 		var bodyBytes []byte
 		if r.Body != nil {
-			bodyBytes, _ = io.ReadAll(r.Body)
+			var err error
+			bodyBytes, err = io.ReadAll(r.Body)
+			if err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
 			r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 		}
 		bodyStr := string(bodyBytes)
@@ -373,7 +387,11 @@ func assertMCPToolResult(t *testing.T, respBytes []byte, wantToolErr bool, wantS
 	var toolResult struct {
 		IsError bool `json:"isError"`
 	}
-	_ = json.Unmarshal(rpcResp.Result, &toolResult)
+	if len(rpcResp.Result) > 0 {
+		if err := json.Unmarshal(rpcResp.Result, &toolResult); err != nil {
+			t.Fatalf("failed to decode tool result: %v, raw: %s", err, string(rpcResp.Result))
+		}
+	}
 
 	if wantToolErr {
 		isErr := toolResult.IsError || rpcResp.Error != nil
@@ -472,13 +490,23 @@ type retryIngressFixture struct {
 func (f *retryIngressFixture) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	f.key = r.Header.Get("Idempotency-Key")
 	f.path = r.URL.Path
-	_ = json.NewDecoder(r.Body).Decode(&f.request)
+	if err := json.NewDecoder(r.Body).Decode(&f.request); err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
 	status := f.status
 	if status == 0 {
 		status = 500
 	}
 	w.WriteHeader(status)
 	_, _ = w.Write([]byte(f.body))
+}
+
+func mustUnmarshal(t *testing.T, data []byte, v any) {
+	t.Helper()
+	if err := json.Unmarshal(data, v); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
 }
 
 func TestRetryActionIntake(t *testing.T) {
@@ -523,10 +551,7 @@ func TestRetryActionIntake(t *testing.T) {
 			f := &retryIngressFixture{status: tc.ingressStatus, body: tc.ingressBody}
 			ts := httptest.NewServer(f)
 			defer ts.Close()
-			status := tc.buildStatus
-			if status == "" {
-				status = "failed"
-			}
+			status := cmp.Or(tc.buildStatus, "failed")
 			var rc *restate.Client
 			if !tc.noIngress {
 				rc = restate.NewClient(config.RestateConfig{RestateIngressURL: ts.URL}, ts.Client())
@@ -549,7 +574,7 @@ func TestRetryActionIntake(t *testing.T) {
 				t.Fatalf("durable path=%s key=%s", f.path, f.key)
 			}
 			var sent RetryActionChunkRequest
-			_ = json.Unmarshal([]byte(tc.body), &sent)
+			mustUnmarshal(t, []byte(tc.body), &sent)
 			if !reflect.DeepEqual(f.request, sent) {
 				t.Fatal("correction not forwarded")
 			}

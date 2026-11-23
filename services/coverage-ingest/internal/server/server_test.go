@@ -88,7 +88,10 @@ func (r *fakeRunner) Func(_ context.Context, dirs []string) ([]byte, error) {
 	r.dirCounts = append(r.dirCounts, len(dirs))
 	var files []string
 	for _, d := range dirs {
-		entries, _ := os.ReadDir(d)
+		entries, err := os.ReadDir(d)
+		if err != nil {
+			return nil, err
+		}
 		for _, e := range entries {
 			files = append(files, e.Name())
 		}

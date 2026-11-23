@@ -107,7 +107,10 @@ func TestInitPostgresAndRunServer(t *testing.T) {
 	if _, err := initPostgres(ctx, srv, "postgres://user:pass@invalid%xx/db"); err == nil {
 		t.Fatal("expected parse error")
 	}
-	cfg, _ := pgxpool.ParseConfig("postgres://u:p@127.0.0.1:5432/db")
+	cfg, err := pgxpool.ParseConfig("postgres://u:p@127.0.0.1:5432/db")
+	if err != nil {
+		t.Fatalf("pgxpool.ParseConfig failed: %v", err)
+	}
 	cleanup, err := initPostgres(ctx, srv, cfg.ConnString())
 	if err != nil || cleanup == nil {
 		t.Fatalf("expected success from initPostgres, got err=%v", err)
@@ -255,7 +258,10 @@ func TestRetryActionRouteWiring(t *testing.T) {
 				t.Fatalf("request failed: %v", err)
 			}
 			defer resp.Body.Close()
-			body, _ := io.ReadAll(resp.Body)
+			body, err := io.ReadAll(resp.Body)
+			if err != nil {
+				t.Fatalf("failed to read body: %v", err)
+			}
 			if resp.StatusCode != tc.wantStatus {
 				t.Fatalf("status = %d, want %d (body: %s)", resp.StatusCode, tc.wantStatus, string(body))
 			}
@@ -366,7 +372,10 @@ func TestMCPHandlerLiveDependencies(t *testing.T) {
 				t.Fatalf("request failed: %v", err)
 			}
 			defer resp.Body.Close()
-			body, _ := io.ReadAll(resp.Body)
+			body, err := io.ReadAll(resp.Body)
+			if err != nil {
+				t.Fatalf("failed to read body: %v", err)
+			}
 			if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), tc.wantSubstr) {
 				t.Fatalf("status=%d body=%s, want substring %q", resp.StatusCode, string(body), tc.wantSubstr)
 			}

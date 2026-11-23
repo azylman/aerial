@@ -35,7 +35,7 @@ type errorReader struct{}
 
 func (errorReader) Read([]byte) (int, error) { return 0, errors.New("read error") }
 
-func setupTestStoreWithBuild() (*memoryVanadisStore, string, []string) {
+func setupTestStoreWithBuild() *memoryVanadisStore {
 	s := newMemoryVanadisStore()
 	buildID := "build-test-1"
 	b := storetest.Build(buildID, "123456789012345678", "Test Build Title", "Test Objective", "running")
@@ -65,8 +65,10 @@ func setupTestStoreWithBuild() (*memoryVanadisStore, string, []string) {
 		CreatedAt:  time.Now().UTC(),
 		UpdatedAt:  time.Now().UTC(),
 	}
-	_ = s.CreateBuild(context.Background(), b, []VanadisChunk{c1, c2})
-	return s, buildID, []string{"chunk-1", "chunk-2"}
+	if err := s.CreateBuild(context.Background(), b, []VanadisChunk{c1, c2}); err != nil {
+		panic(err)
+	}
+	return s
 }
 
 func TestValidateUpdateChunkInput_Validation(t *testing.T) {
@@ -170,7 +172,7 @@ func TestVanadisServer_HandleChunkByID(t *testing.T) {
 			t.Parallel()
 			var store VanadisStore
 			if !tc.nilStore {
-				store, _, _ = setupTestStoreWithBuild()
+				store = setupTestStoreWithBuild()
 			}
 			rec := serveChunkRequest(NewVanadisServer(Config{}, RestateConfig{}, store, nil), tc.method, tc.path, "", false)
 			if rec.Code != tc.wantCode {
@@ -219,7 +221,10 @@ func mockRestateCheckErrors(w http.ResponseWriter, path, bodyStr string) bool {
 func mockRestateRouteSuccess(w http.ResponseWriter, path string, bodyBytes []byte) {
 	if strings.Contains(path, "RouteAttachPR") {
 		var req AttachChunkPRRequest
-		_ = json.Unmarshal(bodyBytes, &req)
+		if err := json.Unmarshal(bodyBytes, &req); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
 		if req.ChunkID == "missing-chunk" {
 			w.WriteHeader(http.StatusNotFound)
 			_, _ = w.Write([]byte(`{"message":"chunk not found"}`))
@@ -266,7 +271,10 @@ func mockRestateRouteSuccess(w http.ResponseWriter, path string, bodyBytes []byt
 	}
 	if strings.Contains(path, "Create") {
 		var createReq CreateBuildRequest
-		_ = json.Unmarshal(bodyBytes, &createReq)
+		if err := json.Unmarshal(bodyBytes, &createReq); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
 		buildID := strutil.FirstNonEmpty(createReq.ID, "b1")
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(VanadisBuild{
@@ -288,7 +296,12 @@ func newMockRestateServer() *httptest.Server {
 		path := r.URL.Path
 		var bodyBytes []byte
 		if r.Body != nil {
-			bodyBytes, _ = io.ReadAll(r.Body)
+			var err error
+			bodyBytes, err = io.ReadAll(r.Body)
+			if err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
 			r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 		}
 		if mockRestateMisrouted(w, path, bodyBytes) || mockRestateCheckErrors(w, path, string(bodyBytes)) {
@@ -332,7 +345,7 @@ func TestVanadisServer_HandleAttachChunkPR(t *testing.T) {
 
 			var store VanadisStore
 			if !tc.nilStore {
-				mem, _, _ := setupTestStoreWithBuild()
+				mem := setupTestStoreWithBuild()
 				mem.PreRecordErr = tc.preRecordErr
 				store = mem
 			}
