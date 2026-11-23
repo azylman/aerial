@@ -346,10 +346,20 @@ func (f *Flow) HandleCIRemediationTurnEnded(ctx context.Context, buildID, chunkI
 // hasFailingRoboRevCheck reports whether the chunk's recorded checks or its
 // failure banner name a failing RoboRev gate.
 func hasFailingRoboRevCheck(chunk model.VanadisChunk) bool {
+	hasRoboRev := false
 	for name, state := range chunk.CIChecks {
-		if prwire.IsRoboRevCheck(name) && state == "failed" {
-			return true
+		if strings.TrimSpace(name) == "_" {
+			continue
 		}
+		if state == "failed" {
+			if !prwire.IsRoboRevCheck(name) {
+				return false
+			}
+			hasRoboRev = true
+		}
+	}
+	if hasRoboRev {
+		return true
 	}
 	name, ok := strings.CutPrefix(strings.TrimSpace(chunk.Banner), "CI check ")
 	if !ok {
@@ -451,6 +461,45 @@ func (f *Flow) syncBuildWidget(ctx context.Context, buildID, notice string) {
 	}
 }
 
+func validateChunkRemediationEligibility(chunk model.VanadisChunk, headSHA string) error {
+	if strings.TrimSpace(chunk.MergeSHA) != "" {
+		return ErrPRTransitionSkipped
+	}
+	switch strings.TrimSpace(chunk.Status) {
+	case statusMerged, statusSynced, statusDeploying, statusDeployed, statusDeployFailed, "completed", statusFailed, "cancelled":
+		return ErrPRTransitionSkipped
+	}
+	if head := strings.TrimSpace(headSHA); head != "" && chunk.HeadSHA != "" && !strings.EqualFold(chunk.HeadSHA, head) {
+		return ErrPRTransitionSkipped
+	}
+	return nil
+}
+
+func (f *Flow) applyCoalescedCIFailureState(ctx context.Context, chunkID, cleanHead string, ev *pubsub.PRLifecycleEvent, res *executor.CIFailureResolution, banner *string) error {
+	if f.Store != nil {
+		for _, chkName := range res.FailedChecks {
+			if executor.IsWorkflowRunFailure(ev.CheckURL, ev.Details) || !strings.EqualFold(chkName, ev.CheckName) {
+				if rErr := f.Store.RecordPRCheckStatus(ctx, chunkID, cleanHead, chkName, "failed"); rErr != nil {
+					return rErr
+				}
+			}
+		}
+	}
+
+	if res.CheckName != "" && res.CheckName != ev.CheckName {
+		ev.CheckName = res.CheckName
+		*banner = fmt.Sprintf("CI check %q failed", ev.CheckName)
+		if f.Store != nil {
+			if uErr := f.Store.UpdateChunkBannerAndStatus(ctx, chunkID, statusCIFailed, *banner); uErr != nil {
+				return uErr
+			}
+		}
+	}
+
+	ev.Details = res.Details
+	return nil
+}
+
 // HandleCIFailureEvent records a CI failure and orchestrates remediation,
 // tripping the remediation cap only for failures beyond the attempt budget.
 // A trailing failure on the same SHA that is already under remediation is
@@ -460,8 +509,10 @@ func (f *Flow) HandleCIFailureEvent(ctx context.Context, buildID, chunkID, event
 	if executor.IsGateAggregatorCheck(ev.CheckName) {
 		return nil
 	}
-	if err := f.HandlePRCheckEvent(ctx, chunkID, event, ev); err != nil {
-		return f.handleSkippedCheckTransition(ctx, buildID, chunkID, ev, err)
+	if !executor.IsWorkflowRunFailure(ev.CheckURL, ev.Details) {
+		if err := f.HandlePRCheckEvent(ctx, chunkID, event, ev); err != nil {
+			return f.handleSkippedCheckTransition(ctx, buildID, chunkID, ev, err)
+		}
 	}
 	banner := fmt.Sprintf("CI check %q failed", ev.CheckName)
 	if f.Store != nil {
@@ -476,26 +527,33 @@ func (f *Flow) HandleCIFailureEvent(ctx context.Context, buildID, chunkID, event
 	if err != nil {
 		return err
 	}
-	if strings.TrimSpace(chunk.MergeSHA) != "" {
-		return ErrPRTransitionSkipped
-	}
-	switch strings.TrimSpace(chunk.Status) {
-	case statusMerged, statusSynced, statusDeploying, statusDeployed, statusDeployFailed, "completed", statusFailed, "cancelled":
-		return ErrPRTransitionSkipped
-	}
-	if head := strings.TrimSpace(ev.HeadSHA); head != "" && chunk.HeadSHA != "" && !strings.EqualFold(chunk.HeadSHA, head) {
-		return ErrPRTransitionSkipped
+	if vErr := validateChunkRemediationEligibility(chunk, ev.HeadSHA); vErr != nil {
+		return vErr
 	}
 	cleanHead := strings.TrimSpace(ev.HeadSHA)
-	if chunk.CIFailCount >= executor.MaxCIRemediationAttempts {
+	if executor.ExtractActionsRunID(ev.CheckURL) == 0 && chunk.CIFailCount >= executor.MaxCIRemediationAttempts {
 		return f.handleCIFailureAtCap(ctx, buildID, chunkID, banner, cleanHead, chunk, ev)
 	}
-	details, err := f.Exec.ResolveCIFailureDetailsChecked(ctx, ev.Repo, ev.PRNumber, ev.CheckName, ev.HeadSHA, ev.CheckURL, ev.Details)
+
+	res, err := f.Exec.ResolveCIFailureChecked(ctx, ev.Repo, ev.PRNumber, ev.CheckName, ev.HeadSHA, ev.CheckURL, ev.Details)
 	if err != nil {
 		return err
 	}
+	if res.Pending {
+		f.syncBuildWidget(ctx, buildID, banner+" — waiting for remaining CI jobs to finish")
+		return nil
+	}
+
+	if aErr := f.applyCoalescedCIFailureState(ctx, chunkID, cleanHead, &ev, &res, &banner); aErr != nil {
+		return aErr
+	}
+
+	if chunk.CIFailCount >= executor.MaxCIRemediationAttempts {
+		return f.handleCIFailureAtCap(ctx, buildID, chunkID, banner, cleanHead, chunk, ev)
+	}
+
 	dispatchID := executor.CIRemediationDispatchID(chunkID, ev.HeadSHA, chunk.CIFailCount+1)
-	ciPrompt := executor.FormatCIFailurePrompt(ev, details, chunkID, dispatchID)
+	ciPrompt := executor.FormatCIFailurePrompt(ev, res.Details, chunkID, dispatchID)
 	skipIfActive := cleanHead == "" || strings.EqualFold(strings.TrimSpace(chunk.RemediatedSHA), cleanHead)
 	if err = f.DispatchChunkRemediationForChunk(ctx, bld, chunk, dispatchID, ciPrompt, skipIfActive); err != nil {
 		if errors.Is(err, eriwire.ErrDispatchActive) {
