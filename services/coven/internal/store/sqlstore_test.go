@@ -1006,7 +1006,10 @@ func TestOllamaClient_GenerateEmbedding(t *testing.T) {
 		var req struct {
 			Prompt string `json:"prompt"`
 		}
-		_ = json.NewDecoder(r.Body).Decode(&req)
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 		mu.Lock()
 		gotPrompt = req.Prompt
 		mu.Unlock()
