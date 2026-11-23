@@ -147,7 +147,7 @@ func TestGuardProcess_EndToEnd(t *testing.T) {
 		{"all mode allows safe command and overwrites WaitMsBeforeAsync", "all", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "git status", "Cwd": "/data", "WaitMsBeforeAsync": 5000}}}`, false, 10000, "git status -sb", ""},
 		{"claude bash git status rewritten without waitms overwrite", "all", `{"session_id": "s1", "hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": "git status"}}`, false, 0, "git status -sb", ""},
 		{"claude share edit denied", "share", `{"session_id": "s1", "hook_event_name": "PreToolUse", "tool_name": "Edit", "tool_input": {"file_path": "/share/aerial/main.go"}}`, true, 0, "", ""},
-		{"all mode preserves psql -A overwrite and WaitMsBeforeAsync", "all", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "psql -c \"\\dt\"", "Cwd": "/data"}}}`, false, 10000, `psql -A -c "\dt"`, ""},
+		{"all mode preserves psql -A -w overwrite and WaitMsBeforeAsync", "all", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "psql -c \"\\dt\"", "Cwd": "/data"}}}`, false, 10000, `psql -A -w -c "\dt"`, ""},
 		{"non-intercepted view_file", "all", `{"toolCall": {"name": "view_file", "args": {"AbsolutePath": "/share/aerial/README.md"}}}`, false, 0, "", ""},
 		{"empty tool call", "all", `{"toolCall": {"name": "", "args": {}}}`, false, 0, "", ""},
 		{"search mode denies unconstrained find", "search", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "find / -name foo"}}}`, true, 0, "", ""},
