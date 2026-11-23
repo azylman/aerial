@@ -1,14 +1,17 @@
 package router
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/azylman/aerial/pkg/prwire"
+	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/synapse/internal/model"
 )
 
@@ -768,6 +771,286 @@ func TestDispatchOwnedWorkflowRunImages(t *testing.T) {
 				t.Fatalf("dispatchOwnedWorkflowRunImages() err = %v, wantErr %v", err, tc.wantErr)
 			}
 			assertOwnedDeploy(t, h, tc.wantPaths, tc.wantBodies, 0)
+		})
+	}
+}
+
+func TestDispatchDeploymentSuccessPrompt(t *testing.T) {
+	t.Parallel()
+	validSnowflake := "100000000000000001"
+	tests := []struct {
+		name           string
+		targetID       string
+		wantPrompts    int
+		wantPromptSubs []string
+	}{
+		{
+			name:        "valid target prompts the system channel",
+			targetID:    validSnowflake,
+			wantPrompts: 1,
+			wantPromptSubs: []string{
+				"Continuous Delivery deployment completed for job brain on azylman/aerial (PR #0, commit: sha123, ref: alloc-1).",
+				"Directive: Confirm the deployment and suggest logical next steps, follow-up verification, or related tasks concisely.",
+			},
+		},
+		{name: "invalid snowflake is no-op", targetID: "invalid-snowflake"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			mockDisp := &mockOutboundDispatcher{}
+			srv := newTestRouter(Config{}, nil, mockDisp)
+			evt := DeployEvent{TargetID: tc.targetID, JobName: "brain", Repo: "azylman/aerial", CommitSHA: "sha123", DeploymentID: "alloc-1"}
+			if err := srv.dispatchDeploymentSuccessPrompt(context.Background(), evt); err != nil {
+				t.Fatalf("dispatchDeploymentSuccessPrompt() = %v", err)
+			}
+			pCalls := mockDisp.PromptCalls()
+			if len(pCalls) != tc.wantPrompts {
+				t.Fatalf("got %d prompts, want %d", len(pCalls), tc.wantPrompts)
+			}
+			for _, sub := range tc.wantPromptSubs {
+				if !strings.Contains(pCalls[0].Prompt, sub) {
+					t.Errorf("prompt %q missing %q", pCalls[0].Prompt, sub)
+				}
+			}
+			if got := len(mockDisp.DirectMessageCalls()); got != 0 {
+				t.Errorf("got %d DMs, want 0", got)
+			}
+		})
+	}
+}
+
+func TestDispatchAlertWithPrompt(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	validSnowflake := "123456789012345678"
+
+	tests := []struct {
+		name          string
+		nilDispatcher bool
+		targetID      string
+		dmMsg         string
+		prompt        string
+		opt           *alertPromptOpts
+		dispatchErr   error
+		wantErr       bool
+		wantDMs       int
+		wantPrompts   int
+		wantBg        int
+	}{
+		{
+			name:          "nil dispatcher returns nil",
+			nilDispatcher: true,
+			targetID:      validSnowflake,
+			prompt:        "test prompt",
+		},
+		{
+			name:        "invalid target without silent is no-op",
+			targetID:    "invalid-snowflake",
+			prompt:      "test prompt",
+			wantPrompts: 0,
+		},
+		{
+			name:        "valid target with dm and prompt dispatches both",
+			targetID:    validSnowflake,
+			dmMsg:       "direct message alert",
+			prompt:      "prompt directive",
+			wantDMs:     1,
+			wantPrompts: 1,
+		},
+		{
+			name:        "prompt dispatch error returns error",
+			targetID:    validSnowflake,
+			prompt:      "prompt directive",
+			dispatchErr: errors.New("prompt dispatch failed"),
+			wantErr:     true,
+			wantPrompts: 1,
+		},
+		{
+			name:     "silent background dispatch",
+			targetID: validSnowflake,
+			prompt:   "background prompt",
+			opt: &alertPromptOpts{
+				silent:       true,
+				skipIfActive: true,
+				effort:       "high",
+				dispatchID:   "disp-1",
+			},
+			wantBg: 1,
+		},
+		{
+			name:     "silent background dispatch error returns error",
+			targetID: validSnowflake,
+			prompt:   "background prompt",
+			opt: &alertPromptOpts{
+				silent: true,
+			},
+			dispatchErr: errors.New("background dispatch failed"),
+			wantErr:     true,
+			wantBg:      1,
+		},
+		{
+			name:        "dmMsg dispatch error logs warning and continues to prompt",
+			targetID:    validSnowflake,
+			dmMsg:       "dm alert",
+			prompt:      "prompt directive",
+			dispatchErr: errors.New("dm error"),
+			wantErr:     true, // prompt also fails when dispatcher returns error
+			wantDMs:     1,
+			wantPrompts: 1,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			srv := NewRouterServer(fixedConfig(Config{}), nil)
+			var mockDisp *mockOutboundDispatcher
+			if !tc.nilDispatcher {
+				mockDisp = &mockOutboundDispatcher{
+					promptErr:        tc.dispatchErr,
+					dispatchErr:      tc.dispatchErr,
+					directMessageErr: tc.dispatchErr,
+				}
+				srv.SetDispatcher(mockDisp)
+			}
+
+			var aOpts []alertPromptOpts
+			if tc.opt != nil {
+				aOpts = append(aOpts, *tc.opt)
+			}
+			err := srv.dispatchAlertWithPrompt(ctx, tc.targetID, "test_alert", tc.dmMsg, tc.prompt, aOpts...)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("dispatchAlertWithPrompt() err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			if mockDisp != nil {
+				if len(mockDisp.DirectMessageCalls()) != tc.wantDMs {
+					t.Errorf("got %d DMs, want %d", len(mockDisp.DirectMessageCalls()), tc.wantDMs)
+				}
+				if len(mockDisp.PromptCalls()) != tc.wantPrompts {
+					t.Errorf("got %d prompts, want %d", len(mockDisp.PromptCalls()), tc.wantPrompts)
+				}
+				if len(mockDisp.DispatchCalls()) != tc.wantBg {
+					t.Errorf("got %d bg calls, want %d", len(mockDisp.DispatchCalls()), tc.wantBg)
+				}
+			}
+		})
+	}
+}
+
+func TestDeployEventIdempotencyKey(t *testing.T) {
+	t.Parallel()
+
+	// Nonce uniqueness across empty events
+	k1 := deployEventIdempotencyKey(DeployEvent{}, "")
+	k2 := deployEventIdempotencyKey(DeployEvent{}, "")
+	if k1 == k2 {
+		t.Errorf("expected distinct random nonces for empty deploy events, got collision %q", k1)
+	}
+
+	base := DeployEvent{
+		Event:     "deploy_success",
+		Repo:      "azylman/aerial",
+		JobName:   "eri",
+		CommitSHA: "abcdef123456",
+	}
+
+	// Determinism: same input yields identical key
+	baseKey := deployEventIdempotencyKey(base, "flux")
+	if deployEventIdempotencyKey(base, "flux") != baseKey {
+		t.Errorf("expected deterministic idempotency key for identical inputs")
+	}
+
+	// Field distinctness: altering any field or prefix must yield a different key
+	cases := []struct {
+		name string
+		evt  DeployEvent
+		pfx  string
+	}{
+		{name: "different prefix", evt: base, pfx: "other"},
+		{name: "empty prefix", evt: base, pfx: ""},
+		{name: "different event", evt: DeployEvent{Event: "deploy_failed", Repo: base.Repo, JobName: base.JobName, CommitSHA: base.CommitSHA}, pfx: "flux"},
+		{name: "different repo", evt: DeployEvent{Event: base.Event, Repo: "azylman/mirrormere", JobName: base.JobName, CommitSHA: base.CommitSHA}, pfx: "flux"},
+		{name: "different job", evt: DeployEvent{Event: base.Event, Repo: base.Repo, JobName: "synapse", CommitSHA: base.CommitSHA}, pfx: "flux"},
+		{name: "different sha", evt: DeployEvent{Event: base.Event, Repo: base.Repo, JobName: base.JobName, CommitSHA: "fedcba654321"}, pfx: "flux"},
+	}
+
+	for _, tc := range cases {
+		if deployEventIdempotencyKey(tc.evt, tc.pfx) == baseKey {
+			t.Errorf("case %q collided with base idempotency key %q", tc.name, baseKey)
+		}
+	}
+}
+
+// wantPREvent is the declarative projection of a published PR lifecycle event.
+type wantPREvent struct {
+	Event      string
+	PRNumber   int
+	HeadSHA    string
+	MergeSHA   string
+	Status     string
+	Title      string
+	CheckName  string
+	CheckState string
+}
+
+// newLifecycleServer builds a router through the production constructor; nil
+// mocks stay unset so typed-nil pointers never reach the interface fields.
+func newLifecycleServer(cfg Config, bus *mockEventBus, disp *mockOutboundDispatcher) *RouterServer {
+	srv := newTestRouter(cfg, nil, nil, bus)
+	if disp != nil {
+		srv.SetDispatcher(disp)
+	}
+	return srv
+}
+
+func assertPREvents(t *testing.T, bus *mockEventBus, want []wantPREvent) {
+	t.Helper()
+	bus.mu.Lock()
+	published := append([]pubsub.PRLifecycleEvent(nil), bus.publishedPREvents...)
+	bus.mu.Unlock()
+	got := make([]wantPREvent, 0, len(published))
+	for _, ev := range published {
+		if ev.OccurredAt.IsZero() {
+			t.Errorf("published %q event has zero OccurredAt", ev.Event)
+		}
+		got = append(got, wantPREvent{
+			Event: ev.Event, PRNumber: ev.PRNumber, HeadSHA: ev.HeadSHA, MergeSHA: ev.MergeSHA,
+			Status: ev.Status, Title: ev.Title, CheckName: ev.CheckName, CheckState: ev.CheckState,
+		})
+	}
+	if len(want) == 0 && len(got) == 0 {
+		return
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("published PR events = %+v, want %+v", got, want)
+	}
+}
+
+func TestPublishPRLifecycleEvent(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		ev   pubsub.PRLifecycleEvent
+		want []wantPREvent
+	}{
+		{
+			name: "opened event published with fields and stamped OccurredAt",
+			ev:   pubsub.PRLifecycleEvent{Event: "opened", Repo: "azylman/aerial", PRNumber: 42, Branch: "feat/something", HeadSHA: "abcdef123456", Status: "open"},
+			want: []wantPREvent{{Event: "opened", PRNumber: 42, HeadSHA: "abcdef123456", Status: "open"}},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			bus := &mockEventBus{}
+			srv := newLifecycleServer(Config{}, bus, &mockOutboundDispatcher{})
+			if err := srv.publishPRLifecycleEvent(context.Background(), tc.ev); err != nil {
+				t.Fatalf("publishPRLifecycleEvent() err = %v", err)
+			}
+			assertPREvents(t, bus, tc.want)
 		})
 	}
 }
