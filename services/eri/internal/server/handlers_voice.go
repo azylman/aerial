@@ -1,4 +1,4 @@
-package main
+package server
 
 import (
 	"context"
@@ -14,6 +14,7 @@ import (
 
 	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/services/eri/internal/restateclient"
 	"github.com/azylman/aerial/services/eri/pkg/metrics"
 	"github.com/azylman/aerial/services/eri/pkg/queue"
 )
@@ -84,7 +85,7 @@ func drainVoiceEvents(events <-chan queue.VoiceStreamEvent, processEvent func(qu
 	}
 }
 
-func streamRestateVoiceEvents(ctx context.Context, pool *queue.WorkerPool, client *RestateIngressClient, bus pubsub.Bus, req VoiceAskRequest, sessionID string, onStatus, onSentence func(string), emitSSE func(string, any)) {
+func streamRestateVoiceEvents(ctx context.Context, pool *queue.WorkerPool, client *restateclient.RestateIngressClient, bus pubsub.Bus, req VoiceAskRequest, sessionID string, onStatus, onSentence func(string), emitSSE func(string, any)) {
 	turnID := uuid.New().String()
 	subject := "voice.stream." + turnID
 	replyReceived := false
@@ -222,7 +223,7 @@ func handleVoiceAskSSE(w http.ResponseWriter, r *http.Request, pool *queue.Worke
 		emitSSE("sentence", map[string]string{"text": sentence})
 	}
 
-	client := resolveRestateClient()
+	client := restateclient.ResolveRestateClient()
 	if bus := resolveVoiceEventBus(pool); bus != nil {
 		streamRestateVoiceEvents(r.Context(), pool, client, bus, req, sessionID, onStatus, onSentence, emitSSE)
 		return
@@ -278,7 +279,7 @@ func handleVoiceAsk(pool *queue.WorkerPool) http.HandlerFunc {
 			return
 		}
 
-		client := resolveRestateClient()
+		client := restateclient.ResolveRestateClient()
 		res, err := client.AskVoice(r.Context(), sessionID, queue.VoiceSessionRequest{
 			TurnID:         uuid.New().String(),
 			Prompt:         req.Prompt,

@@ -1,4 +1,4 @@
-package main
+package server
 
 import (
 	"context"
@@ -12,6 +12,7 @@ import (
 
 	"github.com/azylman/aerial/pkg/discordutil"
 	"github.com/azylman/aerial/pkg/tracing"
+	"github.com/azylman/aerial/services/eri/internal/restateclient"
 	"github.com/azylman/aerial/services/eri/pkg/classifier"
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
@@ -543,7 +544,7 @@ func isSelfOrNilMessage(s *discordgo.Session, m *discordgo.Message, botUserID st
 	return false
 }
 
-func processFunnelMessageIngress(ctx context.Context, s *discordgo.Session, m *discordgo.Message, botUserID string, extraRoleNames map[string]string, clients ...*RestateIngressClient) (string, error) {
+func processFunnelMessageIngress(ctx context.Context, s *discordgo.Session, m *discordgo.Message, botUserID string, extraRoleNames map[string]string, clients ...*restateclient.RestateIngressClient) (string, error) {
 	seedSessionStateForIngress(s, botUserID, m)
 
 	if isSelfOrNilMessage(s, m, botUserID) {
@@ -561,7 +562,7 @@ func processFunnelMessageIngress(ctx context.Context, s *discordgo.Session, m *d
 	}
 	msg := buildFunnelMessage(ctx, s, m, targetThreadID, m.Timestamp, extraRoleNames)
 	idempotencyKey := "discord:" + m.ID
-	if _, err := resolveRestateClient(clients...).EnqueueThread(ctx, targetThreadID, queue.ThreadEnqueueRequest{
+	if _, err := restateclient.ResolveRestateClient(clients...).EnqueueThread(ctx, targetThreadID, queue.ThreadEnqueueRequest{
 		Message: &msg,
 	}, idempotencyKey); err != nil {
 		return "", err
@@ -731,9 +732,9 @@ func connectDiscordFunnel(ctx context.Context, store db.Store, pool *queue.Worke
 }
 
 // activeTurnCanceller returns the Restate ingress client as an untyped nil interface when unset,
-// so the router never sees a typed-nil *RestateIngressClient.
+// so the router never sees a typed-nil *restateclient.RestateIngressClient.
 func activeTurnCanceller() interactions.TurnCanceller {
-	client := ActiveRestateIngressClient()
+	client := restateclient.ActiveRestateIngressClient()
 	if client == nil {
 		return nil
 	}

@@ -1,4 +1,4 @@
-package main
+package server
 
 import (
 	"bytes"
@@ -16,6 +16,7 @@ import (
 	"github.com/bwmarrin/discordgo"
 
 	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/services/eri/internal/restateclient"
 	"github.com/azylman/aerial/services/eri/pkg/db/dbtest"
 	"github.com/azylman/aerial/services/eri/pkg/metrics"
 	"github.com/azylman/aerial/services/eri/pkg/queue"
@@ -548,7 +549,7 @@ func TestStreamRestateVoiceEvents(t *testing.T) {
 			defer ts.Close()
 			defer close(release)
 
-			client := NewRestateIngressClient(ts.URL, "aerial", &http.Client{Transport: noCancelTransport{base: ts.Client().Transport}})
+			client := restateclient.NewRestateIngressClient(ts.URL, "aerial", &http.Client{Transport: noCancelTransport{base: ts.Client().Transport}})
 
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()

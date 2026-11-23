@@ -1,4 +1,4 @@
-package main
+package server
 
 import (
 	"context"
@@ -24,6 +24,7 @@ import (
 	"github.com/azylman/aerial/pkg/k8sauth"
 	"github.com/azylman/aerial/pkg/restateingress"
 	"github.com/azylman/aerial/pkg/sanitizer"
+	"github.com/azylman/aerial/services/eri/internal/restateclient"
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
 	"github.com/azylman/aerial/services/eri/pkg/delivery"
@@ -97,7 +98,7 @@ func handleDuplicatePrompt(ctx context.Context, w http.ResponseWriter, store db.
 	return false
 }
 
-func handleRestatePrompt(ctx context.Context, w http.ResponseWriter, client *RestateIngressClient, req PromptRequest, channelID string) {
+func handleRestatePrompt(ctx context.Context, w http.ResponseWriter, client *restateclient.RestateIngressClient, req PromptRequest, channelID string) {
 	msgID := strings.TrimSpace(req.MessageID)
 	if msgID == "" {
 		msgID = uuid.New().String()
@@ -164,7 +165,7 @@ func handlePrompt(store db.Store, pool *queue.WorkerPool) http.HandlerFunc {
 			return
 		}
 
-		handleRestatePrompt(r.Context(), w, resolveRestateClient(), req, channelID)
+		handleRestatePrompt(r.Context(), w, restateclient.ResolveRestateClient(), req, channelID)
 	}
 }
 
@@ -218,7 +219,7 @@ func handleDuplicateDispatch(ctx context.Context, w http.ResponseWriter, store d
 	return false
 }
 
-func handleRestateDispatch(ctx context.Context, w http.ResponseWriter, client *RestateIngressClient, req DispatchRequest, sessionID, dispatchID string) {
+func handleRestateDispatch(ctx context.Context, w http.ResponseWriter, client *restateclient.RestateIngressClient, req DispatchRequest, sessionID, dispatchID string) {
 	sessionKey := sessionID
 	if sessionKey == "" {
 		sessionKey = eriwire.ResolveDispatchSessionKey(eriwire.BrainDispatchRequest{
@@ -272,7 +273,7 @@ func handleDispatch(store db.Store) http.HandlerFunc {
 			return
 		}
 
-		handleRestateDispatch(r.Context(), w, resolveRestateClient(), req, sessionID, dispatchID)
+		handleRestateDispatch(r.Context(), w, restateclient.ResolveRestateClient(), req, sessionID, dispatchID)
 	}
 }
 
@@ -309,7 +310,7 @@ func handleCancelDispatch() http.HandlerFunc {
 			return
 		}
 		reason := resolveCancelReason(req.Reason, buildID, dispatchID)
-		count, ids, err := handleCancelDispatchViaRestate(r.Context(), resolveRestateClient(), dispatchID, buildID, reason)
+		count, ids, err := handleCancelDispatchViaRestate(r.Context(), restateclient.ResolveRestateClient(), dispatchID, buildID, reason)
 		if err != nil {
 			log.Printf("[HTTP] Failed to cancel dispatch via restate: %v", err)
 			writeErr(w, http.StatusInternalServerError, "Failed to cancel dispatch: "+err.Error())
@@ -713,7 +714,7 @@ func setNoCacheJSONHeaders(w http.ResponseWriter) {
 // header names the caller's logical operation; eri appends a content hash so a
 // retried or redelivered call attaches to the recorded result instead of paying
 // for a new one. Attachments are forwarded as URLs and staged by the service.
-func handleInternalLLM(client *RestateIngressClient) http.HandlerFunc {
+func handleInternalLLM(client *restateclient.RestateIngressClient) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			w.Header().Set("Allow", "POST")
@@ -1050,7 +1051,7 @@ func SetupBrainMuxWithEmbedder(store db.Store, txStore db.TranscriptStore, pool 
 	mux.HandleFunc("/transcripts/steps", stepsHandler)
 	mux.HandleFunc("/api/transcripts/steps", stepsHandler)
 	mux.HandleFunc("/tasks", handleTasks(store, pool))
-	mux.HandleFunc("/internal/llm", handleInternalLLM(activeRestateIngressClient.Load()))
+	mux.HandleFunc("/internal/llm", handleInternalLLM(restateclient.ActiveRestateIngressClient()))
 	mux.HandleFunc("/debug/coverage/flush", httpkit.HandleCoverageFlush("eri"))
 	healthHandler := func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

@@ -1,4 +1,4 @@
-package main
+package server
 
 import (
 	"context"
@@ -21,6 +21,7 @@ import (
 
 	"github.com/azylman/aerial/pkg/eriwire"
 	"github.com/azylman/aerial/pkg/httpkit"
+	"github.com/azylman/aerial/services/eri/internal/restateclient"
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
 	"github.com/azylman/aerial/services/eri/pkg/db/dbtest"
@@ -76,8 +77,8 @@ func installRestateCapture(t *testing.T, status int, resp string) *restateCaptur
 		_, _ = w.Write([]byte(resp))
 	}))
 	t.Cleanup(ts.Close)
-	orig := activeRestateIngressClient.Swap(NewRestateIngressClient(ts.URL, "aerial", ts.Client()))
-	t.Cleanup(func() { activeRestateIngressClient.Store(orig) })
+	orig := restateclient.SwapActiveRestateIngressClient(restateclient.NewRestateIngressClient(ts.URL, "aerial", ts.Client()))
+	t.Cleanup(func() { restateclient.StoreActiveRestateIngressClient(orig) })
 	return capture
 }
 
@@ -1093,9 +1094,9 @@ func TestHandleInternalLLM(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			ts, seen := newLLMIngressStub(t, tc.stubStatus, tc.stubBody)
-			var client *RestateIngressClient
+			var client *restateclient.RestateIngressClient
 			if !tc.nilClient {
-				client = NewRestateIngressClient(ts.URL, tc.agent, ts.Client())
+				client = restateclient.NewRestateIngressClient(ts.URL, tc.agent, ts.Client())
 			}
 			w := runHTTP(handleInternalLLM(client), tc.method, "/internal/llm", strings.NewReader(tc.body), "Idempotency-Key", tc.callerKey)
 			if w.Code != tc.wantStatus {
