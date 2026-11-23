@@ -79,7 +79,8 @@ func TestDeploymentGateRunStepJournal(t *testing.T) {
 
 // TestDeploygateRetryDelegation pins the thin Mutate retry_deployment wiring:
 // the deploygate outcome maps onto the result's BuildID and Status, and a
-// runtime without the deployment surface is rejected. Fencing and deadline
+// runtime without the deployment surface is rejected and a durable snapshot
+// failure surfaces. Fencing and deadline
 // re-arming belong to the deploygate package tests.
 func TestDeploygateRetryDelegation(t *testing.T) {
 	t.Parallel()
@@ -92,16 +93,18 @@ func TestDeploygateRetryDelegation(t *testing.T) {
 	tests := []struct {
 		name                  string
 		rt                    objectRuntime
+		storeErr              error
 		wantErr               string
 		wantBuild, wantStatus string
 	}{
 		{name: "deployment runtime", rt: gateRuntime(), wantBuild: "b", wantStatus: statusRunning},
 		{name: "runtime without deployment surface", rt: newFakeObjectRuntime("b"), wantErr: "deployment runtime unavailable"},
+		{name: "durable snapshot failure surfaces", rt: &deploymentGateFakeRuntime{fakeObjectRuntime: newFakeObjectRuntime("b"), now: now}, storeErr: errors.New("snapshot unavailable"), wantErr: "snapshot unavailable"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			st := &checkStatusSpyStore{chunks: []model.VanadisChunk{{ID: "c", PRNumber: 1, MergeSHA: "sha", Status: statusDeployFailed}}}
+			st := &fakeStore{builds: []model.VanadisBuild{{ID: "b", Status: statusRunning, ThreadID: "th-1"}}, chunks: []model.VanadisChunk{{ID: "c", BuildID: "b", PRNumber: 1, MergeSHA: "sha", Status: statusDeployFailed}}, errs: map[string]error{"GetBuild": tc.storeErr}}
 			bo := NewBuildObject("", nil, func(restate.ObjectContext) objectRuntime { return tc.rt }).WithAuthority(st, nil)
 			out, err := bo.Mutate(nil, BuildMutationRequest{Action: "retry_deployment", ChunkID: "c", Revision: "sha", Generation: 1})
 			if tc.wantErr != "" {
@@ -127,23 +130,15 @@ func TestDeploygateWrapperRuntimeGuards(t *testing.T) {
 }
 
 // TestDeploygateDelegationErrorPaths pins the remaining thin-delegation
-// branches: non-nil retry fencing conversion through the sync wrapper and
-// durable snapshot failures surfacing from the retry wrapper.
+// branch: non-nil retry fencing conversion through the sync wrapper.
 func TestDeploygateDelegationErrorPaths(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	rt := &deploymentGateFakeRuntime{fakeObjectRuntime: newFakeObjectRuntime("b"), now: now}
 	rt.attempts = map[string]deploygate.Attempt{"c": {ChunkID: "c", PRNumber: 1, Revision: "sha", Generation: 1, Deadline: now.Add(-time.Minute)}}
-	st := &checkStatusSpyStore{chunks: []model.VanadisChunk{{ID: "c", PRNumber: 1, MergeSHA: "sha", Status: statusDeploying}}}
+	st := &fakeStore{builds: []model.VanadisBuild{{ID: "b", Status: statusRunning, ThreadID: "th-1"}}, chunks: []model.VanadisChunk{{ID: "c", BuildID: "b", PRNumber: 1, MergeSHA: "sha", Status: statusDeploying}}}
 	bo := NewBuildObject("", nil).WithAuthority(st, nil)
 	state := &model.BuildObjectState{Build: model.VanadisBuild{Status: statusRunning}, Chunks: []model.VanadisChunk{{ID: "c", PRNumber: 1, MergeSHA: "sha", Status: statusDeploying}}}
 	require.NoError(t, bo.syncDeploymentDeadlines(rt, state, nil, &BuildMutationRequest{ChunkID: "c", Revision: "sha", Generation: 1}))
 	require.Equal(t, 2, rt.attempts["c"].Generation)
-
-	rtErr := &deploymentGateFakeRuntime{fakeObjectRuntime: newFakeObjectRuntime("b"), now: now}
-	stErr := &checkStatusSpyStore{getBuildErr: errors.New("snapshot unavailable")}
-	boErr := NewBuildObject("", nil).WithAuthority(stErr, nil)
-	boErr.runtimeFactory = func(restate.ObjectContext) objectRuntime { return rtErr }
-	_, err := boErr.Mutate(nil, BuildMutationRequest{Action: "retry_deployment", ChunkID: "c", Revision: "sha", Generation: 1})
-	require.Error(t, err)
 }
