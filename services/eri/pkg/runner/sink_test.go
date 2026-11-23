@@ -79,6 +79,8 @@ func TestIsSubstantiveResponse(t *testing.T) {
 		{"<turn>content</turn>", true},
 		{"Hello, I am Aerial.", true},
 		{"```go\nfmt.Println(1)\n```", true},
+		{"Turn is aborted because model did not make any tool calls or return any response text", false},
+		{"prefix Turn is aborted because model did not make any tool calls or return any response text suffix", false},
 	} {
 		if got := IsSubstantiveResponse(tc.in); got != tc.want {
 			t.Errorf("IsSubstantiveResponse(%q) = %v, want %v", tc.in, got, tc.want)

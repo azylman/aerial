@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/azylman/aerial/pkg/strutil"
+	"github.com/azylman/aerial/services/eri/pkg/session"
 )
 
 var (
@@ -529,6 +530,9 @@ func IsYieldTrap(exitCode int, stdout, stderr string) (bool, int) {
 				count = c
 			}
 			return true, count
+		}
+		if strings.Contains(output, session.AgyBackgroundAbortNotice) {
+			return true, 1
 		}
 	}
 	return false, 0

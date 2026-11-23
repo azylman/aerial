@@ -255,6 +255,10 @@ func TestIsYieldTrap(t *testing.T) {
 		{name: "Exit 0 with only leaving daemon tasks (no terminating tasks)", exitCode: 0, stdout: `{"status":"SUCCESS","response":"Done."}`, stderr: "leaving 1 daemon task(s) running on exit\n"},
 		{name: "Exit 0 with terminating 0 background tasks", exitCode: 0, stdout: `{"status":"SUCCESS","response":"Done."}`, stderr: "terminating 0 background task(s) on exit\n"},
 		{name: "Exit 0 with background task notice in stdout fallback", exitCode: 0, stdout: "terminating 1 background task(s) on exit\n", wantYield: true, wantCount: 1},
+		{name: "Exit 0 with background abort notice in stderr", exitCode: 0, stderr: "Turn is aborted because model did not make any tool calls or return any response text\n", wantYield: true, wantCount: 1},
+		{name: "Exit 0 with background abort notice in stdout", exitCode: 0, stdout: "Turn is aborted because model did not make any tool calls or return any response text\n", wantYield: true, wantCount: 1},
+		{name: "Exit 1 with background abort notice in stderr ignored", exitCode: 1, stderr: "Turn is aborted because model did not make any tool calls or return any response text\n"},
+		{name: "Exit 1 with background abort notice in stdout ignored", exitCode: 1, stdout: "Turn is aborted because model did not make any tool calls or return any response text\n"},
 	} {
 		gotYield, gotCount := IsYieldTrap(tc.exitCode, tc.stdout, tc.stderr)
 		if gotYield != tc.wantYield || gotCount != tc.wantCount {

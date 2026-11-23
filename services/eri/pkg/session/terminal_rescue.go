@@ -119,7 +119,7 @@ func validateTerminalResponse(finalStep transcriptStepRecord, since time.Time, m
 	}
 
 	trimmedContent := strings.TrimSpace(finalStep.Content)
-	if trimmedContent == "" || strings.HasPrefix(trimmedContent, "[Tool Call Requested]:") {
+	if trimmedContent == "" || strings.HasPrefix(trimmedContent, "[Tool Call Requested]:") || strings.Contains(trimmedContent, AgyBackgroundAbortNotice) {
 		return ""
 	}
 

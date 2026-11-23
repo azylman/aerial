@@ -141,6 +141,8 @@ func TestGuardProcess_EndToEnd(t *testing.T) {
 		{"live-state mode denies rm of live ssh config", "live-state", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "rm -f /data/ssh/config", "Cwd": "/data"}}}`, true, 0, "", ""},
 		{"all mode denies claude write to live ssh config", "all", `{"session_id": "s1", "hook_event_name": "PreToolUse", "tool_name": "Write", "tool_input": {"file_path": "/data/ssh/config"}}`, true, 0, "", ""},
 		{"all mode denies sleep violation", "all", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "sleep 5"}}}`, true, 0, "", ""},
+		{"all mode denies manage_task status", "all", `{"toolCall": {"name": "manage_task", "args": {"Action": "status", "TaskId": "t1"}}}`, true, 0, "", ""},
+		{"all mode denies manage_subagents list", "all", `{"toolCall": {"name": "manage_subagents", "args": {"Action": "list"}}}`, true, 0, "", ""},
 		{"all mode denies unconstrained search", "all", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "find / -name secret"}}}`, true, 0, "", ""},
 		{"all mode allows safe command and overwrites WaitMsBeforeAsync", "all", `{"toolCall": {"name": "run_command", "args": {"CommandLine": "git status", "Cwd": "/data", "WaitMsBeforeAsync": 5000}}}`, false, 10000, "git status -sb", ""},
 		{"claude bash git status rewritten without waitms overwrite", "all", `{"session_id": "s1", "hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": {"command": "git status"}}`, false, 0, "git status -sb", ""},
@@ -619,6 +621,70 @@ func TestOptionsFromEnv(t *testing.T) {
 			scanner, ok := opts.EgressScanner.(*HTTPEgressScanner)
 			if !ok || scanner.URL != "http://127.0.0.1:4028/internal/guard/egress-scan" || scanner.Client == nil || scanner.Client.Timeout != 2*time.Second {
 				t.Fatalf("OptionsFromEnv EgressScanner = %#v, want HTTP scanner on loopback 4028 with 2s timeout", opts.EgressScanner)
+			}
+		})
+	}
+}
+
+func TestCheckSchedule(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		payload  Payload
+		args     ToolArgs
+		wantDeny bool
+	}{
+		{
+			name:     "sleep command denied",
+			payload:  Payload{ToolCall: ToolCall{Name: "run_command"}},
+			args:     ToolArgs{CommandLine: "sleep 10"},
+			wantDeny: true,
+		},
+		{
+			name:     "manage_task status denied",
+			payload:  Payload{ToolCall: ToolCall{Name: "manage_task"}},
+			args:     ToolArgs{Action: "status"},
+			wantDeny: true,
+		},
+		{
+			name:     "manage_task list denied",
+			payload:  Payload{ToolCall: ToolCall{Name: "manage_task"}},
+			args:     ToolArgs{Action: "list"},
+			wantDeny: true,
+		},
+		{
+			name:     "manage_subagents list denied",
+			payload:  Payload{ToolCall: ToolCall{Name: "manage_subagents"}},
+			args:     ToolArgs{Action: "list"},
+			wantDeny: true,
+		},
+		{
+			name:     "task log file read denied",
+			payload:  Payload{ToolCall: ToolCall{Name: "read_file"}},
+			args:     ToolArgs{Path: "/data/brain/conv/.system_generated/tasks/task-1.log"},
+			wantDeny: true,
+		},
+		{
+			name:     "safe run_command allowed",
+			payload:  Payload{ToolCall: ToolCall{Name: "run_command"}},
+			args:     ToolArgs{CommandLine: "echo hello"},
+			wantDeny: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			d := CheckSchedule(tc.payload, tc.args)
+			if tc.wantDeny && d.Decision != DecisionDeny {
+				t.Fatalf("expected DecisionDeny, got %v", d.Decision)
+			}
+			if !tc.wantDeny && d.Decision != DecisionAllow {
+				t.Fatalf("expected DecisionAllow, got %v", d.Decision)
+			}
+			if tc.wantDeny && d.Reason == "" {
+				t.Fatalf("expected non-empty denial reason")
 			}
 		})
 	}
