@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -26,17 +27,10 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/classifier"
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
-	"github.com/azylman/aerial/services/eri/pkg/db/dbtest"
 	"github.com/azylman/aerial/services/eri/pkg/delivery"
 	"github.com/azylman/aerial/services/eri/pkg/runner"
 	"github.com/azylman/aerial/services/eri/pkg/session"
 )
-
-// setupTestStore returns a clean FakeStore for testing.
-func setupTestStore(t testing.TB) *dbtest.FakeStore {
-	t.Helper()
-	return dbtest.NewFakeStore()
-}
 
 func insertMessage(store db.Store, msg db.Message) error {
 	if store == nil {
@@ -284,7 +278,7 @@ type workerTestCase struct {
 	wantAttemptPromptContains, wantAttemptPromptExcludes                                                                                map[int][]string
 }
 
-func initWorkerTestSession(t *testing.T, tc workerTestCase, store *dbtest.FakeStore) (string, *session.Manager, string) {
+func initWorkerTestSession(t *testing.T, tc workerTestCase, store *db.SQLStore, sqlDB *sql.DB) (string, *session.Manager, string) {
 	t.Helper()
 	var tmpHome, threadID string
 	var sessMgr *session.Manager
@@ -305,7 +299,7 @@ func initWorkerTestSession(t *testing.T, tc workerTestCase, store *dbtest.FakeSt
 			_ = os.WriteFile(pbFile, []byte("mock-pb"), 0o644)
 			if tc.seedIdleAge > 0 {
 				idleTime := time.Now().UTC().Add(-tc.seedIdleAge)
-				store.SetSessionInfo(db.SessionInfo{ThreadID: threadID, InternalSessionID: tc.initialSessionID, TurnCount: tc.seedTurnCount, CreatedAt: idleTime, UpdatedAt: idleTime})
+				seedSessionInfo(t, store, sqlDB, db.SessionInfo{ThreadID: threadID, InternalSessionID: tc.initialSessionID, TurnCount: tc.seedTurnCount, CreatedAt: idleTime, UpdatedAt: idleTime})
 				_ = os.Chtimes(pbFile, idleTime, idleTime)
 				_ = os.Chtimes(cliPbDir, idleTime, idleTime)
 				_ = os.Chtimes(sessDir, idleTime, idleTime)
@@ -497,8 +491,8 @@ func makeWorkerTestConfig(tc workerTestCase, store db.Store, sessMgr *session.Ma
 
 func runWorkerTestCase(t *testing.T, tc workerTestCase) {
 	t.Helper()
-	store := setupTestStore(t)
-	tmpHome, sessMgr, threadID := initWorkerTestSession(t, tc, store)
+	store, sqlDB := newTestStore(t)
+	tmpHome, sessMgr, threadID := initWorkerTestSession(t, tc, store, sqlDB)
 	steps, wantDeliveredExcludes := setupWorkerTestPNG(t, tc, append([]mockRunnerStep(nil), tc.runnerSteps...), append([]string(nil), tc.wantDeliveredExcludes...))
 
 	if tc.seedTurnCount > 0 && tc.seedIdleAge == 0 {
@@ -561,7 +555,7 @@ type burstTestCase struct {
 	wantTurnPromptContains, wantTurnPromptExcludes                                                                                                                                                                                  map[int][]string
 }
 
-func setupBurstTestEnv(t *testing.T, tc burstTestCase, tmpDir string, store *dbtest.FakeStore, sessMgr *session.Manager) string {
+func setupBurstTestEnv(t *testing.T, tc burstTestCase, tmpDir string, store *db.SQLStore, sessMgr *session.Manager) string {
 	t.Helper()
 	if len(tc.channelInstructions) > 0 {
 		channelsDir := filepath.Join(tmpDir, "channels")
@@ -775,7 +769,8 @@ func makeBurstTestConfig(tc burstTestCase, store db.Store, sessMgr *session.Mana
 
 func runBurstTestCase(t *testing.T, tc burstTestCase) {
 	t.Helper()
-	tmpDir, store := t.TempDir(), setupTestStore(t)
+	store := testStore(t)
+	tmpDir := t.TempDir()
 	sessMgr := session.New(tmpDir, "")
 
 	initialSessionID := setupBurstTestEnv(t, tc, tmpDir, store, sessMgr)
