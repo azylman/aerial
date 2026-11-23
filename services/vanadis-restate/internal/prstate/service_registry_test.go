@@ -24,7 +24,6 @@ type registryRowView struct {
 	CIChecks               map[string]string
 	Banner                 string
 	DeploySuccessPending   bool
-	DeployFailedPublished  bool
 	BuildRun               int64
 }
 
@@ -35,7 +34,7 @@ func viewRow(s *PRState) registryRowView {
 	v := registryRowView{
 		Status: s.Status, HeadSHA: s.HeadSHA, MergeSHA: s.MergeSHA, Branch: s.Branch, Title: s.Title, TargetID: s.TargetID,
 		Jobs: s.Jobs, StartedJobs: s.StartedJobs, DeployedJobs: s.DeployedJobs, DeployedKustomizations: s.DeployedKustomizations,
-		CIChecks: s.CIChecks, Banner: s.Banner, DeploySuccessPending: s.DeploySuccessPending, DeployFailedPublished: s.DeployFailedPublished,
+		CIChecks: s.CIChecks, Banner: s.Banner, DeploySuccessPending: s.DeploySuccessPending,
 	}
 	if s.BuildMetadata != nil {
 		v.BuildRun = s.BuildMetadata.RunNumber
@@ -63,6 +62,7 @@ func TestPRObjectService_RegistryRow(t *testing.T) {
 		return s
 	}
 	failedDeploy := svcRow("h1", "m1", RegistryStatusDeployFailed, TerminalMerged)
+	failedDeploy.Banner = "old"
 	pendingDeployed := svcRow("h1", "m1", RegistryStatusDeployed, TerminalMerged)
 	pendingDeployed.DeploySuccessPending = true
 	pendingDeployed.KustomizationRequests = map[string]KustomizationRequest{"core": {Namespace: "flux-system"}}
@@ -71,7 +71,6 @@ func TestPRObjectService_RegistryRow(t *testing.T) {
 	conflicted.MarkConflictPublished("h1")
 	failedCI := svcRow("h1", "", RegistryStatusCIFailed, TerminalNone)
 	failedCI.RecordFailedCheckRunDetailed("h1", "ci")
-	failedCI.RecordNonRoboRevFailedSHA("h1")
 	failedCI.RecordFailedCISHA("h1")
 	synced := svcRow("h1", "", RegistryStatusCIFailed, TerminalNone)
 	synced.CIChecks = map[string]string{"ci": "failed"}
@@ -154,8 +153,8 @@ func TestPRObjectService_RegistryRow(t *testing.T) {
 			want: registryRowView{Status: RegistryStatusDeployFailed, HeadSHA: "h1", MergeSHA: "m1", Jobs: []string{"eri"}, StartedJobs: []string{"eri"}, Banner: "boom"},
 		},
 		{
-			name: "deploy failure ack records published", got: svc.HandleDeployFailed(restate.WithMockContext(mc11), PREvent{Repo: "azylman/aerial", PRNumber: 101, MergeSHA: "m1", Acknowledged: true}), rec: rec11, wantSet: true,
-			want: registryRowView{Status: RegistryStatusDeployFailed, HeadSHA: "h1", MergeSHA: "m1", DeployFailedPublished: true},
+			name: "repeated deploy failure takes the newest banner", got: svc.HandleDeployFailed(restate.WithMockContext(mc11), PREvent{Repo: "azylman/aerial", PRNumber: 101, MergeSHA: "m1", Banner: "newest"}), rec: rec11, wantSet: true,
+			want: registryRowView{Status: RegistryStatusDeployFailed, HeadSHA: "h1", MergeSHA: "m1", Banner: "newest"},
 		},
 		{
 			name: "deploy success ack clears pending", got: err12, rec: rec12, wantSet: true,
@@ -401,28 +400,19 @@ func TestPRObjectService_HandleMergedStaleHead(t *testing.T) {
 
 // TestPRObjectService_DeploySuccessMergedStaleHead pins that a
 // deploy_success commit on a PR merged with a stale head repairs the head
-// and indexes it: with the deployed index op on a first record, and with
-// an active index op when the dispatch was already recorded.
+// and indexes it with the deployed index op.
 func TestPRObjectService_DeploySuccessMergedStaleHead(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name       string
-		dispatched bool
-		wantOut    DeployDispatchDecision
-		wantSends  []sentCall
+		name      string
+		wantOut   DeployDispatchDecision
+		wantSends []sentCall
 	}{
 		{
 			name:    "first record indexes the repaired head as deployed",
 			wantOut: DeployDispatchDecision{Disposition: DispositionApply, EffectKey: "azylman/aerial#2308@701c341c:gen0:deploy_dispatch:job=aerial-config", ShouldPublish: true},
 			wantSends: []sentCall{{service: prwire.RepoObjectServiceName, key: "azylman/aerial", method: prwire.RepoHandlerPRIndex, input: PRIndexEvent{
 				Repo: "azylman/aerial", PRNumber: 2308, Branch: "feat/x", HeadSHA: "701c341c", MergeSHA: "913c2325", Lifecycle: IndexDeployed,
-			}}},
-		},
-		{
-			name: "deduped record indexes the repaired head as active", dispatched: true,
-			wantOut: DeployDispatchDecision{Disposition: DispositionApply, EffectKey: "azylman/aerial#2308@701c341c:gen0:deploy_dispatch:job=aerial-config", ShouldPublish: true},
-			wantSends: []sentCall{{service: prwire.RepoObjectServiceName, key: "azylman/aerial", method: prwire.RepoHandlerPRIndex, input: PRIndexEvent{
-				Repo: "azylman/aerial", PRNumber: 2308, Branch: "feat/x", HeadSHA: "701c341c", Lifecycle: IndexActive,
 			}}},
 		},
 	}
@@ -432,9 +422,6 @@ func TestPRObjectService_DeploySuccessMergedStaleHead(t *testing.T) {
 			seed := NewPRState("azylman/aerial", 2308)
 			seed.HeadSHA, seed.MergeSHA, seed.Branch = "c00b710c", "913c2325", "feat/x"
 			seed.Status, seed.Terminal = RegistryStatusMerged, TerminalMerged
-			if tc.dispatched {
-				seed.MarkEffectDispatched(seed.EffectKeyFor(prwire.EffectDeployDispatch, "701c341c", "aerial-config", ""))
-			}
 			mc, rec := newStateMock(t, seed)
 			out, err := NewPRObjectService().HandleDeploySuccess(restate.WithMockContext(mc), PREvent{
 				Repo: "azylman/aerial", PRNumber: 2308, HeadSHA: "701c341c", MergeSHA: "913c2325", JobName: "aerial-config",

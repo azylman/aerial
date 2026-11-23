@@ -2,14 +2,11 @@ package prstate
 
 // Pure state transitions. Every function below is a deterministic transition
 // over PRState/RepoState with no I/O, no clocks, and no Restate calls, so
-// chunks 03a-06 can journal them directly. The transitions port
-// services/synapse/internal/github StateTracker semantics one-for-one into
-// Restate-owned state, including the RecordFailedCheckRunDetailed
-// triple-return with SHA-change reset, transactional rollback, the
-// ClearFailedCISHA seven-way fan-out (updated-for-main survives, exactly like
-// the tracker), BOTH deploy-dedup keys, and the RepoObject durable SHA index
-// replacing commitSHAPRs with newest-writer-wins ambiguity ordering (the
-// ORDER BY updated_at DESC LIMIT 1 semantics of the registry lookup).
+// PRObject and RepoObject handlers journal them directly: per-SHA check
+// failures (RecordFailedCheckRunDetailed returns emit/was-active/ever-failed
+// and resets on a head change, RollbackFailedCheckRun undoes a failed
+// dispatch), the generation-scoped effect keys that dedupe every effect, and
+// the RepoObject durable SHA index whose newest claim wins an ambiguous SHA.
 
 import (
 	"slices"
@@ -39,21 +36,14 @@ type PRState struct {
 	// of heads this PR moved past. A synchronize whose head is in it is a
 	// late redelivery; any other mismatched synchronize recovers the head.
 	// State serialized before the field existed decodes it empty.
-	PriorHeads           []string
-	GateGeneration       uint64
-	ReopenEpoch          uint64
-	Terminal             TerminalState
-	Checks               FailedCheckState
-	FailedCISHA          string
-	NonRoboRevSHA        string
-	CancelledSHA         string
-	CollaboratorAlerted  string
-	CollaboratorConflict string
-	ConflictPublished    string
-	UpdatedForMain       bool
-	DispatchedEffects    map[string]bool
-	DeployPRDispatched   bool
-	DeploySHAJob         map[string]bool
+	PriorHeads        []string
+	GateGeneration    uint64
+	ReopenEpoch       uint64
+	Terminal          TerminalState
+	Checks            FailedCheckState
+	FailedCISHA       string
+	ConflictPublished string
+	DispatchedEffects map[string]bool
 
 	// Registry row: the per-PR registry fields PRObject owns. See
 	// registry_state.go for the transitions.
@@ -69,7 +59,6 @@ type PRState struct {
 	JobStates              map[string]string
 	KustomizationRequests  map[string]KustomizationRequest
 	DeployedKustomizations []string
-	DeployFailedPublished  bool
 	DeploySuccessPending   bool
 	BuildMetadata          *BuildMetadata
 	Banner                 string
@@ -103,7 +92,6 @@ func NewPRState(repo string, prNumber int) *PRState {
 			ActiveFailed: make(map[string]bool),
 		},
 		DispatchedEffects: make(map[string]bool),
-		DeploySHAJob:      make(map[string]bool),
 	}
 }
 
@@ -194,14 +182,6 @@ func (s *PRState) HasFailedCISHA(headSHA string) bool {
 	return true
 }
 
-// GetFailedCISHA returns the recorded failed CI SHA.
-func (s *PRState) GetFailedCISHA() (string, bool) {
-	if s == nil || s.FailedCISHA == "" {
-		return "", false
-	}
-	return s.FailedCISHA, true
-}
-
 // IsCIFailedForSHA reports whether the PR is CI-failed for the given head
 // SHA from the Restate-owned failure slots. It mirrors the registry
 // ci_failed status: a recorded failed-CI SHA or any active failed check run
@@ -223,94 +203,18 @@ func (s *PRState) IsCIFailedForSHA(headSHA string) bool {
 	return s.HasFailedCISHA("") || s.HasActiveFailedCheckRuns(s.Checks.HeadSHA)
 }
 
-// ClearFailedCISHA clears all failure, alert, and conflict tracking for the
-// PR: failed, non-roborev, cancelled, granular check runs, collaborator
-// alerted/conflict, and conflict-published SHAs. UpdatedForMain survives,
-// exactly like StateTracker.ClearFailedCISHA.
+// ClearFailedCISHA clears the PR's CI failure and conflict tracking: the
+// failed CI SHA, every per-check failure, and the conflict-published SHA.
 func (s *PRState) ClearFailedCISHA() {
 	if s == nil {
 		return
 	}
 	s.FailedCISHA = ""
-	s.NonRoboRevSHA = ""
-	s.CancelledSHA = ""
 	s.Checks = FailedCheckState{
 		EverFailed:   make(map[string]bool),
 		ActiveFailed: make(map[string]bool),
 	}
-	s.CollaboratorAlerted = ""
-	s.CollaboratorConflict = ""
 	s.ConflictPublished = ""
-}
-
-// RecordNonRoboRevFailedSHA caches a non-roborev check failure head SHA.
-func (s *PRState) RecordNonRoboRevFailedSHA(headSHA string) {
-	headSHA = strings.TrimSpace(headSHA)
-	if s == nil || s.PRNumber <= 0 || headSHA == "" || prwire.IsZeroSHA(headSHA) {
-		return
-	}
-	s.NonRoboRevSHA = headSHA
-}
-
-// DeleteNonRoboRevFailedSHA removes the non-roborev failure slot.
-func (s *PRState) DeleteNonRoboRevFailedSHA() {
-	if s == nil {
-		return
-	}
-	s.NonRoboRevSHA = ""
-}
-
-// HasNonRoboRevFailedSHA reports whether a non-roborev failure is tracked;
-// a non-empty query must match.
-func (s *PRState) HasNonRoboRevFailedSHA(headSHA string) bool {
-	if s == nil || s.PRNumber <= 0 || s.NonRoboRevSHA == "" {
-		return false
-	}
-	if clean := strings.TrimSpace(headSHA); clean != "" {
-		return strings.EqualFold(s.NonRoboRevSHA, clean)
-	}
-	return true
-}
-
-// RecordCancelledCheckSHA caches a cancelled check run SHA.
-func (s *PRState) RecordCancelledCheckSHA(headSHA string) {
-	headSHA = strings.TrimSpace(headSHA)
-	if s == nil || s.PRNumber <= 0 || headSHA == "" || prwire.IsZeroSHA(headSHA) {
-		return
-	}
-	s.CancelledSHA = headSHA
-}
-
-// DeleteCancelledCheckSHA removes the cancelled check slot.
-func (s *PRState) DeleteCancelledCheckSHA() {
-	if s == nil {
-		return
-	}
-	s.CancelledSHA = ""
-}
-
-// HasCancelledCheckSHA reports whether a cancelled check matches the SHA.
-func (s *PRState) HasCancelledCheckSHA(headSHA string) bool {
-	headSHA = strings.TrimSpace(headSHA)
-	if s == nil || s.PRNumber <= 0 || headSHA == "" || s.CancelledSHA == "" {
-		return false
-	}
-	return strings.EqualFold(s.CancelledSHA, headSHA)
-}
-
-// IsCachedFailedCISHA reports whether headSHA appears in any of the failed,
-// non-roborev, or cancelled SHA slots.
-func (s *PRState) IsCachedFailedCISHA(headSHA string) bool {
-	headSHA = strings.TrimSpace(headSHA)
-	if s == nil || s.Repo == "" || s.PRNumber <= 0 || headSHA == "" || prwire.IsZeroSHA(headSHA) {
-		return false
-	}
-	for _, v := range []string{s.FailedCISHA, s.NonRoboRevSHA, s.CancelledSHA} {
-		if v != "" && strings.EqualFold(v, headSHA) {
-			return true
-		}
-	}
-	return false
 }
 
 // RecordFailedCheckRunDetailed records a check failure into the granular
@@ -371,26 +275,6 @@ func (s *PRState) RollbackFailedCheckRun(headSHA, checkName string, wasActive, h
 	if !hadPriorEverFailed {
 		delete(s.Checks.EverFailed, normCheck)
 	}
-	if len(s.Checks.ActiveFailed) == 0 {
-		s.NonRoboRevSHA = ""
-	}
-}
-
-// ClearActiveFailedCheckRun removes one active failure for the check name on
-// the matching head SHA; ever-failed history is kept.
-func (s *PRState) ClearActiveFailedCheckRun(headSHA, checkName string) {
-	normCheck := prwire.CanonicalFailedCheckKey(checkName)
-	if s == nil || normCheck == "" {
-		return
-	}
-	if !strings.EqualFold(s.Checks.HeadSHA, strings.TrimSpace(headSHA)) {
-		return
-	}
-	if prwire.IsRoboRevCheck(checkName) {
-		s.Checks.RoboRevActiveFailed = false
-		return
-	}
-	delete(s.Checks.ActiveFailed, normCheck)
 }
 
 // ClearFailedCheckRun clears one active failure and reports whether an active
@@ -423,18 +307,6 @@ func (s *PRState) HasActiveFailedCheckRuns(headSHA string) bool {
 		return false
 	}
 	return s.Checks.RoboRevActiveFailed || len(s.Checks.ActiveFailed) > 0
-}
-
-// HasActiveNonRoboRevFailures reports whether any non-roborev failure is active.
-func (s *PRState) HasActiveNonRoboRevFailures(headSHA string) bool {
-	normHeadSHA := strings.TrimSpace(headSHA)
-	if s == nil || s.PRNumber <= 0 || normHeadSHA == "" || prwire.IsZeroSHA(normHeadSHA) {
-		return false
-	}
-	if !strings.EqualFold(s.Checks.HeadSHA, normHeadSHA) {
-		return false
-	}
-	return len(s.Checks.ActiveFailed) > 0
 }
 
 // HasActiveRoboRevFailure reports whether a roborev failure is active.
@@ -476,103 +348,6 @@ func (s *PRState) HasEverFailedCheckRun(headSHA, checkName string) bool {
 	return s.Checks.EverFailed[normCheck]
 }
 
-// CanRecoverNonGateCheckSuccess clears one non-roborev success and reports
-// whether the PR can leave CI failure. It mirrors the tracker: clearing the
-// last non-roborev failure also clears the non-roborev SHA slot and recovers
-// only when no roborev failure stays active.
-func (s *PRState) CanRecoverNonGateCheckSuccess(checkName, headSHA string) bool {
-	normCheck := prwire.CanonicalFailedCheckKey(checkName)
-	if s == nil || normCheck == "" {
-		return false
-	}
-	if !strings.EqualFold(s.Checks.HeadSHA, strings.TrimSpace(headSHA)) || !s.Checks.EverFailed[normCheck] {
-		return false
-	}
-	delete(s.Checks.ActiveFailed, normCheck)
-	if len(s.Checks.ActiveFailed) == 0 {
-		s.NonRoboRevSHA = ""
-		return !s.Checks.RoboRevActiveFailed
-	}
-	return false
-}
-
-// MarkCollaboratorAlerted records a collaborator CI-failure alert for the SHA.
-// Returns true when newly recorded or changed.
-func (s *PRState) MarkCollaboratorAlerted(headSHA string) bool {
-	headSHA = strings.TrimSpace(headSHA)
-	if s == nil || s.PRNumber <= 0 || headSHA == "" || prwire.IsZeroSHA(headSHA) {
-		return false
-	}
-	if strings.EqualFold(s.CollaboratorAlerted, headSHA) {
-		return false
-	}
-	s.CollaboratorAlerted = headSHA
-	return true
-}
-
-// WasCollaboratorAlerted reports whether the collaborator alert matches;
-// an empty query matches any recorded alert.
-func (s *PRState) WasCollaboratorAlerted(headSHA string) bool {
-	if s == nil || s.CollaboratorAlerted == "" {
-		return false
-	}
-	if clean := strings.TrimSpace(headSHA); clean != "" {
-		return strings.EqualFold(s.CollaboratorAlerted, clean)
-	}
-	return true
-}
-
-// ClearCollaboratorAlerted clears the alert record; a non-empty SHA clears
-// only on exact match.
-func (s *PRState) ClearCollaboratorAlerted(headSHA string) {
-	if s == nil {
-		return
-	}
-	if clean := strings.TrimSpace(headSHA); clean != "" {
-		if !strings.EqualFold(s.CollaboratorAlerted, clean) {
-			return
-		}
-	}
-	s.CollaboratorAlerted = ""
-}
-
-// MarkCollaboratorConflict records a collaborator merge-conflict alert.
-func (s *PRState) MarkCollaboratorConflict(headSHA string) bool {
-	headSHA = strings.TrimSpace(headSHA)
-	if s == nil || s.PRNumber <= 0 || headSHA == "" || prwire.IsZeroSHA(headSHA) {
-		return false
-	}
-	if strings.EqualFold(s.CollaboratorConflict, headSHA) {
-		return false
-	}
-	s.CollaboratorConflict = headSHA
-	return true
-}
-
-// WasCollaboratorConflict reports whether a conflict alert matches.
-func (s *PRState) WasCollaboratorConflict(headSHA string) bool {
-	if s == nil || s.CollaboratorConflict == "" {
-		return false
-	}
-	if clean := strings.TrimSpace(headSHA); clean != "" {
-		return strings.EqualFold(s.CollaboratorConflict, clean)
-	}
-	return true
-}
-
-// ClearCollaboratorConflict clears the conflict alert record.
-func (s *PRState) ClearCollaboratorConflict(headSHA string) {
-	if s == nil {
-		return
-	}
-	if clean := strings.TrimSpace(headSHA); clean != "" {
-		if !strings.EqualFold(s.CollaboratorConflict, clean) {
-			return
-		}
-	}
-	s.CollaboratorConflict = ""
-}
-
 // MarkConflictPublished records a conflict lifecycle publication for the SHA.
 func (s *PRState) MarkConflictPublished(headSHA string) {
 	normHeadSHA := strings.TrimSpace(headSHA)
@@ -601,27 +376,6 @@ func (s *PRState) ClearConflictPublished() {
 		return
 	}
 	s.ConflictPublished = ""
-}
-
-// MarkUpdatedForMain records that the PR was updated with current main.
-func (s *PRState) MarkUpdatedForMain() {
-	if s == nil {
-		return
-	}
-	s.UpdatedForMain = true
-}
-
-// WasUpdatedForMain reports the updated-for-main flag.
-func (s *PRState) WasUpdatedForMain() bool {
-	return s != nil && s.UpdatedForMain
-}
-
-// ClearUpdatedForMain clears the updated-for-main flag.
-func (s *PRState) ClearUpdatedForMain() {
-	if s == nil {
-		return
-	}
-	s.UpdatedForMain = false
 }
 
 // RecordKustomizationRequests starts a new gate generation: it bumps
@@ -675,38 +429,6 @@ func (s *PRState) WasEffectDispatched(k EffectKey) bool {
 		return false
 	}
 	return s.DispatchedEffects[k.String()]
-}
-
-// RecordDeployedPR marks the PR-keyed deploy dedup slot.
-func (s *PRState) RecordDeployedPR() {
-	if s == nil {
-		return
-	}
-	s.DeployPRDispatched = true
-}
-
-// WasDeployedPR reports the PR-keyed deploy dedup slot.
-func (s *PRState) WasDeployedPR() bool {
-	return s != nil && s.DeployPRDispatched
-}
-
-// RecordDeployedSHAJob marks the job-plus-SHA deploy dedup slot.
-func (s *PRState) RecordDeployedSHAJob(jobName, sha string) {
-	if s == nil {
-		return
-	}
-	if s.DeploySHAJob == nil {
-		s.DeploySHAJob = make(map[string]bool)
-	}
-	s.DeploySHAJob[DeploySHAJobKey(s.Repo, jobName, sha)] = true
-}
-
-// WasDeployedSHAJob reports the job-plus-SHA deploy dedup slot.
-func (s *PRState) WasDeployedSHAJob(jobName, sha string) bool {
-	if s == nil || s.DeploySHAJob == nil {
-		return false
-	}
-	return s.DeploySHAJob[DeploySHAJobKey(s.Repo, jobName, sha)]
 }
 
 // MarkTerminal absorbs the PR into a terminal state for the current epoch.

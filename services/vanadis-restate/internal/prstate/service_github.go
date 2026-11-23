@@ -299,7 +299,6 @@ func (s *PRObjectService) HandleBranchConflict(ctx restate.ObjectContext, ev PRE
 	}
 	applyEventRow(st, ev)
 	if strings.TrimSpace(st.TargetID) == "" {
-		st.MarkCollaboratorConflict(ev.HeadSHA)
 		restate.Set(ctx, s.stateKey, st)
 		s.runEriEffects(ctx, st, ev)
 		return nil

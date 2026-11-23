@@ -14,8 +14,8 @@
 //     replays return the recorded result, never re-fire.
 //   - Cross-object sends carry head or merge SHA; handlers drop stale events.
 //     Terminal states are absorbing within a reopen epoch.
-//   - Deploy dedup keeps BOTH keys: PR-keyed and job-plus-SHA WasDispatched
-//     semantics. Bare PR-key dedup that never expires is forbidden.
+//   - Deploy dedup is the generation-scoped deploy_dispatch EffectKey
+//     (head SHA plus job), so it never outlives its gate generation.
 //   - Unmanaged collaborator PRs stay inside PRObject for alerts and NEVER
 //     signal BuildRouter.RoutePREvent.
 //   - Readiness retry never mints a generation and never clears effect keys;
@@ -79,12 +79,6 @@ func (k EffectKey) render(withGeneration bool) string {
 		fmt.Fprintf(&sb, ":check=%s", canon)
 	}
 	return sb.String()
-}
-
-// DeploySHAJobKey returns the job-plus-SHA deploy dedup key. Mirrors the sha:
-// key in services/synapse/internal/flux DeployDedupTracker.
-func DeploySHAJobKey(repo, jobName, sha string) string {
-	return fmt.Sprintf("sha:%s:%s:%s", strings.TrimSpace(repo), strings.TrimSpace(jobName), strings.TrimSpace(sha))
 }
 
 // IsStaleEvent reports whether an event SHA is stale against current state.
