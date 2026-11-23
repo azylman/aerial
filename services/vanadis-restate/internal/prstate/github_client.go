@@ -354,6 +354,9 @@ func (c *GitHubClient) RerunFailedJobs(ctx context.Context, repo string, runID i
 	path := fmt.Sprintf("/repos/%s/actions/runs/%d/rerun-failed-jobs", repo, runID)
 	status, raw, gerr := c.do(ctx, http.MethodPost, path, strings.NewReader(`{}`), 64<<10)
 	if gerr != nil {
+		if gerr.Status == http.StatusForbidden && strings.Contains(strings.ToLower(gerr.Message), "already running") {
+			return nil
+		}
 		return gerr
 	}
 	if status >= http.StatusOK && status < http.StatusMultipleChoices {

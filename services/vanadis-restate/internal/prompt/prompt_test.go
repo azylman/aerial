@@ -285,6 +285,22 @@ func TestFormatCIFailurePrompt(t *testing.T) {
 			},
 			wantMissing: []string{"REMEDIATION BLOCKED", "127.0.0.1:4028"},
 		},
+		{
+			name: "coalesced roborev and deterministic failure instructs combined remediation",
+			ev: pubsub.PRLifecycleEvent{
+				Repo: "aerial", PRNumber: 101, CheckName: "lint, roborev", HeadSHA: "abcdef1", Branch: "feat/test",
+				CheckURL: "https://github.com/acme/aerial/actions/runs/123/job/456789",
+			},
+			details: "details",
+			wantContains: []string{
+				"Both deterministic CI jobs and RoboRev code review failed",
+				"critically evaluate each RoboRev finding",
+				"override-roborev",
+				failChunk,
+				"[VANADIS CI REMEDIATION — MANDATORY]",
+			},
+			wantMissing: []string{"REMEDIATION BLOCKED"},
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -348,6 +364,22 @@ func TestFormatInlineCapRemediationPrompt(t *testing.T) {
 			},
 			wantMissing: []string{"Branch:", "Check URL:"},
 		},
+		{
+			name:        "coalesced roborev and deterministic cap reached instructs combined remediation",
+			ev:          pubsub.PRLifecycleEvent{Repo: "aerial", PRNumber: 101, CheckName: "lint, roborev", HeadSHA: "abcdef1"},
+			details:     "coalesced finding",
+			chunkID:     "chunk-c",
+			failCount:   5,
+			maxAttempts: 5,
+			wantContains: []string{
+				`CI check "lint, roborev" failed 5 times for PR #101 on aerial (chunk: chunk-c, head commit: abcdef1; worker remediation cap 5/5 reached).`,
+				"[VANADIS INLINE THREAD CI REMEDIATION — MANDATORY]",
+				"fixing all deterministic CI failures and critically evaluating each RoboRev finding",
+				"/share/aerial/scripts/aerial-pr.sh --repo aerial override-roborev 101 '<technical_rebuttal>'",
+				"recovers the paused chunk to pr_opened and resumes the build",
+			},
+			wantMissing: []string{"Branch:", "Check URL:"},
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -359,6 +391,28 @@ func TestFormatInlineCapRemediationPrompt(t *testing.T) {
 			for _, missing := range tc.wantMissing {
 				assert.NotContains(t, got, missing)
 			}
+		})
+	}
+}
+
+func TestHasCoalescedRoboRevCheck(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		checkName string
+		want      bool
+	}{
+		{name: "single roborev check is false", checkName: "roborev", want: false},
+		{name: "single roborev code review is false", checkName: "RoboRev Code Review", want: false},
+		{name: "coalesced lint and roborev is true", checkName: "lint, roborev", want: true},
+		{name: "coalesced roborev and lint is true", checkName: "roborev, lint", want: true},
+		{name: "coalesced multiple deterministic is false", checkName: "lint, test", want: false},
+		{name: "empty check name is false", checkName: "", want: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tc.want, hasCoalescedRoboRevCheck(tc.checkName))
 		})
 	}
 }

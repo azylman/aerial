@@ -226,6 +226,9 @@ func TestNeedsCIJobLogFetch(t *testing.T) {
 		{name: "timed out", details: "timed_out", want: true},
 		{name: "workflow failure", details: ciWorkflowFail, want: true},
 		{name: "other workflow timed out", details: ` Workflow "Release Build" concluded with timed_out `, want: true},
+		{name: "check failure header only", details: `CI check "test" failed on azylman/aerial (commit abcdef1).`, want: true},
+		{name: "check failure header with check url", details: "CI check \"test\" failed on azylman/aerial (commit abcdef1).\nCheck URL: https://github.com/o/r/actions/runs/1/job/2", want: true},
+		{name: "check failure header with extra details", details: "CI check \"test\" failed on azylman/aerial (commit abcdef1).\nCheck URL: https://github.com/o/r/actions/runs/1/job/2\nextra line", want: false},
 		{name: "workflow prefix with extra text", details: ciWorkflowFail + ": see logs", want: false},
 		{name: "specific details", details: "--- FAIL: TestX", want: false},
 	}
@@ -467,6 +470,250 @@ func TestHasRoboRevOverrideChecked(t *testing.T) {
 			t.Parallel()
 			c, srv := newCILogClient(t, tc.env)
 			got, err := c.HasRoboRevOverrideChecked(context.Background(), "aerial", 10, tc.sha)
+			assertCILogErr(t, err, tc.wantErr)
+			assert.Equal(t, tc.want, got)
+			assertCILogRequests(t, srv, tc.env, tc.wantPaths)
+		})
+	}
+}
+
+func TestIsWorkflowRunFailure(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		checkURL string
+		details  string
+		want     bool
+	}{
+		{name: "workflow conclusion regex matches", checkURL: "", details: ciWorkflowFail, want: true},
+		{name: "run url without job id", checkURL: "https://github.com/acme/aerial/actions/runs/123", details: "failure", want: true},
+		{name: "job url with job id is not workflow failure", checkURL: ciJobURL, details: "failure", want: false},
+		{name: "actions base url without run id is not workflow failure", checkURL: "https://github.com/acme/aerial/actions", details: "failure", want: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tc.want, IsWorkflowRunFailure(tc.checkURL, tc.details))
+		})
+	}
+}
+
+type resolveCIFailureCase struct {
+	name      string
+	env       ciLogEnv
+	pr        int
+	check     string
+	url       string
+	details   string
+	want      CIFailureResolution
+	wantErr   string
+	wantPaths []string
+}
+
+func resolveCIFailureBasicCases() []resolveCIFailureCase {
+	const (
+		ciRun1JobsPath = "GET /repos/acme/aerial/actions/runs/1/jobs?filter=latest&per_page=100"
+	)
+	failLog := ciResp(http.StatusOK, "=== RUN TestA\n--- FAIL: TestA (0.01s)\nFAIL\n")
+	return []resolveCIFailureCase{
+		{
+			name: "nil client returns details and sets failed checks when not workflow failure",
+			env:  ciLogEnv{nilClient: true}, pr: 10, check: "unit", details: "details",
+			want: CIFailureResolution{CheckName: "unit", Details: "details", FailedChecks: []string{"unit"}},
+		},
+		{
+			name:    "url without run id uses fallback and sets FailedChecks",
+			url:     "https://github.com/acme/aerial/actions",
+			check:   "unit",
+			details: "already specific error details",
+			want:    CIFailureResolution{CheckName: "unit", Details: "already specific error details", FailedChecks: []string{"unit"}},
+		},
+		{
+			name:    "workflow failure fallback leaves FailedChecks empty",
+			url:     "https://github.com/acme/aerial/actions",
+			check:   "CI",
+			details: ciWorkflowFail,
+			want:    CIFailureResolution{CheckName: "CI", Details: ciWorkflowFail},
+		},
+		{
+			name: "pending sibling job holds remediation",
+			env: ciLogEnv{routes: map[string][]githubapitest.Response{
+				ciRun1JobsPath: ciResp(http.StatusOK, `{"jobs":[{"id":42,"name":"lint","status":"completed","conclusion":"failure"},{"id":43,"name":"test","status":"in_progress"}]}`),
+			}},
+			check:     "lint",
+			url:       ciJobURL,
+			details:   "failure",
+			want:      CIFailureResolution{Pending: true, CheckName: "lint", Details: "failure"},
+			wantPaths: []string{ciRun1JobsPath},
+		},
+		{
+			name: "single failed job matching triggerJobID with specific details uses details directly",
+			env: ciLogEnv{routes: map[string][]githubapitest.Response{
+				ciRun1JobsPath: ciResp(http.StatusOK, `{"jobs":[{"id":42,"name":"lint","status":"completed","conclusion":"failure"},{"id":43,"name":"test","status":"completed","conclusion":"success"}]}`),
+			}},
+			check:     "lint",
+			url:       ciJobURL,
+			details:   "specific lint failure details",
+			want:      CIFailureResolution{Pending: false, CheckName: "lint", Details: "specific lint failure details", FailedChecks: []string{"lint"}},
+			wantPaths: []string{ciRun1JobsPath},
+		},
+		{
+			name: "single failed job matching triggerJobID fetches job log",
+			env: ciLogEnv{routes: map[string][]githubapitest.Response{
+				ciRun1JobsPath: ciResp(http.StatusOK, `{"jobs":[{"id":42,"name":"lint","status":"completed","conclusion":"failure"},{"id":43,"name":"test","status":"completed","conclusion":"success"}]}`),
+				ciLogsPath:     failLog,
+			}},
+			check:     "lint",
+			url:       ciJobURL,
+			details:   "failure",
+			want:      CIFailureResolution{Pending: false, CheckName: "lint", Details: "=== RUN TestA\n--- FAIL: TestA (0.01s)\nFAIL", FailedChecks: []string{"lint"}},
+			wantPaths: []string{ciRun1JobsPath, ciLogsPath},
+		},
+	}
+}
+
+func resolveCIFailureRunCases() []resolveCIFailureCase {
+	failLog := ciResp(http.StatusOK, "=== RUN TestA\n--- FAIL: TestA (0.01s)\nFAIL\n")
+	return []resolveCIFailureCase{
+		{
+			name: "multiple failed jobs coalesces check names and formats sections",
+			env: ciLogEnv{routes: map[string][]githubapitest.Response{
+				ciRunJobsPath:  ciResp(http.StatusOK, `{"jobs":[{"id":1,"name":"lint","status":"completed","conclusion":"failure"},{"id":2,"name":"unit","status":"completed","conclusion":"failure"}]}`),
+				ciJob1LogsPath: ciResp(http.StatusOK, "--- FAIL: TestLint (0.01s)\n"),
+				ciJob2LogsPath: failLog,
+			}},
+			check:   "lint",
+			url:     "https://github.com/acme/aerial/actions/runs/7/job/1",
+			details: "failure",
+			want: CIFailureResolution{
+				Pending:      false,
+				CheckName:    "lint, unit",
+				Details:      "### Job: lint\n--- FAIL: TestLint (0.01s)\n\n### Job: unit\n=== RUN TestA\n--- FAIL: TestA (0.01s)\nFAIL",
+				FailedChecks: []string{"lint", "unit"},
+			},
+			wantPaths: []string{ciRunJobsPath, ciJob1LogsPath, ciJob2LogsPath},
+		},
+		{
+			name: "run with roborev comment and deterministic failure",
+			env: ciLogEnv{routes: map[string][]githubapitest.Response{
+				ciRunJobsPath:  ciResp(http.StatusOK, `{"jobs":[{"id":1,"name":"lint","status":"completed","conclusion":"failure"},{"id":2,"name":"roborev","status":"completed","conclusion":"failure"}]}`),
+				ciJob1LogsPath: ciResp(http.StatusOK, "--- FAIL: TestLint (0.01s)\n"),
+				ciCommentsPath: ciResp(http.StatusOK, `[{"id":2,"body":"`+strings.ReplaceAll(ciRoboRevBody, "\n", `\n`)+`"}]`),
+			}},
+			pr:      10,
+			check:   "CI",
+			url:     ciRunURL,
+			details: ciWorkflowFail,
+			want: CIFailureResolution{
+				Pending:      false,
+				CheckName:    "lint, roborev",
+				Details:      "### Job: lint\n--- FAIL: TestLint (0.01s)\n\n### Job: roborev\n" + ciRoboRevBody,
+				FailedChecks: []string{"lint", "roborev"},
+			},
+			wantPaths: []string{ciRunJobsPath, ciJob1LogsPath, ciCommentsPath},
+		},
+		{
+			name: "run with no failed jobs returns res leaving FailedChecks empty",
+			env: ciLogEnv{routes: map[string][]githubapitest.Response{
+				ciRunJobsPath: ciResp(http.StatusOK, `{"jobs":[{"id":5,"name":"build","status":"completed","conclusion":"success"}]}`),
+			}},
+			check:     "CI",
+			url:       ciRunURL,
+			details:   ciWorkflowFail,
+			want:      CIFailureResolution{Pending: false, CheckName: "CI", Details: ciWorkflowFail},
+			wantPaths: []string{ciRunJobsPath},
+		},
+		{
+			name: "run with roborev without comment falls back to job logs",
+			env: ciLogEnv{routes: map[string][]githubapitest.Response{
+				ciRunJobsPath:  ciResp(http.StatusOK, `{"jobs":[{"id":2,"name":"roborev","status":"completed","conclusion":"failure"}]}`),
+				ciCommentsPath: ciResp(http.StatusOK, `[]`),
+				ciJob2LogsPath: ciResp(http.StatusOK, "roborev job log failure"),
+			}},
+			pr:      10,
+			check:   "CI",
+			url:     ciRunURL,
+			details: ciWorkflowFail,
+			want: CIFailureResolution{
+				Pending:      false,
+				CheckName:    "roborev",
+				Details:      "### Job: roborev\nroborev job log failure",
+				FailedChecks: []string{"roborev"},
+			},
+			wantPaths: []string{ciRunJobsPath, ciCommentsPath, ciJob2LogsPath},
+		},
+		{
+			name: "run with roborev without pr number fetches job logs directly",
+			env: ciLogEnv{routes: map[string][]githubapitest.Response{
+				ciRunJobsPath:  ciResp(http.StatusOK, `{"jobs":[{"id":2,"name":"roborev","status":"completed","conclusion":"failure"}]}`),
+				ciJob2LogsPath: ciResp(http.StatusOK, "roborev job log failure"),
+			}},
+			pr:      0,
+			check:   "CI",
+			url:     ciRunURL,
+			details: ciWorkflowFail,
+			want: CIFailureResolution{
+				Pending:      false,
+				CheckName:    "roborev",
+				Details:      "### Job: roborev\nroborev job log failure",
+				FailedChecks: []string{"roborev"},
+			},
+			wantPaths: []string{ciRunJobsPath, ciJob2LogsPath},
+		},
+		{
+			name: "run with roborev comments api error propagates",
+			env: ciLogEnv{routes: map[string][]githubapitest.Response{
+				ciRunJobsPath:  ciResp(http.StatusOK, `{"jobs":[{"id":2,"name":"roborev","status":"completed","conclusion":"failure"}]}`),
+				ciCommentsPath: ciResp(http.StatusInternalServerError, ""),
+			}},
+			pr:        10,
+			check:     "CI",
+			url:       ciRunURL,
+			details:   ciWorkflowFail,
+			want:      CIFailureResolution{CheckName: "roborev", Details: ciWorkflowFail, FailedChecks: []string{"roborev"}},
+			wantErr:   "github api error (500): Internal Server Error",
+			wantPaths: []string{ciRunJobsPath, ciCommentsPath},
+		},
+		{
+			name: "run with failed job log error propagates",
+			env: ciLogEnv{routes: map[string][]githubapitest.Response{
+				ciRunJobsPath:  ciResp(http.StatusOK, `{"jobs":[{"id":1,"name":"lint","status":"completed","conclusion":"failure"}]}`),
+				ciJob1LogsPath: ciResp(http.StatusInternalServerError, ""),
+			}},
+			pr:        10,
+			check:     "CI",
+			url:       ciRunURL,
+			details:   ciWorkflowFail,
+			want:      CIFailureResolution{CheckName: "lint", Details: ciWorkflowFail, FailedChecks: []string{"lint"}},
+			wantErr:   "github api error (500): Internal Server Error",
+			wantPaths: []string{ciRunJobsPath, ciJob1LogsPath},
+		},
+		{
+			name: "listing error propagates",
+			env: ciLogEnv{routes: map[string][]githubapitest.Response{
+				ciRunJobsPath: ciResp(http.StatusInternalServerError, ""),
+			}},
+			check:     "CI",
+			url:       ciRunURL,
+			details:   ciWorkflowFail,
+			want:      CIFailureResolution{CheckName: "CI", Details: ciWorkflowFail},
+			wantErr:   "github api error (500): Internal Server Error",
+			wantPaths: []string{ciRunJobsPath},
+		},
+	}
+}
+
+func resolveCIFailureTestCases() []resolveCIFailureCase {
+	return append(resolveCIFailureBasicCases(), resolveCIFailureRunCases()...)
+}
+
+func TestResolveCIFailureChecked(t *testing.T) {
+	t.Parallel()
+	for _, tc := range resolveCIFailureTestCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			c, srv := newCILogClient(t, tc.env)
+			got, err := c.ResolveCIFailureChecked(context.Background(), "aerial", tc.pr, tc.check, "abcdef123456", tc.url, tc.details)
 			assertCILogErr(t, err, tc.wantErr)
 			assert.Equal(t, tc.want, got)
 			assertCILogRequests(t, srv, tc.env, tc.wantPaths)

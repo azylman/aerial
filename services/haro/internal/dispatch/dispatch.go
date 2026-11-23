@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	restate "github.com/restatedev/sdk-go"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
@@ -110,6 +111,27 @@ func TraceFire[R any](ctx context.Context, scheduleType, scheduleID string, disp
 	return resp, err
 }
 
+// invalidRequest marks a dispatch request that can never succeed as a terminal
+// 400 so the Restate step carrying it stops retrying.
+func invalidRequest(msg string) error {
+	return restate.ToTerminalError(errors.New(msg), restate.WithErrorCode(http.StatusBadRequest))
+}
+
+// classifyHTTPStatus makes a rejected dispatch terminal when retrying cannot
+// change the answer: any 4xx except 408 (timeout) and 429 (throttled). 409 is
+// Restate's cancellation code and maps to 412 so callers never emit 409 themselves.
+// 5xx and transport failures stay retryable.
+func classifyHTTPStatus(status int, err error) error {
+	if status < 400 || status >= 500 || status == http.StatusRequestTimeout || status == http.StatusTooManyRequests {
+		return err
+	}
+	code := status
+	if status == http.StatusConflict {
+		code = http.StatusPreconditionFailed
+	}
+	return restate.ToTerminalError(err, restate.WithErrorCode(restate.Code(code)))
+}
+
 func postBrainJSON[Req any, Resp any](ctx context.Context, d *HTTPPromptDispatcher, path, opLabel string, req Req) (Resp, error) {
 	var zero Resp
 	if d == nil {
@@ -154,9 +176,9 @@ func postBrainJSON[Req any, Resp any](ctx context.Context, d *HTTPPromptDispatch
 			Error string `json:"error"`
 		}
 		if jsonErr := json.Unmarshal(respBody, &errResp); jsonErr == nil && strings.TrimSpace(errResp.Error) != "" {
-			return zero, fmt.Errorf("brain %s error (%d): %s", path, resp.StatusCode, errResp.Error)
+			return zero, classifyHTTPStatus(resp.StatusCode, fmt.Errorf("brain %s error (%d): %s", path, resp.StatusCode, errResp.Error))
 		}
-		return zero, fmt.Errorf("brain %s returned HTTP %d: %s", path, resp.StatusCode, string(respBody))
+		return zero, classifyHTTPStatus(resp.StatusCode, fmt.Errorf("brain %s returned HTTP %d: %s", path, resp.StatusCode, string(respBody)))
 	}
 
 	var dispatchResp Resp
@@ -167,13 +189,14 @@ func postBrainJSON[Req any, Resp any](ctx context.Context, d *HTTPPromptDispatch
 	return dispatchResp, nil
 }
 
-// restateRequestError keeps haro's historical error text for failed Restate ingress posts.
+// restateRequestError keeps haro's historical error text for failed Restate ingress posts
+// and marks permanent 4xx rejections terminal (see classifyHTTPStatus).
 func restateRequestError(opLabel string, err error) error {
 	if httpErr, ok := errors.AsType[*restateingress.HTTPError](err); ok {
 		if httpErr.Message != "" {
-			return fmt.Errorf("restate %s error (%d): %s", opLabel, httpErr.Status, httpErr.Message)
+			return classifyHTTPStatus(httpErr.Status, fmt.Errorf("restate %s error (%d): %s", opLabel, httpErr.Status, httpErr.Message))
 		}
-		return fmt.Errorf("restate %s returned HTTP %d: %s", opLabel, httpErr.Status, httpErr.Body)
+		return classifyHTTPStatus(httpErr.Status, fmt.Errorf("restate %s returned HTTP %d: %s", opLabel, httpErr.Status, httpErr.Body))
 	}
 	if urlErr, ok := errors.AsType[*url.Error](err); ok {
 		if urlErr.Op == "parse" {
@@ -220,12 +243,12 @@ func parseRestateEnvelope(respBytes []byte) (restateEnvelopeFields, error) {
 func (d *HTTPPromptDispatcher) dispatchPromptRestate(ctx context.Context, req PromptDispatchRequest) (PromptDispatchResponse, error) {
 	channelID := strings.TrimSpace(req.ChannelID)
 	if channelID == "" {
-		return PromptDispatchResponse{}, errors.New("channel_id cannot be empty for restate prompt dispatch")
+		return PromptDispatchResponse{}, invalidRequest("channel_id cannot be empty for restate prompt dispatch")
 	}
 
 	msgID := strings.TrimSpace(req.MessageID)
 	if msgID == "" {
-		return PromptDispatchResponse{}, errors.New("message_id cannot be empty for restate prompt dispatch")
+		return PromptDispatchResponse{}, invalidRequest("message_id cannot be empty for restate prompt dispatch")
 	}
 
 	agentName := req.Agent
@@ -277,7 +300,7 @@ func (d *HTTPPromptDispatcher) dispatchPromptRestate(ctx context.Context, req Pr
 func (d *HTTPPromptDispatcher) dispatchRestate(ctx context.Context, req eriwire.BrainDispatchRequest) (eriwire.DispatchEnqueueResponse, error) {
 	dispatchID := strings.TrimSpace(req.ID)
 	if dispatchID == "" {
-		return eriwire.DispatchEnqueueResponse{}, errors.New("id cannot be empty for restate dispatch")
+		return eriwire.DispatchEnqueueResponse{}, invalidRequest("id cannot be empty for restate dispatch")
 	}
 
 	keyReq := req
@@ -337,10 +360,10 @@ func (d *HTTPPromptDispatcher) Dispatch(ctx context.Context, req eriwire.BrainDi
 		return eriwire.DispatchEnqueueResponse{}, errors.New("dispatcher is nil")
 	}
 	if strings.TrimSpace(req.Prompt) == "" {
-		return eriwire.DispatchEnqueueResponse{}, errors.New("dispatch prompt cannot be empty")
+		return eriwire.DispatchEnqueueResponse{}, invalidRequest("dispatch prompt cannot be empty")
 	}
 	if strings.TrimSpace(req.Source) == "" {
-		return eriwire.DispatchEnqueueResponse{}, errors.New("dispatch source cannot be empty")
+		return eriwire.DispatchEnqueueResponse{}, invalidRequest("dispatch source cannot be empty")
 	}
 	if strings.TrimSpace(d.restateURL) != "" {
 		return d.dispatchRestate(ctx, req)

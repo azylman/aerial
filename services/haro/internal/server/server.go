@@ -603,7 +603,9 @@ func HandleOneShotJob(ctx context.Context, server *Server, database *sql.DB, msg
 
 	schedID := strings.TrimSpace(args.ID)
 	if schedID == "" {
-		schedID = uuid.New().String()
+		// Derived from the job content so a redelivered job (e.g. after a failed
+		// arm) lands on the same row and arm key instead of a duplicate reminder.
+		schedID = uuid.NewSHA1(uuid.NameSpaceOID, []byte("oneshot-job:"+threadID+":"+args.RunAt.UTC().Format(time.RFC3339Nano)+":"+prompt)).String()
 	}
 
 	sched := model.OneShotSchedule{
@@ -623,6 +625,13 @@ func HandleOneShotJob(ctx context.Context, server *Server, database *sql.DB, msg
 
 	if server != nil {
 		server.InvalidateSchedulesCache()
+		// Arm the inserted one-shot right away; returning the error redelivers
+		// the job (the insert is idempotent) rather than stranding the row until
+		// the next haro restart backfill.
+		if armErr := server.handler.ArmScheduleTick(ctx, model.ScheduleTypeOneShot, schedID, sched.RunAt); armErr != nil {
+			log.Printf("[Haro] failed to arm one-shot schedule %s: %v", schedID, armErr)
+			return armErr
+		}
 	}
 
 	return nil

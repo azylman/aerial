@@ -25,68 +25,94 @@ const chunkModeAction = "action"
 
 var declKeywordPrefixes = []string{"func ", "type ", "var ", "const ", "export ", "function ", "class "}
 
-// FormatCIFailurePrompt formats the failure prompt when a CI check fails.
-func FormatCIFailurePrompt(ev pubsub.PRLifecycleEvent, details, chunkID, dispatchID string) string {
-	failChunk := fmt.Sprintf("call fail_chunk(chunk_id=%s, dispatch_id=%s, reason=\"BLOCKED: <reason and the decision needed>\") and then end the turn", chunkID, dispatchID)
-	var extraParts []string
+func hasCoalescedRoboRevCheck(checkName string) bool {
+	if prwire.IsRoboRevCheck(checkName) {
+		return false
+	}
+	for part := range strings.SplitSeq(checkName, ",") {
+		if prwire.IsRoboRevCheck(strings.TrimSpace(part)) {
+			return true
+		}
+	}
+	return false
+}
+
+type ciPromptMeta struct {
+	shortRepo string
+	branchArg string
+	extraLine string
+}
+
+func parseCIPromptMeta(ev pubsub.PRLifecycleEvent) ciPromptMeta {
 	cleanBranch := strings.TrimPrefix(strings.TrimSpace(ev.Branch), "refs/heads/")
+	var extraParts []string
 	if cleanBranch != "" {
 		extraParts = append(extraParts, "Branch: "+cleanBranch)
 	}
 	if cleanURL := strings.TrimSpace(ev.CheckURL); cleanURL != "" {
 		extraParts = append(extraParts, "Check URL: "+cleanURL)
 	}
-	extraLine := strings.Join(extraParts, "\n")
+	return ciPromptMeta{
+		shortRepo: strutil.FirstNonEmpty(model.CleanRepoName(ev.Repo), "aerial"),
+		branchArg: strutil.FirstNonEmpty(cleanBranch, "<branch>"),
+		extraLine: strings.Join(extraParts, "\n"),
+	}
+}
 
-	shortRepo := strutil.FirstNonEmpty(model.CleanRepoName(ev.Repo), "aerial")
-	branchArg := strutil.FirstNonEmpty(cleanBranch, "<branch>")
-	checkoutAndSubmit := fmt.Sprintf("Check out the existing PR branch via '/share/aerial/scripts/aerial-pr.sh init %s --branch %s' and push updates via '/share/aerial/scripts/aerial-pr.sh submit <scratch_dir> \"<commit_msg>\"' (PR_DESCRIPTION.md is not required when updating an existing PR; never run bare 'git push').", shortRepo, branchArg)
+// FormatCIFailurePrompt formats the failure prompt when a CI check fails.
+func FormatCIFailurePrompt(ev pubsub.PRLifecycleEvent, details, chunkID, dispatchID string) string {
+	failChunk := fmt.Sprintf("call fail_chunk(chunk_id=%s, dispatch_id=%s, reason=\"BLOCKED: <reason and the decision needed>\") and then end the turn", chunkID, dispatchID)
+	meta := parseCIPromptMeta(ev)
+	checkoutAndSubmit := fmt.Sprintf("Check out the existing PR branch via '/share/aerial/scripts/aerial-pr.sh init %s --branch %s' and push updates via '/share/aerial/scripts/aerial-pr.sh submit <scratch_dir> \"<commit_msg>\"' (PR_DESCRIPTION.md is not required when updating an existing PR; never run bare 'git push').", meta.shortRepo, meta.branchArg)
 
-	directive := "[VANADIS CI REMEDIATION — MANDATORY]\n" +
-		"Investigate the failing logs, diagnose the root cause, verify locally, and remediate this turn. This turn must end in exactly one machine-visible outcome: (1) a fix pushed to the existing PR branch, or (2) when genuinely blocked, " + failChunk + ". " + checkoutAndSubmit + "\n" +
-		"If the details above lack the failing log, list the run's jobs via curl http://127.0.0.1:4028/internal/github-api/repos/<owner>/<repo>/actions/runs/<run_id>/jobs and fetch failed job logs from .../actions/jobs/<job_id>/logs (gh is not installed; github.com job pages need sign-in).\n" +
-		"Ending this turn with none of these outcomes pauses the chunk for human review automatically and is a failed remediation, not a completed one. A recommendation, waiver request, or \"no legitimate fix\" conclusion written only in your final response is invisible to the thread and counts as no outcome.\n" +
-		"If the correct fix conflicts with the chunk's stated boundaries, do not silently stop: apply the smallest boundary-crossing fix that makes the gate pass, note the scope change in the commit and PR description, and let the next chunk absorb it."
-	if prwire.IsRoboRevCheck(ev.CheckName) {
+	var directive string
+	switch {
+	case prwire.IsRoboRevCheck(ev.CheckName):
 		directive = "[VANADIS CI REMEDIATION — MANDATORY]\n" +
-			fmt.Sprintf("Please critically evaluate each RoboRev finding against codebase reality and architectural intent. This turn must end in exactly one machine-visible outcome: (1) a verified fix pushed to the existing PR branch, (2) a technical rebuttal recorded via '/share/aerial/scripts/aerial-pr.sh --repo %s override-roborev %d '<technical_rebuttal>'', or (3) when genuinely blocked, %s. %s\n", shortRepo, ev.PRNumber, failChunk, checkoutAndSubmit) +
+			fmt.Sprintf("Please critically evaluate each RoboRev finding against codebase reality and architectural intent. This turn must end in exactly one machine-visible outcome: (1) a verified fix pushed to the existing PR branch, (2) a technical rebuttal recorded via '/share/aerial/scripts/aerial-pr.sh --repo %s override-roborev %d '<technical_rebuttal>'', or (3) when genuinely blocked, %s. %s\n", meta.shortRepo, ev.PRNumber, failChunk, checkoutAndSubmit) +
+			"Ending this turn with none of these outcomes pauses the chunk for human review automatically and is a failed remediation, not a completed one. A recommendation, waiver request, or \"no legitimate fix\" conclusion written only in your final response is invisible to the thread and counts as no outcome.\n" +
+			"If the correct fix conflicts with the chunk's stated boundaries, do not silently stop: apply the smallest boundary-crossing fix that makes the gate pass, note the scope change in the commit and PR description, and let the next chunk absorb it."
+	case hasCoalescedRoboRevCheck(ev.CheckName):
+		directive = "[VANADIS CI REMEDIATION — MANDATORY]\n" +
+			fmt.Sprintf("Both deterministic CI jobs and RoboRev code review failed. Investigate the failing logs, diagnose the root cause, verify locally, and critically evaluate each RoboRev finding against codebase reality. This turn must end in exactly one machine-visible outcome: (1) a verified fix pushed to the existing PR branch fixing all deterministic CI failures and any valid RoboRev findings in the same commit (or recording a technical rebuttal via '/share/aerial/scripts/aerial-pr.sh --repo %s override-roborev %d '<technical_rebuttal>'' before pushing when a RoboRev finding is a false positive), or (2) when genuinely blocked, %s. %s\n", meta.shortRepo, ev.PRNumber, failChunk, checkoutAndSubmit) +
+			"If the details above lack the failing log, list the run's jobs via curl http://127.0.0.1:4028/internal/github-api/repos/<owner>/<repo>/actions/runs/<run_id>/jobs and fetch failed job logs from .../actions/jobs/<job_id>/logs (gh is not installed; github.com job pages need sign-in).\n" +
+			"Ending this turn with none of these outcomes pauses the chunk for human review automatically and is a failed remediation, not a completed one. A recommendation, waiver request, or \"no legitimate fix\" conclusion written only in your final response is invisible to the thread and counts as no outcome.\n" +
+			"If the correct fix conflicts with the chunk's stated boundaries, do not silently stop: apply the smallest boundary-crossing fix that makes the gate pass, note the scope change in the commit and PR description, and let the next chunk absorb it."
+	default:
+		directive = "[VANADIS CI REMEDIATION — MANDATORY]\n" +
+			"Investigate the failing logs, diagnose the root cause, verify locally, and remediate this turn. This turn must end in exactly one machine-visible outcome: (1) a fix pushed to the existing PR branch, or (2) when genuinely blocked, " + failChunk + ". " + checkoutAndSubmit + "\n" +
+			"If the details above lack the failing log, list the run's jobs via curl http://127.0.0.1:4028/internal/github-api/repos/<owner>/<repo>/actions/runs/<run_id>/jobs and fetch failed job logs from .../actions/jobs/<job_id>/logs (gh is not installed; github.com job pages need sign-in).\n" +
 			"Ending this turn with none of these outcomes pauses the chunk for human review automatically and is a failed remediation, not a completed one. A recommendation, waiver request, or \"no legitimate fix\" conclusion written only in your final response is invisible to the thread and counts as no outcome.\n" +
 			"If the correct fix conflicts with the chunk's stated boundaries, do not silently stop: apply the smallest boundary-crossing fix that makes the gate pass, note the scope change in the commit and PR description, and let the next chunk absorb it."
 	}
 	return formatErrorDetailsBlock(
 		fmt.Sprintf("CI check %q failed for PR #%d on %s (head commit: %s).", ev.CheckName, ev.PRNumber, ev.Repo, ev.HeadSHA),
-		details, extraLine,
+		details, meta.extraLine,
 		directive,
 	)
+}
+
+func buildInlineCapDirective(ev pubsub.PRLifecycleEvent, shortRepo, branchArg string, maxAttempts int) string {
+	switch {
+	case prwire.IsRoboRevCheck(ev.CheckName):
+		return "[VANADIS INLINE THREAD CI REMEDIATION — MANDATORY]\n" +
+			fmt.Sprintf("Worker CI remediation cap (%d/%d) reached. As the source-thread agent running in-line on the thread's high-effort model with full thread context, please remediate in this turn by critically evaluating each RoboRev finding against codebase reality and full thread context and either (1) checking out '/share/aerial/scripts/aerial-pr.sh init %s --branch %s' and pushing a verified fix via '/share/aerial/scripts/aerial-pr.sh submit <scratch_dir> \"<commit_msg>\"', or (2) recording a commit-SHA-bound technical rebuttal via '/share/aerial/scripts/aerial-pr.sh --repo %s override-roborev %d '<technical_rebuttal>''. Note that either action automatically recovers the paused chunk to pr_opened and resumes the build.", maxAttempts, maxAttempts, shortRepo, branchArg, shortRepo, ev.PRNumber)
+	case hasCoalescedRoboRevCheck(ev.CheckName):
+		return "[VANADIS INLINE THREAD CI REMEDIATION — MANDATORY]\n" +
+			fmt.Sprintf("Worker CI remediation cap (%d/%d) reached. As the source-thread agent running in-line on the thread's high-effort model with full thread context, please remediate in this turn by fixing all deterministic CI failures and critically evaluating each RoboRev finding against codebase reality: check out '/share/aerial/scripts/aerial-pr.sh init %s --branch %s', fix deterministic CI failures and any valid RoboRev findings in the code (recording '/share/aerial/scripts/aerial-pr.sh --repo %s override-roborev %d '<technical_rebuttal>'' before pushing if any finding is a false positive), and push a verified fix via '/share/aerial/scripts/aerial-pr.sh submit <scratch_dir> \"<commit_msg>\"'. Either action automatically recovers the paused chunk to pr_opened and resumes the build.", maxAttempts, maxAttempts, shortRepo, branchArg, shortRepo, ev.PRNumber)
+	default:
+		return "[VANADIS INLINE THREAD CI REMEDIATION — MANDATORY]\n" +
+			fmt.Sprintf("Worker CI remediation cap (%d/%d) reached. As the source-thread agent running in-line on the thread's high-effort model with full thread context, please remediate in this turn by checking out '/share/aerial/scripts/aerial-pr.sh init %s --branch %s', diagnosing the root cause, verifying locally, and pushing a verified fix via '/share/aerial/scripts/aerial-pr.sh submit <scratch_dir> \"<commit_msg>\"'. Either action automatically recovers the paused chunk to pr_opened and resumes the build.", maxAttempts, maxAttempts, shortRepo, branchArg)
+	}
 }
 
 // FormatInlineCapRemediationPrompt formats the prompt sent to the build's source thread
 // when worker CI remediation attempts are exhausted.
 func FormatInlineCapRemediationPrompt(ev pubsub.PRLifecycleEvent, details, chunkID string, failCount, maxAttempts int) string {
-	var extraParts []string
-	cleanBranch := strings.TrimPrefix(strings.TrimSpace(ev.Branch), "refs/heads/")
-	if cleanBranch != "" {
-		extraParts = append(extraParts, "Branch: "+cleanBranch)
-	}
-	if cleanURL := strings.TrimSpace(ev.CheckURL); cleanURL != "" {
-		extraParts = append(extraParts, "Check URL: "+cleanURL)
-	}
-	extraLine := strings.Join(extraParts, "\n")
-
-	shortRepo := strutil.FirstNonEmpty(model.CleanRepoName(ev.Repo), "aerial")
-	branchArg := strutil.FirstNonEmpty(cleanBranch, "<branch>")
+	meta := parseCIPromptMeta(ev)
 	header := fmt.Sprintf("CI check %q failed %d times for PR #%d on %s (chunk: %s, head commit: %s; worker remediation cap %d/%d reached).", ev.CheckName, failCount, ev.PRNumber, ev.Repo, chunkID, ev.HeadSHA, maxAttempts, maxAttempts)
-
-	var directive string
-	if prwire.IsRoboRevCheck(ev.CheckName) {
-		directive = "[VANADIS INLINE THREAD CI REMEDIATION — MANDATORY]\n" +
-			fmt.Sprintf("Worker CI remediation cap (%d/%d) reached. As the source-thread agent running in-line on the thread's high-effort model with full thread context, please remediate in this turn by critically evaluating each RoboRev finding against codebase reality and full thread context and either (1) checking out '/share/aerial/scripts/aerial-pr.sh init %s --branch %s' and pushing a verified fix via '/share/aerial/scripts/aerial-pr.sh submit <scratch_dir> \"<commit_msg>\"', or (2) recording a commit-SHA-bound technical rebuttal via '/share/aerial/scripts/aerial-pr.sh --repo %s override-roborev %d '<technical_rebuttal>''. Note that either action automatically recovers the paused chunk to pr_opened and resumes the build.", maxAttempts, maxAttempts, shortRepo, branchArg, shortRepo, ev.PRNumber)
-	} else {
-		directive = "[VANADIS INLINE THREAD CI REMEDIATION — MANDATORY]\n" +
-			fmt.Sprintf("Worker CI remediation cap (%d/%d) reached. As the source-thread agent running in-line on the thread's high-effort model with full thread context, please remediate in this turn by checking out '/share/aerial/scripts/aerial-pr.sh init %s --branch %s', diagnosing the root cause, verifying locally, and pushing a verified fix via '/share/aerial/scripts/aerial-pr.sh submit <scratch_dir> \"<commit_msg>\"'. Either action automatically recovers the paused chunk to pr_opened and resumes the build.", maxAttempts, maxAttempts, shortRepo, branchArg)
-	}
-
-	return formatErrorDetailsBlock(header, details, extraLine, directive)
+	directive := buildInlineCapDirective(ev, meta.shortRepo, meta.branchArg, maxAttempts)
+	return formatErrorDetailsBlock(header, details, meta.extraLine, directive)
 }
 
 // FormatNoPRResumePrompt builds a self-contained resume prompt for a PR chunk

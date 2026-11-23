@@ -30,10 +30,11 @@ var (
 	actionsRunIDRegex = regexp.MustCompile(`/actions/runs/(\d+)`)
 	// workflowConclusionRegex matches synapse's generic workflow_run details,
 	// e.g. `Workflow "CI" concluded with failure`.
-	workflowConclusionRegex = regexp.MustCompile(`^Workflow ".*" concluded with [a-z_]+$`)
-	ghaTimestampRegex       = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}T[0-9:.]+Z ?`)
-	ansiEscapeRegex         = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
-	goCoordinateRegex       = regexp.MustCompile(`\.go:\d+`)
+	workflowConclusionRegex     = regexp.MustCompile(`^Workflow ".*" concluded with [a-z_]+$`)
+	checkFailureHeaderOnlyRegex = regexp.MustCompile(`^CI check ".*" failed on [^\n]+ \(commit [^\n]+\)\.(?:\nCheck URL: [^\n]+)?$`)
+	ghaTimestampRegex           = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}T[0-9:.]+Z ?`)
+	ansiEscapeRegex             = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
+	goCoordinateRegex           = regexp.MustCompile(`\.go:\d+`)
 
 	ciPlumbingPrefixes = []string{
 		"##[group]",
@@ -149,6 +150,7 @@ func (c *Client) fetchCheckJobFailureLogsChecked(ctx context.Context, repo strin
 type gitHubRunJob struct {
 	ID         int64  `json:"id"`
 	Name       string `json:"name"`
+	Status     string `json:"status"`
 	Conclusion string `json:"conclusion"`
 }
 
@@ -384,7 +386,172 @@ func isHighSignalLine(line string) bool {
 func NeedsCIJobLogFetch(details string) bool {
 	trimmed := strings.TrimSpace(details)
 	return trimmed == "" || strings.EqualFold(details, "failure") || strings.EqualFold(details, "timed_out") ||
-		workflowConclusionRegex.MatchString(trimmed)
+		workflowConclusionRegex.MatchString(trimmed) ||
+		checkFailureHeaderOnlyRegex.MatchString(trimmed)
+}
+
+// CIFailureResolution describes the coalesced failure outcome of one or more jobs in a workflow run.
+type CIFailureResolution struct {
+	Pending      bool
+	CheckName    string
+	Details      string
+	FailedChecks []string
+}
+
+// IsWorkflowRunFailure reports whether checkURL and details represent a workflow-level run failure rather than a single job check-run.
+func IsWorkflowRunFailure(checkURL, details string) bool {
+	return workflowConclusionRegex.MatchString(strings.TrimSpace(details)) ||
+		(ExtractActionsRunID(checkURL) > 0 && ExtractActionsJobID(checkURL) == 0)
+}
+
+type jobSection struct {
+	name string
+	body string
+}
+
+func (c *Client) fallbackCIFailureResolution(ctx context.Context, repo string, prNumber int, checkName, headSHA, checkURL, details string) (CIFailureResolution, error) {
+	res := CIFailureResolution{CheckName: strings.TrimSpace(checkName)}
+	resolved, err := c.ResolveCIFailureDetailsChecked(ctx, repo, prNumber, checkName, headSHA, checkURL, details)
+	res.Details = resolved
+	if !IsWorkflowRunFailure(checkURL, details) && res.CheckName != "" {
+		res.FailedChecks = []string{res.CheckName}
+	}
+	return res, err
+}
+
+func hasPendingJobs(jobs []gitHubRunJob, triggerJobID int64) bool {
+	for _, job := range jobs {
+		if job.ID != triggerJobID && strings.TrimSpace(job.Status) != "" && !strings.EqualFold(strings.TrimSpace(job.Status), "completed") {
+			return true
+		}
+	}
+	return false
+}
+
+func filterFailedRunJobs(jobs []gitHubRunJob, triggerJobID int64) []gitHubRunJob {
+	var failed []gitHubRunJob
+	for _, job := range jobs {
+		if !isGateAggregatorJob(job.Name) && (isFailedJobConclusion(job.Conclusion) || (triggerJobID > 0 && job.ID == triggerJobID)) {
+			failed = append(failed, job)
+		}
+	}
+	return failed
+}
+
+func (c *Client) fetchRoboRevJobBody(ctx context.Context, repo, repoPath, headSHA string, prNumber int, jobID int64) (string, error) {
+	if prNumber > 0 {
+		comment, cErr := c.fetchLatestRoboRevCommentChecked(ctx, repo, prNumber, headSHA)
+		if cErr != nil {
+			return "", cErr
+		}
+		if comment != "" {
+			return comment, nil
+		}
+	}
+	if jobID > 0 {
+		return c.fetchCheckJobFailureLogsChecked(ctx, repoPath, jobID)
+	}
+	return "", nil
+}
+
+func (c *Client) fetchFailedJobSections(ctx context.Context, repo, repoPath, headSHA, details string, prNumber int, triggerJobID int64, failedJobs []gitHubRunJob) ([]jobSection, error) {
+	if len(failedJobs) == 1 && triggerJobID > 0 && failedJobs[0].ID == triggerJobID && !prwire.IsRoboRevCheck(failedJobs[0].Name) && !NeedsCIJobLogFetch(details) {
+		if trimmed := strings.TrimSpace(details); trimmed != "" {
+			return []jobSection{{name: failedJobs[0].Name, body: trimmed}}, nil
+		}
+		return nil, nil
+	}
+	var sections []jobSection
+	nonRoboRevFetched := 0
+	for _, job := range failedJobs {
+		if prwire.IsRoboRevCheck(job.Name) {
+			body, err := c.fetchRoboRevJobBody(ctx, repo, repoPath, headSHA, prNumber, job.ID)
+			if err != nil {
+				return nil, err
+			}
+			if body != "" {
+				sections = append(sections, jobSection{name: job.Name, body: body})
+			}
+			continue
+		}
+		if nonRoboRevFetched >= maxRunFailedJobLogs || job.ID <= 0 {
+			continue
+		}
+		nonRoboRevFetched++
+		logBody, err := c.fetchCheckJobFailureLogsChecked(ctx, repoPath, job.ID)
+		if err != nil {
+			return nil, err
+		}
+		if logBody != "" {
+			sections = append(sections, jobSection{name: job.Name, body: logBody})
+		}
+	}
+	return sections, nil
+}
+
+func formatCIFailureSections(sections []jobSection, failedCount int, triggerJobID int64, defaultDetails string) string {
+	if failedCount == 1 && triggerJobID > 0 && len(sections) == 1 {
+		if sections[0].body != "" {
+			return sections[0].body
+		}
+		return defaultDetails
+	}
+	if len(sections) == 0 {
+		return defaultDetails
+	}
+	var parts []string
+	for _, s := range sections {
+		parts = append(parts, "### Job: "+s.name+"\n"+s.body)
+	}
+	return strings.Join(parts, "\n\n")
+}
+
+// ResolveCIFailureChecked resolves CI failure details and failed checks across all jobs in a workflow run.
+func (c *Client) ResolveCIFailureChecked(ctx context.Context, repo string, prNumber int, checkName, headSHA, checkURL, details string) (CIFailureResolution, error) {
+	res := CIFailureResolution{CheckName: strings.TrimSpace(checkName), Details: details}
+	if c == nil || c.HTTPClient == nil {
+		return c.fallbackCIFailureResolution(ctx, repo, prNumber, checkName, headSHA, checkURL, details)
+	}
+	runID := ExtractActionsRunID(checkURL)
+	if runID <= 0 {
+		return c.fallbackCIFailureResolution(ctx, repo, prNumber, checkName, headSHA, checkURL, details)
+	}
+	repoPath := githubapi.QualifyRepo(c.gitHubOwner, repo)
+	jobs, err := c.listRunJobsChecked(ctx, repoPath, runID)
+	if err != nil {
+		return res, err
+	}
+	if len(jobs) == 0 {
+		return c.fallbackCIFailureResolution(ctx, repo, prNumber, checkName, headSHA, checkURL, details)
+	}
+
+	triggerJobID := ExtractActionsJobID(checkURL)
+	if !IsWorkflowRunFailure(checkURL, details) && hasPendingJobs(jobs, triggerJobID) {
+		return CIFailureResolution{Pending: true, CheckName: res.CheckName, Details: details}, nil
+	}
+
+	failedJobs := filterFailedRunJobs(jobs, triggerJobID)
+	if len(failedJobs) == 0 {
+		return res, nil
+	}
+
+	for _, job := range failedJobs {
+		if name := strings.TrimSpace(job.Name); name != "" {
+			res.FailedChecks = append(res.FailedChecks, name)
+		}
+	}
+	if len(res.FailedChecks) == 1 {
+		res.CheckName = res.FailedChecks[0]
+	} else if len(res.FailedChecks) > 1 {
+		res.CheckName = strings.Join(res.FailedChecks, ", ")
+	}
+
+	sections, err := c.fetchFailedJobSections(ctx, repo, repoPath, headSHA, details, prNumber, triggerJobID, failedJobs)
+	if err != nil {
+		return res, err
+	}
+	res.Details = formatCIFailureSections(sections, len(res.FailedChecks), triggerJobID, details)
+	return res, nil
 }
 
 // ExtractActionsJobID parses a GitHub Actions job ID from a check URL.

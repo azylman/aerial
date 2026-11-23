@@ -49,13 +49,6 @@ type FireRequest struct {
 	DueAt        time.Time `json:"due_at"`
 }
 
-// EventWatchFireRequest is the input payload for HaroEventWatch.Fire.
-type EventWatchFireRequest struct {
-	TriggerID     string `json:"trigger_id,omitempty"`
-	ContextHeader string `json:"context_header,omitempty"`
-	EventID       string `json:"event_id"`
-}
-
 // ScheduleRow represents a loaded schedule record across cron, one-shot, or heartbeat types.
 type ScheduleRow struct {
 	Found        bool      `json:"found"`
@@ -219,7 +212,49 @@ func (s *HaroSchedule) loadScheduleRow(ctx context.Context, id, schedType string
 	return ScheduleRow{Found: false}, nil
 }
 
-// Arm increments the monotonic generation counter, loads the schedule, and arms Fire with delay.
+// fireIdempotencyKey names the logical "fire this schedule at this due tick"
+// operation. Re-arming the same tick (backfill, tool update, Fire's own
+// follow-up send) collapses into one pending Fire via Restate idempotency;
+// the generation is part of the key so a Cancel followed by a fresh Arm of
+// the same tick schedules a new Fire.
+func fireIdempotencyKey(scheduleID string, gen int64, dueAt time.Time) string {
+	return fmt.Sprintf("haro:fire:%s:%d:%s", scheduleID, gen, dueAt.UTC().Format(time.RFC3339Nano))
+}
+
+// scheduleGoneError is the terminal result for a Fire or Arm whose schedule
+// was deleted (404) or disabled (412); state is fenced before it is returned.
+func scheduleGoneError(scheduleID string, loaded ScheduleRow) error {
+	if !loaded.Found {
+		return restate.ToTerminalError(fmt.Errorf("schedule %q not found", scheduleID), restate.WithErrorCode(http.StatusNotFound))
+	}
+	return restate.ToTerminalError(fmt.Errorf("schedule %q is disabled", scheduleID), restate.WithErrorCode(http.StatusPreconditionFailed))
+}
+
+// fenceSchedule bumps the generation so every pending Fire becomes a no-op.
+func fenceSchedule(ctx restate.ObjectContext, gen int64) {
+	restate.Set(ctx, "gen", gen+1)
+	restate.Clear(ctx, "armed_due_at")
+}
+
+// sendFire schedules Fire for dueAt, deduplicated per schedule, generation and due tick.
+func sendFire(ctx restate.ObjectContext, scheduleID string, gen int64, schedType string, dueAt time.Time, delay time.Duration) {
+	restate.Set(ctx, "armed_due_at", dueAt.UTC().Format(time.RFC3339Nano))
+	_ = restate.ObjectSend(ctx, "HaroSchedule", scheduleID, "Fire").Send(
+		FireRequest{
+			Generation:   gen,
+			ScheduleType: schedType,
+			DueAt:        dueAt,
+		},
+		restate.WithDelay(max(0, delay)),
+		restate.WithIdempotencyKey(fireIdempotencyKey(scheduleID, gen, dueAt)),
+	)
+}
+
+// Arm loads the schedule and sends Fire for its next due tick. Arm is safe to
+// repeat: the Fire send is keyed by schedule, generation and due tick, so a
+// pending Fire for the same tick is deduplicated by Restate while a lost one
+// is re-armed. A deleted or disabled schedule fences pending Fires and ends
+// terminally.
 func (s *HaroSchedule) Arm(ctx restate.ObjectContext, req ArmRequest) (restate.Void, error) {
 	scheduleID := restate.Key(ctx)
 	gen, err := restate.Get[int64](ctx, "gen")
@@ -228,43 +263,20 @@ func (s *HaroSchedule) Arm(ctx restate.ObjectContext, req ArmRequest) (restate.V
 	}
 
 	loaded, err := restate.Run(ctx, func(rc restate.RunContext) (ScheduleRow, error) {
-		return s.loadScheduleRow(rc, scheduleID, req.ScheduleType)
+		return withStoreTimeout(rc, func(c context.Context) (ScheduleRow, error) {
+			return s.loadScheduleRow(c, scheduleID, req.ScheduleType)
+		})
 	}, restate.WithName("load-schedule"))
 	if err != nil {
 		return restate.Void{}, err
 	}
 	if !loaded.Found || !loaded.Enabled {
-		restate.Clear(ctx, "armed_due_at")
-		return restate.Void{}, nil
+		fenceSchedule(ctx, gen)
+		return restate.Void{}, scheduleGoneError(scheduleID, loaded)
 	}
 
-	dueStr := loaded.NextRunAt.UTC().Format(time.RFC3339Nano)
-	lastArmedDue, err := restate.Get[string](ctx, "armed_due_at")
-	if err != nil {
-		return restate.Void{}, err
-	}
-	if lastArmedDue == dueStr {
-		return restate.Void{}, nil
-	}
-
-	gen++
-	restate.Set(ctx, "gen", gen)
-	restate.Set(ctx, "armed_due_at", dueStr)
-
-	schedType := loaded.ScheduleType
-	if schedType == "" {
-		schedType = req.ScheduleType
-	}
-	delay := max(0, time.Duration(loaded.DelayMs)*time.Millisecond)
-
-	_ = restate.ObjectSend(ctx, "HaroSchedule", scheduleID, "Fire").Send(
-		FireRequest{
-			Generation:   gen,
-			ScheduleType: schedType,
-			DueAt:        loaded.NextRunAt,
-		},
-		restate.WithDelay(delay),
-	)
+	schedType := strutil.FirstNonEmpty(loaded.ScheduleType, req.ScheduleType)
+	sendFire(ctx, scheduleID, gen, schedType, loaded.NextRunAt, time.Duration(loaded.DelayMs)*time.Millisecond)
 	return restate.Void{}, nil
 }
 
@@ -278,24 +290,31 @@ func (s *HaroSchedule) Fire(ctx restate.ObjectContext, req FireRequest) (restate
 	if req.Generation != currentGen {
 		return restate.Void{}, nil
 	}
+	// A Fire for a tick that has since been superseded (re-armed for another
+	// due time, or already fired and advanced) is a no-op.
+	armedDue, err := restate.Get[string](ctx, "armed_due_at")
+	if err != nil {
+		return restate.Void{}, err
+	}
+	if !req.DueAt.IsZero() && armedDue != "" && armedDue != req.DueAt.UTC().Format(time.RFC3339Nano) {
+		return restate.Void{}, nil
+	}
 
 	// Step 1: load-schedule
 	loaded, err := restate.Run(ctx, func(rc restate.RunContext) (ScheduleRow, error) {
-		return s.loadScheduleRow(rc, scheduleID, req.ScheduleType)
+		return withStoreTimeout(rc, func(c context.Context) (ScheduleRow, error) {
+			return s.loadScheduleRow(c, scheduleID, req.ScheduleType)
+		})
 	}, restate.WithName("load-schedule"))
 	if err != nil {
 		return restate.Void{}, err
 	}
 	if !loaded.Found || !loaded.Enabled {
-		restate.Set(ctx, "gen", currentGen+1)
-		restate.Clear(ctx, "armed_due_at")
-		return restate.Void{}, nil
+		fenceSchedule(ctx, currentGen)
+		return restate.Void{}, scheduleGoneError(scheduleID, loaded)
 	}
 
-	schedType := loaded.ScheduleType
-	if schedType == "" {
-		schedType = req.ScheduleType
-	}
+	schedType := strutil.FirstNonEmpty(loaded.ScheduleType, req.ScheduleType)
 	dueAt := req.DueAt
 	if dueAt.IsZero() {
 		dueAt = loaded.NextRunAt
@@ -327,37 +346,51 @@ func (s *HaroSchedule) Fire(ctx restate.ObjectContext, req FireRequest) (restate
 		return restate.Void{}, err
 	}
 
-	// Step 3: finalize-schedule
+	// Step 3: record-run (the dispatch's completion record, separate from the dispatch itself)
+	if _, err = restate.Run(ctx, func(rc restate.RunContext) (restate.Void, error) {
+		return restate.Void{}, s.recordRunStep(rc, loaded, schedType, scheduleID, runID, dispatchRes, s.now())
+	}, restate.WithName("record-run")); err != nil {
+		return restate.Void{}, err
+	}
+
+	// Step 4: finalize-schedule (delete the one-shot or advance the recurring schedule)
 	finRes, err := restate.Run(ctx, func(rc restate.RunContext) (FinalizeResult, error) {
-		return s.finalizeStep(rc, loaded, schedType, scheduleID, runID, dispatchRes, s.now())
+		return s.finalizeStep(rc, loaded, schedType, scheduleID, s.now())
 	}, restate.WithName("finalize-schedule"))
 	if err != nil {
 		return restate.Void{}, err
 	}
 
 	if finRes.IsOneShot {
-		restate.Set(ctx, "gen", currentGen+1)
-		restate.Clear(ctx, "armed_due_at")
+		fenceSchedule(ctx, currentGen)
 		return restate.Void{}, nil
 	}
 
-	nextDelay := max(0, time.Duration(finRes.DelayMs)*time.Millisecond)
-	restate.Set(ctx, "armed_due_at", finRes.NextRunAt.UTC().Format(time.RFC3339Nano))
-
-	_ = restate.ObjectSend(ctx, "HaroSchedule", scheduleID, "Fire").Send(
-		FireRequest{
-			Generation:   currentGen,
-			ScheduleType: schedType,
-			DueAt:        finRes.NextRunAt,
-		},
-		restate.WithDelay(nextDelay),
-	)
+	sendFire(ctx, scheduleID, currentGen, schedType, finRes.NextRunAt, time.Duration(finRes.DelayMs)*time.Millisecond)
 	return restate.Void{}, nil
+}
+
+// permanentDispatchFailure turns a terminal dispatcher error (eri or ingress
+// 4xx, invalid request) into a failed run so the schedule records it and moves
+// on to its next tick instead of retrying a dispatch that cannot succeed.
+func permanentDispatchFailure(schedType string, err error, now time.Time) (DispatchStepResult, error) {
+	if !restate.IsTerminalError(err) {
+		return DispatchStepResult{}, err
+	}
+	log.Printf("[Haro Schedule] permanent %s dispatch failure, recording failed run: %v", schedType, err)
+	return DispatchStepResult{
+		Status:       model.StatusFailed,
+		Error:        err.Error(),
+		DispatchedAt: now,
+	}, nil
 }
 
 func (s *HaroSchedule) dispatchHeartbeatStep(rc restate.RunContext, loaded ScheduleRow, scheduleID, idempotencyKey, runID string, now time.Time) (DispatchStepResult, error) {
 	sessionKey := "heartbeat-" + scheduleID
-	if active, activeErr := store.HasRunningHeartbeatRun(rc, s.db, scheduleID, now.Add(-2*time.Hour)); activeErr == nil && active {
+	active, activeErr := withStoreTimeout(rc, func(c context.Context) (bool, error) {
+		return store.HasRunningHeartbeatRun(c, s.db, scheduleID, now.Add(-2*time.Hour))
+	})
+	if activeErr == nil && active {
 		metrics.RecordScheduleRun(model.ScheduleTypeHeartbeat, model.StatusSkippedActive)
 		slog.Info("Skipping heartbeat run: schedule has an active run in progress", "id", scheduleID, "thread_id", sessionKey)
 		return DispatchStepResult{
@@ -400,7 +433,7 @@ func (s *HaroSchedule) dispatchHeartbeatStep(rc restate.RunContext, loaded Sched
 	})
 	metrics.RecordScheduleDispatchDuration(model.ScheduleTypeHeartbeat, time.Since(dispatchStart).Seconds())
 	if dispatchErr != nil {
-		return DispatchStepResult{}, dispatchErr
+		return permanentDispatchFailure(model.ScheduleTypeHeartbeat, dispatchErr, now)
 	}
 	if resp.Status == eriwire.StatusSkippedActive {
 		metrics.RecordScheduleRun(model.ScheduleTypeHeartbeat, model.StatusSkippedActive)
@@ -439,7 +472,7 @@ func (s *HaroSchedule) dispatchPromptStep(rc restate.RunContext, loaded Schedule
 	})
 	metrics.RecordScheduleDispatchDuration(schedType, time.Since(dispatchStart).Seconds())
 	if dispatchErr != nil {
-		return DispatchStepResult{}, dispatchErr
+		return permanentDispatchFailure(schedType, dispatchErr, now)
 	}
 	completedAt := time.Now().UTC()
 	durationMs := completedAt.Sub(now).Milliseconds()
@@ -460,39 +493,49 @@ func (s *HaroSchedule) dispatchPromptStep(rc restate.RunContext, loaded Schedule
 	}, nil
 }
 
-func (s *HaroSchedule) finalizeStep(rc restate.RunContext, loaded ScheduleRow, schedType, scheduleID, runID string, dispatchRes DispatchStepResult, now time.Time) (FinalizeResult, error) {
-	if !dispatchRes.SkippedActive {
-		var completedAt *time.Time
-		if dispatchRes.Status == model.StatusCompleted || dispatchRes.Status == model.StatusFailed {
-			c := now
-			completedAt = &c
-		}
-		run := model.ScheduleRun{
-			ID:           runID,
-			ScheduleID:   scheduleID,
-			ScheduleType: schedType,
-			MessageID:    strutil.FirstNonEmpty(dispatchRes.MessageID, runID),
-			TargetID:     loaded.TargetID,
-			ThreadID:     strutil.FirstNonEmpty(dispatchRes.ThreadID, loaded.TargetID),
-			Title:        loaded.TitlePrefix,
-			Prompt:       loaded.Prompt,
-			Status:       dispatchRes.Status,
-			StartedAt:    dispatchRes.DispatchedAt,
-			CompletedAt:  completedAt,
-			DurationMs:   dispatchRes.DurationMs,
-			Error:        dispatchRes.Error,
-			Effort:       loaded.Effort,
-			Agent:        loaded.Agent,
-		}
-		if createErr := store.CreateScheduleRun(rc, s.db, run); createErr != nil {
-			log.Printf("[Haro Schedule] Error creating schedule run for %s (%s): %v", scheduleID, schedType, createErr)
-			return FinalizeResult{}, createErr
-		}
-		metrics.RecordScheduleRun(schedType, dispatchRes.Status)
+// recordRunStep upserts the run row for this due tick (idempotent on the deterministic run ID).
+func (s *HaroSchedule) recordRunStep(rc restate.RunContext, loaded ScheduleRow, schedType, scheduleID, runID string, dispatchRes DispatchStepResult, now time.Time) error {
+	if dispatchRes.SkippedActive {
+		return nil
 	}
+	var completedAt *time.Time
+	if dispatchRes.Status == model.StatusCompleted || dispatchRes.Status == model.StatusFailed {
+		c := now
+		completedAt = &c
+	}
+	run := model.ScheduleRun{
+		ID:           runID,
+		ScheduleID:   scheduleID,
+		ScheduleType: schedType,
+		MessageID:    strutil.FirstNonEmpty(dispatchRes.MessageID, runID),
+		TargetID:     loaded.TargetID,
+		ThreadID:     strutil.FirstNonEmpty(dispatchRes.ThreadID, loaded.TargetID),
+		Title:        loaded.TitlePrefix,
+		Prompt:       loaded.Prompt,
+		Status:       dispatchRes.Status,
+		StartedAt:    dispatchRes.DispatchedAt,
+		CompletedAt:  completedAt,
+		DurationMs:   dispatchRes.DurationMs,
+		Error:        dispatchRes.Error,
+		Effort:       loaded.Effort,
+		Agent:        loaded.Agent,
+	}
+	if _, createErr := withStoreTimeout(rc, func(c context.Context) (struct{}, error) {
+		return struct{}{}, store.CreateScheduleRun(c, s.db, run)
+	}); createErr != nil {
+		log.Printf("[Haro Schedule] Error creating schedule run for %s (%s): %v", scheduleID, schedType, createErr)
+		return createErr
+	}
+	metrics.RecordScheduleRun(schedType, dispatchRes.Status)
+	return nil
+}
 
+// finalizeStep deletes a fired one-shot or advances a recurring schedule to its next tick.
+func (s *HaroSchedule) finalizeStep(rc restate.RunContext, loaded ScheduleRow, schedType, scheduleID string, now time.Time) (FinalizeResult, error) {
 	if schedType == model.ScheduleTypeOneShot {
-		if _, delErr := store.DeleteOneShotSchedule(rc, s.db, scheduleID); delErr != nil {
+		if _, delErr := withStoreTimeout(rc, func(c context.Context) (bool, error) {
+			return store.DeleteOneShotSchedule(c, s.db, scheduleID)
+		}); delErr != nil {
 			return FinalizeResult{}, delErr
 		}
 		return FinalizeResult{IsOneShot: true}, nil
@@ -518,10 +561,13 @@ func (s *HaroSchedule) advanceRecurringSchedule(rc restate.RunContext, loaded Sc
 	if calcErr != nil {
 		nextRun = now.Add(24 * time.Hour)
 	}
-	if schedType == model.ScheduleTypeCron {
-		return nextRun, store.AdvanceCronNextRun(rc, s.db, scheduleID, nextRun)
-	}
-	return nextRun, store.AdvanceHeartbeatNextRun(rc, s.db, scheduleID, nextRun)
+	_, err := withStoreTimeout(rc, func(c context.Context) (struct{}, error) {
+		if schedType == model.ScheduleTypeCron {
+			return struct{}{}, store.AdvanceCronNextRun(c, s.db, scheduleID, nextRun)
+		}
+		return struct{}{}, store.AdvanceHeartbeatNextRun(c, s.db, scheduleID, nextRun)
+	})
+	return nextRun, err
 }
 
 // Cancel increments the generation counter to fence off pending Fires.
@@ -532,87 +578,6 @@ func (*HaroSchedule) Cancel(ctx restate.ObjectContext, _ struct{}) (restate.Void
 	}
 	restate.Set(ctx, "gen", gen+1)
 	restate.Clear(ctx, "armed_due_at")
-	return restate.Void{}, nil
-}
-
-// HaroEventWatch is a Restate Virtual Object keyed by trigger_id managing durable event watch firing.
-type HaroEventWatch struct {
-	db         *sql.DB
-	dispatcher dispatch.PromptDispatcher
-	nowFn      func() time.Time
-}
-
-func (w *HaroEventWatch) now() time.Time {
-	if w.nowFn != nil {
-		return w.nowFn()
-	}
-	return time.Now().UTC()
-}
-
-// NewHaroEventWatch constructs a HaroEventWatch Virtual Object handler.
-func NewHaroEventWatch(db *sql.DB, dispatcher dispatch.PromptDispatcher) *HaroEventWatch {
-	return &HaroEventWatch{
-		db:         db,
-		dispatcher: dispatcher,
-	}
-}
-
-// Fire executes the event watch trigger in two durable Restate steps.
-func (w *HaroEventWatch) Fire(ctx restate.ObjectContext, req EventWatchFireRequest) (restate.Void, error) {
-	triggerID := restate.Key(ctx)
-
-	// Step 1: dispatch-event
-	dispatched, err := restate.Run(ctx, func(rc restate.RunContext) (bool, error) {
-		trig, getErr := store.GetEventTrigger(rc, w.db, triggerID)
-		if getErr != nil {
-			if errors.Is(getErr, sql.ErrNoRows) || strings.Contains(getErr.Error(), "not found") {
-				return false, nil
-			}
-			return false, getErr
-		}
-		now := w.now()
-		if trig.Persistent && trig.UpdatedAt != nil && now.Sub(*trig.UpdatedAt) < 5*time.Second {
-			log.Printf("[Haro EventWatch] Suppressing persistent event watch %s (%s:%s) within 5s cooldown (elapsed: %v)", triggerID, trig.Source, trig.Target, now.Sub(*trig.UpdatedAt))
-			metrics.RecordScheduleRun(model.ScheduleTypeEventWatch, model.StatusSkippedActive)
-			return false, nil
-		}
-		if w.dispatcher == nil {
-			return false, errors.New("dispatcher not initialized")
-		}
-
-		prompt := model.FormatEventTriggerPrompt(req.ContextHeader, trig.Prompt)
-		msgID := uuid.NewSHA1(uuid.NameSpaceOID, []byte("event_watch:"+strings.TrimSpace(trig.ID)+":"+strings.TrimSpace(req.EventID))).String()
-		start := time.Now()
-		_, dispErr := dispatch.TraceFire(rc, model.ScheduleTypeEventWatch, trig.ID, func(dispCtx context.Context) (dispatch.PromptDispatchResponse, error) {
-			return w.dispatcher.DispatchPrompt(dispCtx, dispatch.PromptDispatchRequest{
-				ChannelID: trig.ChannelID,
-				MessageID: msgID,
-				Prompt:    prompt,
-				Effort:    trig.Effort,
-				Agent:     trig.Agent,
-			})
-		})
-		metrics.RecordScheduleDispatchDuration(model.ScheduleTypeEventWatch, time.Since(start).Seconds())
-		if dispErr != nil {
-			metrics.RecordScheduleRun(model.ScheduleTypeEventWatch, model.StatusFailed)
-			return false, dispErr
-		}
-		metrics.RecordScheduleRun(model.ScheduleTypeEventWatch, model.StatusCompleted)
-		return true, nil
-	}, restate.WithName("dispatch-event"))
-	if err != nil || !dispatched {
-		return restate.Void{}, err
-	}
-
-	// Step 2: consume-trigger
-	_, err = restate.Run(ctx, func(rc restate.RunContext) (restate.Void, error) {
-		_, consumeErr := store.ConsumeEventTrigger(rc, w.db, triggerID, w.now())
-		return restate.Void{}, consumeErr
-	}, restate.WithName("consume-trigger"))
-	if err != nil {
-		return restate.Void{}, err
-	}
-
 	return restate.Void{}, nil
 }
 
@@ -745,39 +710,6 @@ func (t *Ticker) BackfillActiveSchedules(ctx context.Context) error {
 		}
 	}
 
-	return errors.Join(errs...)
-}
-
-// HandleExternalEvent queries matching triggers and invokes HaroEventWatch/<triggerID>/Fire synchronously via Restate ingress.
-func HandleExternalEvent(ctx context.Context, db *sql.DB, restateIngressURL string, ev pubsub.ExternalEvent, client ...*http.Client) error {
-	if ev.Source == "healthcheck" || len(ev.Targets) == 0 {
-		return nil
-	}
-	if db == nil {
-		return errors.New("database not initialized")
-	}
-	triggers, err := store.QueryMatchingEventTriggers(ctx, db, ev.Source, ev.Targets, ev.EventType)
-	if err != nil {
-		return err
-	}
-	var httpClient *http.Client
-	if len(client) > 0 && client[0] != nil {
-		httpClient = client[0]
-	}
-	var errs []error
-	for _, trig := range triggers {
-		idempotencyKey := fmt.Sprintf("haro:event:%s:%s", trig.ID, ev.EventID)
-		endpoint := fmt.Sprintf("%s/HaroEventWatch/%s/Fire", strings.TrimRight(restateIngressURL, "/"), url.PathEscape(trig.ID))
-		payload := EventWatchFireRequest{
-			TriggerID:     trig.ID,
-			ContextHeader: ev.ContextHeader,
-			EventID:       ev.EventID,
-		}
-		if _, postErr := restateingress.Post(ctx, httpClient, endpoint, idempotencyKey, payload, 0); postErr != nil {
-			log.Printf("[Haro] error firing event watch %s (%s): %v", trig.ID, trig.Source, postErr)
-			errs = append(errs, postErr)
-		}
-	}
 	return errors.Join(errs...)
 }
 
