@@ -194,7 +194,7 @@ func (s *PRState) ApplyIdentity(branch, title string) {
 // stores one): it is then claimed as the inserted row's owner
 // (claimRowOwner) and also fills BotID, the two keys the insert writes. The
 // status is untouched. Filling the target makes the PR tracked, so the
-// untracked guard stops applying and Project writes the row legacy writes.
+// untracked guard stops applying and Project writes the row.
 // Returns true when the state changed.
 func (s *PRState) ApplySelfRegistration(branch, head, targetID, title, agent string) bool {
 	targetID = strings.TrimSpace(targetID)
@@ -254,7 +254,7 @@ func (s *PRState) ApplyRegistrySync(prevHead, head string) bool {
 // head, or a redelivery of the same new head. A head this PR already moved
 // past (PriorHeads) is a late redelivery and drops stale. Any other
 // mismatch means PRObject missed a synchronize; it recovers last-write-wins
-// like the legacy row instead of wedging the head until merge.
+// instead of wedging the head until merge.
 func (s *PRState) SynchronizeDisposition(ev PREvent) EventDisposition {
 	if s == nil {
 		return DispositionDropStale
@@ -400,14 +400,12 @@ func (s *PRState) RecordExpectedJobs(jobs []string) bool {
 	return true
 }
 
-// Untracked reports whether st never saw any event that makes a PR exist
-// for the legacy registry: no register or self-registration (Registered,
+// Untracked reports whether st never saw any event that makes a PR
+// tracked: no register or self-registration (Registered,
 // TargetID), no opened (it carries the head SHA, and PR-body bot metadata
 // sets BotID), and no merge or close (Terminal, MergeSHA). Such a state was built only from deploy-phase
 // events, for example an upstream Flux source commit resolved to a PR of a
-// repo nobody registers. The legacy registry has no row for it, so its
-// deploy transitions and request records are no-ops there; prstate must not
-// start a rollout for it either. A nil state is not untracked: there is
+// repo nobody registers. prstate never starts a rollout for it. A nil state is not untracked: there is
 // nothing to drop.
 func (s *PRState) Untracked() bool {
 	return s != nil && !s.Registered && s.Terminal == TerminalNone &&

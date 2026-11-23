@@ -126,7 +126,7 @@ const (
 	DispositionAbsorbTerminal EventDisposition = "absorb_terminal"
 	// DispositionRecoverStale applies a synchronize whose stored head matches
 	// neither its head nor its before SHA: PRObject missed an earlier
-	// synchronize, so the head moves last-write-wins like the legacy row.
+	// synchronize, so the head moves last-write-wins.
 	DispositionRecoverStale EventDisposition = "recover_stale"
 )
 

@@ -100,8 +100,8 @@ func TestPRObjectService_RegistryRow(t *testing.T) {
 	mc17, rec17 := newStateMock(t, redelivered)
 	mc19, rec19 := newStateMock(t, svcRow("h1", "", RegistryStatusOpen, TerminalNone))
 	mc18, rec18 := newStateMock(t, svcRow("h1", "m1", RegistryStatusMerged, TerminalMerged))
-	_, err12 := svc.HandleDeploySuccessPublished(restate.WithMockContext(mc12), PREvent{Repo: "azylman/aerial", PRNumber: 101, MergeSHA: "m1", JobName: "core"})
-	_, err16 := svc.HandleConflictPublished(restate.WithMockContext(mc16), PREvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "h1"})
+	_, err12 := svc.HandleDeploySuccess(restate.WithMockContext(mc12), PREvent{Repo: "azylman/aerial", PRNumber: 101, MergeSHA: "m1", JobName: "core"})
+	_, err16 := svc.HandleConflict(restate.WithMockContext(mc16), PREvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "h1"})
 	tests := []struct {
 		name    string
 		got     error
@@ -341,12 +341,15 @@ func TestPRObjectService_HandleSynchronized(t *testing.T) {
 
 // TestPRObjectService_HandleMergedStaleHead pins the merged stale-head
 // repair: a same-merge closed event carrying the real head adopts it
-// (PriorHeads, RepoObject index), while a merge-only ref, a prior head and
-// another merge commit never move the head.
+// (PriorHeads, RepoObject index), the first merge of an open PR whose
+// stored head is stale applies on its merge SHA and adopts the carried head,
+// while a merge-only ref, a prior head and another merge commit never move
+// the head.
 func TestPRObjectService_HandleMergedStaleHead(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name      string
+		open      bool
 		prior     []string
 		ev        PREvent
 		wantSet   bool
@@ -359,6 +362,12 @@ func TestPRObjectService_HandleMergedStaleHead(t *testing.T) {
 			ev:      PREvent{Repo: "azylman/aerial", PRNumber: 2308, HeadSHA: "701c341c", MergeSHA: "913c2325", Branch: "feat/x"},
 			wantSet: true, wantHead: "701c341c", wantPrior: []string{"c00b710c"},
 			wantSends: []sentCall{{service: prwire.RepoObjectServiceName, key: "azylman/aerial", method: prwire.RepoHandlerPRIndex, input: PRIndexEvent{Repo: "azylman/aerial", PRNumber: 2308, Branch: "feat/x", HeadSHA: "701c341c", Lifecycle: IndexActive}}},
+		},
+		{
+			name: "first merge of a stale open pr adopts the carried head", open: true,
+			ev:      PREvent{Repo: "azylman/aerial", PRNumber: 2308, HeadSHA: "701c341c", MergeSHA: "913c2325", Branch: "feat/x"},
+			wantSet: true, wantHead: "701c341c", wantPrior: []string{"c00b710c"},
+			wantSends: []sentCall{{service: prwire.RepoObjectServiceName, key: "azylman/aerial", method: prwire.RepoHandlerPRIndex, input: PRIndexEvent{Repo: "azylman/aerial", PRNumber: 2308, Branch: "feat/x", HeadSHA: "701c341c", MergeSHA: "913c2325", Lifecycle: IndexMerged}}},
 		},
 		{
 			name:     "merge-only ref never overwrites the head",
@@ -377,6 +386,9 @@ func TestPRObjectService_HandleMergedStaleHead(t *testing.T) {
 			seed := NewPRState("azylman/aerial", 2308)
 			seed.HeadSHA, seed.MergeSHA, seed.Branch = "c00b710c", "913c2325", "feat/x"
 			seed.Status, seed.Terminal, seed.PriorHeads = RegistryStatusMerged, TerminalMerged, tc.prior
+			if tc.open {
+				seed.Status, seed.Terminal, seed.MergeSHA = RegistryStatusOpen, TerminalNone, ""
+			}
 			mc, rec := newStateMock(t, seed)
 			require.NoError(t, NewPRObjectService().HandleMerged(restate.WithMockContext(mc), tc.ev))
 			require.Equal(t, tc.wantSet, rec.setCalled)
@@ -387,28 +399,28 @@ func TestPRObjectService_HandleMergedStaleHead(t *testing.T) {
 	}
 }
 
-// TestPRObjectService_DeploySuccessPublishedMergedStaleHead pins that a
+// TestPRObjectService_DeploySuccessMergedStaleHead pins that a
 // deploy_success commit on a PR merged with a stale head repairs the head
 // and indexes it: with the deployed index op on a first record, and with
 // an active index op when the dispatch was already recorded.
-func TestPRObjectService_DeploySuccessPublishedMergedStaleHead(t *testing.T) {
+func TestPRObjectService_DeploySuccessMergedStaleHead(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name       string
 		dispatched bool
-		wantOut    DeployPublishedOutcome
+		wantOut    DeployDispatchDecision
 		wantSends  []sentCall
 	}{
 		{
 			name:    "first record indexes the repaired head as deployed",
-			wantOut: DeployPublishedOutcome{Disposition: DispositionApply, EffectKey: "azylman/aerial#2308@701c341c:gen0:deploy_dispatch:job=aerial-config", Recorded: true},
+			wantOut: DeployDispatchDecision{Disposition: DispositionApply, EffectKey: "azylman/aerial#2308@701c341c:gen0:deploy_dispatch:job=aerial-config", ShouldPublish: true},
 			wantSends: []sentCall{{service: prwire.RepoObjectServiceName, key: "azylman/aerial", method: prwire.RepoHandlerPRIndex, input: PRIndexEvent{
 				Repo: "azylman/aerial", PRNumber: 2308, Branch: "feat/x", HeadSHA: "701c341c", MergeSHA: "913c2325", Lifecycle: IndexDeployed,
 			}}},
 		},
 		{
 			name: "deduped record indexes the repaired head as active", dispatched: true,
-			wantOut: DeployPublishedOutcome{Disposition: DispositionApply, EffectKey: "azylman/aerial#2308@701c341c:gen0:deploy_dispatch:job=aerial-config", Recorded: true, Deduped: true},
+			wantOut: DeployDispatchDecision{Disposition: DispositionApply, EffectKey: "azylman/aerial#2308@701c341c:gen0:deploy_dispatch:job=aerial-config", ShouldPublish: true},
 			wantSends: []sentCall{{service: prwire.RepoObjectServiceName, key: "azylman/aerial", method: prwire.RepoHandlerPRIndex, input: PRIndexEvent{
 				Repo: "azylman/aerial", PRNumber: 2308, Branch: "feat/x", HeadSHA: "701c341c", Lifecycle: IndexActive,
 			}}},
@@ -424,7 +436,7 @@ func TestPRObjectService_DeploySuccessPublishedMergedStaleHead(t *testing.T) {
 				seed.MarkEffectDispatched(seed.EffectKeyFor(prwire.EffectDeployDispatch, "701c341c", "aerial-config", ""))
 			}
 			mc, rec := newStateMock(t, seed)
-			out, err := NewPRObjectService().HandleDeploySuccessPublished(restate.WithMockContext(mc), PREvent{
+			out, err := NewPRObjectService().HandleDeploySuccess(restate.WithMockContext(mc), PREvent{
 				Repo: "azylman/aerial", PRNumber: 2308, HeadSHA: "701c341c", MergeSHA: "913c2325", JobName: "aerial-config",
 			})
 			require.NoError(t, err)

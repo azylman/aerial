@@ -3,8 +3,8 @@ package prstate
 // Stateless renders the GitHub effects need when no synapse is in the loop
 // (the RepoObject auto-update cascade): the collaborator conflict DM, the
 // conflict and closed-unmerged lifecycle facts, and the Aerial PR-metadata
-// trailer check. Each mirrors its synapse counterpart byte for byte so a
-// restate-owned effect renders what the legacy pipeline sends.
+// trailer check. Each renders byte for byte what the synapse-edge
+// counterpart renders, so both paths produce identical messages.
 
 import (
 	"encoding/json"
