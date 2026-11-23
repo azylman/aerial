@@ -88,7 +88,7 @@ func (f *Flow) HandlePRCheckEvent(ctx context.Context, chunkID, event string, ev
 	}
 	checkState := strings.TrimSpace(ev.CheckState)
 	if event == "check_failed" || event == "ci_failed" {
-		checkState = "failed"
+		checkState = statusFailed
 	}
 	if checkState == "" {
 		return nil
@@ -320,7 +320,7 @@ func (f *Flow) HandleCIRemediationTurnEnded(ctx context.Context, buildID, chunkI
 		return nil
 	}
 	chunk := chunks[idx]
-	if strings.TrimSpace(chunk.Status) != statusCIFailed || chunk.PRNumber <= 0 || chunk.CIFailCount != attempt {
+	if !isEligibleCIRemediationChunk(chunk, attempt) || hasActiveChunkCheck(chunk) {
 		return nil
 	}
 	liveHead, open, err := f.Exec.LivePRState(ctx, chunk.Repo, chunk.PRNumber)
@@ -330,17 +330,64 @@ func (f *Flow) HandleCIRemediationTurnEnded(ctx context.Context, buildID, chunkI
 	if !open || !strings.EqualFold(liveHead, headSHA) {
 		return nil
 	}
-	if hasFailingRoboRevCheck(chunk) {
-		overridden, oErr := f.Exec.HasRoboRevOverride(ctx, chunk.Repo, chunk.PRNumber, headSHA)
-		if oErr != nil {
-			return oErr
-		}
-		if overridden {
-			return nil
-		}
+	overridden, oErr := f.isRoboRevOverridden(ctx, chunk, headSHA)
+	if oErr != nil {
+		return oErr
+	}
+	if overridden {
+		return nil
+	}
+	active, aErr := f.hasActiveCIFailureChecks(ctx, chunk, headSHA)
+	if aErr != nil {
+		return aErr
+	}
+	if active {
+		return nil
 	}
 	content := fmt.Sprintf("🛑 [%s#%d] CI fix-up turn ended without pushing a fix, recording an override, or calling fail_chunk. Chunk paused for a decision.", chunk.Repo, chunk.PRNumber)
 	return f.pauseChunk(ctx, chunkID, CIRemediationNoOutcomeReason, content, "CI fix-up turn ended without an outcome — awaiting a decision")
+}
+
+func isEligibleCIRemediationChunk(chunk model.VanadisChunk, attempt int) bool {
+	return strings.TrimSpace(chunk.Status) == statusCIFailed && chunk.PRNumber > 0 && chunk.CIFailCount == attempt
+}
+
+func (f *Flow) isRoboRevOverridden(ctx context.Context, chunk model.VanadisChunk, headSHA string) (bool, error) {
+	if !hasFailingRoboRevCheck(chunk) {
+		return false, nil
+	}
+	return f.Exec.HasRoboRevOverride(ctx, chunk.Repo, chunk.PRNumber, headSHA)
+}
+
+func (f *Flow) hasActiveCIFailureChecks(ctx context.Context, chunk model.VanadisChunk, headSHA string) (bool, error) {
+	if !hasRecordedCIFailure(chunk) {
+		return false, nil
+	}
+	return f.Exec.HasActiveOrRecoveredChecks(ctx, chunk.Repo, headSHA)
+}
+
+func hasActiveChunkCheck(chunk model.VanadisChunk) bool {
+	for name, state := range chunk.CIChecks {
+		if strings.HasPrefix(strings.TrimSpace(name), "_") {
+			continue
+		}
+		if state == "pending" || state == "running" {
+			return true
+		}
+	}
+	return false
+}
+
+func hasRecordedCIFailure(chunk model.VanadisChunk) bool {
+	for name, state := range chunk.CIChecks {
+		if strings.HasPrefix(strings.TrimSpace(name), "_") {
+			continue
+		}
+		if state == statusFailed {
+			return true
+		}
+	}
+	return strings.HasPrefix(strings.TrimSpace(chunk.Banner), "CI check ")
 }
 
 // hasFailingRoboRevCheck reports whether the chunk's recorded checks or its
@@ -351,7 +398,7 @@ func hasFailingRoboRevCheck(chunk model.VanadisChunk) bool {
 		if strings.TrimSpace(name) == "_" {
 			continue
 		}
-		if state == "failed" {
+		if state == statusFailed {
 			if !prwire.IsRoboRevCheck(name) {
 				return false
 			}

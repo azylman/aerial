@@ -225,6 +225,40 @@ func TestLivePRState(t *testing.T) {
 	}
 }
 
+func TestHasActiveOrRecoveredChecks(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		status  int
+		body    string
+		want    bool
+		wantErr bool
+	}{
+		{"active check run", http.StatusOK, `{"check_runs":[{"name":"unit-tests","status":"in_progress"}]}`, true, false},
+		{"completed passing check run", http.StatusOK, `{"check_runs":[{"name":"unit-tests","status":"completed","conclusion":"success"}]}`, true, false},
+		{"completed failing check run", http.StatusOK, `{"check_runs":[{"name":"unit-tests","status":"completed","conclusion":"failure"}]}`, false, false},
+		{"api server error", http.StatusInternalServerError, `{}`, false, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				assert.Equal(t, "/repos/example-owner/aerial/commits/abc123/check-runs", r.URL.Path)
+				assert.Equal(t, "latest", r.URL.Query().Get("filter"))
+				assert.Equal(t, "100", r.URL.Query().Get("per_page"))
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer srv.Close()
+			exec := NewExecutor("", nil, nil, "", "example-owner", srv.Client())
+			exec.GitHubAPIURL = srv.URL
+			got, err := exec.HasActiveOrRecoveredChecks(context.Background(), "aerial", "abc123")
+			assert.Equal(t, tc.wantErr, err != nil)
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}
+
 func TestIsTrustedPRAuthor(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
