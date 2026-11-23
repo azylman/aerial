@@ -21,7 +21,6 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/classifier"
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
-	"github.com/azylman/aerial/services/eri/pkg/db/dbtest"
 	"github.com/azylman/aerial/services/eri/pkg/interactions"
 	"github.com/azylman/aerial/services/eri/pkg/metrics"
 	"github.com/azylman/aerial/services/eri/pkg/queue"
@@ -448,7 +447,7 @@ channels:
 	clsErr.LLMFunc = func(ctx context.Context, model, prompt string) (string, error) {
 		return "", errors.New("summarizer forced failure")
 	}
-	pool := queue.New(currentFunnelConfig(), queue.WorkerPoolConfig{Classifier: clsErr, Store: dbtest.NewFakeStore()})
+	pool := queue.New(currentFunnelConfig(), queue.WorkerPoolConfig{Classifier: clsErr, Store: newTestStore(t)})
 	SetFunnelPool(pool)
 	defer SetFunnelPool(nil)
 
@@ -621,7 +620,7 @@ func TestConnectDiscordFunnel_DisabledAndLifecycle(t *testing.T) {
 		t.Errorf("Expected nil session for empty token with canceled ctx, got %v", dg)
 	}
 
-	store := dbtest.NewFakeStore()
+	store := newTestStore(t)
 	pool := newTestWorkerPool(store)
 	pool.Start()
 	defer pool.Stop()
