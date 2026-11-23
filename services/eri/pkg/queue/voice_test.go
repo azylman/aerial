@@ -102,6 +102,7 @@ func runEffortModelResolutionCase(t *testing.T, tt effortModelResolutionCase) {
 
 func TestWorkerPool_EffortModelResolution(t *testing.T) {
 	t.Parallel()
+	// Verifies worker pool message processing and voice lifecycle models.
 	defaultLow := config.DefaultConfigData().LowEffortModel
 	defaultMed := config.DefaultConfigData().MediumEffortModel
 	appLow, appMed, appEmpty, appVoice := "app-cfg-low-model", "app-cfg-med-model", "", "app-voice-model"
