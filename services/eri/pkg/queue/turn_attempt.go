@@ -702,7 +702,8 @@ func (burstSubject) applyAttemptStart(te *turnExecution, id string, start db.Att
 }
 
 func (b burstSubject) recordFailure(ctx context.Context, s db.Store, _ *turnExecution, ids []string, summary AttemptSummary) error {
-	return b.pool.failActiveBurstRows(ctx, s, ids, summary)
+	_, err := b.pool.failActiveBurstRows(ctx, s, ids, summary)
+	return err
 }
 
 func (burstSubject) ensureCompleted(ctx context.Context, s db.Store, te *turnExecution, ids []string) error {

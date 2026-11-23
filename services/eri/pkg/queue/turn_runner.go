@@ -45,7 +45,7 @@ type turnSteps interface {
 	RunBurstPostTurnHook(ctx context.Context, threadID string, ids []string, attempted bool, outcome TurnOutcome, hookMetadata map[string]string) error
 	RefreshBurstThreadSummary(ctx context.Context, threadID string, ids []string, outcome TurnOutcome) error
 	StopBurstTurn(ctx context.Context, turnID string, ids []string) error
-	FailBurstTurn(ctx context.Context, turnID string, ids []string, reason string) error
+	FailBurstTurn(ctx context.Context, turnID string, ids []string, reason string, hookMetadata ...map[string]string) error
 
 	RecordDispatchStarted(ctx context.Context, sessionKey, dispatchID string) (StartedTurn, error)
 	PrepareDispatchTurn(ctx context.Context, sessionKey, turnID, dispatchID string) (TurnPrep, error)
@@ -118,7 +118,7 @@ type runnerSubject interface {
 	// afterSteps are the journaled steps run after record-outcome.
 	afterSteps(t turnProgress) []namedStep
 	stop(ctx context.Context, turnID string, ids []string) error
-	fail(ctx context.Context, turnID string, ids []string, reason string) error
+	fail(ctx context.Context, turnID string, ids []string, reason string, hookMetadata ...map[string]string) error
 }
 
 // namedStep is one journaled post-outcome step.
@@ -135,6 +135,7 @@ type turnProgress struct {
 	delayMs      int64
 	hookMetadata map[string]string
 	last         AttemptResult
+	hookRan      bool
 }
 
 type burstRunner struct {
@@ -184,8 +185,8 @@ func (b burstRunner) stop(ctx context.Context, turnID string, ids []string) erro
 	return b.steps.StopBurstTurn(ctx, turnID, ids)
 }
 
-func (b burstRunner) fail(ctx context.Context, turnID string, ids []string, reason string) error {
-	return b.steps.FailBurstTurn(ctx, turnID, ids, reason)
+func (b burstRunner) fail(ctx context.Context, turnID string, ids []string, reason string, hookMetadata ...map[string]string) error {
+	return b.steps.FailBurstTurn(ctx, turnID, ids, reason, hookMetadata...)
 }
 
 type dispatchRunner struct {
@@ -230,7 +231,7 @@ func (d dispatchRunner) stop(ctx context.Context, turnID string, ids []string) e
 	return d.steps.StopDispatchTurn(ctx, turnID, ids)
 }
 
-func (d dispatchRunner) fail(ctx context.Context, turnID string, ids []string, reason string) error {
+func (d dispatchRunner) fail(ctx context.Context, turnID string, ids []string, reason string, _ ...map[string]string) error {
 	return d.steps.FailDispatchTurn(ctx, turnID, ids, reason)
 }
 
@@ -238,7 +239,7 @@ func (d dispatchRunner) fail(ctx context.Context, turnID string, ids []string, r
 func (s *TurnRunnerService) drive(ctx restate.Context, subj runnerSubject, coordinator, key, turnID string) (TurnRunResult, error) {
 	var t turnProgress
 	if err := s.executeTurn(ctx, subj, turnID, &t); err != nil {
-		return endOnTerminal(ctx, subj, coordinator, key, turnID, err)
+		return endOnTerminal(ctx, subj, coordinator, key, turnID, err, t)
 	}
 	sendTurnDone(ctx, coordinator, key, TurnDoneRequest{TurnID: turnID, Outcome: t.outcome, RescheduleDelayMs: t.delayMs})
 	return TurnRunResult{TurnID: turnID, Outcome: t.outcome}, nil
@@ -287,6 +288,9 @@ func (s *TurnRunnerService) executeTurn(ctx restate.Context, subj runnerSubject,
 	for _, step := range after {
 		if _, err := runStep(ctx, step.name, func(rc context.Context) (struct{}, error) { return struct{}{}, step.fn(rc) }); err != nil {
 			return err
+		}
+		if step.name == StepPostTurnHook {
+			t.hookRan = true
 		}
 	}
 	return nil
@@ -417,7 +421,11 @@ func outcomeSummary(t turnProgress) AttemptSummary {
 
 // endOnTerminal ends a turn whose await returned a terminal error: a Restate cancel (409) takes
 // stop-turn, anything else fail-turn. OnTurnDone is sent either way.
-func endOnTerminal(ctx restate.Context, subj runnerSubject, coordinator, key, turnID string, cause error) (TurnRunResult, error) {
+func endOnTerminal(ctx restate.Context, subj runnerSubject, coordinator, key, turnID string, cause error, prog ...turnProgress) (TurnRunResult, error) {
+	var t turnProgress
+	if len(prog) > 0 {
+		t = prog[0]
+	}
 	ids := subj.inputIDs()
 	outcome := OutcomeFailed
 	var stepErr error
@@ -430,8 +438,12 @@ func endOnTerminal(ctx restate.Context, subj runnerSubject, coordinator, key, tu
 	} else {
 		reason := cause.Error()
 		log.Printf("[TurnRunner] Turn %s for %s/%s failed: %s", turnID, coordinator, key, reason)
+		var meta map[string]string
+		if !t.hookRan {
+			meta = t.hookMetadata
+		}
 		_, stepErr = runStep(ctx, StepFailTurn, func(rc context.Context) (struct{}, error) {
-			return struct{}{}, subj.fail(rc, turnID, ids, reason)
+			return struct{}{}, subj.fail(rc, turnID, ids, reason, meta)
 		})
 	}
 	sendTurnDone(ctx, coordinator, key, TurnDoneRequest{TurnID: turnID, Outcome: outcome})
