@@ -668,6 +668,10 @@ func (m *Manager) ExtractLastTurnError(ctx context.Context, convID string, since
 	return "", nil
 }
 
+// AgyBackgroundAbortNotice is the synthetic notice agy writes when a turn aborts
+// because the model did not make any tool calls or return any response text.
+const AgyBackgroundAbortNotice = "Turn is aborted because model did not make any tool calls or return any response text"
+
 type transcriptStepRecord struct {
 	Type      string            `json:"type"`
 	Status    string            `json:"status"`
@@ -700,6 +704,9 @@ func scanLinesForResponse(ctx context.Context, lines []string, since time.Time) 
 		}
 
 		trimmedContent := strings.TrimSpace(step.Content)
+		if strings.Contains(trimmedContent, AgyBackgroundAbortNotice) {
+			return ""
+		}
 		if trimmedContent == "" || strings.HasPrefix(trimmedContent, "[Tool Call Requested]:") {
 			continue
 		}

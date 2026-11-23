@@ -17,19 +17,18 @@ const ScheduleDenyReason = "The built-in ephemeral CLI 'schedule' tool is strict
 
 // SleepDenyReason explains the foreground sleep prohibition in run_command.
 const SleepDenyReason = "Arbitrary sleep/polling commands in run_command are prohibited by system invariants. " +
-	"When a background command or subagent is running and no parallel work remains, stop calling tools and emit empty text—" +
-	"agy natively suspends the turn in place and wakes you reactively via <SYSTEM_MESSAGE> when the task completes."
+	"When a background task or subagent is running and no parallel work remains, stop calling tools and wait for the " +
+	"<SYSTEM_MESSAGE> completion wakeup before running any dependent follow-up or PR submission steps."
 
 // TaskPollDenyReason explains the background task polling prohibition.
 const TaskPollDenyReason = "Manual background task polling ('manage_task status'/'list' or reading '/.system_generated/tasks/' logs) " +
-	"is strictly prohibited by the Zero-Polling Policy. When a background command is running and no parallel work remains, " +
-	"stop calling tools and emit empty text—agy natively suspends the turn in place and wakes you reactively via <SYSTEM_MESSAGE> " +
-	"as soon as the background task completes."
+	"is strictly prohibited by the Zero-Polling Policy. When a background task or subagent is running and no parallel work remains, " +
+	"stop calling tools and wait for the <SYSTEM_MESSAGE> completion wakeup before running any dependent follow-up or PR submission steps."
 
 // SubagentPollDenyReason explains the subagent status polling prohibition.
 const SubagentPollDenyReason = "Manual subagent status polling ('manage_subagents list') is strictly prohibited by the Zero-Polling Policy. " +
-	"When an in-flight subagent is running and no parallel work remains, stop calling tools and emit empty text—" +
-	"agy natively suspends the turn in place and wakes you reactively via <SYSTEM_MESSAGE> when the subagent completes."
+	"When a background task or subagent is running and no parallel work remains, stop calling tools and wait for the " +
+	"<SYSTEM_MESSAGE> completion wakeup before running any dependent follow-up or PR submission steps."
 
 // sleepCommandPattern matches executable sleep invocations with duration >= 1 second like `sleep 1`, `sleep 3`, `/bin/sleep 5`, `foo && sleep 20`.
 var sleepCommandPattern = regexp.MustCompile(`(?:^|[;&|\n]\s*)(?:/bin/|/usr/bin/)?sleep\s+([1-9]\d*)(?:s|m)?(?:\s|$|[;&|])`)

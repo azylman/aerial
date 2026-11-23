@@ -134,6 +134,14 @@ func TestExtractTerminalTurnResponse(t *testing.T) {
 			wantResp:   "Default quiescence output",
 		},
 		{
+			name:          "terminal PLANNER_RESPONSE containing agy background abort notice rejected",
+			convID:        "s-term-agy-abort",
+			transcript:    fmt.Sprintf("{\"type\":\"USER_INPUT\",\"content\":\"deploy\",\"created_at\":%q}\n{\"type\":\"PLANNER_RESPONSE\",\"status\":\"DONE\",\"content\":\"Turn is aborted because model did not make any tool calls or return any response text\",\"created_at\":%q,\"tool_calls\":[]}\n", tPast30.Format(time.RFC3339Nano), tPast20.Format(time.RFC3339Nano)),
+			since:         tPast30,
+			minQuiescence: 15 * time.Second,
+			wantResp:      "",
+		},
+		{
 			name:          "pending background task without SYSTEM_MESSAGE",
 			convID:        "s-term-pending-bg-task",
 			transcript:    fmt.Sprintf("{\"type\":\"USER_INPUT\",\"content\":\"test\",\"created_at\":%q}\n{\"type\":\"GENERIC\",\"content\":\"Tool is running as a background task with task id: task-1\",\"created_at\":%q}\n{\"type\":\"PLANNER_RESPONSE\",\"status\":\"DONE\",\"content\":\"Running command\",\"created_at\":%q,\"tool_calls\":[]}\n", tPast40.Format(time.RFC3339Nano), tPast30.Format(time.RFC3339Nano), tPast20.Format(time.RFC3339Nano)),

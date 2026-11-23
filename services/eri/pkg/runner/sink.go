@@ -6,12 +6,14 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/azylman/aerial/services/eri/pkg/session"
 )
 
 // IsSubstantiveResponse returns true if the response contains substantive text.
 func IsSubstantiveResponse(text string) bool {
 	trimmed := strings.TrimSpace(text)
-	if trimmed == "" || strings.HasPrefix(trimmed, "[Tool Call Requested]:") {
+	if trimmed == "" || strings.HasPrefix(trimmed, "[Tool Call Requested]:") || strings.Contains(trimmed, session.AgyBackgroundAbortNotice) {
 		return false
 	}
 	return !strings.HasPrefix(trimmed, "<turn>") || strings.Contains(trimmed, "</turn>")
