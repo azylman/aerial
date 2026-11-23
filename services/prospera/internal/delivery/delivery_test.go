@@ -14,6 +14,7 @@ import (
 	"github.com/azylman/aerial/services/prospera/internal/config"
 	"github.com/azylman/aerial/services/prospera/internal/fakes"
 	"github.com/azylman/aerial/services/prospera/internal/model"
+	"github.com/azylman/aerial/services/prospera/internal/store"
 )
 
 func TestMain(m *testing.M) {
@@ -21,17 +22,71 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
+type flushLiveTranscriptTestCase struct {
+	name        string
+	call        *model.VoiceCall
+	callID      string
+	nilStore    bool
+	storeOpErr  error
+	discordResp int
+	advanceErr  error
+	wantErr     bool
+	wantAdvance bool
+}
+
+func runFlushLiveTranscriptCase(t *testing.T, tc flushLiveTranscriptTestCase) {
+	t.Helper()
+
+	var st store.Store
+	var fakeStore *fakes.FakeStore
+	if !tc.nilStore {
+		fakeStore = fakes.NewFakeStore()
+		fakeStore.AdvanceErr = tc.advanceErr
+		fakeStore.OpErr = tc.storeOpErr
+		if tc.call != nil {
+			if err := fakeStore.CreateOutboundCall(context.Background(), *tc.call, 5); err != nil {
+				t.Fatalf("CreateOutboundCall: %v", err)
+			}
+		}
+		st = fakeStore
+	}
+
+	srv := fakes.NewStubUpstreamServer(t, fakes.StubUpstreamConfig{
+		DiscordStatusCode: tc.discordResp,
+	})
+
+	cfg := &config.Config{
+		BrainURL:              srv.URL,
+		DefaultDiscordChannel: "prospera",
+	}
+
+	reporter := NewReporter(fakes.StaticConfig{Cfg: cfg}, st, &fakes.FakeTwilio{}, WithReporterHTTPClient(srv.Client()))
+	callID := tc.callID
+	if tc.call != nil {
+		callID = tc.call.CallID
+	}
+	err := reporter.FlushLiveTranscript(context.Background(), callID)
+
+	if (err != nil) != tc.wantErr {
+		t.Fatalf("FlushLiveTranscript() err = %v, wantErr = %v", err, tc.wantErr)
+	}
+
+	if !tc.wantErr && tc.call != nil && fakeStore != nil {
+		updated, err := fakeStore.GetCall(context.Background(), tc.call.CallID)
+		if err != nil {
+			t.Fatalf("GetCall: %v", err)
+		}
+		advanced := updated.LiveTranscriptCursor > tc.call.LiveTranscriptCursor
+		if advanced != tc.wantAdvance {
+			t.Fatalf("cursor advanced = %v, want = %v", advanced, tc.wantAdvance)
+		}
+	}
+}
+
 func TestFlushLiveTranscript(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
-		name        string
-		call        *model.VoiceCall
-		discordResp int
-		advanceErr  error
-		wantErr     bool
-		wantAdvance bool
-	}{
+	tests := []flushLiveTranscriptTestCase{
 		{
 			name: "flushes unsent turns",
 			call: &model.VoiceCall{
@@ -58,6 +113,18 @@ func TestFlushLiveTranscript(t *testing.T) {
 			advanceErr:  errors.New("advance failed"),
 			wantErr:     true,
 			wantAdvance: false,
+		},
+		{
+			name: "empty text turns advance without posting",
+			call: &model.VoiceCall{
+				CallID:               "call-empty-turn",
+				LiveTranscriptCursor: 0,
+				Transcript: []model.TranscriptTurn{
+					{Role: "user", Text: "   "},
+				},
+			},
+			discordResp: http.StatusOK,
+			wantAdvance: true,
 		},
 		{
 			name: "posted turns with advance error returns error",
@@ -99,61 +166,51 @@ func TestFlushLiveTranscript(t *testing.T) {
 			wantErr:     true,
 			wantAdvance: false,
 		},
+		{
+			name:     "nil store returns error",
+			callID:   "call-1",
+			nilStore: true,
+			wantErr:  true,
+		},
+		{
+			name:    "nonexistent call returns error",
+			callID:  "call-nonexistent",
+			wantErr: true,
+		},
+		{
+			name:       "store op error returns error",
+			callID:     "call-operr",
+			storeOpErr: errors.New("db error"),
+			wantErr:    true,
+		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-
-			store := fakes.NewFakeStore()
-			store.AdvanceErr = tc.advanceErr
-			if err := store.CreateOutboundCall(context.Background(), *tc.call, 5); err != nil {
-				t.Fatalf("CreateOutboundCall: %v", err)
-			}
-
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				w.WriteHeader(tc.discordResp)
-			}))
-			defer srv.Close()
-
-			cfg := &config.Config{
-				BrainURL:              srv.URL,
-				DefaultDiscordChannel: "prospera",
-			}
-
-			reporter := NewReporter(fakes.StaticConfig{Cfg: cfg}, store, &fakes.FakeTwilio{}, WithReporterHTTPClient(srv.Client()))
-			err := reporter.FlushLiveTranscript(context.Background(), tc.call.CallID)
-
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("FlushLiveTranscript() err = %v, wantErr = %v", err, tc.wantErr)
-			}
-
-			updated, err := store.GetCall(context.Background(), tc.call.CallID)
-			if err != nil {
-				t.Fatalf("GetCall: %v", err)
-			}
-			advanced := updated.LiveTranscriptCursor > tc.call.LiveTranscriptCursor
-			if advanced != tc.wantAdvance {
-				t.Fatalf("cursor advanced = %v, want = %v", advanced, tc.wantAdvance)
-			}
+			runFlushLiveTranscriptCase(t, tc)
 		})
 	}
 }
 
 type voicemailRecordingTestCase struct {
-	name            string
-	initialStatus   string
-	whisperCode     int
-	whisperResp     string
-	geminiCode      int
-	geminiResp      string
-	downloadErr     error
-	discordCode     int
-	vmRecErr        error
-	failTransitions []string
-	wantErr         bool
-	wantErrContains string
-	wantStatus      string
+	name                  string
+	initialStatus         string
+	nilStore              bool
+	missingCall           bool
+	emptyAudioContentType bool
+	whisperCode           int
+	whisperResp           string
+	geminiCode            int
+	geminiResp            string
+	downloadErr           error
+	discordCode           int
+	vmRecErr              error
+	transErr              error
+	failTransitions       []string
+	wantErr               bool
+	wantErrContains       string
+	wantStatus            string
 }
 
 func TestProcessVoicemailRecording(t *testing.T) {
@@ -223,6 +280,47 @@ func TestProcessVoicemailRecording(t *testing.T) {
 			whisperResp:   `{"text":"Retry succeeded."}`,
 			wantStatus:    "delivered",
 		},
+		{
+			name:                  "whisper and gemini fail fallback to unavailable message",
+			initialStatus:         "awaiting_recording",
+			emptyAudioContentType: true,
+			whisperCode:           http.StatusInternalServerError,
+			geminiCode:            http.StatusInternalServerError,
+			wantStatus:            "delivered",
+		},
+		{
+			name:     "nil store returns error",
+			nilStore: true,
+			wantErr:  true,
+		},
+		{
+			name:        "nonexistent call returns error",
+			missingCall: true,
+			wantErr:     true,
+		},
+		{
+			name:          "download error returns error",
+			initialStatus: "awaiting_recording",
+			downloadErr:   errors.New("download timeout"),
+			wantErr:       true,
+			wantStatus:    "failed",
+		},
+		{
+			name:          "discord delivery error returns error",
+			initialStatus: "awaiting_recording",
+			whisperCode:   http.StatusOK,
+			whisperResp:   `{"text":"Please call back."}`,
+			discordCode:   http.StatusInternalServerError,
+			wantErr:       true,
+			wantStatus:    "failed",
+		},
+		{
+			name:          "transition to processing error returns error",
+			initialStatus: "awaiting_recording",
+			transErr:      errors.New("transition failed"),
+			wantErr:       true,
+			wantStatus:    "awaiting_recording",
+		},
 	}
 
 	for _, tc := range tests {
@@ -233,40 +331,57 @@ func TestProcessVoicemailRecording(t *testing.T) {
 	}
 }
 
+func seedVoicemailStore(t *testing.T, tc voicemailRecordingTestCase, callID string) *fakes.FakeStore {
+	t.Helper()
+	fakeStore := fakes.NewFakeStore()
+	fakeStore.VMRecErr = tc.vmRecErr
+	fakeStore.TransErr = tc.transErr
+	fakes.SeedFailTransitions(fakeStore, tc.failTransitions)
+	if tc.missingCall {
+		return fakeStore
+	}
+	initStatus := tc.initialStatus
+	if initStatus == "" {
+		initStatus = "awaiting_recording"
+	}
+	call := model.VoiceCall{
+		CallID:       callID,
+		FromNumber:   "+15105550199",
+		ToNumber:     "+15105550100",
+		ReportStatus: initStatus,
+	}
+	if err := fakeStore.CreateInboundCall(context.Background(), call); err != nil {
+		t.Fatalf("CreateInboundCall: %v", err)
+	}
+	return fakeStore
+}
+
 func runProcessVoicemailRecordingCase(t *testing.T, tc voicemailRecordingTestCase) {
 	t.Helper()
 
-	store := fakes.NewFakeStore()
-	store.VMRecErr = tc.vmRecErr
-	fakes.SeedFailTransitions(store, tc.failTransitions)
-	call := model.VoiceCall{
-		CallID:       "call-vm-1",
-		FromNumber:   "+15105550199",
-		ToNumber:     "+15105550100",
-		ReportStatus: tc.initialStatus,
+	callID := "call-vm-1"
+	if tc.missingCall {
+		callID = "call-nonexistent"
 	}
-	if err := store.CreateInboundCall(context.Background(), call); err != nil {
-		t.Fatalf("CreateInboundCall: %v", err)
+
+	var st store.Store
+	var fakeStore *fakes.FakeStore
+	if !tc.nilStore {
+		fakeStore = seedVoicemailStore(t, tc, callID)
+		st = fakeStore
 	}
 
 	discordCode := tc.discordCode
 	if discordCode == 0 {
 		discordCode = http.StatusOK
 	}
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.Contains(r.URL.Path, "/v1/audio/transcriptions") {
-			w.WriteHeader(tc.whisperCode)
-			_, _ = w.Write([]byte(tc.whisperResp))
-			return
-		}
-		if strings.Contains(r.URL.Path, "generateContent") {
-			w.WriteHeader(tc.geminiCode)
-			_, _ = w.Write([]byte(tc.geminiResp))
-			return
-		}
-		w.WriteHeader(discordCode)
-	}))
-	defer srv.Close()
+	srv := fakes.NewStubUpstreamServer(t, fakes.StubUpstreamConfig{
+		WhisperStatusCode:   tc.whisperCode,
+		WhisperResponseBody: tc.whisperResp,
+		GeminiStatusCode:    tc.geminiCode,
+		GeminiResponseBody:  tc.geminiResp,
+		DiscordStatusCode:   discordCode,
+	})
 
 	cfg := &config.Config{
 		BrainURL:              srv.URL,
@@ -276,14 +391,18 @@ func runProcessVoicemailRecordingCase(t *testing.T, tc voicemailRecordingTestCas
 		DefaultDiscordChannel: "prospera",
 	}
 
+	contentType := "audio/wav"
+	if tc.emptyAudioContentType {
+		contentType = ""
+	}
 	twilioMock := &fakes.FakeTwilio{
 		AudioData:   []byte("fake-wav-audio-content"),
-		ContentType: "audio/wav",
+		ContentType: contentType,
 		DownloadErr: tc.downloadErr,
 	}
 
-	reporter := NewReporter(fakes.StaticConfig{Cfg: cfg}, store, twilioMock, WithReporterHTTPClient(srv.Client()), WithReporterGeminiBaseURL(srv.URL))
-	err := reporter.ProcessVoicemailRecording(context.Background(), call.CallID, "https://api.twilio.com/recording.wav")
+	reporter := NewReporter(fakes.StaticConfig{Cfg: cfg}, st, twilioMock, WithReporterHTTPClient(srv.Client()), WithReporterGeminiBaseURL(srv.URL))
+	err := reporter.ProcessVoicemailRecording(context.Background(), callID, "https://api.twilio.com/recording.wav")
 
 	if (err != nil) != tc.wantErr {
 		t.Fatalf("ProcessVoicemailRecording() err = %v, wantErr = %v", err, tc.wantErr)
@@ -292,25 +411,83 @@ func runProcessVoicemailRecordingCase(t *testing.T, tc voicemailRecordingTestCas
 		t.Fatalf("ProcessVoicemailRecording() err = %v, want substring %q", err, tc.wantErrContains)
 	}
 
-	updated, err := store.GetCall(context.Background(), call.CallID)
-	if err != nil {
-		t.Fatalf("GetCall: %v", err)
+	if fakeStore != nil && !tc.missingCall && tc.wantStatus != "" {
+		updated, err := fakeStore.GetCall(context.Background(), callID)
+		if err != nil {
+			t.Fatalf("GetCall: %v", err)
+		}
+		if updated.ReportStatus != tc.wantStatus {
+			t.Fatalf("final ReportStatus = %s, want %s", updated.ReportStatus, tc.wantStatus)
+		}
 	}
-	if updated.ReportStatus != tc.wantStatus {
-		t.Fatalf("final ReportStatus = %s, want %s", updated.ReportStatus, tc.wantStatus)
+}
+
+type deliverInboundSMSTestCase struct {
+	name          string
+	msg           model.VoiceMessage
+	discordCode   int
+	markErr       error
+	emptyBrainURL bool
+	wantErr       bool
+}
+
+func assertInboundSMSDelivered(t *testing.T, tc deliverInboundSMSTestCase, fakeStore *fakes.FakeStore, recorded []fakes.RecordedRequest) {
+	t.Helper()
+	if len(recorded) != 1 || !strings.Contains(string(recorded[0].Body), tc.msg.Body) {
+		t.Errorf("discord payload missing sms body: %+v", recorded)
+	}
+	if tc.markErr != nil {
+		return
+	}
+	msgs, err := fakeStore.ListVoiceMessages(context.Background(), 10)
+	if err != nil {
+		t.Fatalf("ListVoiceMessages: %v", err)
+	}
+	if len(msgs) > 0 && !msgs[0].DiscordDelivered {
+		t.Fatalf("expected message to be marked delivered")
+	}
+}
+
+func runDeliverInboundSMSCase(t *testing.T, tc deliverInboundSMSTestCase) {
+	t.Helper()
+
+	fakeStore := fakes.NewFakeStore()
+	fakeStore.MarkErr = tc.markErr
+	if _, err := fakeStore.SaveVoiceMessage(context.Background(), tc.msg); err != nil {
+		t.Fatalf("SaveVoiceMessage: %v", err)
+	}
+
+	var recorded []fakes.RecordedRequest
+	srv := fakes.NewStubUpstreamServer(t, fakes.StubUpstreamConfig{
+		DiscordStatusCode: tc.discordCode,
+		RecordedRequests:  &recorded,
+	})
+
+	brainURL := srv.URL
+	if tc.emptyBrainURL {
+		brainURL = ""
+	}
+	cfg := &config.Config{
+		BrainURL:              brainURL,
+		DefaultDiscordChannel: "prospera",
+	}
+
+	reporter := NewReporter(fakes.StaticConfig{Cfg: cfg}, fakeStore, &fakes.FakeTwilio{}, WithReporterHTTPClient(srv.Client()))
+	err := reporter.DeliverInboundSMS(context.Background(), tc.msg)
+
+	if (err != nil) != tc.wantErr {
+		t.Fatalf("DeliverInboundSMS() err = %v, wantErr = %v", err, tc.wantErr)
+	}
+
+	if !tc.wantErr && !tc.emptyBrainURL {
+		assertInboundSMSDelivered(t, tc, fakeStore, recorded)
 	}
 }
 
 func TestDeliverInboundSMS(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
-		name        string
-		msg         model.VoiceMessage
-		discordCode int
-		markErr     error
-		wantErr     bool
-	}{
+	tests := []deliverInboundSMSTestCase{
 		{
 			name: "deliver text and media sms",
 			msg: model.VoiceMessage{
@@ -346,161 +523,22 @@ func TestDeliverInboundSMS(t *testing.T) {
 			markErr:     errors.New("mark failed"),
 			wantErr:     false,
 		},
+		{
+			name: "empty brain url returns err",
+			msg: model.VoiceMessage{
+				MessageSID: "SM1",
+				Body:       "test",
+			},
+			emptyBrainURL: true,
+			wantErr:       true,
+		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-
-			store := fakes.NewFakeStore()
-			store.MarkErr = tc.markErr
-			if _, err := store.SaveVoiceMessage(context.Background(), tc.msg); err != nil {
-				t.Fatalf("SaveVoiceMessage: %v", err)
-			}
-
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				body, err := io.ReadAll(r.Body)
-				if err != nil {
-					t.Errorf("read body: %v", err)
-					return
-				}
-				if !strings.Contains(string(body), tc.msg.Body) {
-					t.Errorf("discord payload missing sms body: %s", string(body))
-				}
-				w.WriteHeader(tc.discordCode)
-			}))
-			defer srv.Close()
-
-			cfg := &config.Config{
-				BrainURL:              srv.URL,
-				DefaultDiscordChannel: "prospera",
-			}
-
-			reporter := NewReporter(fakes.StaticConfig{Cfg: cfg}, store, &fakes.FakeTwilio{}, WithReporterHTTPClient(srv.Client()))
-			err := reporter.DeliverInboundSMS(context.Background(), tc.msg)
-
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("DeliverInboundSMS() err = %v, wantErr = %v", err, tc.wantErr)
-			}
-
-			if !tc.wantErr && tc.markErr == nil {
-				msgs, err := store.ListVoiceMessages(context.Background(), 10)
-				if err != nil {
-					t.Fatalf("ListVoiceMessages: %v", err)
-				}
-				if len(msgs) > 0 && !msgs[0].DiscordDelivered {
-					t.Fatalf("expected message to be marked delivered")
-				}
-			}
+			runDeliverInboundSMSCase(t, tc)
 		})
-	}
-}
-
-func TestFlushLiveTranscript_Errors(t *testing.T) {
-	t.Parallel()
-
-	nilStoreReporter := NewReporter(fakes.StaticConfig{Cfg: &config.Config{BrainURL: "http://brain"}}, nil, &fakes.FakeTwilio{})
-	if err := nilStoreReporter.FlushLiveTranscript(context.Background(), "call-1"); err == nil {
-		t.Fatal("expected error with nil store")
-	}
-
-	store := fakes.NewFakeStore()
-	reporter := NewReporter(fakes.StaticConfig{Cfg: &config.Config{BrainURL: "http://brain"}}, store, &fakes.FakeTwilio{})
-	if err := reporter.FlushLiveTranscript(context.Background(), "call-nonexistent"); err == nil {
-		t.Fatal("expected error with nonexistent call")
-	}
-
-	storeWithOpErr := fakes.NewFakeStore()
-	storeWithOpErr.OpErr = errors.New("db error")
-	opErrReporter := NewReporter(fakes.StaticConfig{Cfg: &config.Config{BrainURL: "http://brain"}}, storeWithOpErr, &fakes.FakeTwilio{})
-	if err := opErrReporter.FlushLiveTranscript(context.Background(), "call-operr"); err == nil {
-		t.Fatal("expected error with store op error")
-	}
-
-	// Empty text turns advance cursor without posting to discord
-	if err := store.CreateOutboundCall(context.Background(), model.VoiceCall{
-		CallID: "call-empty-turn",
-		Transcript: []model.TranscriptTurn{
-			{Role: "user", Text: "   "},
-		},
-	}, 5); err != nil {
-		t.Fatalf("CreateOutboundCall: %v", err)
-	}
-	if err := reporter.FlushLiveTranscript(context.Background(), "call-empty-turn"); err != nil {
-		t.Fatalf("unexpected error with empty text turns: %v", err)
-	}
-}
-
-func TestProcessVoicemailRecording_Errors(t *testing.T) {
-	t.Parallel()
-
-	nilStoreReporter := NewReporter(fakes.StaticConfig{Cfg: &config.Config{BrainURL: "http://brain"}}, nil, &fakes.FakeTwilio{})
-	if err := nilStoreReporter.ProcessVoicemailRecording(context.Background(), "call-1", "https://rec"); err == nil {
-		t.Fatal("expected error with nil store")
-	}
-
-	store := fakes.NewFakeStore()
-	reporter := NewReporter(fakes.StaticConfig{Cfg: &config.Config{BrainURL: "http://brain"}}, store, &fakes.FakeTwilio{})
-	if err := reporter.ProcessVoicemailRecording(context.Background(), "call-nonexistent", "https://rec"); err == nil {
-		t.Fatal("expected error with nonexistent call")
-	}
-
-	// Download recording error
-	if err := store.CreateInboundCall(context.Background(), model.VoiceCall{
-		CallID:       "call-dl-err",
-		ReportStatus: "awaiting_recording",
-	}); err != nil {
-		t.Fatalf("CreateInboundCall: %v", err)
-	}
-	failTwilio := &fakes.FakeTwilio{DownloadErr: errors.New("download timeout")}
-	failReporter := NewReporter(fakes.StaticConfig{Cfg: &config.Config{BrainURL: "http://brain"}}, store, failTwilio)
-	if err := failReporter.ProcessVoicemailRecording(context.Background(), "call-dl-err", "https://rec"); err == nil {
-		t.Fatal("expected error when download fails")
-	}
-
-	// Discord delivery error
-	discordFailSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
-	}))
-	defer discordFailSrv.Close()
-
-	if err := store.CreateInboundCall(context.Background(), model.VoiceCall{
-		CallID:       "call-discord-fail",
-		ReportStatus: "awaiting_recording",
-	}); err != nil {
-		t.Fatalf("CreateInboundCall: %v", err)
-	}
-	discordFailReporter := NewReporter(fakes.StaticConfig{Cfg: &config.Config{
-		BrainURL: discordFailSrv.URL,
-	}}, store, &fakes.FakeTwilio{AudioData: []byte("wav")}, WithReporterHTTPClient(discordFailSrv.Client()))
-	if err := discordFailReporter.ProcessVoicemailRecording(context.Background(), "call-discord-fail", "https://rec"); err == nil {
-		t.Fatal("expected error when discord delivery fails")
-	}
-
-	storeVMTransErr := fakes.NewFakeStore()
-	if err := storeVMTransErr.CreateInboundCall(context.Background(), model.VoiceCall{
-		CallID:       "call-vm-trans-err",
-		ReportStatus: "awaiting_recording",
-	}); err != nil {
-		t.Fatalf("CreateInboundCall: %v", err)
-	}
-	storeVMTransErr.TransErr = errors.New("transition failed")
-	vmTransReporter := NewReporter(fakes.StaticConfig{Cfg: &config.Config{BrainURL: "http://brain"}}, storeVMTransErr, &fakes.FakeTwilio{})
-	if err := vmTransReporter.ProcessVoicemailRecording(context.Background(), "call-vm-trans-err", "https://rec"); err == nil {
-		t.Fatal("expected error on transition failure")
-	}
-}
-
-func TestDeliverInboundSMS_EmptyBrainURL(t *testing.T) {
-	t.Parallel()
-
-	reporter := NewReporter(fakes.StaticConfig{Cfg: &config.Config{BrainURL: ""}}, nil, &fakes.FakeTwilio{})
-	err := reporter.DeliverInboundSMS(context.Background(), model.VoiceMessage{
-		MessageSID: "SM1",
-		Body:       "test",
-	})
-	if err == nil {
-		t.Fatal("expected error when brain url is empty")
 	}
 }
 

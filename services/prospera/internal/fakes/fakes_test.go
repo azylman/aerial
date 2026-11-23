@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -256,6 +258,61 @@ func TestTwilioSignature(t *testing.T) {
 			t.Parallel()
 			if got := TwilioSignature("token-a", hook, tc.form); got != tc.want {
 				t.Errorf("TwilioSignature() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestNewStubUpstreamServer(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		path       string
+		cfg        StubUpstreamConfig
+		wantStatus int
+		wantBody   string
+	}{
+		{name: "discord default", path: "/discord/message", cfg: StubUpstreamConfig{}, wantStatus: http.StatusOK, wantBody: `{"status":"ok"}`},
+		{name: "discord custom", path: "/discord/message", cfg: StubUpstreamConfig{DiscordStatusCode: http.StatusAccepted, DiscordResponseBody: `accepted`}, wantStatus: http.StatusAccepted, wantBody: `accepted`},
+		{name: "whisper default", path: "/v1/audio/transcriptions", cfg: StubUpstreamConfig{}, wantStatus: http.StatusOK, wantBody: `{"text":"transcribed text"}`},
+		{name: "whisper custom", path: "/v1/audio/transcriptions", cfg: StubUpstreamConfig{WhisperStatusCode: http.StatusBadRequest, WhisperResponseBody: `bad request`}, wantStatus: http.StatusBadRequest, wantBody: `bad request`},
+		{name: "chat default", path: "/v1/chat/completions", cfg: StubUpstreamConfig{}, wantStatus: http.StatusOK, wantBody: `{"choices":[{"message":{"content":"ok"}}]}`},
+		{name: "chat custom", path: "/v1/chat/completions", cfg: StubUpstreamConfig{ChatStatusCode: http.StatusInternalServerError, ChatResponseBody: `server error`}, wantStatus: http.StatusInternalServerError, wantBody: `server error`},
+		{name: "gemini default", path: "/models/gemini:generateContent", cfg: StubUpstreamConfig{}, wantStatus: http.StatusOK, wantBody: `{"candidates":[{"content":{"parts":[{"text":"gemini text"}]}}]}`},
+		{name: "gemini custom", path: "/models/gemini:generateContent", cfg: StubUpstreamConfig{GeminiStatusCode: http.StatusForbidden, GeminiResponseBody: `forbidden`}, wantStatus: http.StatusForbidden, wantBody: `forbidden`},
+		{name: "fallback default", path: "/unknown", cfg: StubUpstreamConfig{}, wantStatus: http.StatusOK, wantBody: ""},
+		{name: "fallback custom", path: "/restate/ProsperaReport", cfg: StubUpstreamConfig{DefaultStatusCode: http.StatusAccepted, DefaultResponseBody: "accepted"}, wantStatus: http.StatusAccepted, wantBody: "accepted"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var recorded []RecordedRequest
+			var onRequestCalled bool
+			cfg := tc.cfg
+			cfg.RecordedRequests = &recorded
+			cfg.OnRequest = func(r *http.Request, body []byte) {
+				onRequestCalled = true
+			}
+			srv := NewStubUpstreamServer(t, cfg)
+			resp, err := srv.Client().Post(srv.URL+tc.path, "application/json", strings.NewReader(`{"hello":"world"}`))
+			if err != nil {
+				t.Fatalf("POST %s: %v", tc.path, err)
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != tc.wantStatus {
+				t.Errorf("status = %d, want %d", resp.StatusCode, tc.wantStatus)
+			}
+			body, err := io.ReadAll(resp.Body)
+			if err != nil {
+				t.Fatalf("ReadAll: %v", err)
+			}
+			if string(body) != tc.wantBody {
+				t.Errorf("body = %q, want %q", string(body), tc.wantBody)
+			}
+			if !onRequestCalled || len(recorded) != 1 || string(recorded[0].Body) != `{"hello":"world"}` {
+				t.Errorf("recorded request mismatch: called=%v, recorded=%+v", onRequestCalled, recorded)
 			}
 		})
 	}

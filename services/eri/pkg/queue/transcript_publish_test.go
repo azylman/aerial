@@ -346,7 +346,15 @@ func TestWorkerPool_ExecuteVoiceTurn_TranscriptPublish(t *testing.T) {
 			pool := New(nil, WorkerPoolConfig{})
 			pool.transcriptPublishCh = make(chan TranscriptPublishJob, 10)
 			if tc.isStandard {
-				pool.voiceProcessPool = &queueMockVoiceProcessPool{sessions: make(map[string]*queueMockVoiceSession)}
+				testPool := newTestRunnerAgentPool(WorkerPoolConfig{
+					RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+						return mockJSONResponse("sess-mock-dev-1", "pong"), "", 0, nil
+					},
+				}, nil)
+				if _, err := testPool.GetOrCreateSession(context.Background(), tc.deviceKey, tc.wantJob); err != nil {
+					t.Fatalf("GetOrCreateSession: %v", err)
+				}
+				pool.voiceProcessPool = testPool
 			} else {
 				pool.cfg.VoiceRunnerFunc = func(ctx context.Context, prompt, deviceKey string, onStatus func(string)) (string, string, error) {
 					return "ok", tc.customConv, nil

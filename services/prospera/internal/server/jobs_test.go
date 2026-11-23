@@ -57,9 +57,7 @@ func (c *captureConsumerBus) ConsumeQueue(ctx context.Context, subject string, q
 
 func setupMockReporterServer(t *testing.T) (*Server, *fakes.FakeStore, *httptest.Server) {
 	t.Helper()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
+	srv := fakes.NewStubUpstreamServer(t, fakes.StubUpstreamConfig{})
 	server, store, cfg := setupTestServer()
 	if cfg == nil {
 		t.Fatal("setupTestServer returned nil config")
@@ -311,23 +309,16 @@ type handleReportJobTestCase struct {
 
 func runHandleReportJobTest(t *testing.T, tc handleReportJobTestCase) {
 	t.Helper()
-	var calledIngress bool
-	var mu sync.Mutex
+	var recorded []fakes.RecordedRequest
 
 	ingressCode := tc.ingressStatus
 	if ingressCode == 0 {
 		ingressCode = http.StatusOK
 	}
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.Contains(r.URL.Path, "ProsperaReport") {
-			mu.Lock()
-			calledIngress = true
-			mu.Unlock()
-			w.WriteHeader(ingressCode)
-			return
-		}
-		w.WriteHeader(http.StatusOK)
-	}))
+	srv := fakes.NewStubUpstreamServer(t, fakes.StubUpstreamConfig{
+		DefaultStatusCode: ingressCode,
+		RecordedRequests:  &recorded,
+	})
 	defer srv.Close()
 
 	cfg := &config.Config{
@@ -355,9 +346,13 @@ func runHandleReportJobTest(t *testing.T, tc handleReportJobTestCase) {
 		t.Fatalf("HandleReportJob() err = %v, wantErr = %v", err, tc.wantErr)
 	}
 
-	mu.Lock()
-	gotIngress := calledIngress
-	mu.Unlock()
+	gotIngress := false
+	for _, req := range recorded {
+		if strings.Contains(req.Path, "ProsperaReport") {
+			gotIngress = true
+			break
+		}
+	}
 	if gotIngress != tc.wantIngress {
 		t.Errorf("calledIngress = %v, want %v", gotIngress, tc.wantIngress)
 	}
@@ -729,9 +724,7 @@ func TestServer_Webhooks_PublishToEventBus(t *testing.T) {
 
 func TestServer_Webhooks_FallbackToBackgroundGoroutine(t *testing.T) {
 	t.Parallel()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
+	srv := fakes.NewStubUpstreamServer(t, fakes.StubUpstreamConfig{})
 	defer srv.Close()
 
 	server, store, cfg := setupTestServer()

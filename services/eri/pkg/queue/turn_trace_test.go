@@ -196,7 +196,11 @@ func TestEndTurnSpanContent(t *testing.T) {
 			rec := tracetest.NewSpanRecorder()
 			tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(rec))
 			pool := New(nil, WorkerPoolConfig{TraceContent: tc.capture, TracerProvider: tp})
-			pool.voiceProcessPool = &queueMockVoiceProcessPool{sessions: make(map[string]*queueMockVoiceSession)}
+			spawner := newEventDrivenVoiceDaemonSpawner(voiceProcessPoolSpawnerConfig{
+				resultStatus:   "SUCCESS",
+				resultResponse: "Hello from mock voice.",
+			})
+			pool.voiceProcessPool = runner.NewUnifiedProcessPool(runner.PoolConfig{DefaultModel: "gemini-2.5-flash"}, spawner)
 			defer pool.Stop()
 			if _, _, err := pool.ExecuteVoiceTurn(context.Background(), "what's the weather?", "kiosk", nil); err != nil {
 				t.Fatalf("ExecuteVoiceTurn: %v", err)

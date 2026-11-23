@@ -10,12 +10,15 @@ import (
 	"crypto/sha1" //nolint:gosec // G505: Twilio signs X-Twilio-Signature with HMAC-SHA1; the protocol fixes the hash
 	"encoding/base64"
 	"errors"
+	"io"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"slices"
 	"sort"
 	"strings"
 	"sync"
+	"testing"
 	"time"
 
 	"go.opentelemetry.io/otel"
@@ -93,6 +96,118 @@ func HeaderTraceID(h http.Header) string {
 		return ""
 	}
 	return sc.TraceID().String()
+}
+
+// RecordedRequest captures a request received by NewStubUpstreamServer.
+type RecordedRequest struct {
+	Path   string
+	Method string
+	Header http.Header
+	Body   []byte
+}
+
+// StubUpstreamConfig configures NewStubUpstreamServer responses and behavior.
+type StubUpstreamConfig struct {
+	DiscordStatusCode   int
+	DiscordResponseBody string
+	WhisperStatusCode   int
+	WhisperResponseBody string
+	ChatStatusCode      int
+	ChatResponseBody    string
+	GeminiStatusCode    int
+	GeminiResponseBody  string
+	DefaultStatusCode   int
+	DefaultResponseBody string
+	RecordedRequests    *[]RecordedRequest
+	OnRequest           func(r *http.Request, body []byte)
+}
+
+func resolveStubResponse(path string, cfg StubUpstreamConfig) (int, string) {
+	switch {
+	case strings.Contains(path, "/discord/message"):
+		status := cfg.DiscordStatusCode
+		if status == 0 {
+			status = http.StatusOK
+		}
+		resp := cfg.DiscordResponseBody
+		if resp == "" && status == http.StatusOK {
+			resp = `{"status":"ok"}`
+		}
+		return status, resp
+	case strings.Contains(path, "/v1/audio/transcriptions"):
+		status := cfg.WhisperStatusCode
+		if status == 0 {
+			status = http.StatusOK
+		}
+		resp := cfg.WhisperResponseBody
+		if resp == "" && status == http.StatusOK {
+			resp = `{"text":"transcribed text"}`
+		}
+		return status, resp
+	case strings.Contains(path, "/v1/chat/completions"):
+		status := cfg.ChatStatusCode
+		if status == 0 {
+			status = http.StatusOK
+		}
+		resp := cfg.ChatResponseBody
+		if resp == "" && status == http.StatusOK {
+			resp = `{"choices":[{"message":{"content":"ok"}}]}`
+		}
+		return status, resp
+	case strings.Contains(path, "generateContent"):
+		status := cfg.GeminiStatusCode
+		if status == 0 {
+			status = http.StatusOK
+		}
+		resp := cfg.GeminiResponseBody
+		if resp == "" && status == http.StatusOK {
+			resp = `{"candidates":[{"content":{"parts":[{"text":"gemini text"}]}}]}`
+		}
+		return status, resp
+	default:
+		status := cfg.DefaultStatusCode
+		if status == 0 {
+			status = http.StatusOK
+		}
+		return status, cfg.DefaultResponseBody
+	}
+}
+
+// NewStubUpstreamServer spins up an httptest.Server configured to respond to
+// /discord/message, /v1/audio/transcriptions, /v1/chat/completions, and
+// generateContent endpoints, recording received request bodies.
+func NewStubUpstreamServer(t testing.TB, cfg StubUpstreamConfig) *httptest.Server {
+	t.Helper()
+	var mu sync.Mutex
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			body = nil
+		}
+		if cfg.RecordedRequests != nil {
+			mu.Lock()
+			*cfg.RecordedRequests = append(*cfg.RecordedRequests, RecordedRequest{
+				Path:   r.URL.Path,
+				Method: r.Method,
+				Header: r.Header.Clone(),
+				Body:   body,
+			})
+			mu.Unlock()
+		}
+		if cfg.OnRequest != nil {
+			cfg.OnRequest(r, body)
+		}
+
+		status, resp := resolveStubResponse(r.URL.Path, cfg)
+		w.WriteHeader(status)
+		if resp != "" {
+			if _, writeErr := w.Write([]byte(resp)); writeErr != nil {
+				return
+			}
+		}
+	}))
+	t.Cleanup(srv.Close)
+	return srv
 }
 
 // FakeStore is an in-memory store.Store. The exported error fields inject
