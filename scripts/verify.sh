@@ -249,12 +249,105 @@ ensure_deadcode() {
     exit 1
 }
 
+run_pkg_deadcode() {
+    if [ "${SKIP_DEADCODE:-0}" = "1" ] || [ "${AERIAL_SKIP_DEADCODE:-0}" = "1" ]; then
+        if [ "$MODE" != "staged" ]; then
+            echo "   [deadcode] Skipping deadcode check for pkg (SKIP_DEADCODE=1)"
+        fi
+        return 0
+    fi
+    if [ "$MODE" != "staged" ]; then
+        echo "   [deadcode] Checking pkg for unreachable code (workspace call graph)..."
+    fi
+    ensure_deadcode
+
+    tmp_gowork=$(mktemp -d)
+    if [ -f "$REPO_ROOT/go.mod" ]; then
+        work_dirs="$REPO_ROOT"
+        pkg_targets="./..."
+    else
+        work_dirs="$REPO_ROOT/pkg"
+        pkg_targets="./pkg/..."
+        for s in $GO_SERVICES; do
+            if [ "$s" != "pkg" ] && [ -f "$REPO_ROOT/$s/go.mod" ]; then
+                work_dirs="$work_dirs $REPO_ROOT/$s"
+                pkg_targets="$pkg_targets ./$s/..."
+            fi
+        done
+    fi
+
+    # shellcheck disable=SC2086
+    (cd "$tmp_gowork" && go work init $work_dirs >/dev/null) || {
+        echo "🚨 [Aerial Verify] Error: failed to initialize go.work for pkg deadcode analysis" >&2
+        rm -rf "$tmp_gowork"
+        exit 1
+    }
+
+    # Collect main package import paths and all package import paths
+    # shellcheck disable=SC2086
+    main_pkgs=$(cd "$REPO_ROOT" && GOWORK="$tmp_gowork/go.work" go list -f '{{if eq .Name "main"}}{{.ImportPath}}{{end}}' $pkg_targets) || {
+        echo "🚨 [Aerial Verify] Error: failed to list main packages in workspace" >&2
+        rm -rf "$tmp_gowork"
+        exit 1
+    }
+    # shellcheck disable=SC2086
+    all_pkgs=$(cd "$REPO_ROOT" && GOWORK="$tmp_gowork/go.work" go list $pkg_targets) || {
+        echo "🚨 [Aerial Verify] Error: failed to list all packages in workspace" >&2
+        rm -rf "$tmp_gowork"
+        exit 1
+    }
+
+    # Pass 1: Production Call Graph on non-*test pkg/* packages
+    if [ -n "$main_pkgs" ]; then
+        # shellcheck disable=SC2086
+        dead_prod=$(cd "$REPO_ROOT" && GOWORK="$tmp_gowork/go.work" "$DEADCODE_BIN" -filter='^github\.com/azylman/aerial/pkg/' $main_pkgs 2>&1) || {
+            echo "🚨 [Aerial Verify] Error: deadcode (pkg production) execution failed:" >&2
+            echo "$dead_prod" >&2
+            rm -rf "$tmp_gowork"
+            exit 1
+        }
+        filtered_prod=""
+        if [ -n "$dead_prod" ]; then
+            filtered_prod=$(echo "$dead_prod" | grep -v -E "((^|/)pkg/(.*/)?[^/]*test/[^/]+:|pkg/pubsub/memory\.go:|unreachable func: ResetSensitiveTokensForTest$)" || true)
+        fi
+        if [ -n "$filtered_prod" ]; then
+            echo "🚨 [Aerial Verify] Unreachable production code detected in pkg/ packages:" >&2
+            echo "$filtered_prod" | sed 's/^/   • /' >&2
+            rm -rf "$tmp_gowork"
+            exit 1
+        fi
+    fi
+
+    # Pass 2: Workspace Test Call Graph across all pkg/* and pkg/*test packages
+    if [ -n "$all_pkgs" ]; then
+        # shellcheck disable=SC2086
+        dead_test=$(cd "$REPO_ROOT" && GOWORK="$tmp_gowork/go.work" "$DEADCODE_BIN" -test -filter='^github\.com/azylman/aerial/pkg/' $all_pkgs 2>&1) || {
+            echo "🚨 [Aerial Verify] Error: deadcode (pkg test) execution failed:" >&2
+            echo "$dead_test" >&2
+            rm -rf "$tmp_gowork"
+            exit 1
+        }
+        if [ -n "$dead_test" ]; then
+            echo "🚨 [Aerial Verify] [FAIL] deadcode -test found unreachable functions in pkg/ packages:" >&2
+            echo "$dead_test" | sed 's/^/   • /' >&2
+            rm -rf "$tmp_gowork"
+            exit 1
+        fi
+    fi
+
+    rm -rf "$tmp_gowork"
+}
+
 run_deadcode() {
     svc="$1"
     if [ "${SKIP_DEADCODE:-0}" = "1" ] || [ "${AERIAL_SKIP_DEADCODE:-0}" = "1" ]; then
         if [ "$MODE" != "staged" ]; then
             echo "   [deadcode] Skipping deadcode check for $svc (SKIP_DEADCODE=1)"
         fi
+        return 0
+    fi
+    if [ "$svc" = "pkg" ]; then
+        run_pkg_deadcode
         return 0
     fi
     if [ -d "$svc" ]; then
@@ -526,6 +619,134 @@ run_atlas_validate() {
     done
 }
 
+check_k8s_manifests() {
+    if [ "$MODE" != "staged" ]; then
+        echo "   [k8s-manifests] Validating Kubernetes manifests, Flux substitutions, and CRD immutability..."
+    fi
+    # Step A: Validate Kustomize rendering if kubectl is available
+    if has_cmd kubectl; then
+        if ! kubectl kustomize --load-restrictor=LoadRestrictionsNone "$REPO_ROOT/k8s" >/dev/null; then
+            echo "🚨 [Aerial Verify] Error: kubectl kustomize failed to render k8s manifests." >&2
+            exit 1
+        fi
+    fi
+
+    # Step B: Standard-library Python validation
+    if has_cmd python3; then
+        python3 - "$REPO_ROOT" << 'EOF'
+import glob
+import os
+import re
+import subprocess
+import sys
+
+repo_root = sys.argv[1]
+k8s_dir = os.path.join(repo_root, "k8s")
+yaml_files = sorted(glob.glob(os.path.join(k8s_dir, "*.yaml")))
+
+errors = []
+
+def parse_cnpg_resources(content):
+    docs = re.split(r"(?m)^---\s*$", content)
+    resources = {}
+    for doc in docs:
+        if not re.search(r"(?m)^\s*apiVersion:\s*[\"']?postgresql\.cnpg\.io/v1", doc):
+            continue
+        kind_m = re.search(r"(?m)^\s*kind:\s*[\"']?(Database|ScheduledBackup)[\"']?\s*$", doc)
+        if not kind_m:
+            continue
+        kind = kind_m.group(1).strip()
+
+        meta_m = re.search(r"(?m)^\s*metadata:\s*\n((?:^[ \t]+[^\n]*\n?)*)", doc)
+        if not meta_m:
+            continue
+        meta_text = meta_m.group(1)
+        name_m = re.search(r"(?m)^\s+name:\s*[\"']?([^\"'\s]+)", meta_text)
+        if not name_m:
+            continue
+        name = name_m.group(1).strip()
+        ns_m = re.search(r"(?m)^\s+namespace:\s*[\"']?([^\"'\s]+)", meta_text)
+        namespace = ns_m.group(1).strip() if ns_m else "default"
+
+        spec_m = re.search(r"(?m)^\s*spec:\s*\n((?:^[ \t]+[^\n]*\n?)*)", doc)
+        if not spec_m:
+            continue
+        spec_text = spec_m.group(1)
+        cluster_m = re.search(r"(?m)^\s+cluster:\s*\n(?:^\s+[^\n]*\n)*?\s+name:\s*[\"']?([^\"'\s]+)", spec_text)
+        if not cluster_m:
+            continue
+        cluster_name = cluster_m.group(1).strip()
+        resources[(kind, namespace, name)] = cluster_name
+    return resources
+
+has_origin_main = False
+res = subprocess.run(["git", "-C", repo_root, "rev-parse", "--verify", "origin/main"],
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+if res.returncode == 0:
+    has_origin_main = True
+
+for yaml_path in yaml_files:
+    basename = os.path.basename(yaml_path)
+    rel_path = os.path.relpath(yaml_path, repo_root)
+    with open(yaml_path, "r", encoding="utf-8") as f:
+        content = f.read()
+
+    lines = content.splitlines()
+    docs = []
+    current_doc = []
+    doc_start = 1
+    for idx, line in enumerate(lines, start=1):
+        if re.match(r"^---\s*$", line):
+            if current_doc:
+                docs.append((doc_start, current_doc))
+            current_doc = []
+            doc_start = idx + 1
+        else:
+            current_doc.append((idx, line))
+    if current_doc:
+        docs.append((doc_start, current_doc))
+
+    for start_line, doc in docs:
+        doc_text = "\n".join(l for _, l in doc)
+        if basename == "kustomization.yaml" or "kustomize.toolkit.fluxcd.io/substitute: disabled" in doc_text:
+            continue
+        for lineno, line in doc:
+            stripped = line.strip()
+            if stripped.startswith("#"):
+                continue
+            for m in re.finditer(r"(?<!\$)\$\{([^}]+)\}", line):
+                expr = m.group(1)
+                if ":=" not in expr and ":-" not in expr:
+                    errors.append(f"{rel_path}:{lineno}: unescaped ${{{expr}}} without Flux default (:= or :-) or kustomize.toolkit.fluxcd.io/substitute: disabled")
+
+    if has_origin_main:
+        current_cnpg = parse_cnpg_resources(content)
+        if current_cnpg:
+            git_show = subprocess.run(["git", "-C", repo_root, "show", f"origin/main:k8s/{basename}"],
+                                      stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+            if git_show.returncode == 0:
+                base_cnpg = parse_cnpg_resources(git_show.stdout)
+                for (kind, ns, name), current_cluster in current_cnpg.items():
+                    if (kind, ns, name) in base_cnpg:
+                        base_cluster = base_cnpg[(kind, ns, name)]
+                        if current_cluster != base_cluster:
+                            errors.append(
+                                f"{rel_path}: {kind} '{ns}/{name}' changes spec.cluster.name from '{base_cluster}' to '{current_cluster}'. "
+                                f"spec.cluster.name is immutable on CloudNativePG Database/ScheduledBackup CRDs and a new resource name must be used."
+                            )
+
+if errors:
+    print("🚨 [Aerial Verify] Kubernetes manifest validation errors detected:", file=sys.stderr)
+    for err in errors:
+        print(f"   • {err}", file=sys.stderr)
+    sys.exit(1)
+EOF
+    else
+        echo "🚨 [Aerial Verify] Error: python3 not found to perform k8s manifest validation." >&2
+        exit 1
+    fi
+}
+
 if [ "$MODE" = "staged" ]; then
     if has_cmd git; then
         git rm --cached -q PR_DESCRIPTION.md .pr_description.md 2>/dev/null || true
@@ -554,9 +775,18 @@ if [ "$MODE" = "staged" ]; then
     check_synapse_zero_vanadis
     check_code_health
 
+    # Check Kubernetes manifests
+    if echo "$CHANGED_FILES" | grep -q -E '^(k8s/|scripts/verify\.sh$)'; then
+        check_k8s_manifests
+    fi
+
     lint_all_go=0
     if echo "$CHANGED_FILES" | grep -q -E '^(pkg/|\.golangci\.yml|scripts/verify\.sh)$'; then
         lint_all_go=1
+    fi
+
+    if [ "$lint_all_go" -eq 1 ]; then
+        run_deadcode "pkg"
     fi
 
     # Check Go microservices
@@ -588,7 +818,9 @@ if [ "$MODE" = "staged" ]; then
         if [ "$svc_staged" -eq 1 ]; then
             pkgs=$(echo "$CHANGED_FILES" | grep "^$svc/.*\.go$" | grep -v -E "(^|/)testdata/" | sed "s|^$svc/||" | while read -r f; do dirname "$f"; done | sort -u)
             if [ -n "$pkgs" ]; then
-                run_deadcode "$svc"
+                if [ "$svc" != "pkg" ] || [ "$lint_all_go" -ne 1 ]; then
+                    run_deadcode "$svc"
+                fi
             fi
             for p in $pkgs; do
                 if [ ! -d "$svc/$p" ]; then
@@ -670,6 +902,7 @@ check_rule_file_sizes
 check_dependabot_coverage
 
 echo "=== 1. Static Analysis & Linting ==="
+check_k8s_manifests
 for svc in $GO_SERVICES; do
     run_golangci_lint "$svc"
     run_deadcode "$svc"
