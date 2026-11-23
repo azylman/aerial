@@ -22,7 +22,6 @@ import (
 	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/services/eri/internal/restateclient"
 	"github.com/azylman/aerial/services/eri/pkg/db"
-	"github.com/azylman/aerial/services/eri/pkg/db/dbtest"
 	"github.com/azylman/aerial/services/eri/pkg/delivery"
 	"github.com/azylman/aerial/services/eri/pkg/llmcall"
 	"github.com/azylman/aerial/services/eri/pkg/queue"
@@ -123,7 +122,7 @@ func assertPromptPayloadCase(t *testing.T, capture *restateCapture, tc promptPay
 
 func TestHandlePromptValidation(t *testing.T) {
 	capture := installRestateCapture(t, http.StatusOK, `{"status":"accepted"}`)
-	store := dbtest.NewFakeStore()
+	store := newTestStore(t)
 	pool := newTestWorkerPool(store)
 	pool.Start()
 	defer pool.Stop()
@@ -191,10 +190,12 @@ func TestHandlePromptValidation(t *testing.T) {
 
 func TestHandleDispatch(t *testing.T) {
 	capture := installRestateCapture(t, http.StatusOK, `{"status":"accepted"}`)
+	// Rows share the capture, so they run sequentially against one private
+	// database; every accepted row uses a distinct dispatch id.
+	store := newTestStore(t)
 	for _, tc := range []struct {
 		name               string
 		method             string
-		store              db.Store
 		body               string
 		wantStatus         int
 		wantSubstr         string
@@ -202,23 +203,23 @@ func TestHandleDispatch(t *testing.T) {
 		wantTargetID       string
 		wantVanadisChunkID string
 	}{
-		{"method not allowed", http.MethodGet, dbtest.NewFakeStore(), "", http.StatusMethodNotAllowed, "Method not allowed", "", "", ""},
-		{"invalid json", http.MethodPost, dbtest.NewFakeStore(), `{bad`, http.StatusBadRequest, "Invalid JSON payload", "", "", ""},
-		{"missing source", http.MethodPost, dbtest.NewFakeStore(), `{"prompt":"test"}`, http.StatusBadRequest, "'source' must match", "", "", ""},
-		{"invalid source", http.MethodPost, dbtest.NewFakeStore(), `{"source":"unknown!bad","prompt":"test"}`, http.StatusBadRequest, "'source' must match", "", "", ""},
-		{"empty prompt", http.MethodPost, dbtest.NewFakeStore(), `{"source":"heartbeat","prompt":" "}`, http.StatusBadRequest, "'prompt' field is required", "", "", ""},
-		{"numeric session_id rejected", http.MethodPost, dbtest.NewFakeStore(), `{"source":"heartbeat","prompt":"test","session_id":"1234567890"}`, http.StatusBadRequest, "cannot be a numeric snowflake", "", "", ""},
-		{"discord prefix session_id rejected", http.MethodPost, dbtest.NewFakeStore(), `{"source":"heartbeat","prompt":"test","session_id":"discord-123"}`, http.StatusBadRequest, "cannot be a numeric snowflake", "", "", ""},
-		{"invalid chars session_id rejected", http.MethodPost, dbtest.NewFakeStore(), `{"source":"heartbeat","prompt":"test","session_id":"bad:session"}`, http.StatusBadRequest, "cannot be a numeric snowflake", "", "", ""},
-		{"invalid effort rejected", http.MethodPost, dbtest.NewFakeStore(), `{"source":"heartbeat","prompt":"test","effort":"ultra"}`, http.StatusBadRequest, "'effort' must be 'low', 'medium', or 'high'", "", "", ""},
-		{"valid stateful accepted", http.MethodPost, dbtest.NewFakeStore(), `{"id":"disp-1","source":"heartbeat","session_id":"heartbeat-1","prompt":"run check","effort":"low"}`, http.StatusAccepted, `"status":"accepted"`, "disp-1", "", ""},
-		{"valid ephemeral accepted", http.MethodPost, dbtest.NewFakeStore(), `{"id":"disp-2","source":"vanadis","prompt":"execute build"}`, http.StatusAccepted, `"status":"accepted"`, "disp-2", "", ""},
-		{"valid with target_id normalized and chunk_id propagated", http.MethodPost, dbtest.NewFakeStore(), `{"id":"disp-norm-1","source":"vanadis","prompt":"execute chunk","target_id":"discord-987654321012345678","vanadis_chunk_id":"  build-42-chunk-1  "}`, http.StatusAccepted, `"status":"accepted"`, "disp-norm-1", "987654321012345678", "build-42-chunk-1"},
-		{"valid with pooled target_id normalized", http.MethodPost, dbtest.NewFakeStore(), `{"id":"disp-norm-2","source":"vanadis","prompt":"execute chunk","target_id":"stateful_medium:discord-11223344","vanadis_chunk_id":"build-42-chunk-2"}`, http.StatusAccepted, `"status":"accepted"`, "disp-norm-2", "11223344", "build-42-chunk-2"},
-		{"headless target_id blanked", http.MethodPost, dbtest.NewFakeStore(), `{"id":"disp-norm-3","source":"heartbeat","prompt":"pulse","target_id":"heartbeat-hb-1","vanadis_chunk_id":""}`, http.StatusAccepted, `"status":"accepted"`, "disp-norm-3", "", ""},
+		{"method not allowed", http.MethodGet, "", http.StatusMethodNotAllowed, "Method not allowed", "", "", ""},
+		{"invalid json", http.MethodPost, `{bad`, http.StatusBadRequest, "Invalid JSON payload", "", "", ""},
+		{"missing source", http.MethodPost, `{"prompt":"test"}`, http.StatusBadRequest, "'source' must match", "", "", ""},
+		{"invalid source", http.MethodPost, `{"source":"unknown!bad","prompt":"test"}`, http.StatusBadRequest, "'source' must match", "", "", ""},
+		{"empty prompt", http.MethodPost, `{"source":"heartbeat","prompt":" "}`, http.StatusBadRequest, "'prompt' field is required", "", "", ""},
+		{"numeric session_id rejected", http.MethodPost, `{"source":"heartbeat","prompt":"test","session_id":"1234567890"}`, http.StatusBadRequest, "cannot be a numeric snowflake", "", "", ""},
+		{"discord prefix session_id rejected", http.MethodPost, `{"source":"heartbeat","prompt":"test","session_id":"discord-123"}`, http.StatusBadRequest, "cannot be a numeric snowflake", "", "", ""},
+		{"invalid chars session_id rejected", http.MethodPost, `{"source":"heartbeat","prompt":"test","session_id":"bad:session"}`, http.StatusBadRequest, "cannot be a numeric snowflake", "", "", ""},
+		{"invalid effort rejected", http.MethodPost, `{"source":"heartbeat","prompt":"test","effort":"ultra"}`, http.StatusBadRequest, "'effort' must be 'low', 'medium', or 'high'", "", "", ""},
+		{"valid stateful accepted", http.MethodPost, `{"id":"disp-1","source":"heartbeat","session_id":"heartbeat-1","prompt":"run check","effort":"low"}`, http.StatusAccepted, `"status":"accepted"`, "disp-1", "", ""},
+		{"valid ephemeral accepted", http.MethodPost, `{"id":"disp-2","source":"vanadis","prompt":"execute build"}`, http.StatusAccepted, `"status":"accepted"`, "disp-2", "", ""},
+		{"valid with target_id normalized and chunk_id propagated", http.MethodPost, `{"id":"disp-norm-1","source":"vanadis","prompt":"execute chunk","target_id":"discord-987654321012345678","vanadis_chunk_id":"  build-42-chunk-1  "}`, http.StatusAccepted, `"status":"accepted"`, "disp-norm-1", "987654321012345678", "build-42-chunk-1"},
+		{"valid with pooled target_id normalized", http.MethodPost, `{"id":"disp-norm-2","source":"vanadis","prompt":"execute chunk","target_id":"stateful_medium:discord-11223344","vanadis_chunk_id":"build-42-chunk-2"}`, http.StatusAccepted, `"status":"accepted"`, "disp-norm-2", "11223344", "build-42-chunk-2"},
+		{"headless target_id blanked", http.MethodPost, `{"id":"disp-norm-3","source":"heartbeat","prompt":"pulse","target_id":"heartbeat-hb-1","vanadis_chunk_id":""}`, http.StatusAccepted, `"status":"accepted"`, "disp-norm-3", "", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			w := runHTTP(handleDispatch(tc.store), tc.method, "/dispatch", strings.NewReader(tc.body))
+			w := runHTTP(handleDispatch(store), tc.method, "/dispatch", strings.NewReader(tc.body))
 			if w.Code != tc.wantStatus || !strings.Contains(w.Body.String(), tc.wantSubstr) {
 				t.Fatalf("got status=%d body=%q, want status=%d substr=%q", w.Code, w.Body.String(), tc.wantStatus, tc.wantSubstr)
 			}
@@ -342,7 +343,7 @@ func runDirectMessageMuxCases(t *testing.T) {
 	pool := queue.New(nil, queue.WorkerPoolConfig{
 		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error { return nil },
 	})
-	mux := SetupBrainMux(dbtest.NewFakeStore(), pool)
+	mux := SetupBrainMux(nil, pool)
 	w := httptest.NewRecorder()
 	mux.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/discord/message", strings.NewReader(`{"channel_id":"1542423172400291873","content":"test"}`)))
 	if w.Code != http.StatusOK {
@@ -444,6 +445,7 @@ func runHandleTasksFilterCases(t *testing.T, handler http.HandlerFunc, now time.
 		{name: "limit filter", path: "/tasks?limit=10"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			rr := runHTTP(handler, http.MethodGet, tc.path, nil)
 			if rr.Code != http.StatusOK {
 				t.Fatalf("expected 200 OK, got %d: %s", rr.Code, rr.Body.String())
@@ -493,8 +495,7 @@ func runHandleTasksErrorCases(t *testing.T, handler http.HandlerFunc) {
 		t.Fatalf("expected 405 Method Not Allowed, got %d", code)
 	}
 
-	closedStore := dbtest.NewFakeStore()
-	_ = closedStore.Close()
+	closedStore := newClosedTestStore(t)
 	for _, tc := range []struct {
 		name    string
 		handler http.HandlerFunc
@@ -503,6 +504,7 @@ func runHandleTasksErrorCases(t *testing.T, handler http.HandlerFunc) {
 		{"closed store", handleTasks(closedStore)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			if code := runHTTP(tc.handler, http.MethodGet, "/tasks", nil).Code; code != http.StatusInternalServerError {
 				t.Fatalf("got status=%d, want 500", code)
 			}
@@ -511,7 +513,8 @@ func runHandleTasksErrorCases(t *testing.T, handler http.HandlerFunc) {
 }
 
 func TestHandleTasks(t *testing.T) {
-	store := dbtest.NewFakeStore()
+	t.Parallel()
+	store := newTestStore(t)
 	now := time.Now().UTC()
 	longPrompt := strings.Repeat("A", 600) + " plain-internal-detail"
 	_ = store.InsertMessage(context.Background(), db.Message{
@@ -822,7 +825,7 @@ func TestHandleInternalLLM(t *testing.T) {
 
 func TestSetupBrainMux_And_Endpoints(t *testing.T) {
 	installRestateCapture(t, http.StatusOK, `{"status":"accepted"}`)
-	store := dbtest.NewFakeStore()
+	store := newTestStore(t)
 	pool := newTestWorkerPool(store)
 	mux := SetupBrainMux(store, pool)
 
@@ -897,12 +900,13 @@ func TestHandlePromptDispatch_RelaysRestateStatus(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			store := dbtest.NewFakeStore()
 			runWithMockRestate(http.StatusOK, tc.serverResp, func() {
 				h := handlePrompt(nil)
 				path := "/prompt"
 				if tc.dispatch {
-					h = handleDispatch(store)
+					// No row sends a dispatch id, so the duplicate check never
+					// reaches the store.
+					h = handleDispatch(nil)
 					path = "/dispatch"
 				}
 				w := httptest.NewRecorder()
