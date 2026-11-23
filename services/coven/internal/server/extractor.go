@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -18,14 +17,12 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/pkg/tracing"
 	"github.com/azylman/aerial/services/coven/internal/config"
 	"github.com/azylman/aerial/services/coven/internal/store"
@@ -404,13 +401,20 @@ func buildFactExtractionPrompt(ctx context.Context, s store.Store, threadID, tra
 func reinforceExtractedFactIDs(ctx context.Context, s store.Store, ids []int64) error {
 	seenReinforced := make(map[int64]bool)
 	for _, rid := range ids {
-		if rid > 0 && !seenReinforced[rid] {
-			seenReinforced[rid] = true
-			if err := s.ReinforceFact(ctx, rid); err != nil {
-				return fmt.Errorf("failed to reinforce trajectory fact %d: %w", rid, err)
-			}
-			RecordFactStored("reinforced")
+		if rid <= 0 || seenReinforced[rid] {
+			continue
 		}
+		seenReinforced[rid] = true
+		err := s.ReinforceFact(ctx, rid)
+		if errors.Is(err, store.ErrFactNotFound) {
+			// The LLM named an ID that does not exist (or was merged away): skip it, never stall.
+			slog.InfoContext(ctx, "[Memory] skipping reinforcement of unknown fact", "fact_id", rid)
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("failed to reinforce trajectory fact %d: %w", rid, err)
+		}
+		RecordFactStored("reinforced")
 	}
 	return nil
 }
@@ -518,60 +522,132 @@ func handleEmptyUnextractedTurns(ctx context.Context, s store.Store, threadID st
 	return nil
 }
 
-func processTurnBatch(ctx context.Context, s store.Store, client store.OllamaClient, llmFunc LLMClientFunc, threadID string, turns []store.Message, maxRowID int64, agent ...string) error {
+// extractBatch is one batch of unextracted turns, loaded and ready for the extraction LLM call.
+// Exactly one of Ready, Skipped, or Halve > 0 is set unless the thread is fully extracted
+// (the zero value), so a dropped load result ends extraction instead of looping.
+type extractBatch struct {
+	Ready     bool   `json:"ready,omitempty"`
+	Skipped   bool   `json:"skipped,omitempty"`
+	Halve     int    `json:"halve,omitempty"`
+	Prompt    string `json:"prompt,omitempty"`
+	Watermark int64  `json:"watermark,omitempty"`
+	MaxRowID  int64  `json:"max_row_id,omitempty"`
+	Turns     int    `json:"turns,omitempty"`
+}
+
+// extractAnswer is one extraction LLM answer. Rejected carries the validation failure
+// reason when the answer is not a valid facts payload; TimedOut asks for a smaller batch.
+type extractAnswer struct {
+	Payload  ExtractedFactsPayload `json:"payload"`
+	Rejected string                `json:"rejected,omitempty"`
+	TimedOut bool                  `json:"timed_out,omitempty"`
+}
+
+// extractLLMKey names one extraction LLM call: the batch starting after watermark, plus the
+// durable attempt ordinal once an earlier answer was rejected (eri caches answers by key).
+func extractLLMKey(agent, threadID string, watermark int64, attempt int) string {
+	key := fmt.Sprintf("coven:extract:%s:%s:%d", agent, threadID, watermark)
+	if attempt > 0 {
+		key += fmt.Sprintf(":a%d", attempt)
+	}
+	return key
+}
+
+// prepareTurnBatchPrompt builds the extraction prompt for turns. A batch with no
+// extractable text advances the watermark to maxRowID and reports skipped.
+func prepareTurnBatchPrompt(ctx context.Context, s store.Store, threadID string, turns []store.Message, maxRowID int64, agent string) (string, bool, error) {
 	transcript := formatExtractableTurns(turns)
 	if strings.TrimSpace(transcript) == "" {
 		slog.InfoContext(ctx, "[Memory] empty extractable turns, marking watermark", "thread_id", threadID)
-		if err := s.UpdateConversationFactWatermark(ctx, threadID, maxRowID, agent...); err != nil {
-			return fmt.Errorf("failed to update conversation fact watermark for empty transcript: %w", err)
+		if err := s.UpdateConversationFactWatermark(ctx, threadID, maxRowID, agent); err != nil {
+			return "", false, fmt.Errorf("failed to update conversation fact watermark for empty transcript: %w", err)
 		}
-		return nil
+		return "", true, nil
 	}
-
-	prompt, err := buildFactExtractionPrompt(ctx, s, threadID, transcript, agent...)
+	prompt, err := buildFactExtractionPrompt(ctx, s, threadID, transcript, agent)
 	if err != nil {
+		return "", false, err
+	}
+	return prompt, false, nil
+}
+
+// loadExtractBatch reads the thread watermark and the next batch of unextracted turns.
+func loadExtractBatch(ctx context.Context, s store.Store, threadID, agent string, batchSize int) (extractBatch, error) {
+	watermark, _, err := s.GetConversationFactWatermark(ctx, threadID, agent)
+	if err != nil {
+		return extractBatch{}, fmt.Errorf("failed to get conversation fact watermark: %w", err)
+	}
+	turns, nextBatchSize, err := fetchUnextractedTurnsWithRetry(ctx, s, threadID, agent, batchSize, trace.SpanFromContext(ctx))
+	if err != nil {
+		return extractBatch{}, err
+	}
+	if nextBatchSize != batchSize {
+		return extractBatch{Halve: nextBatchSize}, nil
+	}
+	if len(turns) == 0 {
+		return extractBatch{}, handleEmptyUnextractedTurns(ctx, s, threadID, watermark, agent)
+	}
+	maxRowID, err := resolveThreadTurnWatermark(ctx, s, threadID, turns, agent)
+	if err != nil {
+		return extractBatch{}, err
+	}
+	if maxRowID <= watermark || maxRowID <= 0 {
+		return extractBatch{}, nil
+	}
+	prompt, skipped, err := prepareTurnBatchPrompt(ctx, s, threadID, turns, maxRowID, agent)
+	if err != nil {
+		return extractBatch{}, err
+	}
+	if skipped {
+		return extractBatch{Skipped: true}, nil
+	}
+	return extractBatch{Ready: true, Prompt: prompt, Watermark: watermark, MaxRowID: maxRowID, Turns: len(turns)}, nil
+}
+
+// callExtractLLM sends the extraction prompt (Idempotency-Key taken from ctx) and validates the
+// answer. Transport errors are returned; an unparseable answer is reported as Rejected.
+func callExtractLLM(ctx context.Context, llmFunc LLMClientFunc, prompt string) (extractAnswer, error) {
+	resp, err := llmFunc(ctx, prompt)
+	if err != nil {
+		return extractAnswer{}, fmt.Errorf("LLM fact extraction call failed: %w", err)
+	}
+	return validateExtractAnswer(resp), nil
+}
+
+// validateExtractAnswer parses an extraction answer; an invalid one is data (Rejected), not an error.
+func validateExtractAnswer(resp string) extractAnswer {
+	payload, err := parseFactsJSON(resp)
+	if err != nil {
+		return extractAnswer{Rejected: err.Error()}
+	}
+	return extractAnswer{Payload: *payload}
+}
+
+// applyExtractedPayload writes one validated extraction answer and advances the watermark.
+func applyExtractedPayload(ctx context.Context, s store.Store, client store.OllamaClient, llmFunc LLMClientFunc, threadID, agent string, payload ExtractedFactsPayload, maxRowID int64) error {
+	if err := reinforceExtractedFactIDs(ctx, s, payload.ReinforcedIDs); err != nil {
 		return err
 	}
-
-	respText, err := llmFunc(ctx, prompt)
-	if err != nil {
-		return fmt.Errorf("LLM fact extraction call failed: %w", err)
-	}
-
-	factsPayload, err := parseFactsJSON(respText)
-	if err != nil {
-		return fmt.Errorf("failed to parse extracted facts JSON: %w", err)
-	}
-
-	if err := reinforceExtractedFactIDs(ctx, s, factsPayload.ReinforcedIDs); err != nil {
-		return err
-	}
-
-	candidates := factsPayload.Facts
-	if len(candidates) > 5 {
-		candidates = candidates[:5]
-	}
-
-	targetAgent := ""
-	if len(agent) > 0 {
-		targetAgent = agent[0]
-	}
-
-	for _, item := range candidates {
-		if err := reconcileCandidateFact(ctx, s, client, llmFunc, item, targetAgent); err != nil {
+	for _, item := range firstFactCandidates(payload.Facts) {
+		if err := reconcileCandidateFact(ctx, s, client, llmFunc, item, agent); err != nil {
 			return err
 		}
 	}
-
-	if err := stageProceduralCandidates(ctx, s, client, threadID, factsPayload.ProceduralCandidates, agent...); err != nil {
+	if err := stageProceduralCandidates(ctx, s, client, threadID, payload.ProceduralCandidates, agent); err != nil {
 		return fmt.Errorf("failed to stage procedural candidates: %w", err)
 	}
-
-	if err := s.UpdateConversationFactWatermark(ctx, threadID, maxRowID, agent...); err != nil {
+	if err := s.UpdateConversationFactWatermark(ctx, threadID, maxRowID, agent); err != nil {
 		return fmt.Errorf("failed to update conversation fact watermark: %w", err)
 	}
-
 	return nil
+}
+
+// firstFactCandidates caps one answer's fact candidates at five.
+func firstFactCandidates(items []ExtractedFactItem) []ExtractedFactItem {
+	if len(items) > 5 {
+		return items[:5]
+	}
+	return items
 }
 
 func fetchUnextractedTurnsWithRetry(ctx context.Context, s store.Store, threadID, targetAgent string, batchSize int, span trace.Span) ([]store.Message, int, error) {
@@ -588,18 +664,9 @@ func fetchUnextractedTurnsWithRetry(ctx context.Context, s store.Store, threadID
 	return turns, batchSize, nil
 }
 
-func executeTurnBatch(ctx context.Context, s store.Store, client store.OllamaClient, llmFunc LLMClientFunc, threadID, targetAgent string, turns []store.Message, maxRowID int64) (int, bool, error) {
-	if err := processTurnBatch(ctx, s, client, llmFunc, threadID, turns, maxRowID, targetAgent); err != nil {
-		if errors.Is(err, context.DeadlineExceeded) && len(turns) > 1 {
-			newBatch := max(1, len(turns)/2)
-			slog.WarnContext(ctx, "[Memory] extraction timed out, halving batch size", "thread_id", threadID, "new_batch_size", newBatch)
-			return newBatch, true, nil
-		}
-		return 0, false, err
-	}
-	return 0, false, nil
-}
-
+// processThreadFacts extracts a thread in process (MCP tool and no-Restate fallback). It shares
+// batch loading, the LLM call and the writes with CovenThread but returns a rejected answer as
+// an error to its caller instead of tracking attempts.
 func processThreadFacts(ctx context.Context, s store.Store, client store.OllamaClient, llmFunc LLMClientFunc, threadID string, agent ...string) error {
 	if s == nil {
 		return fmt.Errorf("database is nil")
@@ -613,63 +680,63 @@ func processThreadFacts(ctx context.Context, s store.Store, client store.OllamaC
 	if len(agent) > 0 {
 		targetAgent = strings.TrimSpace(agent[0])
 	}
-	// Coalesced extraction can cover many turns, so each thread gets a deliberate root span
-	// that the outbound LLM call attaches to. A valid incoming context is kept as a span link.
+	ctx, span := startExtractSpan(ctx, targetAgent)
+	defer span.End()
+
+	batchSize := config.DefaultExtractMaxSteps
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		batch, err := loadExtractBatch(ctx, s, trimmed, targetAgent, batchSize)
+		if err != nil {
+			return err
+		}
+		switch {
+		case batch.Halve > 0:
+			batchSize = batch.Halve
+			continue
+		case batch.Skipped:
+			batchSize = config.DefaultExtractMaxSteps
+			continue
+		case !batch.Ready:
+			return nil
+		}
+		span.SetAttributes(attribute.Int("aerial.coven.batch_size", batch.Turns))
+
+		keyCtx := withLLMKey(ctx, extractLLMKey(targetAgent, trimmed, batch.Watermark, 0))
+		ans, err := callExtractLLM(keyCtx, llmFunc, batch.Prompt)
+		if err == nil && ans.Rejected != "" {
+			err = fmt.Errorf("failed to parse extracted facts JSON: %s", ans.Rejected)
+		}
+		if err == nil {
+			err = applyExtractedPayload(keyCtx, s, client, llmFunc, trimmed, targetAgent, ans.Payload, batch.MaxRowID)
+		}
+		if err != nil {
+			if errors.Is(err, context.DeadlineExceeded) && batch.Turns > 1 {
+				batchSize = max(1, batch.Turns/2)
+				slog.WarnContext(ctx, "[Memory] extraction timed out, halving batch size", "thread_id", trimmed, "new_batch_size", batchSize)
+				continue
+			}
+			return err
+		}
+		batchSize = config.DefaultExtractMaxSteps
+	}
+}
+
+// startExtractSpan starts the coven.extract root span. Coalesced extraction can cover many
+// turns, so each thread gets a deliberate root span that the outbound LLM call attaches to;
+// a valid incoming context is kept as a span link.
+func startExtractSpan(ctx context.Context, agent string) (context.Context, trace.Span) {
 	startOpts := []trace.SpanStartOption{trace.WithNewRoot()}
 	if trigger := trace.LinkFromContext(ctx); trigger.SpanContext.IsValid() {
 		startOpts = append(startOpts, trace.WithLinks(trigger))
 	}
 	ctx, span := tracing.Tracer().Start(ctx, "coven.extract", startOpts...)
-	defer span.End()
-	if targetAgent != "" {
-		span.SetAttributes(attribute.String("aerial.agent", targetAgent))
+	if agent != "" {
+		span.SetAttributes(attribute.String("aerial.agent", agent))
 	}
-
-	batchSize := config.DefaultExtractMaxSteps
-
-	for {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-
-		lastWatermark, _, err := s.GetConversationFactWatermark(ctx, trimmed, targetAgent)
-		if err != nil {
-			return fmt.Errorf("failed to get conversation fact watermark: %w", err)
-		}
-
-		turns, nextBatchSize, fetchErr := fetchUnextractedTurnsWithRetry(ctx, s, trimmed, targetAgent, batchSize, span)
-		if fetchErr != nil {
-			return fetchErr
-		}
-		if nextBatchSize != batchSize {
-			batchSize = nextBatchSize
-			continue
-		}
-		if len(turns) == 0 {
-			return handleEmptyUnextractedTurns(ctx, s, trimmed, lastWatermark, targetAgent)
-		}
-		span.SetAttributes(attribute.Int("aerial.coven.batch_size", len(turns)))
-
-		maxRowID, err := resolveThreadTurnWatermark(ctx, s, trimmed, turns, targetAgent)
-		if err != nil {
-			return err
-		}
-		if maxRowID <= lastWatermark || maxRowID <= 0 {
-			break
-		}
-
-		nextBatch, retry, batchErr := executeTurnBatch(withLLMKey(ctx, fmt.Sprintf("coven:extract:%s:%s:%d", targetAgent, trimmed, lastWatermark)), s, client, llmFunc, trimmed, targetAgent, turns, maxRowID)
-		if batchErr != nil {
-			return batchErr
-		}
-		if retry {
-			batchSize = nextBatch
-			continue
-		}
-
-		batchSize = config.DefaultExtractMaxSteps
-	}
-	return nil
+	return ctx, span
 }
 
 func isDuplicateProceduralCandidate(trimmedLoadedSkill, threadID string, emb []float32, pendingExisting []store.ProceduralCandidate) bool {
@@ -681,295 +748,6 @@ func isDuplicateProceduralCandidate(trimmedLoadedSkill, threadID string, emb []f
 		}
 	}
 	return false
-}
-
-func applyReconcileDecision(ctx context.Context, s store.Store, item ExtractedFactItem, emb []float32, neighbors []store.ScoredFact, dec ExtractedFactItem, agent ...string) error {
-	validIDs := make(map[int64]bool, len(neighbors))
-	for _, n := range neighbors {
-		validIDs[n.Fact.ID] = true
-	}
-
-	action := strings.ToUpper(strings.TrimSpace(dec.Action))
-	switch action {
-	case actionDelete:
-		targetID := dec.DeleteID
-		if targetID <= 0 {
-			targetID = dec.SupersedesID
-		}
-		if validIDs[targetID] {
-			if err := s.DeleteFact(ctx, targetID); err != nil {
-				return fmt.Errorf("error deleting fact: %w", err)
-			}
-			RecordFactStored("deleted")
-			return nil
-		}
-		slog.InfoContext(ctx, "[Memory] tier 3 delete rejected: ID not in whitelisted neighbors (NOOP)", "fact_id", targetID)
-		return nil
-	case actionUpdate:
-		targetID := dec.SupersedesID
-		if targetID <= 0 {
-			targetID = dec.DeleteID
-		}
-		if validIDs[targetID] {
-			factText := dec.FactText
-			if strings.TrimSpace(factText) == "" {
-				factText = item.FactText
-			}
-			if err := s.UpdateFact(ctx, targetID, factText, emb); err != nil {
-				return fmt.Errorf("error updating fact: %w", err)
-			}
-			RecordFactStored("updated")
-			return nil
-		}
-		slog.InfoContext(ctx, "[Memory] tier 3 update rejected: ID not in whitelisted neighbors; falling back to ADD", "fact_id", targetID)
-		if _, err := s.InsertFact(ctx, item.FactText, emb, agent...); err != nil {
-			return fmt.Errorf("error inserting fallback fact: %w", err)
-		}
-		RecordFactStored("inserted")
-		return nil
-	case actionNoop:
-		targetID := dec.SupersedesID
-		if !validIDs[targetID] {
-			targetID = neighbors[0].Fact.ID
-		}
-		if err := s.ReinforceFact(ctx, targetID); err != nil {
-			return fmt.Errorf("error reinforcing NOOP fact: %w", err)
-		}
-		RecordFactStored("reinforced")
-		return nil
-	default: // "ADD" or fallback
-		if _, err := s.InsertFact(ctx, item.FactText, emb, agent...); err != nil {
-			return fmt.Errorf("error inserting fact: %w", err)
-		}
-		RecordFactStored("inserted")
-		return nil
-	}
-}
-
-// factWriteMutex provides fallback in-process mutual exclusion for in-memory unit test stores.
-var factWriteMutex sync.Mutex
-
-// factAdvisoryLockSQL is the PostgreSQL transaction-level advisory lock query for global fact writes.
-const factAdvisoryLockSQL = `SELECT pg_advisory_xact_lock(hashtext('coven:facts'))`
-
-type factConnProvider interface {
-	Conn(ctx context.Context) (*sql.Conn, error)
-	DB() store.DBTX
-	WithPinnedConn(conn *sql.Conn) store.Store
-}
-
-func rollbackConn(ctx context.Context, conn *sql.Conn) {
-	if _, err := conn.ExecContext(context.WithoutCancel(ctx), "ROLLBACK"); err != nil && !errors.Is(err, sql.ErrTxDone) {
-		slog.DebugContext(ctx, "failed to rollback fact write lock", "error", err)
-	}
-}
-
-func withDBAdvisoryLock(ctx context.Context, conn *sql.Conn, shouldClose bool, lockedStore store.Store, fn func(context.Context, store.Store) error) error {
-	if shouldClose {
-		defer httpkit.CloseWarn(conn, "fact write lock connection")
-	}
-	if _, err := conn.ExecContext(ctx, "BEGIN"); err != nil {
-		return fmt.Errorf("coven lock: begin fact-write lock: %w", err)
-	}
-	committed := false
-	defer func() {
-		if !committed {
-			rollbackConn(ctx, conn)
-		}
-	}()
-
-	if _, err := conn.ExecContext(ctx, factAdvisoryLockSQL); err != nil {
-		return fmt.Errorf("coven lock: take fact-write lock: %w", err)
-	}
-	if err := fn(ctx, lockedStore); err != nil {
-		return err
-	}
-	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
-		return fmt.Errorf("coven lock: commit fact-write lock: %w", err)
-	}
-	committed = true
-	return nil
-}
-
-// withFactWriteLock serializes fact candidate reconciliation and consolidation writes
-// across cluster replicas using a PostgreSQL transaction-level advisory lock on a single
-// pinned connection (so all queries inside fn run in the same transaction without acquiring
-// a second pool connection), or falls back to an in-process mutex when the store is an in-memory test double.
-// In Kubernetes, coven runs as a single replica (k8s/core-services.yaml replicas: 1).
-func withFactWriteLock(ctx context.Context, s store.Store, fn func(ctx context.Context, lockedStore store.Store) error) error {
-	if s == nil {
-		return fn(ctx, nil)
-	}
-
-	cp, ok := s.(factConnProvider)
-	if !ok {
-		factWriteMutex.Lock()
-		defer factWriteMutex.Unlock()
-		return fn(ctx, s)
-	}
-
-	conn, err := cp.Conn(ctx)
-	if errors.Is(err, store.ErrNoPinnedConn) {
-		slog.DebugContext(ctx, "falling back to in-process factWriteMutex for unpinned test store")
-		factWriteMutex.Lock()
-		defer factWriteMutex.Unlock()
-		return fn(ctx, s)
-	}
-	if err != nil {
-		return fmt.Errorf("coven lock: acquire fact-write connection: %w", err)
-	}
-	if conn == nil {
-		return fmt.Errorf("coven lock: acquire fact-write connection: nil connection")
-	}
-
-	_, isPinnedConn := cp.DB().(*sql.Conn)
-	return withDBAdvisoryLock(ctx, conn, !isPinnedConn, cp.WithPinnedConn(conn), fn)
-}
-
-func reconcileCandidateFact(ctx context.Context, s store.Store, client store.OllamaClient, llmFunc LLMClientFunc, item ExtractedFactItem, agent string) error {
-	if s == nil || client == nil {
-		return fmt.Errorf("nil s or client")
-	}
-	if strings.EqualFold(strings.TrimSpace(item.Action), actionDelete) {
-		return nil
-	}
-	admit, _ := EvaluateCandidateAdmission(item)
-	if !admit {
-		return nil
-	}
-
-	emb, err := client.GenerateEmbedding(ctx, item.FactText, false, 1)
-	if err != nil {
-		return fmt.Errorf("failed to generate embedding for candidate fact: %w", err)
-	}
-	if len(emb) != store.ExpectedEmbeddingDim {
-		return fmt.Errorf("candidate fact embedding dimension mismatch: got %d, want %d", len(emb), store.ExpectedEmbeddingDim)
-	}
-
-	return executeCandidateReconcile(ctx, s, llmFunc, item, emb, agent)
-}
-
-func executeCandidateReconcile(ctx context.Context, s store.Store, llmFunc LLMClientFunc, item ExtractedFactItem, emb []float32, agent ...string) error {
-	prelimNeighbors, err := s.FindNearestScoredFacts(ctx, emb, 5, 0.60)
-	if err != nil {
-		return fmt.Errorf("FindNearestScoredFacts error: %w", err)
-	}
-
-	var tier3Decision *ExtractedFactItem
-	if len(prelimNeighbors) > 0 && prelimNeighbors[0].Score <= 0.88 {
-		dec := evaluateTier3CandidateDecision(ctx, llmFunc, item, prelimNeighbors, agent...)
-		tier3Decision = &dec
-	}
-
-	return withFactWriteLock(ctx, s, func(wCtx context.Context, lockedStore store.Store) error {
-		neighbors, err := lockedStore.FindNearestScoredFacts(wCtx, emb, 5, 0.60)
-		if err != nil {
-			return fmt.Errorf("FindNearestScoredFacts error: %w", err)
-		}
-
-		// Tier 1: len(neighbors) == 0 (maxSim < 0.60)
-		if len(neighbors) == 0 {
-			if _, err = lockedStore.InsertFact(wCtx, item.FactText, emb, agent...); err != nil {
-				return fmt.Errorf("error inserting tier 1 fact: %w", err)
-			}
-			RecordFactStored("inserted")
-			return nil
-		}
-
-		// Tier 2: neighbors[0].Score > 0.88
-		if neighbors[0].Score > 0.88 {
-			if err = lockedStore.ReinforceFact(wCtx, neighbors[0].Fact.ID); err != nil {
-				return fmt.Errorf("error reinforcing tier 2 fact: %w", err)
-			}
-			RecordFactStored("reinforced")
-			return nil
-		}
-
-		// Tier 3: 0.60 <= neighbors[0].Score <= 0.88
-		var decision ExtractedFactItem
-		if tier3Decision != nil && decisionMatchesNeighbors(*tier3Decision, neighbors) {
-			decision = *tier3Decision
-		} else {
-			decision = evaluateTier3CandidateDecision(wCtx, llmFunc, item, neighbors, agent...)
-		}
-		return applyReconcileDecision(wCtx, lockedStore, item, emb, neighbors, decision, agent...)
-	})
-}
-
-func decisionMatchesNeighbors(dec ExtractedFactItem, neighbors []store.ScoredFact) bool {
-	action := strings.ToUpper(strings.TrimSpace(dec.Action))
-	switch action {
-	case actionAdd:
-		return true
-	case actionDelete:
-		targetID := dec.DeleteID
-		if targetID <= 0 {
-			targetID = dec.SupersedesID
-		}
-		if targetID <= 0 {
-			return false
-		}
-		for _, n := range neighbors {
-			if n.Fact.ID == targetID {
-				return true
-			}
-		}
-		return false
-	case actionUpdate:
-		targetID := dec.SupersedesID
-		if targetID <= 0 {
-			targetID = dec.DeleteID
-		}
-		if targetID <= 0 {
-			return false
-		}
-		for _, n := range neighbors {
-			if n.Fact.ID == targetID {
-				return true
-			}
-		}
-		return false
-	case actionNoop:
-		targetID := dec.SupersedesID
-		if targetID <= 0 {
-			return len(neighbors) > 0
-		}
-		for _, n := range neighbors {
-			if n.Fact.ID == targetID {
-				return true
-			}
-		}
-		return false
-	default:
-		return false
-	}
-}
-
-func evaluateTier3CandidateDecision(ctx context.Context, llmFunc LLMClientFunc, item ExtractedFactItem, neighbors []store.ScoredFact, agent ...string) ExtractedFactItem {
-	fallback := ExtractedFactItem{Action: actionAdd, FactText: item.FactText}
-	if llmFunc == nil {
-		return fallback
-	}
-
-	reconcilePrompt := buildCandidateReconcilePrompt(item, neighbors)
-	reconcileAgent := ""
-	if len(agent) > 0 {
-		reconcileAgent = strings.TrimSpace(agent[0])
-	}
-	reconcileCtx := withLLMKey(ctx, "coven:reconcile:"+reconcileAgent+":"+hash16(item.FactText))
-	resp, err := llmFunc(reconcileCtx, reconcilePrompt)
-	if err != nil {
-		slog.WarnContext(ctx, "[Memory] tier 3 reconciliation LLM error; falling back to ADD", "error", err)
-		return fallback
-	}
-
-	decisionPayload, err := parseFactsJSON(resp)
-	if err != nil || len(decisionPayload.Facts) == 0 {
-		slog.WarnContext(ctx, "[Memory] tier 3 parse error; falling back to ADD", "error", err)
-		return fallback
-	}
-
-	return decisionPayload.Facts[0]
 }
 
 func formatExtractableTurns(turns []store.Message) string {
@@ -1347,8 +1125,8 @@ type preparedConsolidatedFact struct {
 	emb  []float32
 }
 
-// prepareConsolidatedFacts pre-generates embeddings for candidate facts outside withFactWriteLock
-// so network latency to Ollama does not hold the PostgreSQL transaction-level advisory lock.
+// prepareConsolidatedFacts pre-generates embeddings for candidate facts outside withFactWriteTx
+// so network latency to Ollama does not hold the write transaction open.
 func prepareConsolidatedFacts(ctx context.Context, client store.OllamaClient, candidates []string) []preparedConsolidatedFact {
 	var prepared []preparedConsolidatedFact
 	for _, text := range candidates {
@@ -1367,7 +1145,7 @@ func prepareConsolidatedFacts(ctx context.Context, client store.OllamaClient, ca
 
 // insertAndReinforceConsolidatedFact inserts a prepared consolidated fact under a savepoint and reinforces
 // it up to maxReinforce times. Any insertion or reinforcement failure rolls back to its savepoint to prevent
-// transaction aborts under withFactWriteLock.
+// transaction aborts under withFactWriteTx.
 func insertAndReinforceConsolidatedFact(ctx context.Context, s store.Store, item preparedConsolidatedFact, maxReinforce int) (int64, bool) {
 	db := storeDB(s)
 	hasSavepoint := savepointBegin(ctx, db, "coven_ins_fact")
@@ -1398,12 +1176,12 @@ func insertAndReinforceConsolidatedFact(ctx context.Context, s store.Store, item
 	return newID, true
 }
 
-func deleteConsolidatedSources(ctx context.Context, lockedStore store.Store, clique []store.ScoredFactWithEmbedding) bool {
+func deleteConsolidatedSources(ctx context.Context, txStore store.Store, clique []store.ScoredFactWithEmbedding) bool {
 	var failed bool
-	db := storeDB(lockedStore)
+	db := storeDB(txStore)
 	for _, src := range clique {
 		hasSavepoint := savepointBegin(ctx, db, "coven_del_fact")
-		if err := lockedStore.DeleteFact(ctx, src.Fact.ID); err != nil {
+		if err := txStore.DeleteFact(ctx, src.Fact.ID); err != nil {
 			if hasSavepoint {
 				savepointRollback(ctx, db, "coven_del_fact")
 			}
@@ -1448,10 +1226,10 @@ func consolidateSingleFactClique(ctx context.Context, s store.Store, client stor
 		return false, true
 	}
 
-	lockErr := withFactWriteLock(ctx, s, func(wCtx context.Context, lockedStore store.Store) error {
+	txErr := withFactWriteTx(ctx, s, func(wCtx context.Context, txStore store.Store) error {
 		var insertedIDs []int64
 		for _, item := range prepared {
-			if newID, ok := insertAndReinforceConsolidatedFact(wCtx, lockedStore, item, maxReinforce); ok {
+			if newID, ok := insertAndReinforceConsolidatedFact(wCtx, txStore, item, maxReinforce); ok {
 				insertedIDs = append(insertedIDs, newID)
 			}
 		}
@@ -1460,13 +1238,13 @@ func consolidateSingleFactClique(ctx context.Context, s store.Store, client stor
 			return errors.New("no consolidated facts inserted")
 		}
 
-		if failed := deleteConsolidatedSources(wCtx, lockedStore, clique); failed {
+		if failed := deleteConsolidatedSources(wCtx, txStore, clique); failed {
 			cliqueFailed = true
 		}
 		consolidated = true
 		return nil
 	})
-	if lockErr != nil {
+	if txErr != nil {
 		return false, true
 	}
 	return consolidated, cliqueFailed
