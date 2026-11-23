@@ -469,7 +469,6 @@ type digestPREvent struct {
 	KustomizationRequests  map[string]prwire.KustomizationRequest `json:"kustomization_requests,omitempty"`
 	DeployedKustomizations []string                               `json:"deployed_kustomizations,omitempty"`
 	Banner                 string                                 `json:"banner,omitempty"`
-	Acknowledged           bool                                   `json:"acknowledged,omitempty"`
 	BuildMetadata          *prwire.BuildMetadata                  `json:"build_metadata,omitempty"`
 	AutoUpdate             *prwire.AutoUpdatePolicy               `json:"auto_update,omitempty"`
 	EriEffects             []prwire.EriEffect                     `json:"eri_effects,omitempty"`
@@ -494,7 +493,7 @@ func toDigestPREvent(ev prwire.PREvent) digestPREvent {
 		GateGeneration: ev.GateGeneration, ReopenEpoch: ev.ReopenEpoch, Unmanaged: ev.Unmanaged, BuildID: ev.BuildID,
 		Agent: ev.Agent, BeforeSHA: ev.BeforeSHA, TargetID: ev.TargetID, CheckState: ev.CheckState, Jobs: ev.Jobs,
 		DeployedJobs: ev.DeployedJobs, JobState: ev.JobState, KustomizationRequests: ev.KustomizationRequests,
-		DeployedKustomizations: ev.DeployedKustomizations, Banner: ev.Banner, Acknowledged: ev.Acknowledged,
+		DeployedKustomizations: ev.DeployedKustomizations, Banner: ev.Banner,
 		BuildMetadata: ev.BuildMetadata, AutoUpdate: ev.AutoUpdate, EriEffects: ev.EriEffects, Facts: ev.Facts,
 		ExpectedJobs: ev.ExpectedJobs, ObservedReconcileAt: ev.ObservedReconcileAt, Kustomization: ev.Kustomization,
 	}
