@@ -446,8 +446,12 @@ func assertReloadWithSupplierCases(t *testing.T) {
 	}); err != nil || ActiveConfig().Current().Model != "reloaded-hermetic" {
 		t.Errorf("expected ReloadWithSupplier success, got err=%v model=%q", err, ActiveConfig().Current().Model)
 	}
-	_ = ReloadWithSupplier(ActiveConfig(), nil)
-	_ = ReloadWithSupplier(ActiveConfig(), New)
+	if err := ReloadWithSupplier(ActiveConfig(), nil); err == nil {
+		t.Errorf("expected error for nil supplier")
+	}
+	if err := ReloadWithSupplier(ActiveConfig(), New); err == nil && ActiveConfig().Current() == nil {
+		t.Errorf("unexpected nil config after ReloadWithSupplier")
+	}
 }
 
 func assertLoadConfigLKGCBootCase(t *testing.T, tc loadConfigLKGCBootCase) {

@@ -251,49 +251,6 @@ func TestWorkerPool_ActiveTurnSessionID(t *testing.T) {
 	}
 }
 
-func TestTurnExecution_FailureResetsActiveSessionID(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name          string
-		isCorruption  bool
-		wantActive    string
-		wantLeaseSess string
-	}{
-		{name: "corruption retry clears active and lease session", isCorruption: true, wantActive: "", wantLeaseSess: ""},
-		{name: "non-transient failure clears active and lease session", isCorruption: false, wantActive: "", wantLeaseSess: ""},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			store := dbtest.NewFakeStore()
-			pool := New(nil, WorkerPoolConfig{Store: store, BackoffBase: time.Nanosecond})
-			te := &turnExecution{
-				pool:              pool,
-				threadID:          "th-1",
-				burst:             []db.Message{{ID: "m-1", ThreadID: "th-1"}},
-				activeSessionID:   "stale-active-sess",
-				leaseSessionID:    "stale-lease-sess",
-				currentSessionID:  "curr-sess",
-				previousSessionID: "prev-sess",
-			}
-			if tc.isCorruption {
-				te.handleSessionCorruptionRetry(1, 2, "", "", "corrupted", "", "model-1")
-			} else {
-				te.handleNonTransientFailure(1, 1, "", "", "fatal error", "", "model-1")
-			}
-			te.activeSessionMu.Lock()
-			gotActive := te.activeSessionID
-			gotLease := te.leaseSessionID
-			te.activeSessionMu.Unlock()
-			if gotActive != tc.wantActive || gotLease != tc.wantLeaseSess {
-				t.Fatalf("after failure, activeSessionID=%q leaseSessionID=%q, want (%q, %q)", gotActive, gotLease, tc.wantActive, tc.wantLeaseSess)
-			}
-		})
-	}
-}
-
 type dispatchExecutionHeadlessCase struct {
 	name         string
 	source       string

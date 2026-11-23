@@ -59,7 +59,7 @@ func TestBuildObject_LifecycleTransitionsAndFailures(t *testing.T) {
 	_, _ = boUpdErr.AppendChunks(ctxCancel, AppendChunksRequest{Chunks: []store.CreateChunkInput{{Title: "C2"}}})
 
 	// 5. RemoveChunk error in store
-	_ = boUpdErr.RemoveChunk(ctxCancel, RemoveChunkRequest{ChunkRef: "c1"})
+	assert.Error(t, boUpdErr.RemoveChunk(ctxCancel, RemoveChunkRequest{ChunkRef: "c1"}))
 
 	// 6. FailChunk error in store
 	_, _ = boUpdErr.FailChunk(ctxCancel, model.FailChunkRequest{ChunkID: "c1", Reason: "boom"})
@@ -82,8 +82,8 @@ func TestBuildObject_LifecycleTransitionsAndFailures(t *testing.T) {
 	})
 
 	// 8. OnDispatchOutcome error branches in store
-	_ = boUpdErr.OnDispatchOutcome(ctxCancel, pubsub.DispatchOutcomeEvent{VanadisChunkID: "c1", Status: "completed"})
-	_ = boUpdErr.OnDispatchOutcome(ctxCancel, pubsub.DispatchOutcomeEvent{VanadisChunkID: "c1", Status: "failed", Error: "boom"})
+	assert.Error(t, boUpdErr.OnDispatchOutcome(ctxCancel, pubsub.DispatchOutcomeEvent{VanadisChunkID: "c1", Status: "completed"}))
+	assert.Error(t, boUpdErr.OnDispatchOutcome(ctxCancel, pubsub.DispatchOutcomeEvent{VanadisChunkID: "c1", Status: "failed", Error: "boom"}))
 
 	// 9. evaluateBuildTerminalStatus error branches and retry recovery
 	// 9a. evaluateBuildTerminalStatus failing on notifyBuildTerminal (execErr)

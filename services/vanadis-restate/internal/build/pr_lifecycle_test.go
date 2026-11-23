@@ -80,7 +80,7 @@ func TestBuildObject_ExecutorErrorBranches(t *testing.T) {
 		assert.Error(t, boStoreErr.notifyChunkFailure(rc, b1, "c1", "reason"))
 		return true, nil
 	})
-	_ = boStoreErr.OnPREvent(ctx, pubsub.PRLifecycleEvent{Repo: "aerial", PRNumber: 101, Event: "check_failed", RolloutState: &pubsub.PRRolloutState{}})
+	assert.Error(t, boStoreErr.OnPREvent(ctx, pubsub.PRLifecycleEvent{Repo: "aerial", PRNumber: 101, Event: "check_failed", RolloutState: &pubsub.PRRolloutState{}}))
 }
 
 func newRemediationTestHarness(t *testing.T, spy *fakeStore, dispatchErr, notifyErr error) (*BuildObject, *mockEriClient) {
