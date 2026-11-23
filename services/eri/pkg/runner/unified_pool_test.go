@@ -1202,9 +1202,17 @@ func TestUnifiedProcessPool_GetOrCreate_RejectsDirtyDaemon(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			var spawnCounter atomic.Int32
+			var d1Ptr atomic.Pointer[StreamingDaemon]
+			var d1StateDuringSpawn2 atomic.Value
 			mock := newPipeMockSpawner(pipeMockSpawnerOpts{
 				killErr: tc.killErr,
-				onSpawn: func(cfg DaemonConfig) { spawnCounter.Add(1) },
+				onSpawn: func(cfg DaemonConfig) {
+					if spawnCounter.Add(1) == 2 {
+						if prev := d1Ptr.Load(); prev != nil {
+							d1StateDuringSpawn2.Store(prev.State())
+						}
+					}
+				},
 			})
 
 			pool := NewUnifiedProcessPool(PoolConfig{}, mock)
@@ -1215,6 +1223,7 @@ func TestUnifiedProcessPool_GetOrCreate_RejectsDirtyDaemon(t *testing.T) {
 			if err != nil {
 				t.Fatalf("initial GetOrCreate failed: %v", err)
 			}
+			d1Ptr.Store(d1)
 
 			d1.MarkDirty()
 			d2, err := pool.GetOrCreate(ctx, "thread-dirty-target", "")
@@ -1225,6 +1234,9 @@ func TestUnifiedProcessPool_GetOrCreate_RejectsDirtyDaemon(t *testing.T) {
 			waitPoolBackground(pool)
 			if d1.State() != StateClosed || (tc.expectSpawns > 0 && int(spawnCounter.Load()) != tc.expectSpawns) {
 				t.Errorf("rejected dirty daemon check failed: d1State=%v spawns=%d", d1.State(), spawnCounter.Load())
+			}
+			if gotState, ok := d1StateDuringSpawn2.Load().(DaemonState); !ok || gotState != StateClosed {
+				t.Errorf("expected evicted daemon closed synchronously before spawning replacement, got state=%v", d1StateDuringSpawn2.Load())
 			}
 		})
 	}

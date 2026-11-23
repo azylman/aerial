@@ -286,7 +286,7 @@ func (p *UnifiedProcessPool) prewarmTarget(ctx context.Context, targetKey string
 	return err
 }
 
-func (p *UnifiedProcessPool) closeEvictedDaemon(oldD *StreamingDaemon, targetKey string) {
+func closeEvictedDaemon(oldD *StreamingDaemon, targetKey string) {
 	if oldD == nil {
 		return
 	}
@@ -301,13 +301,9 @@ func (p *UnifiedProcessPool) closeEvictedDaemon(oldD *StreamingDaemon, targetKey
 			return
 		}
 	}
-	p.bgWg.Add(1)
-	go func(d *StreamingDaemon, tKey string) {
-		defer p.bgWg.Done()
-		if closeErr := d.Close(); closeErr != nil {
-			log.Printf("[UnifiedProcessPool] Warning: error closing old daemon %q: %v", tKey, closeErr)
-		}
-	}(oldD, targetKey)
+	if closeErr := oldD.Close(); closeErr != nil {
+		log.Printf("[UnifiedProcessPool] Warning: error closing old daemon %q: %v", targetKey, closeErr)
+	}
 }
 
 func (p *UnifiedProcessPool) canReuseDaemon(d *StreamingDaemon, trimmedSess string) bool {
@@ -321,24 +317,23 @@ func (p *UnifiedProcessPool) canReuseDaemon(d *StreamingDaemon, trimmedSess stri
 	return !should
 }
 
-func (p *UnifiedProcessPool) checkExistingDaemonForCreateLocked(targetKey, trimmedSess string) (*StreamingDaemon, string, bool) {
+func (p *UnifiedProcessPool) checkExistingDaemonForCreateLocked(targetKey, trimmedSess string) (*StreamingDaemon, *StreamingDaemon, string, bool) {
 	d, exists := p.daemons[targetKey]
 	if !exists || d == nil {
-		return nil, trimmedSess, false
+		return nil, nil, trimmedSess, false
 	}
 	should, rotReason := p.ShouldRotate(d)
 	if isDaemonMatch(d, trimmedSess) && (trimmedSess != "" || !should) {
-		return d, trimmedSess, true
+		return d, nil, trimmedSess, true
 	}
 	if !should && trimmedSess == "" && d.SessionID() != "" && !strings.Contains(targetKey, ":") {
 		trimmedSess = d.SessionID()
 	}
 	delete(p.daemons, targetKey)
-	p.closeEvictedDaemon(d, targetKey)
 	if should && trimmedSess == "" {
 		metrics.RecordSessionRotation("pre_flight", "pool", rotReason)
 	}
-	return nil, trimmedSess, false
+	return nil, d, trimmedSess, false
 }
 
 // buildDaemonConfig resolves the daemon's config. traceEnv is the daemon.spawn span's
@@ -466,17 +461,19 @@ func (p *UnifiedProcessPool) spawnStreamingDaemonWithRetry(ctx context.Context, 
 
 func (p *UnifiedProcessPool) registerSpawnedDaemon(targetKey string, daemon *StreamingDaemon) error {
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	if p.closed {
+		p.mu.Unlock()
 		if closeErr := daemon.Close(); closeErr != nil {
 			log.Printf("[UnifiedProcessPool] Warning: failed closing daemon after pool closed: %v", closeErr)
 		}
 		return fmt.Errorf("process pool is closed")
 	}
-	if prev, exists := p.daemons[targetKey]; exists && prev != nil && prev != daemon {
-		p.closeEvictedDaemon(prev, targetKey)
-	}
+	prev := p.daemons[targetKey]
 	p.daemons[targetKey] = daemon
+	p.mu.Unlock()
+	if prev != nil && prev != daemon {
+		closeEvictedDaemon(prev, targetKey)
+	}
 	return nil
 }
 
@@ -500,9 +497,12 @@ func (p *UnifiedProcessPool) GetOrCreate(ctx context.Context, targetKey string, 
 			p.mu.Unlock()
 			return nil, fmt.Errorf("process pool is closed")
 		}
-		reusable, updatedSess, reused := p.checkExistingDaemonForCreateLocked(targetKey, trimmedSess)
+		reusable, evicted, updatedSess, reused := p.checkExistingDaemonForCreateLocked(targetKey, trimmedSess)
 		trimmedSess = updatedSess
 		p.mu.Unlock()
+		if evicted != nil {
+			closeEvictedDaemon(evicted, targetKey)
+		}
 		if reused {
 			return reusable, nil
 		}

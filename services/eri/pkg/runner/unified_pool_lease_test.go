@@ -483,15 +483,15 @@ func TestUnifiedProcessPool_PrewarmAndLeaseResilience(t *testing.T) {
 	if !okWorker1 || dWorker1 == nil {
 		t.Fatalf("expected discord:worker-1 to exist")
 	}
-	verifyEvictedDaemonInflightClose(t, pool, dWorker1)
+	verifyEvictedDaemonInflightClose(t, dWorker1)
 }
 
-func verifyEvictedDaemonInflightClose(t *testing.T, pool *UnifiedProcessPool, dWorker1 *StreamingDaemon) {
+func verifyEvictedDaemonInflightClose(t *testing.T, dWorker1 *StreamingDaemon) {
 	t.Helper()
 	dWorker1.inflightMu.Lock()
 	dWorker1.inflight = append(dWorker1.inflight, &TurnContext{TurnID: "inflight-1"})
 	dWorker1.inflightMu.Unlock()
-	pool.closeEvictedDaemon(dWorker1, "discord:worker-1")
+	closeEvictedDaemon(dWorker1, "discord:worker-1")
 	if dWorker1.State() == StateClosed {
 		t.Fatalf("expected closeEvictedDaemon not to close daemon while inflight > 0")
 	}
@@ -506,7 +506,7 @@ func verifyEvictedDaemonInflightClose(t *testing.T, pool *UnifiedProcessPool, dW
 	if dWorker1.State() != StateClosed {
 		t.Fatalf("expected evicted daemon to close once onTurnFinished fires")
 	}
-	pool.closeEvictedDaemon(nil, "discord:worker-1")
+	closeEvictedDaemon(nil, "discord:worker-1")
 }
 
 func TestUnifiedSessionLease_ExecuteFailure_MarksDirty(t *testing.T) {

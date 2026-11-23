@@ -101,12 +101,14 @@ func TestStreamingDaemon_Muse_Handshake(t *testing.T) {
 }
 
 type handshakeApprovalModeTestCase struct {
-	name         string
-	cfg          DaemonConfig
-	mockReplies  []string
-	wantMethod   string
-	wantParamKey string
-	wantParamVal string
+	name             string
+	cfg              DaemonConfig
+	mockReplies      []string
+	wantMethod       string
+	wantParamKey     string
+	wantParamVal     string
+	wantOmittedParam string
+	wantSessionID    string
 }
 
 func assertHandshakeApprovalMode(t *testing.T, tc handshakeApprovalModeTestCase) {
@@ -150,6 +152,10 @@ func assertHandshakeApprovalMode(t *testing.T, tc handshakeApprovalModeTestCase)
 	}
 	defer daemon.Close()
 
+	if tc.wantSessionID != "" && daemon.SessionID() != tc.wantSessionID {
+		t.Errorf("expected sessionID %q, got %q", tc.wantSessionID, daemon.SessionID())
+	}
+
 	var foundReq *codexRPCRequest
 CaptureLoop:
 	for {
@@ -172,6 +178,11 @@ CaptureLoop:
 	}
 	if params[tc.wantParamKey] != tc.wantParamVal {
 		t.Errorf("expected %s[%s] = %q, got %v", tc.wantMethod, tc.wantParamKey, tc.wantParamVal, params[tc.wantParamKey])
+	}
+	if tc.wantOmittedParam != "" {
+		if _, exists := params[tc.wantOmittedParam]; exists {
+			t.Errorf("expected %s to omit %q, got %v", tc.wantMethod, tc.wantOmittedParam, params[tc.wantOmittedParam])
+		}
 	}
 }
 
@@ -209,6 +220,25 @@ func TestStreamingDaemon_Muse_HandshakeApprovalMode(t *testing.T) {
 			wantMethod:   "session/setApprovalMode",
 			wantParamKey: "mode",
 			wantParamVal: museApprovalAllowAll,
+		},
+		{
+			name: "failed resume fallback to start omits colliding sessionId",
+			cfg: DaemonConfig{
+				Engine:        "muse",
+				SessionID:     "018e3f94-3333-7000-8000-000000000003",
+				ResumeSession: true,
+				Timeout:       2 * time.Second,
+			},
+			mockReplies: []string{
+				`{"jsonrpc":"2.0","id":1,"result":{}}` + "\n",
+				`{"jsonrpc":"2.0","id":2,"error":{"code":-32000,"message":"abandoned incomplete session/start"}}` + "\n",
+				`{"jsonrpc":"2.0","id":4,"result":{"session":{"id":"018e3f94-4444-7000-8000-000000000004"}}}` + "\n",
+			},
+			wantMethod:       "session/start",
+			wantParamKey:     "approvalMode",
+			wantParamVal:     museApprovalAllowAll,
+			wantOmittedParam: fieldSessionID,
+			wantSessionID:    "018e3f94-4444-7000-8000-000000000004",
 		},
 	}
 
