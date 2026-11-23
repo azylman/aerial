@@ -92,3 +92,17 @@ func seedSessionTurns(t testing.TB, store *db.SQLStore, sessionKey string, turns
 		}
 	}
 }
+
+// seedSessionInfo writes info's session through the production SaveSessionID and
+// IncrementSessionTurnCount, then backdates created_at/updated_at with a plain
+// UPDATE (production only ever stamps the current time) for idle-age rows.
+func seedSessionInfo(t testing.TB, store *db.SQLStore, sqlDB *sql.DB, info db.SessionInfo) {
+	t.Helper()
+	if err := store.SaveSessionID(context.Background(), info.ThreadID, info.InternalSessionID); err != nil {
+		t.Fatalf("seed session %s: %v", info.ThreadID, err)
+	}
+	seedSessionTurns(t, store, info.ThreadID, info.TurnCount)
+	if _, err := sqlDB.ExecContext(context.Background(), `UPDATE sessions SET created_at = $1, updated_at = $2 WHERE session_id = $3`, info.CreatedAt, info.UpdatedAt, db.DiscordSessionID(info.ThreadID)); err != nil {
+		t.Fatalf("backdate session %s: %v", info.ThreadID, err)
+	}
+}

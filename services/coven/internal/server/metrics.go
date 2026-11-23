@@ -46,6 +46,13 @@ var (
 		},
 	)
 
+	ExtractBatchesRejectedTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "coven_extract_batches_rejected_total",
+			Help: "Extraction batches skipped after the LLM returned an invalid answer on every allowed attempt.",
+		},
+	)
+
 	FactsStoredTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "coven_facts_stored_total",
@@ -75,6 +82,7 @@ func init() {
 	registerCovenCollector(OperationDurationSeconds)
 	registerCovenCollector(FactsStoredTotal)
 	registerCovenCollector(RestateRegistered)
+	registerCovenCollector(ExtractBatchesRejectedTotal)
 
 	FactsTotal.Set(0)
 	RestateRegistered.Set(0)
