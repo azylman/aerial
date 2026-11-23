@@ -664,7 +664,7 @@ func TestIsExtractableAdminTurn(t *testing.T) {
 }
 
 // sqlstoreAlphaTurns exercise every GetUnextractedAdminTurns filter for
-// agent-alpha/th-1 with a watermark at row 10: only row 12 qualifies.
+// agent-alpha/th-1 with a watermark at row 10: only rows 12 and 19 qualify.
 var sqlstoreAlphaTurns = []testTurn{
 	{agent: "agent-alpha", thread: "th-1", rowID: 5, content: "old", response: "below watermark", status: "COMPLETED", admin: true},
 	{agent: "agent-alpha", thread: "th-1", rowID: 12, content: "hello", response: "world", status: "COMPLETED", admin: true},
@@ -672,6 +672,7 @@ var sqlstoreAlphaTurns = []testTurn{
 	{agent: "agent-alpha", thread: "th-1", rowID: 14, content: "pending", response: "not completed", status: "PENDING", admin: true},
 	{agent: "agent-alpha", thread: "th-1", rowID: 15, content: "silent", response: "[SILENT_TURN]", status: "COMPLETED", admin: true},
 	{agent: "agent-alpha", thread: "th-1", rowID: 16, content: "no response", status: "COMPLETED", admin: true},
+	{agent: "agent-alpha", thread: "th-1", rowID: 19, content: "after silent rows", response: "reply", status: "COMPLETED", admin: true},
 	{agent: "agent-alpha", thread: "th-9", rowID: 17, content: "other thread", response: "x", status: "COMPLETED", admin: true},
 	adminTurn("th-1", 18, "other agent", "x"),
 	adminTurn("th-2", 25, "turn 2", "answer 2"),
@@ -705,7 +706,8 @@ func TestSQLStore_GetUnextractedAdminTurns(t *testing.T) {
 		{name: "EmptyThreadID", turns: sqlstoreAlphaTurns, threadID: "   "},
 		{name: "WatermarkError", turns: sqlstoreAlphaTurns, threadID: "th-1", sabotage: sabotageWatermarks, wantErr: true},
 		{name: "TurnQueryError", turns: sqlstoreAlphaTurns, threadID: "th-1", sabotage: sabotageTurnReads, wantErr: true},
-		{name: "AgentScopedAboveWatermarkExtractableOnly", turns: sqlstoreAlphaTurns, watermarks: sqlstoreAlphaWatermarks, threadID: " th-1 ", limit: 50, agent: []string{" agent-alpha "}, want: []string{"m12|12|th-1|hello|world|2026-01-02T03:04:17Z"}},
+		{name: "AgentScopedAboveWatermarkExtractableOnly", turns: sqlstoreAlphaTurns, watermarks: sqlstoreAlphaWatermarks, threadID: " th-1 ", limit: 50, agent: []string{" agent-alpha "}, want: []string{"m12|12|th-1|hello|world|2026-01-02T03:04:17Z", "m19|19|th-1|after silent rows|reply|2026-01-02T03:04:24Z"}},
+		{name: "LimitSkipsNonExtractableRows", turns: sqlstoreAlphaTurns, watermarks: []sqlstoreWatermark{{agent: "agent-alpha", thread: "th-1", rowID: 12}}, threadID: "th-1", limit: 1, agent: []string{"agent-alpha"}, want: []string{"m19|19|th-1|after silent rows|reply|2026-01-02T03:04:24Z"}},
 		{name: "DefaultAgentSortedAscending", turns: sqlstoreAlphaTurns, watermarks: sqlstoreAlphaWatermarks, threadID: "th-2", want: []string{"m11|11|th-2|turn 1|answer 1|2026-01-02T03:04:16Z", "m25|25|th-2|turn 2|answer 2|2026-01-02T03:04:30Z"}},
 		{name: "LimitBoundsBatch", turns: sqlstoreAlphaTurns, threadID: "th-2", limit: 1, want: []string{"m11|11|th-2|turn 1|answer 1|2026-01-02T03:04:16Z"}},
 	}

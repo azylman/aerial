@@ -44,7 +44,9 @@ func (s *SQLStore) GetConversationFactWatermark(ctx context.Context, threadID st
 	return lastRowID, t, nil
 }
 
-// GetUnextractedAdminTurns retrieves completed admin turns for threadID that haven't been extracted.
+// GetUnextractedAdminTurns retrieves extractable admin turns (see IsExtractableAdminTurn) above the
+// thread watermark. The extractability filter runs in SQL so a run of unanswered or silent turns can
+// never fill the batch with rows that are all dropped, which would stall the watermark forever.
 func (s *SQLStore) GetUnextractedAdminTurns(ctx context.Context, threadID string, limit int, agent ...string) ([]Message, error) {
 	if err := s.checkDB(); err != nil {
 		return nil, err
@@ -72,6 +74,7 @@ func (s *SQLStore) GetUnextractedAdminTurns(ctx context.Context, threadID string
 	query := `SELECT id, COALESCE(row_id, 0), thread_id, content, COALESCE(response_text, ''), status, is_admin, created_at, updated_at
 	FROM messages
 	WHERE agent = $1 AND thread_id = $2 AND status = 'COMPLETED' AND is_admin = true AND row_id > $3
+	  AND COALESCE(response_text, '') ~ '^\s*[^\s\[]'
 	ORDER BY row_id ASC
 	LIMIT $4`
 
