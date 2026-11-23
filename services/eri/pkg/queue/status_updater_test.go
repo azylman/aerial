@@ -416,6 +416,9 @@ func TestStatusUpdater_TransientSendErrorSelfHeals(t *testing.T) {
 		return "msg-healed", nil
 	}
 	u := NewStatusUpdater(nil, "thread-heals", true, h.options(WithStatusInterval(time.Hour), WithStatusDebounce(0))...)
+	// Stop the background loop first: HandleStep's flush notification would otherwise
+	// race the manual flushes below and consume the healing attempt early.
+	u.Stop()
 	u.HandleStep(&runner.StepUpdateEvent{StepType: "tool", ToolName: "heal_tool", State: "ACTIVE"})
 	u.flush()
 
@@ -434,7 +437,6 @@ func TestStatusUpdater_TransientSendErrorSelfHeals(t *testing.T) {
 		t.Errorf("expected msg-healed, got %s", healedID)
 	}
 
-	u.Stop()
 	u.DeleteStatusMessage()
 	select {
 	case <-h.deleteDone:

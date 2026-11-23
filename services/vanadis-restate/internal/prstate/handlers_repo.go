@@ -454,6 +454,9 @@ func (h *RepoHandlers) beginRepoEffect(kind string, ev RepoEvent) (*RepoState, R
 	return st, out, false, nil
 }
 
+// MergeQueueCheckName is the synthetic check name used to publish and track merge queue positions.
+const MergeQueueCheckName = "_merge_queue"
+
 // HandleAutoUpdate runs the open-PR auto-update cascade synapse's
 // checkOpenPRConflicts runs, once per trigger key. It lists open PRs
 // targeting main and, for each eligible PR (not draft, allowlisted author,
@@ -508,6 +511,19 @@ func (h *RepoHandlers) runAutoUpdate(ctx context.Context, st *RepoState, policy 
 		out.Err, out.Retry = gerr, gerr.Retryable()
 		return nil
 	}
+	var errs []error
+	if !hasActiveUpdatedPR(st, policy, prs) {
+		errs = append(errs, h.updateFirstEligibleBranch(ctx, st, policy, prs, out)...)
+	}
+	if !out.Retry {
+		if berr := h.broadcastMergeQueue(ctx, st, policy, prs, out); berr != nil {
+			errs = append(errs, berr)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func hasActiveUpdatedPR(st *RepoState, policy *AutoUpdatePolicy, prs []GitHubPR) bool {
 	for _, pr := range prs {
 		if !autoUpdateEligible(st, policy, pr) {
 			continue
@@ -517,9 +533,14 @@ func (h *RepoHandlers) runAutoUpdate(ctx context.Context, st *RepoState, policy 
 				st.ClearPRUpdatedForMain(pr.Number)
 				continue
 			}
-			return nil
+			return true
 		}
 	}
+	return false
+}
+
+func (h *RepoHandlers) updateFirstEligibleBranch(ctx context.Context, st *RepoState, policy *AutoUpdatePolicy, prs []GitHubPR, out *RepoEffectOutcome) []error {
+	repo := st.Repo
 	var errs []error
 	for _, pr := range prs {
 		if !autoUpdateEligible(st, policy, pr) || h.github.HeadChecksBlocked(ctx, repo, pr.Head.SHA) {
@@ -551,7 +572,96 @@ func (h *RepoHandlers) runAutoUpdate(ctx context.Context, st *RepoState, policy 
 		}
 		break
 	}
-	return errors.Join(errs...)
+	return errs
+}
+
+func (h *RepoHandlers) broadcastMergeQueue(ctx context.Context, st *RepoState, policy *AutoUpdatePolicy, prs []GitHubPR, out *RepoEffectOutcome) error {
+	var candidates []GitHubPR
+	for _, pr := range prs {
+		if !autoUpdateEligible(st, policy, pr) {
+			continue
+		}
+		if strings.EqualFold(pr.MergeableState, "dirty") || strings.EqualFold(pr.MergeableState, "conflicting") {
+			continue
+		}
+		if failedInUpdates(out.Updates, pr.Number) {
+			continue
+		}
+		candidates = append(candidates, pr)
+	}
+
+	var queue []GitHubPR
+	var active *GitHubPR
+	for i := range candidates {
+		if st.WasPRUpdatedForMain(candidates[i].Number) {
+			active = &candidates[i]
+			break
+		}
+	}
+	if active != nil {
+		queue = append(queue, *active)
+		for _, c := range candidates {
+			if c.Number != active.Number {
+				queue = append(queue, c)
+			}
+		}
+	} else {
+		queue = candidates
+	}
+
+	total := len(queue)
+	if total == 1 {
+		pr := queue[0]
+		if st.HasPRQueuePosition(pr.Number) {
+			st.ClearPRQueuePosition(pr.Number)
+			return h.forward(ctx, prwire.PRHandlerCheckStatus, queueCheckStatusEvent(st, pr, "1/1"), out)
+		}
+		return nil
+	}
+	if total >= 2 {
+		var errs []error
+		for i, pr := range queue {
+			pos := i + 1
+			posStr := fmt.Sprintf("%d/%d", pos, total)
+			if st.RecordPRQueuePosition(pr.Number, pr.Head.SHA, posStr) {
+				errs = append(errs, h.forward(ctx, prwire.PRHandlerCheckStatus, queueCheckStatusEvent(st, pr, posStr), out))
+			}
+		}
+		return errors.Join(errs...)
+	}
+	return nil
+}
+
+func failedInUpdates(updates []BranchUpdate, prNumber int) bool {
+	for _, u := range updates {
+		if u.PRNumber == prNumber && (u.Outcome == UpdateBranchConflict || u.Outcome == UpdateBranchHeadMissing) {
+			return true
+		}
+	}
+	return false
+}
+
+func queueCheckStatusEvent(st *RepoState, pr GitHubPR, posStr string) PREvent {
+	return PREvent{
+		Event:      "check_updated",
+		Repo:       st.Repo,
+		PRNumber:   pr.Number,
+		HeadSHA:    strings.TrimSpace(pr.Head.SHA),
+		Branch:     strings.TrimSpace(pr.Head.Ref),
+		CheckName:  MergeQueueCheckName,
+		CheckState: posStr,
+		Facts: []pubsub.PRLifecycleEvent{{
+			Event:      "check_updated",
+			Repo:       st.Repo,
+			PRNumber:   pr.Number,
+			Branch:     strings.TrimSpace(pr.Head.Ref),
+			HeadSHA:    strings.TrimSpace(pr.Head.SHA),
+			JobName:    fmt.Sprintf("%s#%d", posStr, st.nextSeq()),
+			CheckName:  MergeQueueCheckName,
+			CheckState: posStr,
+			Status:     RegistryStatusOpen,
+		}},
+	}
 }
 
 // forward sends one restate-owned PRObject event and counts it.

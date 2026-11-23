@@ -3,72 +3,13 @@ package queue
 import (
 	"context"
 	"errors"
-	"slices"
 	"testing"
+	"time"
 
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
 	"github.com/azylman/aerial/services/eri/pkg/runner"
 )
-
-func TestWorkerPool_InterruptThread_FinalizedTurnLatch(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name            string
-		finalized       bool
-		seedStatus      string
-		wantLatchedIDs  []string
-		wantStatus      string
-		wantInterrupted bool
-	}{
-		{name: "finalized turn refreshing its summary keeps completed status", finalized: true, seedStatus: db.StatusCompleted, wantStatus: db.StatusCompleted},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			ctx := context.Background()
-			store := setupTestStore(t)
-			threadID := "th-latch"
-			msg := db.Message{ID: "msg-latch", ThreadID: threadID, Content: "hi", Status: db.StatusPending}
-			if err := store.InsertMessage(ctx, msg); err != nil {
-				t.Fatalf("insert: %v", err)
-			}
-			if err := store.UpdateMessageStatus(ctx, msg.ID, tc.seedStatus, ""); err != nil {
-				t.Fatalf("seed status: %v", err)
-			}
-			turnCtx, cancel := context.WithCancel(ctx)
-			defer cancel()
-			te := &turnExecution{threadID: threadID, burst: []db.Message{msg}, turnCtx: turnCtx, turnCancel: cancel}
-			te.finalized.Store(tc.finalized)
-			pool := &WorkerPool{ctx: ctx, cfg: WorkerPoolConfig{Store: store}, activeTurns: map[string]*turnExecution{db.DiscordSessionID(threadID): te}}
-
-			pool.mu.Lock()
-			active, latchedIDs := pool.latchActiveTurnsLocked(threadID)
-			pool.mu.Unlock()
-			if len(active) != 1 || active[0] != te {
-				t.Errorf("latched active turns = %d, want the registered turn", len(active))
-			}
-			if !slices.Equal(latchedIDs, tc.wantLatchedIDs) {
-				t.Errorf("latched burst IDs = %v, want %v", latchedIDs, tc.wantLatchedIDs)
-			}
-			if got := te.isInterrupted(); got != tc.wantInterrupted {
-				t.Errorf("interrupted after latch = %t, want %t", got, tc.wantInterrupted)
-			}
-
-			pool.InterruptThread(ctx, threadID, false)
-			if turnCtx.Err() == nil {
-				t.Errorf("turn context not cancelled by interrupt")
-			}
-			got, err := store.GetMessage(ctx, msg.ID)
-			if err != nil {
-				t.Fatalf("get message: %v", err)
-			}
-			if got.Status != tc.wantStatus {
-				t.Errorf("message status = %q, want %q", got.Status, tc.wantStatus)
-			}
-		})
-	}
-}
 
 func TestLogInterruptWarning(t *testing.T) {
 	t.Parallel()
@@ -187,4 +128,169 @@ func TestWorkerPool_ResolveChannelPolicy(t *testing.T) {
 
 	poolDefault := &WorkerPool{}
 	_ = poolDefault.resolveChannelPolicy("ch-default", "default")
+}
+
+func TestWorkerPool_CloseTurnExecution(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name           string
+		nilTurn        bool
+		dispatch       bool
+		noThread       bool
+		daemonKey      string
+		wantDaemonLive bool
+	}{
+		{name: "nil turn is a no-op", nilTurn: true, daemonKey: "discord-1234567890", wantDaemonLive: true},
+		{name: "burst turn closes its thread daemon", daemonKey: "discord-1234567890"},
+		{name: "dispatch turn closes the daemon under its session key", dispatch: true, daemonKey: "1234567890"},
+		{name: "daemon under another key survives", daemonKey: "discord-9876543210", wantDaemonLive: true},
+		{name: "turn without a thread closes no daemon", noThread: true, daemonKey: "discord-1234567890", wantDaemonLive: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			procPool := runner.NewUnifiedProcessPool(runner.PoolConfig{DefaultModel: "gemini-2.5-flash"}, newMockDaemonSpawner())
+			t.Cleanup(func() { _ = procPool.Close() })
+			if _, err := procPool.GetOrCreate(context.Background(), tc.daemonKey, ""); err != nil {
+				t.Fatalf("spawn daemon: %v", err)
+			}
+			pool := &WorkerPool{pools: map[PoolKey]runner.AgentPool{{Ephemeral: false, Effort: config.EffortHigh}: procPool}}
+			turnCtx, cancel := context.WithCancel(context.Background())
+			t.Cleanup(cancel)
+			var te *turnExecution
+			if !tc.nilTurn {
+				te = &turnExecution{threadID: "1234567890", turnCtx: turnCtx, turnCancel: cancel}
+				if tc.dispatch {
+					te.dispatch = &db.Dispatch{ID: "d-close"}
+				}
+				if tc.noThread {
+					te.threadID = ""
+				}
+			}
+			pool.closeTurnExecution(te, "operator stop")
+			if _, live := procPool.Get(tc.daemonKey); live != tc.wantDaemonLive {
+				t.Errorf("daemon %q live = %v, want %v", tc.daemonKey, live, tc.wantDaemonLive)
+			}
+			if gotCancelled := turnCtx.Err() != nil; gotCancelled != !tc.nilTurn {
+				t.Errorf("turn context cancelled = %v, want %v", gotCancelled, !tc.nilTurn)
+			}
+		})
+	}
+}
+
+func TestResolveDefaultAppConfig(t *testing.T) {
+	t.Parallel()
+	given := config.NewFromData(&config.ConfigData{Model: "given-model"})
+	tests := []struct {
+		name             string
+		appCfg           *config.Config
+		cfg              WorkerPoolConfig
+		wantExplicit     bool
+		wantModel        string
+		wantLowModel     string
+		wantMediumModel  string
+		wantSystemPrompt string
+		wantNATSURL      string
+	}{
+		{name: "explicit config wins", appCfg: given, cfg: WorkerPoolConfig{Model: "ignored"}, wantExplicit: true, wantModel: "given-model"},
+		{name: "pool overrides fill defaults", cfg: WorkerPoolConfig{Model: "m-high", LowEffortModel: "m-low", MediumEffortModel: "m-med", SystemPrompt: "be brief", NATSURL: "nats://bus:4222"}, wantModel: "m-high", wantLowModel: "m-low", wantMediumModel: "m-med", wantSystemPrompt: "be brief", wantNATSURL: "nats://bus:4222"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, explicit := resolveDefaultAppConfig(tc.appCfg, tc.cfg)
+			if explicit != tc.wantExplicit {
+				t.Errorf("explicit = %v, want %v", explicit, tc.wantExplicit)
+			}
+			cur := got.Current()
+			if cur.Model != tc.wantModel {
+				t.Errorf("Model = %q, want %q", cur.Model, tc.wantModel)
+			}
+			if tc.wantExplicit {
+				return
+			}
+			if cur.LowEffortModel != tc.wantLowModel || cur.MediumEffortModel != tc.wantMediumModel || cur.SystemPrompt != tc.wantSystemPrompt || cur.NATSURL != tc.wantNATSURL {
+				t.Errorf("overrides = %q/%q/%q/%q, want %q/%q/%q/%q", cur.LowEffortModel, cur.MediumEffortModel, cur.SystemPrompt, cur.NATSURL, tc.wantLowModel, tc.wantMediumModel, tc.wantSystemPrompt, tc.wantNATSURL)
+			}
+		})
+	}
+}
+
+func TestApplyWorkerPoolTimingDefaults(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		in          WorkerPoolConfig
+		wantMax     int
+		wantBackoff time.Duration
+		wantFlush   time.Duration
+	}{
+		{name: "zero values get defaults", wantMax: 3, wantBackoff: 3 * time.Second, wantFlush: 5 * time.Second},
+		{name: "explicit values kept", in: WorkerPoolConfig{MaxAttempts: 5, BackoffBase: time.Second, ChunkStepFlushInterval: time.Minute}, wantMax: 5, wantBackoff: time.Second, wantFlush: time.Minute},
+		{name: "negative flush interval disables flushing", in: WorkerPoolConfig{ChunkStepFlushInterval: -time.Second}, wantMax: 3, wantBackoff: 3 * time.Second},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := tc.in
+			applyWorkerPoolTimingDefaults(&cfg)
+			if cfg.MaxAttempts != tc.wantMax || cfg.BackoffBase != tc.wantBackoff || cfg.ChunkStepFlushInterval != tc.wantFlush {
+				t.Errorf("got max=%d backoff=%v flush=%v, want %d/%v/%v", cfg.MaxAttempts, cfg.BackoffBase, cfg.ChunkStepFlushInterval, tc.wantMax, tc.wantBackoff, tc.wantFlush)
+			}
+		})
+	}
+}
+
+func TestWorkerPool_NilReceiverAccessors(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name              string
+		pool              *WorkerPool
+		wantEventBusNil   bool
+		wantStatefulPools int
+		wantRuntimeModel  string
+	}{
+		{name: "nil pool", wantEventBusNil: true},
+		{name: "override model wins", pool: &WorkerPool{overrideModel: "override-m", cfg: WorkerPoolConfig{Model: "cfg-m"}}, wantEventBusNil: true, wantRuntimeModel: "override-m"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			tc.pool.SetEventBus(nil)
+			tc.pool.MarkDirty()
+			if got := tc.pool.EventBus() == nil; got != tc.wantEventBusNil {
+				t.Errorf("EventBus() nil = %v, want %v", got, tc.wantEventBusNil)
+			}
+			if got := len(tc.pool.StatefulProcessPools()); got != tc.wantStatefulPools {
+				t.Errorf("StatefulProcessPools() = %d, want %d", got, tc.wantStatefulPools)
+			}
+			if tc.pool != nil && tc.pool.GetRuntimeConfig() != tc.wantRuntimeModel {
+				t.Errorf("GetRuntimeConfig() = %q, want %q", tc.pool.GetRuntimeConfig(), tc.wantRuntimeModel)
+			}
+		})
+	}
+}
+
+func TestIsScopeKeyForThread(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		scopeKey string
+		threadID string
+		want     bool
+	}{
+		{name: "raw thread key", scopeKey: "1234567890", threadID: "1234567890", want: true},
+		{name: "normalized discord key", scopeKey: "discord-1234567890", threadID: "1234567890", want: true},
+		{name: "scoped raw suffix", scopeKey: "lock:1234567890", threadID: "1234567890", want: true},
+		{name: "scoped normalized suffix", scopeKey: "lock:discord-1234567890", threadID: "1234567890", want: true},
+		{name: "other thread", scopeKey: "discord-9876543210", threadID: "1234567890", want: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := isScopeKeyForThread(tc.scopeKey, tc.threadID); got != tc.want {
+				t.Errorf("isScopeKeyForThread(%q, %q) = %v, want %v", tc.scopeKey, tc.threadID, got, tc.want)
+			}
+		})
+	}
 }

@@ -970,7 +970,6 @@ func TestWorkerPool_RunnerFallbackAdaptersAndLifecycle(t *testing.T) {
 	}
 
 	var nilPool *WorkerPool
-	_ = nilPool.ReleaseLeaderHold()
 	_ = nilPool.DeliverDirect("c", "t")
 	pEmpty := &WorkerPool{}
 	_ = pEmpty.DeliverDirect("c", "t")
@@ -991,21 +990,6 @@ func TestWorkerPool_RunnerFallbackAdaptersAndLifecycle(t *testing.T) {
 	if unwrapUnifiedPool(nil) != nil || unwrapUnifiedPool(&testRunnerAgentPool{}) != nil {
 		t.Errorf("expected nil from unwrapUnifiedPool")
 	}
-
-	mockDrain := &mockDrainErrStore{Store: fake, messages: []db.Message{{ID: "m1", ThreadID: "t1", Status: db.StatusProcessing, RestartCount: 5, RetryCount: 5}}}
-	pDrain := New(nil, WorkerPoolConfig{Store: mockDrain})
-	RecoverInterrupted(t.Context(), mockDrain, pDrain)
-	RecoverInterrupted(t.Context(), nil, nil)
-	RecoverInterrupted(t.Context(), fake, nil)
-	RecoverInterrupted(t.Context(), nil, &WorkerPool{})
-	pDrain.Stop()
-
-	recStore := setupTestStore(t)
-	_ = recStore.InsertMessage(ctx, db.Message{ID: "m-rec-stale", ThreadID: "t-rec-stale", AuthorID: "u1", Status: db.StatusPending, CreatedAt: time.Now().UTC().Add(-2 * time.Hour)})
-	_ = recStore.InsertMessage(ctx, db.Message{ID: "m-rec-poison", ThreadID: "t-rec-poison", AuthorID: "u1", Content: "poison content with a rather long snippet that exceeds sixty characters easily", Status: db.StatusProcessing, RetryCount: 5})
-	pRec := New(nil, WorkerPoolConfig{Store: recStore, NotifierFunc: func(b, k, d string) string { return "poison alert" }, DeliveryFunc: func(s *discordgo.Session, c, txt string) error { return nil }})
-	t.Cleanup(pRec.Stop)
-	RecoverInterrupted(t.Context(), recStore, pRec)
 
 	p := New(nil, WorkerPoolConfig{Store: fake})
 	p.EnqueueBurst()

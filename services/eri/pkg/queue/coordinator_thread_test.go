@@ -65,17 +65,18 @@ func threadSend(key, method string, input any, delay time.Duration) sentCall {
 func TestThreadCoordinator_Enqueue(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name       string
-		key        string
-		state      coordinatorState
-		resolver   fakeThreadResolver
-		req        ThreadEnqueueRequest
-		failInsert error
-		wantResp   ThreadEnqueueResponse
-		wantSends  []sentCall
-		wantRows   map[string]rowWant
-		wantNoRow  string
-		wantCode   int
+		name            string
+		key             string
+		state           coordinatorState
+		resolver        fakeThreadResolver
+		req             ThreadEnqueueRequest
+		failInsert      error
+		wantResp        ThreadEnqueueResponse
+		wantSends       []sentCall
+		wantRows        map[string]rowWant
+		wantNoRow       string
+		wantTraceparent string
+		wantCode        int
 	}{
 		{
 			name:      "PromptAccepted",
@@ -86,12 +87,39 @@ func TestThreadCoordinator_Enqueue(t *testing.T) {
 			wantRows:  map[string]rowWant{"m1": {status: db.StatusPending}},
 		},
 		{
+			name:            "PromptWithTraceparent",
+			key:             tcKey,
+			req:             ThreadEnqueueRequest{Prompt: "traced prompt", MessageID: "m-tp", Traceparent: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"},
+			wantResp:        ThreadEnqueueResponse{Status: eriwire.StatusAccepted, ThreadID: tcKey, MessageID: "m-tp"},
+			wantSends:       []sentCall{threadSend(tcKey, HandlerAppend, AppendRequest{IDs: []string{"m-tp"}}, 0)},
+			wantRows:        map[string]rowWant{"m-tp": {status: db.StatusPending}},
+			wantTraceparent: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+		},
+		{
 			name:      "DiscordMessageAccepted",
 			key:       tcKey,
 			req:       ThreadEnqueueRequest{Message: &db.Message{ID: "m2", ThreadID: tcKey, Content: "hi"}},
 			wantResp:  ThreadEnqueueResponse{Status: eriwire.StatusAccepted, ThreadID: tcKey, MessageID: "m2"},
 			wantSends: []sentCall{threadSend(tcKey, HandlerAppend, AppendRequest{IDs: []string{"m2"}}, 0)},
 			wantRows:  map[string]rowWant{"m2": {status: db.StatusPending}},
+		},
+		{
+			name:            "DiscordMessageInheritsEnvelopeTraceparent",
+			key:             tcKey,
+			req:             ThreadEnqueueRequest{Message: &db.Message{ID: "m-env-tp", ThreadID: tcKey, Content: "hi"}, Traceparent: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-02"},
+			wantResp:        ThreadEnqueueResponse{Status: eriwire.StatusAccepted, ThreadID: tcKey, MessageID: "m-env-tp"},
+			wantSends:       []sentCall{threadSend(tcKey, HandlerAppend, AppendRequest{IDs: []string{"m-env-tp"}}, 0)},
+			wantRows:        map[string]rowWant{"m-env-tp": {status: db.StatusPending}},
+			wantTraceparent: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-02",
+		},
+		{
+			name:            "DiscordMessagePreservesExistingTraceparent",
+			key:             tcKey,
+			req:             ThreadEnqueueRequest{Message: &db.Message{ID: "m-keep-tp", ThreadID: tcKey, Content: "hi", Traceparent: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-03"}, Traceparent: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-04"},
+			wantResp:        ThreadEnqueueResponse{Status: eriwire.StatusAccepted, ThreadID: tcKey, MessageID: "m-keep-tp"},
+			wantSends:       []sentCall{threadSend(tcKey, HandlerAppend, AppendRequest{IDs: []string{"m-keep-tp"}}, 0)},
+			wantRows:        map[string]rowWant{"m-keep-tp": {status: db.StatusPending}},
+			wantTraceparent: "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-03",
 		},
 		{
 			name:      "MessageWithoutIDsDerivesIDOnKey",
@@ -168,6 +196,12 @@ func TestThreadCoordinator_Enqueue(t *testing.T) {
 			if tc.wantNoRow != "" {
 				m, _ := store.GetMessage(context.Background(), tc.wantNoRow)
 				assert.Nil(t, m)
+			}
+			if tc.wantResp.MessageID != "" && tc.wantResp.Status != eriwire.StatusSkippedActive && tc.failInsert == nil && tc.wantCode == 0 {
+				m, getErr := store.GetMessage(context.Background(), tc.wantResp.MessageID)
+				require.NoError(t, getErr)
+				require.NotNil(t, m)
+				assert.Equal(t, tc.wantTraceparent, m.Traceparent)
 			}
 		})
 	}
