@@ -185,6 +185,9 @@ check_dependabot_coverage() {
     fi
 }
 
+# Ensure Bazel build files and Gazelle targets are generated if Bazel is available
+ensure_bazel_build_files "$REPO_ROOT"
+
 # Dynamically discover all Go modules in the monorepo
 GO_SERVICES=$(discover_go_services)
 
@@ -413,11 +416,46 @@ run_go_pkg_coverage() {
             race_flag="-race"
         fi
         prof_file=$(mktemp /tmp/aerial-staged-cov.XXXXXX)
-        if ! (cd "$svc" && hermetic_go \
-            CGO_ENABLED="$cgo_val" \
-            go test ${race_flag:+"$race_flag"} -trimpath -timeout "${AERIAL_TEST_TIMEOUT:-180s}" -coverprofile="$prof_file" "$targetPkg"); then
-            rm -f "$prof_file"
-            exit 1
+        rel_svc="$svc"
+        if [ -d "$svc" ]; then
+            rel_svc=$(cd "$svc" && (pwd -W 2>/dev/null || pwd))
+            if [ -n "${REPO_ROOT:-}" ]; then
+                rel_svc="${rel_svc#$REPO_ROOT/}"
+                rel_svc="${rel_svc#$REPO_ROOT}"
+            fi
+        fi
+        rel_svc="${rel_svc#/}"
+        if [ -n "${REPO_ROOT:-}" ] && [ -f "${REPO_ROOT}/MODULE.bazel" ] && command -v bazel >/dev/null 2>&1 && [ -d "${REPO_ROOT}/${rel_svc}" ]; then
+            rel_pkg="${rel_svc}"
+            if [ "$targetPkg" != "." ]; then
+                rel_pkg="${rel_svc}/${targetPkg#./}"
+            fi
+            rel_pkg="${rel_pkg%/}"
+            bazel_log=$(mktemp /tmp/aerial-bazel-cov.XXXXXX)
+            if bazel coverage "//${rel_pkg}:all" >"$bazel_log" 2>&1; then
+                cov_files=$(find "${REPO_ROOT}/bazel-testlogs/${rel_pkg}" -maxdepth 5 -name "coverage.dat" 2>/dev/null || true)
+                if [ -n "$cov_files" ]; then
+                    # shellcheck disable=SC2086
+                    if ! merge_coverage_profiles "$prof_file" $cov_files || [ ! -s "$prof_file" ]; then
+                        echo "🚨 [Aerial Verify] merge_coverage_profiles failed or produced empty profile for //${rel_pkg}:all" >&2
+                        rm -f "$prof_file" "$bazel_log"
+                        exit 1
+                    fi
+                fi
+                rm -f "$bazel_log"
+            else
+                echo "🚨 [Aerial Verify] Bazel coverage failed on //${rel_pkg}:all:" >&2
+                cat "$bazel_log" >&2
+                rm -f "$prof_file" "$bazel_log"
+                exit 1
+            fi
+        else
+            if ! (cd "$svc" && hermetic_go \
+                CGO_ENABLED="$cgo_val" \
+                go test ${race_flag:+"$race_flag"} -trimpath -timeout "${AERIAL_TEST_TIMEOUT:-180s}" -coverprofile="$prof_file" "$targetPkg"); then
+                rm -f "$prof_file"
+                exit 1
+            fi
         fi
         if [ -f "$prof_file" ]; then
             counts=$(awk '

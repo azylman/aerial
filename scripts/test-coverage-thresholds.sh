@@ -48,4 +48,40 @@ done <<'CASES'
 94999 100000 1
 0 0 0
 CASES
+
+# Verify merge_coverage_profiles handles conflicting modes and output cleanup.
+. "$fixture/scripts/lib/hermetic-go-env.sh"
+prof_a="$fixture/prof_a.out"
+prof_b="$fixture/prof_b.out"
+prof_merged="$fixture/prof_merged.out"
+printf 'mode: set\nexample/pkg/a.go:1.1,2.1 1 1\n' > "$prof_a"
+printf 'mode: count\nexample/pkg/b.go:1.1,2.1 1 2\n' > "$prof_b"
+
+merge_rc=0
+merge_coverage_profiles "$prof_merged" "$prof_a" "$prof_b" 2>/dev/null || merge_rc=$?
+if [ "$merge_rc" -eq 0 ]; then
+    echo "FAIL: merge_coverage_profiles should return non-zero on conflicting modes"
+    failures=$((failures + 1))
+fi
+if [ -e "$prof_merged" ]; then
+    echo "FAIL: merge_coverage_profiles left output file on conflicting modes failure"
+    failures=$((failures + 1))
+fi
+
+# Ensure existing output file is removed on conflicting modes failure.
+touch "$prof_merged"
+merge_rc=0
+merge_coverage_profiles "$prof_merged" "$prof_a" "$prof_b" 2>/dev/null || merge_rc=$?
+if [ "$merge_rc" -eq 0 ] || [ -e "$prof_merged" ]; then
+    echo "FAIL: merge_coverage_profiles should fail and clean up existing output file on conflicting modes"
+    failures=$((failures + 1))
+fi
+
+# Verify matching modes merge successfully into a non-empty profile.
+printf 'mode: set\nexample/pkg/b.go:1.1,2.1 1 1\n' > "$prof_b"
+if ! merge_coverage_profiles "$prof_merged" "$prof_a" "$prof_b" || [ ! -s "$prof_merged" ]; then
+    echo "FAIL: merge_coverage_profiles failed on valid matching profiles"
+    failures=$((failures + 1))
+fi
+
 [ "$failures" -eq 0 ] && echo 'Coverage boundary regressions passed.'

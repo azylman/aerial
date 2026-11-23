@@ -1,0 +1,22 @@
+startup --experimental_remote_repo_contents_cache
+
+common --enable_bzlmod
+
+build --remote_download_minimal
+build --rewind_lost_inputs
+build --incompatible_strict_action_env
+
+test --test_env=PATH
+test --sandbox_tmpfs_path=/dev/shm
+test --test_output=errors
+test --test_summary=short
+coverage --@rules_go//go/config:cover_format=go_cover
+coverage --remote_download_regex=.*coverage\.dat$
+
+# Cluster profile (enabled automatically on eri-restate and ARC runners via /etc/bazel.bazelrc)
+common:cluster --repo_contents_cache=/data/cache/bazel-repo-contents
+common:cluster --repository_cache=/data/cache/bazel-repo-cache
+build:cluster --remote_cache=grpc://bazel-remote.aerial:9092
+build:cluster --remote_cache_compression
+build:cluster --remote_upload_local_results
+build:cluster --remote_timeout=5s

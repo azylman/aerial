@@ -1,0 +1,16 @@
+exports_files(
+    [
+        "aerial-tokens.css",
+        "aerial-theme.js",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "theme",
+    srcs = [
+        "aerial-theme.js",
+        "aerial-tokens.css",
+    ],
+    visibility = ["//visibility:public"],
+)

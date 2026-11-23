@@ -40,3 +40,13 @@ PR_DESCRIPTION.md
 # Go test binaries
 *.test
 *.test.exe
+
+# Bazel
+bazel-*
+**/BUILD.bazel
+!/BUILD.bazel
+!/build/BUILD.bazel
+!/images/BUILD.bazel
+!/services/docs-service/BUILD.bazel
+!/web/theme/BUILD.bazel
+

@@ -1,0 +1,22 @@
+load("@gazelle//:def.bzl", "gazelle")
+
+# gazelle:prefix github.com/azylman/aerial
+# gazelle:exclude vendor
+# gazelle:exclude node_modules
+# gazelle:exclude .git
+# gazelle:exclude scripts/affected/testdata
+# gazelle:map_kind go_test go_test //build:go_test.bzl
+
+gazelle(name = "gazelle")
+
+filegroup(
+    name = "testdata",
+    srcs = glob(["testdata/**"]),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "canonical_hooks",
+    srcs = ["scripts/hooks/hooks.json"],
+    visibility = ["//visibility:public"],
+)
