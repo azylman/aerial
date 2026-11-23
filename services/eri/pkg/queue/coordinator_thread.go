@@ -89,19 +89,23 @@ func buildEnqueuedMessage(req ThreadEnqueueRequest, finalThreadID, fallbackID st
 		msg = *req.Message
 	} else {
 		msg = db.Message{
-			ID:         strings.TrimSpace(req.MessageID),
-			ThreadID:   finalThreadID,
-			AuthorID:   httpClientAuthorID,
-			AuthorName: "HTTP Client",
-			IsAdmin:    true,
-			Content:    req.Prompt,
-			Summary:    db.CleanTaskSummary(req.Prompt),
-			Effort:     ResolvePromptEffort(strings.TrimSpace(req.Model), strings.TrimSpace(req.Effort)),
-			ChannelID:  finalThreadID,
-			Model:      strings.TrimSpace(req.Model),
-			CreatedAt:  now,
-			UpdatedAt:  now,
+			ID:          strings.TrimSpace(req.MessageID),
+			ThreadID:    finalThreadID,
+			AuthorID:    httpClientAuthorID,
+			AuthorName:  "HTTP Client",
+			IsAdmin:     true,
+			Content:     req.Prompt,
+			Summary:     db.CleanTaskSummary(req.Prompt),
+			Effort:      ResolvePromptEffort(strings.TrimSpace(req.Model), strings.TrimSpace(req.Effort)),
+			ChannelID:   finalThreadID,
+			Model:       strings.TrimSpace(req.Model),
+			Traceparent: strings.TrimSpace(req.Traceparent),
+			CreatedAt:   now,
+			UpdatedAt:   now,
 		}
+	}
+	if strings.TrimSpace(msg.Traceparent) == "" {
+		msg.Traceparent = strings.TrimSpace(req.Traceparent)
 	}
 	if strings.TrimSpace(msg.ID) == "" {
 		msg.ID = fallbackID

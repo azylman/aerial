@@ -80,6 +80,7 @@ func buildEnqueuedDispatch(req eriwire.BrainDispatchRequest, dispatchID, session
 		Summary:        db.CleanTaskSummary(req.Prompt),
 		Effort:         strings.ToLower(strings.TrimSpace(req.Effort)),
 		Model:          strings.TrimSpace(req.Model),
+		Traceparent:    strings.TrimSpace(req.Traceparent),
 		Status:         db.StatusPending,
 		CreatedAt:      now,
 		UpdatedAt:      now,
