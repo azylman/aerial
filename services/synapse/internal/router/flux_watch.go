@@ -348,15 +348,3 @@ func (s *RouterServer) failKustomizationRollout(ctx context.Context, pr Deployin
 func newKustomizationRequests(refs []fluxKustomizationRef, now time.Time) map[string]prwire.KustomizationRequest {
 	return flux.NewKustomizationRequests(refs, now)
 }
-
-// reconcileImageKustomizations patches each ref with its recorded request; one failure never skips the rest.
-func (s *RouterServer) reconcileImageKustomizations(ctx context.Context, refs []fluxKustomizationRef, requests map[string]prwire.KustomizationRequest) error {
-	var errs []error
-	for _, ref := range refs {
-		if err := s.dispatcher.ReconcileKustomization(ctx, ref, requests[ref.Name].RequestedAt); err != nil {
-			slog.ErrorContext(ctx, "[synapse] [dispatcher] error reconciling kustomization", "namespace", ref.Namespace, "name", ref.Name, "error", err)
-			errs = append(errs, err)
-		}
-	}
-	return errors.Join(errs...)
-}

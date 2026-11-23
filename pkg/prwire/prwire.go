@@ -41,9 +41,10 @@ const (
 	EffectGitHubConflictCheck = "github_conflict_check"
 )
 
-// Flux effect kinds. Git-push dispatch and untracked reconciles are
-// repo-level (RepoObject); a PR rollout's reconcile requests are per-PR
-// (PRObject). Image promotion uses EffectImagePromote.
+// Flux effect kinds. Git-push dispatch and untracked reconciles (PR-less
+// image-promotion rollouts and untracked PRs' HandleUntrackedReconcile) are
+// repo-level (RepoObject); a tracked PR rollout's reconcile requests are
+// per-PR (PRObject). Image promotion uses EffectImagePromote.
 const (
 	EffectFluxGitPush   = "flux_git_push"
 	EffectFluxReconcile = "flux_reconcile"
@@ -142,6 +143,9 @@ const (
 
 	RepoHandlerGitPush        = "HandleGitPush"
 	RepoHandlerImagePromotion = "HandleImagePromotion"
+	// RepoHandlerUntrackedReconcile patches requestedAt on an untracked
+	// PR commit's Kustomizations (synapse's last Flux write, moved).
+	RepoHandlerUntrackedReconcile = "HandleUntrackedReconcile"
 
 	// RepoHandlerRolloutIndex applies one PRObject rollout-index update on
 	// the RolloutIndexKey object.

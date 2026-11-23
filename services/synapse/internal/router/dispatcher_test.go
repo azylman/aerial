@@ -195,8 +195,6 @@ func TestDefaultOutboundDispatcher_MultiBotRouting(t *testing.T) {
 
 type mockOutboundDispatcher struct {
 	mu                           sync.Mutex
-	reconcileCalls               []fluxKustomizationRef
-	reconcileRequestedAts        []string
 	promptCalls                  []PromptRequest
 	dispatchCalls                []DispatchRequest
 	directMessageCalls           []DirectMessageRequest
@@ -204,7 +202,6 @@ type mockOutboundDispatcher struct {
 	discordInteractionCalls      []*discordgo.Interaction
 	discordInteractionAgentCalls []string
 	discoverErr                  error
-	reconcileErrs                map[string]error
 	sourceRepo                   string
 	sourceRepoErr                error
 	promptErr                    error
@@ -273,12 +270,6 @@ func (m *mockOutboundDispatcher) DispatchDirectMessage(ctx context.Context, req 
 	m.directMessageCalls = append(m.directMessageCalls, req)
 	m.mu.Unlock()
 	return m.directMessageErr
-}
-
-func (m *mockOutboundDispatcher) ReconcileCalls() []fluxKustomizationRef {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return append([]fluxKustomizationRef(nil), m.reconcileCalls...)
 }
 
 func (m *mockOutboundDispatcher) PromptCalls() []PromptRequest {

@@ -793,6 +793,27 @@ func (h *RepoHandlers) HandleGitPush(ctx context.Context, ev RepoEvent) (RepoEff
 	return h.finishKubeEffect(st, out, kerr), nil
 }
 
+// HandleUntrackedReconcile patches requestedAt on the Kustomizations an
+// untracked PR's commit rolls out (PRState.Untracked: e.g. an upstream Flux
+// source PR nobody registered), once per trigger key (repo, PR, commit). It
+// replaces synapse's direct patch, so a repeated Flux alert on one unchanged
+// commit no longer re-patches. A retryable failure leaves the key
+// uncommitted for the binding's delayed retry.
+func (h *RepoHandlers) HandleUntrackedReconcile(ctx context.Context, ev RepoEvent) (RepoEffectOutcome, error) {
+	if ev.PRNumber <= 0 || usableHeadSHA(ev.HeadSHA) == "" || len(sortedRequestNames(ev.KustomizationRequests)) == 0 {
+		return RepoEffectOutcome{}, fmt.Errorf("%w: untracked reconcile requires a pr, head sha and kustomization requests", ErrInvalidRepoEvent)
+	}
+	st, out, done, err := h.beginRepoEffect(prwire.EffectFluxReconcile, ev)
+	if done || err != nil {
+		return out, err
+	}
+	if h.kube == nil {
+		out.Retry, out.Kube = true, errKubeUnconfigured
+		return out, nil
+	}
+	return h.finishKubeEffect(st, out, reconcileRequests(ctx, h.kube, ev.KustomizationRequests)), nil
+}
+
 // sortedRequestNames returns the non-empty request names in order.
 func sortedRequestNames(requests map[string]KustomizationRequest) []string {
 	names := make([]string, 0, len(requests))
@@ -813,7 +834,8 @@ func sortedRequestNames(requests map[string]KustomizationRequest) []string {
 // reconcile renders all of them: a PR rollout forwards
 // HandleKustomizationRequested to PRObject (which records the requests
 // before patching them), and an untracked rollout (no PR) reconciles here
-// under its own key. A retryable failure leaves the failed key uncommitted for the
+// under its own key. An untracked PR's rollout reconciles through
+// HandleUntrackedReconcile instead. A retryable failure leaves the failed key uncommitted for the
 // binding's delayed retry; a failed restate-owned PR promotion also reports
 // HandleDeployAttemptFailed so the PR's deploy-failure deadline arms.
 func (h *RepoHandlers) HandleImagePromotion(ctx context.Context, ev RepoEvent) (RepoEffectOutcome, error) {

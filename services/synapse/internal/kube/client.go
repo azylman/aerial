@@ -63,7 +63,8 @@ var (
 )
 
 // Client lists and watches Flux Kustomizations, workloads, ConfigMaps and
-// GitRepositories. Writes are limited to Kustomization reconcile requests.
+// GitRepositories. It is read-only: every Flux write (reconcile requests
+// included) runs as a Restate RepoObject or PRObject effect.
 type Client struct {
 	kubeAPIServer string
 	kubeToken     string
@@ -305,22 +306,6 @@ func (c *Client) DiscoverImageKustomizations(ctx context.Context, imageNames []s
 		return nil, fmt.Errorf("decode kustomizations: %w", err)
 	}
 	return refs, nil
-}
-
-// ReconcileKustomization requests a Flux reconcile by patching the requestedAt annotation.
-func (c *Client) ReconcileKustomization(ctx context.Context, ref model.FluxKustomizationRef, requestedAt string) error {
-	patchBody, err := json.Marshal(map[string]any{
-		fieldMetadata: map[string]any{
-			"annotations": map[string]string{fluxReconcileRequestedAtAnnotation: requestedAt},
-		},
-	})
-	if err != nil {
-		return fmt.Errorf("marshal kustomization patch body: %w", err)
-	}
-	if _, err := c.KubeJSON(ctx, http.MethodPatch, kustomizationPath(ref), "application/merge-patch+json", patchBody); err != nil {
-		return fmt.Errorf("reconcile kustomization %s/%s: %w", ref.Namespace, ref.Name, err)
-	}
-	return nil
 }
 
 // ResolveFluxSourceRepo returns the owner/repo of the GitRepository behind a Flux object.
