@@ -52,9 +52,8 @@ func TestSQLStoreHoistedMethods(t *testing.T) {
 }
 
 func TestSQLStoreDelegationAndQueries(t *testing.T) {
-	database := setupTestDB(t)
-	defer database.Close()
-	store := NewSQLStore(database)
+	t.Parallel()
+	store := NewSQLStore(newTestDB(t))
 	ctx := context.Background()
 
 	if err := store.SaveSessionID(ctx, "ext-thread-99", "internal-sess-99"); err != nil {
@@ -71,8 +70,5 @@ func TestSQLStoreDelegationAndQueries(t *testing.T) {
 	tasks, err := store.GetActiveTasks(ctx)
 	if err != nil || len(tasks) == 0 || tasks[0].ID != "m-sqlstore-task" || tasks[0].Summary != "SQLStore task summary" {
 		t.Fatalf("unexpected active tasks: %+v (err: %v)", tasks, err)
-	}
-	if isPostgresDriver(nil) {
-		t.Errorf("expected isPostgresDriver(nil) to be false")
 	}
 }

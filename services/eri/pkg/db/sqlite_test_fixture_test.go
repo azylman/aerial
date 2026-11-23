@@ -185,17 +185,6 @@ func initTestSQLite(dsn string) (*sql.DB, error) {
 	return database, nil
 }
 
-func initTestSQLiteDB(t testing.TB) *sql.DB {
-	t.Helper()
-	sqlitePath := filepath.Join(t.TempDir(), "aerial_test.db")
-	database, err := initTestSQLite(sqlitePath)
-	if err != nil {
-		t.Fatalf("initTestSQLiteDB failed to initialize SQLite database: %v", err)
-	}
-	t.Cleanup(func() { _ = database.Close() })
-	return database
-}
-
 func init() {
 	sqliteTestInitHook = initTestSQLite
 }
