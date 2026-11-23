@@ -348,9 +348,9 @@ func TestNewSetup(t *testing.T) {
 		pgConfigErr error
 		want        setup
 	}{
-		{"both resolved", nil, "/opt/pg/bin\n", nil, setup{uid: 1000, binDirs: []string{"/usr/lib/postgresql/18/bin", "/opt/pg/bin"}, workDir: "/repo"}},
-		{"getwd failure clears work dir", errors.New("gone"), "/opt/pg/bin\n", nil, setup{uid: 1000, binDirs: []string{"/usr/lib/postgresql/18/bin", "/opt/pg/bin"}, workDir: ""}},
-		{"missing pg_config keeps default only", nil, "partial", errors.New("not found"), setup{uid: 1000, binDirs: []string{"/usr/lib/postgresql/18/bin", ""}, workDir: "/repo"}},
+		{"both resolved", nil, "/opt/pg/bin\n", nil, setup{uid: 1000, binDirs: []string{"/usr/lib/postgresql/19/bin", "/usr/lib/postgresql/18/bin", "/opt/pg/bin"}, workDir: "/repo"}},
+		{"getwd failure clears work dir", errors.New("gone"), "/opt/pg/bin\n", nil, setup{uid: 1000, binDirs: []string{"/usr/lib/postgresql/19/bin", "/usr/lib/postgresql/18/bin", "/opt/pg/bin"}, workDir: ""}},
+		{"missing pg_config keeps default only", nil, "partial", errors.New("not found"), setup{uid: 1000, binDirs: []string{"/usr/lib/postgresql/19/bin", "/usr/lib/postgresql/18/bin", ""}, workDir: "/repo"}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

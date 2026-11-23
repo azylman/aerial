@@ -43,7 +43,7 @@ STT, TTS, Embeddings & Wyoming"]
 
     subgraph Persistence ["💾 Persistence & GitOps"]
         Postgres[("postgres (:5432 / :9187)
-• CloudNativePG PostgreSQL 18 + pgvector
+• CloudNativePG PostgreSQL 19 + pgvector
 • CAS Task Queues & PR Registry
 • Vector RAG & State Persistence")]
         Nats["nats (:4222 / :8222)
