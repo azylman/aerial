@@ -27,6 +27,7 @@ type GitHubPullRequest struct {
 	Title             string `json:"title"`
 	State             string `json:"state"`
 	Merged            *bool  `json:"merged"`
+	MergeCommitSHA    string `json:"merge_commit_sha"`
 	Body              string `json:"body"`
 	AuthorAssociation string `json:"author_association"`
 	User              struct {
@@ -120,6 +121,20 @@ func (e *Executor) LivePRState(ctx context.Context, repo string, number int) (st
 	}
 	open := pr.State == "open" && (pr.Merged == nil || !*pr.Merged)
 	return strings.TrimSpace(pr.Head.SHA), open, nil
+}
+
+// MergedPRState reads GitHub's current merge state, head SHA, and merge commit SHA.
+// A missing PR (404/410) reports unmerged without an error; other API failures are returned.
+func (e *Executor) MergedPRState(ctx context.Context, repo string, number int) (bool, string, string, error) {
+	pr, _, _, err := e.fetchGitHubPullRequest(ctx, repo, number)
+	if errors.Is(err, store.ErrPRTransitionSkipped) {
+		return false, "", "", nil
+	}
+	if err != nil {
+		return false, "", "", err
+	}
+	merged := pr.Merged != nil && *pr.Merged
+	return merged, strings.TrimSpace(pr.Head.SHA), strings.TrimSpace(pr.MergeCommitSHA), nil
 }
 
 // HasRoboRevOverride reports whether `aerial-pr.sh override-roborev` recorded

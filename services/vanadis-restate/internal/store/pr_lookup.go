@@ -77,6 +77,62 @@ func (s *Store) LookupPRChunk(ctx context.Context, repo string, prNumber int) (B
 	return BuildRoute{BuildID: match.buildID}, match.chunkID, nil
 }
 
+// LookupPRBuildRoutes returns all distinct active build routes owning a PR,
+// or falls back to the most recent non-cancelled build route.
+func (s *Store) LookupPRBuildRoutes(ctx context.Context, repo string, prNumber int) ([]BuildRoute, error) {
+	if s == nil || s.db == nil {
+		return nil, errors.New("database connection is nil")
+	}
+	candidates := RepoMatchCandidates(s.gitHubOwner, repo)
+	if len(candidates) == 0 || prNumber <= 0 {
+		return nil, ErrChunkNotFound
+	}
+	const activeQ = `SELECT DISTINCT c.build_id
+		FROM vanadis_chunks c
+		JOIN vanadis_builds b ON c.build_id = b.id
+		WHERE c.repo = ANY($1) AND c.pr_number = $2
+		  AND b.status NOT IN ('cancelled', 'completed')
+		  AND c.status NOT IN ('cancelled', 'completed')
+		ORDER BY c.build_id ASC;`
+	rows, err := s.db.Query(ctx, activeQ, candidates, prNumber)
+	if err != nil {
+		return nil, fmt.Errorf("lookup active pr build routes for candidates %v #%d: %w", candidates, prNumber, err)
+	}
+	defer rows.Close()
+
+	var routes []BuildRoute
+	for rows.Next() {
+		var r BuildRoute
+		if scanErr := rows.Scan(&r.BuildID); scanErr != nil {
+			return nil, fmt.Errorf("scan active pr build route: %w", scanErr)
+		}
+		routes = append(routes, r)
+	}
+	if rowsErr := rows.Err(); rowsErr != nil {
+		return nil, fmt.Errorf("iterate active pr build routes: %w", rowsErr)
+	}
+	if len(routes) > 0 {
+		return routes, nil
+	}
+
+	const fallbackQ = `SELECT c.build_id
+		FROM vanadis_chunks c
+		JOIN vanadis_builds b ON c.build_id = b.id
+		WHERE c.repo = ANY($1) AND c.pr_number = $2
+		  AND b.status != 'cancelled' AND c.status != 'cancelled'
+		ORDER BY c.updated_at DESC, c.id ASC
+		LIMIT 1;`
+	var fallback BuildRoute
+	err = s.db.QueryRow(ctx, fallbackQ, candidates, prNumber).Scan(&fallback.BuildID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrChunkNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("lookup fallback pr build route for candidates %v #%d: %w", candidates, prNumber, err)
+	}
+	return []BuildRoute{fallback}, nil
+}
+
 // LookupChunkBuildID resolves the build route that owns a chunk.
 func (s *Store) LookupChunkBuildID(ctx context.Context, chunkID string) (BuildRoute, error) {
 	if s == nil || s.db == nil {
@@ -137,7 +193,7 @@ func (s *Store) LookupUnattachedChunkByThreadAndRepo(ctx context.Context, thread
 }
 
 func (s *Store) findChunkPRMatch(ctx context.Context, candidates []string, prNumber int) (chunkPRMatch, bool, error) {
-	const query = `SELECT c.id, c.build_id, c.chunk_index, COALESCE(NULLIF(c.effort, ''), 'medium'), EXISTS (SELECT 1 FROM vanadis_chunks c2 WHERE c2.build_id = c.build_id AND c2.chunk_index > c.chunk_index) FROM vanadis_chunks c JOIN vanadis_builds b ON c.build_id = b.id WHERE c.repo = ANY($1) AND c.pr_number = $2 AND b.status != 'cancelled' ORDER BY c.updated_at DESC LIMIT 1;`
+	const query = `SELECT c.id, c.build_id, c.chunk_index, COALESCE(NULLIF(c.effort, ''), 'medium'), EXISTS (SELECT 1 FROM vanadis_chunks c2 WHERE c2.build_id = c.build_id AND c2.chunk_index > c.chunk_index) FROM vanadis_chunks c JOIN vanadis_builds b ON c.build_id = b.id WHERE c.repo = ANY($1) AND c.pr_number = $2 AND b.status != 'cancelled' ORDER BY (c.status NOT IN ('completed', 'cancelled') AND b.status NOT IN ('completed', 'cancelled')) DESC, c.updated_at DESC, c.id ASC LIMIT 1;`
 	var m chunkPRMatch
 	err := s.db.QueryRow(ctx, query, candidates, prNumber).Scan(&m.chunkID, &m.buildID, &m.chunkIdx, &m.effort, &m.hasRemaining)
 	if errors.Is(err, pgx.ErrNoRows) {
