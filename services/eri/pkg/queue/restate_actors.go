@@ -233,7 +233,9 @@ func (v *VoiceSessionObject) Ask(ctx restate.ObjectContext, req VoiceSessionRequ
 				Event: "error",
 				Error: turnErr.Error(),
 			})
-			return VoiceSessionResult{}, turnErr
+			// Terminal: a voice turn is answered live, so a retry would only hold the device
+			// lock for the retry policy's lifetime and answer nobody.
+			return VoiceSessionResult{}, restate.ToTerminalError(turnErr, restate.WithErrorCode(500))
 		}
 
 		publishEvent(VoiceStreamEvent{

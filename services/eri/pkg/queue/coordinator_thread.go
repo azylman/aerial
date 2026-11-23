@@ -2,6 +2,7 @@ package queue
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"log"
 	"strings"
@@ -67,7 +68,8 @@ func (r threadRecords) failIfPending(ctx context.Context, ids []string, reason s
 }
 
 func (r threadRecords) markSkipped(ctx context.Context, id string) error {
-	return r.store.UpdateMessageStatus(ctx, id, db.StatusCompleted, skippedActiveTurnReason)
+	_, err := r.store.SkipMessagesIfActive(ctx, []string{id}, skippedActiveTurnReason)
+	return err
 }
 
 // threadEnqueueTarget picks the thread a request addresses before any redirect.
@@ -127,6 +129,12 @@ func (t *ThreadCoordinator) Enqueue(ctx restate.ObjectSharedContext, req ThreadE
 		return ThreadEnqueueResponse{}, restate.ToTerminalError(errors.New("thread_id or channel_id is required"), restate.WithErrorCode(400))
 	}
 
+	if req.Message == nil {
+		if existing, found, err := t.lookupExistingPrompt(ctx, req.MessageID); err != nil || found {
+			return existing, coordinatorError(err)
+		}
+	}
+
 	final := target
 	if req.Message == nil && t.resolver != nil {
 		resolved, err := restate.Run(ctx, func(rc restate.RunContext) (string, error) {
@@ -168,6 +176,38 @@ func (t *ThreadCoordinator) Enqueue(ctx restate.ObjectSharedContext, req ThreadE
 
 	restate.ObjectSend(ctx, t.ServiceName(), final, HandlerAppend).Send(AppendRequest{IDs: []string{msgID}, SkipIfActive: req.SkipIfActive})
 	return ThreadEnqueueResponse{Status: eriwire.StatusAccepted, ThreadID: final, MessageID: msgID}, nil
+}
+
+// existingPrompt is the journaled result of looking up a prompt's message row.
+type existingPrompt struct {
+	Found    bool   `json:"found"`
+	ThreadID string `json:"thread_id,omitempty"`
+}
+
+// lookupExistingPrompt reports (with an AlreadyExists response) whether a row for the caller's
+// message ID is already recorded, so a request replayed after its idempotency window never
+// creates a second Discord thread or re-runs a finished prompt.
+func (t *ThreadCoordinator) lookupExistingPrompt(ctx restate.ObjectSharedContext, rawID string) (ThreadEnqueueResponse, bool, error) {
+	msgID := strings.TrimSpace(rawID)
+	if msgID == "" {
+		return ThreadEnqueueResponse{}, false, nil
+	}
+	found, err := restate.Run(ctx, func(rc restate.RunContext) (existingPrompt, error) {
+		return storeCall(rc, func(sc context.Context) (existingPrompt, error) {
+			m, gErr := t.store.GetMessage(sc, msgID)
+			if gErr != nil && !errors.Is(gErr, sql.ErrNoRows) {
+				return existingPrompt{}, gErr
+			}
+			if m == nil {
+				return existingPrompt{}, nil
+			}
+			return existingPrompt{Found: true, ThreadID: m.ThreadID}, nil
+		})
+	}, restate.WithName(StepLookupExisting))
+	if err != nil || !found.Found {
+		return ThreadEnqueueResponse{}, false, err
+	}
+	return ThreadEnqueueResponse{Status: eriwire.StatusAlreadyExists, ThreadID: found.ThreadID, MessageID: msgID}, true, nil
 }
 
 // Append adds IDs to the thread's pending list (deduplicated) and starts a turn when idle; with

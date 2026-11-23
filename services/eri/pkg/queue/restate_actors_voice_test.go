@@ -25,7 +25,7 @@ type voiceAskTestCase struct {
 	runnerErr    error
 	wantReply    string
 	wantErrorSub string
-	wantTerminal bool
+	wantCode     restate.Code
 	// wantSession is the conversation persisted for the voice-<key> session ("" = no row).
 	wantSession string
 }
@@ -83,7 +83,7 @@ func runVoiceSessionAskCase(t *testing.T, tc voiceAskTestCase) {
 
 	res, err := obj.Ask(restate.WithMockContext(mc), tc.req)
 	if tc.wantErrorSub != "" {
-		assertTerminalOrRetriableError(t, err, tc.wantErrorSub, tc.wantTerminal)
+		assertHandlerErrorCode(t, err, tc.wantErrorSub, tc.wantCode)
 		return
 	}
 
@@ -105,14 +105,14 @@ func TestVoiceSessionObject_Ask(t *testing.T) {
 			deviceKey:    "",
 			req:          VoiceSessionRequest{Prompt: "hello"},
 			wantErrorSub: "device_key is required",
-			wantTerminal: true,
+			wantCode:     400,
 		},
 		{
 			name:         "empty prompt returns error",
 			deviceKey:    "dev-1",
 			req:          VoiceSessionRequest{DeviceKey: "dev-1", Prompt: ""},
 			wantErrorSub: "prompt is required",
-			wantTerminal: true,
+			wantCode:     400,
 		},
 		{
 			name:         "nil pool returns error",
@@ -120,7 +120,7 @@ func TestVoiceSessionObject_Ask(t *testing.T) {
 			req:          VoiceSessionRequest{DeviceKey: "dev-2", Prompt: "hello"},
 			nilPool:      true,
 			wantErrorSub: "worker pool is nil",
-			wantTerminal: false,
+			wantCode:     500,
 		},
 		{
 			name:         "fallback from empty key to session id",
@@ -159,12 +159,12 @@ func TestVoiceSessionObject_Ask(t *testing.T) {
 			wantReply:    "done",
 		},
 		{
-			name:         "runner failure streams error event and returns non-terminal error",
+			name:         "runner failure streams error event and returns terminal error",
 			deviceKey:    "kiosk-kitchen",
 			req:          VoiceSessionRequest{DeviceKey: "kiosk-kitchen", Prompt: "bad turn", TurnID: "turn-voice-2"},
 			runnerErr:    errors.New("voice backend failure"),
 			wantErrorSub: "voice backend failure",
-			wantTerminal: false,
+			wantCode:     500,
 		},
 	}
 

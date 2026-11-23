@@ -21,7 +21,6 @@ import (
 	"github.com/azylman/aerial/pkg/eriwire"
 	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/services/eri/internal/restateclient"
-	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
 	"github.com/azylman/aerial/services/eri/pkg/db/dbtest"
 	"github.com/azylman/aerial/services/eri/pkg/delivery"
@@ -91,9 +90,9 @@ type promptPayloadCase struct {
 	wantContent   string
 }
 
-func assertPromptPayloadCase(t *testing.T, store db.Store, capture *restateCapture, tc promptPayloadCase) {
+func assertPromptPayloadCase(t *testing.T, capture *restateCapture, tc promptPayloadCase) {
 	t.Helper()
-	w := runHTTP(handlePrompt(store, tc.pool), http.MethodPost, "/prompt", strings.NewReader(tc.payload))
+	w := runHTTP(handlePrompt(tc.pool), http.MethodPost, "/prompt", strings.NewReader(tc.payload))
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("got status=%d body=%q, want 202", w.Code, w.Body.String())
 	}
@@ -129,16 +128,6 @@ func TestHandlePromptValidation(t *testing.T) {
 	pool.Start()
 	defer pool.Stop()
 
-	existingMsgStore := dbtest.NewFakeStore()
-	_ = existingMsgStore.InsertMessage(context.Background(), db.Message{
-		ID:       "msg-existing-123",
-		ThreadID: "1542423172400291873",
-		Status:   db.StatusCompleted,
-	})
-
-	msgExistsErrStore := dbtest.NewFakeStore()
-	msgExistsErrStore.FailNext("MessageExists", errors.New("simulated message exists failure"))
-
 	mockSess, _ := discordgo.New("Bot fake-token")
 	mockSess.State = discordgo.NewState()
 	mockSess.State.GuildAdd(&discordgo.Guild{
@@ -160,57 +149,31 @@ func TestHandlePromptValidation(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
 		method     string
-		store      db.Store
 		pool       *queue.WorkerPool
 		body       io.Reader
 		wantStatus int
 		wantSubstr string
 	}{
-		{"method not allowed", http.MethodGet, store, pool, nil, http.StatusMethodNotAllowed, "Method not allowed"},
-		{"read error", http.MethodPost, store, pool, &errReadCloser{readErr: errors.New("simulated network read error")}, http.StatusBadRequest, "Failed to read request body"},
-		{"invalid JSON", http.MethodPost, store, pool, strings.NewReader("{invalid-json"), http.StatusBadRequest, "Invalid JSON payload"},
-		{"empty prompt", http.MethodPost, store, pool, strings.NewReader(`{"prompt":""}`), http.StatusBadRequest, "Invalid payload: 'prompt' field is required and cannot be empty"},
-		{"whitespace prompt", http.MethodPost, store, pool, strings.NewReader(`{"prompt":"   "}`), http.StatusBadRequest, "Invalid payload: 'prompt' field is required and cannot be empty"},
-		{"missing channel_id", http.MethodPost, store, pool, strings.NewReader(`{"prompt":"hello"}`), http.StatusBadRequest, "Invalid payload: 'channel_id' field is required and cannot be empty"},
-		{"non-snowflake channel_id", http.MethodPost, store, pool, strings.NewReader(`{"prompt":"hello","channel_id":"not-a-snowflake"}`), http.StatusBadRequest, "Invalid payload: 'channel_id' must be a valid numeric Discord snowflake"},
-		{"unknown effort", http.MethodPost, store, pool, strings.NewReader(`{"prompt":"hello","channel_id":"1542423172400291873","effort":"extreme"}`), http.StatusBadRequest, "Invalid payload: 'effort' must be 'low', 'medium', or 'high'"},
-		{"channel name resolution prospera", http.MethodPost, store, prosperaPromptPool, strings.NewReader(`{"prompt":"hello","channel_id":"prospera"}`), http.StatusAccepted, "1564150557705248879"},
-		{"channel name resolution hash prospera", http.MethodPost, store, prosperaPromptPool, strings.NewReader(`{"prompt":"hello","channel_id":"#prospera"}`), http.StatusAccepted, "1564150557705248879"},
-		{"channel name unresolvable falls back to snowflake validation", http.MethodPost, store, prosperaPromptPool, strings.NewReader(`{"prompt":"hello","channel_id":"unknown-channel"}`), http.StatusBadRequest, "must be a valid numeric Discord snowflake"},
-		{"nil store", http.MethodPost, nil, pool, strings.NewReader(`{"prompt":"hello","channel_id":"1542423172400291873"}`), http.StatusAccepted, `"status":"accepted"`},
-		{"duplicate message_id returns 200 already_exists", http.MethodPost, existingMsgStore, nil, strings.NewReader(`{"prompt":"check","channel_id":"1542423172400291873","message_id":"msg-existing-123"}`), http.StatusOK, `"status":"already_exists"`},
-		{"message_exists store error returns 500", http.MethodPost, msgExistsErrStore, nil, strings.NewReader(`{"prompt":"check","channel_id":"1542423172400291873","message_id":"msg-check-err"}`), http.StatusInternalServerError, "Failed to check existing prompt message"},
-		{"body close error", http.MethodPost, store, pool, &errReadCloser{reader: strings.NewReader(`{"prompt":"hello","channel_id":"1542423172400291873"}`), closeErr: errors.New("close error")}, http.StatusAccepted, "channel_id"},
+		{"method not allowed", http.MethodGet, pool, nil, http.StatusMethodNotAllowed, "Method not allowed"},
+		{"read error", http.MethodPost, pool, &errReadCloser{readErr: errors.New("simulated network read error")}, http.StatusBadRequest, "Failed to read request body"},
+		{"invalid JSON", http.MethodPost, pool, strings.NewReader("{invalid-json"), http.StatusBadRequest, "Invalid JSON payload"},
+		{"empty prompt", http.MethodPost, pool, strings.NewReader(`{"prompt":""}`), http.StatusBadRequest, "Invalid payload: 'prompt' field is required and cannot be empty"},
+		{"whitespace prompt", http.MethodPost, pool, strings.NewReader(`{"prompt":"   "}`), http.StatusBadRequest, "Invalid payload: 'prompt' field is required and cannot be empty"},
+		{"missing channel_id", http.MethodPost, pool, strings.NewReader(`{"prompt":"hello"}`), http.StatusBadRequest, "Invalid payload: 'channel_id' field is required and cannot be empty"},
+		{"non-snowflake channel_id", http.MethodPost, pool, strings.NewReader(`{"prompt":"hello","channel_id":"not-a-snowflake"}`), http.StatusBadRequest, "Invalid payload: 'channel_id' must be a valid numeric Discord snowflake"},
+		{"unknown effort", http.MethodPost, pool, strings.NewReader(`{"prompt":"hello","channel_id":"1542423172400291873","effort":"extreme"}`), http.StatusBadRequest, "Invalid payload: 'effort' must be 'low', 'medium', or 'high'"},
+		{"channel name resolution prospera", http.MethodPost, prosperaPromptPool, strings.NewReader(`{"prompt":"hello","channel_id":"prospera"}`), http.StatusAccepted, "1564150557705248879"},
+		{"channel name resolution hash prospera", http.MethodPost, prosperaPromptPool, strings.NewReader(`{"prompt":"hello","channel_id":"#prospera"}`), http.StatusAccepted, "1564150557705248879"},
+		{"channel name unresolvable falls back to snowflake validation", http.MethodPost, prosperaPromptPool, strings.NewReader(`{"prompt":"hello","channel_id":"unknown-channel"}`), http.StatusBadRequest, "must be a valid numeric Discord snowflake"},
+		{"body close error", http.MethodPost, pool, &errReadCloser{reader: strings.NewReader(`{"prompt":"hello","channel_id":"1542423172400291873"}`), closeErr: errors.New("close error")}, http.StatusAccepted, "channel_id"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			w := runHTTP(handlePrompt(tc.store, tc.pool), tc.method, "/prompt", tc.body)
+			w := runHTTP(handlePrompt(tc.pool), tc.method, "/prompt", tc.body)
 			if w.Code != tc.wantStatus || !strings.Contains(w.Body.String(), tc.wantSubstr) {
 				t.Fatalf("got status=%d body=%q, want status=%d substr=%q", w.Code, w.Body.String(), tc.wantStatus, tc.wantSubstr)
 			}
 		})
 	}
-
-	threadPool := queue.New(nil, queue.WorkerPoolConfig{
-		Store: store,
-		CreateThreadFunc: func(channelID, title string) (string, error) {
-			return "1542999999999999999", nil
-		},
-	})
-	defer threadPool.Stop()
-
-	redirectCfg := config.NewFromData(&config.ConfigData{
-		SystemChannel: "1564150557705248879",
-		Channels: map[string]config.ChannelPolicy{
-			"1542423172400291873": {
-				Mode:           "channel",
-				NoBuildUpdates: true,
-			},
-		},
-	})
-	redirectPool := queue.New(redirectCfg, queue.WorkerPoolConfig{
-		Store: store,
-	})
-	defer redirectPool.Stop()
 
 	for _, tc := range []promptPayloadCase{
 		{"default effort", pool, `{"prompt":"Test valid prompt","channel_id":"1542423172400291873","message_id":"msg-123"}`, "msg-123", "1542423172400291873", "1542423172400291873", "", "", "Test valid prompt"},
@@ -218,33 +181,10 @@ func TestHandlePromptValidation(t *testing.T) {
 		{"inferred medium effort", pool, `{"prompt":"Test medium effort","channel_id":"1542423172400291873","model":"model-medium","message_id":"msg-effort-med"}`, "msg-effort-med", "1542423172400291873", "1542423172400291873", "medium", "model-medium", "Test medium effort"},
 		{"inferred low effort", pool, `{"prompt":"Test low effort","channel_id":"1542423172400291873","model":"model-flash","message_id":"msg-effort-flash"}`, "msg-effort-flash", "1542423172400291873", "1542423172400291873", "low", "model-flash", "Test low effort"},
 		{"nil pool", nil, `{"prompt":"hello nil pool","channel_id":"1542423172400291873","message_id":"msg-nil-pool"}`, "msg-nil-pool", "1542423172400291873", "1542423172400291873", "", "", "hello nil pool"},
-		{"auto-generated uuid when message_id omitted", pool, `{"prompt":"auto uuid prompt","channel_id":"1542423172400291873"}`, "", "", "", "", "", "auto uuid prompt"},
-		{"resolve target thread", threadPool, `{"prompt":"create thread prompt","channel_id":"1542423172400291873","title":"Heartbeat Alert","message_id":"msg-thread-create"}`, "msg-thread-create", "1542999999999999999", "1542999999999999999", "", "", "create thread prompt"},
-		{
-			"cd build completion redirects to system channel when no_build_updates",
-			redirectPool,
-			`{"prompt":"Continuous Delivery deployment completed for job aerial-eri","channel_id":"1542423172400291873","message_id":"msg-cd-redirect"}`,
-			"msg-cd-redirect",
-			"1564150557705248879",
-			"1564150557705248879",
-			"",
-			"",
-			"Continuous Delivery deployment completed for job aerial-eri",
-		},
-		{
-			"vanadis build completion redirects to system channel when no_build_updates",
-			redirectPool,
-			`{"prompt":"Vanadis build build-123 completed successfully","channel_id":"1542423172400291873","message_id":"msg-vanadis-redirect"}`,
-			"msg-vanadis-redirect",
-			"1564150557705248879",
-			"1564150557705248879",
-			"",
-			"",
-			"Vanadis build build-123 completed successfully",
-		},
+		{"derived id when message_id omitted", pool, `{"prompt":"auto uuid prompt","channel_id":"1542423172400291873"}`, "", "", "", "", "", "auto uuid prompt"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			assertPromptPayloadCase(t, store, capture, tc)
+			assertPromptPayloadCase(t, capture, tc)
 		})
 	}
 }
@@ -959,7 +899,7 @@ func TestHandlePromptDispatch_RelaysRestateStatus(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			store := dbtest.NewFakeStore()
 			runWithMockRestate(http.StatusOK, tc.serverResp, func() {
-				h := handlePrompt(store, nil)
+				h := handlePrompt(nil)
 				path := "/prompt"
 				if tc.dispatch {
 					h = handleDispatch(store)

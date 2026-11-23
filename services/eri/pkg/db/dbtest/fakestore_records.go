@@ -90,6 +90,24 @@ func (f *FakeStore) FailMessagesIfPending(ctx context.Context, ids []string, rea
 	return f.failMessages("FailMessagesIfPending", ids, reason, fakePendingStatuses)
 }
 
+func (f *FakeStore) SkipMessagesIfActive(ctx context.Context, ids []string, reason string) ([]string, error) {
+	return withFakeLock(f, "SkipMessagesIfActive", func() ([]string, error) {
+		now := time.Now().UTC()
+		return fakeUpdateByID(ids, f.messages, messageStatus, fakeActiveStatuses, func(m *db.Message) {
+			m.Status, m.ErrorMessage, m.UpdatedAt = db.StatusCompleted, reason, now
+		}), nil
+	})
+}
+
+func (f *FakeStore) SkipDispatchesIfActive(ctx context.Context, ids []string, reason string) ([]string, error) {
+	return withFakeLock(f, "SkipDispatchesIfActive", func() ([]string, error) {
+		now := time.Now().UTC()
+		return fakeUpdateByID(ids, f.dispatches, dispatchStatus, fakeActiveStatuses, func(d *db.Dispatch) {
+			d.Status, d.ErrorMessage, d.UpdatedAt = db.StatusCompleted, reason, now
+		}), nil
+	})
+}
+
 func (f *FakeStore) RequeueProcessingMessages(ctx context.Context, ids []string, reason string) ([]string, error) {
 	return withFakeLock(f, "RequeueProcessingMessages", func() ([]string, error) {
 		now := time.Now().UTC()

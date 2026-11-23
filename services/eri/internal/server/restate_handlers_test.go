@@ -70,7 +70,7 @@ func TestHandlePrompt_RestateCutover(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			runWithMockRestate(tc.statusCode, tc.serverResp, func() {
-				handler := handlePrompt(nil, nil)
+				handler := handlePrompt(nil)
 				req := httptest.NewRequest(http.MethodPost, "/prompt", strings.NewReader(tc.reqBody))
 				rec := httptest.NewRecorder()
 				handler(rec, req)
@@ -446,34 +446,68 @@ func TestHandlePromptViaRestate_IdempotencyKey(t *testing.T) {
 		traceparent        string
 		skipIfActive       bool
 		channelID          string
-		msgID              string
+		recordID           string
+		keyID              string
+		wantRecordID       string
+		title              string
+		serverResp         string
 		wantIdempotencyKey string
 		wantTraceparent    string
+		wantTitle          string
+		wantResp           queue.ThreadEnqueueResponse
 	}{
+		{
+			name:               "key names caller channel and message, not the thread Enqueue creates",
+			channelID:          "ch-parent",
+			recordID:           "msg-300",
+			keyID:              "msg-300",
+			wantRecordID:       "msg-300",
+			title:              " Build notes ",
+			serverResp:         `{"status":"accepted","thread_id":"th-created","message_id":"msg-300"}`,
+			wantIdempotencyKey: "prompt:ch-parent:msg-300",
+			wantTitle:          "Build notes",
+			wantResp:           queue.ThreadEnqueueResponse{Status: "accepted", ThreadID: "th-created", MessageID: "msg-300"},
+		},
+		{
+			name:               "derived key leaves message id for Enqueue to mint",
+			channelID:          "ch-parent",
+			keyID:              "derived-1",
+			wantIdempotencyKey: "prompt:ch-parent:derived-1",
+			wantResp:           queue.ThreadEnqueueResponse{Status: "accepted"},
+		},
 		{
 			name:               "idempotency key populated when skip-if-active is false",
 			skipIfActive:       false,
 			channelID:          "ch-100",
-			msgID:              "msg-200",
+			recordID:           "msg-200",
+			keyID:              "msg-200",
+			wantRecordID:       "msg-200",
 			wantIdempotencyKey: "prompt:ch-100:msg-200",
 			wantTraceparent:    "",
+			wantResp:           queue.ThreadEnqueueResponse{Status: "accepted"},
 		},
 		{
 			name:               "idempotency key populated when skip-if-active is true",
 			skipIfActive:       true,
 			channelID:          "ch-100",
-			msgID:              "msg-200",
+			recordID:           "msg-200",
+			keyID:              "msg-200",
+			wantRecordID:       "msg-200",
 			wantIdempotencyKey: "prompt:ch-100:msg-200",
 			wantTraceparent:    "",
+			wantResp:           queue.ThreadEnqueueResponse{Status: "accepted"},
 		},
 		{
 			name:               "trace context propagated when active span in ctx",
 			traceparent:        "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
 			skipIfActive:       false,
 			channelID:          "ch-100",
-			msgID:              "msg-200",
+			recordID:           "msg-200",
+			keyID:              "msg-200",
+			wantRecordID:       "msg-200",
 			wantIdempotencyKey: "prompt:ch-100:msg-200",
 			wantTraceparent:    "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+			wantResp:           queue.ThreadEnqueueResponse{Status: "accepted"},
 		},
 	}
 
@@ -481,13 +515,18 @@ func TestHandlePromptViaRestate_IdempotencyKey(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			var capturedKey string
+			var capturedKey, capturedPath string
 			var headerPresent bool
 			var capturedBody []byte
+			serverResp := tc.serverResp
+			if serverResp == "" {
+				serverResp = `{"status":"accepted"}`
+			}
 			httpClient := &http.Client{
 				Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
 					capturedKey = r.Header.Get("Idempotency-Key")
 					_, headerPresent = r.Header["Idempotency-Key"]
+					capturedPath = r.URL.Path
 					var err error
 					capturedBody, err = io.ReadAll(r.Body)
 					if err != nil {
@@ -495,7 +534,7 @@ func TestHandlePromptViaRestate_IdempotencyKey(t *testing.T) {
 					}
 					return &http.Response{
 						StatusCode: http.StatusOK,
-						Body:       io.NopCloser(strings.NewReader(`{"status":"accepted"}`)),
+						Body:       io.NopCloser(strings.NewReader(serverResp)),
 						Header:     make(http.Header),
 					}, nil
 				}),
@@ -506,18 +545,23 @@ func TestHandlePromptViaRestate_IdempotencyKey(t *testing.T) {
 			if tc.traceparent != "" {
 				ctx = tracing.ContextWithTraceparent(ctx, tc.traceparent)
 			}
-			status, err := handlePromptViaRestate(ctx, client, PromptRequest{
+			resp, err := handlePromptViaRestate(ctx, client, PromptRequest{
 				Prompt:       "hello world",
+				Title:        tc.title,
 				SkipIfActive: tc.skipIfActive,
-			}, tc.channelID, tc.msgID)
+			}, tc.channelID, tc.recordID, tc.keyID)
 			require.NoError(t, err)
-			assert.Equal(t, "accepted", status)
+			assert.Equal(t, tc.wantResp, resp)
 			assert.True(t, headerPresent)
 			assert.Equal(t, tc.wantIdempotencyKey, capturedKey)
+			assert.Equal(t, "/ThreadSession/"+tc.channelID+"/Enqueue", capturedPath)
 
 			var enqueuedReq queue.ThreadEnqueueRequest
 			require.NoError(t, json.Unmarshal(capturedBody, &enqueuedReq))
 			assert.Equal(t, tc.wantTraceparent, enqueuedReq.Traceparent)
+			assert.Equal(t, tc.wantTitle, enqueuedReq.Title)
+			assert.Equal(t, tc.channelID, enqueuedReq.ChannelID)
+			assert.Equal(t, tc.wantRecordID, enqueuedReq.MessageID)
 		})
 	}
 }
@@ -530,15 +574,25 @@ func TestHandleDispatchViaRestate_IdempotencyKey(t *testing.T) {
 		traceparent        string
 		skipIfActive       bool
 		sessionKey         string
-		dispatchID         string
+		recordID           string
+		keyID              string
+		wantRecordID       string
 		wantIdempotencyKey string
 		wantTraceparent    string
 	}{
 		{
+			name:               "derived key leaves dispatch id for Enqueue to mint",
+			sessionKey:         "sess-100",
+			keyID:              "derived-2",
+			wantIdempotencyKey: "derived-2",
+		},
+		{
 			name:               "idempotency key populated with dispatch id when skip-if-active is false",
 			skipIfActive:       false,
 			sessionKey:         "sess-100",
-			dispatchID:         "disp-200",
+			recordID:           "disp-200",
+			keyID:              "disp-200",
+			wantRecordID:       "disp-200",
 			wantIdempotencyKey: "disp-200",
 			wantTraceparent:    "",
 		},
@@ -546,7 +600,9 @@ func TestHandleDispatchViaRestate_IdempotencyKey(t *testing.T) {
 			name:               "idempotency key populated with dispatch id when skip-if-active is true",
 			skipIfActive:       true,
 			sessionKey:         "sess-100",
-			dispatchID:         "disp-200",
+			recordID:           "disp-200",
+			keyID:              "disp-200",
+			wantRecordID:       "disp-200",
 			wantIdempotencyKey: "disp-200",
 			wantTraceparent:    "",
 		},
@@ -555,7 +611,9 @@ func TestHandleDispatchViaRestate_IdempotencyKey(t *testing.T) {
 			traceparent:        "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
 			skipIfActive:       false,
 			sessionKey:         "sess-100",
-			dispatchID:         "disp-200",
+			recordID:           "disp-200",
+			keyID:              "disp-200",
+			wantRecordID:       "disp-200",
 			wantIdempotencyKey: "disp-200",
 			wantTraceparent:    "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
 		},
@@ -589,15 +647,45 @@ func TestHandleDispatchViaRestate_IdempotencyKey(t *testing.T) {
 			res, err := handleDispatchViaRestate(ctx, ingress, DispatchRequest{
 				Prompt:       "run task",
 				SkipIfActive: tc.skipIfActive,
-			}, tc.sessionKey, tc.dispatchID)
+			}, tc.sessionKey, tc.recordID, tc.keyID)
 			require.NoError(t, err)
-			assert.Equal(t, "accepted", res)
+			assert.Equal(t, "accepted", res.Status)
 			assert.True(t, hasHeader)
 			assert.Equal(t, tc.wantIdempotencyKey, receivedKey)
 
 			var brainReq eriwire.BrainDispatchRequest
 			require.NoError(t, json.Unmarshal(capturedBody, &brainReq))
 			assert.Equal(t, tc.wantTraceparent, brainReq.Traceparent)
+			assert.Equal(t, tc.wantRecordID, brainReq.ID)
+		})
+	}
+}
+
+func TestPromptRequestID(t *testing.T) {
+	t.Parallel()
+	base := PromptRequest{Prompt: "deploy done", AuthorID: "u1", Timestamp: "2026-11-22T10:00:00Z"}
+	tests := []struct {
+		name      string
+		channelA  string
+		reqA      PromptRequest
+		channelB  string
+		reqB      PromptRequest
+		wantEqual bool
+	}{
+		{name: "retry of same request keeps id", channelA: "ch-1", reqA: base, channelB: "ch-1", reqB: base, wantEqual: true},
+		{name: "model and effort do not change id", channelA: "ch-1", reqA: base, channelB: "ch-1", reqB: PromptRequest{Prompt: "deploy done", AuthorID: "u1", Timestamp: "2026-11-22T10:00:00Z", Model: "m", Effort: "high"}, wantEqual: true},
+		{name: "different channel", channelA: "ch-1", reqA: base, channelB: "ch-2", reqB: base},
+		{name: "different author", channelA: "ch-1", reqA: base, channelB: "ch-1", reqB: PromptRequest{Prompt: "deploy done", AuthorID: "u2", Timestamp: "2026-11-22T10:00:00Z"}},
+		{name: "different content", channelA: "ch-1", reqA: base, channelB: "ch-1", reqB: PromptRequest{Prompt: "deploy failed", AuthorID: "u1", Timestamp: "2026-11-22T10:00:00Z"}},
+		{name: "different timestamp", channelA: "ch-1", reqA: base, channelB: "ch-1", reqB: PromptRequest{Prompt: "deploy done", AuthorID: "u1", Timestamp: "2026-11-22T11:00:00Z"}},
+		{name: "fields do not bleed across separators", channelA: "ch-1", reqA: PromptRequest{Prompt: "ab"}, channelB: "ch-1", reqB: PromptRequest{Title: "a", Prompt: "b"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			a, b := promptRequestID(tc.channelA, tc.reqA), promptRequestID(tc.channelB, tc.reqB)
+			assert.Len(t, a, 36)
+			assert.Equal(t, tc.wantEqual, a == b)
 		})
 	}
 }
