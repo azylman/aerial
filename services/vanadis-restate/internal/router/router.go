@@ -10,6 +10,7 @@ import (
 
 	"github.com/azylman/aerial/pkg/buildplan"
 	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/pkg/strutil"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/build"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
@@ -148,12 +149,28 @@ func (s *BuildRouterService) RoutePREvent(ctx restate.Context, ev pubsub.PRLifec
 		build.RecordReconcileError(build.LabelRoutePREvent, err)
 		return restate.ToTerminalError(err, restate.WithErrorCode(400))
 	}
+	ev.TargetID = strutil.FirstNonEmpty(strings.TrimSpace(ev.TargetID), model.ExtractTargetIDFromBranch(repo, ev.Branch))
 
 	route, err := build.RunJournaled(ctx, build.LabelRoutePREvent, "lookup-pr-chunk", func(rc restate.RunContext) (store.BuildRoute, error) {
 		return s.resolvePRBuildID(rc, repo, ev)
 	})
 	if err != nil {
 		return err
+	}
+
+	if s.store != nil && route.BuildID == "" && strings.EqualFold(strings.TrimSpace(ev.Event), "opened") && build.CanFallbackThreadRepoLookup(ev) && model.ExtractChunkIDFromBranch(repo, ev.Branch) == "" {
+		attached, aErr := s.RouteAttachPR(ctx, store.AttachChunkPRRequest{
+			PRNumber: ev.PRNumber,
+			Repo:     repo,
+			Branch:   ev.Branch,
+			Title:    ev.Title,
+			TargetID: ev.TargetID,
+			Quiet:    ev.Quiet,
+		})
+		if aErr != nil {
+			return aErr
+		}
+		route.BuildID = attached.BuildID
 	}
 
 	if route.BuildID == "" {
