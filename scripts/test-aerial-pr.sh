@@ -1393,7 +1393,7 @@ cat << 'CACHE_TEST_EOF' > "$CACHE_ENV_TEST"
 #!/usr/bin/env bash
 set -euo pipefail
 CACHE_TEST_EOF
-awk '/flock 200/ {seen=1} /if \[ -d "\/cache" \]; then/ {flag=1; buf=""} flag {buf=buf $0 "\n"} flag && /^fi$/ {flag=0; if (buf ~ /flock 200/) {printf "%s", buf; exit}}' "$ENTRYPOINT_FILE" \
+awk '/if \[ -d "\/cache" \]; then/ {flag=1; buf=""} flag {buf=buf $0 "\n"} flag && /^fi$/ {flag=0; if (buf ~ /GOCACHE=/) {printf "%s", buf; exit}}' "$ENTRYPOINT_FILE" \
   | sed -e "s|/data/cache|__DATA_CACHE__|g" -e "s|/cache|__CACHE__|g" -e "s|/data|__DATA__|g" -e "s|/actions-runner|__ACTIONS_RUNNER__|g" \
         -e "s|__DATA_CACHE__|$TEST_ROOT/mock_data/cache|g" -e "s|__CACHE__|$TEST_ROOT/mock_cache|g" -e "s|__DATA__|$TEST_ROOT/mock_data|g" -e "s|__ACTIONS_RUNNER__|$TEST_ROOT/actions-runner|g" >> "$CACHE_ENV_TEST"
 cat << 'CACHE_ASSERT_EOF' >> "$CACHE_ENV_TEST"
