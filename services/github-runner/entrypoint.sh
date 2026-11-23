@@ -130,15 +130,10 @@ RUNNER_LABELS="${RUNNER_LABELS:-self-hosted,roborev}"
 echo "${PATH}" > /actions-runner/.path
 
 if [ -d "/cache" ]; then
-  mkdir -p /data
+  mkdir -p /data /cache/go-build /cache/go/pkg/mod /cache/pip /cache/golangci-lint /cache/cargo-target /cache/npm /cache/buildx-config
   chmod 0755 /data 2>/dev/null || true
   ln -sfn /cache /data/cache
-  chown -h 1000:1000 /data/cache 2>/dev/null || true
-  (
-    flock 200
-    mkdir -p /cache/go-build /cache/go/pkg/mod /cache/pip /cache/golangci-lint /cache/cargo-target /cache/npm /cache/buildx-config
-    find /cache \( -not -user 1000 -o -not -group 1000 \) -exec chown -h 1000:1000 {} + 2>/dev/null || true
-  ) 200>"/cache/.init.lock"
+  chown -h 1000:1000 /data/cache /cache /cache/go-build /cache/go /cache/go/pkg /cache/go/pkg/mod /cache/pip /cache/golangci-lint /cache/cargo-target /cache/npm /cache/buildx-config 2>/dev/null || true
   export GOCACHE="/data/cache/go-build"
   export GOPATH="/data/cache/go"
   export GOMODCACHE="/data/cache/go/pkg/mod"
