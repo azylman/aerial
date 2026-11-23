@@ -277,8 +277,8 @@ run_deadcode() {
             if [ "$svc" = "services/eri" ]; then
                 # services/eri exports shared worker packages (pkg/env, pkg/runner, pkg/mcp) to services/eri-restate,
                 # while legacy queue recovery fallbacks are scheduled for deletion in chunk c09f.
-                # Scope deadcode to services/eri root package during the Restate transition.
-                filter_flag="-filter=^github\.com/azylman/aerial/services/eri$"
+                # Scope deadcode to services/eri root package and its internal domain packages during the Restate transition.
+                filter_flag="-filter=^github\.com/azylman/aerial/services/eri($|/internal/)"
             fi
             # shellcheck disable=SC2086
             dead_prod=$(cd "$svc" && "$DEADCODE_BIN" $filter_flag $main_pkgs 2>&1) || {
