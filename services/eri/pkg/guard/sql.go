@@ -130,7 +130,7 @@ func (c *livePgxConn) Close(ctx context.Context) {
 // or nil if unconfigured. It connects lazily, on the first described query.
 func DefaultSQLDescriber(getenv func(string) string) SQLDescriber {
 	dsn := strings.TrimSpace(getenv("DATABASE_URL"))
-	if dsn == "" || dsn == ":memory:" || strings.HasPrefix(dsn, "sqlite") {
+	if dsn == "" {
 		return nil
 	}
 	return &pgxDescriber{

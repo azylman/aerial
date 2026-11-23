@@ -543,8 +543,6 @@ func TestDefaultSQLDescriber(t *testing.T) {
 	}{
 		{"unset", "", true},
 		{"whitespace", "   ", true},
-		{"memory", ":memory:", true},
-		{"sqlite", "sqlite:///tmp/x.db", true},
 		{"postgres refused on loopback", "postgres://127.0.0.1:1/aerial?connect_timeout=1", false},
 	}
 	for _, tc := range tests {
