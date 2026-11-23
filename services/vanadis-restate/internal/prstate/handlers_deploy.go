@@ -3,10 +3,9 @@ package prstate
 // Deploy verdicts, dedup slots and the deploy-failure deadline. PRObject is
 // the single ordered authority for per-PR deploy state.
 //
-// The deploy_success verdict uses BOTH-key deploy dedup: a deploy counts as fully dispatched only when a PR-keyed or
-// job-plus-SHA slot hit coincides with every applicable recorded effect
-// key. Readiness retry never mints a generation and never clears effect
-// keys.
+// The deploy_success verdict dedupes on the generation-scoped
+// deploy_dispatch effect key (head SHA plus job). Readiness retry never
+// mints a generation and never clears effect keys.
 
 import (
 	"errors"
@@ -24,7 +23,7 @@ import (
 
 // DeployDispatchDecision is the deploy_success publish verdict
 // HandleDeploySuccess returns. PRObject computes it from the deploy_dispatch
-// effect key plus both WasDispatched slots before recording anything; only
+// effect key before recording anything; only
 // a ShouldPublish verdict commits (RecordDeployPublished) and publishes.
 type DeployDispatchDecision struct {
 	Disposition   EventDisposition `json:"disposition"`
@@ -34,7 +33,7 @@ type DeployDispatchDecision struct {
 }
 
 // DeployPublishedOutcome is the result of one deploy_success record. The
-// record marks the dispatch key and both dedup slots, so it is idempotent:
+// record marks the dispatch key, so it is idempotent:
 // a repeated record reports Deduped.
 type DeployPublishedOutcome struct {
 	Disposition EventDisposition `json:"disposition"`
@@ -47,10 +46,9 @@ type DeployPublishedOutcome struct {
 // without recording anything. Stale SHAs drop and same-epoch terminal states
 // absorb with no publish. A watcher-tracked rollout publishes only when
 // DeploySuccessDue (once per PR, on its last Kustomization). A dispatch is
-// fully deduped only when the
-// deploy_dispatch effect key is recorded and a WasDispatched slot hits;
-// every other applied dispatch must publish, so an unrecorded publish is
-// always retried instead of lost.
+// deduped only when its deploy_dispatch effect key is recorded; every other
+// applied dispatch must publish, so an unrecorded publish is always retried
+// instead of lost.
 func ResolveDeployDispatchDecision(s *PRState, ev PREvent) (DeployDispatchDecision, error) {
 	if s == nil {
 		return DeployDispatchDecision{Disposition: DispositionDropStale}, errNilPRState
@@ -63,7 +61,7 @@ func ResolveDeployDispatchDecision(s *PRState, ev PREvent) (DeployDispatchDecisi
 	if !s.DeploySuccessDue(ev.JobName) {
 		return out, nil
 	}
-	if s.WasEffectDispatched(key) && WasDispatched(s, ev.Repo, ev.JobName, ev.HeadSHA, ev.PRNumber) {
+	if s.WasEffectDispatched(key) {
 		out.Deduped = true
 		return out, nil
 	}
@@ -93,8 +91,7 @@ func (s *PRState) DeploySuccessDue(jobName string) bool {
 }
 
 // RecordDeployPublished marks one confirmed deploy_success publish: the
-// deploy_dispatch effect key plus the PR-keyed and job-plus-SHA dedup slots,
-// and the observed head SHA for later staleness checks. Stale SHAs drop and
+// deploy_dispatch effect key and the observed head SHA for later staleness checks. Stale SHAs drop and
 // same-epoch terminal states absorb with nothing recorded.
 func RecordDeployPublished(s *PRState, ev PREvent) (DeployPublishedOutcome, error) {
 	if s == nil {
@@ -107,10 +104,6 @@ func RecordDeployPublished(s *PRState, ev PREvent) (DeployPublishedOutcome, erro
 	out := DeployPublishedOutcome{Disposition: DispositionApply, EffectKey: key.String()}
 	out.Deduped = s.WasEffectDispatched(key)
 	s.MarkEffectDispatched(key)
-	s.RecordDeployedPR()
-	if cleanJob, cleanHead := strings.TrimSpace(ev.JobName), strings.TrimSpace(ev.HeadSHA); cleanJob != "" && cleanHead != "" && !prwire.IsZeroSHA(cleanHead) {
-		s.RecordDeployedSHAJob(cleanJob, cleanHead)
-	}
 	syncHeadSHA(s, ev)
 	out.Recorded = true
 	return out, nil
@@ -118,32 +111,6 @@ func RecordDeployPublished(s *PRState, ev PREvent) (DeployPublishedOutcome, erro
 
 // errNilPRState reports a nil state, which can never apply an event.
 var errNilPRState = errors.New("prstate: nil PRState")
-
-// WasDispatched reports whether a deployment already fired, preserving
-// BOTH WasDispatched keys from DeployDedupTracker: the PR-keyed slot
-// (pr:repo:prNumber) OR the job-plus-SHA slot (sha:repo:job:sha).
-// A hit alone does not suppress re-dispatch: HandleDeployEvent treats the
-// deploy as fully deduped only when every applicable effect key is also
-// recorded, so a promotion that arrived after an empty-merge dispatch is
-// retried instead of lost. A bare PR key that never expires is forbidden,
-// so the SHA-scoped slot bounds dedup per commit.
-func WasDispatched(s *PRState, repo, jobName, sha string, prNumber int) bool {
-	if s == nil {
-		return false
-	}
-	if prNumber > 0 && prNumber == s.PRNumber && strings.TrimSpace(repo) == s.Repo && s.WasDeployedPR() {
-		return true
-	}
-	cleanJob := strings.TrimSpace(jobName)
-	cleanSHA := strings.TrimSpace(sha)
-	if cleanJob == "" || cleanSHA == "" || prwire.IsZeroSHA(cleanSHA) {
-		return false
-	}
-	if s.DeploySHAJob == nil {
-		return false
-	}
-	return s.DeploySHAJob[DeploySHAJobKey(repo, cleanJob, cleanSHA)]
-}
 
 // syncHeadSHA records the observed head SHA after a successful apply so
 // later events judge staleness against it. A merged PR keeps its head
@@ -271,9 +238,10 @@ func (s *PRObjectService) HandleDeployAttemptFailed(ctx restate.ObjectContext, e
 }
 
 // HandleDeployFailureDeadline fires one armed deadline: when the attempt is
-// still the current one, it applies deploy_failed with the newest banner,
-// commits, publishes the captured deploy_failed facts, and acknowledges the
-// publish. A disarmed, superseded, or stale deadline does nothing.
+// still the current one, it (re-)applies deploy_failed, commits, and
+// publishes the captured deploy_failed facts, which carry the newest
+// failure; the facts' generation-scoped effect keys dedupe a repeat. A
+// disarmed, superseded, or stale deadline does nothing.
 func (s *PRObjectService) HandleDeployFailureDeadline(ctx restate.ObjectContext, req DeployFailureDeadlineRequest) error {
 	st, err := restate.Get[*PRState](ctx, s.stateKey)
 	if err != nil || st == nil {
@@ -291,8 +259,6 @@ func (s *PRObjectService) HandleDeployFailureDeadline(ctx restate.ObjectContext,
 	}
 	restate.Set(ctx, s.stateKey, st)
 	s.runFacts(ctx, st, p.Facts)
-	st.AckDeployFailedPublished()
-	restate.Set(ctx, s.stateKey, st)
 	s.afterCommit(ctx, st)
 	return nil
 }

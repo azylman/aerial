@@ -362,25 +362,23 @@ func TestPRState_TransitionDeploying(t *testing.T) {
 		wantJobs    []string
 		wantStarted []string
 		wantBanner  string
-		wantPub     bool
 	}{
 		{name: "merged starts deploying", status: RegistryStatusMerged, jobs: []string{"eri", "coven"}, want: true, wantStatus: RegistryStatusDeploying, wantJobs: []string{"eri", "synapse"}, wantStarted: []string{"coven", "eri", "haro"}},
 		{name: "deploy failed restarts", status: RegistryStatusDeployFailed, jobs: []string{"eri"}, want: true, wantStatus: RegistryStatusDeploying, wantJobs: []string{"eri", "synapse"}, wantStarted: []string{"eri", "haro"}},
-		{name: "all deployed is a no-op", status: RegistryStatusMerged, jobs: []string{"coven"}, want: false, wantStatus: RegistryStatusMerged, wantJobs: []string{"synapse"}, wantStarted: []string{"haro"}, wantBanner: "b", wantPub: true},
-		{name: "conflict is ignored", status: RegistryStatusConflict, jobs: []string{"eri"}, want: false, wantStatus: RegistryStatusConflict, wantJobs: []string{"synapse"}, wantStarted: []string{"haro"}, wantBanner: "b", wantPub: true},
+		{name: "all deployed is a no-op", status: RegistryStatusMerged, jobs: []string{"coven"}, want: false, wantStatus: RegistryStatusMerged, wantJobs: []string{"synapse"}, wantStarted: []string{"haro"}, wantBanner: "b"},
+		{name: "conflict is ignored", status: RegistryStatusConflict, jobs: []string{"eri"}, want: false, wantStatus: RegistryStatusConflict, wantJobs: []string{"synapse"}, wantStarted: []string{"haro"}, wantBanner: "b"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			s := rowState("h1", "m1", tc.status)
 			s.Jobs, s.StartedJobs, s.DeployedJobs = []string{"synapse"}, []string{"haro"}, []string{"coven"}
-			s.Banner, s.DeployFailedPublished = "b", true
+			s.Banner = "b"
 			require.Equal(t, tc.want, s.TransitionDeploying(tc.jobs))
 			require.Equal(t, tc.wantStatus, s.Status)
 			require.Equal(t, tc.wantJobs, s.Jobs)
 			require.Equal(t, tc.wantStarted, s.StartedJobs)
 			require.Equal(t, tc.wantBanner, s.Banner)
-			require.Equal(t, tc.wantPub, s.DeployFailedPublished)
 		})
 	}
 }
@@ -500,50 +498,26 @@ func TestPRState_ApplyRegistryDeployFailed(t *testing.T) {
 	tests := []struct {
 		name       string
 		status     string
-		published  bool
 		banner     string
 		want       bool
 		wantStatus string
 		wantBanner string
-		wantPub    bool
 	}{
-		{name: "deploying fails and resets published", status: RegistryStatusDeploying, published: true, banner: "boom", want: true, wantStatus: RegistryStatusDeployFailed, wantBanner: "boom"},
-		{name: "unpublished failure re-fails", status: RegistryStatusDeployFailed, want: true, wantStatus: RegistryStatusDeployFailed, wantBanner: "old"},
-		{name: "published failure is a no-op", status: RegistryStatusDeployFailed, published: true, banner: "boom", want: false, wantStatus: RegistryStatusDeployFailed, wantBanner: "old", wantPub: true},
+		{name: "deploying fails", status: RegistryStatusDeploying, banner: "boom", want: true, wantStatus: RegistryStatusDeployFailed, wantBanner: "boom"},
+		{name: "merged fails", status: RegistryStatusMerged, banner: "boom", want: true, wantStatus: RegistryStatusDeployFailed, wantBanner: "boom"},
+		{name: "synced fails", status: RegistryStatusSynced, want: true, wantStatus: RegistryStatusDeployFailed, wantBanner: "old"},
+		{name: "repeated failure takes the newest banner", status: RegistryStatusDeployFailed, banner: "newest", want: true, wantStatus: RegistryStatusDeployFailed, wantBanner: "newest"},
+		{name: "repeated failure without a banner keeps the stored one", status: RegistryStatusDeployFailed, want: true, wantStatus: RegistryStatusDeployFailed, wantBanner: "old"},
 		{name: "open is ignored", status: RegistryStatusOpen, banner: "boom", want: false, wantStatus: RegistryStatusOpen, wantBanner: "old"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			s := rowState("h1", "m1", tc.status)
-			s.Banner, s.DeployFailedPublished = "old", tc.published
+			s.Banner = "old"
 			require.Equal(t, tc.want, s.ApplyRegistryDeployFailed(tc.banner))
 			require.Equal(t, tc.wantStatus, s.Status)
 			require.Equal(t, tc.wantBanner, s.Banner)
-			require.Equal(t, tc.wantPub, s.DeployFailedPublished)
-		})
-	}
-}
-
-func TestPRState_AckDeployFailedPublished(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name      string
-		status    string
-		published bool
-		want      bool
-	}{
-		{name: "deploy failed acks", status: RegistryStatusDeployFailed, want: true},
-		{name: "already acked is a no-op", status: RegistryStatusDeployFailed, published: true, want: false},
-		{name: "deploying is ignored", status: RegistryStatusDeploying, want: false},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			s := rowState("h1", "m1", tc.status)
-			s.DeployFailedPublished = tc.published
-			require.Equal(t, tc.want, s.AckDeployFailedPublished())
-			require.Equal(t, tc.want || tc.published, s.DeployFailedPublished)
 		})
 	}
 }

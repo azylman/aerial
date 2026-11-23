@@ -224,17 +224,16 @@ func TestPRObjectServiceHandleConflictCheck(t *testing.T) {
 		wantGHCalls   []string
 		wantFacts     []string
 		wantDMs       int
-		wantConflict  string
 		wantSendCount int
 		wantFirstSend *sentCall
 	}{
 		{
 			name: "restate conflict on a registered pr publishes the conflict fact", state: registeredPR(), ev: ev("h1"), gh: &fakeGitHub{mergeability: dirty},
-			wantSet: true, wantGHCalls: []string{"mergeability 101"}, wantFacts: []string{"conflict"}, wantConflict: "h1", wantSendCount: 1, wantFirstSend: &recheck,
+			wantSet: true, wantGHCalls: []string{"mergeability 101"}, wantFacts: []string{"conflict"}, wantSendCount: 1, wantFirstSend: &recheck,
 		},
 		{
 			name: "restate conflict on a collaborator pr fires the carried dm", state: collaboratorPR(), ev: ev("h1"), gh: &fakeGitHub{mergeability: dirty},
-			wantSet: true, wantGHCalls: []string{"mergeability 101"}, wantDMs: 1, wantConflict: "h1", wantSendCount: 1, wantFirstSend: &recheck,
+			wantSet: true, wantGHCalls: []string{"mergeability 101"}, wantDMs: 1, wantSendCount: 1, wantFirstSend: &recheck,
 		},
 		{name: "restate clean head records nothing more", state: registeredPR(), ev: ev("h1"), gh: &fakeGitHub{mergeability: clean}, wantSet: true, wantGHCalls: []string{"mergeability 101"}},
 		{
@@ -268,7 +267,6 @@ func TestPRObjectServiceHandleConflictCheck(t *testing.T) {
 			}
 			require.Equal(t, tc.wantFacts, gotFacts)
 			require.Len(t, eri.Calls(), tc.wantDMs)
-			require.Equal(t, tc.wantConflict, tc.state.CollaboratorConflict)
 			sends := rec.sends.snapshot()
 			require.Len(t, sends, tc.wantSendCount)
 			if tc.wantFirstSend != nil {

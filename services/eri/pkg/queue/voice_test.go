@@ -1029,7 +1029,6 @@ func TestStatusUpdater_GuardrailsAndRESTTransport(t *testing.T) {
 	nilSu.MarkTurnStarted()
 	nilSu.SetCapacityBackoff(5 * time.Second)
 	nilSu.Stop()
-	nilSu.Reset()
 	nilSu.DeleteStatusMessage()
 	nilSu.HandleStep(&runner.StepUpdateEvent{StepType: "thinking"})
 

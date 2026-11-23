@@ -3,7 +3,7 @@ package prstate
 // Registry state. PRState carries the per-PR registry fields (branch, head,
 // merge, target, title and status plus jobs, started_jobs, deployed_jobs,
 // job_states, kustomization_requests, deployed_kustomizations,
-// deploy_failed_published, deploy_success_pending, build_metadata, banner,
+// deploy_success_pending, build_metadata, banner,
 // ci_checks and agent). The transitions below are pure ports of the
 // synapse registry SQL (services/synapse/internal/registry/registry.go and
 // kustomization.go): each names the statement it mirrors, and none performs
@@ -406,7 +406,7 @@ func (s *PRState) ClearDeployResidue() {
 	s.Jobs, s.StartedJobs, s.DeployedJobs = nil, nil, nil
 	s.JobStates = nil
 	s.KustomizationRequests, s.DeployedKustomizations = nil, nil
-	s.DeploySuccessPending, s.DeployFailedPublished = false, false
+	s.DeploySuccessPending = false
 	s.PendingDeployFailure = nil
 	s.Banner = ""
 }
@@ -414,7 +414,7 @@ func (s *PRState) ClearDeployResidue() {
 // TransitionDeploying mirrors TransitionDeploying: when at least one
 // requested job is not yet deployed and the PR is not closed or in conflict,
 // the PR moves to deploying, jobs gain the undeployed requests, started_jobs
-// gain every request, and banner/deploy_failed_published clear.
+// gain every request, and the banner clears.
 func (s *PRState) TransitionDeploying(jobs []string) bool {
 	jobs = cleanStrings(jobs)
 	if s == nil || len(jobs) == 0 || statusIn(s.Status, RegistryStatusClosed, RegistryStatusConflict) {
@@ -427,7 +427,6 @@ func (s *PRState) TransitionDeploying(jobs []string) bool {
 	s.Jobs = withoutStrings(unionStrings(s.Jobs, jobs...), s.DeployedJobs)
 	s.StartedJobs = unionStrings(s.StartedJobs, jobs...)
 	s.Banner = ""
-	s.DeployFailedPublished = false
 	return true
 }
 
@@ -479,8 +478,8 @@ func (s *PRState) MarkJobsDeployed(jobs []string) bool {
 // MarkKustomizationsDeployed mirrors MarkKustomizationsDeployed: for a
 // deploying or deploy_failed PR with recorded requests, requested names
 // union into deployed_kustomizations, and once every request is deployed
-// the PR flips to deployed with deploy_success_pending set and banner and
-// deploy_failed_published cleared. Returns true only on the flip.
+// the PR flips to deployed with deploy_success_pending set and the banner
+// cleared. Returns true only on the flip.
 func (s *PRState) MarkKustomizationsDeployed(names []string) bool {
 	names = cleanStrings(names)
 	if s == nil || len(names) == 0 || len(s.KustomizationRequests) == 0 || !statusIn(s.Status, RegistryStatusDeploying, RegistryStatusDeployFailed) {
@@ -499,7 +498,6 @@ func (s *PRState) MarkKustomizationsDeployed(names []string) bool {
 	s.Status = RegistryStatusDeployed
 	s.DeploySuccessPending = true
 	s.Banner = ""
-	s.DeployFailedPublished = false
 	return true
 }
 
@@ -530,35 +528,18 @@ func (s *PRState) AckDeploySuccess() {
 	s.DeploySuccessPending = false
 }
 
-// ApplyRegistryDeployFailed mirrors AtomicTransitionDeployFailed: a
-// deploying/merged/synced PR, or a deploy_failed PR whose failure was not
-// yet published, moves to deploy_failed; entering the state resets
-// deploy_failed_published. A non-empty banner is recorded. Returns true on
-// the transition.
+// ApplyRegistryDeployFailed moves a deploying, merged, synced or already
+// deploy_failed PR to deploy_failed: the newest failure always wins, so a
+// repeated failure re-enters the state and a non-empty banner replaces the
+// stored one. Returns true on the transition.
 func (s *PRState) ApplyRegistryDeployFailed(banner string) bool {
-	if s == nil {
-		return false
-	}
-	switch {
-	case statusIn(s.Status, RegistryStatusDeploying, RegistryStatusMerged, RegistryStatusSynced):
-		s.DeployFailedPublished = false
-	case s.Status == RegistryStatusDeployFailed && !s.DeployFailedPublished:
-	default:
+	if s == nil || !statusIn(s.Status, RegistryStatusDeploying, RegistryStatusMerged, RegistryStatusSynced, RegistryStatusDeployFailed) {
 		return false
 	}
 	s.Status = RegistryStatusDeployFailed
 	if b := strings.TrimSpace(banner); b != "" {
 		s.Banner = b
 	}
-	return true
-}
-
-// AckDeployFailedPublished mirrors AcknowledgeDeployFailedPublished.
-func (s *PRState) AckDeployFailedPublished() bool {
-	if s == nil || s.Status != RegistryStatusDeployFailed || s.DeployFailedPublished {
-		return false
-	}
-	s.DeployFailedPublished = true
 	return true
 }
 
