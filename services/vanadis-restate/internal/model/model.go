@@ -92,6 +92,18 @@ func isHexDigit(c byte) bool {
 	return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
 }
 
+func isDiscordSnowflake(s string) bool {
+	if len(s) < 17 || len(s) > 20 {
+		return false
+	}
+	for i := range len(s) {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
 // ExtractChunkIDFromBranch recovers the Vanadis chunk ID encoded in a
 // feat/<repo>-pr-vanadis-<chunk>-<6hex> branch name, or "" when absent.
 func ExtractChunkIDFromBranch(repo, branch string) string {
@@ -114,8 +126,47 @@ func ExtractChunkIDFromBranch(repo, branch string) string {
 			return ""
 		}
 	}
+	if prefix, candidate, ok := strings.CutLast(chunkID, "-t"); ok {
+		if isDiscordSnowflake(candidate) {
+			chunkID = prefix
+		}
+	}
 	if !buildplan.IsValidVanadisChunkID(chunkID) {
 		return ""
 	}
 	return chunkID
+}
+
+// ExtractTargetIDFromBranch recovers the 17-20 digit Discord snowflake encoded
+// in a feat/<repo>-pr-t<target_id>-<6hex> or feat/<repo>-pr-vanadis-<chunk>-t<target_id>-<6hex>
+// branch name, or "" when absent.
+func ExtractTargetIDFromBranch(repo, branch string) string {
+	repoName := strings.TrimSuffix(CleanRepoName(repo), ".git")
+	if repoName == "" {
+		return ""
+	}
+	branch = strings.TrimSpace(branch)
+	branch = strings.TrimPrefix(branch, "refs/heads/")
+	after, ok := strings.CutPrefix(branch, "feat/"+repoName+"-pr-")
+	if !ok {
+		return ""
+	}
+	remainder, suffix, hasSuffix := strings.CutLast(after, "-")
+	if !hasSuffix || len(suffix) != 6 {
+		return ""
+	}
+	for i := range suffix {
+		if !isHexDigit(suffix[i]) {
+			return ""
+		}
+	}
+	if strings.HasPrefix(remainder, "t") && isDiscordSnowflake(remainder[1:]) {
+		return remainder[1:]
+	}
+	if _, candidate, ok := strings.CutLast(remainder, "-t"); ok {
+		if isDiscordSnowflake(candidate) {
+			return candidate
+		}
+	}
+	return ""
 }

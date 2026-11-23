@@ -82,6 +82,7 @@ var exactSecretKeys = map[string]struct{}{
 	"DISCORD_TOKEN":                   {},
 	"DISCORD_BOT_TOKEN":               {},
 	"DATABASE_URL":                    {},
+	"POSTGRES_URL":                    {},
 	"POSTGRES_PASSWORD":               {},
 	"HA_TOKEN":                        {},
 	"UNIFI_PASS":                      {},
@@ -251,7 +252,26 @@ func BuildAgyEnv(input AgyEnvInput) []string {
 	cmdEnv = append(cmdEnv, mcpTraceEnv(input.MCPProxyPort, input.DaemonID)...)
 	cmdEnv = append(cmdEnv, claudeOTelEnv(input.Engine, input.MCPProxyPort, input.DaemonID)...)
 	cmdEnv = appendTraceEnv(cmdEnv, input.TraceEnv)
-	return append(cmdEnv, input.ExtraEnv...)
+	cmdEnv = append(cmdEnv, input.ExtraEnv...)
+	if !hasEnvKey(cmdEnv, "PGUSER") {
+		cmdEnv = append(cmdEnv, "PGUSER=aerial")
+	}
+	if !hasEnvKey(cmdEnv, "PGDATABASE") {
+		cmdEnv = append(cmdEnv, "PGDATABASE=aerial")
+	}
+	if !hasEnvKey(cmdEnv, "PGHOST") {
+		cmdEnv = append(cmdEnv, "PGHOST=/var/run/postgresql")
+	}
+	return cmdEnv
+}
+
+func hasEnvKey(env []string, key string) bool {
+	for _, e := range env {
+		if k, _, ok := strings.Cut(e, "="); ok && strings.EqualFold(strings.TrimSpace(k), key) {
+			return true
+		}
+	}
+	return false
 }
 
 func claudeOTelEnv(engine, port, daemonID string) []string {

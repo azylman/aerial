@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -167,7 +169,7 @@ func checkSearchBaseCases() []searchTestCase {
 		{"grep with explicit -e flag allowed", "run_command", "grep -m 10 -e 'foo' main.go", "", false, "", ""},
 		{"bash safe command in search", "run_command", "bash -c 'echo safe'", "", false, "", ""},
 		{"grep short flag with digit", "run_command", "grep -m 10 foo file.txt", "", false, "", ""},
-		{"unclosed sql single quote", "run_command", `psql -A -c "SELECT 'unclosed"`, "", false, "", ""},
+		{"unclosed sql single quote", "run_command", `psql -A -w -c "SELECT 'unclosed"`, "", false, "", ""},
 	}
 }
 
@@ -315,34 +317,58 @@ type psqlTestCase struct {
 func psqlGuardBasicCases(twoCols, threeCols, cteCols, embedCols []SQLColumn, meta3 map[uint32][2]string, rel3 map[string]string, limitPlan, aggLimitPlan, overLimitPlan, unboundedPlan, pkPlan, dmlPlan string) []psqlTestCase {
 	return []psqlTestCase{
 		{
-			name:          "scoped select injects -A",
+			name:          "scoped select injects -A -w",
 			cmd:           `psql "$DATABASE_URL" -c "SELECT id, author_name FROM messages LIMIT 10;"`,
 			conn:          &fakeSQLCatalogConn{cols: twoCols, explainJSON: limitPlan, tableMeta: meta3, relCounts: rel3},
-			wantOverwrite: `psql -A "$DATABASE_URL" -c "SELECT id, author_name FROM messages LIMIT 10;"`,
+			wantOverwrite: `psql -A -w "$DATABASE_URL" -c "SELECT id, author_name FROM messages LIMIT 10;"`,
 		},
 		{
-			name:     "existing -Atc preserves command without overwrite",
-			cmd:      `psql "$DATABASE_URL" -Atc "SELECT id, author_name FROM messages LIMIT 10;"`,
+			name:          "attached -Uwriter injects -A -w",
+			cmd:           `psql -Uwriter "$DATABASE_URL" -c "SELECT id, author_name FROM messages LIMIT 10;"`,
+			conn:          &fakeSQLCatalogConn{cols: twoCols, explainJSON: limitPlan, tableMeta: meta3, relCounts: rel3},
+			wantOverwrite: `psql -A -w -Uwriter "$DATABASE_URL" -c "SELECT id, author_name FROM messages LIMIT 10;"`,
+		},
+		{
+			name:          "attached -dwork injects -A -w",
+			cmd:           `psql -dwork "$DATABASE_URL" -c "SELECT id, author_name FROM messages LIMIT 10;"`,
+			conn:          &fakeSQLCatalogConn{cols: twoCols, explainJSON: limitPlan, tableMeta: meta3, relCounts: rel3},
+			wantOverwrite: `psql -A -w -dwork "$DATABASE_URL" -c "SELECT id, author_name FROM messages LIMIT 10;"`,
+		},
+		{
+			name:          "existing -Atc injects only -w",
+			cmd:           `psql "$DATABASE_URL" -Atc "SELECT id, author_name FROM messages LIMIT 10;"`,
+			conn:          &fakeSQLCatalogConn{cols: twoCols, explainJSON: limitPlan, tableMeta: meta3},
+			wantOverwrite: `psql -w "$DATABASE_URL" -Atc "SELECT id, author_name FROM messages LIMIT 10;"`,
+		},
+		{
+			name:          "existing -w injects only -A",
+			cmd:           `psql -w "$DATABASE_URL" -c "SELECT id, author_name FROM messages LIMIT 10;"`,
+			conn:          &fakeSQLCatalogConn{cols: twoCols, explainJSON: limitPlan, tableMeta: meta3},
+			wantOverwrite: `psql -A -w "$DATABASE_URL" -c "SELECT id, author_name FROM messages LIMIT 10;"`,
+		},
+		{
+			name:     "existing -Atwc preserves command without overwrite",
+			cmd:      `psql "$DATABASE_URL" -Atwc "SELECT id, author_name FROM messages LIMIT 10;"`,
 			conn:     &fakeSQLCatalogConn{cols: twoCols, explainJSON: limitPlan, tableMeta: meta3},
 			wantDeny: false,
 		},
 		{
-			name:     "existing --csv preserves command without overwrite",
-			cmd:      `psql "$DATABASE_URL" --csv --command="SELECT id, author_name FROM messages WHERE id = '1'"`,
+			name:     "existing --csv and --no-password preserves command without overwrite",
+			cmd:      `psql "$DATABASE_URL" --csv --no-password --command="SELECT id, author_name FROM messages WHERE id = '1'"`,
 			conn:     &fakeSQLCatalogConn{cols: twoCols, explainJSON: pkPlan, tableMeta: meta3},
 			wantDeny: false,
 		},
 		{
-			name:     "existing -P format=unaligned and -Pformat=csv",
-			cmd:      `psql -P format=unaligned -c "\d messages" && psql -Pformat=csv -U aerial -d aerial -c "SELECT '--not-comment'; SELECT id, author_name FROM messages WHERE id = '1'"`,
+			name:     "existing -P format=unaligned -W and -Pformat=csv -w",
+			cmd:      `psql -P format=unaligned -W -c "\d messages" && psql -Pformat=csv -w -U aerial -d aerial -c "SELECT '--not-comment'; SELECT id, author_name FROM messages WHERE id = '1'"`,
 			conn:     &fakeSQLCatalogConn{cols: twoCols, explainJSON: pkPlan, tableMeta: meta3},
 			wantDeny: false,
 		},
 		{
-			name:          "leading env var and attached -c injects -A",
+			name:          "leading env var and attached -c injects -A -w",
 			cmd:           `PGPASSWORD=secret /usr/bin/psql -U Admin -d Aerial -c"SELECT id, embedding FROM facts WHERE id = 1"`,
 			conn:          &fakeSQLCatalogConn{cols: embedCols, explainJSON: pkPlan, tableMeta: meta3},
-			wantOverwrite: `PGPASSWORD=secret /usr/bin/psql -A -U Admin -d Aerial -c"SELECT id, embedding FROM facts WHERE id = 1"`,
+			wantOverwrite: `PGPASSWORD=secret /usr/bin/psql -A -w -U Admin -d Aerial -c"SELECT id, embedding FROM facts WHERE id = 1"`,
 		},
 		{
 			name:          "select star detected via TableOID column count",
@@ -363,7 +389,7 @@ func psqlGuardBasicCases(twoCols, threeCols, cteCols, embedCols []SQLColumn, met
 			cmd:           `psql "$DATABASE_URL" -c "SELECT author_name, count(1), max(id) FROM messages GROUP BY author_name LIMIT 10"`,
 			conn:          &fakeSQLCatalogConn{cols: cteCols, explainJSON: aggLimitPlan, tableMeta: meta3, relCounts: rel3},
 			wantDeny:      false,
-			wantOverwrite: `psql -A "$DATABASE_URL" -c "SELECT author_name, count(1), max(id) FROM messages GROUP BY author_name LIMIT 10"`,
+			wantOverwrite: `psql -A -w "$DATABASE_URL" -c "SELECT author_name, count(1), max(id) FROM messages GROUP BY author_name LIMIT 10"`,
 		},
 		{
 			name:          "unbounded multi-row select without LIMIT denied",
@@ -380,10 +406,10 @@ func psqlGuardBasicCases(twoCols, threeCols, cteCols, embedCols []SQLColumn, met
 			wantReasonSub: "psql LIMIT exceeds maximum allowed rows",
 		},
 		{
-			name:          "DML RETURNING all columns allowed and injects -A",
+			name:          "DML RETURNING all columns allowed and injects -A -w",
 			cmd:           `psql "$DATABASE_URL" -c "UPDATE messages SET content = 'a''b' WHERE id = '1' RETURNING *"`,
 			conn:          &fakeSQLCatalogConn{cols: threeCols, explainJSON: dmlPlan, tableMeta: meta3},
-			wantOverwrite: `psql -A "$DATABASE_URL" -c "UPDATE messages SET content = 'a''b' WHERE id = '1' RETURNING *"`,
+			wantOverwrite: `psql -A -w "$DATABASE_URL" -c "UPDATE messages SET content = 'a''b' WHERE id = '1' RETURNING *"`,
 		},
 	}
 }
@@ -412,28 +438,28 @@ func psqlGuardErrorCases(twoCols, threeCols []SQLColumn, meta3 map[uint32][2]str
 			wantReasonSub: `42703: column "bad_col" does not exist`,
 		},
 		{
-			name:          "syntax error 42601 on psql variable fails open and injects -A",
+			name:          "syntax error 42601 on psql variable fails open and injects -A -w",
 			cmd:           `psql "$DATABASE_URL" -c "SELECT :var FROM messages"`,
 			conn:          &fakeSQLCatalogConn{prepareErr: &pgconn.PgError{Code: "42601", Message: "syntax error"}},
-			wantOverwrite: `psql -A "$DATABASE_URL" -c "SELECT :var FROM messages"`,
+			wantOverwrite: `psql -A -w "$DATABASE_URL" -c "SELECT :var FROM messages"`,
 		},
 		{
-			name:          "connection failure fails open and injects -A",
+			name:          "connection failure fails open and injects -A -w",
 			cmd:           `psql "$DATABASE_URL" -c "SELECT * FROM messages"`,
 			connErr:       errors.New("dial error"),
-			wantOverwrite: `psql -A "$DATABASE_URL" -c "SELECT * FROM messages"`,
+			wantOverwrite: `psql -A -w "$DATABASE_URL" -c "SELECT * FROM messages"`,
 		},
 		{
-			name:          "backslash command in multi-statement skipped and injects -A",
+			name:          "backslash command in multi-statement skipped and injects -A -w",
 			cmd:           `psql "$DATABASE_URL" --command "\dt" -c "\d; SELECT id, author_name FROM messages LIMIT 5"`,
 			conn:          &fakeSQLCatalogConn{cols: twoCols, explainJSON: limitPlan, tableMeta: meta3},
-			wantOverwrite: `psql -A "$DATABASE_URL" --command "\dt" -c "\d; SELECT id, author_name FROM messages LIMIT 5"`,
+			wantOverwrite: `psql -A -w "$DATABASE_URL" --command "\dt" -c "\d; SELECT id, author_name FROM messages LIMIT 5"`,
 		},
 		{
-			name:          "docker exec psql injects -A",
+			name:          "docker exec psql injects -A -w",
 			cmd:           `docker exec -i -e PGPASSWORD=secret postgres psql -U aerial -d aerial -c "SELECT id, author_name FROM messages LIMIT 5"`,
 			conn:          &fakeSQLCatalogConn{cols: twoCols, explainJSON: limitPlan, tableMeta: meta3},
-			wantOverwrite: `docker exec -i -e PGPASSWORD=secret postgres psql -A -U aerial -d aerial -c "SELECT id, author_name FROM messages LIMIT 5"`,
+			wantOverwrite: `docker exec -i -e PGPASSWORD=secret postgres psql -A -w -U aerial -d aerial -c "SELECT id, author_name FROM messages LIMIT 5"`,
 		},
 		{
 			name:          "docker exec psql select star denied",
@@ -452,13 +478,13 @@ func psqlGuardErrorCases(twoCols, threeCols []SQLColumn, meta3 map[uint32][2]str
 			name:          "psql empty query allowed",
 			cmd:           `psql "$DATABASE_URL" -c ""`,
 			wantDeny:      false,
-			wantOverwrite: `psql -A "$DATABASE_URL" -c ""`,
+			wantOverwrite: `psql -A -w "$DATABASE_URL" -c ""`,
 		},
 		{
 			name:          "psql backslash stmt skipped",
 			cmd:           `psql "$DATABASE_URL" -c "SELECT id, author_name FROM messages LIMIT 5; \timing"`,
 			conn:          &fakeSQLCatalogConn{cols: twoCols, explainJSON: limitPlan, tableMeta: meta3},
-			wantOverwrite: `psql -A "$DATABASE_URL" -c "SELECT id, author_name FROM messages LIMIT 5; \timing"`,
+			wantOverwrite: `psql -A -w "$DATABASE_URL" -c "SELECT id, author_name FROM messages LIMIT 5; \timing"`,
 		},
 		{
 			name:          "schema hint connect failure returns empty",
@@ -466,13 +492,13 @@ func psqlGuardErrorCases(twoCols, threeCols []SQLColumn, meta3 map[uint32][2]str
 			connErr:       errors.New("dial fail"),
 			conn:          &fakeSQLCatalogConn{prepareErr: &pgconn.PgError{Code: "42703", Message: `column "bad_col" does not exist`}},
 			wantDeny:      false,
-			wantOverwrite: `psql -A "$DATABASE_URL" -c "SELECT bad_col FROM messages"`,
+			wantOverwrite: `psql -A -w "$DATABASE_URL" -c "SELECT bad_col FROM messages"`,
 		},
 		{
 			name:          "psql empty explain plan ignored",
 			cmd:           `psql "$DATABASE_URL" -c "SELECT id FROM messages"`,
 			conn:          &fakeSQLCatalogConn{cols: twoCols, explainJSON: ""},
-			wantOverwrite: `psql -A "$DATABASE_URL" -c "SELECT id FROM messages"`,
+			wantOverwrite: `psql -A -w "$DATABASE_URL" -c "SELECT id FROM messages"`,
 		},
 	}
 }
@@ -536,21 +562,28 @@ func TestPsqlGuard(t *testing.T) {
 
 func TestDefaultSQLDescriber(t *testing.T) {
 	t.Parallel()
+	sockDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(sockDir, ".s.PGSQL.5432"), []byte("x"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
 	tests := []struct {
 		name        string
 		databaseURL string
+		pgHost      string
 		wantNil     bool
 	}{
-		{"unset", "", true},
-		{"whitespace", "   ", true},
-		{"postgres refused on loopback", "postgres://127.0.0.1:1/aerial?connect_timeout=1", false},
+		{"unset", "", "", true},
+		{"whitespace", "   ", "", true},
+		{"pghost without socket file", "", t.TempDir(), true},
+		{"pghost with socket file fallback", "", sockDir, false},
+		{"postgres refused on loopback", "postgres://127.0.0.1:1/aerial?connect_timeout=1", "", false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			desc := DefaultSQLDescriber(mapEnv(map[string]string{"DATABASE_URL": tc.databaseURL}))
+			desc := DefaultSQLDescriber(mapEnv(map[string]string{"DATABASE_URL": tc.databaseURL, "PGHOST": tc.pgHost}))
 			if (desc == nil) != tc.wantNil {
-				t.Fatalf("DefaultSQLDescriber(%q) nil = %v, want %v", tc.databaseURL, desc == nil, tc.wantNil)
+				t.Fatalf("DefaultSQLDescriber(%q, %q) nil = %v, want %v", tc.databaseURL, tc.pgHost, desc == nil, tc.wantNil)
 			}
 			if desc == nil {
 				return

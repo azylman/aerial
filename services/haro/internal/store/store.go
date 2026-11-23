@@ -527,24 +527,31 @@ func HasRunningHeartbeatRun(ctx context.Context, database *sql.DB, scheduleID st
 	return count > 0, nil
 }
 
-// GetScheduleRun fetches a schedule run by id.
-func GetScheduleRun(ctx context.Context, database *sql.DB, id string) (*model.ScheduleRun, error) {
+const scheduleRunColumns = `id, agent, schedule_id, schedule_type, COALESCE(message_id, ''), COALESCE(target_id, ''), COALESCE(thread_id, ''), COALESCE(title, ''), COALESCE(prompt, ''), status, started_at, completed_at, COALESCE(duration_ms, 0), COALESCE(error, ''), COALESCE(effort, 'medium'), COALESCE(model, '')`
+
+// GetScheduleRunByDispatchID fetches the newest schedule run whose stored
+// dispatch ID (message_id) matches the ID haro sent to eri, so a dispatch
+// outcome resolves the exact run row that started it.
+func GetScheduleRunByDispatchID(ctx context.Context, database *sql.DB, dispatchID string) (*model.ScheduleRun, error) {
+	return getScheduleRunWhere(ctx, database, "dispatch id", dispatchID, `SELECT `+scheduleRunColumns+` FROM schedule_runs WHERE message_id = $1 ORDER BY started_at DESC, id DESC LIMIT 1`)
+}
+
+func getScheduleRunWhere(ctx context.Context, database *sql.DB, label, key, query string) (*model.ScheduleRun, error) {
 	ctx, err := normCtxAndDB(ctx, database)
 	if err != nil {
 		return nil, err
 	}
-	id = strings.TrimSpace(id)
-	if id == "" {
-		return nil, fmt.Errorf("run id cannot be empty")
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return nil, fmt.Errorf("%s cannot be empty", label)
 	}
-	query := `SELECT id, agent, schedule_id, schedule_type, COALESCE(message_id, ''), COALESCE(target_id, ''), COALESCE(thread_id, ''), COALESCE(title, ''), COALESCE(prompt, ''), status, started_at, completed_at, COALESCE(duration_ms, 0), COALESCE(error, ''), COALESCE(effort, 'medium'), COALESCE(model, '') FROM schedule_runs WHERE id = $1`
 	var r model.ScheduleRun
 	var completedAt sql.NullTime
-	row := database.QueryRowContext(ctx, query, id)
+	row := database.QueryRowContext(ctx, query, key)
 	err = row.Scan(&r.ID, &r.Agent, &r.ScheduleID, &r.ScheduleType, &r.MessageID, &r.TargetID, &r.ThreadID, &r.Title, &r.Prompt, &r.Status, &r.StartedAt, &completedAt, &r.DurationMs, &r.Error, &r.Effort, &r.Model)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return nil, fmt.Errorf("schedule run %q not found: %w", id, sql.ErrNoRows)
+			return nil, fmt.Errorf("schedule run %q not found: %w", key, sql.ErrNoRows)
 		}
 		return nil, err
 	}
