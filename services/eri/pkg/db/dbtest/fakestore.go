@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"math"
 	"slices"
 	"sort"
 	"strings"
@@ -35,29 +34,6 @@ func cloneSlice[T any](src []T) []T {
 	return out
 }
 
-func cosineSimilarity(a, b []float32) float64 {
-	if len(a) != len(b) || len(a) == 0 {
-		return 0
-	}
-	var dot, normA, normB float64
-	for i := range a {
-		dot += float64(a[i]) * float64(b[i])
-		normA += float64(a[i]) * float64(a[i])
-		normB += float64(b[i]) * float64(b[i])
-	}
-	if normA == 0 || normB == 0 {
-		return 0
-	}
-	return dot / (math.Sqrt(normA) * math.Sqrt(normB))
-}
-
-func setIf[T comparable](dst *T, src T) {
-	var zero T
-	if src != zero {
-		*dst = src
-	}
-}
-
 func defaultVal[T ~int | ~float64 | ~int64](v, def T) T {
 	if v <= 0 {
 		return def
@@ -82,23 +58,18 @@ type FakeStore struct {
 
 	sessions        map[string]*db.SessionInfo
 	threadSummaries map[string]threadSummaryRecord
-
-	sessionSummaries map[string]*db.SessionSummary
-	transcriptSteps  map[string][]db.TranscriptStep
 }
 
 // NewFakeStore constructs an initialized, empty in-memory FakeStore.
 func NewFakeStore() *FakeStore {
 	f := &FakeStore{
-		failNext:         make(map[string]error),
-		messages:         make(map[string]*db.Message),
-		messageOrder:     make([]string, 0),
-		dispatches:       make(map[string]*db.Dispatch),
-		dispatchOrder:    make([]string, 0),
-		sessions:         make(map[string]*db.SessionInfo),
-		threadSummaries:  make(map[string]threadSummaryRecord),
-		sessionSummaries: make(map[string]*db.SessionSummary),
-		transcriptSteps:  make(map[string][]db.TranscriptStep),
+		failNext:        make(map[string]error),
+		messages:        make(map[string]*db.Message),
+		messageOrder:    make([]string, 0),
+		dispatches:      make(map[string]*db.Dispatch),
+		dispatchOrder:   make([]string, 0),
+		sessions:        make(map[string]*db.SessionInfo),
+		threadSummaries: make(map[string]threadSummaryRecord),
 	}
 	return f
 }
@@ -181,53 +152,6 @@ func cloneMessage(m *db.Message) *db.Message {
 	cp.Mentions, cp.MentionUserIDs = cloneSlice(m.Mentions), cloneSlice(m.MentionUserIDs)
 	cp.MentionRoleIDs, cp.Attachments = cloneSlice(m.MentionRoleIDs), cloneSlice(m.Attachments)
 	return &cp
-}
-
-func cloneDispatch(d *db.Dispatch) *db.Dispatch {
-	if d == nil {
-		return nil
-	}
-	cp := *d
-	return &cp
-}
-
-func cloneSessionSummary(s *db.SessionSummary) *db.SessionSummary {
-	if s == nil {
-		return nil
-	}
-	cp := *s
-	cp.Embedding = cloneSlice(s.Embedding)
-	return &cp
-}
-
-func textMatchScore(text, qLower string, words []string) float64 {
-	lower := strings.ToLower(text)
-	if strings.Contains(lower, qLower) {
-		return 1.0
-	}
-	var matched int
-	for _, w := range words {
-		if strings.Contains(lower, w) {
-			matched++
-		}
-	}
-	if len(words) == 0 {
-		return 0
-	}
-	return float64(matched) / float64(len(words))
-}
-
-func textContainsAll(content, qLower string, words []string) bool {
-	lower := strings.ToLower(content)
-	if strings.Contains(lower, qLower) {
-		return true
-	}
-	for _, w := range words {
-		if !strings.Contains(lower, w) {
-			return false
-		}
-	}
-	return len(words) > 0
 }
 
 func (f *FakeStore) insertMessageLocked(msg db.Message) {
@@ -594,7 +518,7 @@ func (f *FakeStore) InsertDispatch(ctx context.Context, d db.Dispatch) (bool, er
 		if d.RowID == 0 {
 			d.RowID = f.nextDispatchRowID
 		}
-		f.dispatches[d.ID] = cloneDispatch(&d)
+		f.dispatches[d.ID] = clonePtr(&d)
 		f.dispatchOrder = append(f.dispatchOrder, d.ID)
 		return true, nil
 	})
@@ -606,7 +530,7 @@ func (f *FakeStore) GetDispatch(ctx context.Context, id string) (*db.Dispatch, e
 		if !ok {
 			return nil, nil
 		}
-		return cloneDispatch(d), nil
+		return clonePtr(d), nil
 	})
 }
 
@@ -676,7 +600,7 @@ func (f *FakeStore) GetRecentSessionDispatches(ctx context.Context, sessionID st
 		var matches []db.Dispatch
 		for _, v := range slices.Backward(f.dispatchOrder) {
 			if d := f.dispatches[v]; d != nil && d.SessionID == sessionID && d.Status == db.StatusCompleted {
-				matches = append(matches, *cloneDispatch(d))
+				matches = append(matches, *d)
 				if len(matches) >= limit {
 					break
 				}
@@ -726,21 +650,6 @@ func (f *FakeStore) GetSessionID(ctx context.Context, threadID string) (string, 
 
 func (f *FakeStore) GetPreviousSessionID(ctx context.Context, threadID string) (string, error) {
 	return withFakeLock(f, "GetPreviousSessionID", func() (string, error) { return sessionPrevID(f.sessions[db.DiscordSessionID(threadID)]), nil })
-}
-
-func (f *FakeStore) ResolveThreadForSession(ctx context.Context, sessionID string) (string, error) {
-	return withFakeLock(f, "ResolveThreadForSession", func() (string, error) {
-		sessionID = strings.TrimSpace(sessionID)
-		if sessionID == "" {
-			return "", nil
-		}
-		for _, s := range f.sessions {
-			if s.InternalSessionID == sessionID || s.PreviousSessionID == sessionID {
-				return s.ThreadID, nil
-			}
-		}
-		return "", nil
-	})
 }
 
 func (f *FakeStore) SaveSessionID(ctx context.Context, threadID, sessionID string) error {
@@ -800,22 +709,6 @@ func (f *FakeStore) SetSessionInfo(s db.SessionInfo) {
 	f.withLock(func() { f.sessions[s.ThreadID] = clonePtr(&s) })
 }
 
-// FakeTranscriptStack labels every transcript row the FakeStore writes; the fake models a single
-// stack's view, so reads filtered to any other stack return nothing.
-const FakeTranscriptStack = "fake"
-
-func (f *FakeStore) GetSessionSyncStates(ctx context.Context) (map[string]db.SessionSyncState, error) {
-	return withFakeLock(f, "GetSessionSyncStates", func() (map[string]db.SessionSyncState, error) {
-		res := make(map[string]db.SessionSyncState, len(f.sessionSummaries))
-		for id, s := range f.sessionSummaries {
-			if s != nil {
-				res[id] = db.SessionSyncState{SessionID: id, Engine: s.Engine, LastMtime: s.LastMtime, LastIndexedStep: s.LastIndexedStep, IsSettled: s.IsSettled}
-			}
-		}
-		return res, nil
-	})
-}
-
 func (f *FakeStore) hasAnyTurnRowLocked() bool {
 	for _, m := range f.messages {
 		if m != nil && strings.TrimSpace(m.ConversationID) != "" {
@@ -870,306 +763,5 @@ func (f *FakeStore) GetKnownTurnSessionIDs(ctx context.Context) (map[string]bool
 			return nil, nil
 		}
 		return f.collectKnownTurnSessionIDsLocked(), nil
-	})
-}
-
-func updateExistingSessionSummary(existing *db.SessionSummary, summary db.SessionSummary, now time.Time) {
-	setIf(&existing.Engine, summary.Engine)
-	setIf(&existing.ThreadID, summary.ThreadID)
-	setIf(&existing.Summary, summary.Summary)
-	if len(summary.Embedding) > 0 {
-		existing.Embedding = cloneSlice(summary.Embedding)
-	}
-	if summary.LastIndexedStep >= 0 {
-		existing.LastIndexedStep = summary.LastIndexedStep
-	} else if summary.LastIndexedStep == -2 {
-		existing.LastIndexedStep = -1
-	}
-	if !summary.LastMtime.IsZero() {
-		existing.LastMtime = summary.LastMtime
-	}
-	if summary.SummaryStepWatermark >= 0 {
-		existing.SummaryStepWatermark = summary.SummaryStepWatermark
-	}
-	if summary.IsSettled {
-		existing.IsSettled = true
-	} else if summary.LastIndexedStep > existing.SummaryStepWatermark && existing.SummaryStepWatermark >= 0 {
-		existing.IsSettled = false
-	}
-	existing.UpdatedAt = now
-}
-
-func (f *FakeStore) UpsertSessionSummary(ctx context.Context, summary db.SessionSummary) error {
-	return f.withLockErr("UpsertSessionSummary", func() error {
-		if strings.TrimSpace(summary.SessionID) == "" {
-			return fmt.Errorf("session ID cannot be empty")
-		}
-		now := time.Now().UTC()
-		existing := f.sessionSummaries[summary.SessionID]
-		if existing != nil {
-			updateExistingSessionSummary(existing, summary, now)
-			return nil
-		}
-		cp := summary
-		cp.Stack = FakeTranscriptStack
-		if cp.CreatedAt.IsZero() {
-			cp.CreatedAt = now
-		}
-		cp.UpdatedAt = now
-		f.sessionSummaries[summary.SessionID] = cloneSessionSummary(&cp)
-		return nil
-	})
-}
-
-func (f *FakeStore) BackfillToolKinds(ctx context.Context, mapper func(string) string) (int64, error) {
-	return withFakeLock(f, "BackfillToolKinds", func() (int64, error) {
-		if mapper == nil {
-			return 0, fmt.Errorf("tool kind mapper cannot be nil")
-		}
-		var updated int64
-		for _, steps := range f.transcriptSteps {
-			for i := range steps {
-				if steps[i].ToolKind != "" || steps[i].ToolName == "" {
-					continue
-				}
-				if kind := mapper(steps[i].ToolName); kind != "" {
-					steps[i].ToolKind = kind
-					updated++
-				}
-			}
-		}
-		return updated, nil
-	})
-}
-
-func (f *FakeStore) BackfillSessionEngines(ctx context.Context, infer func([]string) string) (int64, error) {
-	return withFakeLock(f, "BackfillSessionEngines", func() (int64, error) {
-		if infer == nil {
-			return 0, fmt.Errorf("engine inference func cannot be nil")
-		}
-		var updated int64
-		for sessionID, sm := range f.sessionSummaries {
-			if sm.Engine != "" {
-				continue
-			}
-			var names []string
-			for _, st := range f.transcriptSteps[sessionID] {
-				if st.ToolName != "" && !slices.Contains(names, st.ToolName) {
-					names = append(names, st.ToolName)
-				}
-			}
-			slices.Sort(names)
-			if engine := infer(names); engine != "" {
-				sm.Engine = engine
-				updated++
-			}
-		}
-		return updated, nil
-	})
-}
-
-// PurgeMigratedLocalTranscripts is a no-op: the fake is a single index with no stranded primary-DB
-// rows, so it never deletes anything. FailNext still arms failures for sweep error-path tests.
-func (f *FakeStore) PurgeMigratedLocalTranscripts(ctx context.Context) (int64, error) {
-	return withFakeLock(f, "PurgeMigratedLocalTranscripts", func() (int64, error) {
-		return 0, nil
-	})
-}
-
-// GetTranscriptStats counts the fake's single stack; it reports nothing when the index is empty
-// or the stack filter excludes it.
-func (f *FakeStore) GetTranscriptStats(ctx context.Context, stack string) ([]db.TranscriptStackStats, error) {
-	return withFakeLock(f, "GetTranscriptStats", func() ([]db.TranscriptStackStats, error) {
-		if len(f.sessionSummaries) == 0 || !fakeStackMatches(stack) {
-			return nil, nil
-		}
-		st := db.TranscriptStackStats{Stack: FakeTranscriptStack, Sessions: len(f.sessionSummaries)}
-		for _, steps := range f.transcriptSteps {
-			st.Steps += len(steps)
-		}
-		return []db.TranscriptStackStats{st}, nil
-	})
-}
-
-// fakeStackMatches reports whether a read filtered to stack can see the fake's single stack.
-func fakeStackMatches(stack string) bool {
-	stack = strings.TrimSpace(stack)
-	return stack == "" || stack == FakeTranscriptStack
-}
-
-// readStep decorates a stored step with its session's engine, as the SQL join does.
-func (f *FakeStore) readStep(s db.TranscriptStep) db.TranscriptStep {
-	if sm := f.sessionSummaries[s.SessionID]; sm != nil {
-		s.Engine = sm.Engine
-	}
-	s.RankScore = 1.0
-	return s
-}
-
-func (f *FakeStore) BatchInsertTranscriptSteps(ctx context.Context, steps []db.TranscriptStep) error {
-	return f.withLockErr("BatchInsertTranscriptSteps", func() error {
-		now := time.Now().UTC()
-		for _, s := range steps {
-			if strings.TrimSpace(s.SessionID) == "" {
-				continue
-			}
-			cp := s
-			cp.Stack = FakeTranscriptStack
-			if cp.CreatedAt.IsZero() {
-				cp.CreatedAt = now
-			}
-			if !slices.ContainsFunc(f.transcriptSteps[s.SessionID], func(e db.TranscriptStep) bool { return e.StepIndex == s.StepIndex }) {
-				f.transcriptSteps[s.SessionID] = append(f.transcriptSteps[s.SessionID], cp)
-			}
-		}
-		return nil
-	})
-}
-
-func (f *FakeStore) SearchSessionSummaries(ctx context.Context, stack string, embedding []float32, queryText string, limit int, minScore float64) ([]db.SessionSummary, error) {
-	return withFakeLock(f, "SearchSessionSummaries", func() ([]db.SessionSummary, error) {
-		hasEmbedding := len(embedding) == db.ExpectedEmbeddingDim
-		queryText = strings.TrimSpace(queryText)
-		hasText := queryText != ""
-		if (!hasEmbedding && !hasText) || !fakeStackMatches(stack) {
-			return nil, nil
-		}
-		limit = defaultVal(limit, 10)
-		if minScore < 0 {
-			minScore = 0.0
-		}
-		qLower, words := strings.ToLower(queryText), strings.Fields(strings.ToLower(queryText))
-		var scored []db.SessionSummary
-		for _, s := range f.sessionSummaries {
-			if s == nil {
-				continue
-			}
-			var sim, textScore float64
-			if hasEmbedding && len(s.Embedding) == db.ExpectedEmbeddingDim {
-				sim = cosineSimilarity(embedding, s.Embedding)
-			}
-			if hasText {
-				textScore = textMatchScore(s.Summary, qLower, words)
-			}
-			score := textScore
-			if hasEmbedding && hasText {
-				score = 0.50*sim + 0.50*textScore
-			} else if hasEmbedding {
-				score = sim
-			}
-			if score >= minScore {
-				cp := *cloneSessionSummary(s)
-				cp.Score = score
-				scored = append(scored, cp)
-			}
-		}
-		sort.Slice(scored, func(i, j int) bool { return scored[i].Score > scored[j].Score })
-		return scored[:min(limit, len(scored))], nil
-	})
-}
-
-func parseAllowedSessions(filter string) map[string]bool {
-	if filter == "" {
-		return nil
-	}
-	allowed := make(map[string]bool)
-	for sid := range strings.SplitSeq(filter, ",") {
-		if trimmed := strings.TrimSpace(sid); trimmed != "" {
-			allowed[trimmed] = true
-		}
-	}
-	return allowed
-}
-
-// matchesToolFilter mirrors the SQL tool filter: bare "mcp" matches any mcp:<server> kind, any
-// other value matches the normalized kind or the engine-native name.
-func matchesToolFilter(s db.TranscriptStep, toolFilter string) bool {
-	switch toolFilter {
-	case "":
-		return true
-	case db.MCPToolFamily:
-		return strings.HasPrefix(s.ToolKind, db.MCPToolFamily+":")
-	}
-	return s.ToolKind == toolFilter || s.ToolName == toolFilter
-}
-
-func matchesTranscriptStep(s db.TranscriptStep, toolFilter string, sinceTime time.Time, queryText, qLower string, words []string) bool {
-	if !matchesToolFilter(s, toolFilter) {
-		return false
-	}
-	if !sinceTime.IsZero() && !s.CreatedAt.After(sinceTime) {
-		return false
-	}
-	if queryText != "" && !textContainsAll(s.Content, qLower, words) {
-		return false
-	}
-	return true
-}
-
-func (f *FakeStore) SearchTranscriptSteps(ctx context.Context, stack, queryText, sessionFilter, toolFilter string, limit int, since ...time.Time) ([]db.TranscriptStep, error) {
-	return withFakeLock(f, "SearchTranscriptSteps", func() ([]db.TranscriptStep, error) {
-		queryText, sessionFilter, toolFilter = strings.TrimSpace(queryText), strings.TrimSpace(sessionFilter), strings.TrimSpace(toolFilter)
-		var sinceTime time.Time
-		if len(since) > 0 {
-			sinceTime = since[0]
-		}
-		if (queryText == "" && sessionFilter == "" && toolFilter == "" && sinceTime.IsZero()) || !fakeStackMatches(stack) {
-			return nil, nil
-		}
-		limit = defaultVal(limit, 20)
-		qLower, words := strings.ToLower(queryText), strings.Fields(strings.ToLower(queryText))
-		allowedSessions := parseAllowedSessions(sessionFilter)
-
-		var matched []db.TranscriptStep
-		for sid, steps := range f.transcriptSteps {
-			if allowedSessions != nil && !allowedSessions[sid] {
-				continue
-			}
-			for _, s := range steps {
-				if !matchesTranscriptStep(s, toolFilter, sinceTime, queryText, qLower, words) {
-					continue
-				}
-				matched = append(matched, f.readStep(s))
-			}
-		}
-
-		if !sinceTime.IsZero() && queryText == "" {
-			sort.Slice(matched, func(i, j int) bool {
-				if matched[i].CreatedAt.Equal(matched[j].CreatedAt) {
-					return matched[i].StepIndex < matched[j].StepIndex
-				}
-				return matched[i].CreatedAt.Before(matched[j].CreatedAt)
-			})
-		} else {
-			sort.Slice(matched, func(i, j int) bool { return matched[i].CreatedAt.After(matched[j].CreatedAt) })
-		}
-		return matched[:min(limit, len(matched))], nil
-	})
-}
-
-func (f *FakeStore) GetTranscriptStepRange(ctx context.Context, stack, sessionID string, startStep, endStep int) ([]db.TranscriptStep, error) {
-	return withFakeLock(f, "GetTranscriptStepRange", func() ([]db.TranscriptStep, error) {
-		sessionID = strings.TrimSpace(sessionID)
-		if sessionID == "" || !fakeStackMatches(stack) {
-			return nil, nil
-		}
-		if startStep < 0 {
-			startStep = 0
-		}
-		if endStep < startStep {
-			endStep = startStep
-		}
-		steps, exists := f.transcriptSteps[sessionID]
-		if !exists {
-			return nil, nil
-		}
-		var matched []db.TranscriptStep
-		for _, s := range steps {
-			if s.StepIndex >= startStep && s.StepIndex <= endStep {
-				matched = append(matched, f.readStep(s))
-			}
-		}
-		sort.Slice(matched, func(i, j int) bool { return matched[i].StepIndex < matched[j].StepIndex })
-		return matched, nil
 	})
 }

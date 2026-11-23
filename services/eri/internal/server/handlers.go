@@ -32,7 +32,6 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/llmcall"
 	"github.com/azylman/aerial/services/eri/pkg/metrics"
 	"github.com/azylman/aerial/services/eri/pkg/queue"
-	"github.com/azylman/aerial/services/eri/pkg/transcript"
 )
 
 type PromptRequest struct {
@@ -542,7 +541,7 @@ func proxyTranscriptRequest(w http.ResponseWriter, r *http.Request, indexerURL, 
 	githubproxy.StreamResponse(w, resp)
 }
 
-func handleTranscriptsSearch(indexerURL string, store db.TranscriptStore, embedder transcript.EmbedderFunc) http.HandlerFunc {
+func handleTranscriptsSearch(indexerURL string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			writeErr(w, http.StatusMethodNotAllowed, "Method not allowed")
@@ -552,11 +551,11 @@ func handleTranscriptsSearch(indexerURL string, store db.TranscriptStore, embedd
 			proxyTranscriptRequest(w, r, indexerURL, "/transcripts/search")
 			return
 		}
-		handleTranscriptSearch(store, embedder)(w, r)
+		writeErr(w, http.StatusServiceUnavailable, "transcripts indexer is not configured")
 	}
 }
 
-func handleTranscriptsStats(indexerURL string, store db.TranscriptStore) http.HandlerFunc {
+func handleTranscriptsStats(indexerURL string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			writeErr(w, http.StatusMethodNotAllowed, "Method not allowed")
@@ -566,11 +565,11 @@ func handleTranscriptsStats(indexerURL string, store db.TranscriptStore) http.Ha
 			proxyTranscriptRequest(w, r, indexerURL, "/transcripts/stats")
 			return
 		}
-		handleTranscriptStats(store)(w, r)
+		writeErr(w, http.StatusServiceUnavailable, "transcripts indexer is not configured")
 	}
 }
 
-func handleTranscriptsSteps(indexerURL string, store db.TranscriptStore) http.HandlerFunc {
+func handleTranscriptsSteps(indexerURL string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			writeErr(w, http.StatusMethodNotAllowed, "Method not allowed")
@@ -580,127 +579,7 @@ func handleTranscriptsSteps(indexerURL string, store db.TranscriptStore) http.Ha
 			proxyTranscriptRequest(w, r, indexerURL, "/transcripts/steps")
 			return
 		}
-		handleTranscriptSteps(store)(w, r)
-	}
-}
-
-func handleTranscriptSearch(store db.TranscriptStore, embedder transcript.EmbedderFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if !requireGetWithStore(w, r, store == nil) {
-			return
-		}
-
-		q := r.URL.Query().Get("q")
-		if q == "" {
-			q = r.URL.Query().Get("query")
-		}
-		mode := r.URL.Query().Get("mode")
-		tool := r.URL.Query().Get("tool")
-		session := r.URL.Query().Get("session")
-		limitStr := r.URL.Query().Get("limit")
-		limit := 10
-		if limitStr != "" {
-			if l, err := strconv.Atoi(limitStr); err == nil && l > 0 {
-				limit = l
-			}
-		}
-
-		var since time.Time
-		if sinceStr := strings.TrimSpace(r.URL.Query().Get("since")); sinceStr != "" {
-			if t, err := time.Parse(time.RFC3339, sinceStr); err == nil {
-				since = t
-			}
-		}
-
-		res, err := transcript.ExecuteTranscriptSearch(r.Context(), store, embedder, transcript.SearchOptions{
-			Stack:         strings.TrimSpace(r.URL.Query().Get("stack")),
-			Query:         q,
-			Mode:          mode,
-			SessionFilter: session,
-			SessionID:     session,
-			ToolFilter:    tool,
-			Limit:         limit,
-			Since:         since,
-		})
-		if err != nil {
-			writeErr(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-
-		httpkit.WriteJSON(w, http.StatusOK, res)
-	}
-}
-
-func handleTranscriptStats(store db.TranscriptStore) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if !requireGetWithStore(w, r, store == nil) {
-			return
-		}
-
-		stacks, err := store.GetTranscriptStats(r.Context(), strings.TrimSpace(r.URL.Query().Get("stack")))
-		if err != nil {
-			writeErr(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-		if stacks == nil {
-			stacks = []db.TranscriptStackStats{}
-		}
-		var totalSessions, totalSteps int
-		for _, st := range stacks {
-			totalSessions += st.Sessions
-			totalSteps += st.Steps
-		}
-
-		httpkit.WriteJSON(w, http.StatusOK, map[string]any{
-			"total_sessions": totalSessions,
-			"total_steps":    totalSteps,
-			"stacks":         stacks,
-			jsonKeyStatus:    "ok",
-		})
-	}
-}
-
-func handleTranscriptSteps(store db.TranscriptStore) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if !requireGetWithStore(w, r, store == nil) {
-			return
-		}
-
-		session := strings.TrimSpace(r.URL.Query().Get("session"))
-		if session == "" {
-			writeErr(w, http.StatusBadRequest, "session parameter is required")
-			return
-		}
-
-		stepStr := strings.TrimSpace(r.URL.Query().Get("step"))
-		if stepStr == "" {
-			writeErr(w, http.StatusBadRequest, "step parameter is required")
-			return
-		}
-		step, err := strconv.Atoi(stepStr)
-		if err != nil || step < 0 {
-			writeErr(w, http.StatusBadRequest, "step parameter must be a non-negative integer")
-			return
-		}
-
-		contextWindow := 2
-		contextStr := strings.TrimSpace(r.URL.Query().Get("context"))
-		if contextStr != "" {
-			c, atoiErr := strconv.Atoi(contextStr)
-			if atoiErr != nil {
-				writeErr(w, http.StatusBadRequest, "context parameter must be an integer")
-				return
-			}
-			contextWindow = c
-		}
-
-		res, err := transcript.GetTranscriptStepWindow(r.Context(), store, r.URL.Query().Get("stack"), session, step, contextWindow)
-		if err != nil {
-			writeErr(w, http.StatusInternalServerError, err.Error())
-			return
-		}
-
-		httpkit.WriteJSON(w, http.StatusOK, res)
+		writeErr(w, http.StatusServiceUnavailable, "transcripts indexer is not configured")
 	}
 }
 
@@ -1011,8 +890,7 @@ func metricsMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-func SetupBrainMuxWithEmbedder(store db.Store, txStore db.TranscriptStore, pool *queue.WorkerPool, embedder transcript.EmbedderFunc, searchPaths ...string) *http.ServeMux {
-	_ = searchPaths
+func SetupBrainMux(store db.Store, pool *queue.WorkerPool) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", metrics.Handler())
 	mux.HandleFunc("/prompt", handlePrompt(store, pool))
@@ -1031,9 +909,9 @@ func SetupBrainMuxWithEmbedder(store db.Store, txStore db.TranscriptStore, pool 
 	mux.HandleFunc("/voice/ask", handleVoiceAsk(pool))
 	mux.HandleFunc("/api/voice/ask", handleVoiceAsk(pool))
 	indexerURL := resolveTranscriptsIndexerURL(cfg, pool)
-	searchHandler := handleTranscriptsSearch(indexerURL, txStore, embedder)
-	statsHandler := handleTranscriptsStats(indexerURL, txStore)
-	stepsHandler := handleTranscriptsSteps(indexerURL, txStore)
+	searchHandler := handleTranscriptsSearch(indexerURL)
+	statsHandler := handleTranscriptsStats(indexerURL)
+	stepsHandler := handleTranscriptsSteps(indexerURL)
 
 	mux.HandleFunc("/transcripts/search", searchHandler)
 	mux.HandleFunc("/api/transcripts/search", searchHandler)

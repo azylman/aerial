@@ -8,10 +8,7 @@ import (
 	"github.com/azylman/aerial/pkg/pgutil"
 )
 
-var (
-	formatPGTextArray = pgutil.FormatPGTextArray
-	parsePGTextArray  = pgutil.ParsePGTextArray
-)
+var formatPGTextArray = pgutil.FormatPGTextArray
 
 type pgStringSlice = pgutil.PGStringSlice
 
@@ -64,9 +61,10 @@ func TestPGTextArray_FormatAndParse(t *testing.T) {
 			if formatted != tc.expected {
 				t.Errorf("formatPGTextArray() = %q, want %q", formatted, tc.expected)
 			}
-			parsed, err := parsePGTextArray(formatted)
-			if err != nil {
-				t.Fatalf("parsePGTextArray() error: %v", err)
+			var parsed []string
+			s := pgStringSlice{Dest: &parsed}
+			if err := s.Scan(formatted); err != nil {
+				t.Fatalf("pgStringSlice.Scan() error: %v", err)
 			}
 			wantLen := len(tc.input)
 			if tc.input == nil {

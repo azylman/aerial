@@ -105,29 +105,3 @@ func (c *LRUCache[V]) Set(key string, val V) {
 	el := c.ll.PushFront(entry)
 	c.items[key] = el
 }
-
-// Delete removes an item from the cache.
-func (c *LRUCache[V]) Delete(key string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if el, ok := c.items[key]; ok {
-		c.ll.Remove(el)
-		delete(c.items, key)
-	}
-}
-
-// Len returns the number of active entries currently stored in the cache.
-func (c *LRUCache[V]) Len() int {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.ll.Len()
-}
-
-// Clear removes all entries from the cache.
-func (c *LRUCache[V]) Clear() {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.ll.Init()
-	c.items = make(map[string]*list.Element, c.maxEntries)
-}

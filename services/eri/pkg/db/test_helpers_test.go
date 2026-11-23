@@ -58,8 +58,3 @@ func assertStoreUnavailable(t *testing.T, s Store) {
 	requireErr(t, c1(s.BeginDispatchAttempt(ctx, "id", 1)), "BeginDispatchAttempt")
 	requireErr(t, c1(s.ListActiveDispatchSessionKeys(ctx, "d", "b")), "ListActiveDispatchSessionKeys")
 }
-
-func newTestTranscriptStore(t testing.TB, stack string) *SQLTranscriptStore {
-	t.Helper()
-	return NewSQLTranscriptStore(initTestSQLiteDB(t), stack)
-}
