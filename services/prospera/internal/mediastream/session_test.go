@@ -193,10 +193,13 @@ func TestMediaStreamBridge_Lifecycle(t *testing.T) {
 
 	exerciseBridgeSteerAndAMD(t, sessionMgr, "call-test-bridge", "CA_twilio_123")
 
-	receivedMedia := waitForHangupMark(t, twilioWS)
-	if !receivedMedia {
-		t.Error("expected to receive paced media frames on Twilio WebSocket")
+	waitForMediaFrame(t, twilioWS)
+
+	if err := sessionMgr.SteerCall(t.Context(), "call-test-bridge", "test_end_trigger", "guidance"); err != nil {
+		t.Fatalf("trigger end_call err: %v", err)
 	}
+
+	waitForHangupMark(t, twilioWS)
 
 	select {
 	case <-sess.Done():
@@ -378,9 +381,31 @@ func injectTwilioAudioFrames(t *testing.T, ws *websocket.Conn) {
 	}
 }
 
-func waitForHangupMark(t *testing.T, ws *websocket.Conn) bool {
+func waitForMediaFrame(t *testing.T, ws *websocket.Conn) {
 	t.Helper()
-	var receivedMedia bool
+	for {
+		if err := ws.SetReadDeadline(time.Now().Add(3 * time.Second)); err != nil {
+			t.Fatalf("SetReadDeadline failed: %v", err)
+		}
+		_, data, err := ws.ReadMessage()
+		if err != nil {
+			t.Fatalf("reading from Twilio WS failed: %v", err)
+		}
+		var evt map[string]any
+		if err := json.Unmarshal(data, &evt); err != nil {
+			continue
+		}
+		if evt["event"] == "media" {
+			if evt["streamSid"] != "MZ123" {
+				t.Errorf("outbound media frame streamSid = %v, want MZ123", evt["streamSid"])
+			}
+			return
+		}
+	}
+}
+
+func waitForHangupMark(t *testing.T, ws *websocket.Conn) {
+	t.Helper()
 	for {
 		if err := ws.SetReadDeadline(time.Now().Add(3 * time.Second)); err != nil {
 			t.Fatalf("SetReadDeadline failed: %v", err)
@@ -393,12 +418,6 @@ func waitForHangupMark(t *testing.T, ws *websocket.Conn) bool {
 		if err := json.Unmarshal(data, &evt); err != nil {
 			continue
 		}
-		if evt["event"] == "media" {
-			receivedMedia = true
-			if evt["streamSid"] != "MZ123" {
-				t.Errorf("outbound media frame streamSid = %v, want MZ123", evt["streamSid"])
-			}
-		}
 		if markObj, ok := evt["mark"].(map[string]any); ok && evt["event"] == "mark" && markObj["name"] == "hangup" {
 			if err := ws.WriteJSON(map[string]any{
 				"event":     "mark",
@@ -407,7 +426,7 @@ func waitForHangupMark(t *testing.T, ws *websocket.Conn) bool {
 			}); err != nil {
 				t.Fatalf("WriteJSON hangup mark failed: %v", err)
 			}
-			return receivedMedia
+			return
 		}
 	}
 }
@@ -889,9 +908,6 @@ func exerciseBridgeSteerAndAMD(t *testing.T, sessionMgr *CallSessionManager, cal
 	}
 	if err := sessionMgr.HandleAMDWebhook(t.Context(), providerSID, "human"); err != nil {
 		t.Fatalf("HandleAMDWebhook() error: %v", err)
-	}
-	if err := sessionMgr.SteerCall(t.Context(), callID, "test_end_trigger", "guidance"); err != nil {
-		t.Fatalf("trigger end_call err: %v", err)
 	}
 }
 

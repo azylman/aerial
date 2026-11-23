@@ -35,18 +35,7 @@ const (
 	DefaultShortFrictionMinRepeats = 5
 )
 
-var (
-	validSkillNameRegex = regexp.MustCompile(`^[a-z0-9-]+$`)
-	_                   = []any{
-		cleanOuterCodeFences,
-		ParseSkillFrontmatter,
-		ScanCustomSkills,
-		PlanSkillConsolidation,
-		findCandidateCliques,
-		ValidateCompiledSkillMarkdown,
-		buildSkillDesignerPrompt,
-	}
-)
+var validSkillNameRegex = regexp.MustCompile(`^[a-z0-9-]+$`)
 
 // DiskSkill represents a custom skill scanned from the disk repository.
 type DiskSkill struct {

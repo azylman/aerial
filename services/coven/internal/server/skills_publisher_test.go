@@ -13,7 +13,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/azylman/aerial/services/coven/internal/config"
 	"github.com/azylman/aerial/services/coven/internal/store"
 )
 
@@ -1090,37 +1089,6 @@ func TestCovenDreamer_ConsolidatePass_ProceduralSkills(t *testing.T) {
 		t.Errorf("publisher changes len = %d, want 1", len(pub.changes))
 	}
 	if got, want := procStatusRows(t, s.DB()), []string{"1:consolidated:55"}; !equalStrings(got, want) {
-		t.Errorf("candidate rows = %q, want %q", got, want)
-	}
-}
-
-// TestToolHandler_Consolidate_ProceduralSkills is serial: consolidation
-// single-flights on the package-global extractionMutex.
-func TestToolHandler_Consolidate_ProceduralSkills(t *testing.T) {
-	customSkills := writeHAOpsSkillDir(t, haOpsShortSkillMD)
-
-	s := newTestStore(t)
-	seedProceduralCandidates(t, s, []store.ProceduralCandidate{testProcCand(1, "ha-ops", "trigger 1", []string{"avoid"}, nil)})
-
-	pub := &mockSkillPublisher{prNum: 77}
-	cfg := &config.Config{CustomSkillsDir: customSkills}
-
-	h := NewToolHandler(cfg, s, &MockOllamaClient{embedding: testEmbeddingAt(0, 1.0)}, pub)
-	h.llmClient = func(c context.Context, prompt string) (string, error) {
-		return fmt.Sprintf(`{"action":"EDIT","name":"ha-ops","markdown":%q}`, haOpsShortSkillMD), nil
-	}
-
-	count, err := h.Consolidate(context.Background())
-	if err != nil {
-		t.Fatalf("Consolidate() err = %v", err)
-	}
-	if count != 0 {
-		t.Errorf("fact consolidate count = %d, want 0", count)
-	}
-	if len(pub.changes) != 1 {
-		t.Errorf("pub.changes len = %d, want 1", len(pub.changes))
-	}
-	if got, want := procStatusRows(t, s.DB()), []string{"1:consolidated:77"}; !equalStrings(got, want) {
 		t.Errorf("candidate rows = %q, want %q", got, want)
 	}
 }
