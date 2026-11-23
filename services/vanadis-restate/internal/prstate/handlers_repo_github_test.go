@@ -3,6 +3,7 @@ package prstate
 import (
 	"context"
 	"fmt"
+	"maps"
 	"sync"
 	"testing"
 
@@ -191,17 +192,16 @@ func TestRepoHandlersHandleAutoUpdate(t *testing.T) {
 				fetches: map[int]fetchResult{5: {pr: GitHubPR{Number: 5, State: "closed", Head: GitHubPRRef{Ref: "b5", SHA: "h5"}}}, 7: {pr: GitHubPR{Number: 7, State: "open"}}},
 			},
 			wantOutcome: RepoEffectOutcome{
-				Key: EffectKey{Repo: "azylman/aerial", PRNumber: 9, HeadSHA: "h9", Kind: prwire.EffectGitHubAutoUpdate, CheckName: "CI Gate"}, Executed: true, Err: errGHInvalid, Forwards: 6,
+				Key: EffectKey{Repo: "azylman/aerial", PRNumber: 9, HeadSHA: "h9", Kind: prwire.EffectGitHubAutoUpdate, CheckName: "CI Gate"}, Executed: true, Err: errGHInvalid, Forwards: 5,
 				Updates: []BranchUpdate{{PRNumber: 4, HeadSHA: "h4", Outcome: UpdateBranchConflict}, {PRNumber: 5, HeadSHA: "h5", Outcome: UpdateBranchHeadMissing}, {PRNumber: 7, HeadSHA: "h7", Outcome: UpdateBranchHeadMissing}, {PRNumber: 8, HeadSHA: "h8", Outcome: UpdateBranchUpToDate}},
 			},
 			wantCalls: []string{"list azylman/aerial", "checks h2", "checks h4", "update 4", "checks h5", "update 5", "fetch 5", "checks h6", "update 6", "checks h7", "update 7", "fetch 7", "checks h8", "update 8"},
 			wantSent: []sentPR{
 				{handler: prwire.PRHandlerBranchConflict, ev: PREvent{Event: "branch_conflict", Repo: "azylman/aerial", PRNumber: 4, HeadSHA: "h4", Branch: "b4", Title: "PR 4", EriEffects: []EriEffect{conflictDM}}},
 				{handler: prwire.PRHandlerHeadRefMissing, ev: PREvent{Event: "head_ref_missing", Repo: "azylman/aerial", PRNumber: 5, HeadSHA: "h5", Branch: "b5"}},
-				queueCheckStatusSent("azylman/aerial", 8, "b8", "h8", "1/4", 1),
-				queueCheckStatusSent("azylman/aerial", 2, "b2", "h2", "2/4", 2),
-				queueCheckStatusSent("azylman/aerial", 6, "b6", "h6", "3/4", 3),
-				queueCheckStatusSent("azylman/aerial", 10, "b10", "h10", "4/4", 4),
+				queueCheckStatusSent("azylman/aerial", 8, "b8", "h8", "1/3", 1),
+				queueCheckStatusSent("azylman/aerial", 6, "b6", "h6", "2/3", 2),
+				queueCheckStatusSent("azylman/aerial", 10, "b10", "h10", "3/3", 3),
 			},
 			wantEffects: []string{"azylman/aerial#9@h9:gen0:github_auto_update:check=ci gate"},
 		},
@@ -414,10 +414,29 @@ func openGitHubDirtyPR(n int, author, sha string) GitHubPR {
 }
 
 type fencingSeed struct {
-	mainSHA       string
-	updatedPRs    []int
-	indexPRs      []PRIndexEvent
-	fannedOutMain string
+	mainSHA        string
+	updatedPRs     []int
+	indexPRs       []PRIndexEvent
+	fannedOutMain  string
+	queuePositions map[int]string
+	blockedHeads   map[int]string
+}
+
+func seedFencingRepoState(seed fencingSeed) *RepoState {
+	st := NewRepoState("azylman/aerial")
+	if seed.mainSHA != "" {
+		st.RecordMainPushSHA(seed.mainSHA)
+	}
+	for _, pr := range seed.updatedPRs {
+		st.MarkPRUpdatedForMain(pr)
+	}
+	for _, ev := range seed.indexPRs {
+		st.ApplyPRIndex(ev)
+	}
+	st.QueuePositions = maps.Clone(seed.queuePositions)
+	st.BlockedHeads = maps.Clone(seed.blockedHeads)
+	st.FannedOutMainSHA = seed.fannedOutMain
+	return st
 }
 
 func TestRepoHandlersHandleAutoUpdate_Fencing(t *testing.T) {
@@ -457,10 +476,6 @@ func TestRepoHandlersHandleAutoUpdate_Fencing(t *testing.T) {
 			gh:            &fakeGitHub{prs: prsTwo, blocked: map[string]bool{"h1": true}, updates: map[int]updateResult{2: {outcome: UpdateBranchUpdated}}},
 			wantUpdates:   []BranchUpdate{{PRNumber: 2, HeadSHA: "h2", Outcome: UpdateBranchUpdated}},
 			wantFencedPR2: true,
-			wantSent: []sentPR{
-				queueCheckStatusSent("azylman/aerial", 2, "b2", "h2", "1/2", 1),
-				queueCheckStatusSent("azylman/aerial", 1, "b1", "h1", "2/2", 2),
-			},
 		},
 		{
 			name:          "check failure by pr number clears fence and updates pr2",
@@ -469,10 +484,6 @@ func TestRepoHandlersHandleAutoUpdate_Fencing(t *testing.T) {
 			gh:            &fakeGitHub{prs: prsTwo, blocked: map[string]bool{"h1": true}, updates: map[int]updateResult{2: {outcome: UpdateBranchUpdated}}},
 			wantUpdates:   []BranchUpdate{{PRNumber: 2, HeadSHA: "h2", Outcome: UpdateBranchUpdated}},
 			wantFencedPR2: true,
-			wantSent: []sentPR{
-				queueCheckStatusSent("azylman/aerial", 2, "b2", "h2", "1/2", 1),
-				queueCheckStatusSent("azylman/aerial", 1, "b1", "h1", "2/2", 2),
-			},
 		},
 		{
 			name:          "check failure by head sha clears fence and updates pr2",
@@ -481,10 +492,6 @@ func TestRepoHandlersHandleAutoUpdate_Fencing(t *testing.T) {
 			gh:            &fakeGitHub{prs: prsTwo, blocked: map[string]bool{"h1": true}, updates: map[int]updateResult{2: {outcome: UpdateBranchUpdated}}},
 			wantUpdates:   []BranchUpdate{{PRNumber: 2, HeadSHA: "h2", Outcome: UpdateBranchUpdated}},
 			wantFencedPR2: true,
-			wantSent: []sentPR{
-				queueCheckStatusSent("azylman/aerial", 2, "b2", "h2", "1/2", 2),
-				queueCheckStatusSent("azylman/aerial", 1, "b1", "h1", "2/2", 3),
-			},
 		},
 		{
 			name:          "route by sha check failure clears fence before auto update",
@@ -496,8 +503,6 @@ func TestRepoHandlersHandleAutoUpdate_Fencing(t *testing.T) {
 			wantFencedPR2: true,
 			wantSent: []sentPR{
 				{handler: prwire.PRHandlerCheckFailed, ev: PREvent{Event: "check_failed", Repo: "azylman/aerial", PRNumber: 1, Branch: "feat-1", HeadSHA: "h1"}},
-				queueCheckStatusSent("azylman/aerial", 2, "b2", "h2", "1/2", 2),
-				queueCheckStatusSent("azylman/aerial", 1, "b1", "h1", "2/2", 3),
 			},
 		},
 		{
@@ -517,10 +522,30 @@ func TestRepoHandlersHandleAutoUpdate_Fencing(t *testing.T) {
 			wantUpdates:   []BranchUpdate{{PRNumber: 2, HeadSHA: "h2", Outcome: UpdateBranchUpdated}},
 			wantFencedPR2: true,
 			wantSent: []sentPR{
-				queueCheckStatusSent("azylman/aerial", 2, "b2", "h2", "1/2", 3),
-				queueCheckStatusSent("azylman/aerial", 1, "b1", "h1", "2/2", 4),
 				mainAdvanced(1),
 				mainAdvanced(2),
+			},
+		},
+		{
+			name:          "queued pr1 ci failure excludes it and drains pr2 to 1/1",
+			seed:          fencingSeed{mainSHA: "m1", updatedPRs: []int{1}, queuePositions: map[int]string{1: "h1@1/2", 2: "h2@2/2"}},
+			autoUpdateEV:  RepoEvent{Repo: "azylman/aerial", PRNumber: 1, HeadSHA: "h1", CheckName: "", AutoUpdate: defaultPolicy},
+			gh:            &fakeGitHub{prs: prsTwo, blocked: map[string]bool{"h1": true}, updates: map[int]updateResult{2: {outcome: UpdateBranchUpdated}}},
+			wantUpdates:   []BranchUpdate{{PRNumber: 2, HeadSHA: "h2", Outcome: UpdateBranchUpdated}},
+			wantFencedPR2: true,
+			wantSent: []sentPR{
+				queueCheckStatusSent("azylman/aerial", 2, "b2", "h2", "1/1", 1),
+			},
+		},
+		{
+			name:          "in-place rerun recovery unblocks pr1 while pr2 is fenced",
+			seed:          fencingSeed{mainSHA: "m1", updatedPRs: []int{2}, blockedHeads: map[int]string{1: "h1"}},
+			autoUpdateEV:  RepoEvent{Repo: "azylman/aerial", PRNumber: 1, HeadSHA: "h1", CheckName: "ci-gate", AutoUpdate: defaultPolicy},
+			gh:            &fakeGitHub{prs: prsTwo},
+			wantFencedPR2: true,
+			wantSent: []sentPR{
+				queueCheckStatusSent("azylman/aerial", 2, "b2", "h2", "1/2", 1),
+				queueCheckStatusSent("azylman/aerial", 1, "b1", "h1", "2/2", 2),
 			},
 		},
 	}
@@ -528,17 +553,7 @@ func TestRepoHandlersHandleAutoUpdate_Fencing(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			store := NewMemRepoStore()
-			st := NewRepoState("azylman/aerial")
-			if tc.seed.mainSHA != "" {
-				st.RecordMainPushSHA(tc.seed.mainSHA)
-			}
-			for _, pr := range tc.seed.updatedPRs {
-				st.MarkPRUpdatedForMain(pr)
-			}
-			for _, ev := range tc.seed.indexPRs {
-				st.ApplyPRIndex(ev)
-			}
-			st.FannedOutMainSHA = tc.seed.fannedOutMain
+			st := seedFencingRepoState(tc.seed)
 			store.SaveRepo(st)
 
 			prs := &fakePRSender{}

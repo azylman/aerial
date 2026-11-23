@@ -252,6 +252,7 @@ func (h *RepoHandlers) RouteBySHA(ctx context.Context, kind string, ev SHAEvent)
 	if entry, ok := st.ResolveSHA(sha); ok {
 		if ev.Handler == prwire.PRHandlerCheckFailed {
 			st.ClearPRUpdatedForMain(entry.PRNumber)
+			st.MarkPRHeadBlocked(entry.PRNumber, sha)
 			h.store.SaveRepo(st)
 		}
 		if err := h.prs.SendPR(ctx, ev.Handler, forwardSHAEvent(kind, repo, entry, ev)); err != nil {
@@ -310,6 +311,7 @@ func (h *RepoHandlers) ReplayHeld(ctx context.Context, repo, sha string) error {
 	for _, ev := range held {
 		if ev.Event.Handler == prwire.PRHandlerCheckFailed {
 			st.ClearPRUpdatedForMain(entry.PRNumber)
+			st.MarkPRHeadBlocked(entry.PRNumber, ev.Event.SHA)
 		}
 		if err := h.prs.SendPR(ctx, ev.Event.Handler, forwardSHAEvent(ev.Kind, repo, entry, ev.Event)); err != nil {
 			return fmt.Errorf("replay held %s@%s: %w", repo, ev.Event.SHA, err)
@@ -470,13 +472,15 @@ func (h *RepoHandlers) HandleAutoUpdate(ctx context.Context, ev RepoEvent) (Repo
 	if strings.TrimSpace(ev.CheckName) == "" {
 		if ev.PRNumber > 0 {
 			st.ClearPRUpdatedForMain(ev.PRNumber)
+			st.MarkPRHeadBlocked(ev.PRNumber, ev.HeadSHA)
 		} else if strings.TrimSpace(ev.HeadSHA) != "" {
 			if entry, ok := st.ResolveSHA(ev.HeadSHA); ok {
 				st.ClearPRUpdatedForMain(entry.PRNumber)
+				st.MarkPRHeadBlocked(entry.PRNumber, ev.HeadSHA)
 			}
 		}
 	}
-	sendErr := h.runAutoUpdate(ctx, st, ev.AutoUpdate, &out)
+	sendErr := h.runAutoUpdate(ctx, st, ev, &out)
 	if !out.Retry {
 		out.Executed = true
 		st.MarkRepoEffect(out.Key)
@@ -486,8 +490,9 @@ func (h *RepoHandlers) HandleAutoUpdate(ctx context.Context, ev RepoEvent) (Repo
 }
 
 // runAutoUpdate walks the open PRs for one restate-owned cascade.
-func (h *RepoHandlers) runAutoUpdate(ctx context.Context, st *RepoState, policy *AutoUpdatePolicy, out *RepoEffectOutcome) error {
+func (h *RepoHandlers) runAutoUpdate(ctx context.Context, st *RepoState, ev RepoEvent, out *RepoEffectOutcome) error {
 	repo := st.Repo
+	policy := ev.AutoUpdate
 	prs, gerr := h.github.ListOpenPRs(ctx, repo)
 	if gerr != nil {
 		out.Err, out.Retry = gerr, gerr.Retryable()
@@ -498,6 +503,9 @@ func (h *RepoHandlers) runAutoUpdate(ctx context.Context, st *RepoState, policy 
 		errs = append(errs, h.updateFirstEligibleBranch(ctx, st, policy, prs, out)...)
 	}
 	if !out.Retry {
+		if strings.TrimSpace(ev.CheckName) != "" && ev.PRNumber > 0 && st.IsPRHeadBlocked(ev.PRNumber, ev.HeadSHA) && !h.github.HeadChecksBlocked(ctx, st.Repo, ev.HeadSHA) {
+			st.ClearPRHeadBlocked(ev.PRNumber)
+		}
 		if berr := h.broadcastMergeQueue(ctx, st, policy, prs, out); berr != nil {
 			errs = append(errs, berr)
 		}
@@ -525,9 +533,14 @@ func (h *RepoHandlers) updateFirstEligibleBranch(ctx context.Context, st *RepoSt
 	repo := st.Repo
 	var errs []error
 	for _, pr := range prs {
-		if !autoUpdateEligible(st, policy, pr) || h.github.HeadChecksBlocked(ctx, repo, pr.Head.SHA) {
+		if !autoUpdateEligible(st, policy, pr) {
 			continue
 		}
+		if h.github.HeadChecksBlocked(ctx, repo, pr.Head.SHA) {
+			st.MarkPRHeadBlocked(pr.Number, pr.Head.SHA)
+			continue
+		}
+		st.ClearPRHeadBlocked(pr.Number)
 		outcome, gerr := h.github.UpdateBranch(ctx, repo, pr.Number)
 		if gerr != nil {
 			out.Err = gerr
@@ -567,6 +580,9 @@ func (h *RepoHandlers) broadcastMergeQueue(ctx context.Context, st *RepoState, p
 			continue
 		}
 		if failedInUpdates(out.Updates, pr.Number) {
+			continue
+		}
+		if st.IsPRHeadBlocked(pr.Number, pr.Head.SHA) {
 			continue
 		}
 		candidates = append(candidates, pr)
