@@ -575,8 +575,8 @@ func TestClassifier_ProcessPools(t *testing.T) {
 			outR, outW := io.Pipe()
 			inR, inW := io.Pipe()
 			errR, errW := io.Pipe()
-			defer errW.Close()
 			go func() {
+				defer errW.Close()
 				if _, err := fmt.Fprintf(outW, "{\"event\":\"init\",\"session_id\":\"00000000-0000-0000-0000-000000000099\"}\n"); err != nil {
 					return
 				}

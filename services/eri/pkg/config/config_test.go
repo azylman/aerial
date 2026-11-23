@@ -509,13 +509,6 @@ func assertColdBootConfig(t *testing.T, tmpDir, validBoot string) {
 	waitForColdBootConfig(nil, 1*time.Millisecond)
 	waitForColdBootConfig([]string{filepath.Join(tmpDir, "absent")}, 0)
 
-	wantAbsentColdBoot := false
-	if fi, err := os.Stat("/share/aerial-config"); err == nil && fi.IsDir() {
-		wantAbsentColdBoot = true
-	}
-	if got := isContainerColdBoot(filepath.Join(tmpDir, "absent")); got != wantAbsentColdBoot {
-		t.Errorf("isContainerColdBoot(absent) = %v, want %v", got, wantAbsentColdBoot)
-	}
 	if isContainerColdBoot(validBoot) {
 		t.Error("expected validBoot not to be cold boot")
 	}

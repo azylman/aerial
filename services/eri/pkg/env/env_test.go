@@ -82,7 +82,7 @@ func writeTestFile(t *testing.T, path, content string) string {
 	return path
 }
 
-func newTestProvisioner(t *testing.T, aerialFiles, configFiles map[string]string) (*Provisioner, string, string) {
+func newTestProvisioner(t *testing.T, aerialFiles, configFiles map[string]string) *Provisioner {
 	t.Helper()
 	aerialDir := filepath.Join(t.TempDir(), "aerial")
 	configDir := filepath.Join(t.TempDir(), "config")
@@ -95,7 +95,7 @@ func newTestProvisioner(t *testing.T, aerialFiles, configFiles map[string]string
 	p := newDisabledProvisioner(t, t.TempDir(), t.TempDir())
 	p.SetAerialRulesDir(aerialDir)
 	p.SetConfigRulesDir(configDir)
-	return p, aerialDir, configDir
+	return p
 }
 
 func writeSkillFixture(t *testing.T, baseDir, relPath, content string) string {
@@ -438,14 +438,11 @@ func runSyncCase(t *testing.T, tc syncCase) {
 		getEuid = func() int { return 1000 }
 	}
 
-	p, _, aerialConfigDir := newTestProvisioner(t, map[string]string{
+	p := newTestProvisioner(t, map[string]string{
 		"common/01_base.md":  "Base rule content",
 		"discord/01_flow.md": "Discord flow content",
 		"voice/01_flow.md":   "Voice flow content",
 	}, nil)
-	if aerialConfigDir == "" {
-		t.Fatal("expected non-empty aerialConfigDir")
-	}
 
 	if tc.homeIsRoot {
 		setupMockRootHome(t, p, &chmodded)

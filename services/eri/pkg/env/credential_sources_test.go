@@ -81,10 +81,7 @@ func TestSyncCredentialSnapshot(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			p, _, aerialConfigDir := newTestProvisioner(t, map[string]string{"common/01_base.md": "test rule"}, nil)
-			if aerialConfigDir == "" {
-				t.Fatal("expected non-empty aerialConfigDir")
-			}
+			p := newTestProvisioner(t, map[string]string{"common/01_base.md": "test rule"}, nil)
 			p.SetCustomSkillsDir(t.TempDir())
 			p.SetSuperpowersDir(t.TempDir())
 			p.SetAgentsSkillsDir(t.TempDir())

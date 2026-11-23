@@ -204,7 +204,7 @@ func runCompileAndDiscoverRulesCase(t *testing.T, tc compileAndDiscoverRulesCase
 		content = ""
 	}
 
-	p, aerialDir, configDir := newTestProvisioner(t, map[string]string{
+	p := newTestProvisioner(t, map[string]string{
 		"common/01_identity.md":     "Aerial core identity",
 		"discord/01_chat.md":        "Discord chat handling",
 		"discord/claude/01_exec.md": "Claude discord instructions",
@@ -219,7 +219,7 @@ func runCompileAndDiscoverRulesCase(t *testing.T, tc compileAndDiscoverRulesCase
 		"discord/codex/10_custom.md":  "User codex customizations",
 	})
 
-	setupCompileRuleBlockers(t, aerialDir, configDir, tc)
+	setupCompileRuleBlockers(t, p.aerialRulesDir, p.configRulesDir, tc)
 
 	var rules []ruleSourceFile
 	var err error
@@ -649,7 +649,7 @@ func runSyncRulesCase(t *testing.T, tc syncRulesCase) {
 		return
 	}
 
-	p, aerialDir, aerialConfigDir := newTestProvisioner(t, map[string]string{
+	p := newTestProvisioner(t, map[string]string{
 		"common/01_rule.md":           "Common content",
 		"discord/01_rule.md":          "Discord content",
 		"discord/agy/01_agy.md":       "Agy Discord Content",
@@ -659,9 +659,6 @@ func runSyncRulesCase(t *testing.T, tc syncRulesCase) {
 		"voice/01_rule.md":            "Voice content",
 		"ephemeral/01_rule.md":        "Ephemeral content",
 	}, nil)
-	if aerialConfigDir == "" {
-		t.Fatal("expected non-empty aerialConfigDir")
-	}
 	if tc.noDataDir {
 		np := newDisabledProvisioner(t, t.TempDir(), "")
 		np.SetAerialRulesDir(p.aerialRulesDir)
@@ -680,16 +677,16 @@ func runSyncRulesCase(t *testing.T, tc syncRulesCase) {
 	}
 
 	if tc.voiceFail {
-		writeTestFile(t, filepath.Join(aerialDir, "voice", "torn.md"), "")
+		writeTestFile(t, filepath.Join(p.aerialRulesDir, "voice", "torn.md"), "")
 	}
 	if tc.ephemeralFail {
-		writeTestFile(t, filepath.Join(aerialDir, "ephemeral", "torn.md"), "")
+		writeTestFile(t, filepath.Join(p.aerialRulesDir, "ephemeral", "torn.md"), "")
 	}
 	if tc.claudeDiscordFail {
-		writeTestFile(t, filepath.Join(aerialDir, "discord", "claude", "torn.md"), "")
+		writeTestFile(t, filepath.Join(p.aerialRulesDir, "discord", "claude", "torn.md"), "")
 	}
 	if tc.codexDiscordFail {
-		writeTestFile(t, filepath.Join(aerialDir, "discord", "codex", "torn.md"), "")
+		writeTestFile(t, filepath.Join(p.aerialRulesDir, "discord", "codex", "torn.md"), "")
 	}
 	if tc.primaryFail {
 		writeTestFile(t, filepath.Join(p.homeDir, ".gemini", "rules"), "file blocker")
