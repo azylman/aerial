@@ -43,12 +43,18 @@ func TestNormalizeE164(t *testing.T) {
 func TestResolveConfigPath(t *testing.T) {
 	tmpDir := t.TempDir()
 	validLocal := filepath.Join(tmpDir, "local_valid.yaml")
-	_ = os.WriteFile(validLocal, []byte("port: '4019'\n"), 0o644)
+	if err := os.WriteFile(validLocal, []byte("port: '4019'\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(validLocal): %v", err)
+	}
 	emptyLocal := filepath.Join(tmpDir, "local_empty.yaml")
-	_ = os.WriteFile(emptyLocal, []byte(""), 0o644)
+	if err := os.WriteFile(emptyLocal, []byte(""), 0o644); err != nil {
+		t.Fatalf("WriteFile(emptyLocal): %v", err)
+	}
 	nonExistent := filepath.Join(tmpDir, "nonexistent.yaml")
 	fallbackFile := filepath.Join(tmpDir, "fallback.yaml")
-	_ = os.WriteFile(fallbackFile, []byte("port: '4019'\n"), 0o644)
+	if err := os.WriteFile(fallbackFile, []byte("port: '4019'\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(fallbackFile): %v", err)
+	}
 
 	fallback := "/config/prospera.yaml"
 	tests := []struct {

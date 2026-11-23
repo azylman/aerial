@@ -83,7 +83,10 @@ func TestSetupProsperaBus(t *testing.T) {
 				t.Fatalf("unknown busMode %q", tc.busMode)
 			}
 
-			server, _, _ := setupTestServer()
+			server, _, cfg := setupTestServer()
+			if cfg == nil {
+				t.Fatal("setupTestServer returned nil config")
+			}
 			bus := setupProsperaBus(context.Background(), server, tc.natsURL)
 			if (bus == nil) != tc.wantNil {
 				t.Fatalf("setupProsperaBus() nil = %v, wantNil = %v", bus == nil, tc.wantNil)
@@ -114,7 +117,11 @@ func runRegisterRestateDeploymentCase(t *testing.T, tc registerTestCase) {
 	var receivedPath string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		receivedPath = r.URL.Path
-		b, _ := io.ReadAll(r.Body)
+		b, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("io.ReadAll: %v", err)
+			return
+		}
 		receivedBody = string(b)
 		w.WriteHeader(tc.statusCode)
 		if tc.statusCode >= 300 {
@@ -242,7 +249,9 @@ func runSweepUnfinishedReportsTest(t *testing.T, tc sweepTestCase) {
 		st = fakes.NewFakeStore()
 		st.OpErr = tc.storeErr
 		for _, c := range tc.calls {
-			_ = st.CreateOutboundCall(context.Background(), c, 5)
+			if err := st.CreateOutboundCall(context.Background(), c, 5); err != nil {
+				t.Fatalf("CreateOutboundCall: %v", err)
+			}
 		}
 	}
 

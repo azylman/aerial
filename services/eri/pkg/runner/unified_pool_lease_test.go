@@ -160,8 +160,8 @@ func assertLeaseReleaseAndRotation(t *testing.T, pool *UnifiedProcessPool, lease
 	if tc.concurrencyConflict {
 		if lease3, err3 := pool.AcquireLease(context.Background(), targetKey); err3 != nil {
 			t.Fatalf("lease3 error: %v", err3)
-		} else {
-			_ = lease3.Release()
+		} else if err := lease3.Release(); err != nil {
+			t.Fatalf("lease3 release error: %v", err)
 		}
 	}
 
@@ -371,7 +371,9 @@ func verifyVanadisWarmupLease(ctx context.Context, t *testing.T, pool *UnifiedPr
 	if _, err := lease0.Execute(ctx, &TurnContext{TurnID: "t0", Prompt: "warmup", ChannelInstructions: "chan-rules", ThreadSummary: "summary-text", CoordinationContext: "coord-text"}); err != nil {
 		t.Fatalf("Execute 0 error: %v", err)
 	}
-	_ = lease0.Release()
+	if err := lease0.Release(); err != nil {
+		t.Fatalf("lease0.Release: %v", err)
+	}
 }
 
 func TestUnifiedProcessPool_VanadisChunkIDEnvAndRefresh(t *testing.T) {
@@ -417,7 +419,9 @@ func TestUnifiedProcessPool_VanadisChunkIDEnvAndRefresh(t *testing.T) {
 		if _, err := l.Execute(ctx, &TurnContext{TurnID: fmt.Sprintf("t%d", i+1), Prompt: chunk, Ctx: ctx}); err != nil {
 			t.Fatalf("Execute %d error: %v", i+1, err)
 		}
-		_ = l.Release()
+		if err := l.Release(); err != nil {
+			t.Fatalf("l.Release %d error: %v", i+1, err)
+		}
 	}
 
 	d3, err := pool.GetOrCreate(ctx, "thread-vanadis", "")
@@ -456,7 +460,7 @@ func TestUnifiedProcessPool_PrewarmAndLeaseResilience(t *testing.T) {
 		t.Fatalf("initial prewarm/lease state invalid")
 	}
 	pool.WaitBackground()
-	if dAfterInit, ok := pool.Get("discord:worker-0"); !ok || dAfterInit != dBefore || dBefore.State() == StateClosed || !pool.HasDaemon("discord:worker-1") {
+	if dAfterInit, okInit := pool.Get("discord:worker-0"); !okInit || dAfterInit != dBefore || dBefore.State() == StateClosed || !pool.HasDaemon("discord:worker-1") {
 		t.Fatalf("expected worker-0 untouched and worker-1 pre-warmed after Initialize")
 	}
 
@@ -471,9 +475,19 @@ func TestUnifiedProcessPool_PrewarmAndLeaseResilience(t *testing.T) {
 	if err != nil || res == nil || res.Response != "ok" {
 		t.Fatalf("expected lease.Execute refresh on retry: res=%+v err=%v", res, err)
 	}
-	_ = lease.Release()
+	if err := lease.Release(); err != nil {
+		t.Fatalf("lease.Release: %v", err)
+	}
 
-	dWorker1, _ := pool.Get("discord:worker-1")
+	dWorker1, okWorker1 := pool.Get("discord:worker-1")
+	if !okWorker1 || dWorker1 == nil {
+		t.Fatalf("expected discord:worker-1 to exist")
+	}
+	verifyEvictedDaemonInflightClose(t, pool, dWorker1)
+}
+
+func verifyEvictedDaemonInflightClose(t *testing.T, pool *UnifiedProcessPool, dWorker1 *StreamingDaemon) {
+	t.Helper()
 	dWorker1.inflightMu.Lock()
 	dWorker1.inflight = append(dWorker1.inflight, &TurnContext{TurnID: "inflight-1"})
 	dWorker1.inflightMu.Unlock()
@@ -598,7 +612,9 @@ func TestUnifiedProcessPool_EvictSessionAndTranscriptRescuer(t *testing.T) {
 
 	uPoolRescuer := NewUnifiedProcessPool(PoolConfig{Model: "gemini-2.5-flash"}, mock)
 	defer uPoolRescuer.Close()
-	_, _ = uPoolRescuer.GetOrCreate(context.Background(), "target-rescuer", "")
+	if _, err := uPoolRescuer.GetOrCreate(context.Background(), "target-rescuer", ""); err != nil {
+		t.Fatalf("GetOrCreate target-rescuer failed: %v", err)
+	}
 	rescuerCalled := false
 	uPoolRescuer.SetTranscriptRescuer(func(ctx context.Context, convID string, since time.Time) string {
 		rescuerCalled = true

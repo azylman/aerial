@@ -274,7 +274,7 @@ func execScheduleUpdate(ctx context.Context, database *sql.DB, label, id, query 
 		return fmt.Errorf("failed to determine rows affected: %w", err)
 	}
 	if rowsAffected == 0 {
-		return fmt.Errorf("%s schedule %q not found", label, id)
+		return fmt.Errorf("%s schedule %q not found: %w", label, id, sql.ErrNoRows)
 	}
 	return nil
 }

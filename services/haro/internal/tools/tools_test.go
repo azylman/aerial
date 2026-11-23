@@ -654,3 +654,47 @@ func TestToolHandler_RestateArmingAndCancelling(t *testing.T) {
 		t.Errorf("req 4 path = %q, want %q", capturedPaths[4], wantRecCancel)
 	}
 }
+
+func TestToolHandler_ArmScheduleTick(t *testing.T) {
+	t.Parallel()
+	due := time.Date(2026, 11, 23, 9, 30, 0, 0, time.UTC)
+	tests := []struct {
+		name        string
+		noIngress   bool
+		id          string
+		status      int
+		wantErr     bool
+		wantRequest string
+	}{
+		{name: "no ingress configured skips arming", noIngress: true, id: "os-1"},
+		{name: "blank id skips arming", id: "  ", status: http.StatusAccepted},
+		{name: "arm keyed by type id and due tick", id: " os-2 ", status: http.StatusAccepted, wantRequest: "/HaroSchedule/os-2/Arm/send key=haro:arm:one_shot:os-2:2026-11-23T09:30:00Z"},
+		{name: "ingress failure is returned", id: "os-3", status: http.StatusServiceUnavailable, wantErr: true, wantRequest: "/HaroSchedule/os-3/Arm/send key=haro:arm:one_shot:os-3:2026-11-23T09:30:00Z"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var got []string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				got = append(got, r.URL.Path+" key="+r.Header.Get("Idempotency-Key"))
+				w.WriteHeader(tc.status)
+			}))
+			t.Cleanup(srv.Close)
+			cfg := &config.Config{RestateIngressURL: srv.URL}
+			if tc.noIngress {
+				cfg.RestateIngressURL = ""
+			}
+			err := NewToolHandler(cfg, nil).ArmScheduleTick(context.Background(), model.ScheduleTypeOneShot, tc.id, due)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("ArmScheduleTick err = %v, wantErr %v", err, tc.wantErr)
+			}
+			want := []string(nil)
+			if tc.wantRequest != "" {
+				want = []string{tc.wantRequest}
+			}
+			if strings.Join(got, "|") != strings.Join(want, "|") {
+				t.Errorf("requests = %v, want %v", got, want)
+			}
+		})
+	}
+}
