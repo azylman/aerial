@@ -42,7 +42,9 @@ PR_DESCRIPTION.md
 *.test.exe
 
 # Bazel
-bazel-*
+/bazel-*
+/.bazel-stage/
+!/scripts/bazel-select-images.sh
 **/BUILD.bazel
 !/BUILD.bazel
 !/build/BUILD.bazel

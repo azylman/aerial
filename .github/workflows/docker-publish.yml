@@ -51,8 +51,8 @@ jobs:
       prospera: ${{ steps.affected.outputs.prospera }}
       github-runner: ${{ steps.affected.outputs.github-runner }}
       migrator: ${{ steps.affected.outputs.migrator }}
-      matrix: ${{ steps.set-matrix.outputs.matrix }}
-      has_builds: ${{ steps.set-matrix.outputs.has_builds }}
+      matrix: ${{ steps.affected.outputs.matrix }}
+      has_builds: ${{ steps.affected.outputs.has_builds }}
     steps:
       - uses: actions/checkout@v7
       - uses: dorny/paths-filter@v4
@@ -63,9 +63,7 @@ jobs:
             changed:
               - '**'
 
-      # Images are selected from the Go import graph plus each image's explicit non-Go
-      # Docker inputs (scripts/affected/catalog.json); see scripts/affected/main.go.
-      - name: Select Images From The Go Import Graph
+      - name: Select Images via Bazel & Manifest Digests
         id: affected
         env:
           CHANGED_FILES_JSON: ${{ steps.filter.outputs.changed_files }}
@@ -74,10 +72,10 @@ jobs:
           set -euo pipefail
           FORCE_FLAG=""
           if [ "$FORCE_ALL" = "true" ]; then
-            FORCE_FLAG="-force-all"
+            FORCE_FLAG="--force-all"
           fi
           printf '%s' "${CHANGED_FILES_JSON:-[]}" | jq -r '.[]' > "$RUNNER_TEMP/changed-files.txt"
-          (cd scripts/affected && go run . -root ../.. $FORCE_FLAG -github-output "$GITHUB_OUTPUT") < "$RUNNER_TEMP/changed-files.txt"
+          ./scripts/bazel-select-images.sh $FORCE_FLAG --github-output "$GITHUB_OUTPUT" < "$RUNNER_TEMP/changed-files.txt"
 
       - name: Test Build Metadata Publisher
         run: node --test scripts/build-metadata.test.cjs
@@ -85,25 +83,11 @@ jobs:
       - name: Test Shared Web Theme
         run: node --test web/theme/aerial-theme.test.js
 
-      - name: Compute Dynamic Build Matrix
-        id: set-matrix
-        env:
-          AFFECTED_IMAGES: ${{ steps.affected.outputs.images }}
-        run: |
-          node -e '
-            const selected = new Set(JSON.parse(process.env.AFFECTED_IMAGES || "[]"));
-            const catalog = require("./scripts/affected/catalog.json").map(({ select, ...row }) => row);
-            const active = catalog.filter(c => selected.has(c.service));
-            const fs = require("fs");
-            fs.appendFileSync(process.env.GITHUB_OUTPUT, `matrix=${JSON.stringify(active)}\n`);
-            fs.appendFileSync(process.env.GITHUB_OUTPUT, `has_builds=${active.length > 0}\n`);
-          '
-
       - name: Publish Build Selection
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          MATRIX_JSON: ${{ steps.set-matrix.outputs.matrix }}
-          HAS_BUILDS: ${{ steps.set-matrix.outputs.has_builds }}
+          MATRIX_JSON: ${{ steps.affected.outputs.matrix }}
+          HAS_BUILDS: ${{ steps.affected.outputs.has_builds }}
         run: node scripts/build-metadata.cjs manifest
 
   test:
@@ -122,31 +106,31 @@ jobs:
           FORCE_ALL: ${{ inputs.force_all }}
         run: |
           set -euo pipefail
+          . scripts/lib/hermetic-go-env.sh
+          ensure_bazel_build_files "$GITHUB_WORKSPACE"
           CHANGED_FILES=$(git diff --name-only HEAD^1 HEAD 2>/dev/null || true)
-          # scripts/affected maps the changed files to the modules whose tests can see them
-          # (Go import graph incl. test imports); it selects every module on any doubt.
           TEST_ALL=0
           if [ "$FORCE_ALL" = "true" ] || [ -z "$CHANGED_FILES" ]; then
-            TEST_ALL=1
-          elif ! AFFECTED=$(printf '%s\n' "$CHANGED_FILES" | (cd scripts/affected && go run . -root ../..)); then
-            echo "::warning::scripts/affected failed; testing every module."
-            TEST_ALL=1
-          elif [ "$(printf '%s' "$AFFECTED" | jq -r '.test.all')" = "true" ]; then
             TEST_ALL=1
           fi
           if [ "$TEST_ALL" -eq 1 ]; then
             sh scripts/check-coverage.sh --check --summary
           else
-            RAN_ANY=0
-            FAILED_ANY=0
-            for svc in $(printf '%s' "$AFFECTED" | jq -r '.test.selected[]'); do
-              RAN_ANY=1
-              sh scripts/check-coverage.sh --check --summary --service "$svc" || FAILED_ANY=1
-            done
-            if [ "$RAN_ANY" -eq 0 ]; then
-              echo "No Go module or frontend changes detected; skipping unit test coverage run."
+            AFFECTED_SVCS=$(discover_affected_services "$CHANGED_FILES")
+            if [ "$AFFECTED_SVCS" = "ALL" ]; then
+              sh scripts/check-coverage.sh --check --summary
+            else
+              RAN_ANY=0
+              FAILED_ANY=0
+              for svc in $AFFECTED_SVCS; do
+                RAN_ANY=1
+                sh scripts/check-coverage.sh --check --summary --service "$svc" || FAILED_ANY=1
+              done
+              if [ "$RAN_ANY" -eq 0 ]; then
+                echo "No Go module or frontend changes detected; skipping unit test coverage run."
+              fi
+              [ "$FAILED_ANY" -eq 0 ]
             fi
-            [ "$FAILED_ANY" -eq 0 ]
           fi
 
       # Real-Restate tests (build tag restateintegration) run against a pinned
@@ -204,29 +188,34 @@ jobs:
           ensure_bazel_build_files "$GITHUB_WORKSPACE"
           GO_MODULES=$(discover_go_services)
           CHANGED_FILES=$(git diff --name-only HEAD^1 HEAD 2>/dev/null || true)
-          # Same import-graph selection as the test gate; .golangci.yml selects every module.
           LINT_ALL=0
           if [ "$FORCE_ALL" = "true" ] || [ -z "$CHANGED_FILES" ]; then
             LINT_ALL=1
-          elif ! AFFECTED=$(printf '%s\n' "$CHANGED_FILES" | (cd scripts/affected && go run . -root ../..)); then
-            echo "::warning::scripts/affected failed; linting every module."
-            LINT_ALL=1
-          elif [ "$(printf '%s' "$AFFECTED" | jq -r '.lint.all')" = "true" ]; then
-            LINT_ALL=1
           fi
-          LINT_MODULES="$GO_MODULES"
-          if [ "$LINT_ALL" -eq 0 ]; then
-            LINT_MODULES=$(printf '%s' "$AFFECTED" | jq -r '.lint.selected[]')
-          fi
-          NEW_LINT_MODULES=""
-          for m in $LINT_MODULES; do
-            if [ "$m" = "." ]; then
-              NEW_LINT_MODULES="${NEW_LINT_MODULES} ${GO_MODULES}"
+          if [ "$LINT_ALL" -eq 1 ]; then
+            LINT_MODULES="$GO_MODULES"
+          else
+            AFFECTED_SVCS=$(discover_affected_services "$CHANGED_FILES")
+            if [ "$AFFECTED_SVCS" = "ALL" ]; then
+              LINT_MODULES="$GO_MODULES"
             else
-              NEW_LINT_MODULES="${NEW_LINT_MODULES} ${m}"
+              NEW_LINT_MODULES=""
+              for mod in $GO_MODULES; do
+                svc_name=$(basename "$mod")
+                for aff in $AFFECTED_SVCS; do
+                  if [ "$aff" = "$svc_name" ] || [ "$aff" = "$mod" ]; then
+                    NEW_LINT_MODULES="${NEW_LINT_MODULES} ${mod}"
+                    break
+                  fi
+                done
+              done
+              LINT_MODULES=$(echo "$NEW_LINT_MODULES" | xargs)
+              if [ -z "$LINT_MODULES" ]; then
+                echo "No Go module changes detected for linting; skipping."
+                exit 0
+              fi
             fi
-          done
-          LINT_MODULES=$(printf '%s\n' $NEW_LINT_MODULES | sort -u)
+          fi
           for svc in $LINT_MODULES; do
             echo "=== Linting & checking deadcode in $svc ==="
             (
@@ -344,8 +333,14 @@ jobs:
         id: metadata_running
         run: node scripts/build-metadata.cjs running
 
+      - name: Ensure Ephemeral Bazel Build Files
+        if: matrix.type == 'bazel' || matrix.service == 'eri-restate'
+        run: |
+          . scripts/lib/hermetic-go-env.sh
+          ensure_bazel_build_files "$GITHUB_WORKSPACE"
+
       - name: Set up Persistent Local Buildx Builder
-        if: github.event_name == 'pull_request'
+        if: matrix.type == 'docker' && github.event_name == 'pull_request'
         uses: ./.github/actions/setup-buildx-builder
 
       - name: Lowercase Repository Owner
@@ -375,7 +370,13 @@ jobs:
           TREE_SHA=$(git rev-parse HEAD^{tree})
           echo "tree_sha=${TREE_SHA}" >> "$GITHUB_OUTPUT"
           if { [ "$EVENT_NAME" = "push" ] || [ "$EVENT_NAME" = "workflow_dispatch" ]; } && [ "$REF" = "refs/heads/main" ] && [ "$FORCE_ALL" != "true" ]; then
-            if docker buildx imagetools inspect "ghcr.io/${OWNER}/${IMAGE_NAME}:tree-${TREE_SHA}" >/dev/null 2>&1; then
+            IMAGE_REF="ghcr.io/${OWNER}/${IMAGE_NAME}:tree-${TREE_SHA}"
+            if command -v crane >/dev/null 2>&1; then
+              if crane digest "$IMAGE_REF" >/dev/null 2>&1; then
+                echo "exists=true" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi
+            elif docker buildx imagetools inspect "$IMAGE_REF" >/dev/null 2>&1; then
               echo "exists=true" >> "$GITHUB_OUTPUT"
               exit 0
             fi
@@ -386,28 +387,98 @@ jobs:
       # PR tree-cache image exists: a hit is a registry-side imagetools copy that needs only the
       # buildx CLI and the GHCR login, so the shared calibarn-buildkit builder is set up on a miss only.
       - name: Set up Persistent Local Buildx Builder (Cache Miss)
-        if: github.event_name != 'pull_request' && steps.tree_check.outputs.exists != 'true'
+        if: matrix.type == 'docker' && github.event_name != 'pull_request' && steps.tree_check.outputs.exists != 'true'
         uses: ./.github/actions/setup-buildx-builder
 
-      - name: Push Image from PR Tree Cache (${{ matrix.service }})
+      - name: Stage Pre-Built Binaries for eri-restate
+        if: matrix.service == 'eri-restate'
+        run: |
+          set -euo pipefail
+          bazel build --remote_download_toplevel \
+            //services/eri-restate/cmd/eri-restate:eri-restate \
+            //services/eri/cmd/hook-guard:hook-guard \
+            //services/eri/cmd/transcript-search:transcript-search
+          mkdir -p .bazel-stage
+          cp -L bazel-bin/services/eri-restate/cmd/eri-restate/eri-restate_/eri-restate .bazel-stage/eri-restate
+          cp -L bazel-bin/services/eri/cmd/hook-guard/hook-guard_/hook-guard .bazel-stage/hook-guard
+          cp -L bazel-bin/services/eri/cmd/transcript-search/transcript-search_/transcript-search .bazel-stage/transcript-search
+
+      - name: Push Image (${{ matrix.service }})
         id: cache_push
-        if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main' && steps.tree_check.outputs.exists == 'true'
+        if: matrix.type == 'bazel' || ((github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main' && steps.tree_check.outputs.exists == 'true')
         env:
           OWNER: ${{ steps.repo_owner.outputs.owner }}
           IMAGE_NAME: ${{ matrix.image_name }}
           SHA: ${{ github.sha }}
           TREE_SHA: ${{ steps.tree_check.outputs.tree_sha }}
+          TREE_EXISTS: ${{ steps.tree_check.outputs.exists }}
+          EVENT_NAME: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          TYPE: ${{ matrix.type }}
+          PUSH_ALLOWED: ${{ ((github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }}
         run: |
           set -euo pipefail
-          SRC="ghcr.io/${OWNER}/${IMAGE_NAME}:tree-${TREE_SHA}"
-          docker buildx imagetools create \
-            --tag "ghcr.io/${OWNER}/${IMAGE_NAME}:${SHA}" \
-            --annotation "index:org.opencontainers.image.revision=${SHA}" \
-            "$SRC"
+          if [ "$TYPE" = "bazel" ]; then
+            if { [ "$EVENT_NAME" = "push" ] || [ "$EVENT_NAME" = "workflow_dispatch" ]; } && [ "$REF" = "refs/heads/main" ] && [ "$TREE_EXISTS" = "true" ]; then
+              echo "Reusing existing tree-cache image ghcr.io/${OWNER}/${IMAGE_NAME}:tree-${TREE_SHA} for ${SHA}"
+              SRC="ghcr.io/${OWNER}/${IMAGE_NAME}:tree-${TREE_SHA}"
+              if command -v crane >/dev/null 2>&1; then
+                crane tag "$SRC" "${SHA}"
+                DIGEST=$(crane digest "$SRC" 2>/dev/null || true)
+              else
+                docker buildx imagetools create \
+                  --tag "ghcr.io/${OWNER}/${IMAGE_NAME}:${SHA}" \
+                  --annotation "index:org.opencontainers.image.revision=${SHA}" \
+                  "$SRC"
+                DIGEST=""
+              fi
+              if [ -n "$DIGEST" ]; then
+                echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
+              fi
+            else
+              bazel build --remote_download_toplevel "//images:${{ matrix.service }}"
+              if [ "$PUSH_ALLOWED" = "true" ]; then
+                INDEX="bazel-bin/images/${{ matrix.service }}/index.json"
+                DIGEST=""
+                if [ -f "$INDEX" ]; then
+                  DIGEST=$(jq -r '.manifests[0].digest // empty' "$INDEX")
+                fi
+                TAG_ARGS=(--tag "tree-${TREE_SHA}")
+                if [ "$EVENT_NAME" != "pull_request" ]; then
+                  TAG_ARGS+=(--tag "${SHA}")
+                fi
+                bazel run "//images:push_${{ matrix.service }}" -- --repository "ghcr.io/${OWNER}/${IMAGE_NAME}" "${TAG_ARGS[@]}"
+                if command -v crane >/dev/null 2>&1; then
+                  PUSHED_DIGEST=$(crane digest "ghcr.io/${OWNER}/${IMAGE_NAME}:tree-${TREE_SHA}" 2>/dev/null || true)
+                  if [ -n "$PUSHED_DIGEST" ]; then
+                    DIGEST="$PUSHED_DIGEST"
+                  fi
+                fi
+                if [ -z "${DIGEST:-}" ]; then
+                  echo "::error::Failed to extract image digest from $INDEX" >&2
+                  exit 1
+                fi
+                echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
+              fi
+            fi
+          else
+            SRC="ghcr.io/${OWNER}/${IMAGE_NAME}:tree-${TREE_SHA}"
+            docker buildx imagetools create \
+              --tag "ghcr.io/${OWNER}/${IMAGE_NAME}:${SHA}" \
+              --annotation "index:org.opencontainers.image.revision=${SHA}" \
+              "$SRC"
+            DIGEST=""
+            if command -v crane >/dev/null 2>&1; then
+              DIGEST=$(crane digest "ghcr.io/${OWNER}/${IMAGE_NAME}:tree-${TREE_SHA}" 2>/dev/null || true)
+            fi
+            if [ -n "$DIGEST" ]; then
+              echo "digest=${DIGEST}" >> "$GITHUB_OUTPUT"
+            fi
+          fi
 
       - name: Build and Push ${{ matrix.service }}
         id: image_push
-        if: steps.tree_check.outputs.exists != 'true'
+        if: matrix.type == 'docker' && steps.tree_check.outputs.exists != 'true'
         uses: docker/build-push-action@v7
         with:
           context: ${{ matrix.context }}
@@ -431,7 +502,7 @@ jobs:
           JOB_STATUS: ${{ job.status }}
           PUSH_ALLOWED: ${{ ((github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main') || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository) }}
           TREE_SHA: ${{ steps.tree_check.outputs.tree_sha }}
-          IMAGE_DIGEST: ${{ steps.image_push.outputs.digest }}
+          IMAGE_DIGEST: ${{ steps.image_push.outputs.digest || steps.cache_push.outputs.digest }}
         run: node scripts/build-metadata.cjs result
 
   roborev:

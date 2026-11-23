@@ -195,13 +195,14 @@ To guarantee `rules_oci` binaries include Go's `-cover` instrumentation (support
 1. **Coverage Configuration Transition (`_go_prod_cover_transition`)**:
    - In `build/oci.bzl`, define an incoming Starlark transition rule `go_cover_binary` wrapping `go_binary` with:
      - `//command_line_option:collect_code_coverage = True`
-     - `//command_line_option:instrumentation_filter = "^//(pkg|services|mcp)[/:]"`
-     - `@rules_go//go/config:cover_format = "go_coverdir"`
+     - `//command_line_option:instrumentation_filter = "^//(pkg|services|mcp|images)[/:]"`
+     - `//command_line_option:strip = "always"` (`-ldflags="-s -w" -trimpath`)
+     - `@rules_go//go/config:cover_format = "go_cover"`
      - `@rules_go//go/config:pure = True` (`CGO_ENABLED=0`)
-     - `@rules_go//go/config:strip = True` (`-ldflags="-s -w" -trimpath`)
      - `@rules_go//go/config:tags = ["timetzdata"]` (embeds IANA timezone database directly in the binary as a defense-in-depth backup to `@distroless_static`'s `/usr/share/zoneinfo`).
 2. **Bazel 9 Symbolic Macro (`aerial_go_image`) in `images/BUILD.bazel`**:
    - All 16 OCI image targets live in a single checked-in `images/BUILD.bazel` file, keeping per-service `services/*/BUILD.bazel` files 100% pure `gazelle` output.
+   - Distroless `rules_oci` images intentionally drop legacy Dockerfile `HEALTHCHECK` (`wget`/`curl`) directives in favor of native Kubernetes HTTP `livenessProbe` and `readinessProbe` checks in `k8s/*.yaml`.
    - For each service `<name>`, `aerial_go_image` (as well as the `docs` and `migrator` static targets in `images/BUILD.bazel`) emits three sibling targets:
      - `//images:<name>` (`oci_image`): Deterministic OCI image directory.
      - `//images:load_<name>` (`oci_load` with `repo_tags = ["ghcr.io/azylman/aerial-" + name + ":local"]`): Loads the container image directly into a local Docker or Podman daemon via `bazel run //images:load_<name>` so external contributors can run any service container locally without per-service `Dockerfile`s.

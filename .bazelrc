@@ -12,6 +12,7 @@ test --test_output=errors
 test --test_summary=short
 coverage --@rules_go//go/config:cover_format=go_cover
 coverage --remote_download_regex=.*coverage\.dat$
+build --remote_download_regex=.*images/.*
 
 # Cluster profile (enabled automatically on eri-restate and ARC runners via /etc/bazel.bazelrc)
 common:cluster --repo_contents_cache=/data/cache/bazel-repo-contents

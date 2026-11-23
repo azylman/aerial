@@ -1,0 +1,273 @@
+load("@rules_oci//oci:defs.bzl", "oci_image", "oci_load", "oci_push")
+load("@rules_pkg//pkg:tar.bzl", "pkg_tar")
+load("//build:go_test.bzl", "go_test")
+load("//build:oci.bzl", "aerial_go_image", "build_covdata", "go_cover_binary")
+
+# Helper tools for coverage-ingest
+build_covdata(
+    name = "covdata_bin",
+    visibility = ["//visibility:public"],
+)
+
+genrule(
+    name = "go_wrapper_named",
+    srcs = ["//images/cmd/go_wrapper"],
+    outs = ["go_wrapper_bin/go"],
+    cmd = "cp -L $< $@",
+    executable = True,
+)
+
+pkg_tar(
+    name = "coverage_ingest_tools_layer",
+    srcs = [
+        ":covdata_bin",
+        ":go_wrapper_named",
+    ],
+    package_dir = "/usr/local/bin",
+)
+
+# 12 Pure-Go services with cover = True
+aerial_go_image(
+    name = "eri",
+    bin_path = "/app/eri",
+    exposed_ports = ["8080/tcp"],
+)
+
+aerial_go_image(
+    name = "haro",
+    bin_path = "/app/haro",
+    env = {"PORT": "8080"},
+    exposed_ports = ["8080/tcp"],
+)
+
+aerial_go_image(
+    name = "coven",
+    bin_path = "/app/coven",
+    env = {"PORT": "4008"},
+    exposed_ports = ["4008/tcp"],
+)
+
+aerial_go_image(
+    name = "docket-mcp",
+    bin_path = "/app/docket-mcp",
+    binary = "//mcp/docket-mcp:docket-mcp",
+    env = {"PORT": "8080"},
+    exposed_ports = ["8080/tcp"],
+)
+
+aerial_go_image(
+    name = "kernel-mcp",
+    bin_path = "/app/kernel-mcp",
+    binary = "//mcp/kernel-mcp:kernel-mcp",
+    env = {"PORT": "4018"},
+    exposed_ports = ["4018/tcp"],
+)
+
+aerial_go_image(
+    name = "synapse",
+    bin_path = "/bin/synapse",
+    exposed_ports = ["4020/tcp"],
+)
+
+aerial_go_image(
+    name = "transcripts",
+    bin_path = "/app/transcripts",
+    env = {"PORT": "4030"},
+    exposed_ports = ["4030/tcp"],
+)
+
+aerial_go_image(
+    name = "vanadis",
+    bin_path = "/bin/vanadis",
+    exposed_ports = ["4025/tcp"],
+)
+
+aerial_go_image(
+    name = "vanadis-restate",
+    bin_path = "/bin/vanadis-restate",
+    binary = "//services/vanadis-restate/cmd/vanadis-restate:vanadis-restate",
+    exposed_ports = [
+        "4026/tcp",
+        "9080/tcp",
+    ],
+)
+
+aerial_go_image(
+    name = "vanadis-nats",
+    bin_path = "/bin/vanadis-nats",
+    exposed_ports = ["4027/tcp"],
+)
+
+aerial_go_image(
+    name = "prospera",
+    bin_path = "/app/prospera",
+    env = {"PORT": "4019"},
+    exposed_ports = ["4019/tcp"],
+)
+
+# Console layers
+pkg_tar(
+    name = "console_static_layer",
+    srcs = ["//services/console:static"],
+    package_dir = "/app/static",
+    strip_prefix = "services/console/static",
+)
+
+# Bundles Console React Vite assets into static dist tarball.
+# Note: uses npm ci locally within a temporary workspace with no-sandbox and network access
+# as a bridge during the rules_oci migration; aspect rules_js / hermetic toolchains are planned
+# for a future build tooling chunk. The tar output is normalized with fixed mtime and ownership.
+genrule(
+    name = "console_ui_dist",
+    srcs = [
+        "//services/console:ui_srcs",
+        "//web/theme",
+    ],
+    outs = ["console_ui_dist.tar"],
+    cmd = """
+        set -e
+        WORK=$$(mktemp -d)
+        trap 'rm -rf "$$WORK"' EXIT
+        mkdir -p "$$WORK/src/services/console/ui" "$$WORK/src/web/theme"
+        cp -rL services/console/ui/* "$$WORK/src/services/console/ui/"
+        cp -rL web/theme/* "$$WORK/src/web/theme/"
+        cd "$$WORK/src/services/console/ui"
+        npm ci --no-audit --no-fund --silent
+        npm run build --silent
+        tar --sort=name --mtime='2020-01-01 00:00:00Z' --owner=0 --group=0 --numeric-owner --transform 's|^|app/static/|' -cf "$$OLDPWD/$@" -C dist .
+    """,
+    tags = [
+        "local",
+        "no-sandbox",
+        "requires-network",
+    ],
+)
+
+pkg_tar(
+    name = "console_theme_layer",
+    srcs = ["//web/theme:aerial-tokens.css"],
+    package_dir = "/app/static",
+)
+
+aerial_go_image(
+    name = "console",
+    bin_path = "/app/aerial-console",
+    exposed_ports = ["8080/tcp"],
+    extra_tars = [
+        ":console_static_layer",
+        ":console_ui_dist",
+        ":console_theme_layer",
+    ],
+    workdir = "/app",
+)
+
+# 2 Pure-Go services with cover = False
+aerial_go_image(
+    name = "redact-pattern",
+    bin_path = "/usr/local/bin/redact-pattern",
+    binary = "//services/eri/cmd/redact-pattern:redact-pattern",
+    cover = False,
+    exposed_ports = [],
+)
+
+aerial_go_image(
+    name = "coverage-ingest",
+    bin_path = "/bin/coverage-ingest",
+    cover = False,
+    exposed_ports = ["8080/tcp"],
+    extra_tars = [":coverage_ingest_tools_layer"],
+)
+
+# 2 Static / Migration images
+pkg_tar(
+    name = "docs_nginx_conf_layer",
+    srcs = ["//services/docs-service:nginx.conf"],
+    package_dir = "/etc/nginx",
+)
+
+pkg_tar(
+    name = "docs_app_layer",
+    srcs = ["//services/docs-service:app"],
+    package_dir = "/usr/share/nginx/html",
+    strip_prefix = "services/docs-service/app",
+)
+
+pkg_tar(
+    name = "docs_theme_layer",
+    srcs = ["//web/theme"],
+    package_dir = "/usr/share/nginx/html/assets",
+)
+
+oci_image(
+    name = "docs",
+    base = "@nginx_base",
+    cmd = [
+        "nginx",
+        "-g",
+        "daemon off;",
+    ],
+    exposed_ports = ["80/tcp"],
+    tars = [
+        ":docs_nginx_conf_layer",
+        ":docs_app_layer",
+        ":docs_theme_layer",
+    ],
+    workdir = "/usr/share/nginx/html",
+)
+
+oci_load(
+    name = "load_docs",
+    image = ":docs",
+    repo_tags = ["ghcr.io/azylman/aerial-docs:local"],
+)
+
+oci_push(
+    name = "push_docs",
+    image = ":docs",
+    repository = "ghcr.io/azylman/aerial-docs",
+)
+
+pkg_tar(
+    name = "migrator_layer",
+    srcs = ["//services/eri/pkg/db:migrations"],
+    package_dir = "/migrations",
+    strip_prefix = "services/eri/pkg/db/migrations",
+)
+
+oci_image(
+    name = "migrator",
+    base = "@atlas_base",
+    entrypoint = ["/atlas"],
+    tars = [":migrator_layer"],
+    user = "0:0",
+)
+
+oci_load(
+    name = "load_migrator",
+    image = ":migrator",
+    repo_tags = ["ghcr.io/azylman/aerial-migrator:local"],
+)
+
+oci_push(
+    name = "push_migrator",
+    image = ":migrator",
+    repository = "ghcr.io/azylman/aerial-migrator",
+)
+
+# Verification test targets
+go_cover_binary(
+    name = "cover_sample_cover_bin",
+    actual = "//images/cmd/testsample:testsample",
+    visibility = ["//visibility:private"],
+)
+
+go_test(
+    name = "images_test",
+    srcs = ["oci_cover_test.go"],
+    data = [
+        ":covdata_bin",
+        ":cover_sample_cover_bin",
+        ":coverage_ingest_tools_layer",
+        ":go_wrapper_named",
+    ],  # keep
+)

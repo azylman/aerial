@@ -242,114 +242,109 @@ split_module_profile() {
     ' "$src_prof"
 }
 
-job_count=0
+bazel_targets=""
+while IFS= read -r svc; do
+    [ -n "$svc" ] || continue
+    bazel_targets="$bazel_targets //${svc}/..."
+done < "$SVC_LIST_FILE"
+
+coverage_log="${PROF_DIR}/bazel_coverage.log"
+bazel_status=0
+if [ -n "$bazel_targets" ]; then
+    if ! command -v bazel >/dev/null 2>&1; then
+        echo "Error: bazel is required for coverage collection" >&2
+        exit 1
+    fi
+    rm -rf "$REPO_ROOT/bazel-testlogs"
+    # shellcheck disable=SC2086
+    bazel coverage --keep_going $bazel_targets >"$coverage_log" 2>&1 || bazel_status=$?
+fi
+
 while IFS= read -r svc; do
     [ -n "$svc" ] || continue
     safe_svc=$(echo "$svc" | tr '/.' '__')
     svc_prof_file="${PROF_DIR}/${safe_svc}_module.out"
-    svc_log_file="${PROF_DIR}/${safe_svc}_module.log"
 
-    (
-        svc_pkgs=$(awk -F'|' -v s="$svc" '$1 == s { print $2 }' "$SVC_PKG_FILE")
-        for pkg in $svc_pkgs; do
-            safe_pkg=$(echo "${svc}_${pkg}" | tr '/.' '__')
-            rm -f "${PROF_DIR}/${safe_pkg}.out" "${PROF_DIR}/${safe_pkg}.log" "${PROF_DIR}/${safe_pkg}.status"
-        done
-        if [ -f "$REPO_ROOT/MODULE.bazel" ] && command -v bazel >/dev/null 2>&1; then
-            rm -rf "$REPO_ROOT/bazel-testlogs/${svc}"
-            if bazel coverage "//${svc}/..." >"$svc_log_file" 2>&1; then
-                cov_files=$(find "$REPO_ROOT/bazel-testlogs/${svc}" -maxdepth 5 -name "coverage.dat" 2>/dev/null || true)
-                cov_merge_ok=1
-                if [ -z "$cov_files" ] || ! merge_coverage_profiles "$svc_prof_file" $cov_files || [ ! -s "$svc_prof_file" ]; then
-                    cov_merge_ok=0
+    svc_pkgs=$(awk -F'|' -v s="$svc" '$1 == s { print $2 }' "$SVC_PKG_FILE")
+    for pkg in $svc_pkgs; do
+        safe_pkg=$(echo "${svc}_${pkg}" | tr '/.' '__')
+        rm -f "${PROF_DIR}/${safe_pkg}.out" "${PROF_DIR}/${safe_pkg}.log" "${PROF_DIR}/${safe_pkg}.status"
+    done
+
+    cov_files=$(find "$REPO_ROOT/bazel-testlogs/${svc}" -maxdepth 5 -name "coverage.dat" 2>/dev/null || true)
+    cov_merge_ok=1
+    if [ -z "$cov_files" ] || ! merge_coverage_profiles "$svc_prof_file" $cov_files || [ ! -s "$svc_prof_file" ]; then
+        cov_merge_ok=0
+    fi
+    if [ "$cov_merge_ok" -eq 1 ]; then
+        split_module_profile "$svc" "$svc_prof_file"
+    fi
+
+    found_fail=0
+    first_pkg=""
+    for pkg in $svc_pkgs; do
+        [ -n "$first_pkg" ] || first_pkg="$pkg"
+        safe_pkg=$(echo "${svc}_${pkg}" | tr '/.' '__')
+        rel_pkg="${pkg#github.com/azylman/aerial/}"
+        rel_pkg="${rel_pkg#github.com/azylman/aerial-sidecars/}"
+        rel_pkg="${rel_pkg#github.com/azylman/aerial-config/}"
+        safe_rel_regex=$(printf '%s' "$rel_pkg" | sed 's/[.[\*^$()+?{|]/\\&/g')
+
+        pkg_xml=$(find "$REPO_ROOT/bazel-testlogs/${rel_pkg}" -maxdepth 3 -name "test.xml" 2>/dev/null | head -n 1 || true)
+        pkg_testlog=$(find "$REPO_ROOT/bazel-testlogs/${rel_pkg}" -maxdepth 3 -name "test.log" 2>/dev/null | head -n 1 || true)
+
+        if [ -n "$pkg_xml" ] && [ -f "$pkg_xml" ]; then
+            if grep -q -E 'failures="[1-9]|errors="[1-9]' "$pkg_xml" 2>/dev/null; then
+                echo "FAIL" > "${PROF_DIR}/${safe_pkg}.status"
+                if [ -n "$pkg_testlog" ] && [ -f "$pkg_testlog" ]; then
+                    cp "$pkg_testlog" "${PROF_DIR}/${safe_pkg}.log"
+                elif [ "$found_fail" -eq 0 ]; then
+                    cp "$coverage_log" "${PROF_DIR}/${safe_pkg}.log"
                 fi
-                if [ "$cov_merge_ok" -eq 1 ]; then
-                    split_module_profile "$svc" "$svc_prof_file"
-                    for pkg in $svc_pkgs; do
-                        safe_pkg=$(echo "${svc}_${pkg}" | tr '/.' '__')
-                        echo "PASS" > "${PROF_DIR}/${safe_pkg}.status"
-                    done
-                else
-                    for pkg in $svc_pkgs; do
-                        safe_pkg=$(echo "${svc}_${pkg}" | tr '/.' '__')
-                        echo "FAIL" > "${PROF_DIR}/${safe_pkg}.status"
-                        echo "Error: missing or empty coverage profile after bazel coverage run on $svc" > "${PROF_DIR}/${safe_pkg}.log"
-                    done
-                fi
+                found_fail=1
             else
-                cov_files=$(find "$REPO_ROOT/bazel-testlogs/${svc}" -maxdepth 5 -name "coverage.dat" 2>/dev/null || true)
-                if [ -n "$cov_files" ] && merge_coverage_profiles "$svc_prof_file" $cov_files && [ -s "$svc_prof_file" ]; then
-                    split_module_profile "$svc" "$svc_prof_file"
-                fi
-                found_fail=0
-                first_pkg=""
-                for pkg in $svc_pkgs; do
-                    [ -n "$first_pkg" ] || first_pkg="$pkg"
-                    safe_pkg=$(echo "${svc}_${pkg}" | tr '/.' '__')
-                    rel_pkg="${pkg#github.com/azylman/aerial/}"
-                    rel_pkg="${rel_pkg#github.com/azylman/aerial-sidecars/}"
-                    rel_pkg="${rel_pkg#github.com/azylman/aerial-config/}"
-                    safe_rel_regex=$(printf '%s' "$rel_pkg" | sed 's/[.[\*^$()+?{|]/\\&/g')
-
-                    if grep -q -E "^//${safe_rel_regex}:[a-zA-Z0-9_.-]+[[:space:]]+PASSED" "$svc_log_file" 2>/dev/null && \
-                       ! grep -q -E "^//${safe_rel_regex}:[a-zA-Z0-9_.-]+[[:space:]]+(FAIL|FAILED)" "$svc_log_file" 2>/dev/null; then
-                        echo "PASS" > "${PROF_DIR}/${safe_pkg}.status"
-                    else
-                        echo "FAIL" > "${PROF_DIR}/${safe_pkg}.status"
-                        if [ "$found_fail" -eq 0 ]; then
-                            cp "$svc_log_file" "${PROF_DIR}/${safe_pkg}.log"
-                        fi
-                        found_fail=1
-                    fi
-                done
-                if [ "$found_fail" -eq 0 ] && [ -n "$first_pkg" ]; then
-                    safe_pkg=$(echo "${svc}_${first_pkg}" | tr '/.' '__')
-                    echo "FAIL" > "${PROF_DIR}/${safe_pkg}.status"
-                    cp "$svc_log_file" "${PROF_DIR}/${safe_pkg}.log"
-                fi
+                echo "PASS" > "${PROF_DIR}/${safe_pkg}.status"
             fi
+        elif [ -n "$pkg_testlog" ] && [ -f "$pkg_testlog" ] && grep -q -E '^--- FAIL:|^FAIL\b' "$pkg_testlog" 2>/dev/null; then
+            echo "FAIL" > "${PROF_DIR}/${safe_pkg}.status"
+            cp "$pkg_testlog" "${PROF_DIR}/${safe_pkg}.log"
+            found_fail=1
+        elif [ -n "$pkg_testlog" ] && [ -f "$pkg_testlog" ] && grep -q -E '^PASS$|^--- PASS:' "$pkg_testlog" 2>/dev/null; then
+            echo "PASS" > "${PROF_DIR}/${safe_pkg}.status"
+        elif grep -q -E "^//${safe_rel_regex}:[a-zA-Z0-9_.-]+[[:space:]]+(\([^)]+\)[[:space:]]+)?(FAIL|FAILED|TIMEOUT)" "$coverage_log" 2>/dev/null; then
+            echo "FAIL" > "${PROF_DIR}/${safe_pkg}.status"
+            if [ "$found_fail" -eq 0 ]; then
+                cp "$coverage_log" "${PROF_DIR}/${safe_pkg}.log"
+            fi
+            found_fail=1
+        elif grep -q -E "^//${safe_rel_regex}:[a-zA-Z0-9_.-]+[[:space:]]+(\([^)]+\)[[:space:]]+)?PASSED" "$coverage_log" 2>/dev/null; then
+            echo "PASS" > "${PROF_DIR}/${safe_pkg}.status"
         else
-            if (cd "$svc" && hermetic_go \
-                CGO_ENABLED="$cgo_val" \
-                go test ${race_flag:+"$race_flag"} -trimpath -timeout ${AERIAL_TEST_TIMEOUT:-180s} -coverprofile="$svc_prof_file" ./... >"$svc_log_file" 2>&1); then
-                split_module_profile "$svc" "$svc_prof_file"
-                for pkg in $svc_pkgs; do
-                    safe_pkg=$(echo "${svc}_${pkg}" | tr '/.' '__')
-                    echo "PASS" > "${PROF_DIR}/${safe_pkg}.status"
-                done
-            else
-                split_module_profile "$svc" "$svc_prof_file"
-                found_fail=0
-                first_pkg=""
-                for pkg in $svc_pkgs; do
-                    [ -n "$first_pkg" ] || first_pkg="$pkg"
-                    safe_pkg=$(echo "${svc}_${pkg}" | tr '/.' '__')
-                    if grep -q -E "^FAIL[[:space:]]+$(printf '%s' "$pkg" | sed 's/[.[\*^$()+?{|]/\\&/g')([[:space:]]|$)" "$svc_log_file" 2>/dev/null; then
-                        echo "FAIL" > "${PROF_DIR}/${safe_pkg}.status"
-                        if [ "$found_fail" -eq 0 ]; then
-                            cp "$svc_log_file" "${PROF_DIR}/${safe_pkg}.log"
-                        fi
-                        found_fail=1
-                    else
-                        echo "PASS" > "${PROF_DIR}/${safe_pkg}.status"
-                    fi
-                done
-                if [ "$found_fail" -eq 0 ] && [ -n "$first_pkg" ]; then
-                    safe_pkg=$(echo "${svc}_${first_pkg}" | tr '/.' '__')
-                    echo "FAIL" > "${PROF_DIR}/${safe_pkg}.status"
-                    cp "$svc_log_file" "${PROF_DIR}/${safe_pkg}.log"
+            # Check if package has test targets defined in its build file
+            has_test_target=$(grep -E 'go_test\(' "${REPO_ROOT}/${rel_pkg}/BUILD.bazel" 2>/dev/null || true)
+            if [ -n "$has_test_target" ]; then
+                echo "FAIL" > "${PROF_DIR}/${safe_pkg}.status"
+                if [ "$found_fail" -eq 0 ]; then
+                    cp "$coverage_log" "${PROF_DIR}/${safe_pkg}.log"
                 fi
+                found_fail=1
+            else
+                echo "PASS" > "${PROF_DIR}/${safe_pkg}.status"
             fi
         fi
-    ) &
-
-    job_count=$((job_count + 1))
-    if [ "$job_count" -ge "$PARALLEL_JOBS" ]; then
-        wait
-        job_count=0
+    done
+    if [ "$found_fail" -eq 0 ] && [ "$bazel_status" -ne 0 ] && [ -n "$first_pkg" ]; then
+        if grep -q -E "(^|/)${svc}[/:][a-zA-Z0-9_.-]+.*(ERROR|failed)" "$coverage_log" 2>/dev/null; then
+            safe_pkg=$(echo "${svc}_${first_pkg}" | tr '/.' '__')
+            echo "FAIL" > "${PROF_DIR}/${safe_pkg}.status"
+            cp "$coverage_log" "${PROF_DIR}/${safe_pkg}.log"
+        fi
     fi
 done < "$SVC_LIST_FILE"
-wait
+
+if [ "$bazel_status" -ne 0 ]; then
+    record_violation "Bazel coverage execution failed with exit code $bazel_status (see $coverage_log)"
+fi
 
 # Phase 2: Process results, print logs in order, and record violations
 while IFS='|' read -r svc pkg; do
