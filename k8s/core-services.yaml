@@ -599,8 +599,7 @@ spec:
             - -ec
             - |
               umask 077
-              chown 1000:1000 /data
-              find /data/cache \( -not -user 1000 -o -not -group 1000 \) -exec chown -h 1000:1000 {} + 2>/dev/null || true
+              chown 1000:1000 /data /data/cache 2>/dev/null || true
               install -d -o 1000 -g 1000 -m 0700 /data/ssh
               key=/data/ssh/id_ed25519
               if [ -s /ssh-secret/id_ed25519 ]; then
