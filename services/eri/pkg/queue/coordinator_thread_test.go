@@ -68,6 +68,7 @@ func TestThreadCoordinator_Enqueue(t *testing.T) {
 		name            string
 		key             string
 		state           coordinatorState
+		rows            []db.Message
 		resolver        fakeThreadResolver
 		req             ThreadEnqueueRequest
 		cancelStep      string
@@ -166,11 +167,11 @@ func TestThreadCoordinator_Enqueue(t *testing.T) {
 			wantRows:  map[string]rowWant{"m6": {status: db.StatusPending}},
 		},
 		{
-			name:     "MissingThreadRejected",
-			key:      "",
-			req:      ThreadEnqueueRequest{Prompt: "orphan"},
-			wantCode: 400,
+			name: "PromptAlreadyRecordedReturnsExistingThread", key: "ch-1", resolver: fakeThreadResolver{final: "th-new"},
+			rows: []db.Message{msgRow("m-dup", "th-old", db.StatusCompleted)}, req: ThreadEnqueueRequest{Prompt: "hello", MessageID: "m-dup"},
+			wantResp: ThreadEnqueueResponse{Status: eriwire.StatusAlreadyExists, ThreadID: "th-old", MessageID: "m-dup"},
 		},
+		{name: "MissingThreadRejected", key: "", req: ThreadEnqueueRequest{Prompt: "orphan"}, wantCode: 400},
 		{
 			name:       "RecordStepCancelSurfacesAsConflict",
 			key:        tcKey,
@@ -189,7 +190,7 @@ func TestThreadCoordinator_Enqueue(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			store := seedStore(t, nil, nil, tc.sabotageSQL)
+			store := seedStore(t, tc.rows, nil, tc.sabotageSQL)
 			h := newCoordHarness(t, tc.key, tcInv, tc.state)
 			h.cancelStep = tc.cancelStep
 			resp, err := NewThreadCoordinator(store, tc.resolver, "aerial").Enqueue(h.sharedCtx(), tc.req)

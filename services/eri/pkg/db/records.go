@@ -100,6 +100,10 @@ func (s *SQLStore) failRecords(ctx context.Context, table, statuses string, ids 
 	return s.updateRecordsByID(ctx, table, "status = 'FAILED', error_message = $1, updated_at = $2", statuses, ids, reason, time.Now().UTC())
 }
 
+func (s *SQLStore) skipRecords(ctx context.Context, table string, ids []string, reason string) ([]string, error) {
+	return s.updateRecordsByID(ctx, table, "status = 'COMPLETED', error_message = $1, updated_at = $2", activeStatusesSQL, ids, reason, time.Now().UTC())
+}
+
 // beginAttempt starts attempt ordinal on one row. Two guarded single-row UPDATEs keep it
 // race-free without reading old values in RETURNING (unsupported by SQLite): retry_count only
 // ever grows, so a row the first statement skips (retry_count >= ordinal) always matches the second.
@@ -176,6 +180,18 @@ func (s *SQLStore) FailMessagesIfActive(ctx context.Context, ids []string, reaso
 // FailMessagesIfPending marks PENDING messages FAILED with reason and returns the IDs changed.
 func (s *SQLStore) FailMessagesIfPending(ctx context.Context, ids []string, reason string) ([]string, error) {
 	return s.failRecords(ctx, messagesTable, pendingStatusesSQL, ids, reason)
+}
+
+// SkipMessagesIfActive records PENDING/PROCESSING messages COMPLETED with reason (a skipped
+// turn) and returns the IDs changed; rows already terminal are left untouched.
+func (s *SQLStore) SkipMessagesIfActive(ctx context.Context, ids []string, reason string) ([]string, error) {
+	return s.skipRecords(ctx, messagesTable, ids, reason)
+}
+
+// SkipDispatchesIfActive records PENDING/PROCESSING dispatches COMPLETED with reason (a skipped
+// turn) and returns the IDs changed; rows already terminal are left untouched.
+func (s *SQLStore) SkipDispatchesIfActive(ctx context.Context, ids []string, reason string) ([]string, error) {
+	return s.skipRecords(ctx, dispatchesTable, ids, reason)
 }
 
 // RequeueProcessingMessages moves PROCESSING messages back to PENDING, counting the deferral in

@@ -152,9 +152,8 @@ channels:
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			capture := installRestateCapture(t, http.StatusOK, `{"status":"accepted"}`)
-			// No message_id in the body, so handlePrompt never reaches the store.
 			mux := http.NewServeMux()
-			mux.HandleFunc("/prompt", handlePrompt(nil, nil))
+			mux.HandleFunc("/prompt", handlePrompt(nil))
 
 			req := httptest.NewRequest(http.MethodPost, "/prompt", strings.NewReader(tc.body))
 			if tc.traceparent != "" {

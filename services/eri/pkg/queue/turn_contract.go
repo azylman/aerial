@@ -53,6 +53,7 @@ const (
 const (
 	StepRecordQueued         = "record-queued"
 	StepResolveTargetThread  = "resolve-target-thread"
+	StepLookupExisting       = "lookup-existing"
 	StepRecordSkipped        = "record-skipped"
 	StepRecordCancelled      = "record-cancelled"
 	StepRecordStarted        = "record-started"
