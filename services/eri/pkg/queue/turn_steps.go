@@ -19,7 +19,7 @@ import (
 // Step functions the TurnRunner journals one by one: record-started, prep, record-outcome,
 // post-turn-hook / refresh-thread-summary and publish-dispatch-outcome. Each one is safe to
 // re-run after a crash: it re-reads its rows and only acts on rows whose outcome is not
-// recorded yet. They reuse the legacy helpers so both queue paths write the same rows.
+// recorded yet. They reuse the shared turnExecution helpers to write the rows.
 
 // turnStepStoreTimeout bounds every store call made inside a step, so a hung connection
 // surfaces as a retryable error instead of stalling the step.
@@ -300,7 +300,7 @@ func (p *WorkerPool) RecordDispatchStarted(ctx context.Context, sessionKey, disp
 	return StartedTurn{IDs: []string{d.ID}, BaseRetry: d.RetryCount}, nil
 }
 
-// newStepTurnExecution builds the turnExecution a step reuses the legacy helpers through.
+// newStepTurnExecution builds the turnExecution through which a step reuses the shared turn helpers.
 func (p *WorkerPool) newStepTurnExecution(ctx context.Context, threadID string, burst []db.Message) *turnExecution {
 	triggerType := triggerSourceDiscord
 	if len(burst) > 0 {
@@ -342,12 +342,12 @@ func (p *WorkerPool) preTurnDelayMs(delaySeconds int) int64 {
 }
 
 // PrepareBurstTurn runs prep for a burst: channel policy, ambient classification, the pre_turn
-// hook decision and the prompt, in the legacy order. Terminal decisions write their rows as the
-// legacy path does and return Decision finished; a pre_turn retry requeues the rows once and
+// hook decision and the prompt, in that order. Terminal decisions write their rows through the
+// shared turn helpers and return Decision finished; a pre_turn retry requeues the rows once and
 // returns Decision reschedule. A replay only acts on rows still PROCESSING; rows this step already
 // requeued are reported as reschedule again without another retry_count bump.
 //
-//nolint:contextcheck,nolintlint // the reused legacy turn helpers own their contexts; store calls take ctx.
+//nolint:contextcheck,nolintlint // the reused turn helpers own their contexts; store calls take ctx.
 func (p *WorkerPool) PrepareBurstTurn(ctx context.Context, threadID, turnID string, ids []string) (TurnPrep, error) {
 	s, err := p.stepStore()
 	if err != nil {
@@ -410,7 +410,7 @@ func (p *WorkerPool) PrepareBurstTurn(ctx context.Context, threadID, turnID stri
 	}, nil
 }
 
-// finishPrep returns Decision finished once every row is terminal; otherwise the legacy write
+// finishPrep returns Decision finished once every row is terminal; otherwise the helper's write
 // was lost (or left for recovery) and the step must retry.
 func finishPrep(ctx context.Context, s db.Store, ids []string, reason string) (TurnPrep, error) {
 	if err := unfinishedMessagesError(ctx, s, ids); err != nil {
@@ -419,10 +419,10 @@ func finishPrep(ctx context.Context, s db.Store, ids []string, reason string) (T
 	return TurnPrep{Decision: TurnDecisionFinished, Reason: reason}, nil
 }
 
-// deferPrep applies a pre_turn retry: rows out of attempts are failed exhausted as rescheduleBurst
-// does; the rest go back to PENDING in one RequeueProcessingMessages call.
+// deferPrep applies a pre_turn retry: rows out of attempts are failed exhausted;
+// the rest go back to PENDING in one RequeueProcessingMessages call.
 //
-//nolint:contextcheck,nolintlint // the reused legacy turn helpers own their contexts; store calls take ctx.
+//nolint:contextcheck,nolintlint // the reused turn helpers own their contexts; store calls take ctx.
 func (p *WorkerPool) deferPrep(ctx context.Context, s db.Store, te *turnExecution, ids []string, delaySeconds int) (TurnPrep, error) {
 	te.stopIndicators()
 	maxAttempts := p.maxAttempts()
@@ -448,7 +448,7 @@ func (p *WorkerPool) deferPrep(ctx context.Context, s db.Store, te *turnExecutio
 
 // PrepareDispatchTurn runs prep for a dispatch: it builds the dispatch prompt (dispatches run no hooks).
 //
-//nolint:contextcheck,nolintlint // the reused legacy turn helpers own their contexts; store calls take ctx.
+//nolint:contextcheck,nolintlint // the reused turn helpers own their contexts; store calls take ctx.
 func (p *WorkerPool) PrepareDispatchTurn(ctx context.Context, sessionKey, turnID, dispatchID string) (TurnPrep, error) {
 	s, err := p.stepStore()
 	if err != nil {
@@ -527,7 +527,7 @@ func unfinishedDispatchError(ctx context.Context, s db.Store, dispatchID string)
 }
 
 // RecordBurstOutcome records a burst's non-success outcome (record-outcome): it delivers the
-// failure notice as the legacy path does, fails the still-active rows, then checks every row is
+// failure notice through the shared turn helpers, fails the still-active rows, then checks every row is
 // terminal (M2). A replay finding every row terminal sends no second notice.
 func (p *WorkerPool) RecordBurstOutcome(ctx context.Context, ids []string, summary AttemptSummary) error {
 	s, err := p.stepStore()
@@ -546,7 +546,7 @@ func (p *WorkerPool) RecordBurstOutcome(ctx context.Context, ids []string, summa
 	return unfinishedMessagesError(ctx, s, ids)
 }
 
-//nolint:contextcheck,nolintlint // the reused legacy turn helpers own their contexts; store calls take ctx.
+//nolint:contextcheck,nolintlint // the reused turn helpers own their contexts; store calls take ctx.
 func (p *WorkerPool) failActiveBurstRows(ctx context.Context, s db.Store, ids []string, summary AttemptSummary) error {
 	rows, err := messagesByIDOrdered(ctx, s, ids)
 	if err != nil {
@@ -631,7 +631,7 @@ func (p *WorkerPool) RecordDispatchOutcome(ctx context.Context, ids []string, su
 // RunBurstPostTurnHook runs the post_turn hook (post-turn-hook; only when the turn attempted the
 // agent), rebuilt from the recorded rows. hookMetadata is the journaled TurnPrep.HookMetadata.
 //
-//nolint:contextcheck,nolintlint // the reused legacy turn helpers own their contexts; store calls take ctx.
+//nolint:contextcheck,nolintlint // the reused turn helpers own their contexts; store calls take ctx.
 func (p *WorkerPool) RunBurstPostTurnHook(ctx context.Context, threadID string, ids []string, attempted bool, outcome TurnOutcome, hookMetadata map[string]string) error {
 	te, ok, err := p.postTurnExecution(ctx, threadID, ids, attempted, outcome, hookMetadata)
 	if err != nil || !ok {
@@ -644,7 +644,7 @@ func (p *WorkerPool) RunBurstPostTurnHook(ctx context.Context, threadID string, 
 // RefreshBurstThreadSummary runs the turn-end thread summary refresh (refresh-thread-summary;
 // only after a successful turn), rebuilt from the recorded rows.
 //
-//nolint:contextcheck,nolintlint // the reused legacy turn helpers own their contexts; store calls take ctx.
+//nolint:contextcheck,nolintlint // the reused turn helpers own their contexts; store calls take ctx.
 func (p *WorkerPool) RefreshBurstThreadSummary(ctx context.Context, threadID string, ids []string, outcome TurnOutcome) error {
 	te, ok, err := p.postTurnExecution(ctx, threadID, ids, true, outcome, nil)
 	if err != nil || !ok {
@@ -656,7 +656,7 @@ func (p *WorkerPool) RefreshBurstThreadSummary(ctx context.Context, threadID str
 
 // postTurnExecution rebuilds the post-turn state of a burst from its recorded rows; ok is false when no row exists.
 //
-//nolint:contextcheck,nolintlint // the reused legacy turn helpers own their contexts; store calls take ctx.
+//nolint:contextcheck,nolintlint // the reused turn helpers own their contexts; store calls take ctx.
 func (p *WorkerPool) postTurnExecution(ctx context.Context, threadID string, ids []string, attempted bool, outcome TurnOutcome, hookMetadata map[string]string) (*turnExecution, bool, error) {
 	s, err := p.stepStore()
 	if err != nil {

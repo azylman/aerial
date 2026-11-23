@@ -133,7 +133,6 @@ type WorkerPool struct {
 	cfg               WorkerPoolConfig
 	sessionMgr        *session.Manager
 	mu                sync.Mutex
-	activeTurns       map[string]*turnExecution
 	turns             *TurnRegistry // Restate TurnRunner attempts live on this pod, by turn ID
 	wg                sync.WaitGroup
 	ctx               context.Context
@@ -148,7 +147,6 @@ type WorkerPool struct {
 	voiceProcessPool  runner.AgentPool
 	eventBus          pubsub.Bus
 	createThreadFn    func(channelID, title string) (string, error)
-	startedAt         time.Time // anchors queue.wait for rows resumed after a restart
 	agentName         string
 
 	TranscriptStore         db.TranscriptStore
@@ -499,9 +497,9 @@ func New(appCfg *config.Config, cfg WorkerPoolConfig) *WorkerPool {
 	ctx, cancel := context.WithCancel(parentCtx)
 	p := &WorkerPool{
 		appCfg: resolvedAppCfg, hasExplicitAppCfg: isExplicitAppCfg, cfg: cfg, pools: pools, voiceProcessPool: cfg.VoiceProcessPool,
-		eventBus:    cfg.EventBus,
-		sessionMgr:  cfg.SessionManager,
-		activeTurns: make(map[string]*turnExecution), ctx: ctx, cancel: cancel, startedAt: time.Now().UTC(),
+		eventBus:   cfg.EventBus,
+		sessionMgr: cfg.SessionManager,
+		ctx:        ctx, cancel: cancel,
 		agentName:         cfg.AgentName,
 		webhookDispatcher: cfg.WebhookDispatcher, createThreadFn: cfg.CreateThreadFunc,
 
@@ -794,37 +792,6 @@ func (p *WorkerPool) MediumEffortProcessPool() *runner.UnifiedProcessPool {
 // AgentPool returns the configured primary runner.AgentPool.
 func (p *WorkerPool) AgentPool() runner.AgentPool {
 	return p.Pool(PoolKey{Ephemeral: false, Effort: config.EffortHigh})
-}
-
-func (p *WorkerPool) registerActiveTurn(scopeKey string, te *turnExecution) {
-	p.mu.Lock()
-	if p.activeTurns == nil {
-		p.activeTurns = make(map[string]*turnExecution)
-	}
-	p.activeTurns[scopeKey] = te
-	p.mu.Unlock()
-}
-
-// ActiveTurnSessionID returns the live session ID for an in-flight message ID if the message
-// belongs to an active turn in the worker pool.
-func (p *WorkerPool) ActiveTurnSessionID(msgID string) (string, bool) {
-	if p == nil || msgID == "" {
-		return "", false
-	}
-	p.mu.Lock()
-	turns := make([]*turnExecution, 0, len(p.activeTurns))
-	for _, te := range p.activeTurns {
-		if te != nil {
-			turns = append(turns, te)
-		}
-	}
-	p.mu.Unlock()
-	for _, te := range turns {
-		if sessID, ok := te.liveSessionIDForMessage(msgID); ok {
-			return sessID, true
-		}
-	}
-	return "", false
 }
 
 func logInterruptWarning(op string, err error) {

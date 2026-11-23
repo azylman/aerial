@@ -12,7 +12,6 @@ import (
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/azylman/aerial/services/eri/pkg/db"
 	"github.com/azylman/aerial/services/eri/pkg/runner"
 )
 
@@ -73,39 +72,6 @@ type queuedTurnItem struct {
 	requeuedAt   time.Time // when a resumed row re-entered the queue; zero on a first attempt
 	restartCount int
 	retryCount   int
-}
-
-// resumedRequeueTime is when a row with restartCount > 0 re-entered the queue. Startup recovery
-// bumps RestartCount in memory without refreshing UpdatedAt, so the row's UpdatedAt can predate
-// the restart; the pool's start time bounds it from below.
-func resumedRequeueTime(restartCount int, updatedAt, poolStart time.Time) time.Time {
-	if restartCount <= 0 {
-		return time.Time{}
-	}
-	if updatedAt.After(poolStart) {
-		return updatedAt
-	}
-	return poolStart
-}
-
-func burstTraceItems(burst []db.Message, poolStart time.Time) []queuedTurnItem {
-	items := make([]queuedTurnItem, 0, len(burst))
-	for _, m := range burst {
-		items = append(items, queuedTurnItem{
-			traceparent: m.Traceparent, createdAt: m.CreatedAt,
-			requeuedAt:   resumedRequeueTime(m.RestartCount, m.UpdatedAt, poolStart),
-			restartCount: m.RestartCount, retryCount: m.RetryCount,
-		})
-	}
-	return items
-}
-
-func dispatchTraceItem(d db.Dispatch, poolStart time.Time) queuedTurnItem {
-	return queuedTurnItem{
-		traceparent: d.Traceparent, createdAt: d.CreatedAt,
-		requeuedAt:   resumedRequeueTime(d.RestartCount, d.UpdatedAt, poolStart),
-		restartCount: d.RestartCount, retryCount: d.RetryCount,
-	}
 }
 
 // remoteSpanContext parses a persisted W3C traceparent; the result is invalid when tp is empty or malformed.
@@ -202,16 +168,6 @@ func (p *WorkerPool) tracer() trace.Tracer {
 		return otel.GetTracerProvider().Tracer(runner.TracerScope)
 	}
 	return p.cfg.TracerProvider.Tracer(runner.TracerScope)
-}
-
-// lateSinkUsage returns the usage the latest attempt's trace sink recorded once its turn closes,
-// or zero if there is no sink or ctx ends first.
-func (te *turnExecution) lateSinkUsage(ctx context.Context) runner.TokenUsage {
-	if te.traceSink == nil {
-		return runner.TokenUsage{}
-	}
-	usage, _ := te.traceSink.Usage(ctx)
-	return usage
 }
 
 // finishTurnSpan records model, usage and outcome on a turn's root span, marks it failed for
