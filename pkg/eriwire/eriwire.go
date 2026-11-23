@@ -29,6 +29,7 @@ type BrainDispatchRequest struct {
 	Effort         string `json:"effort,omitempty"`
 	Model          string `json:"model,omitempty"`
 	SkipIfActive   bool   `json:"skip_if_active,omitempty"`
+	Traceparent    string `json:"traceparent,omitempty"`
 }
 
 // DispatchEnqueueResponse defines the enqueue result for a dispatch.

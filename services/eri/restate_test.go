@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/azylman/aerial/pkg/eriwire"
+	"github.com/azylman/aerial/pkg/tracing"
 	"github.com/azylman/aerial/services/eri/pkg/llmcall"
 	"github.com/azylman/aerial/services/eri/pkg/metrics"
 	"github.com/azylman/aerial/services/eri/pkg/queue"
@@ -981,10 +982,12 @@ func TestHandlePromptViaRestate_IdempotencyKey(t *testing.T) {
 
 	tests := []struct {
 		name               string
+		traceparent        string
 		skipIfActive       bool
 		channelID          string
 		msgID              string
 		wantIdempotencyKey string
+		wantTraceparent    string
 	}{
 		{
 			name:               "idempotency key populated when skip-if-active is false",
@@ -992,6 +995,7 @@ func TestHandlePromptViaRestate_IdempotencyKey(t *testing.T) {
 			channelID:          "ch-100",
 			msgID:              "msg-200",
 			wantIdempotencyKey: "prompt:ch-100:msg-200",
+			wantTraceparent:    "",
 		},
 		{
 			name:               "idempotency key populated when skip-if-active is true",
@@ -999,6 +1003,16 @@ func TestHandlePromptViaRestate_IdempotencyKey(t *testing.T) {
 			channelID:          "ch-100",
 			msgID:              "msg-200",
 			wantIdempotencyKey: "prompt:ch-100:msg-200",
+			wantTraceparent:    "",
+		},
+		{
+			name:               "trace context propagated when active span in ctx",
+			traceparent:        "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+			skipIfActive:       false,
+			channelID:          "ch-100",
+			msgID:              "msg-200",
+			wantIdempotencyKey: "prompt:ch-100:msg-200",
+			wantTraceparent:    "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
 		},
 	}
 
@@ -1008,10 +1022,12 @@ func TestHandlePromptViaRestate_IdempotencyKey(t *testing.T) {
 
 			var capturedKey string
 			var headerPresent bool
+			var capturedBody []byte
 			httpClient := &http.Client{
 				Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 					capturedKey = r.Header.Get("Idempotency-Key")
 					_, headerPresent = r.Header["Idempotency-Key"]
+					capturedBody, _ = io.ReadAll(r.Body)
 					return &http.Response{
 						StatusCode: http.StatusOK,
 						Body:       io.NopCloser(strings.NewReader(`{"status":"accepted"}`)),
@@ -1021,7 +1037,11 @@ func TestHandlePromptViaRestate_IdempotencyKey(t *testing.T) {
 			}
 
 			client := NewRestateIngressClient("http://restate.test", "aerial", httpClient)
-			status, err := handlePromptViaRestate(context.Background(), client, PromptRequest{
+			ctx := context.Background()
+			if tc.traceparent != "" {
+				ctx = tracing.ContextWithTraceparent(ctx, tc.traceparent)
+			}
+			status, err := handlePromptViaRestate(ctx, client, PromptRequest{
 				Prompt:       "hello world",
 				SkipIfActive: tc.skipIfActive,
 			}, tc.channelID, tc.msgID)
@@ -1029,6 +1049,10 @@ func TestHandlePromptViaRestate_IdempotencyKey(t *testing.T) {
 			assert.Equal(t, "accepted", status)
 			assert.True(t, headerPresent)
 			assert.Equal(t, tc.wantIdempotencyKey, capturedKey)
+
+			var enqueuedReq queue.ThreadEnqueueRequest
+			require.NoError(t, json.Unmarshal(capturedBody, &enqueuedReq))
+			assert.Equal(t, tc.wantTraceparent, enqueuedReq.Traceparent)
 		})
 	}
 }
@@ -1038,10 +1062,12 @@ func TestHandleDispatchViaRestate_IdempotencyKey(t *testing.T) {
 
 	tests := []struct {
 		name               string
+		traceparent        string
 		skipIfActive       bool
 		sessionKey         string
 		dispatchID         string
 		wantIdempotencyKey string
+		wantTraceparent    string
 	}{
 		{
 			name:               "idempotency key populated with dispatch id when skip-if-active is false",
@@ -1049,6 +1075,7 @@ func TestHandleDispatchViaRestate_IdempotencyKey(t *testing.T) {
 			sessionKey:         "sess-100",
 			dispatchID:         "disp-200",
 			wantIdempotencyKey: "disp-200",
+			wantTraceparent:    "",
 		},
 		{
 			name:               "idempotency key populated with dispatch id when skip-if-active is true",
@@ -1056,6 +1083,16 @@ func TestHandleDispatchViaRestate_IdempotencyKey(t *testing.T) {
 			sessionKey:         "sess-100",
 			dispatchID:         "disp-200",
 			wantIdempotencyKey: "disp-200",
+			wantTraceparent:    "",
+		},
+		{
+			name:               "trace context propagated when active span in ctx",
+			traceparent:        "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+			skipIfActive:       false,
+			sessionKey:         "sess-100",
+			dispatchID:         "disp-200",
+			wantIdempotencyKey: "disp-200",
+			wantTraceparent:    "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
 		},
 	}
 
@@ -1065,16 +1102,22 @@ func TestHandleDispatchViaRestate_IdempotencyKey(t *testing.T) {
 
 			var receivedKey string
 			var hasHeader bool
+			var capturedBody []byte
 			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				receivedKey = r.Header.Get("Idempotency-Key")
 				_, hasHeader = r.Header["Idempotency-Key"]
+				capturedBody, _ = io.ReadAll(r.Body)
 				w.WriteHeader(http.StatusOK)
 				_, _ = w.Write([]byte(`{"status":"accepted"}`))
 			}))
 			defer ts.Close()
 
 			ingress := NewRestateIngressClient(ts.URL, "aerial", ts.Client())
-			res, err := handleDispatchViaRestate(context.Background(), ingress, DispatchRequest{
+			ctx := context.Background()
+			if tc.traceparent != "" {
+				ctx = tracing.ContextWithTraceparent(ctx, tc.traceparent)
+			}
+			res, err := handleDispatchViaRestate(ctx, ingress, DispatchRequest{
 				Prompt:       "run task",
 				SkipIfActive: tc.skipIfActive,
 			}, tc.sessionKey, tc.dispatchID)
@@ -1082,6 +1125,10 @@ func TestHandleDispatchViaRestate_IdempotencyKey(t *testing.T) {
 			assert.Equal(t, "accepted", res)
 			assert.True(t, hasHeader)
 			assert.Equal(t, tc.wantIdempotencyKey, receivedKey)
+
+			var brainReq eriwire.BrainDispatchRequest
+			require.NoError(t, json.Unmarshal(capturedBody, &brainReq))
+			assert.Equal(t, tc.wantTraceparent, brainReq.Traceparent)
 		})
 	}
 }
