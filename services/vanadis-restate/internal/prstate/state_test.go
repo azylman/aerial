@@ -12,23 +12,22 @@ import (
 func TestPRStateRecordFailedCISHA(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name      string
-		repo      string
-		pr        int
-		first     string
-		sha       string
-		want      bool
-		wantGet   string
-		wantGetOK bool
+		name    string
+		repo    string
+		pr      int
+		first   string
+		sha     string
+		want    bool
+		wantGet string
 	}{
-		{name: "records fresh sha", repo: "azylman/aerial", pr: 101, sha: "abc123", want: true, wantGet: "abc123", wantGetOK: true},
+		{name: "records fresh sha", repo: "azylman/aerial", pr: 101, sha: "abc123", want: true, wantGet: "abc123"},
 		{name: "rejects empty sha", repo: "azylman/aerial", pr: 101, sha: "", want: false},
 		{name: "rejects zero sha", repo: "azylman/aerial", pr: 101, sha: "0000000", want: false},
 		{name: "rejects zero pr", repo: "azylman/aerial", pr: 0, sha: "abc123", want: false},
 		{name: "rejects empty repo", repo: "", pr: 101, sha: "abc123", want: false},
-		{name: "same sha not new", repo: "azylman/aerial", pr: 101, first: "abc123", sha: "abc123", want: false, wantGet: "abc123", wantGetOK: true},
-		{name: "same sha different case not new", repo: "azylman/aerial", pr: 101, first: "ABC123", sha: "abc123", want: false, wantGet: "ABC123", wantGetOK: true},
-		{name: "changed sha is new", repo: "azylman/aerial", pr: 101, first: "abc123", sha: "def456", want: true, wantGet: "def456", wantGetOK: true},
+		{name: "same sha not new", repo: "azylman/aerial", pr: 101, first: "abc123", sha: "abc123", want: false, wantGet: "abc123"},
+		{name: "same sha different case not new", repo: "azylman/aerial", pr: 101, first: "ABC123", sha: "abc123", want: false, wantGet: "ABC123"},
+		{name: "changed sha is new", repo: "azylman/aerial", pr: 101, first: "abc123", sha: "def456", want: true, wantGet: "def456"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -38,8 +37,8 @@ func TestPRStateRecordFailedCISHA(t *testing.T) {
 			if got := s.RecordFailedCISHA(tc.sha); got != tc.want {
 				t.Fatalf("RecordFailedCISHA(%q) = %v, want %v", tc.sha, got, tc.want)
 			}
-			if got, ok := s.GetFailedCISHA(); got != tc.wantGet || ok != tc.wantGetOK {
-				t.Fatalf("GetFailedCISHA = (%q,%v), want (%q,%v)", got, ok, tc.wantGet, tc.wantGetOK)
+			if s.FailedCISHA != tc.wantGet {
+				t.Fatalf("FailedCISHA = %q, want %q", s.FailedCISHA, tc.wantGet)
 			}
 		})
 	}
@@ -140,7 +139,6 @@ func TestPRStateRollbackFailedCheckRun(t *testing.T) {
 			t.Parallel()
 			s := NewPRState("azylman/aerial", 101)
 			s.RecordFailedCheckRunDetailed(tc.recordSHA, tc.check)
-			s.RecordNonRoboRevFailedSHA(tc.recordSHA)
 			s.RollbackFailedCheckRun(tc.rollbackSHA, tc.check, tc.wasActive, tc.hadPrior)
 			if got := s.HasActiveCheckRun(tc.recordSHA, tc.check); got != tc.wantActive {
 				t.Fatalf("HasActiveCheckRun = %v, want %v", got, tc.wantActive)
@@ -152,20 +150,14 @@ func TestPRStateRollbackFailedCheckRun(t *testing.T) {
 	}
 }
 
-// TestPRStateClearFailedCISHA pins the ClearFailedCISHA fan-out: every
-// failure, alert and conflict slot for the SHA clears, and only
-// updated-for-main survives.
+// TestPRStateClearFailedCISHA pins the ClearFailedCISHA fan-out: the failed
+// CI SHA, every per-check failure and the conflict-published SHA clear.
 func TestPRStateClearFailedCISHA(t *testing.T) {
 	t.Parallel()
 	s := NewPRState("azylman/aerial", 101)
 	s.RecordFailedCISHA("abc123")
-	s.RecordNonRoboRevFailedSHA("abc123")
-	s.RecordCancelledCheckSHA("abc123")
 	s.RecordFailedCheckRunDetailed("abc123", "lint")
-	s.MarkCollaboratorAlerted("abc123")
-	s.MarkCollaboratorConflict("abc123")
 	s.MarkConflictPublished("abc123")
-	s.MarkUpdatedForMain()
 	s.ClearFailedCISHA()
 	tests := []struct {
 		name string
@@ -173,51 +165,15 @@ func TestPRStateClearFailedCISHA(t *testing.T) {
 		want bool
 	}{
 		{name: "failed ci sha clears", got: s.HasFailedCISHA(""), want: false},
-		{name: "non-roborev sha clears", got: s.HasNonRoboRevFailedSHA(""), want: false},
-		{name: "cancelled sha clears", got: s.HasCancelledCheckSHA("abc123"), want: false},
 		{name: "active check runs clear", got: s.HasActiveFailedCheckRuns("abc123"), want: false},
-		{name: "collaborator alert clears", got: s.WasCollaboratorAlerted("abc123"), want: false},
-		{name: "collaborator conflict clears", got: s.WasCollaboratorConflict("abc123"), want: false},
+		{name: "ever failed checks clear", got: s.HasEverFailedCheckRun("abc123", "lint"), want: false},
 		{name: "conflict published clears", got: s.WasConflictPublished("abc123"), want: false},
-		{name: "updated for main survives", got: s.WasUpdatedForMain(), want: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			if tc.got != tc.want {
 				t.Fatalf("got %v, want %v", tc.got, tc.want)
-			}
-		})
-	}
-}
-
-func TestPRStateClearActiveCheckRun(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name       string
-		record     string
-		clear      string
-		sha        string
-		wantActive bool
-		wantEver   bool
-	}{
-		{name: "clears matching non roborev", record: "lint", clear: "lint", sha: "abc123", wantActive: false, wantEver: true},
-		{name: "case insensitive clear", record: "Lint", clear: "lint", sha: "abc123", wantActive: false, wantEver: true},
-		{name: "stale sha keeps active", record: "lint", clear: "lint", sha: "def456", wantActive: true, wantEver: true},
-		{name: "empty clear noop", record: "lint", clear: "", sha: "abc123", wantActive: true, wantEver: true},
-		{name: "clears roborev active keeps ever", record: "roborev", clear: "roborev", sha: "abc123", wantActive: false, wantEver: true},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			s := NewPRState("azylman/aerial", 101)
-			s.RecordFailedCheckRunDetailed("abc123", tc.record)
-			s.ClearActiveFailedCheckRun(tc.sha, tc.clear)
-			if got := s.HasActiveCheckRun("abc123", tc.record); got != tc.wantActive {
-				t.Fatalf("HasActiveCheckRun = %v, want %v", got, tc.wantActive)
-			}
-			if got := s.HasEverFailedCheckRun("abc123", tc.record); got != tc.wantEver {
-				t.Fatalf("HasEverFailedCheckRun = %v, want %v", got, tc.wantEver)
 			}
 		})
 	}
@@ -252,19 +208,18 @@ func TestPRStateClearFailedCheckRun(t *testing.T) {
 func TestPRStateActiveQueries(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name          string
-		checks        []string
-		sha           string
-		wantAny       bool
-		wantNonRoboRO bool
-		wantRoboRev   bool
+		name        string
+		checks      []string
+		sha         string
+		wantAny     bool
+		wantRoboRev bool
 	}{
-		{name: "no checks nothing active", checks: nil, sha: "abc123", wantAny: false, wantNonRoboRO: false, wantRoboRev: false},
-		{name: "lint active non roborev", checks: []string{"lint"}, sha: "abc123", wantAny: true, wantNonRoboRO: true, wantRoboRev: false},
-		{name: "roborev only", checks: []string{"roborev"}, sha: "abc123", wantAny: true, wantNonRoboRO: false, wantRoboRev: true},
-		{name: "stale sha nothing active", checks: []string{"lint"}, sha: "def456", wantAny: false, wantNonRoboRO: false, wantRoboRev: false},
-		{name: "empty sha nothing active", checks: []string{"lint"}, sha: "", wantAny: false, wantNonRoboRO: false, wantRoboRev: false},
-		{name: "zero sha nothing active", checks: []string{"lint", "roborev"}, sha: "0000000", wantAny: false, wantNonRoboRO: false, wantRoboRev: false},
+		{name: "no checks nothing active", checks: nil, sha: "abc123", wantAny: false, wantRoboRev: false},
+		{name: "lint active non roborev", checks: []string{"lint"}, sha: "abc123", wantAny: true, wantRoboRev: false},
+		{name: "roborev only", checks: []string{"roborev"}, sha: "abc123", wantAny: true, wantRoboRev: true},
+		{name: "stale sha nothing active", checks: []string{"lint"}, sha: "def456", wantAny: false, wantRoboRev: false},
+		{name: "empty sha nothing active", checks: []string{"lint"}, sha: "", wantAny: false, wantRoboRev: false},
+		{name: "zero sha nothing active", checks: []string{"lint", "roborev"}, sha: "0000000", wantAny: false, wantRoboRev: false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -276,42 +231,8 @@ func TestPRStateActiveQueries(t *testing.T) {
 			if got := s.HasActiveFailedCheckRuns(tc.sha); got != tc.wantAny {
 				t.Fatalf("HasActiveFailedCheckRuns = %v, want %v", got, tc.wantAny)
 			}
-			if got := s.HasActiveNonRoboRevFailures(tc.sha); got != tc.wantNonRoboRO {
-				t.Fatalf("HasActiveNonRoboRevFailures = %v, want %v", got, tc.wantNonRoboRO)
-			}
 			if got := s.HasActiveRoboRevFailure(tc.sha); got != tc.wantRoboRev {
 				t.Fatalf("HasActiveRoboRevFailure = %v, want %v", got, tc.wantRoboRev)
-			}
-		})
-	}
-}
-
-func TestPRStateCanRecoverNonGateCheckSuccess(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name    string
-		setup   []string
-		recover string
-		sha     string
-		want    bool
-	}{
-		{name: "sole lint success recovers", setup: []string{"lint"}, recover: "lint", sha: "abc123", want: true},
-		{name: "lint success with build still failing does not recover", setup: []string{"lint", "build"}, recover: "lint", sha: "abc123", want: false},
-		{name: "lint success with roborev active does not recover", setup: []string{"lint", "roborev"}, recover: "lint", sha: "abc123", want: false},
-		{name: "unknown check never recovers", setup: []string{"lint"}, recover: "build", sha: "abc123", want: false},
-		{name: "stale sha never recovers", setup: []string{"lint"}, recover: "lint", sha: "def456", want: false},
-		{name: "empty check never recovers", setup: []string{"lint"}, recover: "", sha: "abc123", want: false},
-		{name: "zero sha never recovers", setup: []string{"lint"}, recover: "lint", sha: "0000000", want: false},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			s := NewPRState("azylman/aerial", 101)
-			for _, c := range tc.setup {
-				s.RecordFailedCheckRunDetailed("abc123", c)
-			}
-			if got := s.CanRecoverNonGateCheckSuccess(tc.recover, tc.sha); got != tc.want {
-				t.Fatalf("CanRecoverNonGateCheckSuccess = %v, want %v", got, tc.want)
 			}
 		})
 	}
@@ -360,39 +281,6 @@ func TestPRStateGenerationGating(t *testing.T) {
 			}
 			if got := s.WasEffectDispatched(s.EffectKeyFor(tc.kind, "abc123", "eri", "lint")); got != tc.wantOldKey {
 				t.Fatalf("current-generation key dispatched = %v, want %v", got, tc.wantOldKey)
-			}
-		})
-	}
-}
-
-func TestPRStateDeployDedupBothKeys(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name    string
-		job     string
-		sha     string
-		wantPR  bool
-		wantSHA bool
-	}{
-		{name: "pr key alone dispatches", job: "", sha: "", wantPR: true, wantSHA: false},
-		{name: "sha job key alone dispatches", job: "eri", sha: "abc123", wantPR: true, wantSHA: true},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			s := NewPRState("azylman/aerial", 101)
-			s.RecordDeployedPR()
-			s.RecordDeployedSHAJob(tc.job, tc.sha)
-			if got := s.WasDeployedPR(); got != tc.wantPR {
-				t.Fatalf("WasDeployedPR = %v, want %v", got, tc.wantPR)
-			}
-			if tc.job != "" {
-				if got := s.WasDeployedSHAJob(tc.job, tc.sha); got != tc.wantSHA {
-					t.Fatalf("WasDeployedSHAJob = %v, want %v", got, tc.wantSHA)
-				}
-				if got := s.WasDeployedSHAJob(tc.job, "other-sha"); got {
-					t.Fatalf("WasDeployedSHAJob(other) = true, want false")
-				}
 			}
 		})
 	}
@@ -455,47 +343,26 @@ func TestPRStateApplyEvent(t *testing.T) {
 	}
 }
 
-// TestPRStateCollaboratorAndConflict pins the collaborator alert and
-// conflict marks (identical contracts) plus the conflict-published slot:
-// zero SHAs never mark, a repeat mark reports false, a clear drops only its
-// own SHA, and an empty query matches a recorded mark but never a
-// published conflict.
-func TestPRStateCollaboratorAndConflict(t *testing.T) {
+// TestPRStateConflictPublished pins the conflict-published slot: a record
+// matches its own SHA, an empty query never matches, and a clear drops it.
+func TestPRStateConflictPublished(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name          string
 		mark          string
-		clear         string
 		query         string
-		wantMark      bool
-		wantWas       bool
 		wantPublished bool
 	}{
-		{name: "mark round trip", mark: "abc123", query: "abc123", wantMark: true, wantWas: true, wantPublished: true},
-		{name: "clear drops the mark", mark: "abc123", clear: "abc123", query: "abc123", wantMark: true, wantPublished: true},
-		{name: "clear of another sha keeps the mark", mark: "abc123", clear: "other-sha", query: "abc123", wantMark: true, wantWas: true, wantPublished: true},
-		{name: "empty query matches a recorded mark", mark: "abc123", query: "", wantMark: true, wantWas: true},
-		{name: "zero sha never marks", mark: "0000000", query: "0000000", wantPublished: true},
+		{name: "mark round trip", mark: "abc123", query: "abc123", wantPublished: true},
+		{name: "case insensitive match", mark: "ABC123", query: "abc123", wantPublished: true},
+		{name: "other sha misses", mark: "abc123", query: "other-sha"},
+		{name: "empty query never matches", mark: "abc123", query: ""},
+		{name: "empty mark records nothing", mark: "", query: "abc123"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			s := NewPRState("azylman/aerial", 101)
-			gotAlert, againAlert := s.MarkCollaboratorAlerted(tc.mark), s.MarkCollaboratorAlerted(tc.mark)
-			gotConflict, againConflict := s.MarkCollaboratorConflict(tc.mark), s.MarkCollaboratorConflict(tc.mark)
-			if gotAlert != tc.wantMark || gotConflict != tc.wantMark || againAlert || againConflict {
-				t.Fatalf("marks alert/conflict = %v,%v repeat %v,%v; want %v and false repeats", gotAlert, gotConflict, againAlert, againConflict, tc.wantMark)
-			}
-			if tc.clear != "" {
-				s.ClearCollaboratorAlerted(tc.clear)
-				s.ClearCollaboratorConflict(tc.clear)
-			}
-			if got := s.WasCollaboratorAlerted(tc.query); got != tc.wantWas {
-				t.Fatalf("WasCollaboratorAlerted(%q) = %v, want %v", tc.query, got, tc.wantWas)
-			}
-			if got := s.WasCollaboratorConflict(tc.query); got != tc.wantWas {
-				t.Fatalf("WasCollaboratorConflict(%q) = %v, want %v", tc.query, got, tc.wantWas)
-			}
 			s.MarkConflictPublished(tc.mark)
 			if got := s.WasConflictPublished(tc.query); got != tc.wantPublished {
 				t.Fatalf("WasConflictPublished(%q) = %v, want %v", tc.query, got, tc.wantPublished)
@@ -503,56 +370,6 @@ func TestPRStateCollaboratorAndConflict(t *testing.T) {
 			s.ClearConflictPublished()
 			if s.WasConflictPublished(tc.query) {
 				t.Fatalf("WasConflictPublished(%q) after clear = true, want false", tc.query)
-			}
-		})
-	}
-}
-
-// TestPRStateFailedSHASlots pins the three single-SHA failure slots (failed
-// CI, non-roborev, cancelled): zero and empty records are ignored, queries
-// match case-insensitively, an empty non-roborev query matches any record,
-// deleted slots miss, and IsCachedFailedCISHA reads all three.
-func TestPRStateFailedSHASlots(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name          string
-		setupFail     string
-		setupNon      string
-		setupCan      string
-		deleteSlots   bool
-		query         string
-		wantCached    bool
-		wantNon       bool
-		wantCancelled bool
-	}{
-		{name: "failed sha cached", setupFail: "abc123", query: "abc123", wantCached: true},
-		{name: "non roborev sha cached", setupNon: "abc123", query: "ABC123", wantCached: true, wantNon: true},
-		{name: "cancelled sha cached", setupCan: "abc123", query: "abc123", wantCached: true, wantCancelled: true},
-		{name: "unknown sha not cached", setupNon: "abc123", setupCan: "abc123", query: "zzz999"},
-		{name: "zero sha never cached", setupFail: "abc123", query: "0000000"},
-		{name: "empty query not cached but matches non roborev", setupFail: "abc123", setupNon: "abc123", setupCan: "abc123", query: "", wantNon: true},
-		{name: "zero and empty records are ignored", setupFail: "0000000", setupNon: "", setupCan: "0000000", query: "0000000"},
-		{name: "deleted slots miss", setupNon: "abc123", setupCan: "abc123", deleteSlots: true, query: "abc123"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			s := NewPRState("azylman/aerial", 101)
-			s.RecordFailedCISHA(tc.setupFail)
-			s.RecordNonRoboRevFailedSHA(tc.setupNon)
-			s.RecordCancelledCheckSHA(tc.setupCan)
-			if tc.deleteSlots {
-				s.DeleteNonRoboRevFailedSHA()
-				s.DeleteCancelledCheckSHA()
-			}
-			if got := s.IsCachedFailedCISHA(tc.query); got != tc.wantCached {
-				t.Fatalf("IsCachedFailedCISHA(%q) = %v, want %v", tc.query, got, tc.wantCached)
-			}
-			if got := s.HasNonRoboRevFailedSHA(tc.query); got != tc.wantNon {
-				t.Fatalf("HasNonRoboRevFailedSHA(%q) = %v, want %v", tc.query, got, tc.wantNon)
-			}
-			if got := s.HasCancelledCheckSHA(tc.query); got != tc.wantCancelled {
-				t.Fatalf("HasCancelledCheckSHA(%q) = %v, want %v", tc.query, got, tc.wantCancelled)
 			}
 		})
 	}
@@ -686,27 +503,15 @@ func TestPRStateNilReceiver(t *testing.T) {
 	alert := prwire.EffectDiscordAlert
 	var nilState *PRState
 	nilState.RollbackFailedCheckRun("abc123", "lint", false, false)
-	nilState.ClearActiveFailedCheckRun("abc123", "lint")
-	nilState.MarkUpdatedForMain()
-	nilState.RecordNonRoboRevFailedSHA("abc123")
-	nilState.RecordCancelledCheckSHA("abc123")
 	nilState.MarkConflictPublished("abc123")
 	nilState.ClearFailedCISHA()
-	nilState.DeleteNonRoboRevFailedSHA()
-	nilState.DeleteCancelledCheckSHA()
-	nilState.ClearCollaboratorAlerted("")
-	nilState.ClearCollaboratorConflict("")
 	nilState.ClearConflictPublished()
-	nilState.ClearUpdatedForMain()
 	nilState.MarkTerminal(TerminalMerged)
 	nilState.Reopen()
 	nilState.RetryPRReadiness()
 	nilState.MarkEffectDispatched(nilState.EffectKeyFor(alert, "abc123", "", ""))
-	nilState.RecordDeployedPR()
-	nilState.RecordDeployedSHAJob("eri", "abc123")
 	zero := &PRState{}
 	zero.MarkEffectDispatched(zero.EffectKeyFor(alert, "abc123", "", ""))
-	zero.RecordDeployedSHAJob("eri", "abc123")
 	zeroPR := NewPRState("azylman/aerial", 0)
 	zeroPR.MarkConflictPublished("abc123")
 	tests := []struct {
@@ -715,41 +520,23 @@ func TestPRStateNilReceiver(t *testing.T) {
 		want any
 	}{
 		{name: "nil HasFailedCISHA", got: nilState.HasFailedCISHA(""), want: false},
-		{name: "nil GetFailedCISHA", got: results(nilState.GetFailedCISHA()), want: results("", false)},
 		{name: "nil RecordFailedCISHA", got: nilState.RecordFailedCISHA("abc123"), want: false},
-		{name: "nil WasUpdatedForMain", got: nilState.WasUpdatedForMain(), want: false},
-		{name: "nil HasNonRoboRevFailedSHA", got: nilState.HasNonRoboRevFailedSHA(""), want: false},
-		{name: "nil HasCancelledCheckSHA", got: nilState.HasCancelledCheckSHA("abc123"), want: false},
-		{name: "nil IsCachedFailedCISHA", got: nilState.IsCachedFailedCISHA("abc123"), want: false},
 		{name: "nil RecordFailedCheckRunDetailed", got: results(nilState.RecordFailedCheckRunDetailed("abc123", "lint")), want: results(false, false, false)},
 		{name: "nil ClearFailedCheckRun", got: nilState.ClearFailedCheckRun("abc123", "lint"), want: false},
 		{name: "nil HasActiveFailedCheckRuns", got: nilState.HasActiveFailedCheckRuns("abc123"), want: false},
-		{name: "nil HasActiveNonRoboRevFailures", got: nilState.HasActiveNonRoboRevFailures("abc123"), want: false},
 		{name: "nil HasActiveRoboRevFailure", got: nilState.HasActiveRoboRevFailure("abc123"), want: false},
 		{name: "nil HasActiveCheckRun", got: nilState.HasActiveCheckRun("abc123", "lint"), want: false},
 		{name: "nil HasEverFailedCheckRun", got: nilState.HasEverFailedCheckRun("abc123", "lint"), want: false},
-		{name: "nil CanRecoverNonGateCheckSuccess", got: nilState.CanRecoverNonGateCheckSuccess("lint", "abc123"), want: false},
-		{name: "nil MarkCollaboratorAlerted", got: nilState.MarkCollaboratorAlerted("abc123"), want: false},
-		{name: "nil WasCollaboratorAlerted", got: nilState.WasCollaboratorAlerted("abc123"), want: false},
-		{name: "nil MarkCollaboratorConflict", got: nilState.MarkCollaboratorConflict("abc123"), want: false},
-		{name: "nil WasCollaboratorConflict", got: nilState.WasCollaboratorConflict("abc123"), want: false},
 		{name: "nil WasConflictPublished", got: nilState.WasConflictPublished("abc123"), want: false},
 		{name: "nil RecordKustomizationRequests", got: nilState.RecordKustomizationRequests(), want: uint64(0)},
 		{name: "nil EffectKeyFor", got: nilState.EffectKeyFor(alert, "abc123", "", ""), want: EffectKey{}},
 		{name: "nil EffectKeyFor still renders", got: nilState.EffectKeyFor(alert, "abc123", "", "").String() != "", want: true},
 		{name: "nil WasEffectDispatched", got: nilState.WasEffectDispatched(nilState.EffectKeyFor(alert, "abc123", "", "")), want: false},
-		{name: "nil WasDeployedPR", got: nilState.WasDeployedPR(), want: false},
-		{name: "nil WasDeployedSHAJob", got: nilState.WasDeployedSHAJob("eri", "abc123"), want: false},
 		{name: "nil ApplyEvent drops stale", got: nilState.ApplyEvent(PREvent{}), want: DispositionDropStale},
 		{name: "zero value effect dispatches", got: zero.WasEffectDispatched(zero.EffectKeyFor(alert, "abc123", "", "")), want: true},
 		{name: "zero value other effect undispatched", got: zero.WasEffectDispatched(zero.EffectKeyFor(prwire.EffectFluxForward, "abc123", "", "")), want: false},
-		{name: "zero value sha job deduped", got: zero.WasDeployedSHAJob("eri", "abc123"), want: true},
-		{name: "zero value other sha job not deduped", got: zero.WasDeployedSHAJob("eri", "zzz999"), want: false},
 		{name: "zero pr RecordFailedCISHA", got: zeroPR.RecordFailedCISHA("abc123"), want: false},
-		{name: "zero pr MarkCollaboratorAlerted", got: zeroPR.MarkCollaboratorAlerted("abc123"), want: false},
-		{name: "zero pr MarkCollaboratorConflict", got: zeroPR.MarkCollaboratorConflict("abc123"), want: false},
 		{name: "zero pr WasConflictPublished", got: zeroPR.WasConflictPublished("abc123"), want: false},
-		{name: "zero pr IsCachedFailedCISHA", got: zeroPR.IsCachedFailedCISHA("abc123"), want: false},
 		{name: "zero pr RecordFailedCheckRunDetailed", got: results(zeroPR.RecordFailedCheckRunDetailed("abc123", "lint")), want: results(false, false, false)},
 	}
 	for _, tc := range tests {

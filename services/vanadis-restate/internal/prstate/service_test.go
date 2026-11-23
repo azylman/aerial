@@ -256,11 +256,10 @@ func TestPRObjectService_DarkHandlers(t *testing.T) {
 		rec          *stateCapture[*PRState]
 		wantSet      bool
 		wantTerminal TerminalState
-		wantAlert    string
 		wantGen      uint64
 	}{
 		{name: "check rerun requested applies", got: NewPRObjectService().HandleCheckRerunRequested(restate.WithMockContext(prMc03), ev), rec: prRec03, wantSet: true},
-		{name: "collaborator alert applies", got: NewPRObjectService().HandleCollaboratorAlert(restate.WithMockContext(prMc04), ev), rec: prRec04, wantSet: true, wantAlert: "abc123"},
+		{name: "collaborator alert applies", got: NewPRObjectService().HandleCollaboratorAlert(restate.WithMockContext(prMc04), ev), rec: prRec04, wantSet: true},
 		{name: "conflict resolved applies", got: NewPRObjectService().HandleConflictResolved(restate.WithMockContext(prMc05), ev), rec: prRec05, wantSet: true},
 		{name: "merged applies", got: NewPRObjectService().HandleMerged(restate.WithMockContext(prMc06), ev), rec: prRec06, wantSet: true, wantTerminal: TerminalMerged},
 		{name: "closed applies", got: NewPRObjectService().HandleClosed(restate.WithMockContext(prMc07), ev), rec: prRec07, wantSet: true, wantTerminal: TerminalClosed},
@@ -286,9 +285,6 @@ func TestPRObjectService_DarkHandlers(t *testing.T) {
 				if tc.wantTerminal != TerminalNone && tc.rec.saved.Terminal != tc.wantTerminal {
 					t.Fatalf("saved terminal = %v, want %v", tc.rec.saved.Terminal, tc.wantTerminal)
 				}
-				if tc.wantAlert != "" && tc.rec.saved.CollaboratorAlerted != tc.wantAlert {
-					t.Fatalf("saved collaborator alert = %q, want %q", tc.rec.saved.CollaboratorAlerted, tc.wantAlert)
-				}
 				if tc.wantGen != 0 && tc.rec.saved.GateGeneration != tc.wantGen {
 					t.Fatalf("saved gate generation = %d, want %d", tc.rec.saved.GateGeneration, tc.wantGen)
 				}
@@ -309,20 +305,19 @@ func TestPRObjectService_HandleCheckFailed(t *testing.T) {
 	reopenedState := &PRState{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "aaa111", Terminal: TerminalMerged}
 	ownedState := func() *PRState { return &PRState{Repo: "azylman/aerial", PRNumber: 101, Agent: "agent-alpha"} }
 	tests := []struct {
-		name           string
-		existing       *PRState
-		ev             PREvent
-		kvFail         bool
-		noKV           bool
-		wantErr        bool
-		wantSet        bool
-		wantFailedCI   string
-		wantNonRoboRev string
-		wantActive     bool
-		wantRobo       bool
-		wantAgent      string
+		name         string
+		existing     *PRState
+		ev           PREvent
+		kvFail       bool
+		noKV         bool
+		wantErr      bool
+		wantSet      bool
+		wantFailedCI string
+		wantActive   bool
+		wantRobo     bool
+		wantAgent    string
 	}{
-		{name: "non-roborev check failure", ev: checkFailedEv(101, "abc123", "ci/lint", ""), wantSet: true, wantFailedCI: "abc123", wantNonRoboRev: "abc123", wantActive: true},
+		{name: "non-roborev check failure", ev: checkFailedEv(101, "abc123", "ci/lint", ""), wantSet: true, wantFailedCI: "abc123", wantActive: true},
 		{name: "roborev check failure", ev: checkFailedEv(101, "abc123", "roborev", ""), wantSet: true, wantFailedCI: "abc123", wantActive: false, wantRobo: true},
 		{name: "empty check name records failed ci sha only", ev: checkFailedEv(101, "abc123", "", ""), wantSet: true, wantFailedCI: "abc123"},
 		{name: "stale sha drops", existing: staleState, ev: checkFailedEv(101, "bbb222", "", "")},
@@ -350,7 +345,6 @@ func TestPRObjectService_HandleCheckFailed(t *testing.T) {
 			}
 			require.NotNil(t, rec.saved)
 			assert.Equal(t, tc.wantFailedCI, rec.saved.FailedCISHA, "FailedCISHA")
-			assert.Equal(t, tc.wantNonRoboRev, rec.saved.NonRoboRevSHA, "NonRoboRevSHA")
 			assert.Equal(t, tc.wantActive, rec.saved.Checks.ActiveFailed[prwire.CanonicalFailedCheckKey(tc.ev.CheckName)], "ActiveFailed")
 			assert.Equal(t, tc.wantRobo, rec.saved.Checks.RoboRevActiveFailed, "RoboRevActiveFailed")
 			assert.Equal(t, tc.wantAgent, rec.saved.Agent, "Agent")
@@ -368,22 +362,19 @@ func TestPRObjectService_HandleCheckPassed(t *testing.T) {
 	t.Parallel()
 	priorState := NewPRState("azylman/aerial", 101)
 	priorState.RecordFailedCheckRunDetailed("abc123", "ci/lint")
-	priorState.RecordNonRoboRevFailedSHA("abc123")
 	priorState.RecordFailedCISHA("abc123")
 
 	priorMultiState := NewPRState("azylman/aerial", 101)
 	priorMultiState.RecordFailedCheckRunDetailed("abc123", "ci/lint")
 	priorMultiState.RecordFailedCheckRunDetailed("abc123", "ci/unit")
-	priorMultiState.RecordNonRoboRevFailedSHA("abc123")
 	priorMultiState.RecordFailedCISHA("abc123")
 
 	tests := []struct {
-		name           string
-		existing       *PRState
-		ev             PREvent
-		wantSet        bool
-		wantFailedCI   string
-		wantNonRoboRev string
+		name         string
+		existing     *PRState
+		ev           PREvent
+		wantSet      bool
+		wantFailedCI string
 	}{
 		{
 			name:     "clears last active failure and clears failed ci sha",
@@ -392,12 +383,11 @@ func TestPRObjectService_HandleCheckPassed(t *testing.T) {
 			wantSet:  true,
 		},
 		{
-			name:           "clears one failure but retains ci sha while other failure active",
-			existing:       priorMultiState,
-			ev:             PREvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "abc123", CheckName: "ci/lint"},
-			wantSet:        true,
-			wantFailedCI:   "abc123",
-			wantNonRoboRev: "abc123",
+			name:         "clears one failure but retains ci sha while other failure active",
+			existing:     priorMultiState,
+			ev:           PREvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "abc123", CheckName: "ci/lint"},
+			wantSet:      true,
+			wantFailedCI: "abc123",
 		},
 	}
 	for _, tc := range tests {
@@ -413,9 +403,6 @@ func TestPRObjectService_HandleCheckPassed(t *testing.T) {
 				require.NotNil(t, rec.saved)
 				if rec.saved.FailedCISHA != tc.wantFailedCI {
 					t.Fatalf("FailedCISHA = %q, want %q", rec.saved.FailedCISHA, tc.wantFailedCI)
-				}
-				if rec.saved.NonRoboRevSHA != tc.wantNonRoboRev {
-					t.Fatalf("NonRoboRevSHA = %q, want %q", rec.saved.NonRoboRevSHA, tc.wantNonRoboRev)
 				}
 			}
 		})
@@ -506,17 +493,16 @@ func TestPRObjectService_IndexSends(t *testing.T) {
 }
 
 // TestPRObjectService_HandleMainAdvanced proves the RepoObject main-push
-// fan-out target clears updated-for-main and is absorbed by terminal PRs.
+// fan-out target applies to open PRs and is absorbed by terminal PRs.
 func TestPRObjectService_HandleMainAdvanced(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name        string
-		existing    *PRState
-		wantSet     bool
-		wantUpdated bool
+		name     string
+		existing *PRState
+		wantSet  bool
 	}{
-		{name: "open pr clears updated for main", existing: &PRState{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "abc123", UpdatedForMain: true}, wantSet: true},
-		{name: "merged pr absorbs the clear", existing: &PRState{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "abc123", UpdatedForMain: true, Terminal: TerminalMerged}},
+		{name: "open pr applies", existing: &PRState{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "abc123"}, wantSet: true},
+		{name: "merged pr absorbs the event", existing: &PRState{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "abc123", Terminal: TerminalMerged}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -524,9 +510,6 @@ func TestPRObjectService_HandleMainAdvanced(t *testing.T) {
 			mc, rec := newStateMock(t, tc.existing)
 			require.NoError(t, NewPRObjectService().HandleMainAdvanced(restate.WithMockContext(mc), PREvent{Event: "main_advanced", Repo: "azylman/aerial", PRNumber: 101}))
 			require.Equal(t, tc.wantSet, rec.setCalled)
-			if tc.wantSet {
-				assert.Equal(t, tc.wantUpdated, rec.saved.UpdatedForMain)
-			}
 			assertSends(t, rec.sends.snapshot(), nil)
 		})
 	}

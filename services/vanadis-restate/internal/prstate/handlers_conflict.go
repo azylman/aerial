@@ -127,14 +127,12 @@ func (h *ConflictHandlers) HandleConflictCheck(ctx context.Context, prKey string
 	}
 	if !conflicted {
 		pr.MarkEffectDispatched(key)
-		pr.ClearCollaboratorConflict(headSHA)
 		h.store.SavePR(pr)
 		return ConflictOutcome{Disposition: DispositionApply}, nil
 	}
 	if err := h.reschedule.ScheduleConflictRecheck(ctx, ConflictRecheckDelay, ev); err != nil {
 		return ConflictOutcome{Disposition: DispositionApply, Conflicted: true}, err
 	}
-	pr.MarkCollaboratorConflict(headSHA)
 	pr.MarkEffectDispatched(key)
 	h.store.SavePR(pr)
 	return ConflictOutcome{Disposition: DispositionApply, Conflicted: true, RecheckScheduled: true}, nil
