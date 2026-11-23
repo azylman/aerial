@@ -135,11 +135,6 @@ check_dependabot_coverage() {
     fi
 
     local missing_manifests=""
-    for svc in $GO_SERVICES; do
-        if ! grep -q -F "\"/${svc}\"" "$dep_file" && ! grep -q -F "'/${svc}'" "$dep_file" && ! grep -q -E "^[[:space:]]*-[[:space:]]*\"?/${svc}\"?[[:space:]]*$" "$dep_file"; then
-            missing_manifests="${missing_manifests} /${svc}"
-        fi
-    done
 
     # Discovered package manifests up to maxdepth 3 excluding vendor, node_modules, testdata, and hidden directories
     local discovered_dirs
@@ -191,7 +186,7 @@ check_dependabot_coverage() {
 }
 
 # Dynamically discover all Go modules in the monorepo
-GO_SERVICES=$(cd "$REPO_ROOT" && find . -maxdepth 3 -name "go.mod" ! -path "*/.*" ! -path "*/vendor/*" | sed 's|^\./||; s|/go\.mod$||' | sort | tr '\n' ' ' | sed 's/[[:space:]]*$//')
+GO_SERVICES=$(discover_go_services)
 
 run_golangci_lint() {
     svc="$1"
@@ -267,14 +262,11 @@ run_deadcode() {
             echo "   [deadcode] Checking $svc for unreachable code (production graph)..."
         fi
         ensure_deadcode
-        dead_dir="$svc"
-        filter_flag=""
+        filter_flag="-filter=^github\.com/azylman/aerial/${svc}(/|$)"
         if [ "$svc" = "services/eri" ]; then
             # services/eri exports shared worker packages to services/eri-restate;
-            # evaluate the production call graph from services/eri-restate across both binaries' main packages.
-            dead_dir="$REPO_ROOT/services/eri-restate"
-            filter_flag="-filter=^github\.com/azylman/aerial/services/eri(/|$)"
-            main_pkgs=$(cd "$dead_dir" && go list -f '{{if eq .Name "main"}}{{.ImportPath}}{{end}}' ./... github.com/azylman/aerial/services/eri/...) || {
+            # evaluate main_pkgs across both services/eri and services/eri-restate.
+            main_pkgs=$(cd "$REPO_ROOT" && go list -f '{{if eq .Name "main"}}{{.ImportPath}}{{end}}' ./services/eri/... ./services/eri-restate/...) || {
                 echo "🚨 [Aerial Verify] Error: failed to list main packages in $svc + services/eri-restate" >&2
                 exit 1
             }
@@ -286,7 +278,7 @@ run_deadcode() {
         fi
         if [ -n "$main_pkgs" ]; then
             # shellcheck disable=SC2086
-            dead_prod=$(cd "$dead_dir" && "$DEADCODE_BIN" $filter_flag $main_pkgs 2>&1) || {
+            dead_prod=$(cd "$REPO_ROOT" && "$DEADCODE_BIN" $filter_flag $main_pkgs 2>&1) || {
                 echo "🚨 [Aerial Verify] Error: deadcode (production) execution failed on $svc:" >&2
                 echo "$dead_prod" >&2
                 exit 1
@@ -297,7 +289,8 @@ run_deadcode() {
                 exit 1
             fi
         fi
-        dead_test=$(cd "$svc" && "$DEADCODE_BIN" -test ./... 2>&1) || {
+        # shellcheck disable=SC2086
+        dead_test=$(cd "$svc" && "$DEADCODE_BIN" -test $filter_flag ./... 2>&1) || {
             echo "🚨 [Aerial Verify] Error: deadcode (-test) execution failed on $svc:" >&2
             echo "$dead_test" >&2
             exit 1

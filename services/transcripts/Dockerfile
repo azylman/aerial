@@ -2,11 +2,10 @@
 FROM golang:1.27.3-alpine AS builder
 
 WORKDIR /src
-COPY pkg/go.mod pkg/go.sum* ./pkg/
-COPY services/transcripts/go.mod services/transcripts/go.sum* ./services/transcripts/
-WORKDIR /src/services/transcripts
+COPY go.mod go.sum ./
 RUN --mount=type=cache,target=/go/pkg/mod go mod download
 
+WORKDIR /src/services/transcripts
 COPY pkg/ /src/pkg/
 COPY services/transcripts/ ./
 RUN --mount=type=cache,target=/go/pkg/mod \

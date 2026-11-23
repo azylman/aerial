@@ -3,11 +3,10 @@
 FROM golang:1.27.3-alpine AS builder
 
 WORKDIR /src
-COPY pkg/go.mod pkg/go.sum* ./pkg/
-COPY services/eri/go.mod services/eri/go.sum* ./services/eri/
-WORKDIR /src/services/eri
+COPY go.mod go.sum ./
 RUN --mount=type=cache,target=/go/pkg/mod go mod download
 
+WORKDIR /src/services/eri
 COPY pkg/ /src/pkg/
 COPY services/eri/ ./
 RUN --mount=type=cache,target=/root/.cache/go-build \

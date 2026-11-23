@@ -35,3 +35,35 @@ hermetic_go() {
         GIT_TERMINAL_PROMPT=0 \
         "$@"
 }
+
+# Discover Go services/modules in the monorepo.
+# Discovers sub-module go.mod dirs (for synthetic test fixtures) plus pkg and
+# immediate child dirs of services/, mcp/, and scripts/ containing non-testdata .go files.
+discover_go_services() {
+    (
+        find . -maxdepth 3 -name "go.mod" ! -path "./go.mod" ! -path "*/.*" ! -path "*/vendor/*" ! -path "*/testdata/*" 2>/dev/null | \
+            sed 's|^\./||; s|/go\.mod$||'
+
+        if [ -d "pkg" ]; then
+            if find pkg -maxdepth 3 -name "*.go" ! -path "*/testdata/*" 2>/dev/null | grep -q '\.go$'; then
+                echo "pkg"
+            fi
+        fi
+
+        for parent in services mcp scripts; do
+            if [ -d "$parent" ]; then
+                for child in "$parent"/*; do
+                    if [ -d "$child" ] && [ ! -L "$child" ]; then
+                        case "$child" in
+                            */.*) continue ;;
+                        esac
+                        if find "$child" -maxdepth 3 -name "*.go" ! -path "*/testdata/*" 2>/dev/null | grep -q '\.go$'; then
+                            echo "${child#./}"
+                        fi
+                    fi
+                done
+            fi
+        done
+    ) | sort -u | tr '\n' ' ' | sed 's/[[:space:]]*$//'
+}
+

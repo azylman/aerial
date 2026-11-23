@@ -77,11 +77,13 @@ func checkPairCloneViolation(a, b funcCloneSig) string {
 	return ""
 }
 
+const cloneAllGroup = "all"
+
 func checkCloneViolations(sigs []funcCloneSig) []string {
 	var violations []string
 	forEachPackagePair(
 		sigs,
-		func(s funcCloneSig) string { return "all" },
+		func(s funcCloneSig) string { return cloneAllGroup },
 		func(s funcCloneSig) string { return s.rel },
 		func(s funcCloneSig) string { return s.name },
 		func(a, b funcCloneSig) {
@@ -97,7 +99,7 @@ func checkStructCloneViolations(sigs []structCloneSig) []string {
 	var violations []string
 	forEachPackagePair(
 		sigs,
-		func(s structCloneSig) string { return s.pkgKey },
+		func(s structCloneSig) string { return cloneAllGroup },
 		func(s structCloneSig) string { return s.rel },
 		func(s structCloneSig) string { return s.name },
 		func(a, b structCloneSig) {

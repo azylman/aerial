@@ -3,11 +3,10 @@
 FROM golang:1.27.3-alpine AS builder
 
 WORKDIR /src
-COPY pkg/go.mod pkg/go.sum* ./pkg/
-COPY services/vanadis-restate/go.mod services/vanadis-restate/go.sum* ./services/vanadis-restate/
-WORKDIR /src/services/vanadis-restate
+COPY go.mod go.sum ./
 RUN --mount=type=cache,target=/go/pkg/mod go mod download
 
+WORKDIR /src/services/vanadis-restate
 COPY pkg/ /src/pkg/
 COPY services/vanadis-restate/ ./
 RUN --mount=type=cache,target=/root/.cache/go-build \

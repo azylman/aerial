@@ -15,6 +15,7 @@ import (
 
 	"github.com/azylman/aerial/pkg/buildplan"
 	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/services/vanadis-restate/internal/deploygate"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/ericlient"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/executor"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
@@ -194,17 +195,7 @@ type BuildMutationRequest struct {
 	Reason       string                 `json:"reason,omitempty"`
 }
 
-type reconcileStepOutput struct {
-	RetryResult    *store.RetryActionChunkResult `json:"retry_result,omitempty"`
-	BuildStatus    string                        `json:"build_status"`
-	LaunchedChunks []string                      `json:"launched_chunks,omitempty"`
-	LaunchedMap    map[string]bool               `json:"launched_map,omitempty"`
-	Error          string                        `json:"error,omitempty"`
-	State          *model.BuildObjectState       `json:"state,omitempty"`
-	// ReconcileTargets are other builds this step changed; each is reconciled
-	// by its own runner after the step commits.
-	ReconcileTargets []store.SweptChunk `json:"reconcile_targets,omitempty"`
-}
+type reconcileStepOutput = deploygate.StepOutput
 
 type objectRuntime interface {
 	Key() string

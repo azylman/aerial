@@ -7,12 +7,10 @@ WORKDIR /src
 # Prune Go SDK test, doc, and api directories before source copy to keep /usr/local/go layer static
 RUN rm -rf /usr/local/go/test /usr/local/go/doc /usr/local/go/api
 
-COPY pkg/go.mod pkg/go.sum* ./pkg/
-COPY services/eri/go.mod services/eri/go.sum* ./services/eri/
-COPY services/eri-restate/go.mod services/eri-restate/go.sum* ./services/eri-restate/
-WORKDIR /src/services/eri-restate
+COPY go.mod go.sum ./
 RUN --mount=type=cache,target=/go/pkg/mod go mod download
 
+WORKDIR /src/services/eri-restate
 COPY pkg/ /src/pkg/
 COPY services/eri/ /src/services/eri/
 COPY services/eri-restate/ ./

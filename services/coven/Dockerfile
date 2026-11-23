@@ -2,11 +2,10 @@
 FROM golang:1.27.3-alpine AS builder
 
 WORKDIR /src
-COPY pkg/go.mod pkg/go.sum* ./pkg/
-COPY services/coven/go.mod services/coven/go.sum* ./services/coven/
-WORKDIR /src/services/coven
+COPY go.mod go.sum ./
 RUN --mount=type=cache,target=/go/pkg/mod go mod download
 
+WORKDIR /src/services/coven
 COPY pkg/ /src/pkg/
 COPY services/coven/ ./
 RUN --mount=type=cache,target=/go/pkg/mod \
