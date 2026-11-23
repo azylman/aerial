@@ -86,43 +86,6 @@ func TestTurnExecution_LeaseKey(t *testing.T) {
 	}
 }
 
-func TestTurnExecution_InitialRetryCount(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name string
-		te   *turnExecution
-		want int
-	}{
-		{
-			name: "nil receiver",
-			te:   nil,
-			want: 0,
-		},
-		{
-			name: "dispatch turn uses dispatch retry count",
-			te:   &turnExecution{dispatch: &db.Dispatch{ID: "d1", RetryCount: 3}},
-			want: 3,
-		},
-		{
-			name: "burst turn uses max burst retry count",
-			te: &turnExecution{burst: []db.Message{
-				{ID: "m1", RetryCount: 1},
-				{ID: "m2", RetryCount: 4},
-				{ID: "m3", RetryCount: 2},
-			}},
-			want: 4,
-		},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			if got := tc.te.initialRetryCount(); got != tc.want {
-				t.Errorf("initialRetryCount() = %d, want %d", got, tc.want)
-			}
-		})
-	}
-}
-
 func TestTurnExecution_TurnEffortAndModel(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -220,68 +183,6 @@ func TestTurnExecution_OwnsTurnItem(t *testing.T) {
 			t.Parallel()
 			if got := tc.te.ownsTurnItem(tc.itemID); got != tc.want {
 				t.Errorf("ownsTurnItem(%q) = %t, want %t", tc.itemID, got, tc.want)
-			}
-		})
-	}
-}
-
-func TestTurnExecution_IncrementTurnRetries(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name          string
-		isDispatch    bool
-		isNil         bool
-		wantDispRetry int
-		wantMsgRetry  int
-	}{
-		{
-			name:       "nil receiver",
-			isNil:      true,
-			isDispatch: false,
-		},
-		{
-			name:          "dispatch turn increments dispatch retry in store",
-			isDispatch:    true,
-			wantDispRetry: 1,
-		},
-		{
-			name:         "burst turn increments message retry in store",
-			isDispatch:   false,
-			wantMsgRetry: 1,
-		},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			if tc.isNil {
-				var nilTE *turnExecution
-				nilTE.incrementTurnRetries("nil error")
-				return
-			}
-			store := dbtest.NewFakeStore()
-			ctx := context.Background()
-			pool := New(config.NewFromData(&config.ConfigData{}), WorkerPoolConfig{Store: store})
-			te := &turnExecution{pool: pool}
-			if tc.isDispatch {
-				d := db.Dispatch{ID: "d-retry-1", Status: db.StatusProcessing}
-				_, _ = store.InsertDispatch(ctx, d)
-				te.dispatch = &d
-			} else {
-				m := db.Message{ID: "m-retry-1", ThreadID: "t-1", Status: db.StatusProcessing}
-				_ = store.InsertMessage(ctx, m)
-				te.burst = []db.Message{m}
-			}
-			te.incrementTurnRetries("timeout error")
-			if tc.isDispatch {
-				gotD, _ := store.GetDispatch(ctx, "d-retry-1")
-				if gotD != nil && gotD.RetryCount != tc.wantDispRetry {
-					t.Errorf("dispatch retry count = %d, want %d", gotD.RetryCount, tc.wantDispRetry)
-				}
-			} else {
-				gotM, _ := store.GetMessage(ctx, "m-retry-1")
-				if gotM != nil && gotM.RetryCount != tc.wantMsgRetry {
-					t.Errorf("message retry count = %d, want %d", gotM.RetryCount, tc.wantMsgRetry)
-				}
 			}
 		})
 	}

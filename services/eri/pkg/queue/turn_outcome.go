@@ -105,33 +105,6 @@ func shouldReplaceWithTranscriptError(currentErr, currentStderr, transcriptErr s
 	return transcriptExact || !currentExact
 }
 
-func (te *turnExecution) handleRetryBackoff(attempt, maxAttempts int, errDetail, currentModel string) (shutdown bool) {
-	te.incrementTurnRetries(errDetail)
-	if attempt >= maxAttempts {
-		return false
-	}
-	backoff := retryBackoff(attempt, te.pool.cfg.BackoffBase)
-	if te.statusUpdater != nil {
-		if isRateLimitError(errDetail) {
-			te.statusUpdater.SetCapacityBackoff(backoff)
-		} else {
-			te.statusUpdater.Reset()
-		}
-	}
-	select {
-	case <-time.After(backoff):
-		return false
-	case <-te.turnDone():
-		if te.isInterrupted() {
-			te.finalizeInterruptedTurn(currentModel)
-			return true
-		}
-		metrics.RecordTurnCompleted("cancelled", te.triggerType, currentModel, time.Since(te.execStart))
-		te.cancelBurstOnShutdown(outcomeFailed, true)
-		return true
-	}
-}
-
 func (te *turnExecution) resolveTurnOutcome(runCtx context.Context, turnRes *runner.TurnResult, execErr error) (runner.TurnOutcome, string) {
 	targetSess := ""
 	if te.lease != nil {
@@ -382,38 +355,10 @@ func (te *turnExecution) isQuotaRetry() bool {
 	return strings.Contains(te.turnPrompt, "[QUOTA_RETRY]")
 }
 
-func (te *turnExecution) retryCapacityBlip(errDetail string, resetDur time.Duration, currentModel string, attempt int) bool {
-	te.incrementTurnRetries(errDetail)
-	var override time.Duration
-	if te.pool != nil {
-		override = te.pool.cfg.RetryDelayOverride
-	}
-	delay := capacityRetryDelay(attempt, resetDur, override)
-	if te.statusUpdater != nil {
-		te.statusUpdater.SetCapacityBackoff(delay)
-	}
-	cancelChan := te.turnDone()
-	select {
-	case <-time.After(delay):
-		return true
-	case <-cancelChan:
-		if te.isInterrupted() {
-			te.finalizeInterruptedTurn(currentModel)
-			return false
-		}
-		te.logf("[WorkerPool] Context cancelled during capacity blip backoff for thread %s", te.threadID)
-		te.stopIndicators()
-		te.cancelBurstOnShutdown("pending", false)
-		return false
-	}
-}
-
-func (te *turnExecution) handleCapacityBlip(errDetail string, resetDur time.Duration, currentModel string, attempt, maxAttempts int) bool {
-	te.logf("[WorkerPool] Capacity blip detected for thread %s on attempt %d/%d (reset=%v): %s.", te.threadID, attempt, maxAttempts, resetDur, errDetail)
-	if attempt < maxAttempts {
-		return te.retryCapacityBlip(errDetail, resetDur, currentModel, attempt)
-	}
-	te.logf("[WorkerPool] Capacity blip retry budget exhausted for thread %s after %d attempts", te.threadID, maxAttempts)
+// handleCapacityBlip fails a turn whose final attempt hit a capacity blip; earlier blips are
+// retried by the TurnRunner with capacityRetryDelay.
+func (te *turnExecution) handleCapacityBlip(errDetail string, resetDur time.Duration, currentModel string) bool {
+	te.logf("[WorkerPool] Capacity blip retry budget exhausted for thread %s (reset=%v): %s", te.threadID, resetDur, errDetail)
 	te.stopIndicators()
 	reason := fmt.Sprintf("[CAPACITY_EXHAUSTED reset_in=%v] %s", resetDur, errDetail)
 	metrics.RecordRunnerError("capacity_exhausted", currentModel)
@@ -427,7 +372,7 @@ func (te *turnExecution) handleCapacityBlip(errDetail string, resetDur time.Dura
 func (te *turnExecution) handleQuotaPause(errDetail, stderr, currentModel, burstEffort string, attempt, maxAttempts int) bool {
 	resetDur, _ := runner.ExtractQuotaResetDuration(errDetail, stderr)
 	if runner.IsCapacityBlip(errDetail, stderr) || resetDur <= 5*time.Second {
-		return te.handleCapacityBlip(errDetail, resetDur, currentModel, attempt, maxAttempts)
+		return te.handleCapacityBlip(errDetail, resetDur, currentModel)
 	}
 	te.isQuotaPaused = true
 	if te.stopTyping != nil {

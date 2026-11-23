@@ -19,8 +19,7 @@ import (
 // One TurnRunner run-<n> step executes exactly one lease attempt through RunBurstAttempt /
 // RunDispatchAttempt, so no step outlives the Restate timeouts and a crash re-runs at most one
 // attempt. The step returns how the attempt ended; waiting out a retry backoff is the caller's
-// restate.Sleep, never an in-process wait. retry_count is written only by BeginAttempt here: the
-// legacy retry handlers (which bump it again) are never called on this path.
+// restate.Sleep, never an in-process wait. retry_count is written only by BeginAttempt.
 
 // Attempt result kinds.
 const (
@@ -74,8 +73,7 @@ type AttemptResult struct {
 	Telemetry   AttemptTelemetry `json:"telemetry"`
 }
 
-// failureKind is the category of a failed lease attempt, shared by the legacy retry loop and the
-// TurnRunner attempt step.
+// failureKind is the category of a failed lease attempt in the TurnRunner attempt step.
 type failureKind int
 
 const (
@@ -87,7 +85,7 @@ const (
 	failureTransient
 )
 
-// classifyFailure categorizes a failed attempt in the legacy precedence: quota (pause or
+// classifyFailure categorizes a failed attempt in precedence order: quota (pause or
 // capacity blip), watchdog, session corruption, transient, non-transient.
 func classifyFailure(errDetail, stderr string, transient, sessionCorruption bool) failureKind {
 	switch {
@@ -261,7 +259,7 @@ func (p *WorkerPool) RunDispatchAttempt(ctx context.Context, in AttemptInput) (A
 	return p.runAttempt(ctx, in, dispatchSubject{pool: p, ids: in.IDs})
 }
 
-//nolint:contextcheck,nolintlint // the reused legacy turn helpers own their contexts; store calls take ctx.
+//nolint:contextcheck,nolintlint // the reused turn helpers own their contexts; store calls take ctx.
 func (p *WorkerPool) runAttempt(ctx context.Context, in AttemptInput, subj attemptSubject) (res AttemptResult, err error) {
 	s, err := p.stepStore()
 	if err != nil {
@@ -359,7 +357,7 @@ type attemptRun struct {
 	poolMissing bool
 }
 
-//nolint:contextcheck,nolintlint // the reused legacy turn helpers own their contexts; store calls take ctx.
+//nolint:contextcheck,nolintlint // the reused turn helpers own their contexts; store calls take ctx.
 func (p *WorkerPool) executeAttempt(ctx context.Context, s db.Store, te *turnExecution, subj attemptSubject, in AttemptInput, ids []string) (res AttemptResult, err error) {
 	maxAttempts := p.maxAttempts()
 	cfg := te.resolveAttemptConfig(ctx, in.Ordinal)
@@ -481,7 +479,7 @@ func (te *turnExecution) runOneLease(cfg attemptConfig, in AttemptInput) attempt
 	}
 }
 
-// inspectSuccess applies the legacy success checks that precede delivery: the cold-start session
+// inspectSuccess applies the success checks that precede delivery: the cold-start session
 // latch and yield-trap detection. It returns the error failing the run, if any, and whether the
 // run yielded prematurely.
 func (te *turnExecution) inspectSuccess(st attemptOutcomeState) (string, bool) {
@@ -512,9 +510,9 @@ func abortedAttempt(ctx context.Context, te *turnExecution, in AttemptInput, bas
 	return base, err
 }
 
-// succeedAttempt delivers and records the reply (delivery then COMPLETED, as the legacy path).
+// succeedAttempt delivers and records the reply (delivery then COMPLETED).
 //
-//nolint:contextcheck,nolintlint // the reused legacy delivery helpers own their contexts; store calls take ctx.
+//nolint:contextcheck,nolintlint // the reused delivery helpers own their contexts; store calls take ctx.
 func (p *WorkerPool) succeedAttempt(ctx context.Context, s db.Store, te *turnExecution, subj attemptSubject, in AttemptInput, ids []string, st attemptOutcomeState, base AttemptResult, model string, maxAttempts int) (AttemptResult, error) {
 	if isYieldTrapCircuitBroken(st, in.AutoResumes) {
 		metrics.RecordYieldTrap("circuit_breaker", "stderr_signature", model)
@@ -566,7 +564,7 @@ type attemptFailure struct {
 // failAttempt applies a failure class: retries return a backoff; timeouts and terminal failures
 // record their rows before returning.
 //
-//nolint:contextcheck,nolintlint // the reused legacy turn helpers own their contexts; store calls take ctx.
+//nolint:contextcheck,nolintlint // the reused turn helpers own their contexts; store calls take ctx.
 func (p *WorkerPool) failAttempt(ctx context.Context, s db.Store, te *turnExecution, subj attemptSubject, f attemptFailure, ids []string, base AttemptResult) (AttemptResult, error) {
 	base.Reason, base.Stderr, base.SessionID = f.errDetail, f.stderr, te.currentSessionID
 	te.logf("[TurnRunner] Turn for %s failed attempt %d/%d (class=%d): %s", te.threadID, f.ordinal, f.maxAttempts, f.class, f.errDetail)
