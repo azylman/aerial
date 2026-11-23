@@ -684,8 +684,7 @@ func (e *itEnv) row(id string) (itRow, bool) {
 // (cross-partition send), so quiescence alone can pass in that window.
 func (e *itEnv) idle() bool {
 	for id, want := range e.tc.wantRows {
-		got, ok := e.row(id)
-		if !ok || got.status != want.status {
+		if got, ok := e.row(id); ok != (want.status != "") || got.status != want.status {
 			return false
 		}
 	}
