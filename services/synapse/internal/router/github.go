@@ -135,6 +135,90 @@ func ParseAerialPRMetadata(body string) AerialPRMetadata {
 	}
 }
 
+func isHexDigit(c byte) bool {
+	return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
+}
+
+func isValidChunkID(id string) bool {
+	id = strings.TrimSpace(id)
+	if len(id) < 1 || len(id) > 120 {
+		return false
+	}
+	for i := range len(id) {
+		c := id[i]
+		if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') && (c < '0' || c > '9') && c != '-' && c != '_' {
+			return false
+		}
+	}
+	return true
+}
+
+func parseAerialBranchRemainder(repo, branch, prefix string) (string, bool) {
+	repoName := strings.TrimSuffix(model.CleanRepoName(repo), ".git")
+	if repoName == "" {
+		return "", false
+	}
+	clean := strings.TrimPrefix(strings.TrimSpace(branch), "refs/heads/")
+	after, ok := strings.CutPrefix(clean, "feat/"+repoName+"-pr-"+prefix)
+	if !ok {
+		return "", false
+	}
+	rem, suffix, hasSuffix := strings.CutLast(after, "-")
+	if !hasSuffix || len(suffix) != 6 {
+		return "", false
+	}
+	for i := range suffix {
+		if !isHexDigit(suffix[i]) {
+			return "", false
+		}
+	}
+	return rem, true
+}
+
+// ExtractChunkIDFromBranch recovers the build chunk ID encoded in a
+// feat/<repo>-pr-<chunkTag>-<chunk>[-t<target_id>]-<6hex> branch name, or "" when absent.
+func ExtractChunkIDFromBranch(repo, branch string) string {
+	rem, ok := parseAerialBranchRemainder(repo, branch, ("van"+"adis")+"-")
+	if !ok {
+		return ""
+	}
+	chunkID := rem
+	if left, target, hasTarget := strings.CutLast(rem, "-t"); hasTarget && model.IsValidDiscordSnowflake(target) {
+		chunkID = left
+	}
+	if !isValidChunkID(chunkID) {
+		return ""
+	}
+	return chunkID
+}
+
+// ExtractTargetIDFromBranch recovers the Discord target snowflake encoded in a
+// feat/<repo>-pr-t<target_id>-<6hex> or feat/<repo>-pr-...-t<target_id>-<6hex>
+// branch name, or "" when absent.
+func ExtractTargetIDFromBranch(repo, branch string) string {
+	rem, ok := parseAerialBranchRemainder(repo, branch, "")
+	if !ok {
+		return ""
+	}
+	if strings.HasPrefix(rem, "t") && model.IsValidDiscordSnowflake(rem[1:]) {
+		return rem[1:]
+	}
+	if _, candidate, hasT := strings.CutLast(rem, "-t"); hasT && model.IsValidDiscordSnowflake(candidate) {
+		return candidate
+	}
+	return ""
+}
+
+// ResolveAerialPRMetadata extracts the Aerial PR metadata from a PR body,
+// falling back to branch-encoded target metadata if the body has no target.
+func ResolveAerialPRMetadata(repo, branch, body string) AerialPRMetadata {
+	meta := ParseAerialPRMetadata(body)
+	if meta.TargetID == "" {
+		meta.TargetID = ExtractTargetIDFromBranch(repo, branch)
+	}
+	return meta
+}
+
 // isForeignBotPR reports whether meta specifies a non-empty BotID/Agent that differs
 // from the local synapse instance's configured BotID.
 func isForeignBotPR(meta AerialPRMetadata, cfgBotID string) bool {
@@ -518,7 +602,7 @@ func (s *RouterServer) resolveCollaboratorAlertTarget(ctx context.Context, repo 
 	if expectedSHA != "" && pr.Head.SHA != "" && !strings.EqualFold(pr.Head.SHA, expectedSHA) {
 		return pr, "", "", false, nil
 	}
-	if ParseAerialPRMetadata(pr.GetBody()).OK() {
+	if ResolveAerialPRMetadata(repo, pr.Head.Ref, pr.GetBody()).OK() || ExtractChunkIDFromBranch(repo, pr.Head.Ref) != "" {
 		return pr, "", "", false, nil
 	}
 	channelID, mention, ok := s.lookupCollaboratorCIAlert(repo, pr.User.Login)
