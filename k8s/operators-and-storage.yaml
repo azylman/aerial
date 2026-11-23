@@ -612,6 +612,178 @@ spec:
       targetPath: githubConfigSecret.github_token
       valuesKey: GITHUB_PAT
 ---
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: deploy-runner-aerial
+  namespace: default
+spec:
+  chart:
+    spec:
+      chart: gha-runner-scale-set
+      sourceRef:
+        kind: HelmRepository
+        name: actions-runner-controller
+        namespace: flux-system
+      version: 0.15.1
+  dependsOn:
+    - name: arc-controller
+      namespace: arc-systems
+  interval: 5m
+  values:
+    controllerServiceAccount:
+      name: arc-controller
+      namespace: arc-systems
+    githubConfigUrl: ${AERIAL_REPO_URL:=https://github.com/azylman/aerial}
+    listenerTemplate:
+      spec:
+        containers:
+          - name: listener
+            resources:
+              limits:
+                cpu: 100m
+                memory: 128Mi
+              requests:
+                cpu: 10m
+                memory: 32Mi
+          - name: patch-unblocker
+            image: ghcr.io/azylman/aerial-github-runner:${TAG_AERIAL_GITHUB_RUNNER:=latest}
+            imagePullPolicy: IfNotPresent
+            command:
+              - node
+              - -e
+              - |
+                const fs = require('node:fs');
+                const https = require('node:https');
+                const cfg = JSON.parse(fs.readFileSync('/etc/gha-listener/config.json', 'utf8'));
+                const ns = cfg.ephemeral_runner_set_namespace;
+                const name = cfg.ephemeral_runner_set_name;
+                const ca = fs.readFileSync('/var/run/secrets/kubernetes.io/serviceaccount/ca.crt');
+                const agent = new https.Agent({ ca, keepAlive: true });
+                const path = '/apis/actions.github.com/v1alpha1/namespaces/' + ns + '/ephemeralrunnersets/' + name;
+                function patch(body) {
+                  const token = fs.readFileSync('/var/run/secrets/kubernetes.io/serviceaccount/token', 'utf8').trim();
+                  return new Promise((resolve, reject) => {
+                    const req = https.request({
+                      hostname: process.env.KUBERNETES_SERVICE_HOST || 'kubernetes.default.svc',
+                      port: process.env.KUBERNETES_SERVICE_PORT || 443,
+                      path,
+                      method: 'PATCH',
+                      agent,
+                      headers: {
+                        Authorization: 'Bearer ' + token,
+                        'Content-Type': 'application/merge-patch+json',
+                        Accept: 'application/json',
+                        'Content-Length': Buffer.byteLength(body),
+                      },
+                    }, (res) => {
+                      let data = '';
+                      res.on('data', (c) => (data += c));
+                      res.on('end', () => {
+                        if (res.statusCode >= 200 && res.statusCode < 300) resolve(JSON.parse(data));
+                        else reject(new Error('HTTP ' + res.statusCode + ': ' + data));
+                      });
+                    });
+                    req.on('error', reject);
+                    req.write(body);
+                    req.end();
+                  });
+                }
+                let seenPatchID = 0;
+                let seenCount = 0;
+                setInterval(async () => {
+                  try {
+                    const ers = await patch('{}');
+                    const pid = ers?.spec?.patchID || 0;
+                    const reps = ers?.spec?.replicas || 0;
+                    const cpid = ers?.status?.finishedRunnerCleanupPatchID || 0;
+                    if (pid > 0 && reps > 0 && cpid === pid) {
+                      if (seenPatchID === pid) {
+                        seenCount++;
+                        if (seenCount >= 2) {
+                          await patch('{"spec":{"patchID":0}}');
+                          console.log('Unblocked suppressed scale-up for ' + ns + '/' + name + ' (patchID=' + pid + ', replicas=' + reps + ')');
+                          seenPatchID = 0;
+                          seenCount = 0;
+                        }
+                      } else {
+                        seenPatchID = pid;
+                        seenCount = 1;
+                      }
+                    } else {
+                      seenPatchID = 0;
+                      seenCount = 0;
+                    }
+                  } catch (e) {
+                    console.error(e.message);
+                  }
+                }, 1000);
+            resources:
+              limits:
+                cpu: 50m
+                memory: 64Mi
+              requests:
+                cpu: 5m
+                memory: 16Mi
+            volumeMounts:
+              - mountPath: /etc/gha-listener
+                name: listener-config
+                readOnly: true
+    maxRunners: 3
+    minRunners: 0
+    runnerScaleSetName: deploy-runner-aerial
+    scaleSetLabels:
+      - self-hosted
+      - deploy
+    template:
+      spec:
+        containers:
+          - command:
+              - /entrypoint.sh
+            env:
+              - name: TARGET_REPO
+                value: ${AERIAL_GITHUB_REPO:=azylman/aerial}
+              - name: RUNNER_LABELS
+                value: self-hosted,deploy
+            image: ghcr.io/azylman/aerial-github-runner:${TAG_AERIAL_GITHUB_RUNNER:=latest}
+            name: runner
+            resources:
+              limits:
+                cpu: "2"
+              requests:
+                cpu: 250m
+            volumeMounts:
+              - mountPath: /var/run/docker.sock
+                name: docker-sock
+              - mountPath: /cache
+                name: ci-cache
+              - mountPath: /tmp
+                name: tmp
+              - mountPath: /actions-runner/_work
+                name: work
+        volumes:
+          - hostPath:
+              path: /var/run/docker.sock
+            name: docker-sock
+          - hostPath:
+              path: /var/lib/aerial/ci-cache
+              type: DirectoryOrCreate
+            name: ci-cache
+          - emptyDir:
+              medium: Memory
+              sizeLimit: 2Gi
+            name: tmp
+          - emptyDir:
+              medium: Memory
+              sizeLimit: 4Gi
+            name: work
+  valuesFrom:
+    - kind: Secret
+      name: git-sync-secret
+      optional: true
+      targetPath: githubConfigSecret.github_token
+      valuesKey: GITHUB_PAT
+---
 # Live Restate cluster; clients reach it via the restate.aerial CoreDNS alias.
 apiVersion: restate.dev/v1
 kind: RestateCluster
