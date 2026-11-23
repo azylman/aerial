@@ -763,6 +763,9 @@ func (b *BuildObject) executePRAttachment(ctx restate.ObjectContext, req store.A
 		if err != nil {
 			return model.AttachChunkPRResponse{}, ToTerminalErr(err)
 		}
+		if err := b.reconcileAttachedChunkState(rc, bID, cID, req.PRNumber); err != nil {
+			return model.AttachChunkPRResponse{}, ToTerminalErr(err)
+		}
 		return model.AttachChunkPRResponse{
 			Status:   "attached",
 			BuildID:  bID,
@@ -779,4 +782,73 @@ func (b *BuildObject) executePRAttachment(ctx restate.ObjectContext, req store.A
 		return model.AttachChunkPRResponse{}, ToTerminalErr(tErr)
 	}
 	return attached, nil
+}
+
+func (b *BuildObject) reconcileAttachedChunkState(ctx context.Context, buildID, chunkID string, prNumber int) error {
+	st := b.store
+	if st == nil {
+		return nil
+	}
+	bld, chunks, err := st.GetBuild(ctx, buildID)
+	if err != nil {
+		if errors.Is(err, store.ErrBuildNotFound) {
+			return nil
+		}
+		return err
+	}
+	idx := findChunkIndex(chunks, chunkID)
+	if bld == nil || idx < 0 || chunks[idx].Mode != "pr" {
+		return nil
+	}
+	chunk, rErr := b.reconcileLiveMergedPRState(ctx, chunks[idx], prNumber)
+	if rErr != nil {
+		return rErr
+	}
+	if chunk.Status == statusCompleted {
+		b.notifyChunkCompleted(ctx, bld, chunkID)
+		if sErr := b.completeSweptDeployments(ctx, chunks, chunkID); sErr != nil {
+			return sErr
+		}
+	}
+	b.handlePostMergeActiveAttachment(ctx, bld, chunkID, chunk.Status)
+	return nil
+}
+
+func (b *BuildObject) reconcileLiveMergedPRState(ctx context.Context, chunk model.VanadisChunk, prNumber int) (model.VanadisChunk, error) {
+	if b.executor == nil || chunk.Status != statusPROpened {
+		return chunk, nil
+	}
+	merged, headSHA, mergeSHA, mErr := b.executor.MergedPRState(ctx, chunk.Repo, prNumber)
+	if mErr != nil {
+		slog.WarnContext(ctx, "[vanadis-restate] check merged pr state warning", "chunk_id", chunk.ID, "pr_number", prNumber, "error", mErr)
+		return chunk, nil
+	}
+	if !merged {
+		return chunk, nil
+	}
+	if err := b.store.UpdatePRLifecycleStatus(ctx, chunk.ID, statusMerged); err != nil && !errors.Is(err, errPRTransitionSkipped) {
+		return chunk, err
+	}
+	if headSHA != "" || mergeSHA != "" {
+		if err := b.store.ResetPRCheckState(ctx, chunk.ID, headSHA, mergeSHA); err != nil && !errors.Is(err, errPRTransitionSkipped) {
+			return chunk, err
+		}
+	}
+	chunk.Status = statusMerged
+	return chunk, nil
+}
+
+func (b *BuildObject) handlePostMergeActiveAttachment(ctx context.Context, bld *model.VanadisBuild, chunkID, status string) {
+	if b.executor == nil {
+		return
+	}
+	switch status {
+	case statusMerged, statusSynced, statusDeploying:
+		if cErr := b.executor.CancelChunkDispatch(withBuildOwner(ctx, bld), chunkID); cErr != nil {
+			slog.WarnContext(ctx, "[vanadis-restate] cancel chunk dispatch failed", "chunk_id", chunkID, "error", cErr)
+		}
+		if pErr := b.executor.PublishExternalEvent(ctx, "vanadis_chunk", statusMerged, []string{chunkID}, ""); pErr != nil {
+			slog.WarnContext(ctx, "[vanadis-restate] publish event warning", "error", pErr)
+		}
+	}
 }
