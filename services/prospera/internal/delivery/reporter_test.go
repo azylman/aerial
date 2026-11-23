@@ -362,7 +362,10 @@ func TestReporter_TriggerReport(t *testing.T) {
 				mu.Lock()
 				defer mu.Unlock()
 				gotPath, gotKey = r.URL.Path, r.Header.Get("Idempotency-Key")
-				_ = json.NewDecoder(r.Body).Decode(&gotReq)
+				if err := json.NewDecoder(r.Body).Decode(&gotReq); err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
 				w.WriteHeader(tc.ingressRC)
 			}))
 			defer srv.Close()

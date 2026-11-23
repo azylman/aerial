@@ -321,17 +321,19 @@ func assertSteeredInstruction(t *testing.T, st store.Store, wantMessage, wantMod
 	}
 }
 
+type handleAMDWebhookTestCase struct {
+	name          string
+	directHit     bool
+	storeFallback bool
+	storeErr      bool
+	withStore     bool
+	wantErrSub    string
+}
+
 func TestCallSessionManager_HandleAMDWebhook(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
-		name          string
-		directHit     bool
-		storeFallback bool
-		storeErr      bool
-		withStore     bool
-		wantErrSub    string
-	}{
+	tests := []handleAMDWebhookTestCase{
 		{name: "missing sid without store returns not-found", directHit: false, storeFallback: false, storeErr: false, withStore: false, wantErrSub: `session: no active session found for provider call sid "CA_missing"`},
 		{name: "routes to direct session", directHit: true, storeFallback: false, storeErr: false, withStore: false, wantErrSub: ""},
 		{name: "resolves via store lookup", directHit: false, storeFallback: true, storeErr: false, withStore: true, wantErrSub: ""},
@@ -341,48 +343,57 @@ func TestCallSessionManager_HandleAMDWebhook(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			var st store.Store
-			if tc.withStore {
-				st = testutil.SetUpTestStore(t)
-			}
-			if tc.storeErr {
-				st = errStore{Store: st}
-			}
-			mgr := NewCallSessionManager(fakes.StaticConfig{Cfg: &config.Config{}}, st, nil, nil, twilio.NewStreamTokenManager(time.Now, nil))
-			sid := "CA_missing"
-			sess := newFakeManagedSession("CA_direct", nil)
-			if tc.directHit {
-				sid = "CA_direct"
-				mgr.RegisterSession("call-amd", sess)
-			}
-			if tc.storeFallback {
-				sid = "CA_store_prov"
-				_ = st.CreateOutboundCall(context.Background(), model.VoiceCall{
-					CallID:     "call-amd-store",
-					Direction:  "outbound",
-					State:      "initiated",
-					FromNumber: "+15105550100",
-					ToNumber:   "+15105550199",
-					StartedAt:  time.Now().UTC(),
-					UpdatedAt:  time.Now().UTC(),
-				}, 5)
-				_ = st.BindProviderCallSID(context.Background(), "call-amd-store", sid)
-				mgr.RegisterSession("call-amd-store", sess)
-			}
-			err := mgr.HandleAMDWebhook(context.Background(), sid, "human")
-			if tc.wantErrSub != "" {
-				if err == nil || !strings.Contains(err.Error(), tc.wantErrSub) {
-					t.Fatalf("HandleAMDWebhook err = %v, want substring %q", err, tc.wantErrSub)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("HandleAMDWebhook failed: %v", err)
-			}
-			if sess.amdCount() != 1 {
-				t.Fatalf("HandleAMD calls = %d, want 1", sess.amdCount())
-			}
+			runHandleAMDWebhookCase(t, tc)
 		})
+	}
+}
+
+func runHandleAMDWebhookCase(t *testing.T, tc handleAMDWebhookTestCase) {
+	t.Helper()
+	var st store.Store
+	if tc.withStore {
+		st = testutil.SetUpTestStore(t)
+	}
+	if tc.storeErr {
+		st = errStore{Store: st}
+	}
+	mgr := NewCallSessionManager(fakes.StaticConfig{Cfg: &config.Config{}}, st, nil, nil, twilio.NewStreamTokenManager(time.Now, nil))
+	sid := "CA_missing"
+	sess := newFakeManagedSession("CA_direct", nil)
+	if tc.directHit {
+		sid = "CA_direct"
+		mgr.RegisterSession("call-amd", sess)
+	}
+	if tc.storeFallback {
+		sid = "CA_store_prov"
+		if err := st.CreateOutboundCall(context.Background(), model.VoiceCall{
+			CallID:     "call-amd-store",
+			Direction:  "outbound",
+			State:      "initiated",
+			FromNumber: "+15105550100",
+			ToNumber:   "+15105550199",
+			StartedAt:  time.Now().UTC(),
+			UpdatedAt:  time.Now().UTC(),
+		}, 5); err != nil {
+			t.Fatalf("CreateOutboundCall failed: %v", err)
+		}
+		if err := st.BindProviderCallSID(context.Background(), "call-amd-store", sid); err != nil {
+			t.Fatalf("BindProviderCallSID failed: %v", err)
+		}
+		mgr.RegisterSession("call-amd-store", sess)
+	}
+	err := mgr.HandleAMDWebhook(context.Background(), sid, "human")
+	if tc.wantErrSub != "" {
+		if err == nil || !strings.Contains(err.Error(), tc.wantErrSub) {
+			t.Fatalf("HandleAMDWebhook err = %v, want substring %q", err, tc.wantErrSub)
+		}
+		return
+	}
+	if err != nil {
+		t.Fatalf("HandleAMDWebhook failed: %v", err)
+	}
+	if sess.amdCount() != 1 {
+		t.Fatalf("HandleAMD calls = %d, want 1", sess.amdCount())
 	}
 }
 
@@ -614,9 +625,13 @@ func makeServeStore(t *testing.T, tc streamServeCase, callID string) store.Store
 	}
 	ctx := context.Background()
 	if tc.direction == "inbound" {
-		_ = st.CreateInboundCall(ctx, call)
+		if err := st.CreateInboundCall(ctx, call); err != nil {
+			t.Fatalf("CreateInboundCall failed: %v", err)
+		}
 	} else {
-		_ = st.CreateOutboundCall(ctx, call, 5)
+		if err := st.CreateOutboundCall(ctx, call, 5); err != nil {
+			t.Fatalf("CreateOutboundCall failed: %v", err)
+		}
 	}
 	return st
 }
@@ -642,7 +657,9 @@ func serveStreamToClose(t *testing.T, mgr *CallSessionManager, tokenMgr *twilio.
 	}
 	defer twilioWS.Close()
 
-	_ = twilioWS.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if err := twilioWS.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatalf("SetReadDeadline failed: %v", err)
+	}
 	for {
 		if _, _, err := twilioWS.ReadMessage(); err != nil {
 			break
