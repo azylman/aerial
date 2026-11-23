@@ -13,9 +13,15 @@ func TestResolveConfigPath(t *testing.T) {
 	tmpDir := t.TempDir()
 	validLocal, emptyLocal, nonExistent := filepath.Join(tmpDir, "valid.yaml"), filepath.Join(tmpDir, "empty.yaml"), filepath.Join(tmpDir, "missing.yaml")
 	fallbackFile := filepath.Join(tmpDir, "haro.yaml")
-	_ = os.WriteFile(validLocal, []byte("port: '4004'\n"), 0o644)
-	_ = os.WriteFile(emptyLocal, []byte{}, 0o644)
-	_ = os.WriteFile(fallbackFile, []byte("port: '4004'\n"), 0o644)
+	if err := os.WriteFile(validLocal, []byte("port: '4004'\n"), 0o644); err != nil {
+		t.Fatalf("write valid.yaml: %v", err)
+	}
+	if err := os.WriteFile(emptyLocal, []byte{}, 0o644); err != nil {
+		t.Fatalf("write empty.yaml: %v", err)
+	}
+	if err := os.WriteFile(fallbackFile, []byte("port: '4004'\n"), 0o644); err != nil {
+		t.Fatalf("write haro.yaml: %v", err)
+	}
 
 	fallback := "/config/haro.yaml"
 	tests := []struct {
@@ -52,11 +58,21 @@ func TestLoadConfigFile(t *testing.T) {
 	tmpDir := t.TempDir()
 	validPath, noPortPath, noTZPath, malformedPath := filepath.Join(tmpDir, "valid.yaml"), filepath.Join(tmpDir, "no_port.yaml"), filepath.Join(tmpDir, "no_tz.yaml"), filepath.Join(tmpDir, "malformed.yaml")
 	extraPath := filepath.Join(tmpDir, "extra.yaml")
-	_ = os.WriteFile(validPath, []byte("port: '4005'\ntimezone: 'America/Chicago'\neri_url: 'http://eri:8080'\nvanadis_url: 'http://vanadis:8080'\n"), 0o644)
-	_ = os.WriteFile(extraPath, []byte("port: '4005'\ntimezone: 'America/Chicago'\neri_url: 'http://eri:8080'\nvanadis_url: 'http://vanadis:8080'\nextra_event_sources:\n  - ' Custom_Source '\n  - ''\n  - 'custom_source'\n"), 0o644)
-	_ = os.WriteFile(noPortPath, []byte("timezone: 'America/Chicago'\neri_url: 'http://eri:8080'\nvanadis_url: 'http://vanadis:8080'\n"), 0o644)
-	_ = os.WriteFile(noTZPath, []byte("port: '4005'\neri_url: 'http://eri:8080'\nvanadis_url: 'http://vanadis:8080'\n"), 0o644)
-	_ = os.WriteFile(malformedPath, []byte("port: [unclosed"), 0o644)
+	if err := os.WriteFile(validPath, []byte("port: '4005'\ntimezone: 'America/Chicago'\neri_url: 'http://eri:8080'\nvanadis_url: 'http://vanadis:8080'\n"), 0o644); err != nil {
+		t.Fatalf("write valid.yaml: %v", err)
+	}
+	if err := os.WriteFile(extraPath, []byte("port: '4005'\ntimezone: 'America/Chicago'\neri_url: 'http://eri:8080'\nvanadis_url: 'http://vanadis:8080'\nextra_event_sources:\n  - ' Custom_Source '\n  - ''\n  - 'custom_source'\n"), 0o644); err != nil {
+		t.Fatalf("write extra.yaml: %v", err)
+	}
+	if err := os.WriteFile(noPortPath, []byte("timezone: 'America/Chicago'\neri_url: 'http://eri:8080'\nvanadis_url: 'http://vanadis:8080'\n"), 0o644); err != nil {
+		t.Fatalf("write no_port.yaml: %v", err)
+	}
+	if err := os.WriteFile(noTZPath, []byte("port: '4005'\neri_url: 'http://eri:8080'\nvanadis_url: 'http://vanadis:8080'\n"), 0o644); err != nil {
+		t.Fatalf("write no_tz.yaml: %v", err)
+	}
+	if err := os.WriteFile(malformedPath, []byte("port: [unclosed"), 0o644); err != nil {
+		t.Fatalf("write malformed.yaml: %v", err)
+	}
 
 	tests := []struct {
 		name        string
@@ -107,16 +123,31 @@ func TestLoadConfigFile(t *testing.T) {
 	}
 }
 
+func writeTestConfigs(t *testing.T, tmpDir string) (pathWithBoth, pathWithoutEri, pathWithoutVanadis, pathWithRestate string) {
+	t.Helper()
+	pathWithBoth = filepath.Join(tmpDir, "with_both.yaml")
+	pathWithoutEri = filepath.Join(tmpDir, "without_eri.yaml")
+	pathWithoutVanadis = filepath.Join(tmpDir, "without_vanadis.yaml")
+	pathWithRestate = filepath.Join(tmpDir, "with_restate.yaml")
+	for _, f := range []struct {
+		path    string
+		content string
+	}{
+		{pathWithBoth, "port: '4005'\ntimezone: 'UTC'\neri_url: 'http://yaml.eri:8088/'\nvanadis_url: 'http://yaml.vanadis:4025/'\n"},
+		{pathWithoutEri, "port: '4005'\ntimezone: 'UTC'\nvanadis_url: 'http://yaml.vanadis:8080'\n"},
+		{pathWithoutVanadis, "port: '4005'\ntimezone: 'UTC'\neri_url: 'http://yaml.eri:8080'\n"},
+		{pathWithRestate, "port: '4005'\ntimezone: 'UTC'\neri_url: 'http://yaml.eri:8088/'\nvanadis_url: 'http://yaml.vanadis:4025/'\nrestate_url: 'http://yaml.restate:8080/'\nagent_name: 'agent-alpha'\n"},
+	} {
+		if err := os.WriteFile(f.path, []byte(f.content), 0o644); err != nil {
+			t.Fatalf("write %s: %v", f.path, err)
+		}
+	}
+	return
+}
+
 func TestLoadConfig_URLResolution(t *testing.T) {
 	tmpDir := t.TempDir()
-	pathWithBoth := filepath.Join(tmpDir, "with_both.yaml")
-	pathWithoutEri := filepath.Join(tmpDir, "without_eri.yaml")
-	pathWithoutVanadis := filepath.Join(tmpDir, "without_vanadis.yaml")
-	pathWithRestate := filepath.Join(tmpDir, "with_restate.yaml")
-	_ = os.WriteFile(pathWithBoth, []byte("port: '4005'\ntimezone: 'UTC'\neri_url: 'http://yaml.eri:8088/'\nvanadis_url: 'http://yaml.vanadis:4025/'\n"), 0o644)
-	_ = os.WriteFile(pathWithoutEri, []byte("port: '4005'\ntimezone: 'UTC'\nvanadis_url: 'http://yaml.vanadis:8080'\n"), 0o644)
-	_ = os.WriteFile(pathWithoutVanadis, []byte("port: '4005'\ntimezone: 'UTC'\neri_url: 'http://yaml.eri:8080'\n"), 0o644)
-	_ = os.WriteFile(pathWithRestate, []byte("port: '4005'\ntimezone: 'UTC'\neri_url: 'http://yaml.eri:8088/'\nvanadis_url: 'http://yaml.vanadis:4025/'\nrestate_url: 'http://yaml.restate:8080/'\nagent_name: 'agent-alpha'\n"), 0o644)
+	pathWithBoth, pathWithoutEri, pathWithoutVanadis, pathWithRestate := writeTestConfigs(t, tmpDir)
 
 	tests := []struct {
 		name             string
@@ -266,7 +297,9 @@ func TestRegisterConfigTokens_TableDriven(t *testing.T) {
 	if err := os.MkdirAll(secretsDir, 0o755); err != nil {
 		t.Fatalf("failed to create secrets dir: %v", err)
 	}
-	_ = os.WriteFile(filepath.Join(secretsDir, "DISCORD_TOKEN"), []byte("shared_bot_token_secret"), 0o600)
+	if err := os.WriteFile(filepath.Join(secretsDir, "DISCORD_TOKEN"), []byte("shared_bot_token_secret"), 0o600); err != nil {
+		t.Fatalf("write DISCORD_TOKEN: %v", err)
+	}
 
 	oldPath := sanitizer.DefaultSharedSecretsPath
 	sanitizer.DefaultSharedSecretsPath = secretsDir

@@ -538,7 +538,9 @@ func TestHeartbeatTools_RestateArming(t *testing.T) {
 	if !ok {
 		t.Fatal("expected *mcp.TextContent")
 	}
-	_ = json.Unmarshal([]byte(txtContent.Text), &parsed)
+	if uErr := json.Unmarshal([]byte(txtContent.Text), &parsed); uErr != nil {
+		t.Fatalf("unmarshal text content: %v", uErr)
+	}
 	hbID, ok := parsed["schedule_id"].(string)
 	if !ok {
 		t.Fatal("expected schedule_id to be string")

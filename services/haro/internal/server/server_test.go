@@ -206,28 +206,34 @@ func TestServer_HTTPEndpointsAndMCPProtocol(t *testing.T) {
 	}
 
 	rpcCtx := context.Background()
-	_ = store.InsertCronSchedule(rpcCtx, server.handler.DB, model.CronSchedule{
+	if err := store.InsertCronSchedule(rpcCtx, server.handler.DB, model.CronSchedule{
 		ID:        "test-cron-id",
 		TargetID:  "123",
 		CronExpr:  "0 0 * * *",
 		Prompt:    "test",
 		NextRunAt: time.Now().UTC(),
 		Enabled:   true,
-	})
-	_ = store.InsertHeartbeatSchedule(rpcCtx, server.handler.DB, model.HeartbeatSchedule{
+	}); err != nil {
+		t.Fatalf("InsertCronSchedule failed: %v", err)
+	}
+	if err := store.InsertHeartbeatSchedule(rpcCtx, server.handler.DB, model.HeartbeatSchedule{
 		ID:        "test-hb-id",
 		TargetID:  "123",
 		CronExpr:  "0 0 * * *",
 		Prompt:    "test",
 		NextRunAt: time.Now().UTC(),
 		Enabled:   true,
-	})
-	_ = store.InsertOneShotSchedule(rpcCtx, server.handler.DB, model.OneShotSchedule{
+	}); err != nil {
+		t.Fatalf("InsertHeartbeatSchedule failed: %v", err)
+	}
+	if err := store.InsertOneShotSchedule(rpcCtx, server.handler.DB, model.OneShotSchedule{
 		ID:       "test-once-id",
 		ThreadID: "123",
 		Prompt:   "test",
 		RunAt:    time.Now().UTC(),
-	})
+	}); err != nil {
+		t.Fatalf("InsertOneShotSchedule failed: %v", err)
+	}
 
 	for _, tc := range serverRPCTestCases() {
 		t.Run(tc.name, func(t *testing.T) {
@@ -350,7 +356,7 @@ func TestHandleSchedules_Table(t *testing.T) {
 		t.Fatalf("failed to insert oneshot: %v", err)
 	}
 
-	_ = store.CreateScheduleRun(ctx, db, model.ScheduleRun{
+	if err := store.CreateScheduleRun(ctx, db, model.ScheduleRun{
 		ID:           "run-1",
 		ScheduleID:   "cron-1",
 		ScheduleType: "cron",
@@ -361,8 +367,10 @@ func TestHandleSchedules_Table(t *testing.T) {
 		Status:       "completed",
 		StartedAt:    time.Now().UTC().Add(-1 * time.Hour),
 		DurationMs:   100,
-	})
-	_ = store.CreateScheduleRun(ctx, db, model.ScheduleRun{
+	}); err != nil {
+		t.Fatalf("CreateScheduleRun run-1 failed: %v", err)
+	}
+	if err := store.CreateScheduleRun(ctx, db, model.ScheduleRun{
 		ID:           "run-2",
 		ScheduleID:   "cron-1",
 		ScheduleType: "cron",
@@ -374,7 +382,9 @@ func TestHandleSchedules_Table(t *testing.T) {
 		Error:        "Failed with token=supersecret",
 		StartedAt:    time.Now().UTC().Add(-30 * time.Minute),
 		DurationMs:   200,
-	})
+	}); err != nil {
+		t.Fatalf("CreateScheduleRun run-2 failed: %v", err)
+	}
 
 	closedDB := testutil.NewClosedDB(t)
 	serverClosed := NewServer(tools.NewToolHandler(&config.Config{DatabaseURL: ":memory:"}, closedDB))
@@ -462,7 +472,7 @@ func TestHandleScheduleRuns_Table(t *testing.T) {
 			status = "failed"
 		}
 		completedAt := completedAtForStatus(status, i)
-		_ = store.CreateScheduleRun(ctx, db, model.ScheduleRun{
+		if err := store.CreateScheduleRun(ctx, db, model.ScheduleRun{
 			ID:           fmt.Sprintf("run-%d", i),
 			ScheduleID:   fmt.Sprintf("sched-%d", i%2+1),
 			ScheduleType: "cron",
@@ -475,7 +485,9 @@ func TestHandleScheduleRuns_Table(t *testing.T) {
 			CompletedAt:  completedAt,
 			DurationMs:   int64(i * 10),
 			Error:        "Error with TOKEN=supersecret",
-		})
+		}); err != nil {
+			t.Fatalf("CreateScheduleRun run-%d failed: %v", i, err)
+		}
 	}
 
 	closedDB := testutil.NewClosedDB(t)
@@ -729,7 +741,10 @@ func TestServer_Auth_Endpoints(t *testing.T) {
 
 func assertMCPToolCallResult(t *testing.T, rpcResp JSONRPCResponse, wantToolErr bool) {
 	t.Helper()
-	resBytes, _ := json.Marshal(rpcResp.Result)
+	resBytes, err := json.Marshal(rpcResp.Result)
+	if err != nil {
+		t.Fatalf("failed to marshal result: %v", err)
+	}
 	if !wantToolErr {
 		if rpcResp.Error != nil {
 			t.Fatalf("unexpected RPC error: %v", rpcResp.Error)

@@ -58,36 +58,44 @@ func TestServer_Metrics_Table(t *testing.T) {
 	defer ts.Close()
 
 	ctx := context.Background()
-	_ = store.InsertCronSchedule(ctx, server.handler.DB, model.CronSchedule{
+	if err := store.InsertCronSchedule(ctx, server.handler.DB, model.CronSchedule{
 		ID:        "m-cron-1",
 		TargetID:  "chan-1",
 		CronExpr:  "0 0 * * *",
 		Prompt:    "daily",
 		NextRunAt: time.Now().UTC(),
 		Enabled:   true,
-	})
-	_ = store.InsertHeartbeatSchedule(ctx, server.handler.DB, model.HeartbeatSchedule{
+	}); err != nil {
+		t.Fatalf("InsertCronSchedule failed: %v", err)
+	}
+	if err := store.InsertHeartbeatSchedule(ctx, server.handler.DB, model.HeartbeatSchedule{
 		ID:        "m-hb-1",
 		TargetID:  "chan-2",
 		CronExpr:  "0 0 * * *",
 		Prompt:    "heartbeat",
 		NextRunAt: time.Now().UTC(),
 		Enabled:   true,
-	})
-	_ = store.InsertOneShotSchedule(ctx, server.handler.DB, model.OneShotSchedule{
+	}); err != nil {
+		t.Fatalf("InsertHeartbeatSchedule failed: %v", err)
+	}
+	if err := store.InsertOneShotSchedule(ctx, server.handler.DB, model.OneShotSchedule{
 		ID:       "m-once-1",
 		ThreadID: "chan-3",
 		Prompt:   "once",
 		RunAt:    time.Now().UTC(),
-	})
-	_ = store.InsertEventTrigger(ctx, server.handler.DB, model.EventTrigger{
+	}); err != nil {
+		t.Fatalf("InsertOneShotSchedule failed: %v", err)
+	}
+	if err := store.InsertEventTrigger(ctx, server.handler.DB, model.EventTrigger{
 		ID:        "m-trig-1",
 		ChannelID: "chan-4",
 		Source:    "github",
 		Target:    "repo",
 		EventType: "push",
 		Prompt:    "p",
-	})
+	}); err != nil {
+		t.Fatalf("InsertEventTrigger failed: %v", err)
+	}
 
 	metrics.RecordScheduleRun("cron", "completed")
 	metrics.RecordScheduleRun("one_shot", "stale")
@@ -239,8 +247,9 @@ func (*stubScenarioDispatcher) Dispatch(_ context.Context, _ eriwire.BrainDispat
 	return eriwire.DispatchEnqueueResponse{}, nil
 }
 
-func seedExternalEventTriggers(ctx context.Context, db *sql.DB) {
-	_ = store.InsertEventTrigger(ctx, db, model.EventTrigger{
+func seedExternalEventTriggers(ctx context.Context, t *testing.T, db *sql.DB) {
+	t.Helper()
+	if err := store.InsertEventTrigger(ctx, db, model.EventTrigger{
 		ID:        "trig-ext-1",
 		ChannelID: "100000000000000001",
 		Source:    "camera",
@@ -248,8 +257,10 @@ func seedExternalEventTriggers(ctx context.Context, db *sql.DB) {
 		EventType: "vehicle_detected",
 		Prompt:    "Vehicle in driveway",
 		Effort:    "low",
-	})
-	_ = store.InsertEventTrigger(ctx, db, model.EventTrigger{
+	}); err != nil {
+		t.Fatalf("InsertEventTrigger trig-ext-1 failed: %v", err)
+	}
+	if err := store.InsertEventTrigger(ctx, db, model.EventTrigger{
 		ID:        "trig-ext-fail",
 		ChannelID: "100000000000000001",
 		Source:    "camera",
@@ -257,8 +268,10 @@ func seedExternalEventTriggers(ctx context.Context, db *sql.DB) {
 		EventType: "motion",
 		Prompt:    "Motion in backyard",
 		Effort:    "low",
-	})
-	_ = store.InsertEventTrigger(ctx, db, model.EventTrigger{
+	}); err != nil {
+		t.Fatalf("InsertEventTrigger trig-ext-fail failed: %v", err)
+	}
+	if err := store.InsertEventTrigger(ctx, db, model.EventTrigger{
 		ID:        "trig-ext-healthcheck",
 		ChannelID: "100000000000000001",
 		Source:    "healthcheck",
@@ -266,8 +279,10 @@ func seedExternalEventTriggers(ctx context.Context, db *sql.DB) {
 		EventType: "ping",
 		Prompt:    "Healthcheck ping",
 		Effort:    "low",
-	})
-	_ = store.InsertEventTrigger(ctx, db, model.EventTrigger{
+	}); err != nil {
+		t.Fatalf("InsertEventTrigger trig-ext-healthcheck failed: %v", err)
+	}
+	if err := store.InsertEventTrigger(ctx, db, model.EventTrigger{
 		ID:         "trig-ext-fail-persistent",
 		ChannelID:  "100000000000000001",
 		Source:     "camera",
@@ -276,7 +291,9 @@ func seedExternalEventTriggers(ctx context.Context, db *sql.DB) {
 		Prompt:     "Motion in sideyard",
 		Effort:     "low",
 		Persistent: true,
-	})
+	}); err != nil {
+		t.Fatalf("InsertEventTrigger trig-ext-fail-persistent failed: %v", err)
+	}
 }
 
 func verifyTriggerState(ctx context.Context, t *testing.T, db *sql.DB, ev pubsub.ExternalEvent, wantInDB bool) {
@@ -315,7 +332,7 @@ func TestHandleExternalEvent_Scenarios(t *testing.T) {
 	db := testutil.NewDB(t)
 	ctx := context.Background()
 
-	seedExternalEventTriggers(ctx, db)
+	seedExternalEventTriggers(ctx, t, db)
 
 	closedDB := testutil.NewClosedDB(t)
 	serverClosed := NewServer(tools.NewToolHandler(&config.Config{DatabaseURL: ":memory:"}, closedDB))
