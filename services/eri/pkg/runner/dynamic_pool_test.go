@@ -217,7 +217,7 @@ func TestDynamicVoicePool_DelegationAndSafety(t *testing.T) {
 	}
 }
 
-func TestDynamicVoicePool_MarkDirtyAndReloadEdgeCases(t *testing.T) {
+func TestDynamicVoicePool_MarkDirtyAndReload(t *testing.T) {
 	t.Parallel()
 	mock1, mock2 := newMockVoicePool("model-v1"), newMockVoicePool("model-v2")
 	sf := &swappablePoolFactory{pool: mock1, fp: "fp-v1"}

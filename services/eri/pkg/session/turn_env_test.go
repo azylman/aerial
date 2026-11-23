@@ -19,8 +19,13 @@ func TestNormalizeEnvTargetID(t *testing.T) {
 		{name: "whitespace only", id: "   ", want: ""},
 		{name: "discord target with whitespace", id: "  discord-9876543210  ", want: "9876543210"},
 		{name: "pooled worker target without discord prefix", id: "discord:worker-0", want: ""},
+		{name: "colon target with discord suffix", id: "kiosk:discord-123", want: "123"},
+		{name: "colon target with invalid suffix", id: "kiosk:foo-123", want: ""},
 		{name: "ephemeral worker target", id: "ephemeral:worker-0", want: ""},
 		{name: "worker target ignored", id: "worker-pool-1", want: ""},
+		{name: "heartbeat target ignored", id: "heartbeat-tick", want: ""},
+		{name: "dispatch target ignored", id: "dispatch-job", want: ""},
+		{name: "vanadis target ignored", id: "vanadis-chunk", want: ""},
 		{name: "raw numeric discord id", id: "1234567890", want: "1234567890"},
 	}
 

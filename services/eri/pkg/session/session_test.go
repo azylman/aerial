@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,68 +11,25 @@ import (
 	"time"
 )
 
-// EnsureSessionDir bootstraps the session directory and transcript files if they do not exist.
-func (m *Manager) EnsureSessionDir(sessionID string) (string, error) {
-	cleanID, ok := m.validSessionID(sessionID)
-	if !ok {
-		return "", fmt.Errorf("sessionID %q is invalid", sessionID)
+func ensureTestSessionDir(t *testing.T, mgr *Manager, sessionID string) string {
+	t.Helper()
+	dirs := mgr.getTargetDirs(sessionID)
+	if len(dirs) == 0 {
+		t.Fatalf("no target dirs for %s", sessionID)
 	}
-
-	baseDir := m.resolveBaseDir(cleanID)
-	if baseDir == "" {
-		return "", fmt.Errorf("no session roots configured")
-	}
-	sessionDir := filepath.Join(baseDir, cleanID)
-	logsDir := filepath.Join(sessionDir, ".system_generated", "logs")
-
+	sessDir := dirs[0]
+	logsDir := filepath.Join(sessDir, ".system_generated", "logs")
 	if err := os.MkdirAll(logsDir, 0o755); err != nil {
-		return "", fmt.Errorf("failed to create session logs directory: %w", err)
+		t.Fatalf("MkdirAll logsDir: %v", err)
 	}
-
-	for _, name := range []string{"transcript.jsonl", "transcript_full.jsonl"} {
-		filePath := filepath.Join(logsDir, name)
-		f, err := os.OpenFile(filePath, os.O_CREATE|os.O_WRONLY, 0o644)
-		if err != nil {
-			return "", fmt.Errorf("failed to ensure %s: %w", name, err)
-		}
-		if closeErr := f.Close(); closeErr != nil {
-			log.Printf("[Session] Warning closing newly created transcript %s: %v", filePath, closeErr)
-		}
-	}
-
-	return sessionDir, nil
-}
-
-// resolveBaseDir locates the appropriate brain base directory for sessions.
-func (m *Manager) resolveBaseDir(sessionID string) string {
-	if m == nil || len(m.roots) == 0 {
-		return ""
-	}
-	for _, targetDir := range m.getTargetDirs(sessionID) {
-		if fi, err := os.Stat(targetDir); err == nil && fi.IsDir() {
-			return filepath.Dir(targetDir)
-		}
-	}
-	for _, root := range m.roots {
-		if fi, err := os.Stat(root); err == nil && fi.IsDir() {
-			return root
-		}
-	}
-	return m.roots[0]
+	return sessDir
 }
 
 // 1-line positional fixture helpers.
 func writeTranscript(t *testing.T, mgr *Manager, sessionID, filename, content string) string {
 	t.Helper()
-	sessDir, err := mgr.EnsureSessionDir(sessionID)
-	if err != nil {
-		t.Fatalf("EnsureSessionDir(%q): %v", sessionID, err)
-	}
-	logsDir := filepath.Join(sessDir, ".system_generated", "logs")
-	if err := os.MkdirAll(logsDir, 0o755); err != nil {
-		t.Fatalf("MkdirAll logsDir: %v", err)
-	}
-	p := filepath.Join(logsDir, filename)
+	sessDir := ensureTestSessionDir(t, mgr, sessionID)
+	p := filepath.Join(sessDir, ".system_generated", "logs", filename)
 	if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
 		t.Fatalf("WriteFile %s: %v", filename, err)
 	}
@@ -102,125 +58,17 @@ func TestManager_Init(t *testing.T) {
 	if len(nilMgr.Roots()) != 0 {
 		t.Fatalf("nil Manager should return nil roots")
 	}
-}
-
-// writeEnsureSessionFixtures creates dirs and files relative to root.
-func writeEnsureSessionFixtures(t *testing.T, root string, dirs []string, files map[string]string) {
-	t.Helper()
-	for _, rel := range dirs {
-		if err := os.MkdirAll(filepath.Join(root, rel), 0o755); err != nil {
-			t.Fatal(err)
-		}
+	if _, ok := nilMgr.validSessionID("s"); ok {
+		t.Fatalf("expected nil manager validSessionID to return false")
 	}
-	for rel, content := range files {
-		if err := os.MkdirAll(filepath.Dir(filepath.Join(root, rel)), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(root, rel), []byte(content), 0o644); err != nil {
-			t.Fatal(err)
-		}
+	if _, ok := m.validSessionID(""); ok {
+		t.Fatalf("expected empty sessionID to return false")
 	}
-}
-
-func TestEnsureSessionDir(t *testing.T) {
-	t.Parallel()
-	const brain = "home/.gemini/antigravity-cli/brain"
-	tests := []struct {
-		name       string
-		isNilMgr   bool
-		emptyRoots bool
-		sessionID  string
-		preExist   bool
-		mkdirs     []string          // created under the temp root before the call
-		files      map[string]string // written under the temp root before the call
-		wantErr    bool
-	}{
-		{name: "nil manager", isNilMgr: true, sessionID: "sess-1", wantErr: true},
-		{name: "empty session ID", sessionID: "", wantErr: true},
-		{name: "path traversal", sessionID: "../bad", wantErr: true},
-		{name: "empty roots manager", emptyRoots: true, sessionID: "sess-no-roots", wantErr: true},
-		{name: "valid new session", sessionID: "sess-valid"},
-		{name: "preexisting session", sessionID: "sess-pre", preExist: true},
-		{
-			name: "transcript.jsonl is a directory fails OpenFile", sessionID: "sess-block",
-			mkdirs: []string{brain + "/sess-block/.system_generated/logs/transcript.jsonl"}, wantErr: true,
-		},
-		{
-			name: ".system_generated is a file fails MkdirAll", sessionID: "sess-mkdir-block",
-			files: map[string]string{brain + "/sess-mkdir-block/.system_generated": "file"}, wantErr: true,
-		},
+	if _, ok := m.validSessionID("../bad"); ok {
+		t.Fatalf("expected path traversal sessionID to return false")
 	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			tmp := t.TempDir()
-			writeEnsureSessionFixtures(t, tmp, tc.mkdirs, tc.files)
-			var mgr *Manager
-			if tc.emptyRoots {
-				mgr = &Manager{}
-			} else if !tc.isNilMgr {
-				mgr = New(filepath.Join(tmp, "home"), filepath.Join(tmp, "data"))
-			}
-			if tc.preExist {
-				if _, err := mgr.EnsureSessionDir(tc.sessionID); err != nil {
-					t.Fatalf("pre-create EnsureSessionDir: %v", err)
-				}
-			}
-			dir, err := mgr.EnsureSessionDir(tc.sessionID)
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("EnsureSessionDir error=%v, wantErr=%v", err, tc.wantErr)
-			}
-			if !tc.wantErr && dir == "" {
-				t.Fatalf("expected non-empty dir")
-			}
-		})
-	}
-}
-
-func TestResolveBaseDir(t *testing.T) {
-	t.Parallel()
-	const brain = "home/.gemini/antigravity-cli/brain"
-	tests := []struct {
-		name      string
-		isNilMgr  bool
-		home      string // relative to the temp root
-		data      string // relative to the temp root; "" = no data dir
-		mkdirs    []string
-		sessionID string
-		want      string // relative to the temp root; "" = empty result
-	}{
-		{name: "nil manager", isNilMgr: true, sessionID: "s1"},
-		{
-			name: "no existing root falls back to the first root", home: "nonexistent-root-1", data: "nonexistent-root-2", sessionID: "s1",
-			want: "nonexistent-root-2/brain",
-		},
-		{
-			name: "existing session dir returns its parent root", home: "home", mkdirs: []string{brain + "/sess-pre"}, sessionID: "sess-pre",
-			want: brain,
-		},
-		{name: "first existing root wins", home: "home", mkdirs: []string{brain}, sessionID: "s1", want: brain},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			tmp := t.TempDir()
-			writeEnsureSessionFixtures(t, tmp, tc.mkdirs, nil)
-			var mgr *Manager
-			if !tc.isNilMgr {
-				data := ""
-				if tc.data != "" {
-					data = filepath.Join(tmp, tc.data)
-				}
-				mgr = New(filepath.Join(tmp, tc.home), data)
-			}
-			want := ""
-			if tc.want != "" {
-				want = filepath.Join(tmp, tc.want)
-			}
-			if got := mgr.resolveBaseDir(tc.sessionID); got != want {
-				t.Fatalf("resolveBaseDir(%q) = %q, want %q", tc.sessionID, got, want)
-			}
-		})
+	if id, ok := m.validSessionID("good-sess"); !ok || id != "good-sess" {
+		t.Fatalf("expected validSessionID to return clean ID")
 	}
 }
 
@@ -930,20 +778,14 @@ func buildTranscriptContent(stepCount, turnCount, transSize int) string {
 func setupSessionStorageTranscript(t *testing.T, mgr *Manager, tc sessionStorageMetricsCase) {
 	t.Helper()
 	if tc.transSize > 0 || tc.zeroByteFiles {
-		sessDir, err := mgr.EnsureSessionDir(tc.sessionID)
-		if err != nil {
-			t.Fatalf("EnsureSessionDir: %v", err)
-		}
+		sessDir := ensureTestSessionDir(t, mgr, tc.sessionID)
 		content := buildTranscriptContent(tc.stepCount, tc.turnCount, tc.transSize)
 		if err := os.WriteFile(filepath.Join(sessDir, ".system_generated", "logs", "transcript.jsonl"), []byte(content), 0o644); err != nil {
 			t.Fatalf("WriteFile: %v", err)
 		}
 	}
 	if tc.fullSize > 0 {
-		sessDir, err := mgr.EnsureSessionDir(tc.sessionID)
-		if err != nil {
-			t.Fatalf("EnsureSessionDir: %v", err)
-		}
+		sessDir := ensureTestSessionDir(t, mgr, tc.sessionID)
 		if err := os.WriteFile(filepath.Join(sessDir, ".system_generated", "logs", "transcript_full.jsonl"), []byte(strings.Repeat("y", tc.fullSize)), 0o644); err != nil {
 			t.Fatalf("WriteFile: %v", err)
 		}

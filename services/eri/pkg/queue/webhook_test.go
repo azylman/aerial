@@ -245,7 +245,7 @@ func assertWebhookDispatcherNetworkAndPayloadErrors(t *testing.T, dispatcher *De
 	}
 }
 
-func TestWebhookDispatcher_ValidationAndGuardBranches(t *testing.T) {
+func TestWebhookDispatcher_ValidationAndGuards(t *testing.T) {
 	t.Parallel()
 	dispatcher := NewDefaultWebhookDispatcher()
 

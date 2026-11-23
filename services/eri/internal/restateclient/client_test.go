@@ -148,7 +148,7 @@ func (e *errRoundTripper) RoundTrip(*http.Request) (*http.Response, error) {
 
 type threadSessionOpCase struct {
 	name             string
-	op               string
+	isCancel         bool
 	threadID         string
 	enqueueReq       queue.ThreadEnqueueRequest
 	cancelReq        queue.CancelTurnRequest
@@ -212,15 +212,14 @@ func runThreadSessionOperationCase(t *testing.T, tc threadSessionOpCase) {
 	}
 
 	var err error
-	switch tc.op {
-	case "enqueue":
-		resp, e := client.EnqueueThread(context.Background(), tc.threadID, tc.enqueueReq)
+	if tc.isCancel {
+		resp, e := client.CancelThreadTurn(context.Background(), tc.threadID, tc.cancelReq)
 		err = e
 		if err == nil {
 			assert.Equal(t, tc.wantStatus, resp.Status)
 		}
-	case "cancel":
-		resp, e := client.CancelThreadTurn(context.Background(), tc.threadID, tc.cancelReq)
+	} else {
+		resp, e := client.EnqueueThread(context.Background(), tc.threadID, tc.enqueueReq)
 		err = e
 		if err == nil {
 			assert.Equal(t, tc.wantStatus, resp.Status)
@@ -245,7 +244,6 @@ func TestRestateIngressClient_ThreadSessionOperations(t *testing.T) {
 	tests := []threadSessionOpCase{
 		{
 			name:        "enqueue thread message accepted",
-			op:          "enqueue",
 			threadID:    "th-101",
 			enqueueReq:  queue.ThreadEnqueueRequest{Prompt: "hello"},
 			serverResp:  `{"status":"accepted","message_id":"msg-101"}`,
@@ -255,7 +253,6 @@ func TestRestateIngressClient_ThreadSessionOperations(t *testing.T) {
 		},
 		{
 			name:        "enqueue thread with special characters escaped in url path",
-			op:          "enqueue",
 			threadID:    "th/special?key#1",
 			enqueueReq:  queue.ThreadEnqueueRequest{Prompt: "hello"},
 			serverResp:  `{"status":"accepted","message_id":"msg-special"}`,
@@ -265,7 +262,6 @@ func TestRestateIngressClient_ThreadSessionOperations(t *testing.T) {
 		},
 		{
 			name:        "enqueue thread message skipped active",
-			op:          "enqueue",
 			threadID:    "th-102",
 			enqueueReq:  queue.ThreadEnqueueRequest{Prompt: "skip", SkipIfActive: true},
 			serverResp:  `{"status":"skipped_active"}`,
@@ -275,7 +271,7 @@ func TestRestateIngressClient_ThreadSessionOperations(t *testing.T) {
 		},
 		{
 			name:        "cancel thread turn returns ok",
-			op:          "cancel",
+			isCancel:    true,
 			threadID:    "th-103",
 			cancelReq:   queue.CancelTurnRequest{Reason: "cancelled"},
 			serverResp:  `{"status":"ok","cancelled_count":1,"cancelled_active_turn":true}`,
@@ -285,7 +281,6 @@ func TestRestateIngressClient_ThreadSessionOperations(t *testing.T) {
 		},
 		{
 			name:         "server returns 500 error",
-			op:           "enqueue",
 			threadID:     "th-105",
 			enqueueReq:   queue.ThreadEnqueueRequest{Prompt: "boom"},
 			serverResp:   `{"error":"server error"}`,
@@ -295,7 +290,6 @@ func TestRestateIngressClient_ThreadSessionOperations(t *testing.T) {
 		},
 		{
 			name:         "server returns invalid json response",
-			op:           "enqueue",
 			threadID:     "th-106",
 			enqueueReq:   queue.ThreadEnqueueRequest{Prompt: "corrupt"},
 			serverResp:   `not-valid-json`,
@@ -305,7 +299,6 @@ func TestRestateIngressClient_ThreadSessionOperations(t *testing.T) {
 		},
 		{
 			name:           "http transport error returns error",
-			op:             "enqueue",
 			threadID:       "th-107",
 			enqueueReq:     queue.ThreadEnqueueRequest{Prompt: "fail"},
 			transportError: true,
@@ -313,7 +306,6 @@ func TestRestateIngressClient_ThreadSessionOperations(t *testing.T) {
 		},
 		{
 			name:            "empty ingress url defaults to restate.aerial:8080",
-			op:              "enqueue",
 			threadID:        "th-108",
 			enqueueReq:      queue.ThreadEnqueueRequest{Prompt: "default url"},
 			emptyIngressURL: true,
@@ -324,7 +316,6 @@ func TestRestateIngressClient_ThreadSessionOperations(t *testing.T) {
 		},
 		{
 			name:         "nil client returns error",
-			op:           "enqueue",
 			threadID:     "th-109",
 			enqueueReq:   queue.ThreadEnqueueRequest{Prompt: "nil client"},
 			nilClient:    true,
@@ -332,7 +323,6 @@ func TestRestateIngressClient_ThreadSessionOperations(t *testing.T) {
 		},
 		{
 			name:             "invalid ingress url returns request creation error",
-			op:               "enqueue",
 			threadID:         "th-110",
 			enqueueReq:       queue.ThreadEnqueueRequest{Prompt: "bad url"},
 			customIngressURL: "http://\x7f",
@@ -348,17 +338,17 @@ func TestRestateIngressClient_ThreadSessionOperations(t *testing.T) {
 }
 
 type dispatchOpCase struct {
-	name           string
-	op             string
-	sessionKey     string
-	dispatchReq    eriwire.BrainDispatchRequest
-	cancelReq      queue.CancelDispatchRequest
-	serverResp     string
-	statusCode     int
-	transportError bool
-	wantStatus     string
-	wantErrorSub   string
-	wantPathSub    string
+	name              string
+	isCancelImmediate bool
+	sessionKey        string
+	dispatchReq       eriwire.BrainDispatchRequest
+	cancelReq         queue.CancelDispatchRequest
+	serverResp        string
+	statusCode        int
+	transportError    bool
+	wantStatus        string
+	wantErrorSub      string
+	wantPathSub       string
 }
 
 func runDispatchOperationCase(t *testing.T, tc dispatchOpCase) {
@@ -387,18 +377,17 @@ func runDispatchOperationCase(t *testing.T, tc dispatchOpCase) {
 	client := NewRestateIngressClient(ts.URL, "aerial", httpClient)
 
 	var err error
-	switch tc.op {
-	case "enqueue":
-		resp, e := client.EnqueueDispatch(context.Background(), tc.sessionKey, tc.dispatchReq)
-		err = e
-		if err == nil {
-			assert.Equal(t, tc.wantStatus, resp.Status)
-		}
-	case "cancel_immediate":
+	if tc.isCancelImmediate {
 		resp, e := client.CancelDispatchImmediate(context.Background(), queue.CancelDispatchControlRequest{
 			SessionKey: tc.sessionKey,
 			Reason:     tc.cancelReq.Reason,
 		})
+		err = e
+		if err == nil {
+			assert.Equal(t, tc.wantStatus, resp.Status)
+		}
+	} else {
+		resp, e := client.EnqueueDispatch(context.Background(), tc.sessionKey, tc.dispatchReq)
 		err = e
 		if err == nil {
 			assert.Equal(t, tc.wantStatus, resp.Status)
@@ -423,7 +412,6 @@ func TestRestateIngressClient_DispatchOperations(t *testing.T) {
 	tests := []dispatchOpCase{
 		{
 			name:        "enqueue dispatch accepted",
-			op:          "enqueue",
 			sessionKey:  "disp-201",
 			dispatchReq: eriwire.BrainDispatchRequest{ID: "d-201", Source: "vanadis"},
 			serverResp:  `{"status":"accepted","dispatch_id":"d-201"}`,
@@ -432,18 +420,17 @@ func TestRestateIngressClient_DispatchOperations(t *testing.T) {
 			wantPathSub: "/DispatchSession/disp-201/Enqueue",
 		},
 		{
-			name:        "cancel dispatch immediate returns ok",
-			op:          "cancel_immediate",
-			sessionKey:  "vanadis-chunk-imm",
-			cancelReq:   queue.CancelDispatchRequest{ChunkID: "chunk-imm"},
-			serverResp:  `{"status":"ok","cancelled_count":1}`,
-			statusCode:  http.StatusOK,
-			wantStatus:  "ok",
-			wantPathSub: "/SessionManager/CancelDispatch",
+			name:              "cancel dispatch immediate returns ok",
+			isCancelImmediate: true,
+			sessionKey:        "vanadis-chunk-imm",
+			cancelReq:         queue.CancelDispatchRequest{ChunkID: "chunk-imm"},
+			serverResp:        `{"status":"ok","cancelled_count":1}`,
+			statusCode:        http.StatusOK,
+			wantStatus:        "ok",
+			wantPathSub:       "/SessionManager/CancelDispatch",
 		},
 		{
 			name:           "enqueue dispatch returns error on transport failure",
-			op:             "enqueue",
 			sessionKey:     "disp-fail",
 			dispatchReq:    eriwire.BrainDispatchRequest{ID: "d-fail", Source: "vanadis", SessionID: "disp-fail"},
 			transportError: true,

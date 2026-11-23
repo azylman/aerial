@@ -183,27 +183,30 @@ func TestWorker_RotateSessionID_EvictsDaemons(t *testing.T) {
 }
 
 type sessionDBRotationCase struct {
-	name, channelMode, runnerMode     string
+	name, channelMode                 string
 	preWriteDBBytes, preWriteWALBytes int64
 	maxAttempts, wantAttempts         int
+	quotaPauseErr                     bool
+	postHeavyDB                       bool
+	retryTransient                    bool
 }
 
 func execSessionDBRotationStep(tc sessionDBRotationCase, sessionID, oldSess, convDir string, cur int) (string, string, int, error) {
-	switch tc.runnerMode {
-	case "quota_429":
+	if tc.quotaPauseErr {
 		return "", "RESOURCE_EXHAUSTED (code 429): You have exhausted your capacity on this model. Resets in 30s.", 1, errors.New("exit code 1")
-	case "post_heavy":
+	}
+	if tc.postHeavyDB {
 		_ = os.WriteFile(filepath.Join(convDir, oldSess+".db"), make([]byte, session.DefaultMaxSessionDBBytes+500), 0o644)
 		return mockJSONResponse(oldSess, "heavy output"), "", 0, nil
-	case "retry_transient":
+	}
+	if tc.retryTransient {
 		if cur == 1 {
 			_ = os.WriteFile(filepath.Join(convDir, oldSess+".db"), make([]byte, session.DefaultMaxSessionDBBytes+1024), 0o644)
 			return `{"status": "ERROR", "error": "temporary network timeout"}`, "", 0, nil
 		}
 		return mockJSONResponse(sessionID, "Recovered"), "", 0, nil
-	default:
-		return mockJSONResponse(sessionID, "OK"), "", 0, nil
 	}
+	return mockJSONResponse(sessionID, "OK"), "", 0, nil
 }
 
 func runSessionDBRotationCase(t *testing.T, tc sessionDBRotationCase) {
@@ -264,10 +267,10 @@ func TestWorker_SessionDBRotation(t *testing.T) {
 		{name: "PreTurn_Channel_DBLimit", channelMode: "channel", preWriteDBBytes: session.DefaultMaxSessionDBBytes + 1024, preWriteWALBytes: 600 * 1024, maxAttempts: 1, wantAttempts: 1},
 		{name: "PreTurn_Channel_WALIgnored", channelMode: "channel", preWriteDBBytes: 1000 * 1024, preWriteWALBytes: 600 * 1024, maxAttempts: 1, wantAttempts: 1},
 		{name: "PreTurn_Thread_DBLimit", channelMode: "thread", preWriteDBBytes: session.DefaultMaxSessionDBBytes + 1024, maxAttempts: 1, wantAttempts: 1},
-		{name: "QuotaPause_AboveThreshold", channelMode: "thread", preWriteDBBytes: session.DefaultMaxQuotaPauseDBBytes + 1024, runnerMode: "quota_429", maxAttempts: 1, wantAttempts: 1},
-		{name: "QuotaPause_BelowThreshold", channelMode: "thread", preWriteDBBytes: 200 * 1024, runnerMode: "quota_429", maxAttempts: 1, wantAttempts: 1},
-		{name: "PostExecutionPreserved", channelMode: "thread", runnerMode: "post_heavy", maxAttempts: 1, wantAttempts: 1},
-		{name: "TransientRetryPreserved", channelMode: "thread", runnerMode: "retry_transient", maxAttempts: 2, wantAttempts: 2},
+		{name: "QuotaPause_AboveThreshold", channelMode: "thread", preWriteDBBytes: session.DefaultMaxQuotaPauseDBBytes + 1024, quotaPauseErr: true, maxAttempts: 1, wantAttempts: 1},
+		{name: "QuotaPause_BelowThreshold", channelMode: "thread", preWriteDBBytes: 200 * 1024, quotaPauseErr: true, maxAttempts: 1, wantAttempts: 1},
+		{name: "PostExecutionPreserved", channelMode: "thread", postHeavyDB: true, maxAttempts: 1, wantAttempts: 1},
+		{name: "TransientRetryPreserved", channelMode: "thread", retryTransient: true, maxAttempts: 2, wantAttempts: 2},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

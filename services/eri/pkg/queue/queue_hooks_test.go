@@ -599,7 +599,7 @@ func TestPreTurnHook_Lifecycle(t *testing.T) {
 	}
 }
 
-func TestPreTurnHook_HelperEdgeCases(t *testing.T) {
+func TestPreTurnHook_Helpers(t *testing.T) {
 	t.Parallel()
 	if reqNil := buildPreTurnRequest(nil); reqNil == nil || reqNil.Timestamp.IsZero() {
 		t.Errorf("expected valid from nil te")
@@ -758,7 +758,7 @@ func TestPostTurnHook_Lifecycle(t *testing.T) {
 	}
 }
 
-func TestPostTurnHook_HelperEdgeCases(t *testing.T) {
+func TestPostTurnHook_Helpers(t *testing.T) {
 	t.Parallel()
 	if reqNil := buildPostTurnRequest(nil); reqNil == nil || reqNil.Timestamp.IsZero() {
 		t.Errorf("expected valid from nil te")

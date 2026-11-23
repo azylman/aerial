@@ -295,7 +295,7 @@ func TestProvider_TemplatePathLoading(t *testing.T) {
 	}
 }
 
-func TestProvider_TemplateHelpersAndEdgeCases(t *testing.T) {
+func TestProvider_TemplateHelpers(t *testing.T) {
 	t.Parallel()
 
 	tmpl := `

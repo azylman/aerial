@@ -47,7 +47,7 @@ func (p *InterchangeablePool) WaitBackground() {
 	}
 	p.bgWg.Wait()
 	if p.underlying != nil {
-		p.underlying.WaitBackground()
+		waitPoolBackground(p.underlying)
 	}
 }
 
@@ -125,7 +125,7 @@ func TestInterchangeablePool_InitializationAndConfig(t *testing.T) {
 	if err := pool.Initialize(context.Background()); err != nil {
 		t.Fatalf("Initialize failed: %v", err)
 	}
-	pool.Underlying().WaitBackground()
+	waitPoolBackground(pool.Underlying())
 	workers := pool.Workers()
 	if len(workers) != 3 || pool.AvailableCount() != 3 || spawns.Load() < 3 || workers[0] != "custom:worker-0" || workers[1] != "custom:worker-1" || workers[2] != "custom:worker-2" {
 		t.Fatalf("unexpected pool state or worker keys: %v", workers)

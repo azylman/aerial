@@ -887,15 +887,31 @@ func TestSyncHooks(t *testing.T) {
 
 // authEngineLayout is the per-engine credential layout shared by the codex and muse seeding contract.
 type authEngineLayout struct {
-	dataSub   string // canonical dir under dataDir
-	homeSub   string // canonical dir under home (no dataDir) and the primary link dir
-	setSource func(p *Provisioner, path string)
-	provision func(p *Provisioner) error
+	dataSub string // canonical dir under dataDir
+	homeSub string // canonical dir under home (no dataDir) and the primary link dir
 }
 
 var authEngineLayouts = map[string]authEngineLayout{
-	config.EngineCodex: {"codex", ".codex", (*Provisioner).SetCodexAuthSourcePath, (*Provisioner).provisionCodexAuthState},
-	config.EngineMuse:  {"muse", filepath.Join(".config", "muse"), (*Provisioner).SetMuseAuthSourcePath, (*Provisioner).provisionMuseAuthState},
+	config.EngineCodex: {"codex", ".codex"},
+	config.EngineMuse:  {"muse", filepath.Join(".config", "muse")},
+}
+
+func setEngineAuthSource(p *Provisioner, engine, path string) {
+	if p == nil {
+		return
+	}
+	if engine == config.EngineCodex {
+		p.SetCodexAuthSourcePath(path)
+	} else {
+		p.SetMuseAuthSourcePath(path)
+	}
+}
+
+func provisionEngineAuth(p *Provisioner, engine string) error {
+	if engine == config.EngineCodex {
+		return p.provisionCodexAuthState()
+	}
+	return p.provisionMuseAuthState()
 }
 
 type authStateCase struct {
@@ -953,7 +969,7 @@ func runAuthStateCase(t *testing.T, tc authStateCase) {
 		if tc.emptyHome {
 			p = newDisabledProvisioner(t, "", "")
 		}
-		if err := layout.provision(p); err != nil {
+		if err := provisionEngineAuth(p, tc.engine); err != nil {
 			t.Fatalf("provision %s auth: expected nil error, got %v", tc.engine, err)
 		}
 		return
@@ -977,12 +993,12 @@ func runAuthStateCase(t *testing.T, tc authStateCase) {
 	if tc.existingSHA != "" {
 		writeTestFile(t, filepath.Join(canonicalDir, ".auth.seed-sha256"), resolveAuthSHA(tc.existingSHA, tc.source))
 	}
-	layout.setSource(p, "")
+	setEngineAuthSource(p, tc.engine, "")
 	if tc.source != "" {
-		layout.setSource(p, writeTestFile(t, filepath.Join(tmpHome, "source-auth.json"), tc.source))
+		setEngineAuthSource(p, tc.engine, writeTestFile(t, filepath.Join(tmpHome, "source-auth.json"), tc.source))
 	}
 
-	err := layout.provision(p)
+	err := provisionEngineAuth(p, tc.engine)
 	if (err != nil) != tc.wantErr {
 		t.Fatalf("provision %s auth error = %v, wantErr %v", tc.engine, err, tc.wantErr)
 	}

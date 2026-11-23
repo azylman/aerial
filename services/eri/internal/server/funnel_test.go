@@ -1180,58 +1180,19 @@ channels:
     mode: "ignore"
 `)
 
-	tests := []struct {
-		name         string
-		botUserID    string
-		sessionUser  string
-		authorID     string
-		channelID    string
-		guildID      string
-		msgID        string
-		wantResult   string
-		wantEnqueued string
-	}{
-		{
-			name:       "IgnoredSelfPayloadBotUser",
-			botUserID:  "bot-123",
-			authorID:   "bot-123",
-			channelID:  "chan-main",
-			msgID:      "msg-self-arg",
-			wantResult: "ignored_self",
-		},
-		{
-			name:        "IgnoredSelfSessionUser",
-			sessionUser: "session-bot-99",
-			authorID:    "session-bot-99",
-			channelID:   "chan-main",
-			msgID:       "msg-self-sess",
-			wantResult:  "ignored_self",
-		},
-		{
-			name:       "IgnoredByPolicy",
-			channelID:  "chan-ignored",
-			authorID:   "user-normal",
-			msgID:      "msg-policy-ign",
-			wantResult: "ignored",
-		},
-		{
-			name:         "SuccessfulEnqueue",
-			channelID:    "chan-main",
-			authorID:     "user-normal",
-			msgID:        "msg-ok-enq",
-			wantResult:   "enqueued",
-			wantEnqueued: "msg-ok-enq",
-		},
-		{
-			name:         "SeedSessionStateWithGuild",
-			botUserID:    "bot-seed",
-			authorID:     "user-normal",
-			channelID:    "chan-main",
-			guildID:      "g-seed-new",
-			msgID:        "msg-seed-ok",
-			wantResult:   "enqueued",
-			wantEnqueued: "msg-seed-ok",
-		},
+	type funnelScenarioCase struct {
+		name, botUserID, sessionUser, authorID, channelID, guildID, msgID, wantResult, wantEnqueued string
+	}
+	fCase := func(name, botUserID, sessionUser, authorID, channelID, guildID, msgID, wantResult, wantEnqueued string) funnelScenarioCase {
+		return funnelScenarioCase{name, botUserID, sessionUser, authorID, channelID, guildID, msgID, wantResult, wantEnqueued}
+	}
+
+	tests := []funnelScenarioCase{
+		fCase("IgnoredSelfPayloadBotUser", "bot-123", "", "bot-123", "chan-main", "", "msg-self-arg", "ignored_self", ""),
+		fCase("IgnoredSelfSessionUser", "", "session-bot-99", "session-bot-99", "chan-main", "", "msg-self-sess", "ignored_self", ""),
+		fCase("IgnoredByPolicy", "", "", "user-normal", "chan-ignored", "", "msg-policy-ign", "ignored", ""),
+		fCase("SuccessfulEnqueue", "", "", "user-normal", "chan-main", "", "msg-ok-enq", "enqueued", "msg-ok-enq"),
+		fCase("SeedSessionStateWithGuild", "bot-seed", "", "user-normal", "chan-main", "g-seed-new", "msg-seed-ok", "enqueued", "msg-seed-ok"),
 	}
 
 	for _, tc := range tests {

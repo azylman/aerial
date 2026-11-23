@@ -129,7 +129,7 @@ func TestMetricsRegistryAndHandler(t *testing.T) {
 	}
 }
 
-func TestMetricsDefaultFallbackBranches(t *testing.T) {
+func TestMetrics_DefaultFallbacks(t *testing.T) {
 	// Call every recorder with empty strings / negative numbers to exercise fallback defaults
 	RecordTurnCompleted("", "", "", 10*time.Millisecond)
 	RecordTokens("", "", 0, 0, 0, 0, 0)

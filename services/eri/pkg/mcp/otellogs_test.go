@@ -78,13 +78,19 @@ func makeTestSpanContext(tidHex, sidHex string) trace.SpanContext {
 	})
 }
 
+type seedTurn struct {
+	turn    runner.ActiveTurn
+	traceID string
+	spanID  string
+}
+
 type otelLogProxyTestCase struct {
 	name            string
 	requestJSON     string
 	gzipContent     bool
 	daemonHeader    string
 	targetSegment   string
-	setupTurns      func(r *runner.ActiveTurnRegistry)
+	seedTurns       []seedTurn
 	wantStatus      int
 	wantRecordCount int
 	wantLevel       slog.Level
@@ -223,8 +229,8 @@ func otelLogProxyFilteringCases() []otelLogProxyTestCase {
 				}]
 			}`,
 			daemonHeader: "d-claude-test",
-			setupTurns: func(r *runner.ActiveTurnRegistry) {
-				r.Set(runner.ActiveTurn{DaemonID: "d-claude-test", Target: "discord", ConversationID: "sess-abc"}, makeTestSpanContext("4bf92f3577b34da6a3ce929d0e0e4736", "00f067aa0ba902b7"))
+			seedTurns: []seedTurn{
+				{turn: runner.ActiveTurn{DaemonID: "d-claude-test", Target: "discord", ConversationID: "sess-abc"}, traceID: "4bf92f3577b34da6a3ce929d0e0e4736", spanID: "00f067aa0ba902b7"},
 			},
 			wantStatus:      http.StatusOK,
 			wantRecordCount: 1,
@@ -303,8 +309,8 @@ func otelLogProxyTurnCases() []otelLogProxyTestCase {
 					}]
 				}]
 			}`,
-			setupTurns: func(r *runner.ActiveTurnRegistry) {
-				r.Set(runner.ActiveTurn{DaemonID: "daemon-conv-42", Target: "ephemeral", ConversationID: "conv-fallback-42"}, makeTestSpanContext("11111111111111111111111111111111", "2222222222222222"))
+			seedTurns: []seedTurn{
+				{turn: runner.ActiveTurn{DaemonID: "daemon-conv-42", Target: "ephemeral", ConversationID: "conv-fallback-42"}, traceID: "11111111111111111111111111111111", spanID: "2222222222222222"},
 			},
 			wantStatus:      http.StatusOK,
 			wantRecordCount: 1,
@@ -365,8 +371,8 @@ func otelLogProxyTurnCases() []otelLogProxyTestCase {
 				}]
 			}`,
 			targetSegment: "kiosk",
-			setupTurns: func(r *runner.ActiveTurnRegistry) {
-				r.Set(runner.ActiveTurn{DaemonID: "daemon-kiosk-1", Target: "kiosk", ConversationID: "kiosk-sess"}, makeTestSpanContext("33333333333333333333333333333333", "4444444444444444"))
+			seedTurns: []seedTurn{
+				{turn: runner.ActiveTurn{DaemonID: "daemon-kiosk-1", Target: "kiosk", ConversationID: "kiosk-sess"}, traceID: "33333333333333333333333333333333", spanID: "4444444444444444"},
 			},
 			wantStatus:      http.StatusOK,
 			wantRecordCount: 1,
@@ -444,8 +450,8 @@ func TestOTelLogProxy_FilteringAndScrubbing(t *testing.T) {
 			t.Parallel()
 
 			turns := runner.NewActiveTurnRegistry()
-			if tc.setupTurns != nil {
-				tc.setupTurns(turns)
+			for _, st := range tc.seedTurns {
+				turns.Set(st.turn, makeTestSpanContext(st.traceID, st.spanID))
 			}
 
 			handler := &recordCaptureHandler{}

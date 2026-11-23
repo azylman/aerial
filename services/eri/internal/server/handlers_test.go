@@ -420,14 +420,14 @@ func TestHandleDirectMessage(t *testing.T) {
 			assertDirectMessageCase(t, tc)
 		})
 	}
+}
 
-	t.Run("delivery success and fallback", func(t *testing.T) {
-		runDirectMessageDeliveryCases(t)
-	})
+func TestHandleDirectMessage_Delivery(t *testing.T) {
+	runDirectMessageDeliveryCases(t)
+}
 
-	t.Run("mux route mounting for /discord/message", func(t *testing.T) {
-		runDirectMessageMuxCases(t)
-	})
+func TestHandleDirectMessage_MuxRoutes(t *testing.T) {
+	runDirectMessageMuxCases(t)
 }
 
 func runHandleTasksFilterCases(t *testing.T, handler http.HandlerFunc, now time.Time) {

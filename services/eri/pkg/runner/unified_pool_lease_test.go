@@ -148,7 +148,7 @@ func assertLeaseReleaseAndRotation(t *testing.T, pool *UnifiedProcessPool, lease
 		if tc.onRotatedErr != nil && !errors.Is(relErr, tc.onRotatedErr) {
 			t.Errorf("expected error %v, got %v", tc.onRotatedErr, relErr)
 		}
-		if pool.HasDaemon(targetKey) {
+		if poolHasDaemon(pool, targetKey) {
 			t.Errorf("expected daemon evicted")
 		}
 		return
@@ -459,13 +459,13 @@ func TestUnifiedProcessPool_PrewarmAndLeaseResilience(t *testing.T) {
 	if !ok || dBefore == nil || pool.prewarmTarget(ctx, "   ") != nil || pool.Initialize(ctx) != nil {
 		t.Fatalf("initial prewarm/lease state invalid")
 	}
-	pool.WaitBackground()
-	if dAfterInit, okInit := pool.Get("discord:worker-0"); !okInit || dAfterInit != dBefore || dBefore.State() == StateClosed || !pool.HasDaemon("discord:worker-1") {
+	waitPoolBackground(pool)
+	if dAfterInit, okInit := pool.Get("discord:worker-0"); !okInit || dAfterInit != dBefore || dBefore.State() == StateClosed || !poolHasDaemon(pool, "discord:worker-1") {
 		t.Fatalf("expected worker-0 untouched and worker-1 pre-warmed after Initialize")
 	}
 
 	pool.MarkDirty()
-	pool.WaitBackground()
+	waitPoolBackground(pool)
 	if err = pool.prewarmTarget(ctx, "discord:worker-0"); err != nil || dBefore.State() == StateClosed {
 		t.Fatalf("MarkDirty or prewarmTarget while locked failed: %v", err)
 	}
@@ -604,7 +604,7 @@ func TestUnifiedProcessPool_EvictSessionAndTranscriptRescuer(t *testing.T) {
 		t.Errorf("expected nil error on nonexistent target eviction: %v", err)
 	}
 	sess, err := uPool.GetOrCreate(context.Background(), "target-evict-live", "")
-	if err != nil || sess == nil || uPool.EvictSession("target-evict-live") != nil || uPool.HasDaemon("target-evict-live") {
+	if err != nil || sess == nil || uPool.EvictSession("target-evict-live") != nil || poolHasDaemon(uPool, "target-evict-live") {
 		t.Fatalf("unexpected error in evict flow: sess=%v err=%v", sess, err)
 	}
 	var nilPool *UnifiedProcessPool

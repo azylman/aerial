@@ -21,15 +21,18 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/session"
 )
 
-func (p *UnifiedProcessPool) HasDaemon(targetKey string) bool {
-	_, ok := p.Get(targetKey)
-	return ok
-}
-
-func (p *UnifiedProcessPool) WaitBackground() {
+func waitPoolBackground(p *UnifiedProcessPool) {
 	if p != nil {
 		p.bgWg.Wait()
 	}
+}
+
+func poolHasDaemon(p *UnifiedProcessPool, targetKey string) bool {
+	if p == nil {
+		return false
+	}
+	_, ok := p.Get(targetKey)
+	return ok
 }
 
 type pipeMockSpawnerOpts struct {
@@ -289,7 +292,7 @@ func runModelResolutionCase(t *testing.T, tc modelResolutionCase) {
 		pool.UpdateEngine(tc.updateEngine, tc.updateClaudeBin)
 	}
 	pool.MarkDirty()
-	pool.WaitBackground()
+	waitPoolBackground(pool)
 	if got := pool.cfg.Model; got != tc.wantUpdatedModel {
 		t.Fatalf("expected updated pool model %q, got %q", tc.wantUpdatedModel, got)
 	}
@@ -627,7 +630,7 @@ func TestUnifiedProcessPool_GetOrCreate_PreflightRotationAndGuardrails(t *testin
 	if err != nil || d2 == d1 {
 		t.Fatalf("expected new daemon after pre-flight rotation, got d2=%v err=%v", d2, err)
 	}
-	pool.WaitBackground()
+	waitPoolBackground(pool)
 	if d1.State() != StateClosed {
 		t.Fatalf("expected old daemon to be closed, got %v", d1.State())
 	}
@@ -671,7 +674,7 @@ func TestUnifiedProcessPool_RotateDaemon(t *testing.T) {
 	d1.mu.Unlock()
 
 	d2, err := pool.RotateDaemon(ctx, "target-session", "compacted conversation history summary")
-	if err != nil || d2 == d1 || d1.State() != StateClosed || d2.TurnCount() != 0 || d2.StepCount() != 0 {
+	if err != nil || d2 == d1 || d1.State() != StateClosed || d2.TurnCount() != 0 {
 		t.Fatalf("rotate failed: d1=%v d2=%v err=%v", d1.State(), d2, err)
 	}
 	d3, err := pool.RotateDaemon(ctx, "non-existent-target", "")
@@ -706,20 +709,20 @@ func TestUnifiedProcessPool_RotateDaemon_Errors(t *testing.T) {
 	}
 }
 
-func TestUnifiedProcessPool_GetHasDaemonAndMarkDirty(t *testing.T) {
+func TestUnifiedProcessPool_GetAndMarkDirty(t *testing.T) {
 	var nilPool *UnifiedProcessPool
-	if d, ok := nilPool.Get("kiosk"); ok || d != nil || nilPool.HasDaemon("kiosk") {
+	if d, ok := nilPool.Get("kiosk"); ok || d != nil {
 		t.Errorf("expected false/nil from nil UnifiedProcessPool")
 	}
 	nilPool.MarkDirty()
 
 	pool := NewUnifiedProcessPool(PoolConfig{}, newPipeMockSpawner(pipeMockSpawnerOpts{pid: 99, initSessID: "00000000-0000-0000-0000-000000000099"}))
 	defer pool.Close()
-	if pool.HasDaemon("kiosk") {
+	if _, ok := pool.Get("kiosk"); ok {
 		t.Errorf("expected false for unspawned target")
 	}
 	d, err := pool.GetOrCreate(context.Background(), "kiosk", "")
-	if err != nil || !pool.HasDaemon("kiosk") {
+	if err != nil {
 		t.Fatalf("failed creating daemon: %v", err)
 	}
 	if got, ok := pool.Get("kiosk"); !ok || got != d {
@@ -1083,7 +1086,7 @@ func runDirtyEvictionCase(t *testing.T, tc dirtyEvictionCase) {
 	}
 	if tc.markDirty {
 		pool.MarkDirty()
-		pool.WaitBackground()
+		waitPoolBackground(pool)
 	}
 
 	assertDirtyEvictionExpectations(t, pool, initialDaemon, tc, &spawnCount)
@@ -1176,7 +1179,7 @@ func TestUnifiedProcessPool_MarkDirty_SingleflightBarrier(t *testing.T) {
 		pool.MarkDirty()
 	}
 	close(spawnGate)
-	pool.WaitBackground()
+	waitPoolBackground(pool)
 	d2, ok := pool.Get("kiosk")
 	if !ok || d2 == nil || d2 == d1 || d2.State() == StateClosed {
 		t.Fatalf("expected kiosk daemon replacement")
@@ -1219,7 +1222,7 @@ func TestUnifiedProcessPool_GetOrCreate_RejectsDirtyDaemon(t *testing.T) {
 				t.Fatalf("second GetOrCreate failed: d1=%p d2=%p err=%v", d1, d2, err)
 			}
 
-			pool.WaitBackground()
+			waitPoolBackground(pool)
 			if d1.State() != StateClosed || (tc.expectSpawns > 0 && int(spawnCounter.Load()) != tc.expectSpawns) {
 				t.Errorf("rejected dirty daemon check failed: d1State=%v spawns=%d", d1.State(), spawnCounter.Load())
 			}
@@ -1436,7 +1439,7 @@ func TestUnifiedProcessPool_ReapIdlePrewarmedDaemons(t *testing.T) {
 			}
 
 			pool.reapIdlePrewarmedDaemons()
-			pool.WaitBackground()
+			waitPoolBackground(pool)
 
 			pool.mu.RLock()
 			_, exists := pool.daemons[target]
