@@ -83,9 +83,7 @@ func applyActiveStepsToChunks(chunks []model.VanadisChunk, currentSteps map[stri
 }
 
 func (b *BuildObject) syncActiveStepWidget(ctx context.Context, build model.VanadisBuild, chunks []model.VanadisChunk) error {
-	buildCopy := build
-	buildCopy.Quiet = true
-	_, err := b.executor.SyncBuildWidget(ctx, b.store, buildCopy, chunks, "")
+	_, err := b.executor.SyncBuildWidget(ctx, b.store, build, chunks, "")
 	return err
 }
 

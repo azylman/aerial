@@ -404,7 +404,7 @@ func TestUpdateActiveStep_ConcurrentCoalesce(t *testing.T) {
 func assertSyncedWidgetStep(t *testing.T, eri *mockEriClient, chunkID, expectStep string, expectCleared ...bool) {
 	t.Helper()
 	require.NotNil(t, eri.LastWidget)
-	assert.True(t, eri.LastWidget.SkipSink, "active step widget sync must set SkipSink = true")
+	assert.False(t, eri.LastWidget.SkipSink, "active step widget sync must allow widget sinking for non-quiet builds")
 	if len(expectCleared) > 0 && expectCleared[0] {
 		for _, ch := range eri.LastWidget.Chunks {
 			assert.Empty(t, ch.ActiveStep, "expected chunk %s active step to be cleared", ch.ID)
