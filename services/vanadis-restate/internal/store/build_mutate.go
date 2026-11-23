@@ -15,7 +15,6 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"strconv"
 	"strings"
 	"time"
 
@@ -79,53 +78,11 @@ func (s *Store) UpdateBuild(ctx context.Context, buildID string, req UpdateBuild
 }
 
 func validateUpdateChunkInput(buildID, chunkRef string, req UpdateChunkRequest) (string, error) {
-	if buildID == "" || chunkRef == "" {
-		return "", fmt.Errorf("%w: build id and chunk ref are required", ErrInvalidBuildInput)
-	}
-	hasField := req.Mode != nil || strings.TrimSpace(req.Repo) != "" ||
-		strings.TrimSpace(req.Title) != "" || strings.TrimSpace(req.Instructions) != "" ||
-		len(req.TargetFiles) > 0 || len(req.TargetSymbols) > 0 ||
-		strings.TrimSpace(req.Effort) != "" || req.DependsOn != nil
-	if !hasField {
-		return "", fmt.Errorf("%w: build id, chunk ref, and at least one updated field are required", ErrInvalidBuildInput)
-	}
-	if req.Mode != nil {
-		if strings.TrimSpace(*req.Mode) == "" {
-			return "", fmt.Errorf("%w: mode cannot be empty string (must be 'pr' or 'action')", ErrInvalidBuildInput)
-		}
-		if _, err := buildplan.NormalizeChunkMode(*req.Mode); err != nil {
-			return "", fmt.Errorf("%w: %w", ErrInvalidBuildInput, err)
-		}
-	}
-	var normEffort string
-	if strings.TrimSpace(req.Effort) != "" {
-		var effErr error
-		normEffort, effErr = buildplan.NormalizeChunkEffort(req.Effort)
-		if effErr != nil {
-			return "", fmt.Errorf("%w: %w", ErrInvalidBuildInput, effErr)
-		}
+	normEffort, err := buildplan.ValidateUpdateChunkInput(buildID, chunkRef, req)
+	if err != nil {
+		return "", fmt.Errorf("%w: %w", ErrInvalidBuildInput, err)
 	}
 	return normEffort, nil
-}
-
-func resolveChunkRef(chunks []model.VanadisChunk, chunkRef string) int {
-	clean := strings.TrimSpace(chunkRef)
-	if clean == "" {
-		return -1
-	}
-	for i, c := range chunks {
-		if c.ID == clean {
-			return i
-		}
-	}
-	if idx, err := strconv.Atoi(clean); err == nil {
-		for i, c := range chunks {
-			if c.ChunkIndex == idx {
-				return i
-			}
-		}
-	}
-	return -1
 }
 
 func applyChunkModeUpdates(chunk *model.VanadisChunk, req UpdateChunkRequest, effectiveMode, effectiveRepo string) error {
@@ -232,7 +189,7 @@ func (s *Store) UpdateChunk(ctx context.Context, buildID, chunkRef string, req U
 		return nil, err
 	}
 
-	targetIdx := resolveChunkRef(existingChunks, chunkRef)
+	targetIdx := buildplan.ResolveChunkRef(existingChunks, chunkRef)
 	if targetIdx < 0 {
 		return nil, ErrChunkNotFound
 	}
@@ -421,7 +378,7 @@ func (s *Store) RemoveChunk(ctx context.Context, buildID, chunkRef string) (*mod
 		return nil, nil, err
 	}
 
-	targetIdx := resolveChunkRef(existingChunks, chunkRef)
+	targetIdx := buildplan.ResolveChunkRef(existingChunks, chunkRef)
 	if targetIdx < 0 {
 		return nil, nil, ErrChunkNotFound
 	}

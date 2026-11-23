@@ -99,42 +99,11 @@ type VanadisChunkPRLookup struct {
 	Effort  string `json:"effort,omitempty"`
 }
 
-type AttachChunkPRRequest struct {
-	ChunkID  string `json:"chunk_id,omitempty"`
-	PRNumber int    `json:"pr_number"`
-	Repo     string `json:"repo"`
-	Branch   string `json:"branch,omitempty"`
-	Title    string `json:"title,omitempty"`
-	TargetID string `json:"target_id,omitempty"`
-	Quiet    bool   `json:"quiet,omitempty"`
-	// Agent is the caller agent that owns a new standalone build.
-	Agent string `json:"agent,omitempty"`
-}
+type AttachChunkPRRequest = buildplan.AttachChunkPRRequest
 
-type CreateChunkInput struct {
-	ID                 string   `json:"id"`
-	Mode               string   `json:"mode,omitempty"`
-	Repo               string   `json:"repo,omitempty"`
-	Title              string   `json:"title"`
-	Instructions       string   `json:"instructions"`
-	TargetFiles        []string `json:"target_files"`
-	TargetSymbols      []string `json:"target_symbols"`
-	Effort             string   `json:"effort,omitempty"`
-	AcceptanceCriteria []string `json:"acceptance_criteria"`
-	DependsOn          []string `json:"depends_on,omitempty"`
-}
+type CreateChunkInput = buildplan.CreateChunkInput
 
-type UpdateChunkRequest struct {
-	ChunkRef      string    `json:"chunk_ref,omitempty"`
-	Mode          *string   `json:"mode,omitempty"`
-	Repo          string    `json:"repo,omitempty"`
-	Title         string    `json:"title,omitempty"`
-	Instructions  string    `json:"instructions,omitempty"`
-	TargetFiles   []string  `json:"target_files,omitempty"`
-	TargetSymbols []string  `json:"target_symbols,omitempty"`
-	Effort        string    `json:"effort,omitempty"`
-	DependsOn     *[]string `json:"depends_on,omitempty"`
-}
+type UpdateChunkRequest = buildplan.UpdateChunkRequest
 
 type UpdateBuildRequest struct {
 	Title         string `json:"title,omitempty"`
@@ -143,21 +112,9 @@ type UpdateBuildRequest struct {
 }
 
 // RetryActionChunkRequest fences a single operator-requested action retry.
-type RetryActionChunkRequest struct {
-	BuildID                 string  `json:"build_id"`
-	ChunkID                 string  `json:"chunk_id"`
-	ExpectedDispatchID      string  `json:"expected_dispatch_id"`
-	Reason                  string  `json:"reason"`
-	ExpectedInstructions    *string `json:"expected_instructions,omitempty"    jsonschema:"Exact stored instructions required for correction; supply with replacement_instructions"`
-	ReplacementInstructions *string `json:"replacement_instructions,omitempty" jsonschema:"Corrected nonblank worker instructions atomically saved before retry; supply with expected_instructions"`
-}
+type RetryActionChunkRequest = buildplan.RetryActionChunkRequest
 
-type RetryActionChunkResult struct {
-	BuildID    string `json:"build_id"`
-	ChunkID    string `json:"chunk_id"`
-	DispatchID string `json:"dispatch_id"`
-	Accepted   bool   `json:"accepted"`
-}
+type RetryActionChunkResult = buildplan.RetryActionChunkResult
 
 // VanadisStore is the persistence authority for multi-chunk builds.
 type VanadisStore interface {
@@ -248,28 +205,7 @@ type BuildRoute struct {
 
 // ApplyRawChunkCIChecks folds raw CI check JSON into derived chunk fields.
 func ApplyRawChunkCIChecks(c *model.VanadisChunk, rawCIChecks []byte) {
-	if len(rawCIChecks) == 0 || string(rawCIChecks) == jsonNull || string(rawCIChecks) == "{}" {
-		return
-	}
-	var checks map[string]string
-	if err := json.Unmarshal(rawCIChecks, &checks); err != nil {
-		return
-	}
-	c.HeadSHA = strings.TrimSpace(checks["_head_sha"])
-	c.RemediatedSHA = strings.TrimSpace(checks["_remediated_sha"])
-	c.MergeSHA = strings.TrimSpace(checks["_merge_sha"])
-	mergeQueue := strings.TrimSpace(checks["_merge_queue"])
-	for k := range checks {
-		if strings.HasPrefix(k, "_") {
-			delete(checks, k)
-		}
-	}
-	if mergeQueue != "" {
-		checks["_merge_queue"] = mergeQueue
-	}
-	if len(checks) > 0 {
-		c.CIChecks = checks
-	}
+	buildplan.ApplyRawChunkCIChecks(c, rawCIChecks)
 }
 
 // ScanChunks scans ordered chunk rows.

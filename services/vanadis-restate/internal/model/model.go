@@ -7,6 +7,8 @@ import (
 	"strings"
 
 	"github.com/azylman/aerial/pkg/buildplan"
+	"github.com/azylman/aerial/pkg/discordutil"
+	"github.com/azylman/aerial/pkg/prwire"
 )
 
 // VanadisBuild is the shared build-plan wire type; see pkg/buildplan.
@@ -31,33 +33,13 @@ type BuildObjectState struct {
 }
 
 // FailChunkRequest carries the chunk and reason for failing a chunk.
-type FailChunkRequest struct {
-	DispatchID string `json:"dispatch_id,omitempty"`
-	BuildID    string `json:"build_id,omitempty"`
-	ChunkID    string `json:"chunk_id"`
-	Reason     string `json:"reason"`
-}
+type FailChunkRequest = buildplan.FailChunkRequest
 
 // FailChunkResponse represents the result of failing a chunk.
-type FailChunkResponse struct {
-	Failed      bool   `json:"failed"`
-	BuildID     string `json:"build_id"`
-	ChunkID     string `json:"chunk_id"`
-	BuildStatus string `json:"build_status"`
-	ChunkStatus string `json:"chunk_status"`
-	ThreadID    string `json:"thread_id,omitempty"`
-	Objective   string `json:"objective,omitempty"`
-	Quiet       bool   `json:"quiet,omitempty"`
-	Agent       string `json:"agent,omitempty"`
-}
+type FailChunkResponse = buildplan.FailChunkResponse
 
 // AttachChunkPRResponse represents the result of attaching a PR to a chunk or standalone build.
-type AttachChunkPRResponse struct {
-	Status   string `json:"status"`
-	BuildID  string `json:"build_id"`
-	ChunkID  string `json:"chunk_id"`
-	ThreadID string `json:"thread_id"`
-}
+type AttachChunkPRResponse = buildplan.AttachChunkPRResponse
 
 // ErrInvalidBuildInput reports malformed build or chunk input; see pkg/buildplan.
 var ErrInvalidBuildInput = buildplan.ErrInvalidBuildInput
@@ -72,20 +54,12 @@ func ActionDispatchID(chunk VanadisChunk) string {
 
 // CleanRepoName strips any owner prefix from a repo reference.
 func CleanRepoName(repo string) string {
-	repo = strings.TrimSpace(repo)
-	if idx := strings.LastIndex(repo, "/"); idx >= 0 {
-		return repo[idx+1:]
-	}
-	return repo
+	return prwire.CleanRepoName(repo)
 }
 
 // NormalizeDiscordThreadID canonicalizes a Discord thread or channel marker.
 func NormalizeDiscordThreadID(s string) string {
-	clean := strings.TrimSpace(s)
-	if idx := strings.LastIndex(clean, ":"); idx >= 0 {
-		clean = strings.TrimSpace(clean[idx+1:])
-	}
-	return strings.TrimSpace(strings.TrimPrefix(clean, "discord-"))
+	return discordutil.NormalizeThreadID(s)
 }
 
 func isHexDigit(c byte) bool {

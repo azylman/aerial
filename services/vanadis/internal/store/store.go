@@ -3,7 +3,6 @@
 package store
 
 import (
-	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -91,7 +90,7 @@ func ScanChunks(rows pgx.Rows) ([]model.VanadisChunk, error) {
 		c.TargetFiles, c.TargetSymbols, c.AcceptanceCriteria = buildplan.NonNilSlice(c.TargetFiles), buildplan.NonNilSlice(c.TargetSymbols), buildplan.NonNilSlice(c.AcceptanceCriteria)
 		c.DependsOn = buildplan.NonNilSlice(c.DependsOn)
 		c.Effort = model.CapChunkEffort(c.Effort)
-		applyChunkCIChecks(&c, rawCIChecks)
+		buildplan.ApplyRawChunkCIChecks(&c, rawCIChecks)
 		applyChunkRolloutState(&c, rawRolloutState)
 		chunks = append(chunks, c)
 	}
@@ -99,39 +98,6 @@ func ScanChunks(rows pgx.Rows) ([]model.VanadisChunk, error) {
 		return nil, fmt.Errorf("error iterating vanadis chunks: %w", err)
 	}
 	return chunks, nil
-}
-
-func applyChunkCIChecks(c *model.VanadisChunk, raw []byte) {
-	if len(raw) == 0 || bytes.Equal(raw, []byte(jsonNull)) || bytes.Equal(raw, []byte("{}")) {
-		return
-	}
-	var rawMap map[string]string
-	if err := json.Unmarshal(raw, &rawMap); err != nil {
-		return
-	}
-	filtered := make(map[string]string, len(rawMap))
-	for k, v := range rawMap {
-		val := strings.TrimSpace(v)
-		switch k {
-		case "_head_sha":
-			c.HeadSHA = val
-		case "_remediated_sha":
-			c.RemediatedSHA = val
-		case "_merge_sha":
-			c.MergeSHA = val
-		case "_merge_queue":
-			if val != "" {
-				filtered[k] = val
-			}
-		default:
-			if !strings.HasPrefix(k, "_") {
-				filtered[k] = v
-			}
-		}
-	}
-	if len(filtered) > 0 {
-		c.CIChecks = filtered
-	}
 }
 
 func applyChunkRolloutState(c *model.VanadisChunk, raw []byte) {

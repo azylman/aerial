@@ -17,8 +17,6 @@ import (
 	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
 )
 
-const maxPromptRunes = 6000
-
 // Action vocabulary stays local; pure repo/branch helpers delegate to the
 // canonical internal/model copies.
 const chunkModeAction = "action"
@@ -210,22 +208,7 @@ func FormatDeployFailurePrompt(ev pubsub.PRLifecycleEvent) string {
 }
 
 func formatErrorDetailsBlock(header, details, extraLine, footer string) string {
-	lines := []string{header}
-	if clean := strings.TrimSpace(details); clean != "" {
-		lines = append(lines, fmt.Sprintf("Error details:\n```\n%s\n```", TruncatePromptDetails(clean)))
-	}
-	if cleanExtra := strings.TrimSpace(extraLine); cleanExtra != "" {
-		lines = append(lines, cleanExtra)
-	}
-	if footer != "" {
-		lines = append(lines, footer)
-	}
-	return strings.Join(lines, "\n")
-}
-
-// TruncatePromptDetails sanitizes details for prompt embedding.
-func TruncatePromptDetails(s string) string {
-	return strutil.TruncateRunes(strings.ReplaceAll(s, "```", "'''"), maxPromptRunes)
+	return prwire.FormatErrorDetailsBlock(header, details, extraLine, footer)
 }
 
 // AST Symbol Spans resolution

@@ -331,3 +331,71 @@ func TestResolveChunkRef(t *testing.T) {
 		})
 	}
 }
+
+func TestApplyRawChunkCIChecks(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		raw        []byte
+		wantHead   string
+		wantChecks map[string]string
+	}{
+		{name: "empty raw", raw: nil},
+		{name: "json null", raw: []byte("null")},
+		{name: "empty json object", raw: []byte("{}")},
+		{
+			name:       "valid checks with private fields",
+			raw:        []byte(`{"_head_sha":"h1","_merge_queue":"q1","unit-tests":"success"}`),
+			wantHead:   "h1",
+			wantChecks: map[string]string{"_merge_queue": "q1", "unit-tests": "success"},
+		},
+		{name: "malformed json ignored", raw: []byte(`{invalid`)},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var c VanadisChunk
+			ApplyRawChunkCIChecks(&c, tc.raw)
+			if c.HeadSHA != tc.wantHead {
+				t.Errorf("HeadSHA = %q, want %q", c.HeadSHA, tc.wantHead)
+			}
+			if !reflect.DeepEqual(c.CIChecks, tc.wantChecks) {
+				t.Errorf("CIChecks = %v, want %v", c.CIChecks, tc.wantChecks)
+			}
+		})
+	}
+}
+
+func TestValidateUpdateChunkInput(t *testing.T) {
+	t.Parallel()
+	prMode := "pr"
+	badMode := "unknown"
+	emptyMode := ""
+	tests := []struct {
+		name       string
+		buildID    string
+		chunkRef   string
+		req        UpdateChunkRequest
+		wantEffort string
+		wantErr    string
+	}{
+		{name: "empty build id", buildID: "", chunkRef: "c1", req: UpdateChunkRequest{Title: "T"}, wantErr: "build id and chunk ref are required"},
+		{name: "empty chunk ref", buildID: "b1", chunkRef: "", req: UpdateChunkRequest{Title: "T"}, wantErr: "build id and chunk ref are required"},
+		{name: "no updated fields", buildID: "b1", chunkRef: "c1", req: UpdateChunkRequest{}, wantErr: "build id, chunk ref, and at least one updated field are required"},
+		{name: "empty string mode", buildID: "b1", chunkRef: "c1", req: UpdateChunkRequest{Mode: &emptyMode}, wantErr: "mode cannot be empty string (must be 'pr' or 'action')"},
+		{name: "invalid mode", buildID: "b1", chunkRef: "c1", req: UpdateChunkRequest{Mode: &badMode}, wantErr: `invalid chunk mode "unknown": must be 'pr' or 'action'`},
+		{name: "invalid effort", buildID: "b1", chunkRef: "c1", req: UpdateChunkRequest{Effort: "extreme", Title: "T"}, wantErr: `invalid chunk effort "extreme": must be 'low', 'medium', or 'high'`},
+		{name: "valid with normalized effort", buildID: "b1", chunkRef: "c1", req: UpdateChunkRequest{Mode: &prMode, Effort: "LOW"}, wantEffort: "low"},
+		{name: "valid with populated target files", buildID: "b1", chunkRef: "c1", req: UpdateChunkRequest{TargetFiles: []string{"main.go"}}},
+		{name: "empty slice target files rejected", buildID: "b1", chunkRef: "c1", req: UpdateChunkRequest{TargetFiles: []string{}}, wantErr: "build id, chunk ref, and at least one updated field are required"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			gotEffort, err := ValidateUpdateChunkInput(tc.buildID, tc.chunkRef, tc.req)
+			if gotErr := errString(err); gotErr != tc.wantErr || gotEffort != tc.wantEffort {
+				t.Errorf("ValidateUpdateChunkInput() = (%q, %q), want (%q, %q)", gotEffort, gotErr, tc.wantEffort, tc.wantErr)
+			}
+		})
+	}
+}

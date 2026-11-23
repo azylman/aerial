@@ -7,16 +7,13 @@
       "blank_assigns": 22
     },
     "services/eri/internal/server/handlers_test.go": {
-      "blank_assigns": 10
+      "blank_assigns": 9
     },
     "services/eri/internal/server/handlers_voice_internal_test.go": {
       "blank_assigns": 2
     },
     "services/eri/pkg/db/db_test.go": {
-      "blank_assigns": 23
-    },
-    "services/eri/pkg/db/dbtest/fakestore_test.go": {
-      "blank_assigns": 39
+      "blank_assigns": 18
     },
     "services/eri/pkg/db/store_test.go": {
       "blank_assigns": 1

@@ -1,10 +1,9 @@
 package metrics
 
 import (
-	"errors"
-
 	"github.com/prometheus/client_golang/prometheus"
 
+	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/services/haro/internal/model"
 )
 
@@ -46,11 +45,7 @@ var (
 
 // RegisterHaroCollector registers a Haro collector, tolerating duplicate registration.
 func RegisterHaroCollector(c prometheus.Collector) {
-	if err := prometheus.Register(c); err != nil {
-		if _, ok := errors.AsType[prometheus.AlreadyRegisteredError](err); !ok {
-			panic(err)
-		}
-	}
+	httpkit.RegisterCollector(c)
 }
 
 func init() {

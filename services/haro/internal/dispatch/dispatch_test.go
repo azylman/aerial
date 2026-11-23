@@ -23,7 +23,6 @@ import (
 
 	"github.com/azylman/aerial/pkg/eriwire"
 	"github.com/azylman/aerial/pkg/restateingress"
-	"github.com/azylman/aerial/pkg/tracing"
 )
 
 // spanRecorder captures every span ended through the global provider; tests filter by trace id.
@@ -75,10 +74,7 @@ func newDispatchRecordingServer(t *testing.T, status int, body string) (*httptes
 	return server, rec
 }
 
-var (
-	nilDispatcher = dispatcherTarget{nilDispatcher: true}
-	closedBrain   = dispatcherTarget{brain: dispatchServerURL + "/", closeServer: true}
-)
+var nilDispatcher = dispatcherTarget{nilDispatcher: true}
 
 // dispatcherTarget is the dispatcher-construction half of a row: brain/restate URLs (dispatchServerURL
 // expands to the recording server), the agent, a struct literal without http client (nilClient), a nil
@@ -147,7 +143,6 @@ func assertDispatchErr(t *testing.T, err error, wantErr string) bool {
 
 func TestHTTPPromptDispatcherDispatchPrompt(t *testing.T) {
 	t.Parallel()
-	brain := dispatcherTarget{brain: dispatchServerURL + "/"}
 	restate := func(agent string) dispatcherTarget {
 		return dispatcherTarget{brain: "http://eri:8080", restate: dispatchServerURL, agent: agent}
 	}
@@ -164,44 +159,7 @@ func TestHTTPPromptDispatcherDispatchPrompt(t *testing.T) {
 		wantStatus      string
 		wantChannelID   string
 	}{
-		{
-			name: "brain success accepted 202", target: brain, status: http.StatusAccepted,
-			body:     `{"status":"accepted","channel_id":"123456789","message_id":"run-1"}`,
-			req:      PromptDispatchRequest{Prompt: "echo test", ChannelID: "123456789", Title: "Daily Check", MessageID: "run-1", Effort: "low"},
-			wantPath: "/prompt", wantStatus: "accepted", wantChannelID: "123456789",
-		},
-		{
-			name: "brain success ok 200", target: brain, status: http.StatusOK, body: `{"status":"ok","channel_id":"123456789"}`,
-			req: PromptDispatchRequest{Prompt: "echo test 2", ChannelID: "123456789"}, wantPath: "/prompt", wantStatus: "ok", wantChannelID: "123456789",
-		},
-		{
-			name: "brain error json 400", target: brain, status: http.StatusBadRequest, body: `{"error":"prompt cannot be empty"}`,
-			req: PromptDispatchRequest{ChannelID: "123456789"}, wantPath: "/prompt", wantErr: "brain /prompt error (400): prompt cannot be empty", wantCode: 400,
-		},
-		{
-			name: "brain non-json error 500", target: brain, status: http.StatusInternalServerError, body: `Internal Server Error`,
-			req: PromptDispatchRequest{Prompt: "fail"}, wantPath: "/prompt", wantErr: "brain /prompt returned HTTP 500: Internal Server Error",
-		},
-		{
-			name: "brain invalid json on 200", target: brain, status: http.StatusOK, body: `not valid json`,
-			req: PromptDispatchRequest{Prompt: "test invalid json"}, wantPath: "/prompt", wantErr: "failed to parse prompt dispatch response",
-		},
-		{
-			name: "brain closed server network error", target: closedBrain,
-			req: PromptDispatchRequest{Prompt: "test closed"}, wantErr: "prompt dispatch failed",
-		},
 		{name: "nil dispatcher returns error", target: nilDispatcher, req: PromptDispatchRequest{Prompt: "test"}, wantErr: "dispatcher is nil"},
-		{
-			name:   "default http client used when httpClient is nil",
-			target: dispatcherTarget{brain: dispatchServerURL, nilClient: true}, status: http.StatusAccepted,
-			body:     `{"status":"accepted","channel_id":"nil-client-chan","message_id":"msg-nc"}`,
-			req:      PromptDispatchRequest{Prompt: "nil client test", ChannelID: "nil-client-chan", MessageID: "msg-nc"},
-			wantPath: "/prompt", wantStatus: "accepted", wantChannelID: "nil-client-chan",
-		},
-		{
-			name: "empty brain url fails fast", target: dispatcherTarget{nilClient: true},
-			req: PromptDispatchRequest{Prompt: "test empty url"}, wantErr: "brain URL is not configured",
-		},
 		{
 			name: "restate default aerial", target: restate("aerial"), status: http.StatusOK,
 			body:     `{"status":"accepted","channel_id":"ch-123","message_id":"msg-abc"}`,
@@ -289,7 +247,6 @@ func TestHTTPPromptDispatcherDispatchPrompt(t *testing.T) {
 
 func TestHTTPPromptDispatcherDispatch(t *testing.T) {
 	t.Parallel()
-	brain := dispatcherTarget{brain: dispatchServerURL}
 	restate := func(agent string) dispatcherTarget {
 		return dispatcherTarget{brain: "http://eri:8080", restate: dispatchServerURL, agent: agent}
 	}
@@ -308,28 +265,8 @@ func TestHTTPPromptDispatcherDispatch(t *testing.T) {
 		wantDispatchID  string
 	}{
 		{name: "nil dispatcher returns error", target: nilDispatcher, req: hb, wantErr: "dispatcher is nil"},
-		{name: "empty source returns error", target: brain, req: eriwire.BrainDispatchRequest{Source: "  ", Prompt: "test"}, wantErr: "source cannot be", wantCode: 400},
-		{name: "empty prompt returns error", target: brain, req: eriwire.BrainDispatchRequest{Source: "heartbeat", Prompt: " "}, wantErr: "prompt cannot", wantCode: 400},
-		{
-			name: "brain error json 400", target: brain, status: http.StatusBadRequest, body: `{"error":"invalid dispatch"}`,
-			req: hb, wantPath: "/dispatch", wantErr: "brain /dispatch error (400): invalid dispatch", wantCode: 400,
-		},
-		{
-			name: "brain non-json error 500", target: brain, status: http.StatusInternalServerError, body: `Internal Server Error`,
-			req: hb, wantPath: "/dispatch", wantErr: "brain /dispatch returned HTTP 500: Internal Server Error",
-		},
-		{name: "brain closed server network error", target: closedBrain, req: hb, wantErr: "dispatch failed: "},
-		{
-			name: "brain success accepted 202", target: brain, status: http.StatusAccepted, body: `{"status":"accepted","dispatch_id":"disp-1"}`,
-			req: eriwire.BrainDispatchRequest{
-				Source: "heartbeat", SessionID: "hb-1", TargetID: "123456789", Prompt: "echo test", Effort: "low", SkipIfActive: true,
-			},
-			wantPath: "/dispatch", wantStatus: "accepted", wantDispatchID: "disp-1",
-		},
-		{
-			name: "brain success ok 200", target: brain, status: http.StatusOK, body: `{"status":"ok","dispatch_id":"disp-2"}`,
-			req: eriwire.BrainDispatchRequest{Source: "heartbeat", Prompt: "echo test 2"}, wantPath: "/dispatch", wantStatus: "ok", wantDispatchID: "disp-2",
-		},
+		{name: "empty source returns error", target: restate("aerial"), req: eriwire.BrainDispatchRequest{Source: "  ", Prompt: "test"}, wantErr: "source cannot be", wantCode: 400},
+		{name: "empty prompt returns error", target: restate("aerial"), req: eriwire.BrainDispatchRequest{Source: "heartbeat", Prompt: " "}, wantErr: "prompt cannot", wantCode: 400},
 		{
 			name: "restate default session_id", target: restate("aerial"), status: http.StatusOK, body: `{"status":"accepted","dispatch_id":"disp-1"}`,
 			req:      eriwire.BrainDispatchRequest{ID: "disp-1", Source: "heartbeat", SessionID: "sess-custom", Prompt: "check something"},
@@ -460,41 +397,6 @@ func TestServiceNameHelpers(t *testing.T) {
 	}
 }
 
-type errReadCloser struct{}
-
-func (errReadCloser) Read([]byte) (int, error) { return 0, errors.New("simulated read failure") }
-
-func (errReadCloser) Close() error { return nil }
-
-type failBodyRoundTripper struct{}
-
-func (failBodyRoundTripper) RoundTrip(*http.Request) (*http.Response, error) {
-	return &http.Response{StatusCode: http.StatusOK, Body: errReadCloser{}, Header: make(http.Header)}, nil
-}
-
-func TestPostBrainJSON_RequestErrors(t *testing.T) {
-	tests := []struct {
-		name            string
-		dispatcher      *HTTPPromptDispatcher
-		req             any
-		wantErrContains string
-	}{
-		{name: "request build fails", dispatcher: &HTTPPromptDispatcher{brainURL: "http://127.0.0.1:1\nbad"}, req: PromptDispatchRequest{Prompt: "x"}, wantErrContains: "failed to create http request"},
-		{name: "response body read fails", dispatcher: &HTTPPromptDispatcher{brainURL: "http://127.0.0.1:1", httpClient: &http.Client{Transport: failBodyRoundTripper{}}}, req: PromptDispatchRequest{Prompt: "x"}, wantErrContains: "failed to read response body"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			_, err := postBrainJSON[any, PromptDispatchResponse](context.Background(), tc.dispatcher, "/prompt", "prompt dispatch", tc.req)
-			if err == nil {
-				t.Fatal("postBrainJSON() expected error, got nil")
-			}
-			if !strings.Contains(err.Error(), tc.wantErrContains) {
-				t.Errorf("postBrainJSON() err = %v, want containing %q", err, tc.wantErrContains)
-			}
-		})
-	}
-}
-
 func TestRestateRequestError(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -532,51 +434,6 @@ func recordedParent(t *testing.T) (context.Context, string) {
 	ctx, span := tp.Tracer("test").Start(context.Background(), "parent")
 	span.End()
 	return ctx, sr.Ended()[0].SpanContext().TraceID().String()
-}
-
-func traceparentTraceID(tp string) string {
-	sc := trace.SpanContextFromContext(tracing.ContextWithTraceparent(context.Background(), tp))
-	if !sc.IsValid() {
-		return ""
-	}
-	return sc.TraceID().String()
-}
-
-func TestPostBrainJSON_Traceparent(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name       string
-		withParent bool
-	}{
-		{name: "continues the fire span's trace", withParent: true},
-		{name: "starts a trace when the caller has none"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			var got string
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				got = r.Header.Get("Traceparent")
-				_, _ = w.Write([]byte(`{"status":"accepted"}`))
-			}))
-			defer srv.Close()
-			parentCtx, parentTraceID := recordedParent(t)
-			ctx := context.Background()
-			if tc.withParent {
-				ctx = parentCtx
-			}
-			if _, err := postBrainJSON[PromptDispatchRequest, PromptDispatchResponse](ctx, NewHTTPPromptDispatcher(srv.URL), "/prompt", "prompt dispatch", PromptDispatchRequest{Prompt: "heartbeat"}); err != nil {
-				t.Fatalf("postBrainJSON: %v", err)
-			}
-			id := traceparentTraceID(got)
-			if id == "" {
-				t.Fatalf("request carried no valid traceparent: %q", got)
-			}
-			if (id == parentTraceID) != tc.withParent {
-				t.Errorf("trace id = %s, parent %s, want continues=%v", id, parentTraceID, tc.withParent)
-			}
-		})
-	}
 }
 
 type traceFireTestCase struct {

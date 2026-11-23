@@ -298,10 +298,6 @@ type GitHubPullRequest struct {
 	} `json:"user"`
 }
 
-func (pr GitHubPullRequest) GetBody() string {
-	return pr.Body
-}
-
 // AerialPRMetadata captures structured metadata trailers in PR descriptions.
 type AerialPRMetadata struct {
 	TargetID string `json:"target_id,omitempty"`

@@ -1,15 +1,11 @@
 package server
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"log/slog"
-	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -159,46 +155,9 @@ func setupProsperaBus(ctx context.Context, server *Server, rawNATSURL string) pu
 	return bus
 }
 
-type restateDeploymentRequest struct {
-	URI   string `json:"uri"`
-	Force bool   `json:"force"`
-}
-
 // RegisterRestateDeployment registers the service deployment with the Restate Admin API.
 func RegisterRestateDeployment(ctx context.Context, client *http.Client, adminURL, advertiseURL string) error {
-	cleanAdmin := strings.TrimRight(strings.TrimSpace(adminURL), "/")
-	cleanAdv := strings.TrimSpace(advertiseURL)
-	if cleanAdmin == "" || cleanAdv == "" {
-		return nil
-	}
-	payload, err := json.Marshal(restateDeploymentRequest{
-		URI:   cleanAdv,
-		Force: true,
-	})
-	if err != nil {
-		return fmt.Errorf("marshal restate deployment payload: %w", err)
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, cleanAdmin+"/deployments", bytes.NewReader(payload))
-	if err != nil {
-		return fmt.Errorf("create restate deployment request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	if client == nil {
-		client = http.DefaultClient
-	}
-	resp, err := client.Do(req)
-	if err != nil {
-		return fmt.Errorf("post restate deployment: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		var detail string
-		if body, err := io.ReadAll(io.LimitReader(resp.Body, 1024)); err == nil && len(body) > 0 {
-			detail = ": " + string(body)
-		}
-		return fmt.Errorf("restate admin /deployments returned %d%s", resp.StatusCode, detail)
-	}
-	return nil
+	return restateingress.RegisterDeployment(ctx, client, adminURL, advertiseURL)
 }
 
 // SweepUnfinishedReports finds calls in pending or processing status and enqueues them into Restate ingress.
@@ -296,27 +255,14 @@ func RunApp(ctx context.Context, cfgSrc *httpkit.Reloadable[config.Config]) erro
 		return fmt.Errorf("app: create restate handler: %w", err)
 	}
 
-	var restateProtocols http.Protocols
-	restateProtocols.SetHTTP1(true)
-	restateProtocols.SetUnencryptedHTTP2(true)
-
-	restateHTTPSrv := &http.Server{
-		Addr:              ":" + restatePort,
-		Handler:           restateHandler,
-		Protocols:         &restateProtocols,
-		ReadHeaderTimeout: 5 * time.Second,
-	}
-
-	var lc net.ListenConfig
-	restateLn, err := lc.Listen(ctx, "tcp", ":"+restatePort)
+	_, restateHTTPSrv, restateErrChan, err := restateingress.StartServer(ctx, ":"+restatePort, restateHandler)
 	if err != nil {
 		httpkit.CloseWarn(httpServer, "prospera http server")
 		return fmt.Errorf("app: listen on restate port %s: %w", restatePort, err)
 	}
 
 	go func() {
-		log.Printf("[prospera] Restate HTTP/2 server listening on :%s", restatePort)
-		if sErr := restateHTTPSrv.Serve(restateLn); sErr != nil && !errors.Is(sErr, http.ErrServerClosed) {
+		for sErr := range restateErrChan {
 			serverErr <- sErr
 		}
 	}()

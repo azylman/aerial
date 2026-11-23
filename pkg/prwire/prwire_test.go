@@ -188,3 +188,89 @@ func TestWireGoldenRoundTrip(t *testing.T) {
 		})
 	}
 }
+
+func TestCleanRepoName(t *testing.T) {
+	t.Parallel()
+	type row struct {
+		label string
+		repo  string
+		out   string
+	}
+	newRow := func(label, repo, out string) row {
+		return row{label: label, repo: repo, out: out}
+	}
+	cases := []row{
+		newRow("empty", "", ""),
+		newRow("bare repo", "aerial", "aerial"),
+		newRow("owner and repo", "azylman/aerial", "aerial"),
+		newRow("nested path", "org/team/repo", "repo"),
+		newRow("trimmed whitespace", "  azylman/mirrormere  ", "mirrormere"),
+	}
+	for _, c := range cases {
+		t.Run(c.label, func(t *testing.T) {
+			t.Parallel()
+			if got := CleanRepoName(c.repo); got != c.out {
+				t.Errorf("CleanRepoName(%q) = %q, want %q", c.repo, got, c.out)
+			}
+		})
+	}
+}
+
+func TestTruncatePromptDetails(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		input    string
+		maxRunes []int
+		want     string
+	}{
+		{name: "short string unchanged", input: "simple error", want: "simple error"},
+		{name: "replaces triple backticks", input: "bad ```text``` here", want: "bad '''text''' here"},
+		{name: "custom limit truncates", input: "1234567890", maxRunes: []int{5}, want: "12345... (truncated)"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := TruncatePromptDetails(tc.input, tc.maxRunes...); got != tc.want {
+				t.Errorf("TruncatePromptDetails() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestFormatErrorDetailsBlock(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		header    string
+		details   string
+		extraLine string
+		footer    string
+		want      string
+	}{
+		{
+			name:      "header only when details empty",
+			header:    "Error occurred",
+			details:   "",
+			extraLine: "",
+			footer:    "",
+			want:      "Error occurred",
+		},
+		{
+			name:      "full block",
+			header:    "Command failed",
+			details:   "exit status 1",
+			extraLine: "Please retry.",
+			footer:    "Run ID: 123",
+			want:      "Command failed\nError details:\n```\nexit status 1\n```\nPlease retry.\nRun ID: 123",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := FormatErrorDetailsBlock(tc.header, tc.details, tc.extraLine, tc.footer); got != tc.want {
+				t.Errorf("FormatErrorDetailsBlock() =\n%q\nwant\n%q", got, tc.want)
+			}
+		})
+	}
+}

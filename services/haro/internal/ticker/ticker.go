@@ -7,16 +7,13 @@
 package ticker
 
 import (
-	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"log/slog"
-	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -636,39 +633,7 @@ func (t *Ticker) SetRestateConfig(port, ingressURL, adminURL, advertiseURL strin
 
 // RegisterDeployment registers advertiseURL with the Restate admin deployments endpoint.
 func RegisterDeployment(ctx context.Context, adminURL, advertiseURL string, client *http.Client) error {
-	adminURL = strings.TrimRight(strings.TrimSpace(adminURL), "/")
-	advertiseURL = strings.TrimSpace(advertiseURL)
-	if adminURL == "" || advertiseURL == "" {
-		return nil
-	}
-	body, err := json.Marshal(map[string]any{
-		"uri":   advertiseURL,
-		"force": true,
-	})
-	if err != nil {
-		return err
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, adminURL+"/deployments", bytes.NewReader(body))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	if client == nil {
-		client = http.DefaultClient
-	}
-	resp, err := client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		b, rErr := io.ReadAll(resp.Body)
-		if rErr != nil {
-			return fmt.Errorf("restate admin HTTP %d: %w", resp.StatusCode, rErr)
-		}
-		return fmt.Errorf("restate admin HTTP %d: %s", resp.StatusCode, string(b))
-	}
-	return nil
+	return restateingress.RegisterDeployment(ctx, client, adminURL, advertiseURL)
 }
 
 // scheduleArm is one schedule tick the startup backfill arms.
@@ -826,39 +791,18 @@ func (t *Ticker) startRestateServer(ctx context.Context, port string) (chan erro
 		return nil, fmt.Errorf("create restate handler: %w", err)
 	}
 
-	var protocols http.Protocols
-	protocols.SetHTTP1(true)
-	protocols.SetUnencryptedHTTP2(true)
-
-	srv := &http.Server{
-		Handler:           h,
-		Protocols:         &protocols,
-		ReadHeaderTimeout: 5 * time.Second,
-	}
-
-	var lc net.ListenConfig
-	ln, err := lc.Listen(ctx, "tcp", ":"+port)
+	_, _, errChan, err := restateingress.StartServer(ctx, ":"+port, h)
 	if err != nil {
 		return nil, fmt.Errorf("listen on restate port %s: %w", port, err)
 	}
 
-	errChan := make(chan error, 1)
+	out := make(chan error, 1)
 	go func() {
-		<-ctx.Done()
-		shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-		defer cancel()
-		if shutErr := srv.Shutdown(shutdownCtx); shutErr != nil {
-			log.Printf("[Haro Ticker] Restate server shutdown notice: %v", shutErr)
+		for e := range errChan {
+			out <- e
 		}
 	}()
-
-	go func() {
-		log.Printf("[Haro Ticker] Restate server listening on %s", ln.Addr().String())
-		if sErr := srv.Serve(ln); sErr != nil && !errors.Is(sErr, http.ErrServerClosed) {
-			errChan <- sErr
-		}
-	}()
-	return errChan, nil
+	return out, nil
 }
 
 // ensureRegisteredAndBackfilled registers the deployment, then arms every

@@ -1,12 +1,10 @@
 package dispatch
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -130,63 +128,6 @@ func classifyHTTPStatus(status int, err error) error {
 		code = http.StatusPreconditionFailed
 	}
 	return restate.ToTerminalError(err, restate.WithErrorCode(restate.Code(code)))
-}
-
-func postBrainJSON[Req any, Resp any](ctx context.Context, d *HTTPPromptDispatcher, path, opLabel string, req Req) (Resp, error) {
-	var zero Resp
-	if d == nil {
-		return zero, fmt.Errorf("dispatcher is nil")
-	}
-	brainURL := strings.TrimRight(strings.TrimSpace(d.brainURL), "/")
-	if brainURL == "" {
-		return zero, fmt.Errorf("brain URL is not configured")
-	}
-
-	body, err := json.Marshal(req)
-	if err != nil {
-		return zero, fmt.Errorf("failed to marshal %s request: %w", opLabel, err)
-	}
-
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, brainURL+path, bytes.NewReader(body))
-	if err != nil {
-		return zero, fmt.Errorf("failed to create http request: %w", err)
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-
-	client := d.httpClient
-	if client == nil {
-		client = http.DefaultClient
-	}
-
-	resp, err := client.Do(httpReq)
-	if err != nil {
-		return zero, fmt.Errorf("%s failed: %w", opLabel, err)
-	}
-	defer func() {
-		_ = resp.Body.Close()
-	}()
-
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return zero, fmt.Errorf("failed to read response body: %w", err)
-	}
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		var errResp struct {
-			Error string `json:"error"`
-		}
-		if jsonErr := json.Unmarshal(respBody, &errResp); jsonErr == nil && strings.TrimSpace(errResp.Error) != "" {
-			return zero, classifyHTTPStatus(resp.StatusCode, fmt.Errorf("brain %s error (%d): %s", path, resp.StatusCode, errResp.Error))
-		}
-		return zero, classifyHTTPStatus(resp.StatusCode, fmt.Errorf("brain %s returned HTTP %d: %s", path, resp.StatusCode, string(respBody)))
-	}
-
-	var dispatchResp Resp
-	if err := json.Unmarshal(respBody, &dispatchResp); err != nil {
-		return zero, fmt.Errorf("failed to parse %s response: %w", opLabel, err)
-	}
-
-	return dispatchResp, nil
 }
 
 // restateRequestError keeps haro's historical error text for failed Restate ingress posts
@@ -349,10 +290,10 @@ func (d *HTTPPromptDispatcher) dispatchRestate(ctx context.Context, req eriwire.
 }
 
 func (d *HTTPPromptDispatcher) DispatchPrompt(ctx context.Context, req PromptDispatchRequest) (PromptDispatchResponse, error) {
-	if d != nil && strings.TrimSpace(d.restateURL) != "" {
-		return d.dispatchPromptRestate(ctx, req)
+	if d == nil {
+		return PromptDispatchResponse{}, errors.New("dispatcher is nil")
 	}
-	return postBrainJSON[PromptDispatchRequest, PromptDispatchResponse](ctx, d, "/prompt", "prompt dispatch", req)
+	return d.dispatchPromptRestate(ctx, req)
 }
 
 func (d *HTTPPromptDispatcher) Dispatch(ctx context.Context, req eriwire.BrainDispatchRequest) (eriwire.DispatchEnqueueResponse, error) {
@@ -365,8 +306,5 @@ func (d *HTTPPromptDispatcher) Dispatch(ctx context.Context, req eriwire.BrainDi
 	if strings.TrimSpace(req.Source) == "" {
 		return eriwire.DispatchEnqueueResponse{}, invalidRequest("dispatch source cannot be empty")
 	}
-	if strings.TrimSpace(d.restateURL) != "" {
-		return d.dispatchRestate(ctx, req)
-	}
-	return postBrainJSON[eriwire.BrainDispatchRequest, eriwire.DispatchEnqueueResponse](ctx, d, "/dispatch", "dispatch", req)
+	return d.dispatchRestate(ctx, req)
 }

@@ -86,7 +86,7 @@ func (s *RouterServer) processOwnedPullRequest(ctx context.Context, delivery str
 	}
 	populatePullRequestEvent(&p, res)
 	slog.InfoContext(ctx, "[synapse] [restate] pull_request", "repo", res.Repo, "pr", res.PRNumber, "action", res.Action, "head_sha", res.HeadSHA, "merge_sha", res.MergeSHA, "delivery", delivery)
-	meta := ResolveAerialPRMetadata(res.Repo, res.Branch, p.PullRequest.GetBody())
+	meta := ResolveAerialPRMetadata(res.Repo, res.Branch, p.PullRequest.Body)
 	if meta.TargetID == "" && ExtractChunkIDFromBranch(res.Repo, res.Branch) != "" && s.currentConfig().DefaultOwner {
 		meta.TargetID = s.systemChannelTarget()
 	}
@@ -650,7 +650,7 @@ func (s *RouterServer) dependabotSelfRegistration(res *ResolvedGitHubEvent, p Gi
 // body snowflake or, for a headless session key, the system channel, with
 // its title and the PR-body owner.
 func (s *RouterServer) metadataSelfRegistration(res *ResolvedGitHubEvent, pr GitHubPullRequest) (prSelfRegistration, bool) {
-	meta := ResolveAerialPRMetadata(res.Repo, res.Branch, pr.GetBody())
+	meta := ResolveAerialPRMetadata(res.Repo, res.Branch, pr.Body)
 	if meta.TargetID == "" && ExtractChunkIDFromBranch(res.Repo, res.Branch) != "" && s.currentConfig().DefaultOwner {
 		meta.TargetID = s.systemChannelTarget()
 	}

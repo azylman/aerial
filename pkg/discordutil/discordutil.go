@@ -27,3 +27,16 @@ func NormalizeThreadID(s string) string {
 	}
 	return strings.TrimSpace(strings.TrimPrefix(clean, "discord-"))
 }
+
+// IsHeadlessSessionKey returns true if id is a Model 2 headless dispatch, heartbeat,
+// or pooled worker session key.
+func IsHeadlessSessionKey(id string) bool {
+	clean := strings.TrimSpace(id)
+	if idx := strings.LastIndex(clean, ":"); idx >= 0 {
+		clean = strings.TrimSpace(clean[idx+1:])
+	}
+	return strings.HasPrefix(clean, "dispatch-") ||
+		strings.HasPrefix(clean, "heartbeat-") ||
+		strings.HasPrefix(clean, "worker-") ||
+		strings.Contains(clean, "-worker-")
+}

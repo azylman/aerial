@@ -1,6 +1,7 @@
 package build
 
 import (
+	"github.com/azylman/aerial/pkg/buildplan"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
 )
 
@@ -44,17 +45,7 @@ type AppendChunksRequest struct {
 }
 
 // CompleteChunkRequest is an action chunk's explicit completion verdict.
-type CompleteChunkRequest struct {
-	BuildID    string `json:"build_id"`
-	ChunkID    string `json:"chunk_id"`
-	DispatchID string `json:"dispatch_id"`
-	Summary    string `json:"summary"`
-}
+type CompleteChunkRequest = buildplan.CompleteChunkRequest
 
 // CompleteChunkResponse reports whether the verdict completed the chunk.
-type CompleteChunkResponse struct {
-	Status    string `json:"status"`
-	BuildID   string `json:"build_id"`
-	ChunkID   string `json:"chunk_id"`
-	Completed bool   `json:"completed"`
-}
+type CompleteChunkResponse = buildplan.CompleteChunkResponse

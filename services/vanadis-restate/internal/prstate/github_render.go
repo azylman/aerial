@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/azylman/aerial/pkg/discordutil"
 	"github.com/azylman/aerial/pkg/prwire"
 	"github.com/azylman/aerial/pkg/pubsub"
 )
@@ -62,20 +63,11 @@ func lastCutPrefix(body string) string {
 }
 
 func normalizeDiscordTargetID(id string) string {
-	clean := strings.TrimSpace(id)
-	if idx := strings.LastIndex(clean, ":"); idx >= 0 {
-		clean = strings.TrimSpace(clean[idx+1:])
-	}
-	return strings.TrimSpace(strings.TrimPrefix(clean, "discord-"))
+	return discordutil.NormalizeThreadID(id)
 }
 
 func isHeadlessSessionKey(id string) bool {
-	clean := strings.TrimSpace(id)
-	if idx := strings.LastIndex(clean, ":"); idx >= 0 {
-		clean = strings.TrimSpace(clean[idx+1:])
-	}
-	return strings.HasPrefix(clean, "dispatch-") || strings.HasPrefix(clean, "heartbeat-") ||
-		strings.HasPrefix(clean, "worker-") || strings.Contains(clean, "-worker-")
+	return discordutil.IsHeadlessSessionKey(id)
 }
 
 // FormatCollaboratorPRTarget renders the PR link plus title, branch, and

@@ -7,12 +7,14 @@ package buildplan
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/azylman/aerial/pkg/eriwire"
 	"github.com/azylman/aerial/pkg/pubsub"
 )
 
@@ -66,8 +68,6 @@ type VanadisChunk struct {
 // Mode and effort vocabulary for the canonical normalization helpers below.
 const (
 	chunkModeAction = "action"
-	effortLow       = "low"
-	effortMedium    = "medium"
 )
 
 // ErrInvalidBuildInput reports malformed build or chunk input.
@@ -114,11 +114,15 @@ func NormalizeChunkMode(raw string) (string, error) {
 
 // NormalizeChunkEffort validates and normalizes a chunk effort.
 func NormalizeChunkEffort(effort string) (string, error) {
-	switch strings.ToLower(strings.TrimSpace(effort)) {
-	case "", effortMedium, "high":
-		return effortMedium, nil
-	case effortLow:
-		return effortLow, nil
+	if strings.TrimSpace(effort) == "" {
+		return eriwire.EffortMedium, nil
+	}
+	norm := eriwire.ParseEffort(effort, "")
+	switch norm {
+	case eriwire.EffortHigh, eriwire.EffortMedium:
+		return eriwire.EffortMedium, nil
+	case eriwire.EffortLow:
+		return eriwire.EffortLow, nil
 	default:
 		return "", fmt.Errorf("invalid chunk effort %q: must be 'low', 'medium', or 'high'", effort)
 	}
@@ -177,4 +181,177 @@ func ResolveChunkRef(chunks []VanadisChunk, chunkRef string) int {
 		}
 	}
 	return -1
+}
+
+const jsonNull = "null"
+
+// UpdateChunkRequest represents the payload to mutate an existing chunk.
+type UpdateChunkRequest struct {
+	ChunkRef      string    `json:"chunk_ref,omitempty"`
+	Mode          *string   `json:"mode,omitempty"`
+	Repo          string    `json:"repo,omitempty"`
+	Title         string    `json:"title,omitempty"`
+	Instructions  string    `json:"instructions,omitempty"`
+	TargetFiles   []string  `json:"target_files,omitempty"`
+	TargetSymbols []string  `json:"target_symbols,omitempty"`
+	Effort        string    `json:"effort,omitempty"`
+	DependsOn     *[]string `json:"depends_on,omitempty"`
+}
+
+// CreateChunkInput defines the input parameters for creating or appending a chunk.
+type CreateChunkInput struct {
+	ID                 string   `json:"id"`
+	Mode               string   `json:"mode,omitempty"`
+	Repo               string   `json:"repo,omitempty"`
+	Title              string   `json:"title"`
+	Instructions       string   `json:"instructions"`
+	TargetFiles        []string `json:"target_files"`
+	TargetSymbols      []string `json:"target_symbols"`
+	Effort             string   `json:"effort,omitempty"`
+	AcceptanceCriteria []string `json:"acceptance_criteria"`
+	DependsOn          []string `json:"depends_on"`
+}
+
+// CompleteChunkRequest is an action chunk's explicit completion verdict.
+type CompleteChunkRequest struct {
+	BuildID    string `json:"build_id"`
+	ChunkID    string `json:"chunk_id"`
+	DispatchID string `json:"dispatch_id"`
+	Summary    string `json:"summary"`
+}
+
+// CompleteChunkResponse reports whether the verdict completed the chunk.
+type CompleteChunkResponse struct {
+	Status    string `json:"status"`
+	BuildID   string `json:"build_id"`
+	ChunkID   string `json:"chunk_id"`
+	Completed bool   `json:"completed"`
+}
+
+// FailChunkRequest carries the chunk and reason for failing a chunk.
+type FailChunkRequest struct {
+	DispatchID string `json:"dispatch_id,omitempty"`
+	BuildID    string `json:"build_id,omitempty"`
+	ChunkID    string `json:"chunk_id"`
+	Reason     string `json:"reason"`
+}
+
+// FailChunkResponse represents the result of failing a chunk.
+type FailChunkResponse struct {
+	Failed      bool   `json:"failed"`
+	BuildID     string `json:"build_id"`
+	ChunkID     string `json:"chunk_id"`
+	BuildStatus string `json:"build_status"`
+	ChunkStatus string `json:"chunk_status"`
+	ThreadID    string `json:"thread_id,omitempty"`
+	Objective   string `json:"objective,omitempty"`
+	Quiet       bool   `json:"quiet,omitempty"`
+	Agent       string `json:"agent,omitempty"`
+}
+
+// AttachChunkPRRequest represents the payload for POST /chunks/attach-pr.
+type AttachChunkPRRequest struct {
+	ChunkID  string `json:"chunk_id,omitempty"`
+	PRNumber int    `json:"pr_number"`
+	Repo     string `json:"repo"`
+	Branch   string `json:"branch,omitempty"`
+	Title    string `json:"title,omitempty"`
+	TargetID string `json:"target_id,omitempty"`
+	Quiet    bool   `json:"quiet,omitempty"`
+	Agent    string `json:"agent,omitempty"`
+}
+
+// AttachChunkPRResponse represents the result of attaching a PR to a chunk or standalone build.
+type AttachChunkPRResponse struct {
+	Status   string `json:"status"`
+	BuildID  string `json:"build_id"`
+	ChunkID  string `json:"chunk_id"`
+	ThreadID string `json:"thread_id,omitempty"`
+}
+
+// RetryActionChunkRequest fences a single operator-requested action retry.
+type RetryActionChunkRequest struct {
+	BuildID                 string  `json:"build_id"`
+	ChunkID                 string  `json:"chunk_id"`
+	ExpectedDispatchID      string  `json:"expected_dispatch_id"`
+	Reason                  string  `json:"reason"`
+	ExpectedInstructions    *string `json:"expected_instructions,omitempty"    jsonschema:"Exact stored instructions required for correction; supply with replacement_instructions"`
+	ReplacementInstructions *string `json:"replacement_instructions,omitempty" jsonschema:"Corrected nonblank worker instructions atomically saved before retry; supply with expected_instructions"`
+}
+
+// RetryActionChunkResult reports the accepted durable retry dispatch.
+type RetryActionChunkResult struct {
+	BuildID    string `json:"build_id"`
+	ChunkID    string `json:"chunk_id"`
+	DispatchID string `json:"dispatch_id"`
+	Accepted   bool   `json:"accepted"`
+}
+
+// UpdateActiveStepRequest carries the target chunk and active step description.
+type UpdateActiveStepRequest struct {
+	ChunkID     string            `json:"chunk_id,omitempty"`
+	ActiveStep  string            `json:"active_step,omitempty"`
+	Step        string            `json:"step,omitempty"`
+	ClearAll    bool              `json:"clear_all,omitempty"`
+	ActiveSteps map[string]string `json:"active_steps,omitempty"`
+}
+
+// ApplyRawChunkCIChecks folds raw CI check JSON into derived chunk fields.
+func ApplyRawChunkCIChecks(c *VanadisChunk, rawCIChecks []byte) {
+	if len(rawCIChecks) == 0 || string(rawCIChecks) == jsonNull || string(rawCIChecks) == "{}" {
+		return
+	}
+	var checks map[string]string
+	if err := json.Unmarshal(rawCIChecks, &checks); err != nil {
+		return
+	}
+	c.HeadSHA = strings.TrimSpace(checks["_head_sha"])
+	c.RemediatedSHA = strings.TrimSpace(checks["_remediated_sha"])
+	c.MergeSHA = strings.TrimSpace(checks["_merge_sha"])
+	mergeQueue := strings.TrimSpace(checks["_merge_queue"])
+	for k := range checks {
+		if strings.HasPrefix(k, "_") {
+			delete(checks, k)
+		}
+	}
+	if mergeQueue != "" {
+		checks["_merge_queue"] = mergeQueue
+	}
+	if len(checks) > 0 {
+		c.CIChecks = checks
+	}
+}
+
+// ValidateUpdateChunkInput validates and normalizes an UpdateChunkRequest.
+// It returns the normalized effort string (if provided) and an error if validation fails.
+func ValidateUpdateChunkInput(buildID, chunkRef string, req UpdateChunkRequest) (string, error) {
+	cleanBuildID := strings.TrimSpace(buildID)
+	cleanChunkRef := strings.TrimSpace(chunkRef)
+	if cleanBuildID == "" || cleanChunkRef == "" {
+		return "", errors.New("build id and chunk ref are required")
+	}
+	hasField := req.Mode != nil || strings.TrimSpace(req.Repo) != "" ||
+		strings.TrimSpace(req.Title) != "" || strings.TrimSpace(req.Instructions) != "" ||
+		len(req.TargetFiles) > 0 || len(req.TargetSymbols) > 0 ||
+		strings.TrimSpace(req.Effort) != "" || req.DependsOn != nil
+	if !hasField {
+		return "", errors.New("build id, chunk ref, and at least one updated field are required")
+	}
+	if req.Mode != nil {
+		if strings.TrimSpace(*req.Mode) == "" {
+			return "", errors.New("mode cannot be empty string (must be 'pr' or 'action')")
+		}
+		if _, err := NormalizeChunkMode(*req.Mode); err != nil {
+			return "", err
+		}
+	}
+	var normEffort string
+	if strings.TrimSpace(req.Effort) != "" {
+		var effErr error
+		normEffort, effErr = NormalizeChunkEffort(req.Effort)
+		if effErr != nil {
+			return "", effErr
+		}
+	}
+	return normEffort, nil
 }

@@ -728,94 +728,48 @@ func SortConfiguredAgents(agents []string) []string {
 	return result
 }
 
-// FilterFactsByAgent filters facts to those matching filterAgent.
-func FilterFactsByAgent(facts []FactItem, filterAgent string) []FactItem {
+func filterByAgent[T any](items []T, filterAgent string, agentOf func(T) string) []T {
 	f := NormalizeAgent(filterAgent)
 	if f == "" || f == agentFilterAll {
-		return facts
+		return items
 	}
-	out := make([]FactItem, 0, len(facts))
-	for _, item := range facts {
-		if MatchAgent(item.Agent, f) {
+	out := make([]T, 0, len(items))
+	for _, item := range items {
+		if MatchAgent(agentOf(item), f) {
 			out = append(out, item)
 		}
 	}
 	return out
+}
+
+// FilterFactsByAgent filters facts to those matching filterAgent.
+func FilterFactsByAgent(facts []FactItem, filterAgent string) []FactItem {
+	return filterByAgent(facts, filterAgent, func(item FactItem) string { return item.Agent })
 }
 
 // FilterCronsByAgent filters cron schedules to those matching filterAgent.
 func FilterCronsByAgent(crons []CronSchedule, filterAgent string) []CronSchedule {
-	f := NormalizeAgent(filterAgent)
-	if f == "" || f == agentFilterAll {
-		return crons
-	}
-	out := make([]CronSchedule, 0, len(crons))
-	for _, item := range crons {
-		if MatchAgent(item.Agent, f) {
-			out = append(out, item)
-		}
-	}
-	return out
+	return filterByAgent(crons, filterAgent, func(item CronSchedule) string { return item.Agent })
 }
 
 // FilterOneShotsByAgent filters one-shot schedules to those matching filterAgent.
 func FilterOneShotsByAgent(oneshots []OneShotSchedule, filterAgent string) []OneShotSchedule {
-	f := NormalizeAgent(filterAgent)
-	if f == "" || f == agentFilterAll {
-		return oneshots
-	}
-	out := make([]OneShotSchedule, 0, len(oneshots))
-	for _, item := range oneshots {
-		if MatchAgent(item.Agent, f) {
-			out = append(out, item)
-		}
-	}
-	return out
+	return filterByAgent(oneshots, filterAgent, func(item OneShotSchedule) string { return item.Agent })
 }
 
 // FilterScheduleRunsByAgent filters schedule runs to those matching filterAgent.
 func FilterScheduleRunsByAgent(runs []ScheduleRun, filterAgent string) []ScheduleRun {
-	f := NormalizeAgent(filterAgent)
-	if f == "" || f == agentFilterAll {
-		return runs
-	}
-	out := make([]ScheduleRun, 0, len(runs))
-	for _, item := range runs {
-		if MatchAgent(item.Agent, f) {
-			out = append(out, item)
-		}
-	}
-	return out
+	return filterByAgent(runs, filterAgent, func(item ScheduleRun) string { return item.Agent })
 }
 
 // FilterBuildsByAgent filters Vanadis builds to those matching filterAgent.
 func FilterBuildsByAgent(builds []VanadisBuildDTO, filterAgent string) []VanadisBuildDTO {
-	f := NormalizeAgent(filterAgent)
-	if f == "" || f == agentFilterAll {
-		return builds
-	}
-	out := make([]VanadisBuildDTO, 0, len(builds))
-	for _, item := range builds {
-		if MatchAgent(item.Agent, f) {
-			out = append(out, item)
-		}
-	}
-	return out
+	return filterByAgent(builds, filterAgent, func(item VanadisBuildDTO) string { return item.Agent })
 }
 
 // FilterActiveTasksByAgent filters active tasks to those matching filterAgent.
 func FilterActiveTasksByAgent(tasks []ActiveTaskStatus, filterAgent string) []ActiveTaskStatus {
-	f := NormalizeAgent(filterAgent)
-	if f == "" || f == agentFilterAll {
-		return tasks
-	}
-	out := make([]ActiveTaskStatus, 0, len(tasks))
-	for _, item := range tasks {
-		if MatchAgent(item.Agent, f) {
-			out = append(out, item)
-		}
-	}
-	return out
+	return filterByAgent(tasks, filterAgent, func(item ActiveTaskStatus) string { return item.Agent })
 }
 
 // AgentBrainTarget is one agent stack's eri base URL.
@@ -1078,8 +1032,10 @@ func (r *FactsAPIResponse) UnmarshalJSON(data []byte) error {
 type ScheduleSummaryMetrics struct {
 	TotalActive    int     `json:"total_active"`
 	CronCount      int     `json:"cron_count"`
+	HeartbeatCount int     `json:"heartbeat_count,omitempty"`
 	OneShotCount   int     `json:"one_shot_count"`
 	TotalRuns24h   int     `json:"total_runs_24h"`
+	NextRunAt      *string `json:"next_run_at,omitempty"`
 	SuccessRate24h float64 `json:"success_rate_24h"`
 }
 
@@ -1115,6 +1071,7 @@ type SchedulesAPIResponse struct {
 	SystemTime time.Time              `json:"system_time,omitempty"`
 	Summary    ScheduleSummaryMetrics `json:"summary"`
 	Crons      []CronSchedule         `json:"crons"`
+	Heartbeats []CronSchedule         `json:"heartbeats,omitempty"`
 	OneShots   []OneShotSchedule      `json:"one_shots"`
 	Error      string                 `json:"error,omitempty"`
 }

@@ -15,6 +15,7 @@ import (
 
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/azylman/aerial/pkg/eriwire"
 	"github.com/azylman/aerial/services/coven/internal/config"
 	"github.com/azylman/aerial/services/coven/internal/store"
 )
@@ -30,9 +31,13 @@ func testHTTPBrainLLMClientCase(ctx context.Context, t *testing.T, tc brainLLMCl
 				http.Error(w, "bad content type", http.StatusBadRequest)
 				return
 			}
-			var req brainLLMRequest
+			var req eriwire.InternalLLMRequest
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			if req.Effort != "" {
+				http.Error(w, "unexpected effort in coven request body", http.StatusBadRequest)
 				return
 			}
 			w.WriteHeader(tc.statusCode)
@@ -129,7 +134,7 @@ func TestHTTPBrainLLMClient(t *testing.T) {
 			rawURL:     "",
 			prompt:     "hello",
 			wantErr:    true,
-			errSubstr:  "brain LLM URL is not configured",
+			errSubstr:  "is not configured",
 		},
 	}
 
