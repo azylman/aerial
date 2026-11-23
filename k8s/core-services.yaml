@@ -1829,22 +1829,6 @@ metadata:
   namespace: flux-system
 rules:
   - apiGroups:
-      - ""
-    resourceNames:
-      - aerial-image-tags
-    resources:
-      - configmaps
-    verbs:
-      - get
-      - update
-      - patch
-  - apiGroups:
-      - ""
-    resources:
-      - configmaps
-    verbs:
-      - create
-  - apiGroups:
       - kustomize.toolkit.fluxcd.io
     resources:
       - kustomizations
@@ -1852,7 +1836,6 @@ rules:
       - get
       - list
       - watch
-      - patch
   - apiGroups:
       - source.toolkit.fluxcd.io
     resources:
