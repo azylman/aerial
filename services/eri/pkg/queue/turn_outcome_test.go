@@ -20,7 +20,6 @@ import (
 
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
-	"github.com/azylman/aerial/services/eri/pkg/db/dbtest"
 	"github.com/azylman/aerial/services/eri/pkg/delivery"
 	"github.com/azylman/aerial/services/eri/pkg/metrics"
 	"github.com/azylman/aerial/services/eri/pkg/runner"
@@ -37,7 +36,8 @@ type capacityBlipCase struct {
 
 func runCapacityBlipCase(t *testing.T, tt capacityBlipCase) {
 	t.Helper()
-	store, tmpDir := setupTestStore(t), t.TempDir()
+	store := testStore(t)
+	tmpDir := t.TempDir()
 	var mu sync.Mutex
 	var attemptCount int
 	var deliveredText string
@@ -229,7 +229,8 @@ func TestDiscordTurnSink_StatusUpdaterLifecycle(t *testing.T) {
 
 func TestWorker_DualPool_YieldTrapFallback(t *testing.T) {
 	t.Parallel()
-	store, tmpHome, tempData := setupTestStore(t), t.TempDir(), t.TempDir()
+	store := testStore(t)
+	tmpHome, tempData := t.TempDir(), t.TempDir()
 	sessID := "f1111111-2222-3333-4444-555555555555"
 	sessDir := filepath.Join(tempData, "brain", sessID, ".system_generated", "logs")
 	_ = os.MkdirAll(sessDir, 0o755)
@@ -294,7 +295,8 @@ type yieldTrapCase struct {
 
 func runYieldTrapCase(t *testing.T, tc yieldTrapCase) {
 	t.Helper()
-	store, tmpHome := setupTestStore(t), t.TempDir()
+	store := testStore(t)
+	tmpHome := t.TempDir()
 	var runnerInvocations atomic.Int32
 	var promptsSeenMu, deliveredMu sync.Mutex
 	var promptsSeen []string
@@ -472,7 +474,7 @@ func TestWorker_GlobalQuotaLockout_SilentAndDeliveryTarget_TableDriven(t *testin
 			var deliveredTo string
 			var deliveredText string
 
-			store := dbtest.NewFakeStore()
+			store := testStore(t)
 			pool := New(config.NewFromData(&config.ConfigData{}), WorkerPoolConfig{
 				Store: store,
 				DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
@@ -562,7 +564,7 @@ func assertCustomSessionDeliveryTelemetry(t *testing.T, tc customSessionTargetCa
 func runCustomSessionTargetCase(t *testing.T, tc customSessionTargetCase) {
 	t.Helper()
 	var deliveredTo string
-	store := dbtest.NewFakeStore()
+	store := testStore(t)
 	pool := New(config.NewFromData(&config.ConfigData{}), WorkerPoolConfig{
 		Store: store,
 		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
@@ -733,7 +735,7 @@ func TestTurnExecution_InlineReplyOnNewerMessages(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			store := dbtest.NewFakeStore()
+			store := testStore(t)
 			for i, m := range tc.stored {
 				m.CreatedAt = time.Now().UTC().Add(time.Duration(i) * time.Second)
 				_ = store.InsertMessage(context.Background(), m)

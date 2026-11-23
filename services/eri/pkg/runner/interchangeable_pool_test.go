@@ -195,7 +195,7 @@ func TestInterchangeablePool_ConcurrencyAndSaturation(t *testing.T) {
 		}
 	})
 
-	pool, _ := newTestInterchangeablePool(t, 2, "", "", mock)
+	pool, underlying := newTestInterchangeablePool(t, 2, "", "", mock)
 	ctx := context.Background()
 
 	b1, b2 := make(chan struct{}), make(chan struct{})
@@ -214,7 +214,7 @@ func TestInterchangeablePool_ConcurrencyAndSaturation(t *testing.T) {
 	if err3 != nil {
 		t.Fatalf("caller 3 expected overflow: %v", err3)
 	}
-	if d3, ok := pool.Get("ephemeral:worker-ondemand-1"); !ok || d3 == nil {
+	if d3, ok := underlying.Get("ephemeral:worker-ondemand-1"); !ok || d3 == nil {
 		t.Fatalf("expected on-demand worker active")
 	}
 	if _, err := lease3.Execute(ctx, &TurnContext{TurnID: "t3", Prompt: "prompt-3", Ctx: ctx}); err != nil {
@@ -222,7 +222,7 @@ func TestInterchangeablePool_ConcurrencyAndSaturation(t *testing.T) {
 	}
 	_ = lease3.Release()
 	pool.WaitBackground()
-	if d3After, ok := pool.Get("ephemeral:worker-ondemand-1"); ok || d3After != nil {
+	if d3After, ok := underlying.Get("ephemeral:worker-ondemand-1"); ok || d3After != nil {
 		t.Fatalf("expected on-demand worker evicted")
 	}
 
@@ -230,7 +230,7 @@ func TestInterchangeablePool_ConcurrencyAndSaturation(t *testing.T) {
 	if err4 != nil {
 		t.Fatalf("caller 4 AcquireLease error: %v", err4)
 	}
-	if d4, ok := pool.Get("ephemeral:worker-ondemand-2"); !ok || d4 == nil {
+	if d4, ok := underlying.Get("ephemeral:worker-ondemand-2"); !ok || d4 == nil {
 		t.Fatalf("expected on-demand worker active")
 	}
 	if _, err := lease4.Execute(ctx, &TurnContext{TurnID: "t4", Prompt: "custom-prompt", Ctx: ctx}); err != nil {
@@ -238,7 +238,7 @@ func TestInterchangeablePool_ConcurrencyAndSaturation(t *testing.T) {
 	}
 	_ = lease4.Release()
 	pool.WaitBackground()
-	if d4After, ok := pool.Get("ephemeral:worker-ondemand-2"); ok || d4After != nil {
+	if d4After, ok := underlying.Get("ephemeral:worker-ondemand-2"); ok || d4After != nil {
 		t.Fatalf("expected on-demand worker evicted")
 	}
 
@@ -488,16 +488,14 @@ func checkInterchangeableNilPool(ctx context.Context, t *testing.T) {
 	_, ngErr := nilPool.AcquireLease(ctx, "t")
 	_, neErr := nilPool.ExecuteEphemeral(ctx, "t", "p")
 	_, nlErr := nilPool.EphemeralLLMFunc("t")(ctx, "m", "p")
-	nd, ndOk := nilPool.Get("t")
 	nilPool.SetTranscriptRescuer(nil)
 	nilPool.UpdateModel("claude-sonnet-5-5-low")
 	nilPool.UpdateEngine("claude", "claude")
 	nilPool.MarkDirty()
 	nilPool.WaitBackground()
 	nilPool.SetSessionManager(nil)
-	nilPool.SetSessionCallbacks(nil, nil)
 	nilPool.returnWorker("ephemeral:worker-0")
-	if nilPool.Close() != nil || nilPool.Workers() != nil || nilPool.AvailableCount() != 0 || nilPool.Underlying() != nil || nilPool.Initialize(ctx) == nil || ngErr == nil || ndOk || nd != nil || neErr == nil || nlErr == nil {
+	if nilPool.Close() != nil || nilPool.Workers() != nil || nilPool.AvailableCount() != 0 || nilPool.Initialize(ctx) == nil || ngErr == nil || neErr == nil || nlErr == nil {
 		t.Error("unexpected nilPool accessor returns or missing errors")
 	}
 }
@@ -554,19 +552,8 @@ func TestInterchangeablePool_DelegationAndErrorGuards(t *testing.T) {
 	if underlying.cfg.Engine != "claude" || underlying.cfg.ClaudeBin != "/usr/bin/claude" {
 		t.Fatalf("expected underlying engine updated, got %q %q", underlying.cfg.Engine, underlying.cfg.ClaudeBin)
 	}
-	if pool.Underlying() != underlying {
-		t.Fatalf("unexpected Underlying: %v", pool.Underlying())
-	}
-	if d, ok := pool.Get("non-existent"); ok || d != nil {
-		t.Errorf("expected missing worker false/nil, got (%v, %v)", d, ok)
-	}
-	if d0, ok0 := pool.Get("ephemeral:worker-0"); !ok0 || d0 == nil {
-		t.Errorf("expected worker-0 lookup success, got (%v, %v)", d0, ok0)
-	}
-
 	lease, sErr := pool.AcquireLease(ctx, "any")
 	pool.SetSessionManager(nil)
-	pool.SetSessionCallbacks(nil, nil)
 	if sErr != nil {
 		t.Fatalf("unexpected AcquireLease error: %v", sErr)
 	}
@@ -867,5 +854,34 @@ func TestInterchangeablePool_Model(t *testing.T) {
 				t.Errorf("Model() = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestInterchangeablePool_UnderlyingAndSessionCallbacks(t *testing.T) {
+	t.Parallel()
+	var nilPool *InterchangeablePool
+	if nilPool.Underlying() != nil {
+		t.Errorf("expected nil Underlying from nil pool")
+	}
+	nilPool.SetSessionCallbacks(nil, nil)
+
+	pool, underlying := newTestInterchangeablePool(t, 2, "test", "test-model", nil)
+	if got := pool.Underlying(); got != underlying {
+		t.Errorf("Underlying() = %p, want %p", got, underlying)
+	}
+
+	getFn := func(ctx context.Context, targetKey string) (SessionRecord, error) {
+		return SessionRecord{ActiveSessionID: "sess-123"}, nil
+	}
+	onRotFn := func(ctx context.Context, targetKey, oldSessionID, newSessionID string) error {
+		return nil
+	}
+	pool.SetSessionCallbacks(getFn, onRotFn)
+	underlying.mu.Lock()
+	hasGet := underlying.cfg.GetSessionRecord != nil
+	hasRot := underlying.cfg.OnSessionRotated != nil
+	underlying.mu.Unlock()
+	if !hasGet || !hasRot {
+		t.Errorf("expected SetSessionCallbacks to configure underlying callbacks: get=%v rot=%v", hasGet, hasRot)
 	}
 }

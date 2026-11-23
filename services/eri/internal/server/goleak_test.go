@@ -11,6 +11,7 @@ import (
 	"go.uber.org/goleak"
 
 	"github.com/azylman/aerial/pkg/k8sauth"
+	"github.com/azylman/aerial/pkg/pgtest"
 )
 
 type hermeticTestTransport struct {
@@ -63,14 +64,29 @@ func init() {
 	}
 }
 
+// TestMain starts one throwaway Postgres for the package (pgtest.Main) inside
+// the hermetic transport guard and goleak check.
 func TestMain(m *testing.M) {
 	wrapHermeticTransport()
-	goleak.VerifyTestMain(m, goleak.Cleanup(func(exitCode int) {
+	goleak.VerifyTestMain(pgtestRunner{m: m}, goleak.Cleanup(func(exitCode int) {
 		http.DefaultClient.CloseIdleConnections()
 		if cl, ok := http.DefaultTransport.(interface{ CloseIdleConnections() }); ok {
 			cl.CloseIdleConnections()
 		}
 	}))
+}
+
+// pgtestRunner runs the tests under pgtest.Main, then closes idle HTTP
+// connections so goleak only sees goroutines the tests really leaked.
+type pgtestRunner struct{ m *testing.M }
+
+func (r pgtestRunner) Run() int {
+	code := pgtest.Main(r.m)
+	http.DefaultClient.CloseIdleConnections()
+	if cl, ok := http.DefaultTransport.(interface{ CloseIdleConnections() }); ok {
+		cl.CloseIdleConnections()
+	}
+	return code
 }
 
 func TestHermeticTransport_BlocksNonLoopbackAndReservedPorts(t *testing.T) {

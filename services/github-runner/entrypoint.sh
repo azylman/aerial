@@ -130,15 +130,15 @@ RUNNER_LABELS="${RUNNER_LABELS:-self-hosted,roborev}"
 echo "${PATH}" > /actions-runner/.path
 
 if [ -d "/cache" ]; then
-  mkdir -p /data
+  mkdir -p /data /cache/go-build /cache/go/pkg/mod /cache/pip /cache/golangci-lint /cache/cargo-target /cache/npm /cache/buildx-config
   chmod 0755 /data 2>/dev/null || true
   ln -sfn /cache /data/cache
-  chown -h 1000:1000 /data/cache 2>/dev/null || true
-  (
-    flock 200
-    mkdir -p /cache/go-build /cache/go/pkg/mod /cache/pip /cache/golangci-lint /cache/cargo-target /cache/npm /cache/buildx-config
-    find /cache \( -not -user 1000 -o -not -group 1000 \) -exec chown -h 1000:1000 {} + 2>/dev/null || true
-  ) 200>"/cache/.init.lock"
+  chown -h 1000:1000 /data/cache /cache /cache/go-build /cache/go /cache/go/pkg /cache/go/pkg/mod /cache/pip /cache/golangci-lint /cache/cargo-target /cache/npm /cache/buildx-config 2>/dev/null || true
+  if [ -z "$(find /cache -maxdepth 1 -name .last-trim -mmin -360 2>/dev/null)" ]; then
+    touch /cache/.last-trim 2>/dev/null || true
+    chown -h 1000:1000 /cache/.last-trim 2>/dev/null || true
+    find /cache/go-build /cache/golangci-lint -maxdepth 2 -type f -mmin +1440 -delete 2>/dev/null || true
+  fi
   export GOCACHE="/data/cache/go-build"
   export GOPATH="/data/cache/go"
   export GOMODCACHE="/data/cache/go/pkg/mod"
@@ -200,7 +200,7 @@ cleanup() {
 trap cleanup SIGTERM SIGINT
 
 echo "Starting runner..."
-if [[ ",${RUNNER_LABELS}," == *",ci,"* ]]; then
+if [[ ",${RUNNER_LABELS}," == *",ci,"* || ",${RUNNER_LABELS}," == *",deploy,"* ]]; then
   run_as_ubuntu env -u GITHUB_PAT ./run.sh &
 else
   run_as_ubuntu ./run.sh &

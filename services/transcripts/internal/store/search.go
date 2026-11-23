@@ -192,16 +192,32 @@ func buildStepsQuery(stack, queryText, sessionFilter, toolFilter string, limit i
 		}
 	}
 	if toolFilter != "" {
-		args = append(args, toolFilter)
-		clauses = append(clauses, fmt.Sprintf("(t.tool_kind = $%d OR t.tool_name = $%d)", len(args), len(args)))
+		if toolFilter == "mcp" {
+			args = append(args, "mcp:%")
+			clauses = append(clauses, fmt.Sprintf("t.tool_kind LIKE $%d", len(args)))
+		} else {
+			args = append(args, toolFilter)
+			clauses = append(clauses, fmt.Sprintf("(t.tool_kind = $%d OR t.tool_name = $%d)", len(args), len(args)))
+		}
 	}
-	if len(since) > 0 && !since[0].IsZero() {
+	hasSince := len(since) > 0 && !since[0].IsZero()
+	if hasSince {
 		args = append(args, since[0].UTC())
-		clauses = append(clauses, fmt.Sprintf("t.created_at >= $%d", len(args)))
+		if queryText == "" {
+			clauses = append(clauses, fmt.Sprintf("t.created_at > $%d", len(args)))
+		} else {
+			clauses = append(clauses, fmt.Sprintf("t.created_at >= $%d", len(args)))
+		}
 	}
 	args = append(args, limit)
+	orderBy := "t.created_at DESC"
+	if queryText != "" {
+		orderBy = "ts_rank_cd(t.fts_tokens, websearch_to_tsquery('simple', $1)) DESC, t.created_at DESC"
+	} else if hasSince {
+		orderBy = "t.created_at ASC, t.step_index ASC"
+	}
 	return stepsSelectClause + ` WHERE ` + strings.Join(clauses, " AND ") +
-		fmt.Sprintf(` ORDER BY t.created_at DESC LIMIT $%d`, len(args)), args
+		fmt.Sprintf(` ORDER BY %s LIMIT $%d`, orderBy, len(args)), args
 }
 
 var reRetrievedMemoryBlock = regexp.MustCompile(`(?is)<\s*\\?retrieved_memory\s*>(.*?)<\s*[\\/]+retrieved_memory\s*>`)

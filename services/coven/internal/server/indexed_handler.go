@@ -33,10 +33,18 @@ func ParseCovenExtractSubject(subject string) (agent, threadID string, ok bool) 
 // so every delay value feeds a retry, never a drop.
 const covenMaxNakDelay = 1 * time.Hour
 
+// extractEventMsgID names the extraction job for one indexed batch from the event's own identity
+// (agent, thread, session, step range, transcript file mtime), so a redelivered event dedupes
+// while every distinct batch gets its own key.
+func extractEventMsgID(agent, threadID string, ev pubsub.TranscriptsIndexedEvent) string {
+	return fmt.Sprintf("coven:extract:%s:%s:%s:%d-%d:%d", agent, threadID, strings.TrimSpace(ev.SessionID), ev.FirstStep, ev.LastStep, ev.FileMtime.UnixMilli())
+}
+
 // HandleTranscriptsIndexed routes one TranscriptsIndexedEvent to extraction or job publishing.
 // When role is "all", it accepts events for any valid agent slug. When role is not "all",
 // it filters strictly for ev.EffectiveAgent() == config.NormalizeStack(stack).
-func HandleTranscriptsIndexed(ctx context.Context, msg pubsub.Message, stack, role string, extract func(ctx context.Context, agent, threadID string) error) error {
+// extract receives the batch's stable message ID (see extractEventMsgID).
+func HandleTranscriptsIndexed(ctx context.Context, msg pubsub.Message, stack, role string, extract func(ctx context.Context, agent, threadID, msgID string) error) error {
 	var ev pubsub.TranscriptsIndexedEvent
 	if err := json.Unmarshal(msg.Data(), &ev); err != nil {
 		slog.ErrorContext(ctx, "[Coven] error unmarshaling transcripts indexed event", "error", err)
@@ -57,7 +65,7 @@ func HandleTranscriptsIndexed(ctx context.Context, msg pubsub.Message, stack, ro
 	if !isAll && agent != config.NormalizeStack(stack) {
 		return nil
 	}
-	if err := extract(ctx, agent, threadID); err != nil {
+	if err := extract(ctx, agent, threadID, extractEventMsgID(agent, threadID, ev)); err != nil {
 		if nakErr := msg.NakWithDelay(pubsub.NakBackoff(msg.NumDelivered(), covenMaxNakDelay)); nakErr != nil {
 			slog.WarnContext(ctx, "[Coven] error naking transcripts indexed event", "error", nakErr)
 		}
@@ -75,8 +83,7 @@ func newTranscriptsIndexedHandler(b pubsub.Bus, stack string, role ...string) pu
 		userRole = strings.TrimSpace(role[0])
 	}
 	return func(ctx context.Context, msg pubsub.Message) error {
-		return HandleTranscriptsIndexed(ctx, msg, normalizedStack, userRole, func(extractCtx context.Context, agent, threadID string) error {
-			msgID := fmt.Sprintf("coven:extract:%s:%s:%d", agent, threadID, time.Now().UnixNano())
+		return HandleTranscriptsIndexed(ctx, msg, normalizedStack, userRole, func(extractCtx context.Context, agent, threadID, msgID string) error {
 			args := pubsub.CovenExtractJobArgs{
 				Agent:    agent,
 				Stack:    agent,

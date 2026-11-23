@@ -27,7 +27,6 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/classifier"
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
-	"github.com/azylman/aerial/services/eri/pkg/db/dbtest"
 	"github.com/azylman/aerial/services/eri/pkg/metrics"
 	"github.com/azylman/aerial/services/eri/pkg/runner"
 	"github.com/azylman/aerial/services/eri/pkg/session"
@@ -131,7 +130,7 @@ type voiceTurnTestCase struct {
 	runnerCode, resultExitCode                                                                                          int
 	runnerErr, spawnerErr, wantErrIs, hookErr                                                                           error
 	poolNil, poolStopped, poolDeadCtx, cancelCaller, nilProcessPool, useVoiceHook, useVoiceStreamHook                   bool
-	closePipeImmediately, cancelCallerOnScan, clearPreSpawnedSessionID                                                  bool
+	closePipeImmediately, cancelCallerOnScan                                                                            bool
 	resultStatus, resultError, resultResponse                                                                           string
 	// wantTurnStatus is the aerial.turn.status of the invoke_agent span parented to the caller's
 	// span; "" leaves the turn's trace unchecked. wantChatSpan expects a chat child under it, and
@@ -269,7 +268,7 @@ func setupVoiceTestPool(t *testing.T, tt *voiceTurnTestCase, h *voiceTraceHarnes
 	}
 	if tt.runnerOut != "" || tt.runnerErr != nil || tt.runnerCode != 0 {
 		p := New(appCfg, WorkerPoolConfig{
-			LowEffortModel: "low-effort-fast-model", Store: dbtest.NewFakeStore(), TracerProvider: h.tp, ActiveTurns: h.registry,
+			LowEffortModel: "low-effort-fast-model", TracerProvider: h.tp, ActiveTurns: h.registry,
 			RunnerWithOptionsFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
 				return tt.runnerOut, tt.runnerErrOut, tt.runnerCode, tt.runnerErr
 			},
@@ -354,14 +353,6 @@ func runVoiceTurnCase(t *testing.T, tt voiceTurnTestCase) {
 	}
 
 	targetSess := tt.sessionID
-	if tt.clearPreSpawnedSessionID && procPool != nil {
-		targetSess = "fallback-conv-id"
-		d, err := procPool.GetOrCreate(context.Background(), targetSess, "")
-		if err != nil {
-			t.Fatalf("failed pre-spawning: %v", err)
-		}
-		d.SetSessionID("")
-	}
 
 	reply, convID, err := pool.ExecuteVoiceTurn(ctx, tt.prompt, targetSess, func(s string) { statusReceived = s }, func(s string) { sentenceReceived = s })
 	caller.End()
@@ -461,7 +452,7 @@ func TestWorkerPool_ExecuteVoiceTurn_TableDriven(t *testing.T) {
 		{name: "DaemonTurnTraced", prompt: "test", sessionID: "sess-daemon-ok", resultStatus: "SUCCESS", resultResponse: "lights on", wantReply: "lights on", wantTurnStatus: "success", wantChatSpan: true, wantRegistered: true},
 		{name: "SendFailureBrokenPipe", prompt: "test", sessionID: "sess-pipe-err", closePipeImmediately: true, wantErrSub: "failed sending turn to voice daemon"},
 		{name: "ContextCanceledWaitingForResult", prompt: "test", sessionID: "sess-ctx-cancel", cancelCallerOnScan: true, wantErrSub: "context canceled", wantTurnStatus: "cancelled", wantRegistered: true},
-		{name: "ExitCodeNonZeroAndEmptySessionFallback", prompt: "test", sessionID: "sess-exit-fallback", clearPreSpawnedSessionID: true, resultStatus: "SUCCESS", resultExitCode: 1, wantErrSub: "empty response", wantRegistered: true},
+		{name: "ExitCodeNonZeroAndEmptySessionFallback", prompt: "test", sessionID: "sess-exit-fallback", resultStatus: "SUCCESS", resultExitCode: 1, wantErrSub: "empty response", wantRegistered: true},
 		{name: "VoiceModelSet", prompt: "test", sessionID: "sess-voice-model", appVoiceModel: "haiku", appLowModel: "opus-low", resultStatus: "SUCCESS", resultResponse: "lights on", wantReply: "lights on", wantTurnStatus: "success", wantChatSpan: true, wantRegistered: true, wantModel: "haiku", wantProvider: "anthropic"},
 		{name: "VoiceModelEmptyFallbackLow", prompt: "test", sessionID: "sess-voice-empty", appVoiceModel: "", appLowModel: "opus-low", resultStatus: "SUCCESS", resultResponse: "lights on", wantReply: "lights on", wantTurnStatus: "success", wantChatSpan: true, wantRegistered: true, wantModel: "opus-low", wantProvider: "anthropic"},
 		{name: "GeminiAPIPoolVoiceModel", prompt: "test", sessionID: "sess-gemini-voice", useGeminiAPIPool: true, wantReply: "gemini voice reply", wantTurnStatus: "success", wantChatSpan: true, wantModel: "gemini-2.5-flash", wantProvider: "gcp.gemini"},
@@ -776,9 +767,9 @@ func TestWorkerPool_ExecuteVoiceTurn_MockVoiceProcessPool(t *testing.T) {
 
 func TestTurnExecution_StoreDelegates(t *testing.T) {
 	t.Parallel()
-	fake := setupTestStore(t)
-	closedFake := setupTestStore(t)
-	_ = closedFake.Close()
+	fake := testStore(t)
+	closedFake, closedDB := newTestStore(t)
+	_ = closedDB.Close()
 	memBus := pubsub.NewMemoryBus()
 	t.Cleanup(func() { _ = memBus.Close() })
 	if err := pubsub.EnsureCoreStreams(context.Background(), memBus); err != nil {
@@ -826,7 +817,7 @@ func TestTurnExecution_StoreDelegates(t *testing.T) {
 
 func TestSummarizeAndHistoryHelpers(t *testing.T) {
 	t.Parallel()
-	fake := setupTestStore(t)
+	fake := testStore(t)
 	now := time.Now().UTC()
 	_ = insertMessage(fake, db.Message{ID: "msg-fast-1", ThreadID: "thread-fast-1", AuthorID: "user-1", AuthorName: "Alice", Content: "Hello fast path", CreatedAt: now})
 
@@ -914,7 +905,7 @@ func TestSummarizeAndHistoryHelpers(t *testing.T) {
 
 func TestWorkerPool_RunnerFallbackAdaptersAndLifecycle(t *testing.T) {
 	t.Parallel()
-	fake := setupTestStore(t)
+	fake := testStore(t)
 	ctx := context.Background()
 
 	tests := []struct {
@@ -986,6 +977,17 @@ func TestWorkerPool_RunnerFallbackAdaptersAndLifecycle(t *testing.T) {
 	if unwrapUnifiedPool(nil) != nil || unwrapUnifiedPool(&testRunnerAgentPool{}) != nil {
 		t.Errorf("expected nil from unwrapUnifiedPool")
 	}
+	upWrap := runner.NewUnifiedProcessPool(runner.PoolConfig{}, nil)
+	t.Cleanup(func() { _ = upWrap.Close() })
+	ipWrap := runner.NewInterchangeablePool(upWrap, runner.InterchangeablePoolConfig{WorkerCount: 1})
+	t.Cleanup(func() { _ = ipWrap.Close() })
+	if got := unwrapUnifiedPool(ipWrap); got != upWrap {
+		t.Errorf("expected unwrapUnifiedPool(ipWrap) = %p, want %p", got, upWrap)
+	}
+	wrappedPools := map[PoolKey]runner.AgentPool{
+		{Ephemeral: false, Effort: config.EffortHigh}: ipWrap,
+	}
+	wirePoolSessionDependencies(wrappedPools, nil, fake)
 }
 
 func TestStatusUpdater_GuardrailsAndRESTTransport(t *testing.T) {
@@ -1027,14 +1029,12 @@ func TestStatusUpdater_GuardrailsAndRESTTransport(t *testing.T) {
 
 	var nilSu *StatusUpdater
 	nilSu.MarkTurnStarted()
-	nilSu.SetCapacityBackoff(5 * time.Second)
 	nilSu.Stop()
 	nilSu.DeleteStatusMessage()
 	nilSu.HandleStep(&runner.StepUpdateEvent{StepType: "thinking"})
 
 	uDis := NewStatusUpdater(nil, "thread-dis", false)
 	uDis.Start()
-	uDis.SetCapacityBackoff(5 * time.Second)
 	uDis.triggerFlush()
 	uEn := NewStatusUpdater(nil, "thread-en", true, WithStatusInterval(50*time.Millisecond))
 	uEn.Start()
@@ -1044,16 +1044,8 @@ func TestStatusUpdater_GuardrailsAndRESTTransport(t *testing.T) {
 	uStep.Stop()
 	uStep.disabled = true
 	uStep.HandleStep(&runner.StepUpdateEvent{StepType: "thinking"})
-	uStep.SetCapacityBackoff(5 * time.Second)
 	uStep.disabled = false
-	uStep.SetCapacityBackoff(15 * time.Second)
-	if got := uStep.currentStatusText(); !strings.Contains(got, "Waiting on model capacity") {
-		t.Errorf("expected capacity backoff text, got %q", got)
-	}
 	uStep.MarkTurnStarted()
-	if uStep.phase != "" {
-		t.Errorf("expected MarkTurnStarted to reset backoff phase, got %q", uStep.phase)
-	}
 	uStep.HandleStep(&runner.StepUpdateEvent{StepType: "thinking"})
 	uStep.HandleStep(&runner.StepUpdateEvent{StepType: "tool_call", ToolName: "view_file", State: "ACTIVE", ToolInfo: &runner.StepToolInfo{Parameters: runner.StepToolParameters{CommandLine: "ls"}}})
 	uStep.HandleStep(&runner.StepUpdateEvent{StepType: "tool_call", ToolName: "other_tool", State: "DONE"})
@@ -1171,7 +1163,7 @@ func burstEdgeCases() []burstEdgeCase {
 // the burst in order.
 func setupBurstEdgeCase(t *testing.T, tc burstEdgeCase) (*WorkerPool, db.Store, []db.Message) {
 	t.Helper()
-	fake := setupTestStore(t)
+	fake := testStore(t)
 	_ = insertMessage(fake, tc.msg)
 	burst := []db.Message{tc.msg}
 	if tc.trailing != nil {

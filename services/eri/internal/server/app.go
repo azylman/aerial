@@ -26,7 +26,6 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/queue"
 	"github.com/azylman/aerial/services/eri/pkg/runner"
 	"github.com/azylman/aerial/services/eri/pkg/session"
-	"github.com/azylman/aerial/services/eri/pkg/transcript"
 )
 
 // BrainAppOption configures optional runtime dependencies for RunBrainApp.
@@ -58,10 +57,7 @@ func validateBrainStartupConfig(cur *config.ConfigData, hasInjectedStore bool) e
 	return nil
 }
 
-var (
-	onServerReady func(addr string)
-	openDefaultDB = db.New
-)
+var onServerReady func(addr string)
 
 func setupDiscordFunnel(
 	ctx context.Context,
@@ -189,7 +185,7 @@ func resolveBrainStores(cfg *config.Config, cur *config.ConfigData, opts brainAp
 	if opts.store != nil {
 		return opts.store, opts.txStore, nil, nil
 	}
-	return bootstrap.InitDefaultStores(openDefaultDB, cfg, cur, opts.agentName)
+	return bootstrap.InitDefaultStores(db.New, cfg, cur, opts.agentName)
 }
 
 func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption) error {
@@ -267,14 +263,7 @@ func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption
 	stopHup := startSIGHUPReloadLoop(ctx, appOpts.hupChan, reloadConfig)
 	defer stopHup()
 
-	txEmbedder := transcript.NewEmbedder(cfg, sessionMgr.Roots()...)
-	var embedder transcript.EmbedderFunc
-	if txEmbedder != nil {
-		embedder = func(eCtx context.Context, text string) ([]float32, error) {
-			return txEmbedder.GenerateEmbedding(eCtx, text, false, 1)
-		}
-	}
-	mux := SetupBrainMuxWithEmbedder(store, txStore, pool, embedder, sessionMgr.Roots()...)
+	mux := SetupBrainMux(store, pool)
 	reloadCtx, stopReloads := context.WithCancel(ctx)
 	gitSyncReloads := bootstrap.NewReloadTrigger(reloadCtx, reloadConfig)
 	defer func() {

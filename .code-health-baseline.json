@@ -16,7 +16,7 @@
       "blank_assigns": 22
     },
     "services/eri/internal/server/handlers_test.go": {
-      "blank_assigns": 12
+      "blank_assigns": 10
     },
     "services/eri/internal/server/handlers_voice_internal_test.go": {
       "blank_assigns": 2
@@ -40,13 +40,10 @@
       "blank_assigns": 23
     },
     "services/eri/pkg/db/dbtest/fakestore_test.go": {
-      "blank_assigns": 49
+      "blank_assigns": 39
     },
     "services/eri/pkg/db/store_test.go": {
       "blank_assigns": 1
-    },
-    "services/eri/pkg/db/transcripts_test.go": {
-      "blank_assigns": 7
     },
     "services/eri/pkg/delivery/delivery_test.go": {
       "blank_assigns": 4
@@ -163,7 +160,7 @@
       "blank_assigns": 19
     },
     "services/eri/pkg/runner/interchangeable_pool_test.go": {
-      "blank_assigns": 52
+      "blank_assigns": 51
     },
     "services/eri/pkg/runner/mcp_dispatcher_test.go": {
       "blank_assigns": 12
@@ -209,12 +206,6 @@
     },
     "services/eri/pkg/transcript/muse_worker_test.go": {
       "blank_assigns": 7
-    },
-    "services/eri/pkg/transcript/ollama_test.go": {
-      "blank_assigns": 1
-    },
-    "services/eri/pkg/transcript/tool_test.go": {
-      "blank_assigns": 9
     },
     "services/eri/pkg/transcript/worker_test.go": {
       "blank_assigns": 4

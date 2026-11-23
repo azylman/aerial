@@ -536,15 +536,65 @@ spec:
                   - victoriametrics
                   - gatus
                   - coverage-ingest
-        - podSelector:
-            matchLabels:
-              app: coverage-ingest
       ports:
         - port: 4030
           protocol: TCP
   podSelector:
     matchLabels:
       app.kubernetes.io/name: transcripts
+  policyTypes:
+    - Ingress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: coven-ingress-netpol
+  namespace: default
+spec:
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchExpressions:
+              - key: kubernetes.io/metadata.name
+                operator: In
+                values:
+                  - restate-green
+                  - restate
+        - podSelector:
+            matchExpressions:
+              - key: app
+                operator: In
+                values:
+                  - restate-operator
+        - podSelector:
+            matchExpressions:
+              - key: app.kubernetes.io/name
+                operator: In
+                values:
+                  - restate-operator
+      ports:
+        - port: 9080
+          protocol: TCP
+    - from:
+        - podSelector:
+            matchExpressions:
+              - key: app.kubernetes.io/name
+                operator: In
+                values:
+                  - eri
+                  - eri-restate
+                  - console
+                  - prospera
+                  - gatus
+                  - vmsingle
+                  - victoriametrics
+                  - coverage-ingest
+      ports:
+        - port: 4008
+          protocol: TCP
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: coven
   policyTypes:
     - Ingress
 ---
