@@ -390,6 +390,33 @@ type SmallB struct {
 			wantOut:  "Checked 1 Go file(s)",
 		},
 		{
+			name: "cross-package struct clone detected above threshold",
+			files: map[string]string{
+				"pkg1/structs.go": `package pkg1
+
+type Alpha struct {
+	A int
+	B string
+	C bool
+	D float64
+	E []byte
+}
+`,
+				"pkg2/structs.go": `package pkg2
+
+type Beta struct {
+	A int
+	B string
+	C bool
+	D float64
+	E []byte
+}
+`,
+			},
+			wantCode: 1,
+			wantErr:  "struct field similarity 1.00 exceeds 0.85 ceiling",
+		},
+		{
 			name: "identical functions in different packages trigger cross-package clone violation",
 			files: map[string]string{
 				"pkg1/a.go": "package pkg1\n\n" + buildCloneFuncSource("CloneA", false),
