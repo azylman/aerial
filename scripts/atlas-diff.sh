@@ -15,7 +15,7 @@ Arguments:
 
 Environment Variables:
   ATLAS_DEV_URL    Optional external Postgres dev URL (skips ephemeral container if provided)
-  ATLAS_IMAGE      Docker image for dev DB (default: pgvector/pgvector:pg18)
+  ATLAS_IMAGE      Docker image for dev DB (default: pgvector/pgvector:pg19)
 
 Examples:
   $0 add_facts_metadata
@@ -106,7 +106,7 @@ if [ -z "$DEV_URL" ]; then
         exit 1
     fi
 
-    ATLAS_IMAGE="${ATLAS_IMAGE:-pgvector/pgvector:pg18}"
+    ATLAS_IMAGE="${ATLAS_IMAGE:-pgvector/pgvector:pg19}"
     DEV_CONTAINER="aerial-atlas-dev-$$-$(date +%s)"
     
     # Check if shared network exists (e.g. aerial-net)

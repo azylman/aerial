@@ -16,7 +16,7 @@ Where standard GitOps homelabs stop at cluster infrastructure, standalone coding
 | :--- | :--- |
 | **Language & Cluster Runtime** | **Go 1.27** microservices on **Kubernetes (`k3s`)** (single-node out of the box or multi-node with optional **NixOS Colmena** provisioning and **Spegel** P2P OCI registry caching) |
 | **Networking & Ingress** | **NGINX Gateway Fabric** (Kubernetes Gateway API for LAN apps and external edge webhooks) and **CoreDNS** (internal service discovery) |
-| **Databases & State** | **CloudNativePG** (**PostgreSQL 18** + **`pgvector`** for relational state, vector embeddings, and hybrid RRF search) and **Valkey 9** (caching) |
+| **Databases & State** | **CloudNativePG** (**PostgreSQL 19** + **`pgvector`** for relational state, vector embeddings, and hybrid RRF search) and **Valkey 9** (caching) |
 | **Workflows & Event Bus** | **Restate** (RocksDB-backed durable execution for workflow and virtual object state machines) and **NATS JetStream** (durable event streams, webhook fan-out, and work-queue job consumers) |
 | **Secrets Governance** | **Infisical** + **External Secrets Operator** (centralized vault syncing scoped Kubernetes Secrets in-memory with zero plaintext disk persistence) |
 | **Observability** | **VictoriaMetrics** (TSDB) + **`vmalert`** (MAD anomaly and alert rules), **Fluent Bit** + **VictoriaLogs** (LogsQL log analytics, 60-day retention), **VictoriaTraces** (OTLP distributed tracing, 30-day retention), **Grafana**, **Headlamp** (Kubernetes/Flux UI), and **Prometheus Exporters** (**Kubelet / cAdvisor**, **Node Exporter**, **CloudNativePG**) |
@@ -130,7 +130,7 @@ azylman/aerial (Engine Repo)              your-aerial-config (Private Overlay Re
 │  • Autonomous Subagent Orchestrator & SDD Planning Engine                                   │
 │  • Self-Healing GitOps Worker (Proactive CI/CD & RoboRev Remediation)                       │
 │  • Read-Only Mounts (:ro), Child-Process Secret Scrubbing & Pre-Tool Hook Guardrails        │
-│  • Two-Tier Ambient Wake Classifier & PostgreSQL 18 Multi-Turn Thread Memory                │
+│  • Two-Tier Ambient Wake Classifier & PostgreSQL 19 Multi-Turn Thread Memory                │
 └─────────────────────────────────────────────────────────────────────────────────────────────┘
                                                │
                                                ▼
@@ -142,7 +142,7 @@ azylman/aerial (Engine Repo)              your-aerial-config (Private Overlay Re
 │ • lan-gateway & edge-gateway │ • vanadis-restate DAG Worker │ • homepage, console, docs     │
 │ • restate (RestateCluster)   │ • docket-mcp & docket-store  │ • agentsview Session HUD      │
 │ • nats (NATS JetStream)      │ • synapse GitOps Fact Router │ • headlamp & infisical UIs    │
-│ • CloudNativePG Postgres 18  │ • github-runner (ARC/RoboRev)│ • Optional GPU / Kiosk Nodes  │
+│ • CloudNativePG Postgres 19  │ • github-runner (ARC/RoboRev)│ • Optional GPU / Kiosk Nodes  │
 │ • infisical, valkey, coredns │ • flux-system GitOps Engine  │   via aerial-config Overlays  │
 └──────────────────────────────┴──────────────────────────────┴───────────────────────────────┘
                                                │
@@ -170,7 +170,7 @@ azylman/aerial (Engine Repo)              your-aerial-config (Private Overlay Re
 
 ## Closed-Loop Software Factory Workflow
 
-Where standalone coding agent orchestrators run in local `tmux` sessions without a deployment target, Aerial runs a self-hosted, lights-out delivery pipeline directly on its Kubernetes platform primitives (**Restate**, **NATS JetStream**, and **PostgreSQL 18**):
+Where standalone coding agent orchestrators run in local `tmux` sessions without a deployment target, Aerial runs a self-hosted, lights-out delivery pipeline directly on its Kubernetes platform primitives (**Restate**, **NATS JetStream**, and **PostgreSQL 19**):
 
 ```text
 ┌────────────────────┐    ┌────────────────────┐    ┌────────────────────┐    ┌────────────────────┐    ┌────────────────────┐
@@ -183,7 +183,7 @@ Where standalone coding agent orchestrators run in local `tmux` sessions without
                                                  (on CI or RoboRev failure)
 ```
 
-1. **Dependency-Aware DAG Backlog (`docket-mcp` + Vikunja)**: Features, multi-stage epics, and deferred discoveries are tracked as a directed acyclic graph (DAG) in **Vikunja** backed by PostgreSQL 18 (`pgvector` + full-text hybrid RRF search), exposing an unblocked `ready` queue so the agent never loses context across sessions.
+1. **Dependency-Aware DAG Backlog (`docket-mcp` + Vikunja)**: Features, multi-stage epics, and deferred discoveries are tracked as a directed acyclic graph (DAG) in **Vikunja** backed by PostgreSQL 19 (`pgvector` + full-text hybrid RRF search), exposing an unblocked `ready` queue so the agent never loses context across sessions.
 2. **Ephemeral Scratch Clones & Multi-Agent Review**: Code, schema, and manifest changes are authored in isolated scratch clones (`scripts/aerial-pr.sh init [repo]`), audited by parallel multi-agent review panels, and verified locally (`./scripts/verify.sh --staged`) before submission.
 3. **Durable Multi-PR Build Pipelines (`vanadis` + `vanadis-restate`)**: Multi-PR and cross-repository rollouts (such as shipping an upstream engine feature before enabling downstream config) are enqueued as a single DAG build (`scripts/aerial-build.sh enqueue`). **Restate** durable Virtual Objects (`Build`, `BuildRouter`) and **NATS JetStream** (`aerial.pr.>`) coordinate ordered chunk execution and GitHub auto-merge (`SQUASH`).
 4. **In-Cluster CI & Automated Code Review (`github-runner` + RoboRev)**: Scale-to-zero **GitHub Actions Runner Controller (ARC)** runner sets execute clean-room test/coverage matrices, publish container images to GHCR, and run automated **RoboRev** LLM code reviews on every Pull Request.

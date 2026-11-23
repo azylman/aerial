@@ -568,27 +568,95 @@ func TestRestateIngressClient_CancelDispatchImmediate(t *testing.T) {
 	assert.Equal(t, "ok", resp.Status)
 }
 
+type newRestateLLMCase struct {
+	name         string
+	agent        string
+	cancelCaller bool
+	nilClient    bool
+	stubStatus   int
+	stubBody     string
+	wantResponse string
+	wantErrSub   string
+	wantPath     string
+}
+
+type llmIngressCapture struct {
+	path    string
+	idemKey string
+	hasKey  bool
+	req     llmcall.Request
+}
+
+func runNewRestateLLMCase(t *testing.T, tc newRestateLLMCase) {
+	t.Helper()
+	t.Parallel()
+	release := make(chan struct{})
+	seen := make(chan llmIngressCapture, 1)
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c := llmIngressCapture{path: r.URL.Path, idemKey: r.Header.Get("Idempotency-Key")}
+		_, c.hasKey = r.Header["Idempotency-Key"]
+		if err := json.NewDecoder(r.Body).Decode(&c.req); err != nil {
+			return
+		}
+		seen <- c
+		if tc.cancelCaller {
+			select {
+			case <-r.Context().Done():
+			case <-release:
+			}
+			return
+		}
+		w.WriteHeader(tc.stubStatus)
+		_, _ = w.Write([]byte(tc.stubBody))
+	}))
+	t.Cleanup(ts.Close)
+	t.Cleanup(func() { close(release) })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	client := NewRestateIngressClient(ts.URL, tc.agent, ts.Client())
+	if tc.nilClient {
+		client = nil
+	}
+	done := make(chan struct{})
+	var resp string
+	var err error
+	go func() {
+		defer close(done)
+		resp, err = NewRestateLLMFunc(client)(ctx, "flash", "summarize")
+	}()
+	var got llmIngressCapture
+	if tc.cancelCaller {
+		got = <-seen
+		cancel()
+	}
+	<-done
+	if !tc.cancelCaller {
+		// The stub records the request before it writes the response, so
+		// a finished call has already published its capture (if any).
+		select {
+		case got = <-seen:
+		default:
+		}
+	}
+
+	if tc.wantErrSub != "" {
+		require.ErrorContains(t, err, tc.wantErrSub)
+	} else {
+		require.NoError(t, err)
+	}
+	assert.Equal(t, tc.wantResponse, resp)
+	assert.False(t, got.hasKey, "unkeyed call must not send Idempotency-Key")
+	assert.Equal(t, tc.wantPath, got.path)
+	if tc.wantPath != "" {
+		assert.Equal(t, llmcall.Request{Prompt: "summarize", Model: "flash"}, got.req)
+	}
+}
+
 func TestNewRestateLLMFunc(t *testing.T) {
 	t.Parallel()
 
-	type llmIngressCapture struct {
-		path    string
-		idemKey string
-		hasKey  bool
-		req     llmcall.Request
-	}
-
-	tests := []struct {
-		name         string
-		agent        string
-		cancelCaller bool
-		nilClient    bool
-		stubStatus   int
-		stubBody     string
-		wantResponse string
-		wantErrSub   string
-		wantPath     string
-	}{
+	tests := []newRestateLLMCase{
 		{name: "unkeyed call returns response", agent: "aerial", stubStatus: http.StatusOK, stubBody: `{"response":"title"}`, wantResponse: "title", wantPath: "/LLM/Complete"},
 		{name: "sibling agent service", agent: "miorine", stubStatus: http.StatusOK, stubBody: `{"response":"ok"}`, wantResponse: "ok", wantPath: "/LLM-miorine/Complete"},
 		{name: "restate failure", agent: "aerial", stubStatus: http.StatusInternalServerError, stubBody: `{"message":"boom"}`, wantErrSub: "boom", wantPath: "/LLM/Complete"},
@@ -600,66 +668,7 @@ func TestNewRestateLLMFunc(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			release := make(chan struct{})
-			seen := make(chan llmIngressCapture, 1)
-			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				c := llmIngressCapture{path: r.URL.Path, idemKey: r.Header.Get("Idempotency-Key")}
-				_, c.hasKey = r.Header["Idempotency-Key"]
-				_ = json.NewDecoder(r.Body).Decode(&c.req)
-				seen <- c
-				if tc.cancelCaller {
-					select {
-					case <-r.Context().Done():
-					case <-release:
-					}
-					return
-				}
-				w.WriteHeader(tc.stubStatus)
-				_, _ = w.Write([]byte(tc.stubBody))
-			}))
-			t.Cleanup(ts.Close)
-			t.Cleanup(func() { close(release) })
-
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-			client := NewRestateIngressClient(ts.URL, tc.agent, ts.Client())
-			if tc.nilClient {
-				client = nil
-			}
-			done := make(chan struct{})
-			var resp string
-			var err error
-			go func() {
-				defer close(done)
-				resp, err = NewRestateLLMFunc(client)(ctx, "flash", "summarize")
-			}()
-			var got llmIngressCapture
-			if tc.cancelCaller {
-				got = <-seen
-				cancel()
-			}
-			<-done
-			if !tc.cancelCaller {
-				// The stub records the request before it writes the response, so
-				// a finished call has already published its capture (if any).
-				select {
-				case got = <-seen:
-				default:
-				}
-			}
-
-			if tc.wantErrSub != "" {
-				require.ErrorContains(t, err, tc.wantErrSub)
-			} else {
-				require.NoError(t, err)
-			}
-			assert.Equal(t, tc.wantResponse, resp)
-			assert.False(t, got.hasKey, "unkeyed call must not send Idempotency-Key")
-			assert.Equal(t, tc.wantPath, got.path)
-			if tc.wantPath != "" {
-				assert.Equal(t, llmcall.Request{Prompt: "summarize", Model: "flash"}, got.req)
-			}
+			runNewRestateLLMCase(t, tc)
 		})
 	}
 }

@@ -113,12 +113,16 @@ func setupCompileRuleBlockers(t *testing.T, aerialDir, configDir string, tc comp
 	if tc.aerialEngineIsFile {
 		path := filepath.Join(aerialDir, "discord", "claude")
 		_ = os.RemoveAll(path)
-		_ = os.WriteFile(path, []byte("file-not-dir"), 0o644)
+		if err := os.WriteFile(path, []byte("file-not-dir"), 0o644); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
 	}
 	if tc.userEngineIsFile {
 		path := filepath.Join(configDir, "discord", "claude")
 		_ = os.RemoveAll(path)
-		_ = os.WriteFile(path, []byte("file-not-dir"), 0o644)
+		if err := os.WriteFile(path, []byte("file-not-dir"), 0o644); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
 	}
 	if tc.aerialEngineTorn {
 		writeTestFile(t, filepath.Join(aerialDir, "discord", "claude", "torn.md"), "")
@@ -138,7 +142,9 @@ func setupCompileRuleBlockers(t *testing.T, aerialDir, configDir string, tc comp
 	} {
 		if pt.cond {
 			_ = os.RemoveAll(pt.path)
-			_ = os.WriteFile(pt.path, []byte("file-not-dir"), 0o644)
+			if err := os.WriteFile(pt.path, []byte("file-not-dir"), 0o644); err != nil {
+				t.Fatalf("WriteFile: %v", err)
+			}
 		}
 	}
 }
@@ -198,7 +204,7 @@ func runCompileAndDiscoverRulesCase(t *testing.T, tc compileAndDiscoverRulesCase
 		content = ""
 	}
 
-	p, aerialDir, configDir := newTestProvisioner(t, map[string]string{
+	p := newTestProvisioner(t, map[string]string{
 		"common/01_identity.md":     "Aerial core identity",
 		"discord/01_chat.md":        "Discord chat handling",
 		"discord/claude/01_exec.md": "Claude discord instructions",
@@ -213,7 +219,7 @@ func runCompileAndDiscoverRulesCase(t *testing.T, tc compileAndDiscoverRulesCase
 		"discord/codex/10_custom.md":  "User codex customizations",
 	})
 
-	setupCompileRuleBlockers(t, aerialDir, configDir, tc)
+	setupCompileRuleBlockers(t, p.aerialRulesDir, p.configRulesDir, tc)
 
 	var rules []ruleSourceFile
 	var err error
@@ -482,18 +488,32 @@ func assertPrimaryRulesMD(t *testing.T, p *Provisioner, tc syncRulesCase) {
 	assertNonEmptyWithoutFrontmatter(t, museMD, "muse AGENTS.md")
 
 	if tc.checkIsolation {
-		cData, _ := os.ReadFile(claudeMD)
-		if !strings.Contains(string(cData), "Claude Discord Content") || strings.Contains(string(cData), "Codex Discord Content") {
-			t.Errorf("primary CLAUDE.md isolation failure: %s", string(cData))
-		}
-		codexData, _ := os.ReadFile(codexMD)
-		if !strings.Contains(string(codexData), "Codex Discord Content") || strings.Contains(string(codexData), "Claude Discord Content") {
-			t.Errorf("primary AGENTS.md isolation failure: %s", string(codexData))
-		}
-		museData, _ := os.ReadFile(museMD)
-		if !strings.Contains(string(museData), "Muse Discord Content") || strings.Contains(string(museData), "Claude Discord Content") {
-			t.Errorf("primary muse AGENTS.md isolation failure: %s", string(museData))
-		}
+		assertPrimaryRulesIsolation(t, claudeMD, codexMD, museMD)
+	}
+}
+
+func assertPrimaryRulesIsolation(t *testing.T, claudeMD, codexMD, museMD string) {
+	t.Helper()
+	cData, err := os.ReadFile(claudeMD)
+	if err != nil {
+		t.Fatalf("ReadFile(claudeMD): %v", err)
+	}
+	if !strings.Contains(string(cData), "Claude Discord Content") || strings.Contains(string(cData), "Codex Discord Content") {
+		t.Errorf("primary CLAUDE.md isolation failure: %s", string(cData))
+	}
+	codexData, err := os.ReadFile(codexMD)
+	if err != nil {
+		t.Fatalf("ReadFile(codexMD): %v", err)
+	}
+	if !strings.Contains(string(codexData), "Codex Discord Content") || strings.Contains(string(codexData), "Claude Discord Content") {
+		t.Errorf("primary AGENTS.md isolation failure: %s", string(codexData))
+	}
+	museData, err := os.ReadFile(museMD)
+	if err != nil {
+		t.Fatalf("ReadFile(museMD): %v", err)
+	}
+	if !strings.Contains(string(museData), "Muse Discord Content") || strings.Contains(string(museData), "Claude Discord Content") {
+		t.Errorf("primary muse AGENTS.md isolation failure: %s", string(museData))
 	}
 }
 
@@ -540,7 +560,10 @@ func assertDiscordGeminiIsolation(t *testing.T, p *Provisioner) {
 
 func assertDiscordEngineMDIsolation(t *testing.T, p *Provisioner) {
 	t.Helper()
-	discordClaudeMD, _ := os.ReadFile(filepath.Join(p.runtimeHomeDir(TargetDiscord), ".claude", "CLAUDE.md"))
+	discordClaudeMD, err := os.ReadFile(filepath.Join(p.runtimeHomeDir(TargetDiscord), ".claude", "CLAUDE.md"))
+	if err != nil {
+		t.Fatalf("ReadFile(discordClaudeMD): %v", err)
+	}
 	if !strings.Contains(string(discordClaudeMD), "Claude Discord Content") {
 		t.Errorf("discord .claude/CLAUDE.md missing Claude content: %s", string(discordClaudeMD))
 	}
@@ -548,7 +571,10 @@ func assertDiscordEngineMDIsolation(t *testing.T, p *Provisioner) {
 		t.Errorf("discord .claude/CLAUDE.md leaked codex/muse content: %s", string(discordClaudeMD))
 	}
 
-	discordCodexMD, _ := os.ReadFile(filepath.Join(p.runtimeHomeDir(TargetDiscord), ".codex", "AGENTS.md"))
+	discordCodexMD, err := os.ReadFile(filepath.Join(p.runtimeHomeDir(TargetDiscord), ".codex", "AGENTS.md"))
+	if err != nil {
+		t.Fatalf("ReadFile(discordCodexMD): %v", err)
+	}
 	if !strings.Contains(string(discordCodexMD), "Codex Discord Content") {
 		t.Errorf("discord .codex/AGENTS.md missing Codex content: %s", string(discordCodexMD))
 	}
@@ -556,7 +582,10 @@ func assertDiscordEngineMDIsolation(t *testing.T, p *Provisioner) {
 		t.Errorf("discord .codex/AGENTS.md leaked claude/muse content: %s", string(discordCodexMD))
 	}
 
-	discordMuseMD, _ := os.ReadFile(filepath.Join(p.runtimeHomeDir(TargetDiscord), ".config", "muse", "AGENTS.md"))
+	discordMuseMD, err := os.ReadFile(filepath.Join(p.runtimeHomeDir(TargetDiscord), ".config", "muse", "AGENTS.md"))
+	if err != nil {
+		t.Fatalf("ReadFile(discordMuseMD): %v", err)
+	}
 	if !strings.Contains(string(discordMuseMD), "Muse Discord Content") {
 		t.Errorf("discord muse AGENTS.md missing Muse content: %s", string(discordMuseMD))
 	}
@@ -567,7 +596,10 @@ func assertDiscordEngineMDIsolation(t *testing.T, p *Provisioner) {
 
 func assertVoiceAndEphemeralIsolation(t *testing.T, p *Provisioner) {
 	t.Helper()
-	voiceClaudeMD, _ := os.ReadFile(filepath.Join(p.runtimeHomeDir(TargetVoice), ".claude", "CLAUDE.md"))
+	voiceClaudeMD, err := os.ReadFile(filepath.Join(p.runtimeHomeDir(TargetVoice), ".claude", "CLAUDE.md"))
+	if err != nil {
+		t.Fatalf("ReadFile(voiceClaudeMD): %v", err)
+	}
 	if strings.Contains(string(voiceClaudeMD), "Claude Discord Content") || strings.Contains(string(voiceClaudeMD), "Discord content") {
 		t.Errorf("voice runtime leaked discord content: %s", string(voiceClaudeMD))
 	}
@@ -575,7 +607,10 @@ func assertVoiceAndEphemeralIsolation(t *testing.T, p *Provisioner) {
 		t.Errorf("voice runtime missing voice content: %s", string(voiceClaudeMD))
 	}
 
-	ephClaudeMD, _ := os.ReadFile(filepath.Join(p.runtimeHomeDir(TargetEphemeral), ".claude", "CLAUDE.md"))
+	ephClaudeMD, err := os.ReadFile(filepath.Join(p.runtimeHomeDir(TargetEphemeral), ".claude", "CLAUDE.md"))
+	if err != nil {
+		t.Fatalf("ReadFile(ephClaudeMD): %v", err)
+	}
 	if strings.Contains(string(ephClaudeMD), "Claude Discord Content") || strings.Contains(string(ephClaudeMD), "Discord content") {
 		t.Errorf("ephemeral runtime leaked discord content: %s", string(ephClaudeMD))
 	}
@@ -614,7 +649,7 @@ func runSyncRulesCase(t *testing.T, tc syncRulesCase) {
 		return
 	}
 
-	p, aerialDir, _ := newTestProvisioner(t, map[string]string{
+	p := newTestProvisioner(t, map[string]string{
 		"common/01_rule.md":           "Common content",
 		"discord/01_rule.md":          "Discord content",
 		"discord/agy/01_agy.md":       "Agy Discord Content",
@@ -642,16 +677,16 @@ func runSyncRulesCase(t *testing.T, tc syncRulesCase) {
 	}
 
 	if tc.voiceFail {
-		writeTestFile(t, filepath.Join(aerialDir, "voice", "torn.md"), "")
+		writeTestFile(t, filepath.Join(p.aerialRulesDir, "voice", "torn.md"), "")
 	}
 	if tc.ephemeralFail {
-		writeTestFile(t, filepath.Join(aerialDir, "ephemeral", "torn.md"), "")
+		writeTestFile(t, filepath.Join(p.aerialRulesDir, "ephemeral", "torn.md"), "")
 	}
 	if tc.claudeDiscordFail {
-		writeTestFile(t, filepath.Join(aerialDir, "discord", "claude", "torn.md"), "")
+		writeTestFile(t, filepath.Join(p.aerialRulesDir, "discord", "claude", "torn.md"), "")
 	}
 	if tc.codexDiscordFail {
-		writeTestFile(t, filepath.Join(aerialDir, "discord", "codex", "torn.md"), "")
+		writeTestFile(t, filepath.Join(p.aerialRulesDir, "discord", "codex", "torn.md"), "")
 	}
 	if tc.primaryFail {
 		writeTestFile(t, filepath.Join(p.homeDir, ".gemini", "rules"), "file blocker")
