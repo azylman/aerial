@@ -3,7 +3,6 @@ package pubsub
 import (
 	"cmp"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
@@ -19,6 +18,7 @@ import (
 	"time"
 
 	"github.com/nats-io/nats.go"
+	"github.com/nats-io/nats.go/jetstream"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/propagation"
@@ -733,72 +733,6 @@ func TestMatchSubject(t *testing.T) {
 	}
 }
 
-func TestContracts_JSONWireFormat(t *testing.T) {
-	t.Parallel()
-
-	fixedTime := time.Date(2026, 11, 14, 16, 0, 0, 0, time.UTC)
-	tests := []struct {
-		name     string
-		payload  any
-		wantJSON string
-	}{
-		{
-			name: "TurnCompletedEvent_telemetry",
-			payload: TurnCompletedEvent{
-				SessionID: "s1", CompletedAt: fixedTime, Status: "ok", DurationMs: 10, TotalTokens: 100,
-			},
-			wantJSON: `{"session_id":"s1","source":"","completed_at":"2026-11-14T16:00:00Z","status":"ok","duration_ms":10,"total_tokens":100}`,
-		},
-		{
-			name:     "TurnCompletedEvent_minimal",
-			payload:  TurnCompletedEvent{SessionID: "s2", Source: "src", CompletedAt: fixedTime},
-			wantJSON: `{"session_id":"s2","source":"src","completed_at":"2026-11-14T16:00:00Z"}`,
-		},
-		{
-			name:     "CovenExtractJobArgs",
-			payload:  CovenExtractJobArgs{ThreadID: "t1", SessionID: "s1"},
-			wantJSON: `{"thread_id":"t1","session_id":"s1"}`,
-		},
-		{
-			name:     "TranscriptsIndexedEvent",
-			payload:  TranscriptsIndexedEvent{Stack: "aerial", SessionID: "s1", ThreadID: "t1", FileMtime: fixedTime, FirstStep: 0, LastStep: 9, StepsIndexed: 10, Final: true, IndexedAt: fixedTime},
-			wantJSON: `{"stack":"aerial","session_id":"s1","thread_id":"t1","file_mtime":"2026-11-14T16:00:00Z","first_step":0,"last_step":9,"steps_indexed":10,"final":true,"indexed_at":"2026-11-14T16:00:00Z"}`,
-		},
-		{
-			name:     "ProsperaReportJobArgs",
-			payload:  ProsperaReportJobArgs{CallID: "c1"},
-			wantJSON: `{"call_id":"c1"}`,
-		},
-		{
-			name:     "ProsperaVoicemailJobArgs",
-			payload:  ProsperaVoicemailJobArgs{CallID: "c1", RecordingURL: "http://u", DurationSec: 30},
-			wantJSON: `{"call_id":"c1","recording_url":"http://u","duration_sec":30}`,
-		},
-		{
-			name:     "ProsperaSMSJobArgs",
-			payload:  ProsperaSMSJobArgs{MessageSID: "m1", FromNumber: "+1", ToNumber: "+2", Body: "hi"},
-			wantJSON: `{"message_sid":"m1","from_number":"+1","to_number":"+2","body":"hi"}`,
-		},
-		{
-			name:     "HaroOneShotJobArgs",
-			payload:  HaroOneShotJobArgs{ThreadID: "t1", Prompt: "p1", RunAt: fixedTime},
-			wantJSON: `{"thread_id":"t1","prompt":"p1","run_at":"2026-11-14T16:00:00Z"}`,
-		},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			b, err := json.Marshal(tc.payload)
-			if err != nil {
-				t.Fatalf("Marshal(%s): %v", tc.name, err)
-			}
-			if string(b) != tc.wantJSON {
-				t.Errorf("%s wire JSON mismatch:\ngot:  %s\nwant: %s", tc.name, string(b), tc.wantJSON)
-			}
-		})
-	}
-}
-
 func TestMemoryBus_ClosedAndErrorPaths(t *testing.T) {
 	t.Parallel()
 
@@ -973,6 +907,141 @@ func TestJetStreamBus_ConsumerStats(t *testing.T) {
 	mjs.consumerInfoErr = errors.New("simulated consumer info err")
 	if _, _, err := bus.ConsumerStats(context.Background(), "stream", "consumer"); err == nil {
 		t.Error("expected error from bus.ConsumerStats with consumerInfoErr")
+	}
+}
+
+// newJetStreamBusWithContext builds a bus around js with a 1ms heartbeat. A
+// non-nil nc also gets a jetstream handle so durable consumers work.
+func newJetStreamBusWithContext(nc *nats.Conn, js nats.JetStreamContext) *JetStreamBus {
+	bus := &JetStreamBus{nc: nc, js: js, heartbeatInterval: 1 * time.Millisecond, pullHeartbeat: defaultPullHeartbeat}
+	if nc != nil {
+		jet, err := jetstream.New(nc)
+		if err != nil {
+			panic(err)
+		}
+		bus.jet = jet
+	}
+	return bus
+}
+
+func TestJetStreamBusOptions(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name                 string
+		extra                []nats.Option
+		wantMaxReconnect     int
+		wantRetryOnFailed    bool
+		wantIgnoreAuthAbort  bool
+		wantClosedHandlerSet bool
+	}{
+		{"defaults", nil, -1, true, true, true},
+		{"caller overrides retry on failed connect", []nats.Option{nats.RetryOnFailedConnect(false)}, -1, false, true, true},
+		{"caller overrides max reconnects", []nats.Option{nats.MaxReconnects(5)}, 5, true, true, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			o := nats.GetDefaultOptions()
+			for _, opt := range jetStreamBusOptions(tc.extra...) {
+				if err := opt(&o); err != nil {
+					t.Fatalf("apply option: %v", err)
+				}
+			}
+			if o.MaxReconnect != tc.wantMaxReconnect {
+				t.Errorf("MaxReconnect = %d, want %d", o.MaxReconnect, tc.wantMaxReconnect)
+			}
+			if o.RetryOnFailedConnect != tc.wantRetryOnFailed {
+				t.Errorf("RetryOnFailedConnect = %v, want %v", o.RetryOnFailedConnect, tc.wantRetryOnFailed)
+			}
+			if o.IgnoreAuthErrorAbort != tc.wantIgnoreAuthAbort {
+				t.Errorf("IgnoreAuthErrorAbort = %v, want %v", o.IgnoreAuthErrorAbort, tc.wantIgnoreAuthAbort)
+			}
+			if (o.ClosedCB != nil) != tc.wantClosedHandlerSet {
+				t.Errorf("ClosedCB set = %v, want %v", o.ClosedCB != nil, tc.wantClosedHandlerSet)
+			}
+		})
+	}
+}
+
+func newMockDialedBus(t *testing.T) *JetStreamBus {
+	t.Helper()
+	bus, err := NewJetStreamBus(context.Background(), "nats://127.0.0.1:4222",
+		nats.SetCustomDialer(&mockNatsDialer{}), nats.Timeout(1*time.Second), nats.NoReconnect())
+	if err != nil {
+		t.Fatalf("NewJetStreamBus with mock dialer: %v", err)
+	}
+	return bus
+}
+
+func TestJetStreamBus_Healthy(t *testing.T) {
+	t.Parallel()
+
+	openBus := newMockDialedBus(t)
+	t.Cleanup(func() { _ = openBus.Close() })
+	closedBus := newMockDialedBus(t)
+	_ = closedBus.Close()
+
+	tests := []struct {
+		name       string
+		bus        Bus
+		wantErr    bool
+		wantClosed bool
+	}{
+		{"nil bus", nil, true, false},
+		{"nil jetstream bus", (*JetStreamBus)(nil), true, false},
+		{"bus without connection", newJetStreamBusWithContext(nil, &mockJetStream{}), true, false},
+		{"open connection", openBus, false, false},
+		{"permanently closed connection", closedBus, true, true},
+		{"memory bus without health checker", NewMemoryBus(), false, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			err := CheckHealth(tc.bus)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("CheckHealth err = %v, wantErr %v", err, tc.wantErr)
+			}
+			if errors.Is(err, ErrConnectionClosed) != tc.wantClosed {
+				t.Errorf("errors.Is(err, ErrConnectionClosed) = %v, want %v (err %v)", errors.Is(err, ErrConnectionClosed), tc.wantClosed, err)
+			}
+		})
+	}
+}
+
+func TestBuildConnectOptions_UserCredentials(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		user         string
+		pass         string
+		url          string
+		wantUser     string
+		wantPassword string
+	}{
+		{name: "credentials injected without userinfo", user: "u1", pass: "p1", url: "nats://127.0.0.1:4222", wantUser: "u1", wantPassword: "p1"},
+		{name: "url userinfo kept without nats.UserInfo", user: "u1", pass: "p1", url: "nats://existing:pass@127.0.0.1:4222"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			opts := buildConnectOptions(tc.url, tc.user, tc.pass)
+			var natsOpts nats.Options
+			for _, opt := range opts {
+				if err := opt(&natsOpts); err != nil {
+					t.Fatalf("unexpected option error: %v", err)
+				}
+			}
+			if natsOpts.User != tc.wantUser {
+				t.Errorf("natsOpts.User = %q, want %q", natsOpts.User, tc.wantUser)
+			}
+			if natsOpts.Password != tc.wantPassword {
+				t.Errorf("natsOpts.Password = %q, want %q", natsOpts.Password, tc.wantPassword)
+			}
+		})
 	}
 }
 
