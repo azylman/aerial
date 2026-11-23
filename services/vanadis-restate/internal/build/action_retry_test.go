@@ -10,7 +10,6 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/jackc/pgx/v5/pgxpool"
 	restate "github.com/restatedev/sdk-go"
 	"github.com/stretchr/testify/require"
 
@@ -22,7 +21,7 @@ import (
 
 // retryStore seeds build b1 (failed) with a completed c0 and the failed
 // action chunk c1 carrying instructions, applying sabotage afterwards.
-func retryStore(t *testing.T, instructions, sabotage string) (*store.Store, *pgxpool.Pool) {
+func retryStore(t *testing.T, instructions, sabotage string) *store.Store {
 	t.Helper()
 	st, pool := seededStore(t,
 		[]model.VanadisBuild{{ID: "b1", ThreadID: "th-1", Status: "failed"}},
@@ -31,7 +30,7 @@ func retryStore(t *testing.T, instructions, sabotage string) (*store.Store, *pgx
 			{ID: "c1", BuildID: "b1", ChunkIndex: 1, Mode: "action", Status: "failed", Instructions: instructions},
 		})
 	mustExec(t, pool, sabotage)
-	return st, pool
+	return st
 }
 
 // retryStored is the persisted retry-relevant view of c1 and its build.
@@ -84,7 +83,7 @@ func TestBuildRetryAction(t *testing.T) {
 			if tc.failBuild {
 				sabotage = failStatement("vanadis_builds", "UPDATE")
 			}
-			st, _ := retryStore(t, "", sabotage)
+			st := retryStore(t, "", sabotage)
 			authority := &faultStore{VanadisStore: st}
 			if tc.lostCommit {
 				authority.lostAcks = map[string]error{"RetryActionChunk": errors.New("commit response lost")}
@@ -136,7 +135,7 @@ func TestBuildRetryActionConcurrent(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			st, _ := retryStore(t, "", "")
+			st := retryStore(t, "", "")
 			req := store.RetryActionChunkRequest{BuildID: "b1", ChunkID: "c1", ExpectedDispatchID: "vanadis-c1-turn-0", Reason: "retry"}
 			results := make(chan store.RetryActionChunkResult, tc.concurrent)
 			errs := make(chan error, tc.concurrent)
@@ -201,7 +200,7 @@ func TestRetryActionDispatchRecovery(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			st, _ := retryStore(t, "verify", "")
+			st := retryStore(t, "verify", "")
 			f := &retryDispatchFixture{accepted: map[string]eriwire.BrainDispatchRequest{}}
 			ts := httptest.NewServer(f)
 			defer ts.Close()

@@ -820,7 +820,7 @@ func TestPRObjectServiceLifecycleFacts(t *testing.T) {
 			if tc.stateTitle != "" {
 				st.Title = tc.stateTitle
 			}
-			mc, _ := newStateMock(t, st)
+			mc := newStateMockContext(t, st)
 			stubRun(mc, false)
 			err := NewPRObjectService().WithFactPublisher(pub).HandleMerged(restate.WithMockContext(mc), tc.ev)
 			require.Equal(t, tc.wantErr, restate.IsTerminalError(err), "err = %v", err)
