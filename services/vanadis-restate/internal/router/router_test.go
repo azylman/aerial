@@ -3,6 +3,7 @@ package router
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -173,12 +174,13 @@ func TestBuildRouterService_RoutePREvent(t *testing.T) {
 		chunks: []model.VanadisChunk{{BuildID: "b-thread", ID: "c1", Status: "running", StartedAt: started}},
 	}
 	tests := []struct {
-		name        string
-		ev          pubsub.PRLifecycleEvent
-		db          *dbFixture
-		wantBuildID string
-		wantErr     bool
-		wantMetric  float64
+		name            string
+		ev              pubsub.PRLifecycleEvent
+		db              *dbFixture
+		wantBuildID     string
+		wantBuildPrefix string
+		wantErr         bool
+		wantMetric      float64
 	}{
 		{name: "empty repo", ev: pubsub.PRLifecycleEvent{Repo: "", PRNumber: 101}, db: &dbFixture{}, wantErr: true},
 		{name: "zero pr number", ev: pubsub.PRLifecycleEvent{Repo: "aerial", PRNumber: 0}, db: &dbFixture{}, wantErr: true},
@@ -221,6 +223,12 @@ func TestBuildRouterService_RoutePREvent(t *testing.T) {
 			db: &dbFixture{},
 		},
 		{
+			name:            "standalone pr event opened creates and routes to new build",
+			ev:              pubsub.PRLifecycleEvent{Repo: "aerial", PRNumber: 109, Event: "opened", Branch: "feat/aerial-pr-t123456789012345678-012345"},
+			db:              &dbFixture{},
+			wantBuildPrefix: "build-",
+		},
+		{
 			// An integer chunk id cannot compare against the branch chunk id,
 			// while the PR lookup (no matching rows) still succeeds.
 			name: "branch-based lookup error propagates", ev: pubsub.PRLifecycleEvent{Repo: "aerial", PRNumber: 107, Event: "opened", Branch: branchChunk},
@@ -239,7 +247,11 @@ func TestBuildRouterService_RoutePREvent(t *testing.T) {
 			before := restatetest.MetricValue(t, "vanadis_restate_reconcile_errors_total", "RoutePREvent")
 			err := router.RoutePREvent(makeRouterMockContext(t), tc.ev)
 			assert.Equal(t, tc.wantErr, err != nil, "err = %v", err)
-			assert.Equal(t, tc.wantBuildID, inv.lastPRBuildID)
+			if tc.wantBuildPrefix != "" {
+				assert.True(t, strings.HasPrefix(inv.lastPRBuildID, tc.wantBuildPrefix))
+			} else {
+				assert.Equal(t, tc.wantBuildID, inv.lastPRBuildID)
+			}
 			assert.Equal(t, before+tc.wantMetric, restatetest.MetricValue(t, "vanadis_restate_reconcile_errors_total", "RoutePREvent"))
 		})
 	}
