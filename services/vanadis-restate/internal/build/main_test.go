@@ -494,7 +494,7 @@ func TestBuildObject_HandlersWithAuthorityAndMockContext(t *testing.T) {
 	assert.Equal(t, "running", stored.Status)
 	assert.Equal(t, "Updated Build", stored.Title)
 	require.Len(t, chunks, 2)
-	assert.Equal(t, []string{"c1", "merged", "101", "Merge conflict detected"}, []string{chunks[0].ID, chunks[0].Status, strconv.Itoa(chunks[0].PRNumber), chunks[0].Banner})
+	assert.Equal(t, []string{"c1", "merged", "101", ""}, []string{chunks[0].ID, chunks[0].Status, strconv.Itoa(chunks[0].PRNumber), chunks[0].Banner})
 	assert.Equal(t, []string{"b-auth-chunk-2", "pending", "Updated Action"}, []string{chunks[1].ID, chunks[1].Status, chunks[1].Title})
 }
 
