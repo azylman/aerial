@@ -231,7 +231,8 @@ func TestBuildObject_AttachPRPreservesOwner(t *testing.T) {
 			rt := newFakeObjectRuntime("b1")
 			rt.runStepErr = errors.New("stop after attach")
 			bo := NewBuildObject("", nil, func(restate.ObjectContext) objectRuntime { return rt }).WithAuthority(spy, nil)
-			_, _ = bo.AttachPR(makeObjectMockContext(t, "b1"), store.AttachChunkPRRequest{Repo: "aerial", PRNumber: 7, Agent: tc.reqAgent})
+			_, err := bo.AttachPR(makeObjectMockContext(t, "b1"), store.AttachChunkPRRequest{Repo: "aerial", PRNumber: 7, Agent: tc.reqAgent})
+			require.Error(t, err)
 			assert.Equal(t, []string{tc.wantAgent}, pickCalls(spy.attemptedCalls(), "AttachChunkPR", "", 3))
 		})
 	}

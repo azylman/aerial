@@ -48,6 +48,17 @@ func openStore(t *testing.T) (*store.Store, *pgxpool.Pool) {
 	return store.New(pool, testOwner), pool
 }
 
+// openStoreOnly opens a private cloned database and returns just the Store.
+func openStoreOnly(t *testing.T) *store.Store {
+	t.Helper()
+	pool, err := pgutil.NewPool(context.Background(), pgtest.NewDSN(t), pgutil.PoolOptions{MaxConns: 10, Ping: true})
+	if err != nil {
+		t.Fatalf("open pool: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	return store.New(pool, testOwner)
+}
+
 // seededStore opens a private database and seeds builds then chunks.
 func seededStore(t *testing.T, builds []model.VanadisBuild, chunks []model.VanadisChunk) (*store.Store, *pgxpool.Pool) {
 	t.Helper()
@@ -59,6 +70,19 @@ func seededStore(t *testing.T, builds []model.VanadisBuild, chunks []model.Vanad
 		seedChunk(t, pool, c)
 	}
 	return st, pool
+}
+
+// seededStoreOnly opens a private database, seeds builds then chunks, and returns just the Store.
+func seededStoreOnly(t *testing.T, builds []model.VanadisBuild, chunks []model.VanadisChunk) *store.Store {
+	t.Helper()
+	st, pool := openStore(t)
+	for _, b := range builds {
+		seedBuild(t, pool, b)
+	}
+	for _, c := range chunks {
+		seedChunk(t, pool, c)
+	}
+	return st
 }
 
 // closedStore returns a Store whose pool is already closed, so Begin, Query,
@@ -170,6 +194,17 @@ func loadBuild(t *testing.T, st *store.Store, id string) (model.VanadisBuild, []
 		t.Fatalf("load build %s: %v", id, err)
 	}
 	return *b, chunks
+}
+
+// loadBuildBuild reads one stored build without returning chunks.
+func loadBuildBuild(t *testing.T, st *store.Store, id string) model.VanadisBuild {
+	t.Helper()
+	b, chunks, err := st.GetBuild(context.Background(), id)
+	if err != nil {
+		t.Fatalf("load build %s: %v", id, err)
+	}
+	_ = chunks
+	return *b
 }
 
 // chunkStatuses maps chunk id to stored status for build id.

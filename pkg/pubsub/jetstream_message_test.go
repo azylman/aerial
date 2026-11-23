@@ -146,7 +146,9 @@ func TestJetStreamBus_Dispatch(t *testing.T) {
 					got.traceID = spanCtx.TraceID().String()
 				}
 				if tc.termInHandler {
-					_ = msg.InProgress()
+					if err := msg.InProgress(); err != nil {
+						return err
+					}
 					return msg.Term()
 				}
 				return tc.handlerErr

@@ -104,6 +104,22 @@ func newStateMock[T any](t *testing.T, existing T) (*mocks.MockContext, *stateCa
 	return mc, rec
 }
 
+// newStateMockContext stubs the Restate K/V surface returning only the MockContext
+// for handlers where stateCapture is not needed.
+func newStateMockContext[T any](t *testing.T, existing T) *mocks.MockContext {
+	t.Helper()
+	mc := mocks.NewMockContext(t)
+	captureSends(t, mc)
+	mc.On("Key").Return("azylman/aerial").Maybe()
+	mc.On("Get", "state", mock.Anything).Run(func(args mock.Arguments) {
+		if pp, ok := args.Get(1).(*T); ok && pp != nil {
+			*pp = existing
+		}
+	}).Return(true, nil).Maybe()
+	mc.On("Set", "state", mock.Anything).Maybe()
+	return mc
+}
+
 // stubRunContext is the hermetic restate.RunContext for executing Run
 // closures in mocks.
 type stubRunContext struct {
@@ -200,6 +216,18 @@ func stateKV[T any](t *testing.T, existing T, kvFail, noKV bool) (*mocks.MockCon
 func prKV(t *testing.T, existing *PRState, kvFail, noKV bool) (*mocks.MockContext, *stateCapture[*PRState]) {
 	t.Helper()
 	return stateKV(t, existing, kvFail, noKV)
+}
+
+// prKVContext is stateKV returning only the MockContext when stateCapture is not needed.
+func prKVContext(t *testing.T, existing *PRState, kvFail, noKV bool) *mocks.MockContext {
+	t.Helper()
+	switch {
+	case noKV:
+		return mocks.NewMockContext(t)
+	case kvFail:
+		return newStateErrorMock(t)
+	}
+	return newStateMockContext(t, existing)
 }
 
 // repoKV is stateKV for RepoObject rows.

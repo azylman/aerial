@@ -99,6 +99,9 @@ func doRequest(t *testing.T, api *githubapitest.Server, method, path string) rep
 		t.Fatalf("Do: %v", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
-	body, _ := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
 	return reply{Status: resp.StatusCode, Body: string(body), Remaining: resp.Header.Get("X-Ratelimit-Remaining"), RetryAfter: resp.Header.Get("Retry-After")}
 }

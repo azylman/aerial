@@ -137,13 +137,22 @@ type fakeCDPParams struct {
 func (s *fakeCDPServer) write(ws *websocket.Conn, msg any) {
 	s.wsMu.Lock()
 	defer s.wsMu.Unlock()
-	_ = ws.WriteJSON(msg)
+	if err := ws.WriteJSON(msg); err != nil {
+		// Write errors occur when a test closes or detaches the client connection early;
+		// connection closure is expected during teardown and safely ignored.
+		return
+	}
 }
 
 // reply returns the reply for req, or nil when the request gets no reply.
 func (s *fakeCDPServer) reply(req fakeCDPReq) any {
 	var p fakeCDPParams
-	_ = json.Unmarshal(req.Params, &p)
+	if len(req.Params) > 0 {
+		if err := json.Unmarshal(req.Params, &p); err != nil {
+			// Malformed or non-object params are safely ignored by omitting the reply.
+			return nil
+		}
+	}
 	if req.Method == s.opts.withholdMethod {
 		return nil
 	}
@@ -244,7 +253,10 @@ func startFakeCDPServer(t *testing.T, opts fakeCDPOptions) (*fakeCDPServer, *con
 		fakeSrv.Close()
 	})
 
-	u, _ := url.Parse(fakeSrv.URL)
+	u, err := url.Parse(fakeSrv.URL)
+	if err != nil {
+		t.Fatalf("parse fake cdp url: %v", err)
+	}
 	cfg := &config.Config{Port: "4018", CDPHost: u.Hostname(), CDPPort: u.Port(), SettleDelay: time.Millisecond}
 	if opts.emptyHost {
 		cfg.CDPHost = ""

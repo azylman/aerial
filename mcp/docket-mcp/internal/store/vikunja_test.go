@@ -44,7 +44,11 @@ type vikunjaFake struct {
 
 func (f *vikunjaFake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	key := r.Method + " " + r.URL.Path
-	body, _ := io.ReadAll(r.Body)
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	f.mu.Lock()
 	f.calls = append(f.calls, key)
 	f.bodies = append(f.bodies, string(body))
@@ -283,10 +287,27 @@ func (s pagedTasksServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(vikunjaErrBody))
 		return
 	}
-	perPage, _ := strconv.Atoi(r.URL.Query().Get("per_page"))
+	perPage := s.maxPerPage
+	if raw := r.URL.Query().Get("per_page"); raw != "" {
+		var err error
+		perPage, err = strconv.Atoi(raw)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
 	perPage = min(perPage, s.maxPerPage)
-	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
-	if s.ignorePage {
+
+	page := 1
+	if raw := r.URL.Query().Get("page"); raw != "" {
+		var err error
+		page, err = strconv.Atoi(raw)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
+	if s.ignorePage || page < 1 {
 		page = 1
 	}
 	tasks := []config.VikunjaTask{}

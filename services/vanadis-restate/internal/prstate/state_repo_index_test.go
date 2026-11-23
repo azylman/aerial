@@ -112,7 +112,10 @@ func TestRepoState_ApplyPRIndex(t *testing.T) {
 			if got := st.DeployingPRNumbers(); !slices.Equal(got, tc.wantDeploying) {
 				t.Fatalf("deploying = %v, want %v", got, tc.wantDeploying)
 			}
-			entry, _ := st.ResolveSHA(tc.probeSHA)
+			entry, ok := st.ResolveSHA(tc.probeSHA)
+			if (entry.PRNumber != 0) != ok {
+				t.Fatalf("ResolveSHA(%q) ok = %v, entry = %+v", tc.probeSHA, ok, entry)
+			}
 			if entry.PRNumber != tc.wantPR || entry.Branch != tc.wantBranch {
 				t.Fatalf("ResolveSHA(%q) = (%d,%q), want (%d,%q)", tc.probeSHA, entry.PRNumber, entry.Branch, tc.wantPR, tc.wantBranch)
 			}
@@ -140,7 +143,10 @@ func TestRepoState_IndexRetention(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			st := seededRepoState(tc.seed, nil)
-			entry, _ := st.ResolveSHA(tc.probeSHA)
+			entry, ok := st.ResolveSHA(tc.probeSHA)
+			if (entry.PRNumber != 0) != ok {
+				t.Fatalf("ResolveSHA(%q) ok = %v, entry = %+v", tc.probeSHA, ok, entry)
+			}
 			if entry.PRNumber != tc.wantPR {
 				t.Fatalf("ResolveSHA(%q) = %d, want %d", tc.probeSHA, entry.PRNumber, tc.wantPR)
 			}
@@ -234,8 +240,8 @@ func TestRepoState_RoutingSetsNilSafe(t *testing.T) {
 			if got := st.DeployingPRNumbers(); !slices.Equal(got, tc.wantDeploying) {
 				t.Fatalf("deploying = %v, want %v", got, tc.wantDeploying)
 			}
-			if changed, _ := st.ApplyPRIndex(idxActive(101, "h1", "", 0)); changed != !tc.nilState {
-				t.Fatalf("ApplyPRIndex changed = %v, want %v", changed, !tc.nilState)
+			if changed, replay := st.ApplyPRIndex(idxActive(101, "h1", "", 0)); changed != !tc.nilState || len(replay) > 0 {
+				t.Fatalf("ApplyPRIndex changed = %v (replay = %v), want %v", changed, replay, !tc.nilState)
 			}
 		})
 	}

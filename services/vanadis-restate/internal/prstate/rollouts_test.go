@@ -261,7 +261,7 @@ func TestPRObjectServiceGetDeployView(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			mc, _ := newStateMock(t, tc.seed)
+			mc := newStateMockContext(t, tc.seed)
 			got, err := NewPRObjectService().GetDeployView(restate.WithMockContext(mc), DeployViewRequest{})
 			require.NoError(t, err)
 			require.Equal(t, tc.want, got)
@@ -320,7 +320,7 @@ func TestPRObjectServiceHandleKustomizationRequestedStartedFact(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			mc, _ := newStateMock(t, tc.seed)
+			mc := newStateMockContext(t, tc.seed)
 			stubRun(mc, true)
 			pub := &fakeFactPublisher{}
 			ev := PREvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "m1", Jobs: []string{"eri"}, KustomizationRequests: coreRequests, Facts: []pubsub.PRLifecycleEvent{started}}
@@ -351,7 +351,7 @@ func TestPRObjectServiceHandleReconcileLost(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			mc, _ := newStateMock(t, tc.seed)
+			mc := newStateMockContext(t, tc.seed)
 			stubRun(mc, true)
 			kube := &fakeKube{}
 			err := NewPRObjectService().WithKube(kube).HandleReconcileLost(restate.WithMockContext(mc), tc.ev)
@@ -378,6 +378,20 @@ func newRolloutIndexMock(t *testing.T, key string, existing *RolloutIndexState) 
 		}
 	}).Maybe()
 	return mc, saved
+}
+
+// newRolloutIndexMockContext returns only the MockContext when the saved pointer is not needed.
+func newRolloutIndexMockContext(t *testing.T, key string, existing *RolloutIndexState) *mocks.MockContext {
+	t.Helper()
+	mc := mocks.NewMockContext(t)
+	mc.On("Key").Return(key).Maybe()
+	mc.On("Get", rolloutIndexStateKey, mock.Anything).Run(func(args mock.Arguments) {
+		if pp, ok := args.Get(1).(**RolloutIndexState); ok && pp != nil {
+			*pp = existing
+		}
+	}).Return(true, nil).Maybe()
+	mc.On("Set", rolloutIndexStateKey, mock.Anything).Maybe()
+	return mc
 }
 
 func TestRepoObjectServiceRolloutIndex(t *testing.T) {
@@ -407,7 +421,7 @@ func TestRepoObjectServiceRolloutIndex(t *testing.T) {
 			if *saved != nil {
 				after = *saved
 			}
-			listMC, _ := newRolloutIndexMock(t, tc.key, after)
+			listMC := newRolloutIndexMockContext(t, tc.key, after)
 			got, err := svc.ListRollouts(restate.WithMockContext(listMC), ListRolloutsRequest{})
 			require.NoError(t, err)
 			require.Equal(t, tc.wantList, got.Rollouts, "key "+tc.key)

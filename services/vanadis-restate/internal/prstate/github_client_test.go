@@ -25,6 +25,13 @@ func newFakeGitHub(t *testing.T, routes map[string][]apiResponse) (*GitHubClient
 	return NewGitHubClient(api.Client(), api.URL()+"/", "tok"), api
 }
 
+// newFakeGitHubClient starts the shared fake GitHub API with routes and returns only the client.
+func newFakeGitHubClient(t *testing.T, routes map[string][]apiResponse) *GitHubClient {
+	t.Helper()
+	api := githubapitest.New(t, routes)
+	return NewGitHubClient(api.Client(), api.URL()+"/", "tok")
+}
+
 const (
 	updateBranchRoute = "PUT /repos/azylman/aerial/pulls/7/update-branch"
 	openPRsRoute      = "GET /repos/azylman/aerial/pulls?state=open&base=main&sort=created&direction=asc&per_page=100"
@@ -229,7 +236,7 @@ func TestGitHubClientListOpenPRs(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			c, _ := newFakeGitHub(t, tc.routes)
+			c := newFakeGitHubClient(t, tc.routes)
 			got, gerr := c.ListOpenPRs(context.Background(), tc.repo)
 			require.Equal(t, tc.want, got)
 			if tc.wantErrStatus == 0 {
@@ -365,7 +372,7 @@ func TestGitHubClientHeadChecksBlocked(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			c, _ := newFakeGitHub(t, tc.routes)
+			c := newFakeGitHubClient(t, tc.routes)
 			require.Equal(t, tc.want, c.HeadChecksBlocked(context.Background(), "azylman/aerial", tc.sha))
 		})
 	}
@@ -388,7 +395,7 @@ func TestGitHubClientRerunFailedJobs(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			c, _ := newFakeGitHub(t, tc.routes)
+			c := newFakeGitHubClient(t, tc.routes)
 			gerr := c.RerunFailedJobs(context.Background(), "azylman/aerial", tc.runID)
 			if tc.wantNil {
 				require.Nil(t, gerr)

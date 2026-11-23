@@ -126,7 +126,9 @@ func TestLRUCache_Eviction(t *testing.T) {
 			}
 
 			if tc.touchKey != "" {
-				_, _ = cache.Get(tc.touchKey)
+				if _, ok := cache.Get(tc.touchKey); !ok {
+					t.Fatalf("expected touch key %q to exist", tc.touchKey)
+				}
 			}
 
 			cache.Set(tc.newKey, tc.newVal)
@@ -303,7 +305,10 @@ func TestExtractBearerToken(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			req, _ := http.NewRequest(http.MethodGet, "http://localhost/test", http.NoBody)
+			req, err := http.NewRequest(http.MethodGet, "http://localhost/test", http.NoBody)
+			if err != nil {
+				t.Fatalf("http.NewRequest: %v", err)
+			}
 			if tc.authHeader != "" {
 				req.Header.Set("Authorization", tc.authHeader)
 			}

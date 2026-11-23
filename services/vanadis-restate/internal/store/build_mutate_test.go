@@ -128,6 +128,21 @@ func bmOpen(t *testing.T, f bmFixture) (*Store, *pgxpool.Pool) {
 	return st, pool
 }
 
+// bmOpenStore materializes f into a Store (nil when the row uses no live database).
+func bmOpenStore(t *testing.T, f bmFixture) *Store {
+	t.Helper()
+	switch {
+	case f.nilDB:
+		return &Store{}
+	case f.closed:
+		return closedStore(t)
+	}
+	st, pool := openStore(t)
+	seed(t, pool, f.builds, f.chunks)
+	mustExec(t, pool, f.sabotage)
+	return st
+}
+
 // bmIndexed sets a fixture chunk's index.
 func bmIndexed(c model.VanadisChunk, idx int) model.VanadisChunk {
 	c.ChunkIndex = idx

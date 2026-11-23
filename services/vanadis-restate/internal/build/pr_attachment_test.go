@@ -42,7 +42,7 @@ func TestExecutePRAttachment(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			st, _ := seededStore(t,
+			st := seededStoreOnly(t,
 				[]model.VanadisBuild{{ID: "b1", ThreadID: "th-1", Status: statusRunning, Title: "Build", StatusMessageID: "msg-123"}},
 				[]model.VanadisChunk{{ID: "c1", BuildID: "b1", Status: statusRunning, Repo: tc.repo, Mode: tc.mode}})
 			if tc.closed {

@@ -180,37 +180,55 @@ func fixtureTasks() []config.VikunjaTask {
 	}
 }
 
+func handleFakeVikunjaListTasks(w http.ResponseWriter, r *http.Request, byID map[int64]config.VikunjaTask) {
+	page := 1
+	if raw := r.URL.Query().Get("page"); raw != "" {
+		var err error
+		page, err = strconv.Atoi(raw)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
+	if page < 1 {
+		page = 1
+	}
+	all := make([]config.VikunjaTask, 0, len(byID))
+	for _, t := range byID {
+		all = append(all, t)
+	}
+	slices.SortFunc(all, func(a, b config.VikunjaTask) int { return cmp.Compare(a.ID, b.ID) })
+	start := (page - 1) * fakeVikunjaMaxPerPage
+	if start >= len(all) {
+		_ = json.NewEncoder(w).Encode([]config.VikunjaTask{})
+		return
+	}
+	end := min(start+fakeVikunjaMaxPerPage, len(all))
+	_ = json.NewEncoder(w).Encode(all[start:end])
+}
+
+func handleFakeVikunjaPutTask(w http.ResponseWriter, r *http.Request) {
+	var body config.VikunjaTask
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	body.ID = 100
+	body.ProjectID = 1
+	_ = json.NewEncoder(w).Encode(body)
+}
+
 func setupFakeVikunjaTasksHandler(byID map[int64]config.VikunjaTask, state *fakeVikunjaServerState) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		if r.Method == http.MethodGet {
-			page, _ := strconv.Atoi(r.URL.Query().Get("page"))
-			if page < 1 {
-				page = 1
-			}
-			all := make([]config.VikunjaTask, 0, len(byID))
-			for _, t := range byID {
-				all = append(all, t)
-			}
-			slices.SortFunc(all, func(a, b config.VikunjaTask) int { return cmp.Compare(a.ID, b.ID) })
-			start := (page - 1) * fakeVikunjaMaxPerPage
-			if start >= len(all) {
-				_ = json.NewEncoder(w).Encode([]config.VikunjaTask{})
-				return
-			}
-			end := min(start+fakeVikunjaMaxPerPage, len(all))
-			_ = json.NewEncoder(w).Encode(all[start:end])
-			return
+		switch r.Method {
+		case http.MethodGet:
+			handleFakeVikunjaListTasks(w, r, byID)
+		case http.MethodPut:
+			handleFakeVikunjaPutTask(w, r)
+		default:
+			http.NotFound(w, r)
 		}
-		if r.Method == http.MethodPut {
-			var body config.VikunjaTask
-			_ = json.NewDecoder(r.Body).Decode(&body)
-			body.ID = 100
-			body.ProjectID = 1
-			_ = json.NewEncoder(w).Encode(body)
-			return
-		}
-		http.NotFound(w, r)
 	}
 }
 
@@ -236,7 +254,11 @@ func handleFakeVikunjaComments(w http.ResponseWriter, r *http.Request, path stri
 
 func handleFakeVikunjaRelations(w http.ResponseWriter, r *http.Request, path string, state *fakeVikunjaServerState) {
 	parts := strings.Split(strings.Trim(path, "/"), "/")
-	taskID, _ := strconv.ParseInt(parts[3], 10, 64)
+	taskID, err := strconv.ParseInt(parts[3], 10, 64)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	if strings.Contains(path, "/888") || strings.Contains(path, "/relations/blocking/888") {
 		w.WriteHeader(http.StatusInternalServerError)
 		_, _ = w.Write([]byte(`{"error":"relation failed"}`))
@@ -248,7 +270,10 @@ func handleFakeVikunjaRelations(w http.ResponseWriter, r *http.Request, path str
 		return
 	}
 	var relReq config.VikunjaRelationReq
-	_ = json.NewDecoder(r.Body).Decode(&relReq)
+	if err := json.NewDecoder(r.Body).Decode(&relReq); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	if relReq.OtherTaskID == 888 {
 		w.WriteHeader(http.StatusInternalServerError)
 		_, _ = w.Write([]byte(`{"error":"relation failed"}`))
@@ -268,7 +293,11 @@ func handleFakeVikunjaRelations(w http.ResponseWriter, r *http.Request, path str
 func handleFakeVikunjaGetTask(w http.ResponseWriter, path string, byID map[int64]config.VikunjaTask) {
 	w.Header().Set("Content-Type", "application/json")
 	parts := strings.Split(strings.Trim(path, "/"), "/")
-	id, _ := strconv.ParseInt(parts[3], 10, 64)
+	id, err := strconv.ParseInt(parts[3], 10, 64)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	if id == 888 {
 		w.WriteHeader(http.StatusInternalServerError)
 		_, _ = w.Write([]byte(`{"error":"upstream down"}`))
@@ -295,11 +324,20 @@ func handleFakeVikunjaPostTask(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	var body config.VikunjaTask
-	_ = json.NewDecoder(r.Body).Decode(&body)
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	_ = json.NewEncoder(w).Encode(body)
 }
 
-func setupTestEnvironment(t *testing.T) (*Server, *http.ServeMux, *fakeVikunjaServerState) {
+type testEnvironment struct {
+	srv   *Server
+	mux   *http.ServeMux
+	state *fakeVikunjaServerState
+}
+
+func setupTestEnvironment(t *testing.T) *testEnvironment {
 	t.Helper()
 	state := &fakeVikunjaServerState{}
 	byID := make(map[int64]config.VikunjaTask)
@@ -362,12 +400,12 @@ func setupTestEnvironment(t *testing.T) (*Server, *http.ServeMux, *fakeVikunjaSe
 	srv := NewServer(cfg, client, taskStore, olClient)
 	mux := NewHTTPMux(srv)
 
-	return srv, mux, state
+	return &testEnvironment{srv: srv, mux: mux, state: state}
 }
 
 func TestServer_HTTPRoutesTable(t *testing.T) {
 	httpkittest.StubCoverageWriters(t, nil, nil)
-	_, mux, _ := setupTestEnvironment(t)
+	env := setupTestEnvironment(t)
 
 	tests := []struct {
 		name             string
@@ -410,7 +448,7 @@ func TestServer_HTTPRoutesTable(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			w := httptest.NewRecorder()
-			mux.ServeHTTP(w, httptest.NewRequest(tc.method, tc.target, http.NoBody))
+			env.mux.ServeHTTP(w, httptest.NewRequest(tc.method, tc.target, http.NoBody))
 
 			if w.Code != tc.wantStatus {
 				t.Fatalf("status = %d, want %d", w.Code, tc.wantStatus)
@@ -462,7 +500,7 @@ func setupErrorEnvironment(t *testing.T) http.Handler {
 func TestServer_RESTUpstreamErrorsTable(t *testing.T) {
 	t.Parallel()
 
-	_, okMux, _ := setupTestEnvironment(t)
+	okEnv := setupTestEnvironment(t)
 	errMux := setupErrorEnvironment(t)
 
 	tests := []struct {
@@ -474,8 +512,8 @@ func TestServer_RESTUpstreamErrorsTable(t *testing.T) {
 	}{
 		{name: "list tasks upstream failure returns 502", mux: errMux, target: "/api/tasks", wantStatus: http.StatusBadGateway, wantSubstr: "vikunja API returned status 500"},
 		{name: "task detail upstream failure returns 502", mux: errMux, target: "/api/tasks/1", wantStatus: http.StatusBadGateway, wantSubstr: "vikunja API returned status 500"},
-		{name: "task detail missing returns 404", mux: okMux, target: "/api/tasks/999", wantStatus: http.StatusNotFound, wantSubstr: "vikunja API returned status 404"},
-		{name: "task in other project returns 404", mux: okMux, target: "/api/tasks/60", wantStatus: http.StatusNotFound, wantSubstr: "not found in project graph"},
+		{name: "task detail missing returns 404", mux: okEnv.mux, target: "/api/tasks/999", wantStatus: http.StatusNotFound, wantSubstr: "vikunja API returned status 404"},
+		{name: "task in other project returns 404", mux: okEnv.mux, target: "/api/tasks/60", wantStatus: http.StatusNotFound, wantSubstr: "not found in project graph"},
 		{name: "search upstream failure returns 502", mux: errMux, target: "/api/search?q=test", wantStatus: http.StatusBadGateway, wantSubstr: "search db failed"},
 	}
 
@@ -530,8 +568,8 @@ func callTool(t *testing.T, handler http.Handler, name, args string) toolCallRes
 func TestServerInstructions(t *testing.T) {
 	t.Parallel()
 
-	_, mux, _ := setupTestEnvironment(t)
-	ts := httptest.NewServer(mux)
+	env := setupTestEnvironment(t)
+	ts := httptest.NewServer(env.mux)
 	t.Cleanup(ts.Close)
 
 	tests := []struct {
@@ -574,8 +612,8 @@ func TestServerInstructions(t *testing.T) {
 func TestServer_ToolsListSchema(t *testing.T) {
 	t.Parallel()
 
-	_, mux, _ := setupTestEnvironment(t)
-	w := postMCP(t, mux, "/mcp", `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`)
+	env := setupTestEnvironment(t)
+	w := postMCP(t, env.mux, "/mcp", `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`)
 	var resp struct {
 		Result struct {
 			Tools []struct {
@@ -716,7 +754,9 @@ func TestServer_ToolsExecutionTable(t *testing.T) {
 			if tc.vikunjaDown {
 				mux = setupErrorEnvironment(t)
 			} else {
-				_, mux, state = setupTestEnvironment(t)
+				env := setupTestEnvironment(t)
+				mux = env.mux
+				state = env.state
 			}
 			resp := callTool(t, mux, tc.toolName, tc.args)
 			if resp.Error != nil || len(resp.Result.Content) != 1 {
@@ -809,13 +849,13 @@ func TestRunServer_Execution(t *testing.T) {
 
 func closeTestServer(t *testing.T, updateErr error) *Server {
 	t.Helper()
-	srv, _, _ := setupTestEnvironment(t)
-	taskStore, ok := srv.store.(*memoryTaskStore)
+	env := setupTestEnvironment(t)
+	taskStore, ok := env.srv.store.(*memoryTaskStore)
 	if !ok {
-		t.Fatalf("store = %T, want *memoryTaskStore", srv.store)
+		t.Fatalf("store = %T, want *memoryTaskStore", env.srv.store)
 	}
 	taskStore.updateErr = updateErr
-	return srv
+	return env.srv
 }
 
 func TestServer_CloseCompleted_Errors(t *testing.T) {

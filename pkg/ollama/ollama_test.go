@@ -97,7 +97,10 @@ func runGenerateEmbeddingCase(t *testing.T, tc generateEmbeddingTestCase) {
 
 		if tc.isQuery && tc.queryPrefix != "" {
 			var req embeddingRequest
-			_ = json.NewDecoder(r.Body).Decode(&req)
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
 			if !strings.HasPrefix(req.Prompt, tc.queryPrefix) {
 				http.Error(w, fmt.Sprintf("expected prompt to have prefix %q", tc.queryPrefix), http.StatusBadRequest)
 				return
