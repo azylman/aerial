@@ -70,7 +70,8 @@ func TestThreadCoordinator_Enqueue(t *testing.T) {
 		state           coordinatorState
 		resolver        fakeThreadResolver
 		req             ThreadEnqueueRequest
-		failInsert      error
+		cancelStep      string
+		sabotageSQL     string
 		wantResp        ThreadEnqueueResponse
 		wantSends       []sentCall
 		wantRows        map[string]rowWant
@@ -174,18 +175,23 @@ func TestThreadCoordinator_Enqueue(t *testing.T) {
 			name:       "RecordStepCancelSurfacesAsConflict",
 			key:        tcKey,
 			req:        ThreadEnqueueRequest{Prompt: "hello", MessageID: "m7"},
-			failInsert: errRestateCancel,
+			cancelStep: StepRecordQueued,
 			wantCode:   CodeQueueConflict,
+		},
+		{
+			name:        "RecordStepStoreFailureIsTerminal",
+			key:         tcKey,
+			req:         ThreadEnqueueRequest{Prompt: "hello", MessageID: "m8"},
+			sabotageSQL: failTriggerSQL("messages", "INSERT", "23505"),
+			wantCode:    500,
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			store := seedStore(t, nil, nil)
-			if tc.failInsert != nil {
-				store.FailNext("InsertMessage", tc.failInsert)
-			}
+			store := seedStore(t, nil, nil, tc.sabotageSQL)
 			h := newCoordHarness(t, tc.key, tcInv, tc.state)
+			h.cancelStep = tc.cancelStep
 			resp, err := NewThreadCoordinator(store, tc.resolver, "aerial").Enqueue(h.sharedCtx(), tc.req)
 			if assertCoordinatorErr(t, err, tc.wantCode) {
 				return
@@ -194,10 +200,11 @@ func TestThreadCoordinator_Enqueue(t *testing.T) {
 			assert.Equal(t, tc.wantSends, h.sends)
 			assertMessageRows(t, store, tc.wantRows)
 			if tc.wantNoRow != "" {
-				m, _ := store.GetMessage(context.Background(), tc.wantNoRow)
+				m, getErr := store.GetMessage(context.Background(), tc.wantNoRow)
+				require.NoError(t, getErr)
 				assert.Nil(t, m)
 			}
-			if tc.wantResp.MessageID != "" && tc.wantResp.Status != eriwire.StatusSkippedActive && tc.failInsert == nil && tc.wantCode == 0 {
+			if tc.wantResp.Status != eriwire.StatusSkippedActive {
 				m, getErr := store.GetMessage(context.Background(), tc.wantResp.MessageID)
 				require.NoError(t, getErr)
 				require.NotNil(t, m)
@@ -219,16 +226,25 @@ func TestThreadCoordinator_Append(t *testing.T) {
 		wantSends   []sentCall
 		wantRows    map[string]rowWant
 		wantCleared bool
-		failSkip    error
+		cancelStep  string
+		sabotageSQL string
 		wantCode    int
 	}{
 		{
-			name:     "SkipStepCancelSurfacesAsConflict",
-			state:    st(nil, &ActiveTurn{TurnID: "t0", ItemIDs: []string{"a"}}),
-			rows:     []db.Message{msgRow("s3", tcKey, db.StatusPending)},
-			req:      AppendRequest{IDs: []string{"s3"}, SkipIfActive: true},
-			failSkip: errRestateCancel,
-			wantCode: CodeQueueConflict,
+			name:       "SkipStepCancelSurfacesAsConflict",
+			state:      st(nil, &ActiveTurn{TurnID: "t0", ItemIDs: []string{"a"}}),
+			rows:       []db.Message{msgRow("s3", tcKey, db.StatusPending)},
+			req:        AppendRequest{IDs: []string{"s3"}, SkipIfActive: true},
+			cancelStep: StepRecordSkipped,
+			wantCode:   CodeQueueConflict,
+		},
+		{
+			name:        "SkipStepStoreFailureIsTerminal",
+			state:       st(nil, &ActiveTurn{TurnID: "t0", ItemIDs: []string{"a"}}),
+			rows:        []db.Message{msgRow("s4", tcKey, db.StatusPending)},
+			req:         AppendRequest{IDs: []string{"s4"}, SkipIfActive: true},
+			sabotageSQL: failTriggerSQL("messages", "UPDATE", "23505"),
+			wantCode:    500,
 		},
 		{
 			name:      "IdleStartsBurst",
@@ -293,18 +309,21 @@ func TestThreadCoordinator_Append(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			store := seedStore(t, tc.rows, nil)
-			if tc.failSkip != nil {
-				store.FailNext("UpdateMessageStatus", tc.failSkip)
+			var store coordinatorStore
+			var sqlStore *db.SQLStore
+			if len(tc.rows) > 0 || len(tc.wantRows) > 0 {
+				sqlStore = seedStore(t, tc.rows, nil, tc.sabotageSQL)
+				store = sqlStore
 			}
 			h := newCoordHarness(t, tcKey, tcInv, tc.state)
+			h.cancelStep = tc.cancelStep
 			if assertCoordinatorErr(t, NewThreadCoordinator(store, nil, "aerial").Append(h.objectCtx(), tc.req), tc.wantCode) {
 				return
 			}
 			assert.Equal(t, tc.wantState, h.snapshot(t))
 			assert.Equal(t, tc.wantSends, h.sends)
 			assert.Equal(t, tc.wantCleared, h.clearAlls > 0)
-			assertMessageRows(t, store, tc.wantRows)
+			assertMessageRows(t, sqlStore, tc.wantRows)
 		})
 	}
 }
@@ -365,7 +384,7 @@ func TestThreadCoordinator_OnTurnDone(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			h := newCoordHarness(t, tcKey, tcInv, tc.state)
-			require.NoError(t, NewThreadCoordinator(seedStore(t, nil, nil), nil, "aerial").OnTurnDone(h.objectCtx(), tc.req))
+			require.NoError(t, NewThreadCoordinator(nil, nil, "aerial").OnTurnDone(h.objectCtx(), tc.req))
 			assert.Equal(t, tc.wantState, h.snapshot(t))
 			assert.Equal(t, tc.wantSends, h.sends)
 			assert.Equal(t, tc.wantCleared, h.clearAlls > 0)
@@ -392,7 +411,7 @@ func TestThreadCoordinator_Kick(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			h := newCoordHarness(t, tcKey, tcInv, tc.state)
-			require.NoError(t, NewThreadCoordinator(seedStore(t, nil, nil), nil, "aerial").Kick(h.objectCtx(), tc.req))
+			require.NoError(t, NewThreadCoordinator(nil, nil, "aerial").Kick(h.objectCtx(), tc.req))
 			assert.Equal(t, tc.wantState, h.snapshot(t))
 			assert.Equal(t, tc.wantSends, h.sends)
 		})
@@ -403,15 +422,16 @@ func TestThreadCoordinator_CancelTurn(t *testing.T) {
 	t.Parallel()
 	t1 := &ActiveTurn{TurnID: "t1", ItemIDs: []string{"a"}, RunnerInvocationID: "inv-r1"}
 	tests := []struct {
-		name      string
-		state     coordinatorState
-		rows      []db.Message
-		req       CancelTurnRequest
-		failStep  error
-		wantResp  CancelTurnResponse
-		wantSends []sentCall
-		wantRows  map[string]rowWant
-		wantCode  int
+		name        string
+		state       coordinatorState
+		rows        []db.Message
+		req         CancelTurnRequest
+		cancelStep  string
+		sabotageSQL string
+		wantResp    CancelTurnResponse
+		wantSends   []sentCall
+		wantRows    map[string]rowWant
+		wantCode    int
 	}{
 		{
 			name:      "UnstartedRunnerFailsPendingActiveIDs",
@@ -435,21 +455,31 @@ func TestThreadCoordinator_CancelTurn(t *testing.T) {
 			wantResp: CancelTurnResponse{Status: "ok"},
 		},
 		{
-			name:     "StepCancelSurfacesAsConflict",
-			state:    st([]string{"b"}, nil),
-			rows:     []db.Message{msgRow("b", tcKey, db.StatusPending)},
-			failStep: errRestateCancel,
-			wantCode: CodeQueueConflict,
+			name:       "StepCancelSurfacesAsConflict",
+			state:      st([]string{"b"}, nil),
+			rows:       []db.Message{msgRow("b", tcKey, db.StatusPending)},
+			cancelStep: StepRecordCancelled,
+			wantCode:   CodeQueueConflict,
+		},
+		{
+			name:        "StepStoreFailureIsTerminal",
+			state:       st([]string{"b"}, nil),
+			rows:        []db.Message{msgRow("b", tcKey, db.StatusPending)},
+			sabotageSQL: failTriggerSQL("messages", "UPDATE", "23505"),
+			wantCode:    500,
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			store := seedStore(t, tc.rows, nil)
-			if tc.failStep != nil {
-				store.FailNext("FailMessagesIfPending", tc.failStep)
+			var store coordinatorStore
+			var sqlStore *db.SQLStore
+			if len(tc.rows) > 0 || len(tc.wantRows) > 0 {
+				sqlStore = seedStore(t, tc.rows, nil, tc.sabotageSQL)
+				store = sqlStore
 			}
 			h := newCoordHarness(t, tcKey, tcInv, tc.state)
+			h.cancelStep = tc.cancelStep
 			resp, err := NewThreadCoordinator(store, nil, "aerial").CancelTurn(h.sharedCtx(), tc.req)
 			if assertCoordinatorErr(t, err, tc.wantCode) {
 				return
@@ -457,7 +487,7 @@ func TestThreadCoordinator_CancelTurn(t *testing.T) {
 			assert.Equal(t, tc.wantResp, resp)
 			assert.Equal(t, tc.wantSends, h.sends)
 			assert.Empty(t, h.cancels, "the shared handler never cancels invocations")
-			assertMessageRows(t, store, tc.wantRows)
+			assertMessageRows(t, sqlStore, tc.wantRows)
 		})
 	}
 }

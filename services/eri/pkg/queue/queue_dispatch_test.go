@@ -14,7 +14,6 @@ import (
 
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
-	"github.com/azylman/aerial/services/eri/pkg/db/dbtest"
 	"github.com/azylman/aerial/services/eri/pkg/runner"
 	"github.com/azylman/aerial/services/eri/pkg/session"
 )
@@ -70,8 +69,8 @@ func TestBuildDispatchPrompt(t *testing.T) {
 		isCold        bool
 		sessionID     string
 		prevSessionID string
-		recent        []string // summaries of completed dispatches already in the session
-		failRecent    error
+		recent        []string // summaries of completed dispatches already in the session, one minute apart
+		closeDB       bool
 		wantPrompt    string
 		wantSpans     []wantPromptSpan
 		wantAbsent    []string
@@ -92,7 +91,7 @@ func TestBuildDispatchPrompt(t *testing.T) {
 			recent:    []string{"first run", "second run"},
 			wantPrompt: "<DISPATCH_HISTORY>\nRecent runs for session sess-cold:\n" +
 				"- [2026-11-13T09:30:00Z] status=COMPLETED: first run\n" +
-				"- [2026-11-13T09:30:00Z] status=COMPLETED: second run\n" +
+				"- [2026-11-13T09:31:00Z] status=COMPLETED: second run\n" +
 				"</DISPATCH_HISTORY>\n\n" + directive,
 			wantSpans: []wantPromptSpan{
 				{name: spanPrompt, attrs: []attribute.KeyValue{attrPromptColdStart.Bool(true)}},
@@ -106,7 +105,7 @@ func TestBuildDispatchPrompt(t *testing.T) {
 			sessionID:     "sess-fail",
 			prevSessionID: "prev-sess-1",
 			recent:        []string{"never read"},
-			failRecent:    errors.New("connection reset"),
+			closeDB:       true,
 			wantPrompt: "<PREVIOUS_SESSION>\nNote: This thread was recently rotated to preserve token budget and optimize context window performance.\n" +
 				"Previous conversation ID: prev-sess-1\n" +
 				"Prior conversation context, active decisions, and recent channel history are summarized in thread summary and channel message history. " +
@@ -123,15 +122,18 @@ func TestBuildDispatchPrompt(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			store := setupTestStore(t)
-			for i, summary := range tc.recent {
-				d := db.Dispatch{ID: fmt.Sprintf("%s-%d", tc.sessionID, i), SessionID: tc.sessionID, Status: db.StatusCompleted, Summary: summary, CreatedAt: runAt}
-				if _, err := store.InsertDispatch(context.Background(), d); err != nil {
-					t.Fatalf("seed dispatch: %v", err)
+			var store db.Store
+			if len(tc.recent) > 0 {
+				sqlStore, sqlDB := newTestStore(t)
+				recent := make([]db.Dispatch, 0, len(tc.recent))
+				for i, summary := range tc.recent {
+					recent = append(recent, db.Dispatch{ID: fmt.Sprintf("%s-%d", tc.sessionID, i), SessionID: tc.sessionID, Status: db.StatusCompleted, Summary: summary, CreatedAt: runAt.Add(time.Duration(i) * time.Minute)})
 				}
-			}
-			if tc.failRecent != nil {
-				store.FailNext("GetRecentSessionDispatches", tc.failRecent)
+				seedDispatchRows(t, sqlStore, recent)
+				if tc.closeDB {
+					_ = sqlDB.Close()
+				}
+				store = sqlStore
 			}
 			rec, tp, ctx, root := newPromptBuildRecorder()
 			var te *turnExecution
@@ -168,10 +170,10 @@ func TestCancelBurstOnShutdown_Dispatch(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			store := dbtest.NewFakeStore()
+			store := db.NewSQLStore(newTestDB(t))
 			ctx := context.Background()
 			interruptedDisp := db.Dispatch{ID: "disp-interrupted-" + tc.name, Status: db.StatusProcessing}
-			_, _ = store.InsertDispatch(ctx, interruptedDisp)
+			seedDispatchRows(t, store, []db.Dispatch{interruptedDisp})
 
 			pool := New(nil, WorkerPoolConfig{Store: store})
 			defer pool.Stop()
@@ -240,10 +242,10 @@ func TestMakeSessionCallbacks(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			store := dbtest.NewFakeStore()
+			store, sqlDB := newTestStore(t)
 			ctx := context.Background()
 			if tc.closeStore {
-				_ = store.Close()
+				_ = sqlDB.Close()
 			}
 			getRec, setRec := makeSessionCallbacks(store)
 			_, err := getRec(ctx, "session-test-key")
@@ -251,8 +253,12 @@ func TestMakeSessionCallbacks(t *testing.T) {
 				t.Fatalf("getRec error mismatch: got %v, wantErr %v", err, tc.wantErr)
 			}
 			if !tc.closeStore {
-				if err := setRec(ctx, "session-test-key", "new-conv", "prev-conv"); err != nil {
+				if err := setRec(ctx, "session-test-key", "prev-conv", "new-conv"); err != nil {
 					t.Fatalf("setRec unexpected error: %v", err)
+				}
+				rec, err := getRec(ctx, "session-test-key")
+				if err != nil || rec.ActiveSessionID != "new-conv" || rec.TurnCount != 0 {
+					t.Fatalf("getRec after rotation = %+v, %v; want active session new-conv with 0 turns", rec, err)
 				}
 			}
 		})
@@ -612,11 +618,8 @@ func TestTurnExecution_HandleQuotaPause_Dispatch(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			store := dbtest.NewFakeStore()
-			ctx := context.Background()
-			if tc.dispatch != nil {
-				_, _ = store.InsertDispatch(ctx, *tc.dispatch)
-			}
+			store := db.NewSQLStore(newTestDB(t))
+			seedDispatchRows(t, store, []db.Dispatch{*tc.dispatch})
 			pool := New(nil, WorkerPoolConfig{Store: store})
 			defer pool.Stop()
 
