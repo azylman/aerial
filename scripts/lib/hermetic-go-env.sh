@@ -11,7 +11,7 @@ hermetic_go() {
         ${PATH:+PATH="$PATH"} \
         ${HOME:+HOME="$HOME"} \
         ${GOROOT:+GOROOT="$GOROOT"} \
-        ${GOTOOLCHAIN:+GOTOOLCHAIN="$GOTOOLCHAIN"} \
+        GOTOOLCHAIN="${GOTOOLCHAIN:-go1.27.4}" \
         ${GOPATH:+GOPATH="$GOPATH"} \
         ${GOCACHE:+GOCACHE="$GOCACHE"} \
         ${GOMODCACHE:+GOMODCACHE="$GOMODCACHE"} \
