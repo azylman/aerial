@@ -2,7 +2,6 @@ package dispatch
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -23,12 +22,12 @@ import (
 
 // ThreadSessionServiceName returns the Restate service name for ThreadSession Virtual Objects.
 func ThreadSessionServiceName(name string) string {
-	return agent.ScopedServiceName("ThreadSession", name)
+	return eriwire.ThreadSessionServiceName(name)
 }
 
 // DispatchSessionServiceName returns the Restate service name for DispatchSession Virtual Objects.
 func DispatchSessionServiceName(name string) string {
-	return agent.ScopedServiceName("DispatchSession", name)
+	return eriwire.DispatchSessionServiceName(name)
 }
 
 type PromptDispatchRequest struct {
@@ -148,39 +147,6 @@ func restateRequestError(opLabel string, err error) error {
 	return fmt.Errorf("failed to read response body: %w", err)
 }
 
-type restateEnvelopeFields struct {
-	status    string
-	channelID string
-	messageID string
-	sessionID string
-}
-
-func parseRestateEnvelope(respBytes []byte) (restateEnvelopeFields, error) {
-	if len(respBytes) == 0 {
-		return restateEnvelopeFields{}, nil
-	}
-	var raw struct {
-		Status     string `json:"status"`
-		ChannelID  string `json:"channel_id"`
-		DispatchID string `json:"dispatch_id"`
-		MessageID  string `json:"message_id"`
-		SessionID  string `json:"session_id"`
-	}
-	if err := json.Unmarshal(respBytes, &raw); err != nil {
-		return restateEnvelopeFields{}, err
-	}
-	msgID := raw.MessageID
-	if msgID == "" {
-		msgID = raw.DispatchID
-	}
-	return restateEnvelopeFields{
-		status:    raw.Status,
-		channelID: raw.ChannelID,
-		messageID: msgID,
-		sessionID: raw.SessionID,
-	}, nil
-}
-
 func (d *HTTPPromptDispatcher) dispatchPromptRestate(ctx context.Context, req PromptDispatchRequest) (PromptDispatchResponse, error) {
 	channelID := strings.TrimSpace(req.ChannelID)
 	if channelID == "" {
@@ -200,7 +166,7 @@ func (d *HTTPPromptDispatcher) dispatchPromptRestate(ctx context.Context, req Pr
 		agentName = agent.Default
 	}
 	svc := ThreadSessionServiceName(agentName)
-	endpoint := d.restateURL + "/" + svc + "/" + url.PathEscape(channelID) + "/Enqueue"
+	endpoint := eriwire.RestateMethodEndpoint(d.restateURL, svc, channelID, "Enqueue")
 	idempotencyKey := "prompt:" + channelID + ":" + msgID
 
 	payload := req
@@ -212,7 +178,7 @@ func (d *HTTPPromptDispatcher) dispatchPromptRestate(ctx context.Context, req Pr
 		return PromptDispatchResponse{}, restateRequestError("prompt dispatch", err)
 	}
 
-	fields, err := parseRestateEnvelope(respBytes)
+	env, err := eriwire.ParseRestateEnqueueEnvelope(respBytes)
 	if err != nil {
 		return PromptDispatchResponse{}, fmt.Errorf("failed to parse prompt dispatch restate response: %w", err)
 	}
@@ -223,17 +189,17 @@ func (d *HTTPPromptDispatcher) dispatchPromptRestate(ctx context.Context, req Pr
 		MessageID: msgID,
 		SessionID: req.SessionID,
 	}
-	if fields.status != "" {
-		out.Status = fields.status
+	if env.Status != "" {
+		out.Status = env.Status
 	}
-	if fields.channelID != "" {
-		out.ChannelID = fields.channelID
+	if env.ChannelID != "" {
+		out.ChannelID = env.ChannelID
 	}
-	if fields.messageID != "" {
-		out.MessageID = fields.messageID
+	if id := env.EffectiveID(); id != "" {
+		out.MessageID = id
 	}
-	if fields.sessionID != "" {
-		out.SessionID = fields.sessionID
+	if env.SessionID != "" {
+		out.SessionID = env.SessionID
 	}
 	return out, nil
 }
@@ -256,7 +222,7 @@ func (d *HTTPPromptDispatcher) dispatchRestate(ctx context.Context, req eriwire.
 		agentName = agent.Default
 	}
 	svc := DispatchSessionServiceName(agentName)
-	endpoint := fmt.Sprintf("%s/%s/%s/Enqueue", d.restateURL, svc, url.PathEscape(sessionKey))
+	endpoint := eriwire.RestateMethodEndpoint(d.restateURL, svc, sessionKey, "Enqueue")
 
 	payload := req
 	payload.ID = dispatchID
@@ -267,7 +233,7 @@ func (d *HTTPPromptDispatcher) dispatchRestate(ctx context.Context, req eriwire.
 		return eriwire.DispatchEnqueueResponse{}, restateRequestError("dispatch", err)
 	}
 
-	fields, err := parseRestateEnvelope(respBytes)
+	env, err := eriwire.ParseRestateEnqueueEnvelope(respBytes)
 	if err != nil {
 		return eriwire.DispatchEnqueueResponse{}, fmt.Errorf("failed to parse dispatch restate response: %w", err)
 	}
@@ -277,14 +243,14 @@ func (d *HTTPPromptDispatcher) dispatchRestate(ctx context.Context, req eriwire.
 		DispatchID: dispatchID,
 		SessionID:  req.SessionID,
 	}
-	if fields.status != "" {
-		res.Status = fields.status
+	if env.Status != "" {
+		res.Status = env.Status
 	}
-	if fields.messageID != "" {
-		res.DispatchID = fields.messageID
+	if id := env.EffectiveID(); id != "" {
+		res.DispatchID = id
 	}
-	if fields.sessionID != "" {
-		res.SessionID = fields.sessionID
+	if env.SessionID != "" {
+		res.SessionID = env.SessionID
 	}
 	return res, nil
 }

@@ -9,9 +9,11 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
+	"github.com/azylman/aerial/pkg/agent"
 	"github.com/azylman/aerial/pkg/tracing"
 )
 
@@ -74,7 +76,7 @@ type InternalLLMClient struct {
 // NewInternalLLMClient builds an InternalLLMClient targeting an internal LLM proxy URL.
 // When effort is provided and non-empty, it is parsed and forwarded in the request body;
 // when omitted or empty, effort is omitted from the request payload so eri selects its default.
-func NewInternalLLMClient(url string, httpClient *http.Client, effort ...string) *InternalLLMClient {
+func NewInternalLLMClient(endpointURL string, httpClient *http.Client, effort ...string) *InternalLLMClient {
 	var eff string
 	if len(effort) > 0 && strings.TrimSpace(effort[0]) != "" {
 		eff = ParseEffort(effort[0], "")
@@ -83,7 +85,7 @@ func NewInternalLLMClient(url string, httpClient *http.Client, effort ...string)
 		httpClient = &http.Client{Timeout: 120 * time.Second}
 	}
 	return &InternalLLMClient{
-		url:        strings.TrimSpace(url),
+		url:        strings.TrimSpace(endpointURL),
 		httpClient: tracing.Client(httpClient),
 		effort:     eff,
 	}
@@ -136,8 +138,8 @@ func (c *InternalLLMClient) Complete(ctx context.Context, prompt string) (string
 }
 
 // HTTPInternalLLMClient returns a closure compatible with func(context.Context, string) (string, error).
-func HTTPInternalLLMClient(url string, httpClient *http.Client, effort ...string) func(context.Context, string) (string, error) {
-	client := NewInternalLLMClient(url, httpClient, effort...)
+func HTTPInternalLLMClient(endpointURL string, httpClient *http.Client, effort ...string) func(context.Context, string) (string, error) {
+	client := NewInternalLLMClient(endpointURL, httpClient, effort...)
 	return func(ctx context.Context, prompt string) (string, error) {
 		return client.Complete(ctx, prompt)
 	}
@@ -185,4 +187,63 @@ func ResolveDispatchSessionKey(req BrainDispatchRequest) string {
 		return "vanadis-" + c
 	}
 	return "dispatch-" + strings.TrimSpace(req.ID)
+}
+
+// ThreadSessionServiceName returns the Restate service name for ThreadSession Virtual Objects.
+func ThreadSessionServiceName(name string) string {
+	return agent.ScopedServiceName("ThreadSession", name)
+}
+
+// DispatchSessionServiceName returns the Restate service name for DispatchSession Virtual Objects.
+func DispatchSessionServiceName(name string) string {
+	return agent.ScopedServiceName("DispatchSession", name)
+}
+
+// VoiceSessionServiceName returns the Restate service name for VoiceSession Virtual Objects.
+func VoiceSessionServiceName(name string) string {
+	return agent.ScopedServiceName("VoiceSession", name)
+}
+
+// SessionManagerServiceName returns the Restate service name for SessionManager.
+func SessionManagerServiceName(name string) string {
+	return agent.ScopedServiceName("SessionManager", name)
+}
+
+// RestateMethodEndpoint constructs a Restate ingress endpoint URL for a service method.
+func RestateMethodEndpoint(restateURL, service, key, method string) string {
+	trimmed := strings.TrimRight(strings.TrimSpace(restateURL), "/")
+	if key == "" {
+		return fmt.Sprintf("%s/%s/%s", trimmed, url.PathEscape(service), url.PathEscape(method))
+	}
+	return fmt.Sprintf("%s/%s/%s/%s", trimmed, url.PathEscape(service), url.PathEscape(key), url.PathEscape(method))
+}
+
+// RestateEnqueueEnvelope holds the common fields returned by ThreadSession and DispatchSession Enqueue handlers.
+type RestateEnqueueEnvelope struct {
+	Status     string `json:"status"`
+	ChannelID  string `json:"channel_id,omitempty"`
+	ThreadID   string `json:"thread_id,omitempty"`
+	DispatchID string `json:"dispatch_id,omitempty"`
+	MessageID  string `json:"message_id,omitempty"`
+	SessionID  string `json:"session_id,omitempty"`
+}
+
+// EffectiveID returns DispatchID when non-empty, else MessageID.
+func (e RestateEnqueueEnvelope) EffectiveID() string {
+	if e.DispatchID != "" {
+		return e.DispatchID
+	}
+	return e.MessageID
+}
+
+// ParseRestateEnqueueEnvelope decodes a Restate Enqueue response body; an empty body returns a zero envelope.
+func ParseRestateEnqueueEnvelope(respBytes []byte) (RestateEnqueueEnvelope, error) {
+	if len(respBytes) == 0 {
+		return RestateEnqueueEnvelope{}, nil
+	}
+	var env RestateEnqueueEnvelope
+	if err := json.Unmarshal(respBytes, &env); err != nil {
+		return RestateEnqueueEnvelope{}, err
+	}
+	return env, nil
 }
