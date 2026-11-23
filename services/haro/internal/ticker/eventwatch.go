@@ -60,11 +60,14 @@ type eventWatchLoad struct {
 	Prompt     string `json:"prompt"`
 	Effort     string `json:"effort"`
 	Agent      string `json:"agent"`
+	Persistent bool   `json:"persistent"`
 }
 
 // Fire executes the event watch trigger in three durable Restate steps:
 // load the trigger, dispatch the prompt, then consume the trigger. A deleted
-// watch ends terminally (404), as does a dispatch eri permanently rejects.
+// watch clears the object's state and ends terminally (404); a dispatch eri
+// permanently rejects also ends terminally. A consumed one-shot watch clears
+// the object's state after its last step.
 func (w *HaroEventWatch) Fire(ctx restate.ObjectContext, req EventWatchFireRequest) (restate.Void, error) {
 	triggerID := restate.Key(ctx)
 
@@ -83,13 +86,19 @@ func (w *HaroEventWatch) Fire(ctx restate.ObjectContext, req EventWatchFireReque
 			return eventWatchLoad{Suppressed: true}, nil
 		}
 		return eventWatchLoad{
-			ID:        trig.ID,
-			ChannelID: trig.ChannelID,
-			Prompt:    trig.Prompt,
-			Effort:    trig.Effort,
-			Agent:     trig.Agent,
+			ID:         trig.ID,
+			ChannelID:  trig.ChannelID,
+			Prompt:     trig.Prompt,
+			Effort:     trig.Effort,
+			Agent:      trig.Agent,
+			Persistent: trig.Persistent,
 		}, nil
 	}, restate.WithName("load-trigger"))
+	if restate.IsTerminalError(err) && restate.AsTerminalError(err).Code() == http.StatusNotFound {
+		// The watch was cancelled (or already consumed): nothing is left to track.
+		restate.ClearAll(ctx)
+		return restate.Void{}, err
+	}
 	if err != nil || loaded.Suppressed {
 		return restate.Void{}, err
 	}
@@ -132,7 +141,10 @@ func (w *HaroEventWatch) Fire(ctx restate.ObjectContext, req EventWatchFireReque
 	if err != nil {
 		return restate.Void{}, err
 	}
-
+	if !loaded.Persistent {
+		// A one-shot watch is deleted once consumed; its object is done.
+		restate.ClearAll(ctx)
+	}
 	return restate.Void{}, nil
 }
 
@@ -153,6 +165,9 @@ func HandleExternalEvent(ctx context.Context, db *sql.DB, restateIngressURL stri
 	triggers, err := store.QueryMatchingEventTriggers(ctx, db, ev.Source, ev.Targets, ev.EventType)
 	if err != nil {
 		return err
+	}
+	if len(triggers) > 0 && strings.TrimSpace(restateIngressURL) == "" {
+		return errors.New("restate ingress URL not configured")
 	}
 	httpClient := eventIngressClient
 	if len(client) > 0 && client[0] != nil {

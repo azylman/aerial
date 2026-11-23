@@ -165,9 +165,22 @@ func IsScheduleStale(scheduledAt, now time.Time, maxOverdue time.Duration) bool 
 	return maxOverdue > 0 && now.Sub(scheduledAt) > maxOverdue
 }
 
-// ShouldPruneRuns reports whether runs should be pruned given the last prune time, interval, and now.
-func ShouldPruneRuns(now, lastPrune time.Time, interval time.Duration) bool {
-	return interval > 0 && (lastPrune.IsZero() || now.Sub(lastPrune) >= interval)
+// ArmIdempotencyKey names the Restate ingress operation "arm schedule id of
+// scheduleType for the tick due at dueAt". Startup backfill and tool updates
+// that leave the tick unchanged collapse into one Arm.
+func ArmIdempotencyKey(scheduleType, id string, dueAt time.Time) string {
+	return fmt.Sprintf("haro:arm:%s:%s:%s", scheduleType, strings.TrimSpace(id), dueAt.UTC().Format(time.RFC3339Nano))
+}
+
+// CancelIdempotencyKey names the Restate ingress operation "cancel schedule id
+// armed for the tick due at dueAt". A zero dueAt names the schedule's deletion,
+// which happens once per ID.
+func CancelIdempotencyKey(id string, dueAt time.Time) string {
+	id = strings.TrimSpace(id)
+	if dueAt.IsZero() {
+		return "haro:cancel:" + id
+	}
+	return fmt.Sprintf("haro:cancel:%s:%s", id, dueAt.UTC().Format(time.RFC3339Nano))
 }
 
 // BuildHeartbeatPrompt wraps a raw heartbeat prompt with runtime instructions for the LLM.

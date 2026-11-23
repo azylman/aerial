@@ -66,32 +66,24 @@ func initHaroJetStreamWithFactory(ctx context.Context, srv *server.Server, datab
 	if len(restateIngressURL) > 0 {
 		ingressURL = strings.TrimSpace(restateIngressURL[0])
 	}
-	if srv != nil {
-		if _, err := b.Subscribe(ctx, "aerial.events.>", "haro-events", func(msgCtx context.Context, msg pubsub.Message) error {
-			var ev pubsub.ExternalEvent
-			if unmarshalErr := json.Unmarshal(msg.Data(), &ev); unmarshalErr != nil {
-				log.Printf("[Haro] warning: failed to unmarshal external event: %v", unmarshalErr)
-				return nil
-			}
-			var handleErr error
-			if ingressURL != "" {
-				handleErr = ticker.HandleExternalEvent(msgCtx, database, ingressURL, ev)
-			} else {
-				handleErr = srv.HandleExternalEvent(msgCtx, ev)
-			}
-			if handleErr != nil {
-				if msg.NumDelivered() < 5 {
-					return handleErr
-				}
-				log.Printf("[Haro] dropping external event %s after %d delivery attempts: %v", ev.EventID, msg.NumDelivered(), handleErr)
-				return nil
-			}
+	if _, err := b.Subscribe(ctx, "aerial.events.>", "haro-events", func(msgCtx context.Context, msg pubsub.Message) error {
+		var ev pubsub.ExternalEvent
+		if unmarshalErr := json.Unmarshal(msg.Data(), &ev); unmarshalErr != nil {
+			log.Printf("[Haro] warning: failed to unmarshal external event: %v", unmarshalErr)
 			return nil
-		}); err != nil {
-			log.Printf("[Haro] warning: failed to subscribe haro-events: %v", err)
-		} else {
-			log.Println("[Haro] Subscribed haro-events durable consumer to aerial.events.>")
 		}
+		if handleErr := ticker.HandleExternalEvent(msgCtx, database, ingressURL, ev); handleErr != nil {
+			if msg.NumDelivered() < 5 {
+				return handleErr
+			}
+			log.Printf("[Haro] dropping external event %s after %d delivery attempts: %v", ev.EventID, msg.NumDelivered(), handleErr)
+			return nil
+		}
+		return nil
+	}); err != nil {
+		log.Printf("[Haro] warning: failed to subscribe haro-events: %v", err)
+	} else {
+		log.Println("[Haro] Subscribed haro-events durable consumer to aerial.events.>")
 	}
 	return b
 }
@@ -125,7 +117,7 @@ func RunApp(ctx context.Context, cfg *config.Config) error {
 	tickerCtx, tickerCancel := context.WithCancel(ctx)
 	var tickerWg sync.WaitGroup
 	tickerWg.Go(func() {
-		t := ticker.NewTicker(database, dispatcher, 30*time.Second)
+		t := ticker.NewTicker(database, dispatcher)
 		t.SetRestateConfig(cfg.RestatePort, cfg.RestateIngressURL, cfg.RestateAdminURL, cfg.RestateAdvertiseURL)
 		if tErr := t.Start(tickerCtx); tErr != nil && !errors.Is(tErr, context.Canceled) {
 			errChan <- tErr

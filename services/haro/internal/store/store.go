@@ -365,48 +365,14 @@ func DeleteSchedule(ctx context.Context, database *sql.DB, scheduleID string) (b
 	return total > 0, nil
 }
 
-func queryDueSchedules[T any](ctx context.Context, database *sql.DB, query string, now time.Time, scanFn func(rowScanner) (T, error)) ([]T, error) {
-	ctx, err := normCtxAndDB(ctx, database)
-	if err != nil {
-		return nil, err
-	}
-	rows, err := database.QueryContext(ctx, query, now)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var results []T
-	for rows.Next() {
-		item, err := scanFn(rows)
-		if err != nil {
-			return nil, err
-		}
-		results = append(results, item)
-	}
-	return results, rows.Err()
-}
-
 func advanceScheduleNextRun(ctx context.Context, database *sql.DB, table, label, id string, nextRun time.Time) error {
 	query := fmt.Sprintf("UPDATE %s SET next_run_at = $1 WHERE id = $2", table)
 	return execScheduleUpdate(ctx, database, label, id, query, nextRun, strings.TrimSpace(id))
 }
 
-// GetDueCronSchedules lists enabled cron schedules whose next run is due.
-func GetDueCronSchedules(ctx context.Context, database *sql.DB, now time.Time) ([]model.CronSchedule, error) {
-	baseQuery := `SELECT id, agent, target_id, title_prefix, cron_expr, prompt, timezone, next_run_at, enabled, created_at, COALESCE(NULLIF(effort, ''), 'medium') FROM cron_schedules WHERE enabled = TRUE AND next_run_at <= $1 ORDER BY next_run_at ASC`
-	return queryDueSchedules(ctx, database, baseQuery, now, scanCronSchedule)
-}
-
 // AdvanceCronNextRun moves a cron schedule's next run timestamp.
 func AdvanceCronNextRun(ctx context.Context, database *sql.DB, id string, nextRun time.Time) error {
 	return advanceScheduleNextRun(ctx, database, "cron_schedules", model.ScheduleTypeCron, id, nextRun)
-}
-
-// GetDueHeartbeatSchedules lists enabled heartbeat schedules whose next run is due.
-func GetDueHeartbeatSchedules(ctx context.Context, database *sql.DB, now time.Time) ([]model.HeartbeatSchedule, error) {
-	baseQuery := `SELECT id, agent, target_id, title_prefix, cron_expr, prompt, timezone, next_run_at, enabled, created_at, COALESCE(NULLIF(effort, ''), 'low'), last_completed_at FROM heartbeat_schedules WHERE enabled = TRUE AND next_run_at <= $1 ORDER BY next_run_at ASC`
-	return queryDueSchedules(ctx, database, baseQuery, now, scanHeartbeatSchedule)
 }
 
 // AdvanceHeartbeatNextRun moves a heartbeat schedule's next run timestamp.
@@ -426,12 +392,6 @@ func AdvanceHeartbeatLastCompletedAt(ctx context.Context, database *sql.DB, id s
 	}
 	query := `UPDATE heartbeat_schedules SET last_completed_at = GREATEST(COALESCE(last_completed_at, $1), $1) WHERE id = $2`
 	return execScheduleUpdate(ctx, database, model.ScheduleTypeHeartbeat, id, query, completedAt, id)
-}
-
-// GetDueOneShotSchedules lists one-shot schedules whose run time is due.
-func GetDueOneShotSchedules(ctx context.Context, database *sql.DB, now time.Time) ([]model.OneShotSchedule, error) {
-	baseQuery := `SELECT id, agent, thread_id, prompt, run_at, created_at, COALESCE(NULLIF(effort, ''), 'medium') FROM one_shot_schedules WHERE run_at <= $1 ORDER BY run_at ASC`
-	return queryDueSchedules(ctx, database, baseQuery, now, scanOneShotSchedule)
 }
 
 func deleteByID(ctx context.Context, database *sql.DB, query, emptyErrMsg, errPrefix, id string) (bool, error) {

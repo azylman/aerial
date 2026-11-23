@@ -560,10 +560,11 @@ func TestToolHandler_RestateArmingAndCancelling(t *testing.T) {
 	db := openToolsTestDB(t)
 	ctx := context.Background()
 
-	var capturedPaths []string
+	var captured []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		capturedPaths = append(capturedPaths, r.URL.Path)
-		w.WriteHeader(http.StatusAccepted)
+		captured = append(captured, r.URL.Path+" key="+r.Header.Get("Idempotency-Key"))
+		// A failed arm or cancel is only logged; every tool call still succeeds.
+		w.WriteHeader(http.StatusServiceUnavailable)
 	}))
 	defer srv.Close()
 
@@ -589,7 +590,7 @@ func TestToolHandler_RestateArmingAndCancelling(t *testing.T) {
 	onceOut, err := h.ScheduleOnce(ctx, ScheduleOnceArgs{
 		ThreadID: "100000000000000001",
 		Prompt:   "Prompt once",
-		RunAt:    "15m",
+		RunAt:    "2099-01-01T10:00:00Z",
 	})
 	if err != nil || onceOut.ScheduleID == "" {
 		t.Fatalf("ScheduleOnce error: %v", err)
@@ -605,54 +606,52 @@ func TestToolHandler_RestateArmingAndCancelling(t *testing.T) {
 		t.Fatalf("UpdateCronSchedule error: %v", err)
 	}
 
-	// 4. UpdateCronSchedule on disabled schedule cancels
+	// 4. UpdateCronSchedule on disabled schedule cancels, keyed by its armed tick
 	if insErr := store.InsertCronSchedule(ctx, db, model.CronSchedule{
 		ID:        "c-disabled-1",
 		TargetID:  "100000000000000001",
 		CronExpr:  "0 * * * *",
 		Prompt:    "Disabled prompt",
-		NextRunAt: time.Now().UTC().Add(time.Hour),
+		NextRunAt: time.Date(2099, 1, 1, 10, 0, 0, 0, time.UTC),
 		Enabled:   false,
 	}); insErr != nil {
 		t.Fatalf("InsertCronSchedule failed: %v", insErr)
 	}
+	newPrompt := "Still disabled"
 	upDisOut, err := h.UpdateCronSchedule(ctx, UpdateCronScheduleArgs{
-		ScheduleID:     "c-disabled-1",
-		CronExpression: &newExpr,
+		ScheduleID: "c-disabled-1",
+		Prompt:     &newPrompt,
 	})
 	if err != nil || upDisOut.Status != "success" {
 		t.Fatalf("UpdateCronSchedule disabled error: %v", err)
 	}
 
-	// 5. CancelSchedule cancels
+	// 5. CancelSchedule cancels, keyed by the deleted schedule alone
 	canOut, err := h.CancelSchedule(ctx, CancelScheduleArgs{ScheduleID: recOut.ScheduleID})
 	if err != nil || canOut.Status != "success" {
 		t.Fatalf("CancelSchedule error: %v", err)
 	}
 
-	wantRecArm := "/HaroSchedule/" + recOut.ScheduleID + "/Arm/send"
-	wantOnceArm := "/HaroSchedule/" + onceOut.ScheduleID + "/Arm/send"
-	wantDisabledCancel := "/HaroSchedule/c-disabled-1/Cancel/send"
-	wantRecCancel := "/HaroSchedule/" + recOut.ScheduleID + "/Cancel/send"
+	want := []string{
+		"/HaroSchedule/" + recOut.ScheduleID + "/Arm/send key=haro:arm:cron:" + recOut.ScheduleID + ":" + utcTick(t, recOut.NextRunAt),
+		"/HaroSchedule/" + onceOut.ScheduleID + "/Arm/send key=haro:arm:one_shot:" + onceOut.ScheduleID + ":2099-01-01T10:00:00Z",
+		"/HaroSchedule/" + recOut.ScheduleID + "/Arm/send key=haro:arm:cron:" + recOut.ScheduleID + ":" + utcTick(t, upOut.NextRunAt),
+		"/HaroSchedule/c-disabled-1/Cancel/send key=haro:cancel:c-disabled-1:2099-01-01T10:00:00Z",
+		"/HaroSchedule/" + recOut.ScheduleID + "/Cancel/send key=haro:cancel:" + recOut.ScheduleID,
+	}
+	if strings.Join(captured, "\n") != strings.Join(want, "\n") {
+		t.Errorf("ingress requests =\n%s\nwant\n%s", strings.Join(captured, "\n"), strings.Join(want, "\n"))
+	}
+}
 
-	if len(capturedPaths) != 5 {
-		t.Fatalf("captured %d requests, want 5", len(capturedPaths))
+// utcTick renders a tool-reported RFC3339 due tick the way ingress keys carry it (UTC).
+func utcTick(t *testing.T, reported string) string {
+	t.Helper()
+	tick, err := time.Parse(time.RFC3339, reported)
+	if err != nil {
+		t.Fatalf("parse reported tick %q: %v", reported, err)
 	}
-	if capturedPaths[0] != wantRecArm {
-		t.Errorf("req 0 path = %q, want %q", capturedPaths[0], wantRecArm)
-	}
-	if capturedPaths[1] != wantOnceArm {
-		t.Errorf("req 1 path = %q, want %q", capturedPaths[1], wantOnceArm)
-	}
-	if capturedPaths[2] != wantRecArm {
-		t.Errorf("req 2 path = %q, want %q", capturedPaths[2], wantRecArm)
-	}
-	if capturedPaths[3] != wantDisabledCancel {
-		t.Errorf("req 3 path = %q, want %q", capturedPaths[3], wantDisabledCancel)
-	}
-	if capturedPaths[4] != wantRecCancel {
-		t.Errorf("req 4 path = %q, want %q", capturedPaths[4], wantRecCancel)
-	}
+	return tick.UTC().Format(time.RFC3339)
 }
 
 func TestToolHandler_ArmScheduleTick(t *testing.T) {

@@ -3,7 +3,6 @@ package db
 import (
 	"context"
 	"database/sql"
-	"database/sql/driver"
 	"errors"
 	"os"
 	"reflect"
@@ -111,11 +110,4 @@ func NewSQLStore(database *sql.DB) *SQLStore {
 		return nil
 	}
 	return &SQLStore{db: database}
-}
-
-func isPostgresDriver(d driver.Driver) bool {
-	if d == nil {
-		return false
-	}
-	return strings.Contains(reflect.TypeOf(d).String(), "stdlib.Driver")
 }
