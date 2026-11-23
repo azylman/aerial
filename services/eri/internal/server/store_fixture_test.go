@@ -7,6 +7,8 @@ package server
 
 import (
 	"database/sql"
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/azylman/aerial/pkg/pgtest"
@@ -33,4 +35,44 @@ func newTestDB(t testing.TB) *sql.DB {
 func newTestStore(t testing.TB) *db.SQLStore {
 	t.Helper()
 	return db.NewSQLStore(newTestDB(t))
+}
+
+// newTestStoreDB returns a production SQLStore plus its *sql.DB, for tests
+// that seed rows or sabotage the private database.
+func newTestStoreDB(t testing.TB) (*db.SQLStore, *sql.DB) {
+	t.Helper()
+	database := newTestDB(t)
+	return db.NewSQLStore(database), database
+}
+
+// newClosedTestStore returns a production SQLStore whose handle is already
+// closed, so every query fails with a retryable driver error.
+func newClosedTestStore(t testing.TB) *db.SQLStore {
+	t.Helper()
+	database, err := db.Open(pgtest.NewDSN(t))
+	if err != nil {
+		t.Fatalf("open test database: %v", err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatalf("close test database: %v", err)
+	}
+	return db.NewSQLStore(database)
+}
+
+// failTriggerSQL makes every <event> on table raise with the given SQLSTATE.
+func failTriggerSQL(table, event, sqlstate string) string {
+	return fmt.Sprintf(`CREATE OR REPLACE FUNCTION test_fail_%[1]s_%[2]s() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+	RAISE EXCEPTION 'injected %[1]s %[2]s failure' USING ERRCODE = '%[3]s';
+END $$;
+CREATE TRIGGER test_fail_%[1]s_%[2]s BEFORE %[2]s ON %[1]s FOR EACH ROW EXECUTE FUNCTION test_fail_%[1]s_%[2]s();`,
+		table, strings.ToLower(event), sqlstate)
+}
+
+// mustExec runs setup or sabotage SQL against a test's private database.
+func mustExec(t testing.TB, database *sql.DB, query string) {
+	t.Helper()
+	if _, err := database.Exec(query); err != nil {
+		t.Fatalf("exec %q: %v", query, err)
+	}
 }
