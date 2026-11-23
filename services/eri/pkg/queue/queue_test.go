@@ -184,7 +184,9 @@ type queueChannelPolicyCase struct {
 	seedSpamThread, nilOnMessageCompleted                                       bool
 	classifierConfidence                                                        float64
 	message                                                                     db.Message
-	expectRunnerCalls, expectDeliveryCalls, expectTypingCalls                   int
+	// expectTypingCalls counts typing starts: a turn that runs the agent starts one in the
+	// prep step and one in the run step.
+	expectRunnerCalls, expectDeliveryCalls, expectTypingCalls int
 }
 
 func runQueueChannelPolicyCase(t *testing.T, tc queueChannelPolicyCase) {
@@ -192,7 +194,6 @@ func runQueueChannelPolicyCase(t *testing.T, tc queueChannelPolicyCase) {
 	store := setupTestStore(t)
 	var mu sync.Mutex
 	var runnerCalls, deliveryCalls, typingCalls int
-	doneCh := make(chan struct{})
 
 	var cls *classifier.Classifier
 	if tc.classifierConfidence > 0 {
@@ -230,7 +231,7 @@ func runQueueChannelPolicyCase(t *testing.T, tc queueChannelPolicyCase) {
 		},
 	}
 	if !tc.nilOnMessageCompleted {
-		cfg.OnMessageCompleted = func(msg db.Message, finalStatus string) { close(doneCh) }
+		cfg.OnMessageCompleted = func(msg db.Message, finalStatus string) {}
 	}
 	pool := NewWorkerPool(cfg)
 	if tc.seedSpamThread {
@@ -241,19 +242,18 @@ func runQueueChannelPolicyCase(t *testing.T, tc queueChannelPolicyCase) {
 		pool.SetDiscordSession(dg)
 	}
 
+	defer pool.Stop()
+
 	msg := tc.message
 	if msg.CreatedAt.IsZero() {
 		msg.CreatedAt = time.Now().UTC()
 	}
+	if msg.Status == "" {
+		msg.Status = db.StatusPending
+	}
 	_ = insertMessage(store, msg)
-
-	if tc.nilOnMessageCompleted {
-		pool.processBurst([]db.Message{msg})
-	} else {
-		pool.Start()
-		defer pool.Stop()
-		pool.Enqueue(msg)
-		waitForCompletion(t, doneCh, 5*time.Second, tc.name)
+	if lt := runLiveBurst(context.Background(), pool, msg.ThreadID, "turn-1", msg.ID); lt.err != nil {
+		t.Fatalf("turn err = %v", lt.err)
 	}
 
 	mu.Lock()
@@ -282,10 +282,10 @@ func TestQueueChannelPolicyIgnoredAndDefaultDenyMatrix(t *testing.T) {
 		{name: "IgnoredChannelPolicy", policy: config.ChannelPolicy{Mode: "threads"}, ignoredTargetID: "chan-ignored-123", message: db.Message{ID: "msg-ignored-1", ThreadID: "chan-ignored-123", Content: "Hello ignored room"}, expectStatus: db.StatusCompleted, expectErrorMessage: "[IGNORE]"},
 		{name: "IgnoredChannelPolicy_NilCallback", policy: config.ChannelPolicy{Mode: "ignore"}, message: db.Message{ID: "msg-nil-cb-1", ThreadID: "chan-ignored-nil-cb", Content: "Testing nil callback safety"}, nilOnMessageCompleted: true, expectStatus: db.StatusCompleted},
 		{name: "ThreadInheritsParentChannelPolicy", policy: config.ChannelPolicy{Mode: "threads"}, ignoredTargetID: "parent-spam-id", seedSpamThread: true, message: db.Message{ID: "msg-thread-spam-1", ThreadID: "thread-in-spam-id", Content: "Hello in thread in spam"}, expectStatus: db.StatusCompleted, expectErrorMessage: "[IGNORE]"},
-		{name: "HTTPClient_NotDroppedByDefaultDenyIgnore", policy: config.ChannelPolicy{Mode: "ignore"}, message: db.Message{ID: "msg-http-prompt-1", ThreadID: "synthetic-http-thread-uuid", AuthorID: "http-client", Content: "Explain Kubernetes architecture"}, expectRunnerCalls: 1, expectDeliveryCalls: 1, expectTypingCalls: 1, expectStatus: db.StatusCompleted, expectResponseText: "HTTP prompt execution response"},
-		{name: "Typing_ThreadsModeActiveTurn", policy: config.ChannelPolicy{Mode: "threads"}, message: db.Message{ID: "m-type-1", ThreadID: "th-active-1", Content: "Hello thread"}, expectRunnerCalls: 1, expectDeliveryCalls: 1, expectTypingCalls: 1, expectStatus: db.StatusCompleted},
-		{name: "Typing_ChannelModeDirectMentionWake", policy: config.ChannelPolicy{Mode: "channel", WakeMode: "mention"}, message: db.Message{ID: "m-type-2", ThreadID: "th-mention-yes", Content: "<@Aerial> help me"}, expectRunnerCalls: 1, expectDeliveryCalls: 1, expectTypingCalls: 1, expectStatus: db.StatusCompleted},
-		{name: "Typing_ChannelModeAmbientClassifierWake", policy: config.ChannelPolicy{Mode: "channel", WakeMode: "classifier", AmbientWakeThreshold: new(0.8)}, classifierConfidence: 0.95, message: db.Message{ID: "m-type-3", ThreadID: "th-ambient-wake", Content: "Let's change all of these to 8am"}, expectRunnerCalls: 1, expectDeliveryCalls: 1, expectTypingCalls: 1, expectStatus: db.StatusCompleted},
+		{name: "HTTPClient_NotDroppedByDefaultDenyIgnore", policy: config.ChannelPolicy{Mode: "ignore"}, message: db.Message{ID: "msg-http-prompt-1", ThreadID: "synthetic-http-thread-uuid", AuthorID: "http-client", Content: "Explain Kubernetes architecture"}, expectRunnerCalls: 1, expectDeliveryCalls: 1, expectTypingCalls: 2, expectStatus: db.StatusCompleted, expectResponseText: "HTTP prompt execution response"},
+		{name: "Typing_ThreadsModeActiveTurn", policy: config.ChannelPolicy{Mode: "threads"}, message: db.Message{ID: "m-type-1", ThreadID: "th-active-1", Content: "Hello thread"}, expectRunnerCalls: 1, expectDeliveryCalls: 1, expectTypingCalls: 2, expectStatus: db.StatusCompleted},
+		{name: "Typing_ChannelModeDirectMentionWake", policy: config.ChannelPolicy{Mode: "channel", WakeMode: "mention"}, message: db.Message{ID: "m-type-2", ThreadID: "th-mention-yes", Content: "<@Aerial> help me"}, expectRunnerCalls: 1, expectDeliveryCalls: 1, expectTypingCalls: 2, expectStatus: db.StatusCompleted},
+		{name: "Typing_ChannelModeAmbientClassifierWake", policy: config.ChannelPolicy{Mode: "channel", WakeMode: "classifier", AmbientWakeThreshold: new(0.8)}, classifierConfidence: 0.95, message: db.Message{ID: "m-type-3", ThreadID: "th-ambient-wake", Content: "Let's change all of these to 8am"}, expectRunnerCalls: 1, expectDeliveryCalls: 1, expectTypingCalls: 2, expectStatus: db.StatusCompleted},
 		{name: "Typing_ChannelModeAmbientNonWakeChatter", policy: config.ChannelPolicy{Mode: "channel", WakeMode: "classifier", AmbientWakeThreshold: new(0.8)}, classifierConfidence: 0.10, message: db.Message{ID: "m-type-4", ThreadID: "th-ambient-drop", Content: "Just random human chat between people"}, expectStatus: db.StatusCompleted},
 		{name: "Typing_IgnoredChannelPolicy", policy: config.ChannelPolicy{Mode: "ignore"}, message: db.Message{ID: "m-type-5", ThreadID: "th-ignored", Content: "Ignored message @Aerial"}, expectStatus: db.StatusCompleted},
 	}
@@ -667,27 +667,6 @@ func TestWorkerPoolShutdown_PreservationMatrix(t *testing.T) {
 	}
 }
 
-func waitPoolIdle(t *testing.T, pool *WorkerPool, timeout time.Duration) {
-	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		pool.mu.Lock()
-		busy := false
-		for _, state := range pool.threadChs {
-			if state != nil && (state.inFlight || len(state.ch) > 0 || state.activeEnqueuers > 0) {
-				busy = true
-				break
-			}
-		}
-		pool.mu.Unlock()
-		if !busy {
-			return
-		}
-		runtime.Gosched()
-	}
-	t.Fatalf("timed out waiting for worker pool to become idle")
-}
-
 func TestQueue_WatchdogAndRecoveryMatrix(t *testing.T) {
 	t.Parallel()
 
@@ -852,7 +831,7 @@ func TestResolveBotRoleIDsSuite(t *testing.T) {
 
 type processBurstQuotaPauseCase struct {
 	name, threadID, policyMode, runnerStderr, wantLastMsgStatus, wantLastMsgErrSub string
-	useProcessBurst                                                                bool
+	burst                                                                          bool
 	messages                                                                       []db.Message
 	wantOneShotCount                                                               int
 	wantPromptSub, wantDeliveredSub                                                []string
@@ -865,7 +844,6 @@ func runProcessBurstQuotaPauseCase(t *testing.T, tc processBurstQuotaPauseCase) 
 	var runnerCalls int
 	var deliveredTexts []string
 	var mu sync.Mutex
-	doneCh := make(chan struct{}, len(tc.messages))
 	haroBus, getOneShots := newMockHaroOneShotBus(t)
 
 	cfg := WorkerPoolConfig{
@@ -883,13 +861,11 @@ func runProcessBurstQuotaPauseCase(t *testing.T, tc processBurstQuotaPauseCase) 
 			mu.Unlock()
 			return nil
 		},
-		OnMessageCompleted: func(m db.Message, status string) { doneCh <- struct{}{} },
 	}
 	if tc.policyMode != "" {
 		cfg.ResolveChannelPolicy = func(cID, cName string) config.ChannelPolicy { return config.ChannelPolicy{Mode: tc.policyMode} }
 	}
 	pool := NewWorkerPool(cfg)
-	pool.Start()
 	defer pool.Stop()
 
 	t0 := time.Now().UTC()
@@ -899,11 +875,15 @@ func runProcessBurstQuotaPauseCase(t *testing.T, tc processBurstQuotaPauseCase) 
 		msgs[i] = m
 		_ = insertMessage(store, m)
 	}
-	if tc.useProcessBurst {
-		pool.processBurst(msgs)
-	} else {
-		pool.Enqueue(msgs[0])
-		waitForCompletion(t, doneCh, 5*time.Second, tc.name)
+	ids := make([]string, len(msgs))
+	for i, m := range msgs {
+		ids[i] = m.ID
+	}
+	if !tc.burst {
+		ids = ids[:1]
+	}
+	if lt := runLiveBurst(context.Background(), pool, tc.threadID, "turn-1", ids...); lt.err != nil || lt.outcome != OutcomeFailed {
+		t.Fatalf("turn = (%s, %v), want failed", lt.outcome, lt.err)
 	}
 
 	mu.Lock()
@@ -944,7 +924,7 @@ func TestProcessBurst_QuotaPause_Suite(t *testing.T) {
 	tests := []processBurstQuotaPauseCase{
 		{name: "SchedulesOneShotAndNotifies", threadID: "chan-quota-suite-1", runnerStderr: "Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 16m58s.", messages: []db.Message{{ID: "msg-quota-suite-1", Content: "<@bot> can you analyze our code coverage?"}}, wantOneShotCount: 1, wantPromptSub: []string{"[QUOTA_RETRY]", "code coverage"}, wantMinRunAtDelay: 16 * time.Minute, wantDeliveredSub: []string{"16m 58s", "<t:", ":R>", "automatically scheduled a retry"}, wantLastMsgStatus: db.StatusFailed, wantLastMsgErrSub: "[QUOTA_PAUSED"},
 		{name: "CircuitBreakerDoesNotReschedule", threadID: "chan-circuit-suite-1", runnerStderr: "Individual quota reached. Resets in 10m.", messages: []db.Message{{ID: "msg-circuit-suite-1", Content: "[QUOTA_RETRY] Previous failed question"}}, wantOneShotCount: 0, wantDeliveredSub: []string{"paused automated retries"}, wantLastMsgStatus: db.StatusFailed},
-		{name: "TrailingBurstSuppression", threadID: "chan-burst-suppress-suite-1", policyMode: "channel", useProcessBurst: true, runnerStderr: "Individual quota reached. Resets in 16m58s.", messages: []db.Message{{ID: "msg-burst-suite-1", Content: "<@aerial> Question 1"}, {ID: "msg-burst-suite-2", Content: "<@aerial> Question 2"}}, wantOneShotCount: 1, wantLastMsgStatus: db.StatusFailed, wantLastMsgErrSub: "[QUOTA_PAUSED"},
+		{name: "TrailingBurstSuppression", threadID: "chan-burst-suppress-suite-1", policyMode: "channel", burst: true, runnerStderr: "Individual quota reached. Resets in 16m58s.", messages: []db.Message{{ID: "msg-burst-suite-1", Content: "<@aerial> Question 1"}, {ID: "msg-burst-suite-2", Content: "<@aerial> Question 2"}}, wantOneShotCount: 1, wantLastMsgStatus: db.StatusFailed, wantLastMsgErrSub: "[QUOTA_PAUSED"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1023,7 +1003,6 @@ func TestThreadColdStartSummarization_Integration(t *testing.T) {
 	var mu sync.Mutex
 	var lastPromptReceived string
 	var llmCallCount int
-	doneCh := make(chan struct{}, 10)
 
 	pool := NewWorkerPool(WorkerPoolConfig{
 		Store: store, BackoffBase: 10 * time.Millisecond, MaxAttempts: 1,
@@ -1051,9 +1030,7 @@ func TestThreadColdStartSummarization_Integration(t *testing.T) {
 			return mockJSONResponse("b1b7fb78-d85d-4bd6-ba9e-330f1e30596f", "Done"), "Starting conversation update stream for b1b7fb78-d85d-4bd6-ba9e-330f1e30596f\n", 0, nil
 		},
 		DeliveryFunc: noopDelivery, TypingFunc: noopTyping,
-		OnMessageCompleted: func(msg db.Message, finalStatus string) { doneCh <- struct{}{} },
 	})
-	pool.Start()
 	defer pool.Stop()
 
 	// Cold starts never call the summarizer; the turn-end refresh after delivery does.
@@ -1072,9 +1049,10 @@ func TestThreadColdStartSummarization_Integration(t *testing.T) {
 			mu.Lock()
 			prevCalls := llmCallCount
 			mu.Unlock()
-			_ = insertMessage(store, st.msg)
-			pool.Enqueue(st.msg)
-			waitForCompletion(t, doneCh, 3*time.Second, st.name)
+			msg := st.msg
+			msg.Status, msg.CreatedAt = db.StatusPending, time.Now().UTC()
+			_ = insertMessage(store, msg)
+			mustRunLiveBurst(t, pool, msg.ThreadID, msg.ID, OutcomeCompleted)
 			if st.wantRefreshEvent != "" {
 				select {
 				case got := <-refreshEvents:
@@ -1128,7 +1106,6 @@ func runProcessBurstErrorClassificationCase(t *testing.T, tt processBurstErrorCl
 	var mu sync.Mutex
 	attempts := 0
 	var deliveredText string
-	doneCh := make(chan struct{}, 1)
 
 	pool := NewWorkerPool(WorkerPoolConfig{
 		SessionManager: session.New(tmpDir, ""), Store: store, BackoffBase: 10 * time.Millisecond, MaxAttempts: 3,
@@ -1151,16 +1128,15 @@ func runProcessBurstErrorClassificationCase(t *testing.T, tt processBurstErrorCl
 			mu.Unlock()
 			return nil
 		},
-		TypingFunc:         noopTyping,
-		OnMessageCompleted: func(msg db.Message, finalStatus string) { doneCh <- struct{}{} },
+		TypingFunc: noopTyping,
 	})
-	pool.Start()
 	defer pool.Stop()
 
-	msg := db.Message{ID: "msg-" + tt.name, ThreadID: tt.threadID, Content: "prompt " + tt.name}
+	msg := db.Message{ID: "msg-" + tt.name, ThreadID: tt.threadID, Content: "prompt " + tt.name, Status: db.StatusPending, CreatedAt: time.Now().UTC()}
 	_ = insertMessage(store, msg)
-	pool.Enqueue(msg)
-	waitForCompletion(t, doneCh, 5*time.Second, tt.name)
+	if lt := runLiveBurst(context.Background(), pool, tt.threadID, "turn-1", msg.ID); lt.err != nil {
+		t.Fatalf("turn err = %v", lt.err)
+	}
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -1208,7 +1184,6 @@ func TestWorkerPool_EffortRouting(t *testing.T) {
 	store := setupTestStore(t)
 	var executedModels []string
 	var mu sync.Mutex
-	doneCh := make(chan struct{}, 2)
 
 	appCfg := config.NewFromData(&config.ConfigData{
 		Model: "claude-opus-4-6-thinking", LowEffortModel: "claude-sonnet-4-6-thinking",
@@ -1223,9 +1198,7 @@ func TestWorkerPool_EffortRouting(t *testing.T) {
 			return mockJSONResponse(sessionID, "Done!"), "", 0, nil
 		},
 		DeliveryFunc: noopDelivery, TypingFunc: noopTyping,
-		OnMessageCompleted: func(msg db.Message, finalStatus string) { doneCh <- struct{}{} },
 	})
-	pool.Start()
 	defer pool.Stop()
 
 	cases := []struct{ runID, schedID, msgID, threadID, effort, wantModel string }{
@@ -1235,8 +1208,9 @@ func TestWorkerPool_EffortRouting(t *testing.T) {
 	for _, c := range cases {
 		msg := db.Message{ID: c.msgID, ThreadID: c.threadID, AuthorID: "scheduler", AuthorName: "Scheduler", Content: "Run routine", Status: db.StatusPending, Effort: c.effort, CreatedAt: time.Now().UTC()}
 		_ = insertMessage(store, msg)
-		pool.Enqueue(msg)
-		waitForCompletion(t, doneCh, 3*time.Second, c.msgID)
+		if lt := runLiveBurst(context.Background(), pool, c.threadID, "turn-"+c.msgID, c.msgID); lt.err != nil || lt.outcome != OutcomeCompleted {
+			t.Fatalf("turn %s = (%s, %v), want completed", c.msgID, lt.outcome, lt.err)
+		}
 	}
 
 	mu.Lock()
@@ -1245,4 +1219,25 @@ func TestWorkerPool_EffortRouting(t *testing.T) {
 	if len(models) != 2 || models[0] != cases[0].wantModel || models[1] != cases[1].wantModel {
 		t.Fatalf("executedModels = %v, want [%s, %s]", models, cases[0].wantModel, cases[1].wantModel)
 	}
+}
+
+func waitPoolIdle(t *testing.T, pool *WorkerPool, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		pool.mu.Lock()
+		busy := false
+		for _, state := range pool.threadChs {
+			if state != nil && (state.inFlight || len(state.ch) > 0 || state.activeEnqueuers > 0) {
+				busy = true
+				break
+			}
+		}
+		pool.mu.Unlock()
+		if !busy {
+			return
+		}
+		runtime.Gosched()
+	}
+	t.Fatalf("timed out waiting for worker pool to become idle")
 }
