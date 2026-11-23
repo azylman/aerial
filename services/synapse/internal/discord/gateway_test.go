@@ -296,13 +296,15 @@ func runGatewayMessageCreateCase(ctx context.Context, t *testing.T, tc gatewayMe
 		session.State.User = &discordgo.User{ID: tc.botUserID}
 	}
 	if tc.hasRolesInState {
-		_ = session.State.GuildAdd(&discordgo.Guild{
+		if err := session.State.GuildAdd(&discordgo.Guild{
 			ID: "guild-1",
 			Roles: []*discordgo.Role{
 				{ID: "role-a", Name: "AdminRole"},
 				{ID: "role-b", Name: "ReviewerRole"},
 			},
-		})
+		}); err != nil {
+			t.Fatalf("session.State.GuildAdd() err = %v", err)
+		}
 	}
 
 	mc := buildGatewayMessage(tc)

@@ -909,10 +909,6 @@ func (*errQueueStore) UpdateMessageCompleted(context.Context, string, string, st
 	return errors.New("errQueueStore: update message completed error")
 }
 
-func (*errQueueStore) IncrementMessageRetry(context.Context, string, string) error {
-	return errors.New("errQueueStore: increment message retry error")
-}
-
 func (*errQueueStore) SaveSessionID(context.Context, string, string) error {
 	return errors.New("errQueueStore: save session id error")
 }

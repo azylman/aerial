@@ -497,7 +497,9 @@ func TestResolveConfigPath(t *testing.T) {
 	}()
 	tmpDir := t.TempDir()
 	existingLocal := filepath.Join(tmpDir, "local.yaml")
-	_ = os.WriteFile(existingLocal, []byte("port: '4015'\n"), 0o644)
+	if err := os.WriteFile(existingLocal, []byte("port: '4015'\n"), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
 	missingLocal := filepath.Join(tmpDir, "nonexistent.yaml")
 
 	tests := []struct {

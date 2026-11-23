@@ -14,19 +14,22 @@ import (
 	"github.com/azylman/aerial/pkg/pubsubtest"
 )
 
-func initTestJobBus(ctx context.Context, busErr error, busReceived chan struct{}) pubsub.Bus {
+func initTestJobBus(ctx context.Context, t *testing.T, busErr error, busReceived chan struct{}) pubsub.Bus {
+	t.Helper()
 	memBus := pubsub.NewMemoryBus()
 	if busErr != nil {
 		_ = memBus.Close()
 		return memBus
 	}
-	_, _ = memBus.ConsumeQueue(ctx, "aerial.jobs.synapse.github", "test-watcher", func(_ context.Context, _ pubsub.Message) error {
+	if _, err := memBus.ConsumeQueue(ctx, "aerial.jobs.synapse.github", "test-watcher", func(_ context.Context, _ pubsub.Message) error {
 		select {
 		case busReceived <- struct{}{}:
 		default:
 		}
 		return nil
-	})
+	}); err != nil {
+		t.Fatalf("ConsumeQueue: %v", err)
+	}
 	return memBus
 }
 
@@ -74,7 +77,7 @@ func TestPublishJetStreamJob(t *testing.T) {
 			srv := &RouterServer{}
 			busReceived := make(chan struct{}, 1)
 			if tc.hasBus {
-				memBus := initTestJobBus(ctx, tc.busErr, busReceived)
+				memBus := initTestJobBus(ctx, t, tc.busErr, busReceived)
 				t.Cleanup(func() { _ = memBus.Close() })
 				srv.SetEventBus(memBus)
 			}

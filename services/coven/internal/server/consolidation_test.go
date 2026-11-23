@@ -294,8 +294,14 @@ func runProcessThreadFactsContextCase(t *testing.T, tc processThreadFactsContext
 
 	ctx := context.Background()
 	if tc.parentTraceID != "" {
-		tid, _ := trace.TraceIDFromHex(tc.parentTraceID)
-		sid, _ := trace.SpanIDFromHex(tc.parentSpanID)
+		tid, err := trace.TraceIDFromHex(tc.parentTraceID)
+		if err != nil {
+			t.Fatalf("TraceIDFromHex(%q): %v", tc.parentTraceID, err)
+		}
+		sid, err := trace.SpanIDFromHex(tc.parentSpanID)
+		if err != nil {
+			t.Fatalf("SpanIDFromHex(%q): %v", tc.parentSpanID, err)
+		}
 		ctx = trace.ContextWithSpanContext(ctx, trace.NewSpanContext(trace.SpanContextConfig{TraceID: tid, SpanID: sid, TraceFlags: trace.FlagsSampled}))
 	}
 	err := processThreadFacts(ctx, s, client, llm, thread)

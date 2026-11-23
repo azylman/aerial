@@ -24,7 +24,7 @@ import (
 func TestMain(m *testing.M) {
 	hermetictest.Install()
 	for _, kv := range os.Environ() {
-		if key, _, _ := strings.Cut(kv, "="); strings.HasPrefix(key, "OTEL_") {
+		if key, _, ok := strings.Cut(kv, "="); ok && strings.HasPrefix(key, "OTEL_") {
 			_ = os.Unsetenv(key)
 		}
 	}

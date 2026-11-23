@@ -52,21 +52,6 @@ var (
 func messageStatus(m *db.Message) string   { return m.Status }
 func dispatchStatus(d *db.Dispatch) string { return d.Status }
 
-func (f *FakeStore) pendingMessagesSorted(match func(*db.Message) bool) []string {
-	var rows []*db.Message
-	for _, id := range f.messageOrder {
-		if m := f.messages[id]; m != nil && m.Status == db.StatusPending && match(m) {
-			rows = append(rows, m)
-		}
-	}
-	sort.SliceStable(rows, func(i, j int) bool { return rows[i].CreatedAt.Before(rows[j].CreatedAt) })
-	out := make([]string, 0, len(rows))
-	for _, m := range rows {
-		out = append(out, m.ID)
-	}
-	return out
-}
-
 func (f *FakeStore) failMessages(method string, ids []string, reason string, statuses []string) ([]string, error) {
 	return withFakeLock(f, method, func() ([]string, error) {
 		now := time.Now().UTC()
@@ -82,16 +67,6 @@ func (f *FakeStore) failDispatches(method string, ids []string, reason string, s
 		return fakeUpdateByID(ids, f.dispatches, dispatchStatus, statuses, func(d *db.Dispatch) {
 			d.Status, d.ErrorMessage, d.UpdatedAt = db.StatusFailed, reason, now
 		}), nil
-	})
-}
-
-func (f *FakeStore) ListPendingMessageIDsForThread(ctx context.Context, threadID string) ([]string, error) {
-	return withFakeLock(f, "ListPendingMessageIDsForThread", func() ([]string, error) {
-		threadID = strings.TrimSpace(threadID)
-		if threadID == "" {
-			return nil, nil
-		}
-		return f.pendingMessagesSorted(func(m *db.Message) bool { return m.ThreadID == threadID }), nil
 	})
 }
 
@@ -131,31 +106,6 @@ func (f *FakeStore) BeginMessageAttempt(ctx context.Context, id string, ordinal 
 			return db.AttemptStart{}, fmt.Errorf("message %s: %w", id, db.ErrRecordNotFound)
 		}
 		return fakeBeginAttempt(ordinal, &m.RetryCount, &m.RestartCount, &m.UpdatedAt)
-	})
-}
-
-func (f *FakeStore) ListPendingDispatchIDsForSession(ctx context.Context, sessionKey string) ([]string, error) {
-	return withFakeLock(f, "ListPendingDispatchIDsForSession", func() ([]string, error) {
-		key := strings.TrimSpace(sessionKey)
-		if key == "" {
-			return nil, nil
-		}
-		var rows []*db.Dispatch
-		for _, id := range f.dispatchOrder {
-			d := f.dispatches[id]
-			if d == nil || d.Status != db.StatusPending {
-				continue
-			}
-			if d.SessionID == key || (d.VanadisChunkID != "" && "vanadis-"+d.VanadisChunkID == key) || "dispatch-"+d.ID == key {
-				rows = append(rows, d)
-			}
-		}
-		sort.SliceStable(rows, func(i, j int) bool { return rows[i].CreatedAt.Before(rows[j].CreatedAt) })
-		out := make([]string, 0, len(rows))
-		for _, d := range rows {
-			out = append(out, d.ID)
-		}
-		return out, nil
 	})
 }
 
