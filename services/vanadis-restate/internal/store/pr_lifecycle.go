@@ -122,38 +122,74 @@ func parseBuildPushServices(checks map[string]string) map[string]struct{} {
 	return services
 }
 
-// deployJobSet returns the provable deploy jobs for a chunk: the rollout
-// ExpectedJobs when present, otherwise the Build-and-Push services parsed
-// from CI checks. An empty set means no shared job can be proven.
+// isRepoKustomizationGateJob reports whether job is a Flux Kustomization or
+// GitOps repo-wide sync gate name.
+func isRepoKustomizationGateJob(job string) bool {
+	switch strings.ToLower(strings.TrimSpace(job)) {
+	case "aerial-core", "aerial-apps", "core", "apps", "git-sync", "git-merge":
+		return true
+	default:
+		return false
+	}
+}
+
+// deployJobSet returns the provable deploy jobs for a chunk as the lowercase trimmed
+// union of rollout ExpectedJobs, StartedJobs, DeployedJobs, and CI Build-and-Push services.
+// An empty set means no shared job can be proven.
 func deployJobSet(c model.VanadisChunk) map[string]struct{} {
+	jobs := make(map[string]struct{})
+	for svc := range parseBuildPushServices(c.CIChecks) {
+		if clean := strings.ToLower(strings.TrimSpace(svc)); clean != "" {
+			jobs[clean] = struct{}{}
+		}
+	}
 	if c.RolloutState != nil {
-		jobs := make(map[string]struct{})
 		for _, job := range c.RolloutState.ExpectedJobs {
 			if clean := strings.ToLower(strings.TrimSpace(job)); clean != "" {
 				jobs[clean] = struct{}{}
 			}
 		}
-		if len(jobs) > 0 {
-			return jobs
+		for _, job := range c.RolloutState.StartedJobs {
+			if clean := strings.ToLower(strings.TrimSpace(job)); clean != "" {
+				jobs[clean] = struct{}{}
+			}
+		}
+		for _, job := range c.RolloutState.DeployedJobs {
+			if clean := strings.ToLower(strings.TrimSpace(job)); clean != "" {
+				jobs[clean] = struct{}{}
+			}
 		}
 	}
-	return parseBuildPushServices(c.CIChecks)
+	return jobs
 }
 
-// sharedDeployJob reports whether both chunks provably deploy at least one
-// common job. Deployment rolls out per job, so repo-only overlap sweeps
-// nothing: either side without a derivable job set blocks the sweep.
+// sharedDeployJob reports whether both chunks deploy at least one common job,
+// or if at least one chunk is a repo-wide Kustomization gate rollout.
 func sharedDeployJob(a, b model.VanadisChunk) bool {
 	aJobs, bJobs := deployJobSet(a), deployJobSet(b)
 	if len(aJobs) == 0 || len(bJobs) == 0 {
 		return false
 	}
+	var aServices, bServices []string
 	for job := range aJobs {
-		if _, ok := bJobs[job]; ok {
-			return true
+		if !isRepoKustomizationGateJob(job) {
+			aServices = append(aServices, job)
 		}
 	}
-	return false
+	for job := range bJobs {
+		if !isRepoKustomizationGateJob(job) {
+			bServices = append(bServices, job)
+		}
+	}
+	if len(aServices) > 0 && len(bServices) > 0 {
+		for _, svc := range aServices {
+			if _, ok := bJobs[svc]; ok {
+				return true
+			}
+		}
+		return false
+	}
+	return true
 }
 
 // sweepPreDeployStatus reports whether a chunk is still pre-deploy (merged,
@@ -330,12 +366,12 @@ func sameDeployRepo(owner string, a, b string) bool {
 }
 
 // UpdatePRLifecycleStatus prevents delayed pre-deployment events from reopening
-// a terminal chunk. Notifications follow only an applied write. The deploying
-// transition preserves the merge stamp without ever creating one: the landed
-// commit contains every earlier merge, so deploy_success needs the deploying
-// chunk's real merge time to prove which earlier chunks it includes, and a
-// deploying chunk with no recorded merge keeps an unknown stamp so the sweep
-// skips it instead of completing unprovable chunks.
+// a terminal chunk. Notifications follow only an applied write. The deploying,
+// synced, and deploy_failed transitions preserve the merge stamp without ever
+// creating one: the landed commit contains every earlier merge, so deploy_success
+// needs the deploying chunk's real merge time to prove which earlier chunks it
+// includes, and a deploying chunk with no recorded merge keeps an unknown stamp so
+// the sweep skips it instead of completing unprovable chunks.
 func (s *Store) UpdatePRLifecycleStatus(ctx context.Context, chunkID, status string) error {
 	if s == nil || s.db == nil {
 		return errors.New("database connection is nil")
@@ -343,7 +379,7 @@ func (s *Store) UpdatePRLifecycleStatus(ctx context.Context, chunkID, status str
 	if strings.TrimSpace(chunkID) == "" {
 		return errors.New("chunk_id cannot be empty")
 	}
-	tag, err := s.db.Exec(ctx, `WITH reopened_build AS (UPDATE vanadis_builds AS rb SET status = 'running', updated_at = CURRENT_TIMESTAMP FROM vanadis_chunks AS target WHERE target.id = $2 AND rb.id = target.build_id AND rb.status = 'failed' AND target.mode = 'pr' AND COALESCE(target.pr_number, 0) > 0 AND target.status = 'failed' AND $1 IN ('merged', 'deploying') AND NOT EXISTS (SELECT 1 FROM vanadis_chunks AS s WHERE s.build_id = target.build_id AND s.id != target.id AND s.status IN ('failed', 'cancelled'))) UPDATE vanadis_chunks SET status = $1, banner = CASE WHEN status IN ('failed', 'conflict', 'ci_failed') OR $1 IN ('merged', 'synced', 'deploying', 'deployed', 'pr_opened') THEN '' ELSE banner END, completed_at = CASE WHEN $1 = 'merged' THEN COALESCE(completed_at, CURRENT_TIMESTAMP) WHEN $1 = 'deploying' THEN completed_at ELSE NULL END, updated_at = CURRENT_TIMESTAMP WHERE id = $2 AND status NOT IN ('completed', 'failed', 'cancelled') OR (id = $2 AND $1 IN ('merged', 'deploying') AND mode = 'pr' AND COALESCE(pr_number, 0) > 0 AND status = 'failed');`, status, strings.TrimSpace(chunkID))
+	tag, err := s.db.Exec(ctx, `WITH reopened_build AS (UPDATE vanadis_builds AS rb SET status = 'running', updated_at = CURRENT_TIMESTAMP FROM vanadis_chunks AS target WHERE target.id = $2 AND rb.id = target.build_id AND rb.status = 'failed' AND target.mode = 'pr' AND COALESCE(target.pr_number, 0) > 0 AND target.status = 'failed' AND $1 IN ('merged', 'deploying') AND NOT EXISTS (SELECT 1 FROM vanadis_chunks AS s WHERE s.build_id = target.build_id AND s.id != target.id AND s.status IN ('failed', 'cancelled'))) UPDATE vanadis_chunks SET status = $1, banner = CASE WHEN status IN ('failed', 'conflict', 'ci_failed') OR $1 IN ('merged', 'synced', 'deploying', 'deployed', 'pr_opened') THEN '' ELSE banner END, completed_at = CASE WHEN $1 = 'merged' THEN COALESCE(completed_at, CURRENT_TIMESTAMP) WHEN $1 IN ('deploying', 'synced', 'deploy_failed') THEN completed_at ELSE NULL END, updated_at = CURRENT_TIMESTAMP WHERE id = $2 AND status NOT IN ('completed', 'failed', 'cancelled') OR (id = $2 AND $1 IN ('merged', 'deploying') AND mode = 'pr' AND COALESCE(pr_number, 0) > 0 AND status = 'failed');`, status, strings.TrimSpace(chunkID))
 	if err != nil {
 		return fmt.Errorf("update pr lifecycle status: %w", err)
 	}
