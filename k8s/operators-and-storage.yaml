@@ -642,7 +642,7 @@ spec:
                   DECLARE
                     s RECORD;
                   BEGIN
-                    FOR s IN SELECT slot_name FROM pg_replication_slots WHERE slot_name IN ('pg19_upgrade_sub', 'pg19_upgrade_sub_' || '$db') LOOP
+                    FOR s IN SELECT slot_name FROM pg_replication_slots WHERE slot_name = (CASE WHEN '$db' = 'docket' THEN 'pg19_upgrade_sub' ELSE 'pg19_upgrade_sub_' || '$db' END) LOOP
                       PERFORM pg_drop_replication_slot(s.slot_name);
                     END LOOP;
                   END \$\$;
