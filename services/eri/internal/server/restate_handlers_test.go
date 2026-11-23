@@ -237,11 +237,19 @@ func TestHandleVoiceAskSSE_RestateCutover(t *testing.T) {
 
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req queue.VoiceSessionRequest
-		_ = json.NewDecoder(r.Body).Decode(&req)
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			return
+		}
 		subj := "voice.stream." + req.TurnID
-		_ = bus.Publish(r.Context(), subj, "1", queue.VoiceStreamEvent{Event: "status", Status: "thinking"})
-		_ = bus.Publish(r.Context(), subj, "2", queue.VoiceStreamEvent{Event: "sentence", Text: "Hello from SSE."})
-		_ = bus.Publish(r.Context(), subj, "3", queue.VoiceStreamEvent{Event: "reply", Reply: "Hello from SSE.", ConversationID: "conv-123"})
+		if err := bus.Publish(r.Context(), subj, "1", queue.VoiceStreamEvent{Event: "status", Status: "thinking"}); err != nil {
+			return
+		}
+		if err := bus.Publish(r.Context(), subj, "2", queue.VoiceStreamEvent{Event: "sentence", Text: "Hello from SSE."}); err != nil {
+			return
+		}
+		if err := bus.Publish(r.Context(), subj, "3", queue.VoiceStreamEvent{Event: "reply", Reply: "Hello from SSE.", ConversationID: "conv-123"}); err != nil {
+			return
+		}
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(`{"reply":"Hello from SSE.","conversation_id":"conv-123","device_key":"kiosk-sse"}`))
 	}))
@@ -398,11 +406,15 @@ func TestHandleVoiceAskSSE_RestateFailures(t *testing.T) {
 			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if tc.publishErr {
 					var req queue.VoiceSessionRequest
-					_ = json.NewDecoder(r.Body).Decode(&req)
-					_ = bus.Publish(r.Context(), "voice.stream."+req.TurnID, "err-1", queue.VoiceStreamEvent{
+					if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+						return
+					}
+					if err := bus.Publish(r.Context(), "voice.stream."+req.TurnID, "err-1", queue.VoiceStreamEvent{
 						Event: "error",
 						Error: "bus stream failed",
-					})
+					}); err != nil {
+						return
+					}
 				}
 				w.WriteHeader(tc.statusCode)
 				_, _ = w.Write([]byte(tc.serverResp))
@@ -476,7 +488,11 @@ func TestHandlePromptViaRestate_IdempotencyKey(t *testing.T) {
 				Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
 					capturedKey = r.Header.Get("Idempotency-Key")
 					_, headerPresent = r.Header["Idempotency-Key"]
-					capturedBody, _ = io.ReadAll(r.Body)
+					var err error
+					capturedBody, err = io.ReadAll(r.Body)
+					if err != nil {
+						return nil, err
+					}
 					return &http.Response{
 						StatusCode: http.StatusOK,
 						Body:       io.NopCloser(strings.NewReader(`{"status":"accepted"}`)),
@@ -555,7 +571,11 @@ func TestHandleDispatchViaRestate_IdempotencyKey(t *testing.T) {
 			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				receivedKey = r.Header.Get("Idempotency-Key")
 				_, hasHeader = r.Header["Idempotency-Key"]
-				capturedBody, _ = io.ReadAll(r.Body)
+				var err error
+				capturedBody, err = io.ReadAll(r.Body)
+				if err != nil {
+					return
+				}
 				w.WriteHeader(http.StatusOK)
 				_, _ = w.Write([]byte(`{"status":"accepted"}`))
 			}))

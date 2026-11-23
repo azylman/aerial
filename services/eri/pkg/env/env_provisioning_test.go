@@ -30,11 +30,19 @@ func assertIsolatedEphemeralStorage(t *testing.T, p *Provisioner, tmpData string
 	p.linkSharedSessionStorage(tmpData, filepath.Join(tmpData, "brain"), filepath.Join(tmpData, "conversations"))
 	ephHome := p.runtimeHomeDir(TargetEphemeral)
 	ephCliBrain := filepath.Join(ephHome, ".gemini", "antigravity-cli", "brain")
-	_ = os.MkdirAll(filepath.Dir(ephCliBrain), 0o755)
-	_ = os.Symlink(filepath.Join(tmpData, "brain"), ephCliBrain)
+	if err := os.MkdirAll(filepath.Dir(ephCliBrain), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.Symlink(filepath.Join(tmpData, "brain"), ephCliBrain); err != nil {
+		t.Fatalf("Symlink: %v", err)
+	}
 	ephCodexSessions := filepath.Join(ephHome, ".codex", "sessions")
-	_ = os.MkdirAll(filepath.Dir(ephCodexSessions), 0o755)
-	_ = os.Symlink(filepath.Join(tmpData, "codex", "sessions"), ephCodexSessions)
+	if err := os.MkdirAll(filepath.Dir(ephCodexSessions), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.Symlink(filepath.Join(tmpData, "codex", "sessions"), ephCodexSessions); err != nil {
+		t.Fatalf("Symlink: %v", err)
+	}
 	p.provisionRuntimeSharedAssets(ephHome)
 	if fi, err := os.Lstat(ephCliBrain); err != nil || fi.Mode()&os.ModeSymlink != 0 || !fi.IsDir() {
 		t.Fatalf("expected ephemeral brain to be isolated directory, got fi=%v err=%v", fi, err)
@@ -83,8 +91,12 @@ func runProvisionRuntimeSharedAssetsCase(t *testing.T, tc sharedAssetsCase) {
 	}
 	if tc.existingSymlink {
 		targetCliBrain := filepath.Join(runtimeGemini, "antigravity-cli", "brain")
-		_ = os.MkdirAll(filepath.Dir(targetCliBrain), 0o755)
-		_ = os.Symlink(t.TempDir(), targetCliBrain)
+		if err := os.MkdirAll(filepath.Dir(targetCliBrain), 0o755); err != nil {
+			t.Fatalf("MkdirAll: %v", err)
+		}
+		if err := os.Symlink(t.TempDir(), targetCliBrain); err != nil {
+			t.Fatalf("Symlink: %v", err)
+		}
 	}
 
 	p.provisionRuntimeSharedAssets(runtimeHome)
@@ -585,11 +597,17 @@ func assertSkillTargetRules(t *testing.T, target RuleTarget, superpowers bool, f
 
 func assertSkillEntries(t *testing.T, tc skillsProvisioningCase, installed int, targetSkillsDir string) {
 	t.Helper()
+	if tc.blockTarget {
+		return
+	}
 	if tc.wantLinked && installed == 0 && tc.target != TargetEphemeral {
 		t.Fatalf("expected installed skills > 0 for target %s", tc.target)
 	}
 	found := make(map[string]bool)
-	entries, _ := os.ReadDir(targetSkillsDir)
+	entries, err := os.ReadDir(targetSkillsDir)
+	if err != nil {
+		t.Fatalf("ReadDir(%s): %v", targetSkillsDir, err)
+	}
 	for _, e := range entries {
 		found[e.Name()] = true
 	}
@@ -828,8 +846,12 @@ func runSyncHooksCase(t *testing.T, tc syncHooksCase) {
 		origPaths := DefaultHooksSearchPaths
 		defer func() { DefaultHooksSearchPaths = origPaths }()
 		DefaultHooksSearchPaths = []string{sourceDir}
-		_ = os.MkdirAll(filepath.Join(sourceDir, "subfolder"), 0o755)
-		_ = os.Symlink(filepath.Join(sourceDir, "nonexistent"), filepath.Join(sourceDir, "broken.sh"))
+		if err := os.MkdirAll(filepath.Join(sourceDir, "subfolder"), 0o755); err != nil {
+			t.Fatalf("MkdirAll: %v", err)
+		}
+		if err := os.Symlink(filepath.Join(sourceDir, "nonexistent"), filepath.Join(sourceDir, "broken.sh")); err != nil {
+			t.Fatalf("Symlink: %v", err)
+		}
 		p.SetHooksDir("")
 	}
 	if tc.hooksDirIsFile {
@@ -1025,21 +1047,31 @@ func setupPruneTestFiles(baseDir string, setupFiles []string) {
 	for _, spec := range setupFiles {
 		if rel, ok := strings.CutPrefix(spec, "file:"); ok {
 			full := filepath.Join(baseDir, rel)
-			_ = os.MkdirAll(filepath.Dir(full), 0o755)
-			_ = os.WriteFile(full, []byte("data"), 0o644)
+			if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+				panic(err)
+			}
+			if err := os.WriteFile(full, []byte("data"), 0o644); err != nil {
+				panic(err)
+			}
 			continue
 		}
 		if rel, ok := strings.CutPrefix(spec, "dir:"); ok {
 			full := filepath.Join(baseDir, rel)
-			_ = os.MkdirAll(full, 0o755)
+			if err := os.MkdirAll(full, 0o755); err != nil {
+				panic(err)
+			}
 			continue
 		}
 		if rest, ok := strings.CutPrefix(spec, "symlink:"); ok {
 			parts := strings.Split(rest, "->")
 			target := filepath.Join(baseDir, parts[0])
 			link := filepath.Join(baseDir, parts[1])
-			_ = os.MkdirAll(filepath.Dir(link), 0o755)
-			_ = os.Symlink(target, link)
+			if err := os.MkdirAll(filepath.Dir(link), 0o755); err != nil {
+				panic(err)
+			}
+			if err := os.Symlink(target, link); err != nil {
+				panic(err)
+			}
 		}
 	}
 }

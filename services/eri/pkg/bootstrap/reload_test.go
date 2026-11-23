@@ -160,7 +160,10 @@ type discordRecorder struct {
 }
 
 func (d *discordRecorder) RoundTrip(req *http.Request) (*http.Response, error) {
-	body, _ := io.ReadAll(req.Body)
+	body, err := io.ReadAll(req.Body)
+	if err != nil {
+		return nil, err
+	}
 	d.mu.Lock()
 	d.bodies = append(d.bodies, string(body))
 	d.mu.Unlock()

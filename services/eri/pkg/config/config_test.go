@@ -487,7 +487,9 @@ func assertLoadConfigLKGCBootCase(t *testing.T, tc loadConfigLKGCBootCase) {
 
 	if tc.badReloadYAML != "" {
 		primaryPath := paths[0]
-		_ = os.WriteFile(primaryPath, []byte(tc.badReloadYAML), 0o600)
+		if err := os.WriteFile(primaryPath, []byte(tc.badReloadYAML), 0o600); err != nil {
+			t.Fatalf("failed to write %s: %v", primaryPath, err)
+		}
 		errReload := ReloadWithSupplier(cfg, func() (*Config, error) {
 			return LoadConfigFromLookup(lookup, primaryPath)
 		})
@@ -497,6 +499,25 @@ func assertLoadConfigLKGCBootCase(t *testing.T, tc loadConfigLKGCBootCase) {
 		if cfg.Current().Model != tc.wantModel {
 			t.Errorf("active config failed to retain LKGC: got %q, want %q", cfg.Current().Model, tc.wantModel)
 		}
+	}
+}
+
+func assertColdBootConfig(t *testing.T, tmpDir, validBoot string) {
+	t.Helper()
+	waitForColdBootConfig([]string{validBoot}, 500*time.Millisecond)
+	waitForColdBootConfig([]string{filepath.Join(tmpDir, "absent")}, 1*time.Millisecond)
+	waitForColdBootConfig(nil, 1*time.Millisecond)
+	waitForColdBootConfig([]string{filepath.Join(tmpDir, "absent")}, 0)
+
+	wantAbsentColdBoot := false
+	if fi, err := os.Stat("/share/aerial-config"); err == nil && fi.IsDir() {
+		wantAbsentColdBoot = true
+	}
+	if got := isContainerColdBoot(filepath.Join(tmpDir, "absent")); got != wantAbsentColdBoot {
+		t.Errorf("isContainerColdBoot(absent) = %v, want %v", got, wantAbsentColdBoot)
+	}
+	if isContainerColdBoot(validBoot) {
+		t.Error("expected validBoot not to be cold boot")
 	}
 }
 
@@ -535,14 +556,10 @@ func TestLoadConfig_LKGCAndColdBoot(t *testing.T) {
 
 	tmpDir := t.TempDir()
 	validBoot := filepath.Join(tmpDir, "boot.yaml")
-	_ = os.WriteFile(validBoot, []byte("model: test\nchannels:\n  default:\n    mode: threads\n"), 0o600)
-	waitForColdBootConfig([]string{validBoot}, 500*time.Millisecond)
-	waitForColdBootConfig([]string{filepath.Join(tmpDir, "absent")}, 1*time.Millisecond)
-	waitForColdBootConfig(nil, 1*time.Millisecond)
-	waitForColdBootConfig([]string{filepath.Join(tmpDir, "absent")}, 0)
-
-	_ = isContainerColdBoot(filepath.Join(tmpDir, "absent"))
-	_ = isContainerColdBoot(validBoot)
+	if err := os.WriteFile(validBoot, []byte("model: test\nchannels:\n  default:\n    mode: threads\n"), 0o600); err != nil {
+		t.Fatalf("failed to write %s: %v", validBoot, err)
+	}
+	assertColdBootConfig(t, tmpDir, validBoot)
 
 	assertReloadWithSupplierCases(t)
 
@@ -1252,7 +1269,9 @@ func runConfigConcurrency(t *testing.T) {
 	}
 	wg.Wait()
 
-	_ = GetRuntimeConfig()
+	if rc := GetRuntimeConfig(); rc.Model == "" {
+		t.Fatal("GetRuntimeConfig returned empty Model")
+	}
 	origG := activeGlobalConfig.Current()
 	activeGlobalConfig.update(&ConfigData{
 		Timezone:      "America/New_York",
@@ -1272,7 +1291,9 @@ func runConfigConcurrency(t *testing.T) {
 		t.Errorf("expected non-nil voice ambient context")
 	}
 
-	_ = LoadScopeInstructions("general")
+	if got := LoadScopeInstructions("general"); got != "" {
+		t.Errorf("LoadScopeInstructions(general) = %q, want empty", got)
+	}
 }
 
 func TestConfig_AccessorsAndConcurrency(t *testing.T) {

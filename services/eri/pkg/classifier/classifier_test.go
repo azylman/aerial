@@ -417,8 +417,8 @@ func TestCircuitBreaker(t *testing.T) {
 			} else {
 				cConc.recordSuccess()
 			}
-			_ = isClassifierCircuitOpen(cConc)
-			_ = getClassifierFailures(cConc)
+			isClassifierCircuitOpen(cConc)
+			getClassifierFailures(cConc)
 		}(i)
 	}
 	wg.Wait()
@@ -574,16 +574,23 @@ func TestClassifier_ProcessPools(t *testing.T) {
 		spawnFn: func(ctx context.Context, cfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
 			outR, outW := io.Pipe()
 			inR, inW := io.Pipe()
-			errR, _ := io.Pipe()
+			errR, errW := io.Pipe()
+			defer errW.Close()
 			go func() {
-				_, _ = fmt.Fprintf(outW, "{\"event\":\"init\",\"session_id\":\"00000000-0000-0000-0000-000000000099\"}\n")
+				if _, err := fmt.Fprintf(outW, "{\"event\":\"init\",\"session_id\":\"00000000-0000-0000-0000-000000000099\"}\n"); err != nil {
+					return
+				}
 				scanner := bufio.NewScanner(inR)
 				for scanner.Scan() {
 					line := scanner.Text()
 					if strings.Contains(line, "summarize") || strings.Contains(line, "nginx") {
-						_, _ = fmt.Fprintf(outW, "{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"Summary from pool\"}}\n")
+						if _, err := fmt.Fprintf(outW, "{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"Summary from pool\"}}\n"); err != nil {
+							return
+						}
 					} else {
-						_, _ = fmt.Fprintf(outW, "{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"{\\\"confidence\\\":0.85,\\\"reason\\\":\\\"needs help\\\"}\"}}\n")
+						if _, err := fmt.Fprintf(outW, "{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"{\\\"confidence\\\":0.85,\\\"reason\\\":\\\"needs help\\\"}\"}}\n"); err != nil {
+							return
+						}
 					}
 				}
 			}()
@@ -781,7 +788,9 @@ func runClassifySystemOneCase(t *testing.T, tc classifySystemOneCase) {
 	var attempts atomic.Int32
 	var lastReq systemOneRequest
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewDecoder(r.Body).Decode(&lastReq)
+		if err := json.NewDecoder(r.Body).Decode(&lastReq); err != nil {
+			return
+		}
 		curr := attempts.Add(1)
 		if int(curr) <= tc.retryFailures {
 			http.Error(w, "transient error", http.StatusInternalServerError)

@@ -345,7 +345,10 @@ func assertRuntimeIsolation(t *testing.T, p *Provisioner) {
 	}
 
 	ephemeralMCP := filepath.Join(p.dataDir, "runtimes", "ephemeral", ".gemini", "config", "mcp_config.json")
-	data, _ := os.ReadFile(ephemeralMCP)
+	data, err := os.ReadFile(ephemeralMCP)
+	if err != nil {
+		t.Fatalf("ReadFile(ephemeralMCP): %v", err)
+	}
 	if strings.Contains(string(data), "scheduler") {
 		t.Errorf("ephemeral runtime should not include scheduler: %s", string(data))
 	}
@@ -375,7 +378,9 @@ func injectSyncFailure(t *testing.T, tc syncCase, p *Provisioner) {
 func setupMockRootHome(t *testing.T, p *Provisioner, chmodded *[]string) {
 	t.Helper()
 	mockRootDir := filepath.Join(t.TempDir(), "mock-root")
-	_ = os.MkdirAll(filepath.Join(mockRootDir, ".gemini"), 0o755)
+	if err := os.MkdirAll(filepath.Join(mockRootDir, ".gemini"), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
 	rootHomeDir = mockRootDir
 	origHome := p.homeDir
 	p.homeDir = mockRootDir
@@ -433,11 +438,14 @@ func runSyncCase(t *testing.T, tc syncCase) {
 		getEuid = func() int { return 1000 }
 	}
 
-	p, _, _ := newTestProvisioner(t, map[string]string{
+	p, _, aerialConfigDir := newTestProvisioner(t, map[string]string{
 		"common/01_base.md":  "Base rule content",
 		"discord/01_flow.md": "Discord flow content",
 		"voice/01_flow.md":   "Voice flow content",
 	}, nil)
+	if aerialConfigDir == "" {
+		t.Fatal("expected non-empty aerialConfigDir")
+	}
 
 	if tc.homeIsRoot {
 		setupMockRootHome(t, p, &chmodded)
@@ -447,7 +455,12 @@ func runSyncCase(t *testing.T, tc syncCase) {
 		symlinkTarget := filepath.Join(t.TempDir(), "target-skill")
 		writeTestFile(t, filepath.Join(symlinkTarget, "SKILL.md"), "skill body")
 		symlinkPath := filepath.Join(p.homeDir, ".gemini", "symlink-test")
-		_ = os.Symlink(symlinkTarget, symlinkPath)
+		if err := os.MkdirAll(filepath.Dir(symlinkPath), 0o755); err != nil {
+			t.Fatalf("MkdirAll: %v", err)
+		}
+		if err := os.Symlink(symlinkTarget, symlinkPath); err != nil {
+			t.Fatalf("Symlink: %v", err)
+		}
 		writeTestFile(t, filepath.Join(p.dataDir, "cache", "go-build", "artifact.bin"), "bin")
 	}
 
@@ -604,16 +617,28 @@ func runSyncSettingsCase(t *testing.T, tc syncSettingsCase) {
 	}
 
 	if tc.preSeedOAuth {
-		_ = os.MkdirAll(filepath.Dir(settingsPath), 0o755)
-		_ = os.WriteFile(settingsPath, []byte(`{"apiKey":"old","modelProvider":"gemini"}`), 0o644)
+		if err := os.MkdirAll(filepath.Dir(settingsPath), 0o755); err != nil {
+			t.Fatalf("MkdirAll: %v", err)
+		}
+		if err := os.WriteFile(settingsPath, []byte(`{"apiKey":"old","modelProvider":"gemini"}`), 0o644); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
 	}
 	if tc.corruptedInput {
-		_ = os.MkdirAll(filepath.Dir(settingsPath), 0o755)
-		_ = os.WriteFile(settingsPath, []byte("{broken json:"), 0o644)
+		if err := os.MkdirAll(filepath.Dir(settingsPath), 0o755); err != nil {
+			t.Fatalf("MkdirAll: %v", err)
+		}
+		if err := os.WriteFile(settingsPath, []byte("{broken json:"), 0o644); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
 	}
 	if tc.blockFile {
-		_ = os.MkdirAll(filepath.Join(tmpHome, ".gemini"), 0o755)
-		_ = os.WriteFile(filepath.Join(tmpHome, ".gemini", "antigravity-cli"), []byte("file-blocker"), 0o644)
+		if err := os.MkdirAll(filepath.Join(tmpHome, ".gemini"), 0o755); err != nil {
+			t.Fatalf("MkdirAll: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(tmpHome, ".gemini", "antigravity-cli"), []byte("file-blocker"), 0o644); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
 	}
 
 	err := p.SyncSettings(tc.apiKey, tc.model)
@@ -680,23 +705,70 @@ func TestWriteAtomic(t *testing.T) {
 			if tc.wantErr {
 				return
 			}
-			if data, _ := os.ReadFile(target); string(data) != "new content" {
+			data, err := os.ReadFile(target)
+			if err != nil {
+				t.Fatalf("ReadFile(%s): %v", target, err)
+			}
+			if string(data) != "new content" {
 				t.Errorf("writeAtomic content = %q, want %q", string(data), "new content")
 			}
 		})
 	}
 }
 
+type claudeTargetMcpCase struct {
+	name          string
+	nilProv       bool
+	emptyDir      bool
+	emptyRaw      json.RawMessage
+	invalidJSON   json.RawMessage
+	noMCPServers  json.RawMessage
+	blockedClaude bool
+}
+
+func runClaudeTargetMcpCase(t *testing.T, tc claudeTargetMcpCase) {
+	t.Helper()
+	tmp := t.TempDir()
+	var p *Provisioner
+	if !tc.nilProv {
+		p = newDisabledProvisioner(t, tmp, tmp)
+	}
+	targetDir := filepath.Join(tmp, ".claude")
+	if tc.emptyDir {
+		targetDir = ""
+	}
+	if tc.blockedClaude {
+		targetDir = filepath.Join(tmp, "blocked_claude")
+		writeTestFile(t, targetDir, "blocking file")
+	}
+
+	raw := json.RawMessage(`{"mcpServers":{"srv":{"server_url":"http://test:8080"}}}`)
+	if len(tc.emptyRaw) > 0 {
+		raw = tc.emptyRaw
+	}
+	if len(tc.invalidJSON) > 0 {
+		converted := ConvertMCPConfigForClaude(tc.invalidJSON)
+		if string(converted) != string(tc.invalidJSON) {
+			t.Fatalf("expected raw return on invalid JSON: %s", string(converted))
+		}
+	}
+	if len(tc.noMCPServers) > 0 {
+		converted := ConvertMCPConfigForClaude(tc.noMCPServers)
+		if string(converted) != string(tc.noMCPServers) {
+			t.Fatalf("expected raw return when no mcpServers: %s", string(converted))
+		}
+	}
+
+	if p != nil {
+		if err := p.EnsureTargetClaudeMcpConfig(targetDir, raw); (err != nil) != tc.blockedClaude {
+			t.Fatalf("EnsureTargetClaudeMcpConfig error = %v, want blocked = %v", err, tc.blockedClaude)
+		}
+		p.provisionTargetClaudeSettings(targetDir)
+	}
+}
+
 func TestClaudeTargetMcpAndSettingsProvisioning(t *testing.T) {
-	tests := []struct {
-		name          string
-		nilProv       bool
-		emptyDir      bool
-		emptyRaw      json.RawMessage
-		invalidJSON   json.RawMessage
-		noMCPServers  json.RawMessage
-		blockedClaude bool
-	}{
+	tests := []claudeTargetMcpCase{
 		{name: "nil provisioner", nilProv: true},
 		{name: "empty dir", emptyDir: true},
 		{name: "empty raw config", emptyRaw: json.RawMessage("")},
@@ -708,41 +780,7 @@ func TestClaudeTargetMcpAndSettingsProvisioning(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			tmp := t.TempDir()
-			var p *Provisioner
-			if !tc.nilProv {
-				p = newDisabledProvisioner(t, tmp, tmp)
-			}
-			targetDir := filepath.Join(tmp, ".claude")
-			if tc.emptyDir {
-				targetDir = ""
-			}
-			if tc.blockedClaude {
-				targetDir = filepath.Join(tmp, "blocked_claude")
-				writeTestFile(t, targetDir, "blocking file")
-			}
-
-			raw := json.RawMessage(`{"mcpServers":{"srv":{"server_url":"http://test:8080"}}}`)
-			if len(tc.emptyRaw) > 0 {
-				raw = tc.emptyRaw
-			}
-			if len(tc.invalidJSON) > 0 {
-				converted := ConvertMCPConfigForClaude(tc.invalidJSON)
-				if string(converted) != string(tc.invalidJSON) {
-					t.Fatalf("expected raw return on invalid JSON: %s", string(converted))
-				}
-			}
-			if len(tc.noMCPServers) > 0 {
-				converted := ConvertMCPConfigForClaude(tc.noMCPServers)
-				if string(converted) != string(tc.noMCPServers) {
-					t.Fatalf("expected raw return when no mcpServers: %s", string(converted))
-				}
-			}
-
-			if p != nil {
-				_ = p.EnsureTargetClaudeMcpConfig(targetDir, raw)
-				p.provisionTargetClaudeSettings(targetDir)
-			}
+			runClaudeTargetMcpCase(t, tc)
 		})
 	}
 }
