@@ -190,7 +190,7 @@ func (e *acceptEdge) synapseEffects() int {
 	e.disp.mu.Lock()
 	defer e.disp.mu.Unlock()
 	return e.bus.factCount() + len(e.disp.promptCalls) + len(e.disp.dispatchCalls) +
-		len(e.disp.directMessageCalls) + len(e.disp.reconcileCalls)
+		len(e.disp.directMessageCalls)
 }
 
 // ownedHandlers counts the Restate writes by handler (one-way sends plus

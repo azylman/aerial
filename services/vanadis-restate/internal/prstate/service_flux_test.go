@@ -139,6 +139,52 @@ func TestRepoObjectServiceHandleGitPush(t *testing.T) {
 	}
 }
 
+// requireRepoFluxOutcome checks one RepoObjectService Flux handler call:
+// its error, state write, journaled step, kube calls and self-sends.
+func requireRepoFluxOutcome(t *testing.T, err error, rec *stateCapture[*RepoState], run *runCapture, kube *fakeKube, wantErr, wantSet, wantRun bool, wantCalls []string, wantSends []sentCall) {
+	t.Helper()
+	require.Equal(t, wantErr, err != nil)
+	require.Equal(t, wantSet, rec.setCalled)
+	require.Equal(t, wantRun, run.ran)
+	require.Equal(t, wantCalls, kube.Calls())
+	require.Equal(t, wantSends, rec.sends.snapshot())
+}
+
+func TestRepoObjectServiceHandleUntrackedReconcile(t *testing.T) {
+	t.Parallel()
+	requests := map[string]KustomizationRequest{"gateway-api-crds": {Namespace: "flux-system", RequestedAt: "t1"}}
+	untracked := func(attempt int) RepoEvent {
+		return RepoEvent{Repo: "kubernetes-sigs/gateway-api", PRNumber: 5433, HeadSHA: "u1", KustomizationRequests: requests, Attempt: attempt}
+	}
+	tests := []struct {
+		name      string
+		ev        RepoEvent
+		kube      *fakeKube
+		wantErr   bool
+		wantSet   bool
+		wantRun   bool
+		wantCalls []string
+		wantSends []sentCall
+	}{
+		{name: "untracked pr commit reconciles", ev: untracked(0), kube: &fakeKube{}, wantSet: true, wantRun: true, wantCalls: []string{"reconcile flux-system/gateway-api-crds@t1"}},
+		{
+			name: "retryable failure schedules a delayed retry", ev: untracked(1), kube: &fakeKube{reconcileErr: map[string]*KubeError{"gateway-api-crds": errKubeDown}}, wantRun: true,
+			wantCalls: []string{"reconcile flux-system/gateway-api-crds@t1"},
+			wantSends: []sentCall{{service: "RepoObject", key: "kubernetes-sigs/gateway-api", method: prwire.RepoHandlerUntrackedReconcile, input: untracked(2), delayed: true}},
+		},
+		{name: "missing pr fails terminally", ev: RepoEvent{Repo: "kubernetes-sigs/gateway-api", HeadSHA: "u1", KustomizationRequests: requests}, kube: &fakeKube{}, wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			mc, rec := newStateMock[*RepoState](t, nil)
+			run := stubRun(mc, true)
+			err := NewRepoObjectService().WithKube(tc.kube).HandleUntrackedReconcile(restate.WithMockContext(mc), tc.ev)
+			requireRepoFluxOutcome(t, err, rec, run, tc.kube, tc.wantErr, tc.wantSet, tc.wantRun, tc.wantCalls, tc.wantSends)
+		})
+	}
+}
+
 func TestRepoObjectServiceHandleImagePromotion(t *testing.T) {
 	t.Parallel()
 	requests := map[string]KustomizationRequest{"core": {Namespace: "flux-system", RequestedAt: "t1"}}
@@ -171,11 +217,7 @@ func TestRepoObjectServiceHandleImagePromotion(t *testing.T) {
 			mc, rec := newStateMock[*RepoState](t, nil)
 			run := stubRun(mc, true)
 			err := NewRepoObjectService().WithKube(tc.kube).HandleImagePromotion(restate.WithMockContext(mc), tc.ev)
-			require.Equal(t, tc.wantErr, err != nil)
-			require.Equal(t, tc.wantSet, rec.setCalled)
-			require.Equal(t, tc.wantRun, run.ran)
-			require.Equal(t, tc.wantCalls, tc.kube.Calls())
-			require.Equal(t, tc.wantSends, rec.sends.snapshot())
+			requireRepoFluxOutcome(t, err, rec, run, tc.kube, tc.wantErr, tc.wantSet, tc.wantRun, tc.wantCalls, tc.wantSends)
 		})
 	}
 }
