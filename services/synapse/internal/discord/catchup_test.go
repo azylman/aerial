@@ -390,7 +390,10 @@ func (m *mockDiscordTransport) roundTripGuilds() (int, []byte) {
 	if m.userGuildsErr {
 		return http.StatusInternalServerError, []byte(`{"message": "error"}`)
 	}
-	bodyBytes, _ := json.Marshal(m.userGuildsResp)
+	bodyBytes, err := json.Marshal(m.userGuildsResp)
+	if err != nil {
+		return http.StatusInternalServerError, []byte(`{"message": "marshal error"}`)
+	}
 	return http.StatusOK, bodyBytes
 }
 
@@ -406,7 +409,10 @@ func (m *mockDiscordTransport) roundTripThreads(path string) (int, []byte) {
 	if thList == nil {
 		thList = &discordgo.ThreadsList{}
 	}
-	bodyBytes, _ := json.Marshal(thList)
+	bodyBytes, err := json.Marshal(thList)
+	if err != nil {
+		return http.StatusInternalServerError, []byte(`{"message": "marshal error"}`)
+	}
 	return http.StatusOK, bodyBytes
 }
 
@@ -419,7 +425,10 @@ func (m *mockDiscordTransport) roundTripChannels(path string) (int, []byte) {
 	if m.channelsResp != nil && m.channelsResp[guildID] != nil {
 		chList = m.channelsResp[guildID]
 	}
-	bodyBytes, _ := json.Marshal(chList)
+	bodyBytes, err := json.Marshal(chList)
+	if err != nil {
+		return http.StatusInternalServerError, []byte(`{"message": "marshal error"}`)
+	}
 	return http.StatusOK, bodyBytes
 }
 
@@ -435,7 +444,10 @@ func (m *mockDiscordTransport) roundTripMessages(req *http.Request, path string)
 	if m.messagesResp != nil && m.messagesResp[channelID] != nil {
 		msgList = m.messagesResp[channelID]
 	}
-	bodyBytes, _ := json.Marshal(msgList)
+	bodyBytes, err := json.Marshal(msgList)
+	if err != nil {
+		return http.StatusInternalServerError, []byte(`{"message": "marshal error"}`)
+	}
 	return http.StatusOK, bodyBytes
 }
 

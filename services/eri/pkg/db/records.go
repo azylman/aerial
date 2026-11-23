@@ -139,18 +139,6 @@ func (s *SQLStore) beginAttempt(ctx context.Context, table, id string, ordinal i
 	return start, nil
 }
 
-// ListPendingMessageIDsForThread returns the IDs of the thread's PENDING messages, oldest first.
-func (s *SQLStore) ListPendingMessageIDsForThread(ctx context.Context, threadID string) ([]string, error) {
-	if err := s.checkDB(); err != nil {
-		return nil, err
-	}
-	threadID = strings.TrimSpace(threadID)
-	if threadID == "" {
-		return nil, nil
-	}
-	return s.queryStrings(ctx, `SELECT id FROM messages WHERE agent = $1 AND thread_id = $2 AND status = 'PENDING' ORDER BY created_at ASC, row_id ASC`, s.effectiveAgent(), threadID)
-}
-
 // GetMessagesByID returns the agent's messages with the given IDs in input order; missing IDs are skipped.
 func (s *SQLStore) GetMessagesByID(ctx context.Context, ids []string) ([]Message, error) {
 	if err := s.checkDB(); err != nil {
@@ -199,23 +187,6 @@ func (s *SQLStore) RequeueProcessingMessages(ctx context.Context, ids []string, 
 // BeginMessageAttempt records the start of attempt ordinal for a message (see beginAttempt).
 func (s *SQLStore) BeginMessageAttempt(ctx context.Context, id string, ordinal int) (AttemptStart, error) {
 	return s.beginAttempt(ctx, messagesTable, id, ordinal)
-}
-
-// ListPendingDispatchIDsForSession returns PENDING dispatch IDs addressed to sessionKey
-// (session_id, vanadis-<chunk> or dispatch-<id> key forms), oldest first.
-func (s *SQLStore) ListPendingDispatchIDsForSession(ctx context.Context, sessionKey string) ([]string, error) {
-	if err := s.checkDB(); err != nil {
-		return nil, err
-	}
-	sessionKey = strings.TrimSpace(sessionKey)
-	if sessionKey == "" {
-		return nil, nil
-	}
-	return s.queryStrings(ctx, `SELECT id FROM dispatches WHERE agent = $1 AND status = 'PENDING' AND (
-		session_id = $2 OR
-		(COALESCE(vanadis_chunk_id, '') != '' AND 'vanadis-' || vanadis_chunk_id = $2) OR
-		'dispatch-' || id = $2
-	) ORDER BY created_at ASC, row_id ASC`, s.effectiveAgent(), sessionKey)
 }
 
 // FailDispatchesIfActive marks PENDING/PROCESSING dispatches FAILED with reason and returns the IDs changed.

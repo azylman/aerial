@@ -266,9 +266,6 @@ func TestStore_MultiAgentIsolation_Records(t *testing.T) {
 			if err := storeAlpha.InsertMessage(ctx, Message{ID: tc.msgID, ThreadID: tc.threadID, Status: StatusProcessing}); err != nil {
 				t.Fatalf("InsertMessage: %v", err)
 			}
-			if ids, err := storeBeta.ListPendingMessageIDsForThread(ctx, tc.threadID); err != nil || len(ids) != 0 {
-				t.Errorf("beta ListPendingMessageIDsForThread = (%v, %v), want none", ids, err)
-			}
 			if ids, err := storeBeta.FailMessagesIfActive(ctx, []string{tc.msgID}, "x"); err != nil || len(ids) != 0 {
 				t.Errorf("beta FailMessagesIfActive = (%v, %v), want none", ids, err)
 			}

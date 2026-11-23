@@ -554,7 +554,11 @@ func TestClient_WatchKustomizations(t *testing.T) {
 				return
 			}
 			defer stream.Close()
-			if body, _ := io.ReadAll(stream); string(body) != tc.wantBody {
+			body, err := io.ReadAll(stream)
+			if err != nil {
+				t.Fatalf("read stream: %v", err)
+			}
+			if string(body) != tc.wantBody {
 				t.Errorf("stream = %q, want %q", body, tc.wantBody)
 			}
 		})
@@ -581,7 +585,11 @@ func TestClient_WatchFluxWorkloads(t *testing.T) {
 				return
 			}
 			defer stream.Close()
-			if body, _ := io.ReadAll(stream); string(body) != tc.wantBody {
+			body, err := io.ReadAll(stream)
+			if err != nil {
+				t.Fatalf("read stream: %v", err)
+			}
+			if string(body) != tc.wantBody {
 				t.Errorf("stream = %q, want %q", body, tc.wantBody)
 			}
 		})

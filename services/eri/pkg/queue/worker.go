@@ -172,7 +172,7 @@ func (te *turnExecution) finalizeInterruptedTurn(currentModel string) {
 		reason = customReason
 	}
 
-	// If this turn was a dispatch that was already marked terminal (FAILED) by CancelPendingDispatches,
+	// If this turn was a dispatch that an operator cancel already marked terminal (FAILED),
 	// do not overwrite the status/error_message in the database; still record the cancelled outcome.
 	if te.isDispatch() && te.store() != nil {
 		if d, err := te.store().GetDispatch(context.Background(), te.dispatch.ID); err == nil && d != nil && d.Status == db.StatusFailed {

@@ -174,7 +174,7 @@ func TestServer_PanicOnNilHandler(t *testing.T) {
 			t.Errorf("expected NewServer(nil) to panic")
 		}
 	}()
-	_ = NewServer(nil)
+	NewServer(nil)
 }
 
 func TestFormatSkillCommitAndPRHelpers(t *testing.T) {
