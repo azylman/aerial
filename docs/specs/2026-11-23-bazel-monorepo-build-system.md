@@ -30,7 +30,8 @@ Standardizing on **Bazel 9.3.3 (LTS)** with **Bzlmod**, **ephemeral `gazelle` ge
 - **Deploy LAN `bazel-remote` Cache on `quiet-zero`:** Run `buchgr/bazel-remote` on `quiet-zero` backed by a 55 GiB `local-path` NVMe PVC (`--max_size=50` GiB with automatic LRU eviction), exposed inside the cluster mesh at `http://bazel-remote.aerial:9090` (HTTP/REST) and `grpc://bazel-remote.aerial:9092` (gRPC).
 - **Collapse `aerial` into a Single Root `go.mod`:** Merge `aerial`'s 17 production Go modules into one root `go.mod` (`module github.com/azylman/aerial`) and `go.sum`, preserving all existing import paths (`github.com/azylman/aerial/...`) and `L0 -> L3` package boundaries while deleting all sub-module `go.mod`/`go.sum` files and `replace` directives.
 - **Ephemeral `gazelle` with Zero Checked-In Per-Package `BUILD.bazel` Files:** Keep only root `MODULE.bazel`, `MODULE.bazel.lock`, `.bazelrc`, `.bazelversion`, root `BUILD.bazel`, `images/BUILD.bazel`, and `build/*.bzl` macros in Git; ignore generated per-package `BUILD.bazel` files in `.gitignore` and auto-generate them before `bazel` invocations.
-- **Replace 16 Boilerplate `Dockerfile`s in `aerial` with `rules_oci`:** Use a Bazel 9 symbolic macro (`aerial_go_image`) plus static layer targets (`oci_image` + `oci_push`) in `images/BUILD.bazel` to build and push all 16 pure-Go and static-asset service images in `aerial`, including live production coverage instrumentation (`-cover -covermode=atomic` for `coverage-ingest`).
+- **Replace 16 Boilerplate `Dockerfile`s in `aerial` with `rules_oci` (`oci_image`, `oci_load`, `oci_push`):** Use a Bazel 9 symbolic macro (`aerial_go_image`) plus static layer targets (`oci_image` + `oci_load` + `oci_push`) in `images/BUILD.bazel` to build, locally load (`bazel run //images:load_<service>`), and push all 16 pure-Go and static-asset service images in `aerial`, including live production coverage instrumentation (`-cover -covermode=atomic` for `coverage-ingest`).
+- **First-Class External Contributor Ergonomics:** Keep default `.bazelrc` flags 100% portable for external macOS/Linux machines (scoping cluster-internal `bazel-remote.aerial` and `/data/cache` flags under `build:cluster` enabled via `/etc/bazel.bazelrc` on cluster pods), support `bazel run //:gazelle` when a standalone `gazelle` binary is absent (or native `go test` fallback in `scripts/verify.sh` when `bazel` is not installed locally), and provide a per-service `oci_load` target (`//images:load_<service>`) for every `rules_oci` image.
 - **Preserve Open-Source `Dockerfile` Usability in `mirrormere`:** Keep all 3 `Dockerfile`s (`./Dockerfile`, `client/remote/Dockerfile`, `client/cast-watcher/Dockerfile`) in `mirrormere` and keep generated `BUILD.bazel` files `.gitignore`d so external contributors can clone `mirrormere` and run `docker build`, `docker compose`, or `go test ./...` without installing Bazel.
 - **Retire `scripts/affected` & `catalog.json` While Preserving `build-metadata` Check-Run Contract:** Replace `scripts/affected` and `dorny/paths-filter` with Bazel's content-addressed dependency graph and OCI digest comparisons against `:latest`, while continuing to emit `build-metadata` and `build-metadata-result` GitHub Check Runs via `scripts/build-metadata.cjs` so `synapse` and `vanadis` promote images without change.
 
@@ -51,10 +52,11 @@ Standardizing on **Bazel 9.3.3 (LTS)** with **Bzlmod**, **ephemeral `gazelle` ge
 
 1. **Bazel 9.3.3 Pure Bzlmod Invariant:**
    - Bazel 9 completely removes legacy `WORKSPACE` support. All external dependencies (`rules_go`, `gazelle`, `rules_oci`, `rules_pkg`, `aspect_rules_js`, `rules_python`, Go toolchains, `go_deps`, and OCI base images) are declared in `MODULE.bazel` with deterministic lockfiles (`MODULE.bazel.lock`).
-2. **Bazel 9.3.3 Performance Flags in `.bazelrc`:**
-   - `--remote_cache=grpc://bazel-remote.aerial:9092` (with `--remote_upload_local_results=true` and `--remote_timeout=5s` fallback so local builds never fail if `bazel-remote` is unreachable).
-   - `--repo_contents_cache=/data/cache/bazel-repo-contents` (shared across all `aerial-pr.sh init` scratch workspaces inside `eri-restate` and mounted via `ci-cache` hostPath on ARC runners).
-   - `--experimental_remote_repo_contents_cache` (shares unpacked, evaluated external repositories across runner pods via `bazel-remote`).
+2. **Bazel 9.3.3 Performance Flags & External Contributor Portability in `.bazelrc`:**
+   - Default `.bazelrc` settings remain 100% portable on external macOS/Linux machines: `test --test_env=PATH` passes through the host `PATH` (without hardcoding Linux container paths), and cluster-only flags are scoped under a `cluster` config profile (`common:cluster` / `build:cluster`) activated automatically inside `aerial-eri-restate` and `aerial-github-runner` via `/etc/bazel.bazelrc` (`common --config=cluster`).
+   - `build:cluster --remote_cache=grpc://bazel-remote.aerial:9092` (with `--remote_upload_local_results=true` and `--remote_timeout=5s` fallback so builds never fail if `bazel-remote` is unreachable).
+   - `common:cluster --repo_contents_cache=/data/cache/bazel-repo-contents` and `common:cluster --repository_cache=/data/cache/bazel-repo-cache` (shared across all `aerial-pr.sh init` scratch workspaces inside `eri-restate` and mounted via `ci-cache` hostPath on ARC runners).
+   - `build:cluster --experimental_remote_repo_contents_cache` (shares unpacked, evaluated external repositories across runner pods via `bazel-remote`).
    - `--remote_download_minimal` paired with Bazel 9.3's default `--rewind_lost_inputs` (avoids downloading intermediate `.a` files on cache hits while automatically rewinding and rebuilding any action whose intermediate blob was LRU-evicted by `bazel-remote`).
    - `--test_summary=short_uncached` (new in Bazel 9.1+; suppresses cached test targets from stdout so agent and CI logs display only tests that actually ran or failed).
 3. **Hermetic `pkg/pgtest` Sandbox Invariant:**
@@ -108,6 +110,7 @@ To prevent any dynamic binary downloads at build time, both `services/github-run
   so `bazelisk` populates its exact metadata and `9.3.3` binary cache layout at image build time and never fetches Bazel over the network at runtime.
 - **`gazelle` v0.47.0** (matching the BCR `gazelle` module version) and **`buildifier` v8.5.1** installed at `/usr/local/bin/gazelle` and `/usr/local/bin/buildifier`.
 - **`crane` v0.21.5** (`go-containerregistry`) installed at `/usr/local/bin/crane` for fast OCI manifest inspection (`crane digest`) and registry-side tagging (`crane tag`) without spinning up `docker buildx imagetools`.
+- **`/etc/bazel.bazelrc` Cluster Profile Activation:** Both images write `common --config=cluster` to `/etc/bazel.bazelrc` so cluster pods automatically use `bazel-remote.aerial:9092` and `/data/cache` while external contributors running on their own machines use the portable default `.bazelrc`.
 
 ### 5.3 Collapsing `aerial` into One Root `go.mod`
 1. **Single Root Module (`module github.com/azylman/aerial`):**
@@ -129,26 +132,28 @@ Only lightweight root/macro configuration files are checked into Git in `aerial`
    ```text
    9.3.3
    ```
-2. **`.bazelrc`**:
+2. **`.bazelrc`** (portable defaults + `cluster` config profile for `eri-restate` & ARC runners):
    ```ini
    common --enable_bzlmod
-   common --repo_contents_cache=/data/cache/bazel-repo-contents
-   common --repository_cache=/data/cache/bazel-repo-cache
 
-   build --remote_cache=grpc://bazel-remote.aerial:9092
-   build --experimental_remote_repo_contents_cache
-   build --remote_cache_compression
-   build --remote_upload_local_results
    build --remote_download_minimal
-   build --remote_timeout=5s
    build --rewind_lost_inputs
    build --incompatible_strict_action_env
 
-   # Pass PostgreSQL 18 binary path into sandboxed test actions for pkg/pgtest
-   test --test_env=PATH=/usr/local/go/bin:/usr/lib/postgresql/18/bin:/usr/local/bin:/usr/bin:/bin
+   # Pass host PATH through into sandboxed test actions so pkg/pgtest finds initdb/pg_ctl on any OS
+   test --test_env=PATH
    test --test_output=errors
    test --test_summary=short_uncached
    coverage --@rules_go//go/config:cover_format=go_cover
+
+   # Cluster profile (enabled automatically on eri-restate and ARC runners via /etc/bazel.bazelrc)
+   common:cluster --repo_contents_cache=/data/cache/bazel-repo-contents
+   common:cluster --repository_cache=/data/cache/bazel-repo-cache
+   build:cluster --remote_cache=grpc://bazel-remote.aerial:9092
+   build:cluster --experimental_remote_repo_contents_cache
+   build:cluster --remote_cache_compression
+   build:cluster --remote_upload_local_results
+   build:cluster --remote_timeout=5s
    ```
 3. **`MODULE.bazel`** (and `MODULE.bazel.lock`):
    - Declares `rules_go` (`0.65.0`), `gazelle` (`0.47.0`), `rules_oci` (`2.3.0`), `rules_pkg` (`1.1.0`), `aspect_rules_js` (`2.4.0`).
@@ -158,24 +163,28 @@ Only lightweight root/macro configuration files are checked into Git in `aerial`
      - `@nginx_base` (`nginx:1.30.7-alpine-slim` for `services/docs-service`).
      - `@atlas_base` (`arigaio/atlas:1.3.4` for `services/migrator`).
 4. **Root `BUILD.bazel`**:
-   - Directives:
+   - Directives and `//:gazelle` runner target:
      ```python
+     load("@gazelle//:def.bzl", "gazelle")
+
      # gazelle:prefix github.com/azylman/aerial
      # gazelle:exclude vendor
      # gazelle:exclude node_modules
      # gazelle:exclude .git
      # gazelle:exclude scripts/affected/testdata
      # gazelle:map_kind go_test go_test //build:go_test.bzl
+     gazelle(name = "gazelle")
      ```
    - Exports shared root test fixtures (`filegroup(name = "testdata", srcs = glob(["testdata/**"]), visibility = ["//visibility:public"])`).
 5. **`build/go_test.bzl` & `build/oci.bzl`**:
    - `build/go_test.bzl`: Wraps `@rules_go//go:def.bzl` `go_test` to automatically append `//services/eri/pkg/db:schema.sql`, `//:testdata`, and `//services/synapse:testdata` to `data` so every sandboxed test has access to the production schema and cross-package test fixtures.
    - `build/oci.bzl`: Defines the Bazel 9 symbolic macro `aerial_go_image` and coverage transition (Section 5.5).
-6. **`ensure_bazel_build_files()` Helper in `scripts/lib/hermetic-go-env.sh`**:
+6. **`ensure_bazel_build_files()` Helper in `scripts/lib/hermetic-go-env.sh` & External Contributor Fallback**:
    - Automatically invoked by `scripts/verify.sh`, `scripts/check-coverage.sh`, and CI before any `bazel` command:
-     1. If `go.mod` is modified or newer than `MODULE.bazel.lock`, runs `bazel mod tidy` so `use_repo(go_deps, ...)` in `MODULE.bazel` updates automatically when an agent adds a new external Go dependency.
-     2. Runs `gazelle` (~180ms) across the repository.
-     3. Appends deterministic `exports_files` / `filegroup` declarations (`visibility = ["//visibility:public"]`) to the 5 packages with cross-package static or test assets (`services/eri/pkg/db/BUILD.bazel` for `schema.sql` and `migrations/**`, `services/console/BUILD.bazel` for `static/**`, `services/docs-service/BUILD.bazel` for `nginx.conf` and `app/**`, `web/theme/BUILD.bazel` for `aerial-tokens.css` and `aerial-theme.js`, and `services/synapse/BUILD.bazel` for `testdata/**`).
+     1. If `bazel` is not installed locally (and not running in CI), `scripts/verify.sh` and `scripts/check-coverage.sh` fall back transparently to native `go test` against the single root `go.mod` so external contributors never have to install Bazel to run verification checks.
+     2. If `go.mod` is modified or newer than `MODULE.bazel.lock`, runs `bazel mod tidy` so `use_repo(go_deps, ...)` in `MODULE.bazel` updates automatically when an agent or contributor adds a new external Go dependency.
+     3. Runs pre-baked `/usr/local/bin/gazelle` (~180ms) if present, or falls back to `bazel run //:gazelle` if a contributor only installed `bazelisk`.
+     4. Appends deterministic `exports_files` / `filegroup` declarations (`visibility = ["//visibility:public"]`) to the 5 packages with cross-package static or test assets (`services/eri/pkg/db/BUILD.bazel` for `schema.sql` and `migrations/**`, `services/console/BUILD.bazel` for `static/**`, `services/docs-service/BUILD.bazel` for `nginx.conf` and `app/**`, `web/theme/BUILD.bazel` for `aerial-tokens.css` and `aerial-theme.js`, and `services/synapse/BUILD.bazel` for `testdata/**`).
 7. **`.gitignore` Entries**:
    - Ignore all generated `BUILD.bazel` files (`**/BUILD.bazel`) while un-ignoring `!/BUILD.bazel`, `!/build/BUILD.bazel`, and `!/images/BUILD.bazel`.
 
@@ -193,6 +202,10 @@ To guarantee `rules_oci` binaries include Go's `-cover` instrumentation (support
      - `@rules_go//go/config:tags = ["timetzdata"]` (embeds IANA timezone database directly in the binary as a defense-in-depth backup to `@distroless_static`'s `/usr/share/zoneinfo`).
 2. **Bazel 9 Symbolic Macro (`aerial_go_image`) in `images/BUILD.bazel`**:
    - All 16 OCI image targets live in a single checked-in `images/BUILD.bazel` file, keeping per-service `services/*/BUILD.bazel` files 100% pure `gazelle` output.
+   - For each service `<name>`, `aerial_go_image` (as well as the `docs` and `migrator` static targets in `images/BUILD.bazel`) emits three sibling targets:
+     - `//images:<name>` (`oci_image`): Deterministic OCI image directory.
+     - `//images:load_<name>` (`oci_load` with `repo_tags = ["ghcr.io/azylman/aerial-" + name + ":local"]`): Loads the container image directly into a local Docker or Podman daemon via `bazel run //images:load_<name>` so external contributors can run any service container locally without per-service `Dockerfile`s.
+     - `//images:push_<name>` (`oci_push` to `ghcr.io/azylman/aerial-<name>`): Daemonless registry push used by CI.
    - `aerial_go_image` accepts:
      - `name`: Service identifier (e.g., `"haro"`, `"console"`, `"redact-pattern"`, `"coverage-ingest"`).
      - `binary`: Label of the `go_binary` target (e.g., `"//services/haro:haro"`).
