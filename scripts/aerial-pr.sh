@@ -3,8 +3,9 @@ set -euo pipefail
 
 # scripts/aerial-pr.sh - Unified Monorepo PR Automation & Continuous Integration Verifier
 # Safely clones repositories into ephemeral scratch space, enforces the universal
-# verification contract (scripts/verify.sh --staged), creates Pull Requests with auto-merge,
-# registers PRs for event-driven continuous delivery, and supports RoboRev overrides.
+# verification contract (scripts/verify.sh --staged), creates Pull Requests,
+# and supports RoboRev overrides. PR registration, attachment, context enrichment,
+# auto-merge, and RoboRev rerun gates are handled event-driven by Synapse and Vanadis-Restate.
 
 REPO_OWNER="azylman"
 DEFAULT_REPO="aerial"
@@ -13,8 +14,6 @@ REPO_NAME_EXPLICIT=0
 DEFAULT_BRANCH="main"
 
 GITHUB_API_BASE="${GITHUB_API_URL:-https://api.github.com}"
-# eri-restate serves the PAT-injecting, secret-scanning GitHub proxy on its
-# loopback-only health mux in every agent pod.
 GITHUB_PROXY_BASE="http://127.0.0.1:4028"
 USE_LOOPBACK_GITHUB=0
 if [ -z "${GITHUB_PAT:-}" ]; then
@@ -26,23 +25,13 @@ fi
 
 normalize_repo() {
     local r="${1:-}"
-    # Strip any leading owner/ prefix (e.g. azylman/aerial-config -> aerial-config)
     r="${r##*/}"
-    # Strip .git suffix if present
     r="${r%.git}"
     case "$r" in
-        core|aerial)
-            echo "aerial"
-            ;;
-        config|aerial-config)
-            echo "aerial-config"
-            ;;
-        sidecars|aerial-sidecars)
-            echo "aerial-sidecars"
-            ;;
-        *)
-            echo "$r"
-            ;;
+        core|aerial) echo "aerial" ;;
+        config|aerial-config) echo "aerial-config" ;;
+        sidecars|aerial-sidecars) echo "aerial-sidecars" ;;
+        *) echo "$r" ;;
     esac
 }
 
@@ -60,14 +49,13 @@ extract_remote_repo() {
 
 run_preflight_verification() {
     local target_dir="${1:-.}"
-    local max_rule_bytes=23040 # 22.5 KB (leaves 512B buffer for SyncRules frontmatter wrapper)
+    local max_rule_bytes=23040 # 22.5 KB
     for rf in "${target_dir}/GEMINI.md" "${target_dir}/AGENTS.md"; do
         if [ -f "$rf" ]; then
             local size
             size=$(wc -c < "$rf" 2>/dev/null | tr -d '[:space:]')
             if [ -n "$size" ] && [ "$size" -gt "$max_rule_bytes" ]; then
                 echo "ERROR: Rule file '$(basename "$rf")' in scratch workspace ($size bytes) exceeds 22.5 KB ceiling ($max_rule_bytes bytes)." >&2
-                echo "       Antigravity truncates prompt context when compiled rules exceed 23 KB." >&2
                 return 1
             fi
         fi
@@ -96,276 +84,22 @@ run_preflight_verification() {
     return 0
 }
 
-# Pre-dispatch global flag parsing (allows --repo and --vanadis-chunk before or after command)
-VANADIS_CHUNK_ID_EXPLICIT=""
-if [ "${AERIAL_NO_VANADIS_CHUNK:-0}" = "1" ]; then
-    VANADIS_CHUNK_ID=""
-else
-    VANADIS_CHUNK_ID="${AERIAL_VANADIS_CHUNK_ID:-${VANADIS_CHUNK_ID:-}}"
-fi
-PRE_ARGS=()
-while [ $# -gt 0 ]; do
-    case "$1" in
-        --repo|-r)
-            if [ $# -lt 2 ]; then
-                echo "ERROR: $1 requires a repository name." >&2
-                exit 1
-            fi
-            REPO_NAME="$(normalize_repo "$2")"
-            REPO_NAME_EXPLICIT=1
-            shift 2
-            ;;
-        --repo=*)
-            REPO_NAME="$(normalize_repo "${1#*=}")"
-            REPO_NAME_EXPLICIT=1
-            shift 1
-            ;;
-        --vanadis-chunk)
-            if [ $# -lt 2 ]; then
-                echo "ERROR: $1 requires a chunk ID argument." >&2
-                exit 1
-            fi
-            VANADIS_CHUNK_ID="$2"
-            VANADIS_CHUNK_ID_EXPLICIT="$2"
-            shift 2
-            ;;
-        --vanadis-chunk=*)
-            VANADIS_CHUNK_ID="${1#*=}"
-            VANADIS_CHUNK_ID_EXPLICIT="${1#*=}"
-            shift 1
-            ;;
-        *)
-            PRE_ARGS+=("$1")
-            shift 1
-            ;;
-    esac
-done
-set -- "${PRE_ARGS[@]}"
-
-cmd="${1:-}"
-if [ -n "$cmd" ]; then
-    shift
-fi
-
 build_auth_header() {
-    if [ "${USE_LOOPBACK_GITHUB:-0}" = "1" ]; then
-        echo "loopback"
-        return 0
-    fi
+    [ "${USE_LOOPBACK_GITHUB:-0}" = "1" ] && { echo "loopback"; return 0; }
     local pat="${GITHUB_PAT:-}"
-    if [ -z "$pat" ]; then
-        echo "ERROR: GITHUB_PAT environment variable is required." >&2
-        return 1
-    fi
+    [ -z "$pat" ] && { echo "ERROR: GITHUB_PAT environment variable is required." >&2; return 1; }
     printf "x-access-token:%s" "$pat" | base64 | tr -d '\r\n'
 }
 
-prune_stale_scratch_dirs() {
-    local base_dir="$1"
-    find "${base_dir}" -maxdepth 1 -mindepth 1 -type d -name '*-scratch.*' -mmin +1440 -exec rm -rf {} + 2>/dev/null || true
-}
-
-init_scratch() {
-    local init_branch=""
-    local positional_repo_set=0
-
-    while [ $# -gt 0 ]; do
-        case "$1" in
-            --repo|-r)
-                if [ $# -lt 2 ]; then
-                    echo "ERROR: $1 requires a repository name." >&2
-                    exit 1
-                fi
-                REPO_NAME="$(normalize_repo "$2")"
-                REPO_NAME_EXPLICIT=1
-                shift 2
-                ;;
-            --repo=*)
-                REPO_NAME="$(normalize_repo "${1#*=}")"
-                REPO_NAME_EXPLICIT=1
-                shift 1
-                ;;
-            --branch|-b)
-                if [ $# -lt 2 ] || [ -z "${2:-}" ]; then
-                    echo "ERROR: $1 requires a branch name." >&2
-                    exit 1
-                fi
-                init_branch="$2"
-                shift 2
-                ;;
-            --branch=*)
-                init_branch="${1#*=}"
-                if [ -z "$init_branch" ]; then
-                    echo "ERROR: --branch requires a branch name." >&2
-                    exit 1
-                fi
-                shift 1
-                ;;
-            --vanadis-chunk)
-                if [ $# -lt 2 ]; then
-                    echo "ERROR: $1 requires a chunk ID argument." >&2
-                    exit 1
-                fi
-                VANADIS_CHUNK_ID="$2"
-                VANADIS_CHUNK_ID_EXPLICIT="$2"
-                shift 2
-                ;;
-            --vanadis-chunk=*)
-                VANADIS_CHUNK_ID="${1#*=}"
-                VANADIS_CHUNK_ID_EXPLICIT="${1#*=}"
-                shift 1
-                ;;
-            -*)
-                echo "ERROR: Unexpected argument to init: $1" >&2
-                exit 1
-                ;;
-            *)
-                if [ "$positional_repo_set" -eq 0 ]; then
-                    REPO_NAME="$(normalize_repo "$1")"
-                    REPO_NAME_EXPLICIT=1
-                    positional_repo_set=1
-                    shift 1
-                else
-                    echo "ERROR: Unexpected argument to init: $1" >&2
-                    exit 1
-                fi
-                ;;
-        esac
-    done
-
-    local default_repo_url="https://github.com/${REPO_OWNER}/${REPO_NAME}.git"
-    if [ "${USE_LOOPBACK_GITHUB:-0}" = "1" ]; then
-        default_repo_url="${GITHUB_PROXY_BASE}/internal/github-git/${REPO_OWNER}/${REPO_NAME}.git"
-    fi
-    REPO_URL="${AERIAL_REPO_URL_OVERRIDE:-$default_repo_url}"
-
-    local auth_header
-    auth_header=$(build_auth_header)
-
-    local base_dir="${AERIAL_SCRATCH_BASE_DIR:-/data/scratch}"
-    if [ -z "${AERIAL_SCRATCH_BASE_DIR:-}" ]; then
-        if [ ! -d "/data" ] || [ ! -w "/data" ]; then
-            base_dir="/dev/shm"
-            if [ ! -d "$base_dir" ] || [ ! -w "$base_dir" ]; then
-                base_dir="${TMPDIR:-/tmp}"
-            fi
-        fi
-    fi
-    mkdir -p "$base_dir"
-
-    prune_stale_scratch_dirs "$base_dir"
-
-    local branch_prefix="feat/${REPO_NAME}-pr"
-    local rand_suffix
-    rand_suffix=$(head -c 16 /dev/urandom | md5sum | head -c 6)
-    local branch_name="${branch_prefix}-$(date +%Y%m%d%H%M%S)-${rand_suffix}"
-    local clone_branch="$DEFAULT_BRANCH"
-    if [ -n "$init_branch" ]; then
-        clone_branch="$init_branch"
-        branch_name="$init_branch"
-    fi
-
-    local vanadis_chunk_id="$(resolve_vanadis_chunk_id "${VANADIS_CHUNK_ID_EXPLICIT:-}")"
-    local deterministic_dir=""
-    local safe_chunk_id=""
-    if [ -n "$vanadis_chunk_id" ] && [ -z "$init_branch" ]; then
-        safe_chunk_id="$(printf '%s' "$vanadis_chunk_id" | sed 's/[^a-zA-Z0-9_-]/_/g')"
-        deterministic_dir="${base_dir}/vanadis-${safe_chunk_id}-${REPO_NAME}"
-        branch_name="${branch_prefix}-vanadis-${safe_chunk_id}-${rand_suffix}"
-    fi
-
-    local scratch_dir
-    if [ -n "$deterministic_dir" ]; then
-        scratch_dir="$deterministic_dir"
-        if [ -d "${scratch_dir}/.git" ] && git -C "$scratch_dir" rev-parse --verify HEAD >/dev/null 2>&1; then
-            rm -f "${scratch_dir}/.git/index.lock"
-            cd "$scratch_dir"
-            git config user.name "Aerial"
-            git config user.email "aerial@noreply.github.com"
-            chmod 700 "$scratch_dir"
-            local existing_branch=""
-            existing_branch="$(git symbolic-ref --short HEAD 2>/dev/null || git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")"
-            if [ -n "$existing_branch" ] && [ "$existing_branch" != "HEAD" ] && [ "$existing_branch" != "$DEFAULT_BRANCH" ]; then
-                echo "{\"status\":\"initialized\",\"scratch_dir\":\"${scratch_dir}\",\"branch\":\"${existing_branch}\",\"repo\":\"${REPO_NAME}\",\"reused\":true}"
-                return 0
-            fi
-            git checkout -b "$branch_name" >/dev/null 2>&1
-            echo "{\"status\":\"initialized\",\"scratch_dir\":\"${scratch_dir}\",\"branch\":\"${branch_name}\",\"repo\":\"${REPO_NAME}\"}"
-            return 0
-        fi
-        rm -rf "$scratch_dir"
-    else
-        local scratch_prefix="${REPO_NAME}-scratch"
-        scratch_dir=$(mktemp -d "${base_dir}/${scratch_prefix}.XXXXXX")
-        chmod 700 "$scratch_dir"
-    fi
-
-    export GIT_TERMINAL_PROMPT=0
-    export GIT_CONFIG_COUNT=2
-    export GIT_CONFIG_KEY_0="http.extraHeader"
-    export GIT_CONFIG_VALUE_0="AUTHORIZATION: basic ${auth_header}"
-    export GIT_CONFIG_KEY_1="http.version"
-    export GIT_CONFIG_VALUE_1="HTTP/1.1"
-
-    local clone_out=""
-    if ! clone_out=$(git clone --depth 20 --single-branch -b "$clone_branch" "$REPO_URL" "$scratch_dir" 2>&1); then
-        echo "ERROR: Failed to clone ${REPO_URL} into scratch directory: ${clone_out}" >&2
-        rm -rf "$scratch_dir"
-        exit 1
-    fi
-    chmod 700 "$scratch_dir"
-
-    cd "$scratch_dir"
-    if [ -z "$init_branch" ]; then
-        git checkout -b "$branch_name" >/dev/null 2>&1
-    elif [ "$init_branch" != "$DEFAULT_BRANCH" ]; then
-        git config --add remote.origin.fetch "+refs/heads/${DEFAULT_BRANCH}:refs/remotes/origin/${DEFAULT_BRANCH}"
-        git fetch --depth 20 origin "+refs/heads/${DEFAULT_BRANCH}:refs/remotes/origin/${DEFAULT_BRANCH}" >/dev/null 2>&1 || true
-    fi
-    git config user.name "Aerial"
-    git config user.email "aerial@noreply.github.com"
-
-    echo "{\"status\":\"initialized\",\"scratch_dir\":\"${scratch_dir}\",\"branch\":\"${branch_name}\",\"repo\":\"${REPO_NAME}\"}"
-}
-
-SCRATCH_DIR_CLEANUP=""
-
-read_config_yaml_val() {
-    local key="$1"
-    local config_files=()
-    if [ -n "${CONFIG_PATH:-}" ]; then
-        config_files+=("${CONFIG_PATH}")
-    else
-        config_files+=("/local/config.yaml" "/share/aerial-config/config.yaml")
-    fi
-
-    for f in "${config_files[@]}"; do
-        if [ -f "$f" ] && [ -r "$f" ]; then
-            local val
-            val=$(awk -v k="$key" '
-                $0 ~ "^" k ":[ \t]*" {
-                    sub("^" k ":[ \t]*", "")
-                    sub(/[ \t]*#.*$/, "")
-                    gsub(/^["\x27]|["\x27]$/, "")
-                    print
-                    exit
-                }
-            ' "$f" 2>/dev/null || true)
-            if [ -n "$val" ]; then
-                echo "$val"
-                return 0
-            fi
-        fi
-    done
-    echo ""
+gh_api_call() {
+    local auth_args=()
+    [ -n "${GITHUB_PAT:-}" ] && auth_args=(-H "Authorization: token ${GITHUB_PAT}")
+    curl -s --connect-timeout 3 -m 15 -w "\n%{http_code}" "${auth_args[@]}" -H "Accept: application/vnd.github.v3+json" "$@"
 }
 
 resolve_target_id() {
-    if [ -n "${1:-}" ]; then echo "$1"; return; fi
-    if [ -n "${AERIAL_TARGET_ID:-}" ]; then echo "${AERIAL_TARGET_ID}"; return; fi
-    if [ -n "${DISCORD_THREAD_ID:-}" ]; then echo "${DISCORD_THREAD_ID}"; return; fi
-    if [ -n "${DISCORD_CHANNEL_ID:-}" ]; then echo "${DISCORD_CHANNEL_ID}"; return; fi
-    echo ""
+    local raw="${1:-${AERIAL_TARGET_ID:-${DISCORD_THREAD_ID:-${DISCORD_CHANNEL_ID:-}}}}"
+    [[ "$raw" =~ ^[0-9]{17,20}$ ]] && echo "$raw" || true
 }
 
 resolve_vanadis_chunk_id() {
@@ -377,399 +111,142 @@ resolve_vanadis_chunk_id() {
     echo ""
 }
 
-resolve_vanadis_url() {
-    local vanadis_base="${VANADIS_URL:-$(read_config_yaml_val vanadis_url)}"
-    if [ -n "$vanadis_base" ]; then
-        echo "${vanadis_base%/}"
-        return 0
-    fi
-    return 1
+prune_stale_scratch_dirs() {
+    find "$1" -maxdepth 1 -mindepth 1 -type d -name '*-scratch.*' -mmin +1440 -exec rm -rf {} + 2>/dev/null || true
 }
 
-get_vanadis_auth_args() {
-    local sa_token_path="${AERIAL_SA_TOKEN_PATH:-/var/run/secrets/kubernetes.io/serviceaccount/token}"
-    if [ ! -r "$sa_token_path" ] && [ -n "${HOME:-}" ] && [ -r "${HOME}/.gemini/turn_env/sa-token" ]; then
-        sa_token_path="${HOME}/.gemini/turn_env/sa-token"
-    fi
-    VANADIS_AUTH_ARGS=()
-    if [ -r "$sa_token_path" ]; then
-        local sa_token
-        sa_token="$(tr -d '[:space:]' < "$sa_token_path" 2>/dev/null || true)"
-        if [ -n "$sa_token" ]; then
-            VANADIS_AUTH_ARGS=(-H "Authorization: Bearer ${sa_token}")
+VANADIS_CHUNK_ID_EXPLICIT=""
+[ "${AERIAL_NO_VANADIS_CHUNK:-0}" = "1" ] && VANADIS_CHUNK_ID="" || VANADIS_CHUNK_ID="${AERIAL_VANADIS_CHUNK_ID:-${VANADIS_CHUNK_ID:-}}"
+PRE_ARGS=()
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --repo|-r) [ $# -ge 2 ] || { echo "ERROR: $1 requires a repo name." >&2; exit 1; }; REPO_NAME="$(normalize_repo "$2")"; REPO_NAME_EXPLICIT=1; shift 2 ;;
+        --repo=*) REPO_NAME="$(normalize_repo "${1#*=}")"; REPO_NAME_EXPLICIT=1; shift 1 ;;
+        --vanadis-chunk) [ $# -ge 2 ] || { echo "ERROR: $1 requires a chunk ID." >&2; exit 1; }; VANADIS_CHUNK_ID="$2"; VANADIS_CHUNK_ID_EXPLICIT="$2"; shift 2 ;;
+        --vanadis-chunk=*) VANADIS_CHUNK_ID="${1#*=}"; VANADIS_CHUNK_ID_EXPLICIT="${1#*=}"; shift 1 ;;
+        *) PRE_ARGS+=("$1"); shift 1 ;;
+    esac
+done
+set -- "${PRE_ARGS[@]}"
+
+cmd="${1:-}"
+[ -n "$cmd" ] && shift
+
+init_scratch() {
+    local init_branch="" positional_repo_set=0
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --repo|-r) [ $# -ge 2 ] || { echo "ERROR: $1 requires a repo name." >&2; exit 1; }; REPO_NAME="$(normalize_repo "$2")"; REPO_NAME_EXPLICIT=1; shift 2 ;;
+            --repo=*) REPO_NAME="$(normalize_repo "${1#*=}")"; REPO_NAME_EXPLICIT=1; shift 1 ;;
+            --branch|-b) [ $# -ge 2 ] && [ -n "${2:-}" ] || { echo "ERROR: $1 requires a branch name." >&2; exit 1; }; init_branch="$2"; shift 2 ;;
+            --branch=*) init_branch="${1#*=}"; [ -n "$init_branch" ] || { echo "ERROR: --branch requires a branch name." >&2; exit 1; }; shift 1 ;;
+            --vanadis-chunk) [ $# -ge 2 ] || { echo "ERROR: $1 requires a chunk ID." >&2; exit 1; }; VANADIS_CHUNK_ID="$2"; VANADIS_CHUNK_ID_EXPLICIT="$2"; shift 2 ;;
+            --vanadis-chunk=*) VANADIS_CHUNK_ID="${1#*=}"; VANADIS_CHUNK_ID_EXPLICIT="${1#*=}"; shift 1 ;;
+            -*) echo "ERROR: Unexpected argument to init: $1" >&2; exit 1 ;;
+            *)
+                if [ "$positional_repo_set" -eq 0 ]; then
+                    REPO_NAME="$(normalize_repo "$1")"; REPO_NAME_EXPLICIT=1; positional_repo_set=1; shift 1
+                else
+                    echo "ERROR: Unexpected argument to init: $1" >&2; exit 1
+                fi
+                ;;
+        esac
+    done
+
+    local default_repo_url="https://github.com/${REPO_OWNER}/${REPO_NAME}.git"
+    [ "${USE_LOOPBACK_GITHUB:-0}" = "1" ] && default_repo_url="${GITHUB_PROXY_BASE}/internal/github-git/${REPO_OWNER}/${REPO_NAME}.git"
+    local repo_url="${AERIAL_REPO_URL_OVERRIDE:-$default_repo_url}" auth_header; auth_header=$(build_auth_header)
+
+    local base_dir="${AERIAL_SCRATCH_BASE_DIR:-}"
+    if [ -z "$base_dir" ]; then
+        base_dir="/data/scratch"
+        if [ ! -d "/data" ] || [ ! -w "/data" ]; then
+            base_dir="/dev/shm"
+            [ ! -d "$base_dir" ] || [ ! -w "$base_dir" ] && base_dir="${TMPDIR:-/tmp}"
         fi
     fi
-}
+    mkdir -p "$base_dir" && prune_stale_scratch_dirs "$base_dir"
 
-attach_pr_in_vanadis() {
-    local vanadis_url="$1"
-    local attach_payload="$2"
-    local pr_num="$3"
-    local chunk_id="${4:-}"
-    local max_attempts="${AERIAL_VANADIS_ATTACH_RETRIES:-3}"
-    local delay="${AERIAL_VANADIS_ATTACH_RETRY_DELAY:-1}"
-    local attempt=1
-    local attach_resp=""
-    get_vanadis_auth_args
+    local vanadis_chunk_id target_id rand_suffix deterministic_dir="" branch_name="" clone_branch="${init_branch:-$DEFAULT_BRANCH}"
+    vanadis_chunk_id="$(resolve_vanadis_chunk_id "${VANADIS_CHUNK_ID_EXPLICIT:-}")"
+    target_id="$(resolve_target_id)"
+    rand_suffix=$(head -c 16 /dev/urandom | md5sum | head -c 6)
 
-    while [ "$attempt" -le "$max_attempts" ]; do
-        attach_resp=$(curl -s --connect-timeout 2 -m 15 -X POST \
-            ${VANADIS_AUTH_ARGS[@]+"${VANADIS_AUTH_ARGS[@]}"} \
-            -H "Content-Type: application/json" \
-            -d "$attach_payload" \
-            "${vanadis_url%/}/chunks/attach-pr" 2>/dev/null || true)
-        if [ -n "$attach_resp" ] && echo "$attach_resp" | jq -e '.status == "attached"' >/dev/null 2>&1; then
-            local resolved_thread
-            resolved_thread=$(echo "$attach_resp" | jq -r '.thread_id // empty' 2>/dev/null || true)
-            echo "🔗 [aerial-pr] Attached PR #${pr_num} to Vanadis (thread: ${resolved_thread:-none})." >&2
-            echo "$attach_resp"
-            return 0
-        fi
+    if [ -n "$init_branch" ]; then
+        branch_name="$init_branch"
+    elif [ -n "$vanadis_chunk_id" ]; then
+        local safe_chunk_id="$(printf '%s' "$vanadis_chunk_id" | sed 's/[^a-zA-Z0-9_-]/_/g')"
+        deterministic_dir="${base_dir}/vanadis-${safe_chunk_id}-${REPO_NAME}"
+        [ -n "$target_id" ] && branch_name="feat/${REPO_NAME}-pr-vanadis-${safe_chunk_id}-t${target_id}-${rand_suffix}" || branch_name="feat/${REPO_NAME}-pr-vanadis-${safe_chunk_id}-${rand_suffix}"
+    else
+        [ -n "$target_id" ] && branch_name="feat/${REPO_NAME}-pr-t${target_id}-${rand_suffix}" || branch_name="feat/${REPO_NAME}-pr-$(date +%Y%m%d%H%M%S)-${rand_suffix}"
+    fi
 
-        # If attach POST returned empty response or non-attached status, probe GET /chunks/<id>
-        if [ -n "$chunk_id" ]; then
-            local chunk_check_resp=""
-            chunk_check_resp=$(curl -sS --connect-timeout 2 --max-time 5 \
-                ${VANADIS_AUTH_ARGS[@]+"${VANADIS_AUTH_ARGS[@]}"} \
-                "${vanadis_url%/}/chunks/${chunk_id}" 2>/dev/null || true)
-            if [ -n "$chunk_check_resp" ] && echo "$chunk_check_resp" | jq -e --argjson pr "$pr_num" '.chunk.pr_number == ($pr | tonumber)' >/dev/null 2>&1; then
-                local thread_id
-                thread_id=$(echo "$chunk_check_resp" | jq -r '.build.thread_id // empty' 2>/dev/null || true)
-                local synth_resp
-                synth_resp=$(jq -n \
-                    --arg chunk_id "$chunk_id" \
-                    --arg thread_id "$thread_id" \
-                    '{status: "attached", chunk_id: $chunk_id, thread_id: (if $thread_id != "" then $thread_id else null end)}')
-                echo "🔗 [aerial-pr] Verified PR #${pr_num} already attached to Vanadis chunk ${chunk_id} (thread: ${thread_id:-none})." >&2
-                echo "$synth_resp"
+    local scratch_dir
+    if [ -n "$deterministic_dir" ]; then
+        scratch_dir="$deterministic_dir"
+        if [ -d "${scratch_dir}/.git" ] && git -C "$scratch_dir" rev-parse --verify HEAD >/dev/null 2>&1; then
+            rm -f "${scratch_dir}/.git/index.lock"
+            local existing_branch="$(git -C "$scratch_dir" symbolic-ref --short HEAD 2>/dev/null || git -C "$scratch_dir" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")"
+            if [ -n "$existing_branch" ] && [ "$existing_branch" != "HEAD" ] && [ "$existing_branch" != "$DEFAULT_BRANCH" ]; then
+                echo "{\"status\":\"initialized\",\"scratch_dir\":\"${scratch_dir}\",\"branch\":\"${existing_branch}\",\"repo\":\"${REPO_NAME}\",\"reused\":true}"
                 return 0
             fi
-        fi
-
-        if [ "$attempt" -lt "$max_attempts" ]; then
-            echo "⚠️ [aerial-pr] Warning: PR #${pr_num} Vanadis attachment attempt ${attempt}/${max_attempts} failed (${vanadis_url}): ${attach_resp:-unreachable}. Retrying in ${delay}s..." >&2
-            if [ "$delay" -gt 0 ] 2>/dev/null; then
-                sleep "$delay"
-                delay=$((delay * 2))
-            fi
-        fi
-        attempt=$((attempt + 1))
-    done
-
-    echo "❌ [aerial-pr] ERROR: Failed to attach PR #${pr_num} to Vanadis (${vanadis_url}) after ${max_attempts} attempts: ${attach_resp:-unreachable}" >&2
-    if [ -n "$attach_resp" ]; then
-        echo "$attach_resp"
-    fi
-    return 1
-}
-
-verify_vanadis_chunk_active() {
-    local chunk_id="${1:-}"
-    if [ -z "$chunk_id" ]; then
-        return 0
-    fi
-    local vanadis_base
-    vanadis_base=$(resolve_vanadis_url 2>/dev/null || true)
-    if [ -z "$vanadis_base" ]; then
-        return 0
-    fi
-    get_vanadis_auth_args
-    local resp=""
-    if resp=$(curl -sS --connect-timeout 2 --max-time 4 ${VANADIS_AUTH_ARGS[@]+"${VANADIS_AUTH_ARGS[@]}"} "${vanadis_base}/chunks/${chunk_id}" 2>/dev/null); then
-        if [ -n "$resp" ] && echo "$resp" | jq -e '(.chunk.status == "cancelled" or .chunk.status == "merged" or .chunk.status == "deploying" or .chunk.status == "completed" or .build.status == "cancelled" or .build.status == "completed")' >/dev/null 2>&1; then
-            echo "ERROR: Vanadis chunk ${chunk_id} (or parent build) is cancelled; aborting PR submission." >&2
-            exit 1
-        fi
-    fi
-    return 0
-}
-
-format_vanadis_chunk_context() {
-    local chunk_id="${1:-}"
-    if [ -z "$chunk_id" ]; then
-        return 0
-    fi
-
-    local vanadis_base
-    vanadis_base="$(resolve_vanadis_url 2>/dev/null || true)"
-    if [ -z "$vanadis_base" ] && [ -n "${VANADIS_FALLBACK_URL:-}" ]; then
-        vanadis_base="${VANADIS_FALLBACK_URL%/}"
-    fi
-    if [ -z "$vanadis_base" ]; then
-        return 0
-    fi
-
-    get_vanadis_auth_args
-    local chunk_resp=""
-    chunk_resp="$(curl -sS --connect-timeout 3 --max-time 5 ${VANADIS_AUTH_ARGS[@]+"${VANADIS_AUTH_ARGS[@]}"} "${vanadis_base}/chunks/${chunk_id}" 2>/dev/null || true)"
-    if [ -z "$chunk_resp" ] && [ -n "${VANADIS_FALLBACK_URL:-}" ] && [ "$vanadis_base" != "${VANADIS_FALLBACK_URL%/}" ]; then
-        chunk_resp="$(curl -sS --connect-timeout 3 --max-time 5 ${VANADIS_AUTH_ARGS[@]+"${VANADIS_AUTH_ARGS[@]}"} "${VANADIS_FALLBACK_URL%/}/chunks/${chunk_id}" 2>/dev/null || true)"
-        if [ -n "$chunk_resp" ]; then
-            vanadis_base="${VANADIS_FALLBACK_URL%/}"
-        fi
-    fi
-
-    if [ -z "$chunk_resp" ] || ! echo "$chunk_resp" | jq -e '.chunk.id != null and .chunk.id != ""' >/dev/null 2>&1; then
-        return 0
-    fi
-
-    local build_id
-    build_id="$(echo "$chunk_resp" | jq -r '.chunk.build_id // .build.id // empty' 2>/dev/null || true)"
-
-    local build_resp=""
-    if [ -n "$build_id" ]; then
-        build_resp="$(curl -sS --connect-timeout 3 --max-time 5 ${VANADIS_AUTH_ARGS[@]+"${VANADIS_AUTH_ARGS[@]}"} "${vanadis_base}/builds/${build_id}" 2>/dev/null || true)"
-        if [ -z "$build_resp" ] && [ -n "${VANADIS_FALLBACK_URL:-}" ] && [ "$vanadis_base" != "${VANADIS_FALLBACK_URL%/}" ]; then
-            build_resp="$(curl -sS --connect-timeout 3 --max-time 5 ${VANADIS_AUTH_ARGS[@]+"${VANADIS_AUTH_ARGS[@]}"} "${VANADIS_FALLBACK_URL%/}/builds/${build_id}" 2>/dev/null || true)"
-        fi
-    fi
-
-    local chunks_json=""
-    if [ -n "$build_resp" ] && echo "$build_resp" | jq -e '.chunks | type == "array" and length > 0' >/dev/null 2>&1; then
-        chunks_json="$(echo "$build_resp" | jq -c '.chunks')"
-    else
-        chunks_json="$(echo "$chunk_resp" | jq -c '[.chunk]')"
-    fi
-
-    jq -r -n \
-        --argjson chunk "$(echo "$chunk_resp" | jq -c '.chunk')" \
-        --argjson build "$(echo "$chunk_resp" | jq -c '.build // {}')" \
-        --argjson chunks "$chunks_json" '
-        $chunk as $c |
-        $build as $b |
-        $chunks as $all_chunks |
-        ($all_chunks | length) as $total |
-        (($c.chunk_index // 0) + 1) as $idx |
-        ([$c.target_files[]?] | join(", ")) as $tf |
-        [
-          "## Vanadis Build Context",
-          "- **Build**: \($b.id // $c.build_id // "unknown") — \($b.title // "Untitled Build")",
-          (if ($b.objective != null and ($b.objective | test("\\S"))) then "- **Build Objective**: \($b.objective | gsub("\r?\n"; " ") | gsub("^[[:space:]]+|[[:space:]]+$"; ""))" else empty end),
-          "- **Active Chunk (\($idx) of \($total))**: \($c.id) — \($c.title // "Untitled Chunk")",
-          (if ($tf != "") then "- **Active Chunk Target Files**: \($tf)" else empty end),
-          "- **Build Chunks Roadmap**:",
-          ($all_chunks[] | "- [Chunk \((.chunk_index // 0) + 1)/\($total)] \(.id): \(.title // "Untitled") (\(.mode // "unknown"), \(.status // "unknown"))"),
-          "- **Scope Boundary (RoboRev & Review Guidance)**: This PR implements ONLY the active chunk listed above. Caller cutover, downstream lifecycle wiring, and legacy code removal assigned to downstream chunks in the roadmap are intentionally deferred to their respective chunks and must not be flagged as incomplete or dead wiring in this PR."
-        ] | join("\n")
-    ' 2>/dev/null || return 0
-}
-
-enable_github_auto_merge() {
-    local node_id="$1"
-    local pr_num="${2:-}"
-    if [ -z "$node_id" ] || { [ -z "${GITHUB_PAT:-}" ] && [ "${USE_LOOPBACK_GITHUB:-0}" -ne 1 ]; }; then
-        return 0
-    fi
-
-    local query='mutation($input: EnablePullRequestAutoMergeInput!) {
-        enablePullRequestAutoMerge(input: $input) {
-            pullRequest {
-                autoMergeRequest {
-                    enabledAt
-                    mergeMethod
-                }
-            }
-        }
-    }'
-
-    local payload
-    payload=$(jq -n \
-        --arg query "$query" \
-        --arg node_id "$node_id" \
-        '{query: $query, variables: {input: {pullRequestId: $node_id, mergeMethod: "SQUASH"}}}')
-
-    local auth_args=()
-    if [ -n "${GITHUB_PAT:-}" ]; then
-        auth_args=(-H "Authorization: token ${GITHUB_PAT}")
-    fi
-
-    local resp
-    resp=$(curl -s --connect-timeout 3 -m 10 -X POST \
-        "${auth_args[@]}" \
-        -H "Content-Type: application/json" \
-        "${GITHUB_API_BASE}/graphql" \
-        -d "$payload" 2>/dev/null || true)
-
-    if echo "$resp" | jq -e '.data.enablePullRequestAutoMerge.pullRequest.autoMergeRequest != null' >/dev/null 2>&1; then
-        echo "🤖 [aerial-pr] Native GitHub auto-merge enabled for PR #${pr_num} (SQUASH)." >&2
-    else
-        local err_msg
-        err_msg=$(echo "$resp" | jq -r '.errors[0].message // "unknown error"' 2>/dev/null || echo "failed")
-        echo "⚠️ [aerial-pr] Warning: Could not enable native GitHub auto-merge on PR #${pr_num}: ${err_msg}" >&2
-    fi
-}
-
-register_pr_in_brain() {
-    local brain_reg_url="$1"
-    local reg_payload="$2"
-    local pr_num="$3"
-    local target_id="$4"
-    local max_attempts="${AERIAL_PR_REGISTER_RETRIES:-3}"
-    local delay="${AERIAL_PR_REGISTER_RETRY_DELAY:-1}"
-    local attempt=1
-    local reg_resp=""
-    get_vanadis_auth_args
-
-    while [ "$attempt" -le "$max_attempts" ]; do
-        reg_resp=$(curl -s --connect-timeout 2 -m 15 -X POST \
-            ${VANADIS_AUTH_ARGS[@]+"${VANADIS_AUTH_ARGS[@]}"} \
-            -H "Content-Type: application/json" \
-            -d "$reg_payload" \
-            "$brain_reg_url" 2>/dev/null || true)
-        if [ -n "$reg_resp" ] && echo "$reg_resp" | jq -e '.status == "registered"' >/dev/null 2>&1; then
-            local resolved_target
-            resolved_target=$(echo "$reg_resp" | jq -r '.target_id // empty' 2>/dev/null || true)
-            echo "🗄️ [aerial-pr] Registered PR #${pr_num} with the PR lifecycle (target: ${resolved_target:-${target_id:-headless}})." >&2
+            git -C "$scratch_dir" checkout -b "$branch_name" >/dev/null 2>&1
+            echo "{\"status\":\"initialized\",\"scratch_dir\":\"${scratch_dir}\",\"branch\":\"${branch_name}\",\"repo\":\"${REPO_NAME}\"}"
             return 0
         fi
-        if [ "$attempt" -lt "$max_attempts" ]; then
-            echo "⚠️ [aerial-pr] Warning: PR #${pr_num} registration attempt ${attempt}/${max_attempts} failed (${brain_reg_url}): ${reg_resp:-unreachable}. Retrying in ${delay}s..." >&2
-            if [ "$delay" -gt 0 ] 2>/dev/null; then
-                sleep "$delay"
-                delay=$((delay * 2))
-            fi
-        fi
-        attempt=$((attempt + 1))
-    done
+        rm -rf "$scratch_dir"
+    else
+        scratch_dir=$(mktemp -d "${base_dir}/${REPO_NAME}-scratch.XXXXXX")
+        chmod 700 "$scratch_dir"
+    fi
 
-    echo "❌ [aerial-pr] ERROR: Failed to register PR #${pr_num} with the PR lifecycle (${brain_reg_url}) after ${max_attempts} attempts: ${reg_resp:-unreachable}" >&2
-    return 1
+    export GIT_TERMINAL_PROMPT=0 GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0="http.extraHeader" GIT_CONFIG_VALUE_0="AUTHORIZATION: basic ${auth_header}" GIT_CONFIG_KEY_1="http.version" GIT_CONFIG_VALUE_1="HTTP/1.1"
+    local clone_out
+    if ! clone_out=$(git clone --depth 20 --single-branch -b "$clone_branch" "$repo_url" "$scratch_dir" 2>&1); then
+        echo "ERROR: Failed to clone ${repo_url} into scratch directory: ${clone_out}" >&2; rm -rf "$scratch_dir"; exit 1
+    fi
+    chmod 700 "$scratch_dir"
+    git -C "$scratch_dir" config user.name "Aerial" && git -C "$scratch_dir" config user.email "aerial@noreply.github.com"
+    if [ -z "$init_branch" ]; then
+        git -C "$scratch_dir" checkout -b "$branch_name" >/dev/null 2>&1
+    elif [ "$init_branch" != "$DEFAULT_BRANCH" ]; then
+        git -C "$scratch_dir" config --add remote.origin.fetch "+refs/heads/${DEFAULT_BRANCH}:refs/remotes/origin/${DEFAULT_BRANCH}"
+        git -C "$scratch_dir" fetch --depth 20 origin "+refs/heads/${DEFAULT_BRANCH}:refs/remotes/origin/${DEFAULT_BRANCH}" >/dev/null 2>&1 || true
+    fi
+    echo "{\"status\":\"initialized\",\"scratch_dir\":\"${scratch_dir}\",\"branch\":\"${branch_name}\",\"repo\":\"${REPO_NAME}\"}"
 }
 
-PUSH_UPDATED_EXISTING=0
-REBASE_INCORPORATED_REMOTE_SHA=""
+SCRATCH_DIR_CLEANUP=""
+SAVED_PR_DESC_FILE=""
+SAVED_PR_DESC_CONTENT=""
 
 push_scratch_branch() {
     local branch="$1"
     PUSH_UPDATED_EXISTING=0
-    if git fetch origin "+refs/heads/${branch}:refs/remotes/origin/${branch}" >/dev/null 2>&1; then
-        PUSH_UPDATED_EXISTING=1
-    fi
-    if git push -u origin "$branch" >/dev/null 2>&1; then
-        return 0
-    fi
-    local remote_sha
-    remote_sha=$(git rev-parse --verify -q "refs/remotes/origin/${branch}" 2>/dev/null || echo "")
-    if [ -n "$remote_sha" ]; then
-        if ! git merge-base --is-ancestor "$remote_sha" HEAD 2>/dev/null && [ "$remote_sha" != "${REBASE_INCORPORATED_REMOTE_SHA:-}" ]; then
-            echo "ERROR: Remote branch ${branch} has newer commits that are not present in local HEAD. Re-run aerial-pr.sh submit or rebase onto the updated remote branch before pushing." >&2
-            return 1
-        fi
-        if git push --force-with-lease="refs/heads/${branch}:${remote_sha}" -u origin "$branch" >/dev/null 2>&1; then
-            PUSH_UPDATED_EXISTING=1
-            echo "🔄 [aerial-pr] Updated existing remote branch ${branch} with --force-with-lease." >&2
-            return 0
-        fi
-    elif git push --force-with-lease -u origin "$branch" >/dev/null 2>&1; then
-        PUSH_UPDATED_EXISTING=1
-        echo "🔄 [aerial-pr] Updated existing remote branch ${branch} with --force-with-lease." >&2
-        return 0
-    fi
+    git fetch origin "+refs/heads/${branch}:refs/remotes/origin/${branch}" >/dev/null 2>&1 && PUSH_UPDATED_EXISTING=1 || true
+    git push -u origin "$branch" >/dev/null 2>&1 && return 0
+    git push --force-with-lease -u origin "$branch" >/dev/null 2>&1 && { PUSH_UPDATED_EXISTING=1; return 0; }
     return 1
 }
 
 lookup_existing_open_pr() {
-    local branch="$1"
-    local auth_args=()
-    if [ -n "${GITHUB_PAT:-}" ]; then
-        auth_args=(-H "Authorization: token ${GITHUB_PAT}")
-    fi
-    curl -s --connect-timeout 3 -m 10 \
-        "${auth_args[@]}" \
+    local branch="$1" auth_args=()
+    [ -n "${GITHUB_PAT:-}" ] && auth_args=(-H "Authorization: token ${GITHUB_PAT}")
+    curl -s --connect-timeout 3 -m 10 "${auth_args[@]}" \
         -H "Accept: application/vnd.github.v3+json" \
         "${GITHUB_API_BASE}/repos/${REPO_OWNER}/${REPO_NAME}/pulls?state=open&head=${REPO_OWNER}:${branch}" 2>/dev/null | jq -c '.[0] // empty' 2>/dev/null || true
 }
 
-format_aerial_pr_trailer() {
-    local t_id="${1:-}" v_id="${2:-}"
-    local b_id="${3:-${AERIAL_BOT_ID:-$(read_config_yaml_val bot_id)}}"
-    [ -z "$t_id" ] && [ -z "$v_id" ] && return 0
-    if [ -n "$b_id" ]; then
-        printf "<!-- aerial-pr: %s -->" "$(jq -c -n --arg target_id "$t_id" --arg vanadis_chunk_id "$v_id" --arg bot_id "$b_id" '{target_id: $target_id, vanadis_chunk_id: $vanadis_chunk_id, bot_id: $bot_id}')"
-    else
-        printf "<!-- aerial-pr: %s -->" "$(jq -c -n --arg target_id "$t_id" --arg vanadis_chunk_id "$v_id" '{target_id: $target_id, vanadis_chunk_id: $vanadis_chunk_id}')"
-    fi
-}
-
 rebase_staged_changes() {
-    local target_branch="${1:-$DEFAULT_BRANCH}"
-    local msg="${2:-chore: temporary rebase commit}"
+    local target_branch="${1:-$DEFAULT_BRANCH}" msg="${2:-chore: temporary rebase commit}"
     if ! git fetch origin "+refs/heads/${target_branch}:refs/remotes/origin/${target_branch}" >/dev/null 2>&1; then
         echo "⚠️ [aerial-pr] Warning: Could not fetch origin/${target_branch}; proceeding with current base." >&2
         return 0
     fi
-    local head_sha upstream_sha current_branch remote_branch_sha=""
-    head_sha=$(git rev-parse --verify -q HEAD 2>/dev/null || echo "")
-    upstream_sha=$(git rev-parse --verify -q "refs/remotes/origin/${target_branch}" 2>/dev/null || echo "")
-    if [ -z "$upstream_sha" ] || [ "$head_sha" = "$upstream_sha" ]; then
-        return 0
-    fi
-    current_branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
-    if [ -n "$current_branch" ] && [ "$current_branch" != "$target_branch" ] && [ "$current_branch" != "HEAD" ]; then
-        git fetch origin "+refs/heads/${current_branch}:refs/remotes/origin/${current_branch}" >/dev/null 2>&1 || true
-        remote_branch_sha=$(git rev-parse --verify -q "refs/remotes/origin/${current_branch}" 2>/dev/null || echo "")
-    fi
-    if [ -n "$remote_branch_sha" ]; then
-        if git merge-base --is-ancestor "$upstream_sha" "$head_sha" 2>/dev/null && git merge-base --is-ancestor "$remote_branch_sha" "$head_sha" 2>/dev/null; then
-            REBASE_INCORPORATED_REMOTE_SHA="$remote_branch_sha"
-            git reset --soft "origin/${target_branch}" >/dev/null 2>&1
-            return 0
-        fi
-        if git merge-base --is-ancestor "$remote_branch_sha" "$head_sha" 2>/dev/null; then
-            [ "$head_sha" != "$remote_branch_sha" ] && git reset --soft "$remote_branch_sha" >/dev/null 2>&1
-            if git merge-base --is-ancestor "$upstream_sha" "$remote_branch_sha" 2>/dev/null; then
-                REBASE_INCORPORATED_REMOTE_SHA="$remote_branch_sha"
-                return 0
-            fi
-            local temp_sha=""
-            if ! git diff --cached --quiet; then
-                git commit -q -m "$msg" >/dev/null 2>&1 && temp_sha=$(git rev-parse HEAD 2>/dev/null || echo "")
-                git reset --hard "$remote_branch_sha" >/dev/null 2>&1
-            fi
-            if git merge --no-edit -q "origin/${target_branch}" >/dev/null 2>&1 && \
-               { [ -z "$temp_sha" ] || git cherry-pick -n "$temp_sha" >/dev/null 2>&1; }; then
-                REBASE_INCORPORATED_REMOTE_SHA="$remote_branch_sha"
-                echo "🔄 [aerial-pr] Merged latest origin/${target_branch} (${upstream_sha:0:7}) into ${current_branch}." >&2
-                return 0
-            fi
-            git cherry-pick --abort >/dev/null 2>&1 || true
-            git merge --abort >/dev/null 2>&1 || true
-            [ -n "$temp_sha" ] && git reset --hard "$temp_sha" >/dev/null 2>&1 && git reset --soft "$remote_branch_sha" >/dev/null 2>&1
-            echo "ERROR: Failed to merge origin/${target_branch} into ${current_branch} due to merge conflicts. Aborting submit." >&2
-            return 1
-        else
-            local fork_point=""
-            fork_point=$(git merge-base "$head_sha" "$remote_branch_sha" 2>/dev/null || echo "")
-            if [ -n "$fork_point" ] && [ "$head_sha" != "$fork_point" ]; then
-                git reset --soft "$fork_point" >/dev/null 2>&1
-            fi
-            local temp_sha=""
-            if ! git diff --cached --quiet; then
-                git commit -q -m "temp: staged changes" >/dev/null 2>&1
-                temp_sha=$(git rev-parse HEAD 2>/dev/null || echo "")
-            fi
-            git reset --hard "$remote_branch_sha" >/dev/null 2>&1
-            if ! git merge-base --is-ancestor "$upstream_sha" HEAD 2>/dev/null; then
-                if ! git merge --no-edit -q "origin/${target_branch}" >/dev/null 2>&1; then
-                    git merge --abort >/dev/null 2>&1 || true
-                    [ -n "$temp_sha" ] && git reset --hard "$temp_sha" >/dev/null 2>&1 && git reset --soft "$head_sha" >/dev/null 2>&1
-                    echo "ERROR: Failed to merge origin/${target_branch} into ${current_branch} due to merge conflicts. Aborting submit." >&2
-                    return 1
-                fi
-                echo "🔄 [aerial-pr] Merged latest origin/${target_branch} (${upstream_sha:0:7}) into ${current_branch}." >&2
-            fi
-            if [ -n "$temp_sha" ]; then
-                if ! git cherry-pick -n "$temp_sha" >/dev/null 2>&1; then
-                    git cherry-pick --abort >/dev/null 2>&1 || true
-                    git reset --hard "$temp_sha" >/dev/null 2>&1 && git reset --soft "$head_sha" >/dev/null 2>&1
-                    echo "ERROR: Failed to apply staged changes onto updated remote branch ${current_branch} due to merge conflicts. Aborting submit." >&2
-                    return 1
-                fi
-            fi
-            REBASE_INCORPORATED_REMOTE_SHA="$remote_branch_sha"
-            return 0
-        fi
-    fi
+    local upstream_sha; upstream_sha=$(git rev-parse --verify -q "refs/remotes/origin/${target_branch}" 2>/dev/null || echo "")
+    [ -z "$upstream_sha" ] && return 0
     local had_staged=0
     if ! git diff --cached --quiet; then
         had_staged=1
@@ -777,9 +254,7 @@ rebase_staged_changes() {
     fi
     if ! git rebase "origin/${target_branch}" >/dev/null 2>&1; then
         git rebase --abort >/dev/null 2>&1 || true
-        if [ "$had_staged" -eq 1 ]; then
-            git reset --soft HEAD~1 >/dev/null 2>&1 || true
-        fi
+        [ "$had_staged" -eq 1 ] && git reset --soft HEAD~1 >/dev/null 2>&1 || true
         echo "ERROR: Failed to rebase scratch branch onto origin/${target_branch} due to merge conflicts. Aborting submit." >&2
         return 1
     fi
@@ -788,512 +263,139 @@ rebase_staged_changes() {
     return 0
 }
 
-resolve_pr_register_url() {
-    if [ -n "${AERIAL_PR_REGISTER_URL:-}" ]; then
-        if [[ "${AERIAL_PR_REGISTER_URL}" == */internal/pr/register ]]; then
-            echo "${AERIAL_PR_REGISTER_URL}"
-        else
-            echo "${AERIAL_PR_REGISTER_URL%/}/internal/pr/register"
-        fi
-        return 0
-    fi
-    local syn_url="${SYNAPSE_URL:-$(read_config_yaml_val synapse_url)}"
-    if [ -n "$syn_url" ]; then
-        echo "${syn_url%/}/internal/pr/register"
-        return 0
-    fi
-    return 1
-}
-
 submit_scratch() {
-    local target_id="$(resolve_target_id)"
-    local scratch_dir=""
-    local commit_msg=""
-    local commit_msg_explicit=0
-    local pr_body=""
-    local pr_body_file=""
-    local vanadis_chunk_id="$(resolve_vanadis_chunk_id "${VANADIS_CHUNK_ID_EXPLICIT:-}")"
-
+    local scratch_dir="" commit_msg="" commit_msg_explicit=0 pr_body="" pr_body_file=""
     while [ $# -gt 0 ]; do
         case "$1" in
-            --repo|-r)
-                if [ $# -lt 2 ]; then
-                    echo "ERROR: $1 requires a repository argument." >&2
-                    exit 1
-                fi
-                REPO_NAME="$(normalize_repo "$2")"
-                REPO_NAME_EXPLICIT=1
-                shift 2
-                ;;
-            --repo=*)
-                REPO_NAME="$(normalize_repo "${1#*=}")"
-                REPO_NAME_EXPLICIT=1
-                shift 1
-                ;;
-            --vanadis-chunk)
-                if [ $# -lt 2 ]; then
-                    echo "ERROR: $1 requires a chunk ID argument." >&2
-                    exit 1
-                fi
-                vanadis_chunk_id="$2"
-                VANADIS_CHUNK_ID_EXPLICIT="$2"
-                shift 2
-                ;;
-            --vanadis-chunk=*)
-                vanadis_chunk_id="${1#*=}"
-                VANADIS_CHUNK_ID_EXPLICIT="${1#*=}"
-                shift 1
-                ;;
-            --async|-a)
-                # Accepted as no-op for backwards compatibility; async is now the only mode
-                shift
-                ;;
-            --sync)
-                echo "ERROR: Synchronous submit mode has been eliminated. Submissions are strictly asynchronous." >&2
-                exit 1
-                ;;
-            --target-id|--target|-t|--target-id=*|--target=*)
-                echo "ERROR: Target ID cannot be specified manually ($1 is removed). Target ID is strictly inherited from the active Discord environment (AERIAL_TARGET_ID / DISCORD_THREAD_ID)." >&2
-                exit 1
-                ;;
-            --body|-b)
-                if [ $# -lt 2 ]; then
-                    echo "ERROR: $1 requires a body string argument." >&2
-                    exit 1
-                fi
-                pr_body="$2"
-                shift 2
-                ;;
-            --body=*|-b=*)
-                pr_body="${1#*=}"
-                shift 1
-                ;;
-            --body-file|-f|-F)
-                if [ $# -lt 2 ]; then
-                    echo "ERROR: $1 requires a file path argument." >&2
-                    exit 1
-                fi
-                pr_body_file="$2"
-                shift 2
-                ;;
-            --body-file=*|-f=*|-F=*)
-                pr_body_file="${1#*=}"
-                shift 1
-                ;;
+            --repo|-r) [ $# -ge 2 ] || { echo "ERROR: $1 requires a repo argument." >&2; exit 1; }; REPO_NAME="$(normalize_repo "$2")"; REPO_NAME_EXPLICIT=1; shift 2 ;;
+            --repo=*) REPO_NAME="$(normalize_repo "${1#*=}")"; REPO_NAME_EXPLICIT=1; shift 1 ;;
+            --vanadis-chunk) [ $# -ge 2 ] || { echo "ERROR: $1 requires a chunk ID." >&2; exit 1; }; shift 2 ;;
+            --vanadis-chunk=*) shift 1 ;;
+            --async|-a) shift ;;
+            --sync) echo "ERROR: Synchronous submit mode has been eliminated. Submissions are strictly asynchronous." >&2; exit 1 ;;
+            --target-id|--target|-t|--target-id=*|--target=*) echo "ERROR: Target ID cannot be specified manually ($1 is removed). Target ID is strictly inherited from the active Discord environment (AERIAL_TARGET_ID / DISCORD_THREAD_ID)." >&2; exit 1 ;;
+            --body|-b) [ $# -ge 2 ] || { echo "ERROR: $1 requires a body string argument." >&2; exit 1; }; pr_body="$2"; shift 2 ;;
+            --body=*|-b=*) pr_body="${1#*=}"; shift 1 ;;
+            --body-file|-f|-F) [ $# -ge 2 ] || { echo "ERROR: $1 requires a file path argument." >&2; exit 1; }; pr_body_file="$2"; shift 2 ;;
+            --body-file=*|-f=*|-F=*) pr_body_file="${1#*=}"; shift 1 ;;
             --)
                 shift
                 while [ $# -gt 0 ]; do
-                    if [ -z "$scratch_dir" ]; then
-                        scratch_dir="$1"
-                    elif [ -z "$commit_msg" ]; then
-                        commit_msg="$1"
-                        commit_msg_explicit=1
-                    else
-                        echo "ERROR: Unexpected extra argument: $1" >&2
-                        exit 1
-                    fi
+                    [ -z "$scratch_dir" ] && scratch_dir="$1" || { [ -z "$commit_msg" ] && commit_msg="$1" && commit_msg_explicit=1 || { echo "ERROR: Unexpected extra argument: $1" >&2; exit 1; }; }
                     shift
-                done
-                break
-                ;;
-            -*)
-                echo "ERROR: Unknown option: $1" >&2
-                exit 1
-                ;;
+                done; break ;;
+            -*) echo "ERROR: Unknown option: $1" >&2; exit 1 ;;
             *)
-                if [ -z "$scratch_dir" ]; then
-                    scratch_dir="$1"
-                elif [ -z "$commit_msg" ]; then
-                    commit_msg="$1"
-                    commit_msg_explicit=1
-                else
-                    echo "ERROR: Unexpected extra argument: $1" >&2
-                    exit 1
-                fi
-                shift
-                ;;
+                [ -z "$scratch_dir" ] && scratch_dir="$1" || { [ -z "$commit_msg" ] && commit_msg="$1" && commit_msg_explicit=1 || { echo "ERROR: Unexpected extra argument: $1" >&2; exit 1; }; }
+                shift ;;
         esac
     done
 
-    # Validation: Mutual exclusivity of body sources
-    if [ -n "$pr_body" ] && [ -n "$pr_body_file" ]; then
-        echo "ERROR: Cannot specify both --body and --body-file." >&2
-        exit 1
-    fi
+    [ -n "$pr_body" ] && [ -n "$pr_body_file" ] && { echo "ERROR: Cannot specify both --body and --body-file." >&2; exit 1; }
+    [ -n "$scratch_dir" ] && [ -d "$scratch_dir" ] || { echo "ERROR: Valid scratch directory path required for submit." >&2; exit 1; }
 
-    if [ -z "$scratch_dir" ] || [ ! -d "$scratch_dir" ]; then
-        echo "ERROR: Valid scratch directory path required for submit." >&2
-        exit 1
-    fi
-
-    verify_vanadis_chunk_active "${vanadis_chunk_id}"
-
-    # Resolve Tier 1 file if specified
     if [ -n "$pr_body_file" ]; then
-        local resolved_body_file=""
-        if [ -f "$pr_body_file" ]; then
-            resolved_body_file="$pr_body_file"
-        elif [ -f "${scratch_dir}/${pr_body_file}" ]; then
-            resolved_body_file="${scratch_dir}/${pr_body_file}"
-        else
-            echo "ERROR: Specified body file does not exist: $pr_body_file" >&2
-            exit 1
-        fi
-        if [ ! -r "$resolved_body_file" ]; then
-            echo "ERROR: Specified body file is not readable: $resolved_body_file" >&2
-            exit 1
-        fi
-        pr_body=$(cat "$resolved_body_file")
+        local r_file="$pr_body_file"
+        [ ! -f "$r_file" ] && [ -f "${scratch_dir}/${r_file}" ] && r_file="${scratch_dir}/${r_file}"
+        [ -r "$r_file" ] || { echo "ERROR: Specified body file does not exist or is not readable: $pr_body_file" >&2; exit 1; }
+        pr_body=$(cat "$r_file")
     fi
 
-    local saved_pr_desc_file=""
-    local saved_pr_desc_content=""
+    local saved_desc="" saved_content=""
     if [ -s "${scratch_dir}/PR_DESCRIPTION.md" ]; then
-        saved_pr_desc_file="${scratch_dir}/PR_DESCRIPTION.md"
-        saved_pr_desc_content=$(cat "${scratch_dir}/PR_DESCRIPTION.md")
+        saved_desc="${scratch_dir}/PR_DESCRIPTION.md"; saved_content=$(cat "$saved_desc")
     elif [ -s "${scratch_dir}/.pr_description.md" ]; then
-        saved_pr_desc_file="${scratch_dir}/.pr_description.md"
-        saved_pr_desc_content=$(cat "${scratch_dir}/.pr_description.md")
+        saved_desc="${scratch_dir}/.pr_description.md"; saved_content=$(cat "$saved_desc")
     fi
 
-    SCRATCH_DIR_CLEANUP="$scratch_dir"
-    SAVED_PR_DESC_FILE="$saved_pr_desc_file"
-    SAVED_PR_DESC_CONTENT="$saved_pr_desc_content"
-    # On non-zero exit, restore convention file; only remove on exit 0
-    trap '
-        exit_status=$?
-        if [ "$exit_status" -ne 0 ]; then
-            if [ -n "${SAVED_PR_DESC_FILE:-}" ] && [ -d "${scratch_dir}" ] && [ ! -f "${SAVED_PR_DESC_FILE}" ]; then
-                printf "%s\n" "${SAVED_PR_DESC_CONTENT}" > "${SAVED_PR_DESC_FILE}" 2>/dev/null || true
-            fi
-        elif [ -n "${SCRATCH_DIR_CLEANUP:-}" ]; then
-            rm -rf "${SCRATCH_DIR_CLEANUP}"
-        fi
-    ' EXIT INT TERM
+    SCRATCH_DIR_CLEANUP="$scratch_dir"; SAVED_PR_DESC_FILE="$saved_desc"; SAVED_PR_DESC_CONTENT="$saved_content"
+    trap 'exit_status=$?; if [ "$exit_status" -ne 0 ]; then [ -n "${SAVED_PR_DESC_FILE:-}" ] && [ -d "${SCRATCH_DIR_CLEANUP:-}" ] && [ ! -f "${SAVED_PR_DESC_FILE}" ] && printf "%s\n" "${SAVED_PR_DESC_CONTENT}" > "${SAVED_PR_DESC_FILE}" 2>/dev/null || true; elif [ -n "${SCRATCH_DIR_CLEANUP:-}" ]; then rm -rf "${SCRATCH_DIR_CLEANUP}"; fi' EXIT INT TERM
 
     cd "$scratch_dir"
-
-    # Auto-detect remote repository from origin URL if not explicitly set via --repo
-    local remote_url
-    remote_url=$(git remote get-url origin 2>/dev/null || echo "")
-    extract_remote_repo "$remote_url"
-    if [ -n "${PARSED_REPO:-}" ]; then
-        REPO_OWNER="${PARSED_OWNER:-$REPO_OWNER}"
-        if [ "$REPO_NAME_EXPLICIT" -eq 0 ]; then
-            REPO_NAME="$(normalize_repo "$PARSED_REPO")"
-        fi
-    fi
-
+    [ -z "$(git config user.name 2>/dev/null || true)" ] && git config user.name "Aerial"
+    [ -z "$(git config user.email 2>/dev/null || true)" ] && git config user.email "aerial@noreply.github.com"
+    local remote_url; remote_url=$(git remote get-url origin 2>/dev/null || echo ""); extract_remote_repo "$remote_url"
+    [ -n "${PARSED_REPO:-}" ] && REPO_OWNER="${PARSED_OWNER:-$REPO_OWNER}" && [ "$REPO_NAME_EXPLICIT" -eq 0 ] && REPO_NAME="$(normalize_repo "$PARSED_REPO")"
     local default_title="feat(${REPO_NAME}): automated update by Aerial"
-
-    # Resolve PR description from convention file in scratch workspace if not explicitly passed
-    if [ -z "$pr_body" ] && [ -n "$saved_pr_desc_content" ]; then
-        pr_body="$saved_pr_desc_content"
-    fi
-
-    # CRITICAL WORKSPACE HYGIENE: Always remove convention files from scratch workspace before staging
-    # so they are NEVER staged by git add -A or permanently committed into git history on main!
+    [ -z "$pr_body" ] && [ -n "$saved_content" ] && pr_body="$saved_content"
     rm -f "${scratch_dir}/PR_DESCRIPTION.md" "${scratch_dir}/.pr_description.md"
 
-    # If submitting on an existing PR branch without a local description, inherit metadata from the open PR
     local current_branch existing_pr=""
     current_branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")
     if [ -z "${pr_body//[[:space:]]/}" ] && { [ -n "${GITHUB_PAT:-}" ] || [ "${USE_LOOPBACK_GITHUB:-0}" -eq 1 ]; } && [ -n "$current_branch" ] && [ "$current_branch" != "$DEFAULT_BRANCH" ] && [ "$current_branch" != "HEAD" ]; then
         existing_pr=$(lookup_existing_open_pr "$current_branch")
         if [ -n "$existing_pr" ]; then
-            pr_body=$(echo "$existing_pr" | jq -r '.body // empty')
-            if [ -z "${pr_body//[[:space:]]/}" ]; then
-                pr_body=$(echo "$existing_pr" | jq -r '.title // "Automated update"')
-            fi
-            if [ "$commit_msg_explicit" -eq 0 ]; then
-                local existing_title
-                existing_title=$(echo "$existing_pr" | jq -r '.title // empty')
-                if [ -n "$existing_title" ]; then
-                    commit_msg="$existing_title"
-                fi
-            fi
+            pr_body=$(echo "$existing_pr" | jq -r '.body // empty'); [ -z "${pr_body//[[:space:]]/}" ] && pr_body=$(echo "$existing_pr" | jq -r '.title // "Automated update"')
+            [ "$commit_msg_explicit" -eq 0 ] && local ex_title && ex_title=$(echo "$existing_pr" | jq -r '.title // empty') && [ -n "$ex_title" ] && commit_msg="$ex_title"
         fi
     fi
 
-    # Mandatory PR Description Invariant: PR description must not be empty
-    local trimmed_body
-    trimmed_body=$(printf "%s" "$pr_body" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
-    if [ -z "$trimmed_body" ]; then
-        echo "ERROR: Pull Request description is mandatory. Provide a description via PR_DESCRIPTION.md in the workspace, or via --body-file / -b." >&2
-        exit 1
-    fi
+    local trimmed_body; trimmed_body=$(printf "%s" "$pr_body" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+    [ -z "$trimmed_body" ] && { echo "ERROR: Pull Request description is mandatory. Provide a description via PR_DESCRIPTION.md in the workspace, or via --body-file / -b." >&2; exit 1; }
+    [ "${#pr_body}" -gt 60000 ] && pr_body="${pr_body:0:60000}"$'\n\n> ⚠️ **[Aerial Notice]**: PR description was truncated because it exceeded 60,000 characters.'
 
-    # Append Vanadis build/chunk context to PR description if chunk ID is set and not already present
-    if [ -n "$vanadis_chunk_id" ] && [[ "$pr_body" != *"## Vanadis Build Context"* ]]; then
-        local vanadis_ctx=""
-        vanadis_ctx="$(format_vanadis_chunk_context "$vanadis_chunk_id" || true)"
-        if [ -n "$vanadis_ctx" ]; then
-            if [ -n "$pr_body" ]; then
-                pr_body="${pr_body}"$'\n\n'"${vanadis_ctx}"
-            else
-                pr_body="$vanadis_ctx"
-            fi
+    git add -A && git rm --cached -f PR_DESCRIPTION.md .pr_description.md 2>/dev/null || true
+    local has_committed=0
+    if git rev-parse --verify "origin/${DEFAULT_BRANCH}" >/dev/null 2>&1 && [ "$(git rev-parse HEAD 2>/dev/null || echo "")" != "$(git rev-parse "origin/${DEFAULT_BRANCH}" 2>/dev/null || echo "")" ]; then
+        has_committed=1
+        if [ "$commit_msg_explicit" -eq 0 ] && [ -z "$commit_msg" ]; then
+            local prior_msg; prior_msg=$(git log -1 --format=%B HEAD 2>/dev/null || true)
+            [ -n "${prior_msg//[[:space:]]/}" ] && commit_msg="$prior_msg"
         fi
     fi
 
-    # Defensively clamp body length to 60,000 characters (GitHub API limit is 65,536)
-    local max_body_len=60000
-    if [ "${#pr_body}" -gt "$max_body_len" ]; then
-        pr_body="${pr_body:0:$max_body_len}
+    [ -z "$commit_msg" ] && commit_msg="$default_title"
+    local clean_title; clean_title=$(printf "%s\n" "$commit_msg" | awk 'NF {print; exit}' | tr -d '\r\n' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | cut -c 1-256)
+    [ -z "$clean_title" ] && clean_title="$default_title"
 
-> ⚠️ **[Aerial Notice]**: PR description was truncated because it exceeded 60,000 characters."
-    fi
-
-    # 1. Stage all modifications (defensively unstage any convention files if previously cached)
-    git add -A
-    git rm --cached -f PR_DESCRIPTION.md .pr_description.md 2>/dev/null || true
-
-    local has_committed_changes=0
-    if git rev-parse --verify "origin/${DEFAULT_BRANCH}" >/dev/null 2>&1; then
-        if [ "$(git rev-parse HEAD 2>/dev/null || echo "")" != "$(git rev-parse "origin/${DEFAULT_BRANCH}" 2>/dev/null || echo "")" ]; then
-            has_committed_changes=1
-            if [ "$commit_msg_explicit" -eq 0 ] && [ -z "$commit_msg" ]; then
-                local prior_msg
-                prior_msg=$(git log -1 --format=%B HEAD 2>/dev/null || true)
-                if [ -n "${prior_msg//[[:space:]]/}" ]; then
-                    commit_msg="$prior_msg"
-                fi
-            fi
-        fi
-    fi
-
-    if [ -z "$commit_msg" ]; then
-        commit_msg="$default_title"
-    fi
-
-    # Title Hygiene: Extract first non-empty line, strip \r, \n, and whitespace, clamp to 256 chars
-    local clean_title
-    clean_title=$(printf "%s\n" "$commit_msg" | awk 'NF {print; exit}' | tr -d '\r\n' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | cut -c 1-256)
-    if [ -z "$clean_title" ]; then
-        clean_title="$default_title"
-    fi
-
-    # 2. Check for modifications (either staged in index or already committed ahead of origin/DEFAULT_BRANCH)
-    if git diff --cached --quiet && [ "$has_committed_changes" -eq 0 ]; then
+    if git diff --cached --quiet && [ "$has_committed" -eq 0 ]; then
         echo "{\"status\":\"no_changes\",\"message\":\"No modifications detected in scratch directory.\"}"
         exit 0
     fi
 
-    local auth_header
-    auth_header=$(build_auth_header)
+    local auth_header; auth_header=$(build_auth_header)
+    export GIT_TERMINAL_PROMPT=0 GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0="http.extraHeader" GIT_CONFIG_VALUE_0="AUTHORIZATION: basic ${auth_header}" GIT_CONFIG_KEY_1="http.version" GIT_CONFIG_VALUE_1="HTTP/1.1"
 
-    export GIT_TERMINAL_PROMPT=0
-    export GIT_CONFIG_COUNT=2
-    export GIT_CONFIG_KEY_0="http.extraHeader"
-    export GIT_CONFIG_VALUE_0="AUTHORIZATION: basic ${auth_header}"
-    export GIT_CONFIG_KEY_1="http.version"
-    export GIT_CONFIG_VALUE_1="HTTP/1.1"
+    rebase_staged_changes "$DEFAULT_BRANCH" "$commit_msg" || exit 1
+    git diff --cached --quiet && { echo "{\"status\":\"no_changes\",\"message\":\"No modifications remaining after rebasing onto origin/${DEFAULT_BRANCH}.\"}"; exit 0; }
+    run_preflight_verification "." || exit 1
 
-    # 3. Rebase staged/committed branch changes onto latest origin/DEFAULT_BRANCH before pre-flight verification
-    if ! rebase_staged_changes "$DEFAULT_BRANCH" "$commit_msg"; then
-        exit 1
-    fi
-    if git diff --cached --quiet; then
-        echo "{\"status\":\"no_changes\",\"message\":\"No modifications remaining after rebasing onto origin/${DEFAULT_BRANCH}.\"}"
-        exit 0
-    fi
-
-    # 4. Pre-flight verification (universal contract: run repo-defined staged verify suite on combined tree)
-    if ! run_preflight_verification "."; then
-        exit 1
-    fi
-
-    verify_vanadis_chunk_active "${vanadis_chunk_id}"
-
-    # 5. Commit (preserves complete multi-line commit message in git history)
     local full_commit_msg="$commit_msg"
-    local commit_body
-    commit_body="$(printf '%s\n' "$pr_body" | grep -v '^<!-- aerial-pr: .* -->$' || true)"
-    if [ -n "$commit_body" ] && [[ "$commit_msg" != *"$commit_body"* ]]; then
-        full_commit_msg="${clean_title}"$'\n\n'"${commit_body}"
-    fi
+    [ -n "$pr_body" ] && [[ "$commit_msg" != *"$pr_body"* ]] && full_commit_msg="${clean_title}"$'\n\n'"${pr_body}"
     git commit -m "$full_commit_msg" >/dev/null
 
-    local branch
-    branch=$(git rev-parse --abbrev-ref HEAD)
-    local commit_sha
-    commit_sha=$(git rev-parse HEAD)
-
-    local pr_trailer
-    pr_trailer=$(format_aerial_pr_trailer "$target_id" "$vanadis_chunk_id")
-    if [ -n "$pr_trailer" ] && [[ "$pr_body" != *"<!-- aerial-pr:"* ]]; then
-        pr_body="${pr_body}"$'\n\n'"${pr_trailer}"
-    fi
-
-    # 6. Push branch to remote
+    local branch commit_sha; branch=$(git rev-parse --abbrev-ref HEAD); commit_sha=$(git rev-parse HEAD)
     echo "📤 [aerial-pr] Pushing feature branch ${branch} to origin (${REPO_OWNER}/${REPO_NAME})..." >&2
-    if ! push_scratch_branch "$branch"; then
-        echo "ERROR: Failed to push branch ${branch} to GitHub." >&2
-        exit 1
-    fi
+    push_scratch_branch "$branch" || { echo "ERROR: Failed to push branch ${branch} to GitHub." >&2; exit 1; }
 
-    # 7. Open Pull Request via GitHub REST API safely using jq (or reuse existing open PR for branch)
     local pr_code="" pr_resp=""
     if [ -n "$existing_pr" ]; then
-        pr_resp="$existing_pr"
-        pr_code="200"
+        pr_resp="$existing_pr"; pr_code="200"
         echo "🔄 [aerial-pr] Reusing existing open Pull Request for branch ${branch}." >&2
     else
-        local pr_payload pr_raw
-        pr_payload=$(jq -n \
-            --arg title "$clean_title" \
-            --arg head "$branch" \
-            --arg base "$DEFAULT_BRANCH" \
-            --arg body "$pr_body" \
-            '{title: $title, head: $head, base: $base, body: $body}')
-
-        local auth_args=()
-        if [ -n "${GITHUB_PAT:-}" ]; then
-            auth_args=(-H "Authorization: token ${GITHUB_PAT}")
-        fi
-
-        pr_raw=$(curl -s --connect-timeout 3 -m 10 -w "\n%{http_code}" -X POST \
-            "${auth_args[@]}" \
-            -H "Accept: application/vnd.github.v3+json" \
-            "${GITHUB_API_BASE}/repos/${REPO_OWNER}/${REPO_NAME}/pulls" \
-            -d "$pr_payload")
-
-        pr_code=$(echo "$pr_raw" | tail -n1)
-        pr_resp=$(echo "$pr_raw" | sed '$d')
-
+        local pr_payload pr_raw auth_args=()
+        pr_payload=$(jq -n --arg title "$clean_title" --arg head "$branch" --arg base "$DEFAULT_BRANCH" --arg body "$pr_body" '{title: $title, head: $head, base: $base, body: $body}')
+        [ -n "${GITHUB_PAT:-}" ] && auth_args=(-H "Authorization: token ${GITHUB_PAT}")
+        pr_raw=$(curl -s --connect-timeout 3 -m 10 -w "\n%{http_code}" -X POST "${auth_args[@]}" -H "Accept: application/vnd.github.v3+json" "${GITHUB_API_BASE}/repos/${REPO_OWNER}/${REPO_NAME}/pulls" -d "$pr_payload")
+        pr_code=$(echo "$pr_raw" | tail -n1); pr_resp=$(echo "$pr_raw" | sed '$d')
         if [ "$pr_code" = "422" ]; then
             existing_pr=$(lookup_existing_open_pr "$branch")
-            if [ -n "$existing_pr" ]; then
-                pr_resp="$existing_pr"
-                pr_code="200"
-                echo "🔄 [aerial-pr] Reusing existing open Pull Request for branch ${branch}." >&2
-            fi
+            [ -n "$existing_pr" ] && pr_resp="$existing_pr" && pr_code="200" && echo "🔄 [aerial-pr] Reusing existing open Pull Request for branch ${branch}." >&2
         fi
     fi
 
     if [ "$pr_code" -lt 200 ] || [ "$pr_code" -ge 300 ]; then
         echo "ERROR: Failed to create Pull Request (HTTP ${pr_code}): ${pr_resp}" >&2
-        # Prune remote branch only when it was newly created (never delete an existing remote PR branch)
         if [ "${PUSH_UPDATED_EXISTING:-0}" -eq 0 ] && [ -z "${existing_pr:-}" ]; then
             local del_auth_args=()
-            if [ -n "${GITHUB_PAT:-}" ]; then
-                del_auth_args=(-H "Authorization: token ${GITHUB_PAT}")
-            fi
-            curl -s --connect-timeout 3 -m 10 -X DELETE \
-                "${del_auth_args[@]}" \
-                -H "Accept: application/vnd.github.v3+json" \
-                "${GITHUB_API_BASE}/repos/${REPO_OWNER}/${REPO_NAME}/git/refs/heads/${branch}" >/dev/null 2>&1 || true
+            [ -n "${GITHUB_PAT:-}" ] && del_auth_args=(-H "Authorization: token ${GITHUB_PAT}")
+            curl -s --connect-timeout 3 -m 10 -X DELETE "${del_auth_args[@]}" -H "Accept: application/vnd.github.v3+json" "${GITHUB_API_BASE}/repos/${REPO_OWNER}/${REPO_NAME}/git/refs/heads/${branch}" >/dev/null 2>&1 || true
         fi
         exit 1
     fi
 
-    local pr_num
-    pr_num=$(echo "$pr_resp" | jq -r '.number')
-    local pr_url
-    pr_url=$(echo "$pr_resp" | jq -r '.html_url')
-    local pr_node_id
-    pr_node_id=$(echo "$pr_resp" | jq -r '.node_id // empty')
-
-    # Attach PR directly to Vanadis (for both multi-chunk and standalone Tier 0 PRs)
-    local vanadis_url
-    vanadis_url=$(resolve_vanadis_url 2>/dev/null || true)
-    if [ -n "$vanadis_url" ]; then
-        local attach_payload
-        attach_payload=$(jq -n \
-            --arg chunk_id "$vanadis_chunk_id" \
-            --argjson pr_number "$pr_num" \
-            --arg repo "${REPO_NAME}" \
-            --arg branch "$branch" \
-            --arg title "$clean_title" \
-            --arg target_id "$target_id" \
-            '{chunk_id: $chunk_id, pr_number: $pr_number, repo: $repo, branch: $branch, title: $title, target_id: $target_id}')
-        local vanadis_attach_out
-        if vanadis_attach_out=$(attach_pr_in_vanadis "$vanadis_url" "$attach_payload" "$pr_num" "$vanadis_chunk_id"); then
-            local returned_thread
-            returned_thread=$(echo "$vanadis_attach_out" | jq -r '.thread_id // empty' 2>/dev/null || true)
-            if [ -n "$returned_thread" ]; then
-                target_id="$returned_thread"
-            fi
-        else
-            # Check whether the last attach response was a deterministic 4xx rejection.
-            # If the response was empty, not valid JSON, or a timeout/5xx, treat as acceptance unknown.
-            local is_deterministic_rejection=0
-            if [ -n "$vanadis_attach_out" ] && echo "$vanadis_attach_out" | jq -e . >/dev/null 2>&1; then
-                local err_text status_text
-                err_text=$(echo "$vanadis_attach_out" | jq -r '(.error // .message // "") | ascii_downcase' 2>/dev/null || echo "")
-                status_text=$(echo "$vanadis_attach_out" | jq -r '(.status // "") | ascii_downcase' 2>/dev/null || echo "")
-                if [[ "$err_text" =~ conflict|not[[:space:]_-]*found|invalid|terminal|bad[[:space:]_-]*request ]] || \
-                   [[ "$status_text" =~ conflict|invalid|cancelled|completed ]]; then
-                    is_deterministic_rejection=1
-                fi
-            fi
-
-            if [ "$is_deterministic_rejection" -eq 1 ]; then
-                echo "ERROR: Failed to attach PR #${pr_num} to Vanadis (chunk: '${vanadis_chunk_id:-standalone}'): ${vanadis_attach_out}" >&2
-                exit 1
-            else
-                echo "⚠️ [aerial-pr] Warning: Vanadis attach-pr timed out or returned non-deterministic error for PR #${pr_num} (acceptance unknown: ${vanadis_attach_out:-timeout}); continuing to register PR." >&2
-            fi
-        fi
-    elif [ -n "$vanadis_chunk_id" ]; then
-        echo "ERROR: Cannot attach PR #${pr_num} to Vanadis chunk '${vanadis_chunk_id}': Vanadis URL could not be resolved." >&2
-        exit 1
-    fi
-
-    # Register PR with the PR lifecycle via internal endpoint
-    local brain_reg_url
-    brain_reg_url=$(resolve_pr_register_url 2>/dev/null || true)
-
-    local bot_id
-    bot_id="${AERIAL_BOT_ID:-$(read_config_yaml_val bot_id)}"
-
-    local reg_meta="{}"
-    if [ -n "$vanadis_chunk_id" ]; then
-        reg_meta=$(jq -n --arg cid "$vanadis_chunk_id" '{"vanadis_chunk_id": $cid}')
-    fi
-
-    local reg_payload
-    if [ -n "$bot_id" ]; then
-        reg_payload=$(jq -n \
-            --arg repo "${REPO_NAME}" \
-            --argjson pr_num "$pr_num" \
-            --arg branch "$branch" \
-            --arg head_sha "$commit_sha" \
-            --arg target_id "$target_id" \
-            --arg title "$clean_title" \
-            --arg bot_id "$bot_id" \
-            --arg meta "$reg_meta" \
-            '{repo: $repo, pr_number: $pr_num, branch: $branch, head_sha: $head_sha, target_id: $target_id, title: $title, bot_id: $bot_id, metadata: $meta}')
-    else
-        reg_payload=$(jq -n \
-            --arg repo "${REPO_NAME}" \
-            --argjson pr_num "$pr_num" \
-            --arg branch "$branch" \
-            --arg head_sha "$commit_sha" \
-            --arg target_id "$target_id" \
-            --arg title "$clean_title" \
-            --arg meta "$reg_meta" \
-            '{repo: $repo, pr_number: $pr_num, branch: $branch, head_sha: $head_sha, target_id: $target_id, title: $title, metadata: $meta}')
-    fi
-
-    if [ -n "$brain_reg_url" ]; then
-        if ! register_pr_in_brain "$brain_reg_url" "$reg_payload" "$pr_num" "$target_id"; then
-            echo "ERROR: Failed to register PR #${pr_num} with the PR lifecycle (${brain_reg_url})." >&2
-            exit 1
-        fi
-    else
-        echo "ERROR: No PR registration endpoint available (AERIAL_PR_REGISTER_URL, SYNAPSE_URL, or synapse_url in config.yaml must be set)." >&2
-        exit 1
-    fi
-
-    # Enable native GitHub auto-merge (SQUASH) only after PR attach and registration succeed
-    enable_github_auto_merge "$pr_node_id" "$pr_num"
-
-    # Asynchronous Submission: Disarm cleanup trap and remove scratch workspace immediately
-    if [ -n "${SCRATCH_DIR_CLEANUP:-}" ]; then
-        rm -rf "${SCRATCH_DIR_CLEANUP}"
-        SCRATCH_DIR_CLEANUP=""
-    fi
+    local pr_num pr_url; pr_num=$(echo "$pr_resp" | jq -r '.number'); pr_url=$(echo "$pr_resp" | jq -r '.html_url')
+    [ -n "${SCRATCH_DIR_CLEANUP:-}" ] && rm -rf "${SCRATCH_DIR_CLEANUP}" && SCRATCH_DIR_CLEANUP=""
 
     cat <<EOF >&2
 ================================================================================
@@ -1302,275 +404,99 @@ submit_scratch() {
 🛑 MANDATORY TURN ACTION: Do not poll CI in the foreground. End active execution turn now.
 ================================================================================
 EOF
-
     echo "{\"status\":\"submitted\",\"pr_url\":\"${pr_url}\",\"pr_number\":${pr_num},\"branch\":\"${branch}\",\"commit_sha\":\"${commit_sha}\",\"async\":true,\"repo\":\"${REPO_NAME}\",\"turn_action\":\"end_turn\",\"message\":\"PR #${pr_num} submitted on ${REPO_OWNER}/${REPO_NAME}. Continuous delivery automated via push events. End active turn now.\"}"
     return 0
 }
 
 override_roborev() {
-    local pr_num=""
-    local rebuttal=""
-    local reason_file=""
-
+    local pr_num="" rebuttal="" reason_file=""
     while [ $# -gt 0 ]; do
         case "$1" in
-            --repo|-r)
-                [ $# -ge 2 ] || { echo "ERROR: $1 requires a repository argument." >&2; exit 1; }
-                REPO_NAME="$(normalize_repo "$2")"
-                REPO_NAME_EXPLICIT=1
-                shift 2
-                ;;
-            --repo=*)
-                REPO_NAME="$(normalize_repo "${1#*=}")"
-                REPO_NAME_EXPLICIT=1
-                shift 1
-                ;;
-            -m|--reason)
-                [ $# -ge 2 ] || { echo "ERROR: $1 requires a rebuttal argument." >&2; exit 1; }
-                rebuttal="$2"
-                shift 2
-                ;;
-            --reason=*)
-                rebuttal="${1#*=}"
-                shift 1
-                ;;
-            -f|--reason-file)
-                [ $# -ge 2 ] || { echo "ERROR: $1 requires a file path argument." >&2; exit 1; }
-                reason_file="$2"
-                shift 2
-                ;;
-            --reason-file=*)
-                reason_file="${1#*=}"
-                shift 1
-                ;;
+            --repo|-r) [ $# -ge 2 ] || { echo "ERROR: $1 requires a repo argument." >&2; exit 1; }; REPO_NAME="$(normalize_repo "$2")"; REPO_NAME_EXPLICIT=1; shift 2 ;;
+            --repo=*) REPO_NAME="$(normalize_repo "${1#*=}")"; REPO_NAME_EXPLICIT=1; shift 1 ;;
+            -m|--reason) [ $# -ge 2 ] || { echo "ERROR: $1 requires a rebuttal." >&2; exit 1; }; rebuttal="$2"; shift 2 ;;
+            --reason=*) rebuttal="${1#*=}"; shift 1 ;;
+            -f|--reason-file) [ $# -ge 2 ] || { echo "ERROR: $1 requires a file path." >&2; exit 1; }; reason_file="$2"; shift 2 ;;
+            --reason-file=*) reason_file="${1#*=}"; shift 1 ;;
             *)
-                if [ -z "$pr_num" ]; then
-                    pr_num="$1"
-                elif [ -z "$rebuttal" ] && [ -z "$reason_file" ]; then
-                    rebuttal="$1"
-                else
-                    echo "ERROR: Unexpected argument: $1" >&2
-                    exit 1
-                fi
-                shift 1
-                ;;
+                if [ -z "$pr_num" ]; then pr_num="$1"
+                elif [ -z "$rebuttal" ] && [ -z "$reason_file" ]; then rebuttal="$1"
+                else echo "ERROR: Unexpected argument: $1" >&2; exit 1; fi
+                shift 1 ;;
         esac
     done
 
-    if [ -z "$pr_num" ] || ! [[ "$pr_num" =~ ^[0-9]+$ ]]; then
-        echo "ERROR: Valid numeric pr_num required for roborev override." >&2
-        exit 1
-    fi
+    [ -z "$pr_num" ] || ! [[ "$pr_num" =~ ^[0-9]+$ ]] && { echo "ERROR: Valid numeric pr_num required for roborev override." >&2; exit 1; }
+    [ -n "$reason_file" ] && { [ -f "$reason_file" ] || { echo "ERROR: Rebuttal file not found: $reason_file" >&2; exit 1; }; rebuttal="$(cat "$reason_file")"; }
+    [ -z "${rebuttal//[[:space:]]/}" ] && { echo "ERROR: Technical rebuttal cannot be empty." >&2; exit 1; }
+    [ -z "${GITHUB_PAT:-}" ] && [ "${USE_LOOPBACK_GITHUB:-0}" -ne 1 ] && { echo "ERROR: GITHUB_PAT environment variable must be set (or loopback proxy available)." >&2; exit 1; }
 
-    if [ -n "$reason_file" ]; then
-        [ -f "$reason_file" ] || { echo "ERROR: Rebuttal file not found: $reason_file" >&2; exit 1; }
-        rebuttal="$(cat "$reason_file")"
-    fi
+    local remote_url; remote_url=$(git remote get-url origin 2>/dev/null || echo ""); extract_remote_repo "$remote_url"
+    [ -n "${PARSED_REPO:-}" ] && REPO_OWNER="${PARSED_OWNER:-$REPO_OWNER}" && [ "$REPO_NAME_EXPLICIT" -eq 0 ] && REPO_NAME="$(normalize_repo "$PARSED_REPO")"
 
-    if [ -z "${rebuttal//[[:space:]]/}" ]; then
-        echo "ERROR: Technical rebuttal cannot be empty." >&2
-        exit 1
-    fi
+    local pr_raw pr_code pr_resp; pr_raw=$(gh_api_call -X GET "${GITHUB_API_BASE}/repos/${REPO_OWNER}/${REPO_NAME}/pulls/${pr_num}")
+    pr_code=$(echo "$pr_raw" | tail -n1); pr_resp=$(echo "$pr_raw" | sed '$d')
+    [ -z "$pr_code" ] || [ "$pr_code" -lt 200 ] || [ "$pr_code" -ge 300 ] && { echo "ERROR: Failed to query PR #${pr_num} on ${REPO_OWNER}/${REPO_NAME} (HTTP ${pr_code}): ${pr_resp}" >&2; exit 1; }
+    [ "$(echo "$pr_resp" | jq -r '.state // empty')" = "closed" ] && { echo "ERROR: Pull Request #${pr_num} is closed. Cannot override RoboRev on closed PR." >&2; exit 1; }
 
-    if [ -z "${GITHUB_PAT:-}" ] && [ "${USE_LOOPBACK_GITHUB:-0}" -ne 1 ]; then
-        echo "ERROR: GITHUB_PAT environment variable must be set (or loopback proxy available)." >&2
-        exit 1
-    fi
+    local head_sha short_sha pr_url; head_sha=$(echo "$pr_resp" | jq -r '.head.sha // empty'); short_sha="${head_sha:0:7}"; pr_url=$(echo "$pr_resp" | jq -r '.html_url // empty')
+    [ -z "$head_sha" ] && { echo "ERROR: Could not resolve head commit SHA for PR #${pr_num}." >&2; exit 1; }
 
-    local remote_url
-    remote_url=$(git remote get-url origin 2>/dev/null || echo "")
-    extract_remote_repo "$remote_url"
-    if [ -n "${PARSED_REPO:-}" ]; then
-        REPO_OWNER="${PARSED_OWNER:-$REPO_OWNER}"
-        if [ "$REPO_NAME_EXPLICIT" -eq 0 ]; then
-            REPO_NAME="$(normalize_repo "$PARSED_REPO")"
-        fi
-    fi
-
-    gh_api_call() {
-        local auth_args=()
-        if [ -n "${GITHUB_PAT:-}" ]; then
-            auth_args=(-H "Authorization: token ${GITHUB_PAT}")
-        fi
-        curl -s --connect-timeout 3 -m 15 --retry 3 --retry-delay 2 --retry-connrefused -w "\n%{http_code}" \
-            "${auth_args[@]}" \
-            -H "Accept: application/vnd.github.v3+json" "$@"
-    }
-
-    # 1. Fetch Pull Request details
-    local pr_raw pr_code pr_resp
-    pr_raw=$(gh_api_call -X GET "${GITHUB_API_BASE}/repos/${REPO_OWNER}/${REPO_NAME}/pulls/${pr_num}")
-    pr_code=$(echo "$pr_raw" | tail -n1)
-    pr_resp=$(echo "$pr_raw" | sed '$d')
-
-    if [ -z "$pr_code" ] || [ "$pr_code" -lt 200 ] || [ "$pr_code" -ge 300 ]; then
-        echo "ERROR: Failed to query PR #${pr_num} on ${REPO_OWNER}/${REPO_NAME} (HTTP ${pr_code}): ${pr_resp}" >&2
-        exit 1
-    fi
-
-    local pr_state
-    pr_state=$(echo "$pr_resp" | jq -r '.state // empty')
-    if [ "$pr_state" = "closed" ]; then
-        echo "ERROR: Pull Request #${pr_num} is closed. Cannot override RoboRev on closed PR." >&2
-        exit 1
-    fi
-
-    local head_sha short_sha pr_url
-    head_sha=$(echo "$pr_resp" | jq -r '.head.sha // empty')
-    short_sha="${head_sha:0:7}"
-    pr_url=$(echo "$pr_resp" | jq -r '.html_url // empty')
-
-    if [ -z "$head_sha" ]; then
-        echo "ERROR: Could not resolve head commit SHA for PR #${pr_num}." >&2
-        exit 1
-    fi
-
-    # 2. Check for existing override comment or post override comment on PR issue
     local comments_raw comments_code comments_resp existing_comment_id=""
     comments_raw=$(gh_api_call -X GET "${GITHUB_API_BASE}/repos/${REPO_OWNER}/${REPO_NAME}/issues/${pr_num}/comments?per_page=100")
-    comments_code=$(echo "$comments_raw" | tail -n1)
-    comments_resp=$(echo "$comments_raw" | sed '$d')
-
-    if [ -n "$comments_code" ] && [ "$comments_code" -ge 200 ] && [ "$comments_code" -lt 300 ]; then
+    comments_code=$(echo "$comments_raw" | tail -n1); comments_resp=$(echo "$comments_raw" | sed '$d')
+    [ -n "$comments_code" ] && [ "$comments_code" -ge 200 ] && [ "$comments_code" -lt 300 ] && \
         existing_comment_id=$(echo "$comments_resp" | jq -r --arg sha "${short_sha}" '[if type == "array" then .[] else empty end | objects | select((.body // "") | (contains("## roborev-override") and contains($sha))) | .id] | first // empty')
-    fi
 
-    local comment_id=""
-    if [ -n "$existing_comment_id" ]; then
-        comment_id="$existing_comment_id"
-    else
+    if [ -z "$existing_comment_id" ]; then
         local comment_body comment_payload comment_raw comment_code
-        comment_body=$(cat <<EOF
-## roborev-override (\`${short_sha}\`)
-
-**Commit:** \`${head_sha}\`
-**Technical Rebuttal:**
-${rebuttal}
-EOF
-)
+        comment_body=$(printf "## roborev-override (\`%s\`)\n\n**Commit:** \`%s\`\n**Technical Rebuttal:**\n%s\n" "$short_sha" "$head_sha" "$rebuttal")
         comment_payload=$(jq -n --arg b "$comment_body" '{body: $b}')
-        comment_raw=$(gh_api_call -H "Content-Type: application/json" -X POST -d "$comment_payload" \
-            "${GITHUB_API_BASE}/repos/${REPO_OWNER}/${REPO_NAME}/issues/${pr_num}/comments")
+        comment_raw=$(gh_api_call -H "Content-Type: application/json" -X POST -d "$comment_payload" "${GITHUB_API_BASE}/repos/${REPO_OWNER}/${REPO_NAME}/issues/${pr_num}/comments")
         comment_code=$(echo "$comment_raw" | tail -n1)
-
-        if [ -z "$comment_code" ] || [ "$comment_code" -lt 200 ] || [ "$comment_code" -ge 300 ]; then
-            local comment_resp
-            comment_resp=$(echo "$comment_raw" | sed '$d')
-            echo "ERROR: Failed to post override comment on PR #${pr_num} (HTTP ${comment_code}): ${comment_resp}" >&2
-            exit 1
-        fi
-        comment_id=$(echo "$comment_raw" | sed '$d' | jq -r '.id // empty')
+        [ -z "$comment_code" ] || [ "$comment_code" -lt 200 ] || [ "$comment_code" -ge 300 ] && { echo "ERROR: Failed to post override comment on PR #${pr_num} (HTTP ${comment_code}): $(echo "$comment_raw" | sed '$d')" >&2; exit 1; }
     fi
 
-    # 3. Locate single latest RoboRev workflow run for head_sha
     local runs_raw runs_code runs_resp target_run run_id run_status
     runs_raw=$(gh_api_call -X GET "${GITHUB_API_BASE}/repos/${REPO_OWNER}/${REPO_NAME}/actions/runs?head_sha=${head_sha}")
-    runs_code=$(echo "$runs_raw" | tail -n1)
-    runs_resp=$(echo "$runs_raw" | sed '$d')
-
-    if [ -z "$runs_code" ] || [ "$runs_code" -lt 200 ] || [ "$runs_code" -ge 300 ]; then
-        echo "ERROR: Failed to query workflow runs for commit ${short_sha} (HTTP ${runs_code}): ${runs_resp}" >&2
-        exit 1
-    fi
+    runs_code=$(echo "$runs_raw" | tail -n1); runs_resp=$(echo "$runs_raw" | sed '$d')
+    [ -z "$runs_code" ] || [ "$runs_code" -lt 200 ] || [ "$runs_code" -ge 300 ] && { echo "ERROR: Failed to query workflow runs for commit ${short_sha} (HTTP ${runs_code}): ${runs_resp}" >&2; exit 1; }
 
     target_run=$(echo "$runs_resp" | jq -c '
         ([.workflow_runs[]? | select(.name == "RoboRev Code Review" or (.path // "" | endswith("roborev.yml")))] | first) //
         ([.workflow_runs[]? | select(.name == "Continuous Delivery" or .name == "Validate Configuration" or (.path // "" | (endswith("docker-publish.yml") or endswith("ci.yml") or endswith("validate.yml"))))] | first) //
         empty
     ')
-    run_id=$(echo "$target_run" | jq -r '.id // empty')
-    run_status=$(echo "$target_run" | jq -r '.status // empty')
+    run_id=$(echo "$target_run" | jq -r '.id // empty'); run_status=$(echo "$target_run" | jq -r '.status // empty')
+    [ -z "$run_id" ] && { echo "ERROR: No RoboRev workflow run found for commit ${short_sha} on PR #${pr_num}." >&2; exit 1; }
 
-    if [ -z "$run_id" ]; then
-        echo "ERROR: No RoboRev workflow run found for commit ${short_sha} on PR #${pr_num}." >&2
-        exit 1
-    fi
-
-    # 4. Trigger workflow re-run (rerun-failed-jobs falling back to rerun)
-    wait_for_workflow_completed() {
-        local target_run_id="$1"
-        local max_attempts="${AERIAL_RERUN_WAIT_ATTEMPTS:-60}"
-        local wait_delay="${AERIAL_RERUN_WAIT_DELAY:-5}"
-        local attempt=0
-        local poll_raw poll_code poll_resp cur_status=""
-
-        while [ "$attempt" -lt "$max_attempts" ]; do
-            attempt=$((attempt + 1))
-            poll_raw=$(gh_api_call -X GET "${GITHUB_API_BASE}/repos/${REPO_OWNER}/${REPO_NAME}/actions/runs/${target_run_id}")
-            poll_code=$(echo "$poll_raw" | tail -n1)
-            poll_resp=$(echo "$poll_raw" | sed '$d')
-            if [ -n "$poll_code" ] && [ "$poll_code" -ge 200 ] && [ "$poll_code" -lt 300 ]; then
-                cur_status=$(echo "$poll_resp" | jq -r '.status // empty')
-                if [ "$cur_status" = "completed" ]; then
-                    return 0
-                fi
-            fi
-            if [ "$attempt" -lt "$max_attempts" ]; then
-                [ "${wait_delay}" -gt 0 ] && sleep "${wait_delay}"
-            fi
-        done
-        return 1
-    }
-
-    if [ -n "$run_status" ] && [ "$run_status" != "completed" ]; then
-        wait_for_workflow_completed "$run_id" || true
-    fi
-
-    local rerun_raw rerun_code
-    rerun_raw=$(gh_api_call -X POST "${GITHUB_API_BASE}/repos/${REPO_OWNER}/${REPO_NAME}/actions/runs/${run_id}/rerun-failed-jobs")
-    rerun_code=$(echo "$rerun_raw" | tail -n1)
-
-    if [ "$rerun_code" = "403" ] || [ "$rerun_code" = "409" ]; then
-        wait_for_workflow_completed "$run_id" || true
+    if [ "$run_status" = "completed" ]; then
+        local rerun_raw rerun_code
         rerun_raw=$(gh_api_call -X POST "${GITHUB_API_BASE}/repos/${REPO_OWNER}/${REPO_NAME}/actions/runs/${run_id}/rerun-failed-jobs")
         rerun_code=$(echo "$rerun_raw" | tail -n1)
-    fi
-
-    if [ -z "$rerun_code" ] || [ "$rerun_code" -lt 200 ] || [ "$rerun_code" -ge 300 ]; then
-        echo "⚠️ rerun-failed-jobs returned HTTP ${rerun_code}; attempting fallback to full workflow rerun..." >&2
-        rerun_raw=$(gh_api_call -X POST "${GITHUB_API_BASE}/repos/${REPO_OWNER}/${REPO_NAME}/actions/runs/${run_id}/rerun")
-        rerun_code=$(echo "$rerun_raw" | tail -n1)
-        if [ "$rerun_code" = "403" ] || [ "$rerun_code" = "409" ]; then
-            wait_for_workflow_completed "$run_id" || true
+        if [ "$rerun_code" != "403" ] && [ "$rerun_code" != "409" ] && { [ -z "$rerun_code" ] || [ "$rerun_code" -lt 200 ] || [ "$rerun_code" -ge 300 ]; }; then
             rerun_raw=$(gh_api_call -X POST "${GITHUB_API_BASE}/repos/${REPO_OWNER}/${REPO_NAME}/actions/runs/${run_id}/rerun")
             rerun_code=$(echo "$rerun_raw" | tail -n1)
-        fi
-        if [ -z "$rerun_code" ] || [ "$rerun_code" -lt 200 ] || [ "$rerun_code" -ge 300 ]; then
-            local rerun_resp
-            rerun_resp=$(echo "$rerun_raw" | sed '$d')
-            echo "ERROR: Failed to rerun RoboRev workflow run ${run_id} (both rerun-failed-jobs and rerun failed, HTTP ${rerun_code}): ${rerun_resp}" >&2
-            exit 1
+            [ "$rerun_code" != "403" ] && [ "$rerun_code" != "409" ] && { [ -z "$rerun_code" ] || [ "$rerun_code" -lt 200 ] || [ "$rerun_code" -ge 300 ]; } && {
+                echo "ERROR: Failed to rerun RoboRev workflow run ${run_id} (HTTP ${rerun_code}): $(echo "$rerun_raw" | sed '$d')" >&2; exit 1
+            }
         fi
     fi
 
-    # 5. Output JSON deliverable
     local msg="RoboRev gate overridden for PR #${pr_num} (${short_sha}) on ${REPO_OWNER}/${REPO_NAME}. Re-run triggered."
-    jq -n \
-        --arg pr_url "$pr_url" \
-        --argjson pr_number "$pr_num" \
-        --arg commit_sha "$head_sha" \
-        --argjson run_id "$run_id" \
-        --arg repo "$REPO_NAME" \
-        --arg message "$msg" \
+    jq -n --arg pr_url "$pr_url" --argjson pr_number "$pr_num" --arg commit_sha "$head_sha" --argjson run_id "$run_id" --arg repo "$REPO_NAME" --arg message "$msg" \
         '{status: "overridden", pr_url: $pr_url, pr_number: $pr_number, commit_sha: $commit_sha, run_id: $run_id, repo: $repo, turn_action: "end_turn", message: $message}'
     return 0
 }
 
-# Testing hook: allow unit tests to source all functions without executing command dispatch
 if [ "${REPO_TEST_MODE:-0}" = "1" ] || [ "${cmd:-}" = "--source-only" ]; then
     return 0 2>/dev/null || exit 0
 fi
 
 case "$cmd" in
-    init)
-        init_scratch "$@"
-        ;;
-    submit)
-        submit_scratch "$@"
-        ;;
-    override-roborev|dispute-roborev)
-        override_roborev "$@"
-        ;;
+    init) init_scratch "$@" ;;
+    submit) submit_scratch "$@" ;;
+    override-roborev|dispute-roborev) override_roborev "$@" ;;
     *)
         echo "Usage: $0 [--repo <name>] {init [repo] [-b|--branch <branch>]|submit [-b <body>|--body <body>|-f <file>|--body-file <file>] <scratch_dir> [commit_msg]|override-roborev [-m <rebuttal>|--reason <rebuttal>|-f <path>|--reason-file <path>] <pr_num> [rebuttal]}" >&2
         exit 1
