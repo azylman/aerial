@@ -271,7 +271,10 @@ func TestStore_MultiAgentIsolation_Records(t *testing.T) {
 				t.Errorf("beta GetMessagesByID = (%v, %v), want none", msgs, err)
 			}
 			assertIsolatedMessageContent(ctx, t, storeAlpha, tc.msgID, "", "agent-alpha")
-			msg, _ := storeAlpha.GetMessage(ctx, tc.msgID)
+			msg, err := storeAlpha.GetMessage(ctx, tc.msgID)
+			if err != nil || msg == nil {
+				t.Fatalf("storeAlpha.GetMessage(%q) = (%v, %v), want non-nil and nil error", tc.msgID, msg, err)
+			}
 			if msg.Status != StatusProcessing || msg.RetryCount != 0 || msg.RestartCount != 0 {
 				t.Errorf("alpha row changed: status %s retry %d restart %d", msg.Status, msg.RetryCount, msg.RestartCount)
 			}

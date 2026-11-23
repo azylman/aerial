@@ -355,7 +355,10 @@ func TestHandleInternalDiscordInteraction(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := newTestWorkerPool(store)
 			if tc.hasPoolSession {
-				sess, _ := discordgo.New("Bot fake-token")
+				sess, err := discordgo.New("Bot fake-token")
+				if err != nil {
+					t.Fatalf("failed to create discord session: %v", err)
+				}
 				pool.SetDiscordSession(sess)
 			}
 			handler := handleInternalDiscordInteraction(store, pool)
@@ -451,6 +454,47 @@ func awaitVoiceCallback(handled <-chan string, event string) {
 	}
 }
 
+type voiceStreamTestCase struct {
+	name           string
+	events         []queue.VoiceStreamEvent
+	status         int
+	holdAsk        bool
+	unsubscribeErr error
+	wantStatuses   []string
+	wantSentences  []string
+	wantSSE        []string
+}
+
+func handleMockVoiceStreamIngress(w http.ResponseWriter, r *http.Request, tc voiceStreamTestCase, bus *syncVoiceBus, handled chan string, release chan struct{}) {
+	var req queue.VoiceSessionRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	topic := "voice.stream." + req.TurnID
+	for i, ev := range tc.events {
+		if err := bus.Publish(r.Context(), topic, fmt.Sprintf("step-%d", i), ev); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		awaitVoiceCallback(handled, ev.Event)
+	}
+	if tc.holdAsk {
+		<-release
+	}
+	if tc.status != http.StatusOK {
+		http.Error(w, "boom", tc.status)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(queue.VoiceSessionResult{
+		Reply:          "Full response.",
+		ConversationID: "conv-buff-1",
+		DeviceKey:      "kiosk-1",
+	})
+}
+
 // TestStreamRestateVoiceEvents drives the fake ingress in lockstep with the
 // stream loop: after publishing each event the ingress waits until the loop has
 // handed it to a callback, and only then publishes the next one or answers. The
@@ -459,16 +503,7 @@ func awaitVoiceCallback(handled <-chan string, event string) {
 func TestStreamRestateVoiceEvents(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
-		name           string
-		events         []queue.VoiceStreamEvent
-		status         int
-		holdAsk        bool
-		unsubscribeErr error
-		wantStatuses   []string
-		wantSentences  []string
-		wantSSE        []string
-	}{
+	tests := []voiceStreamTestCase{
 		{
 			name: "buffered events emit reply once",
 			events: []queue.VoiceStreamEvent{
@@ -522,30 +557,7 @@ func TestStreamRestateVoiceEvents(t *testing.T) {
 			handled := make(chan string, 16)
 			release := make(chan struct{})
 			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				var req queue.VoiceSessionRequest
-				if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-					http.Error(w, err.Error(), http.StatusBadRequest)
-					return
-				}
-				topic := "voice.stream." + req.TurnID
-				for i, ev := range tc.events {
-					_ = bus.Publish(r.Context(), topic, fmt.Sprintf("step-%d", i), ev)
-					awaitVoiceCallback(handled, ev.Event)
-				}
-				if tc.holdAsk {
-					<-release
-				}
-				if tc.status != http.StatusOK {
-					http.Error(w, "boom", tc.status)
-					return
-				}
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusOK)
-				_ = json.NewEncoder(w).Encode(queue.VoiceSessionResult{
-					Reply:          "Full response.",
-					ConversationID: "conv-buff-1",
-					DeviceKey:      "kiosk-1",
-				})
+				handleMockVoiceStreamIngress(w, r, tc, bus, handled, release)
 			}))
 			defer ts.Close()
 			defer close(release)

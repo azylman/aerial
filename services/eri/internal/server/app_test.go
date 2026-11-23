@@ -159,7 +159,9 @@ func TestRunBrainApp_ValidationAndErrors(t *testing.T) {
 		})
 	}
 	blockDir := filepath.Join(t.TempDir(), "block")
-	_ = os.WriteFile(blockDir, []byte("file"), 0o644)
+	if err := os.WriteFile(blockDir, []byte("file"), 0o644); err != nil {
+		t.Fatalf("failed to write block file: %v", err)
+	}
 	storeOpt := []BrainAppOption{WithStore(newTestStore(t))}
 
 	tests := []struct {
@@ -231,8 +233,12 @@ func TestRunBrainApp_ValidationAndErrors(t *testing.T) {
 func newLifecycleCfg(t *testing.T, mutators ...func(*config.ConfigData)) (string, *config.Config) {
 	t.Helper()
 	tmpDir := t.TempDir()
-	_ = os.MkdirAll(filepath.Join(tmpDir, "data", ".gemini", "config", "skills"), 0o755)
-	_ = os.MkdirAll(filepath.Join(tmpDir, ".gemini", "config", "skills"), 0o755)
+	if err := os.MkdirAll(filepath.Join(tmpDir, "data", ".gemini", "config", "skills"), 0o755); err != nil {
+		t.Fatalf("failed to mkdir skills: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(tmpDir, ".gemini", "config", "skills"), 0o755); err != nil {
+		t.Fatalf("failed to mkdir skills: %v", err)
+	}
 	cfg := newTestConfig(func(d *config.ConfigData) {
 		d.Port = "0"
 		d.AgyBin = "/bin/true"
