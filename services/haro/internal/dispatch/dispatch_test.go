@@ -60,7 +60,10 @@ func newDispatchRecordingServer(t *testing.T, status int, body string) (*httptes
 	t.Helper()
 	rec := &dispatchRecording{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		reqBody, _ := io.ReadAll(r.Body)
+		reqBody, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read request body: %v", err)
+		}
 		rec.mu.Lock()
 		rec.last = dispatchRequest{path: r.URL.Path, idempotency: r.Header.Get("Idempotency-Key"), contentType: r.Header.Get("Content-Type"), body: reqBody}
 		rec.mu.Unlock()

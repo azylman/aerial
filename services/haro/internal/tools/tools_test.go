@@ -209,7 +209,10 @@ func assertScheduleCreated(t *testing.T, status, effort string, err error, wantE
 
 func TestToolHandler_ScheduleRecurring(t *testing.T) {
 	closed := newClosedToolHandler(t)
-	h, _ := newMemoryToolHandler(t)
+	h, db := newMemoryToolHandler(t)
+	if db == nil {
+		t.Fatal("expected non-nil db")
+	}
 	ctx := context.Background()
 	tests := []struct {
 		name       string
@@ -251,7 +254,10 @@ func TestToolHandler_ScheduleRecurring(t *testing.T) {
 
 func TestToolHandler_ScheduleOnce(t *testing.T) {
 	closed := newClosedToolHandler(t)
-	h, _ := newMemoryToolHandler(t)
+	h, db := newMemoryToolHandler(t)
+	if db == nil {
+		t.Fatal("expected non-nil db")
+	}
 	ctx := context.Background()
 	tests := []struct {
 		name       string
@@ -600,14 +606,16 @@ func TestToolHandler_RestateArmingAndCancelling(t *testing.T) {
 	}
 
 	// 4. UpdateCronSchedule on disabled schedule cancels
-	_ = store.InsertCronSchedule(ctx, db, model.CronSchedule{
+	if insErr := store.InsertCronSchedule(ctx, db, model.CronSchedule{
 		ID:        "c-disabled-1",
 		TargetID:  "100000000000000001",
 		CronExpr:  "0 * * * *",
 		Prompt:    "Disabled prompt",
 		NextRunAt: time.Now().UTC().Add(time.Hour),
 		Enabled:   false,
-	})
+	}); insErr != nil {
+		t.Fatalf("InsertCronSchedule failed: %v", insErr)
+	}
 	upDisOut, err := h.UpdateCronSchedule(ctx, UpdateCronScheduleArgs{
 		ScheduleID:     "c-disabled-1",
 		CronExpression: &newExpr,

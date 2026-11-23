@@ -157,7 +157,10 @@ func freeLoopbackPort(t *testing.T) string {
 	if err != nil {
 		t.Fatalf("listen 127.0.0.1:0: %v", err)
 	}
-	_, port, _ := net.SplitHostPort(ln.Addr().String())
+	_, port, err := net.SplitHostPort(ln.Addr().String())
+	if err != nil {
+		t.Fatalf("split host port: %v", err)
+	}
 	_ = ln.Close()
 	return port
 }
@@ -172,7 +175,7 @@ func TestHaro_EventsConsumerIntegration(t *testing.T) {
 	db := testutil.NewDB(t)
 	ctx := context.Background()
 
-	_ = store.InsertEventTrigger(ctx, db, model.EventTrigger{
+	if err := store.InsertEventTrigger(ctx, db, model.EventTrigger{
 		ID:        "trig-int-1",
 		ChannelID: "100000000000000001",
 		Source:    "flux",
@@ -180,7 +183,9 @@ func TestHaro_EventsConsumerIntegration(t *testing.T) {
 		EventType: "sync_success",
 		Prompt:    "Deploy succeeded",
 		Effort:    "low",
-	})
+	}); err != nil {
+		t.Fatalf("InsertEventTrigger failed: %v", err)
+	}
 
 	mockDisp := &mockDispatcher{response: dispatch.PromptDispatchResponse{Status: "ok", MessageID: "msg-ext-int"}}
 	srv := server.NewServer(tools.NewToolHandler(&config.Config{DatabaseURL: ":memory:"}, db), mockDisp)
@@ -219,7 +224,7 @@ func TestHaro_EventsConsumerIntegration_RestateIngress(t *testing.T) {
 	db := testutil.NewDB(t)
 	ctx := context.Background()
 
-	_ = store.InsertEventTrigger(ctx, db, model.EventTrigger{
+	if err := store.InsertEventTrigger(ctx, db, model.EventTrigger{
 		ID:        "trig-restate-1",
 		ChannelID: "100000000000000001",
 		Source:    "flux",
@@ -227,7 +232,9 @@ func TestHaro_EventsConsumerIntegration_RestateIngress(t *testing.T) {
 		EventType: "sync_success",
 		Prompt:    "Deploy succeeded",
 		Effort:    "low",
-	})
+	}); err != nil {
+		t.Fatalf("InsertEventTrigger failed: %v", err)
+	}
 
 	var capturedPath string
 	var capturedKey string
@@ -462,7 +469,10 @@ func TestHaro_InitJetStreamEdgeCases(t *testing.T) {
 	}); bus == nil || captureBus.captured == nil {
 		t.Fatal("expected captured subscribe handler")
 	}
-	evBytes, _ := json.Marshal(pubsub.ExternalEvent{EventID: "ev-retry-test", Source: "camera", EventType: "motion", Targets: []string{"driveway"}})
+	evBytes, err := json.Marshal(pubsub.ExternalEvent{EventID: "ev-retry-test", Source: "camera", EventType: "motion", Targets: []string{"driveway"}})
+	if err != nil {
+		t.Fatalf("marshal event: %v", err)
+	}
 
 	tests := []struct {
 		name         string
