@@ -62,6 +62,17 @@ func closedEndpoint() string {
 	return dead.URL
 }
 
+func primeClientSession(t *testing.T, c *Client, tool string) {
+	t.Helper()
+	_, err := c.CallTool(context.Background(), tool, map[string]any{"parts": []string{"first"}})
+	if tool == "missing" && err == nil {
+		t.Fatalf("expected missing prime tool to fail")
+	}
+	if tool != "missing" && err != nil {
+		t.Fatalf("unexpected prime tool error: %v", err)
+	}
+}
+
 func TestClientCallTool(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -97,7 +108,7 @@ func TestClientCallTool(t *testing.T) {
 			t.Cleanup(func() { _ = c.Close() })
 			ctx := context.Background()
 			if tc.primeTool != "" {
-				_, _ = c.CallTool(ctx, tc.primeTool, map[string]any{"parts": []string{"first"}})
+				primeClientSession(t, c, tc.primeTool)
 			}
 			if tc.forget {
 				srv.forgetSessions()

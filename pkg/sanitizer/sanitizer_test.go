@@ -388,19 +388,35 @@ func TestRegisterSharedSecrets_TableDriven(t *testing.T) {
 	if err := os.MkdirAll(secretsDir, 0o755); err != nil {
 		t.Fatalf("failed to create secrets dir: %v", err)
 	}
-	_ = os.WriteFile(filepath.Join(secretsDir, "SECRET_KEY"), []byte("shared_secret_key_val_7890"), 0o600)
-	_ = os.WriteFile(filepath.Join(secretsDir, "EMPTY_KEY"), []byte("   "), 0o600)
-	_ = os.WriteFile(filepath.Join(secretsDir, ".hidden"), []byte("ignore_me"), 0o600)
-	_ = os.MkdirAll(filepath.Join(secretsDir, "subdir"), 0o755)
+	if err := os.WriteFile(filepath.Join(secretsDir, "SECRET_KEY"), []byte("shared_secret_key_val_7890"), 0o600); err != nil {
+		t.Fatalf("write SECRET_KEY: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(secretsDir, "EMPTY_KEY"), []byte("   "), 0o600); err != nil {
+		t.Fatalf("write EMPTY_KEY: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(secretsDir, ".hidden"), []byte("ignore_me"), 0o600); err != nil {
+		t.Fatalf("write .hidden: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(secretsDir, "subdir"), 0o755); err != nil {
+		t.Fatalf("mkdir subdir: %v", err)
+	}
 	oauthDir := filepath.Join(tempDir, "oauth_secrets")
-	_ = os.MkdirAll(oauthDir, 0o755)
-	_ = os.WriteFile(filepath.Join(oauthDir, "OAUTH_JSON"),
-		[]byte(`{"refresh_token":"shared_refresh_tok_4321","token_uri":"https://oauth.example.test/tok"}`), 0o600)
+	if err := os.MkdirAll(oauthDir, 0o755); err != nil {
+		t.Fatalf("mkdir oauthDir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(oauthDir, "OAUTH_JSON"),
+		[]byte(`{"refresh_token":"shared_refresh_tok_4321","token_uri":"https://oauth.example.test/tok"}`), 0o600); err != nil {
+		t.Fatalf("write OAUTH_JSON: %v", err)
+	}
 
 	jsonFilePath := filepath.Join(tempDir, "shared_secrets.json")
-	_ = os.WriteFile(jsonFilePath, []byte(`{"JSON_SECRET":"json_secret_key_val_1234"}`), 0o600)
+	if err := os.WriteFile(jsonFilePath, []byte(`{"JSON_SECRET":"json_secret_key_val_1234"}`), 0o600); err != nil {
+		t.Fatalf("write jsonFilePath: %v", err)
+	}
 	invalidJSON := filepath.Join(tempDir, "invalid.json")
-	_ = os.WriteFile(invalidJSON, []byte(`{invalid`), 0o600)
+	if err := os.WriteFile(invalidJSON, []byte(`{invalid`), 0o600); err != nil {
+		t.Fatalf("write invalidJSON: %v", err)
+	}
 
 	tests := []struct {
 		name         string

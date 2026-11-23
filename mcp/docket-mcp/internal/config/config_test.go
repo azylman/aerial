@@ -574,7 +574,10 @@ func TestLoadConfig(t *testing.T) {
 			if path != "" {
 				path = filepath.Join(tempDir, path)
 			}
-			envKey, envVal, _ := strings.Cut(tc.env, "=")
+			envKey, envVal, ok := strings.Cut(tc.env, "=")
+			if tc.env != "" && !ok {
+				t.Fatalf("unexpected env format: %q", tc.env)
+			}
 			getenv := func(key string) string {
 				if tc.env != "" && key == envKey {
 					return envVal

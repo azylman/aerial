@@ -137,13 +137,19 @@ type fakeCDPParams struct {
 func (s *fakeCDPServer) write(ws *websocket.Conn, msg any) {
 	s.wsMu.Lock()
 	defer s.wsMu.Unlock()
-	_ = ws.WriteJSON(msg)
+	if err := ws.WriteJSON(msg); err != nil {
+		return
+	}
 }
 
 // reply returns the reply for req, or nil when the request gets no reply.
 func (s *fakeCDPServer) reply(req fakeCDPReq) any {
 	var p fakeCDPParams
-	_ = json.Unmarshal(req.Params, &p)
+	if len(req.Params) > 0 {
+		if err := json.Unmarshal(req.Params, &p); err != nil {
+			return map[string]any{"id": req.ID, "error": map[string]any{"code": -32700, "message": "invalid params"}}
+		}
+	}
 	if req.Method == s.opts.withholdMethod {
 		return nil
 	}
@@ -244,7 +250,10 @@ func startFakeCDPServer(t *testing.T, opts fakeCDPOptions) (*fakeCDPServer, *con
 		fakeSrv.Close()
 	})
 
-	u, _ := url.Parse(fakeSrv.URL)
+	u, err := url.Parse(fakeSrv.URL)
+	if err != nil {
+		t.Fatalf("parse fake cdp url: %v", err)
+	}
 	cfg := &config.Config{Port: "4018", CDPHost: u.Hostname(), CDPPort: u.Port(), SettleDelay: time.Millisecond}
 	if opts.emptyHost {
 		cfg.CDPHost = ""
@@ -462,12 +471,14 @@ func TestCDPClient_WaitSettle(t *testing.T) {
 func TestCDPClient_SendCDP(t *testing.T) {
 	tests := []struct {
 		name         string
+		params       any
 		closedServer bool
 		want         string
 		wantErr      string
 	}{
-		{"returns result", false, "{}", ""},
-		{"dead cdp host", true, "", "cdp target query failed"},
+		{"returns result", nil, false, "{}", ""},
+		{"malformed params returns cdp error", "not-a-struct", false, "", "cdp error -32700: invalid params"},
+		{"dead cdp host", nil, true, "", "cdp target query failed"},
 	}
 
 	for _, tc := range tests {
@@ -476,7 +487,7 @@ func TestCDPClient_SendCDP(t *testing.T) {
 			if tc.closedServer {
 				server.Close()
 			}
-			got, err := client.SendCDP(ctx, "Page.enable", nil)
+			got, err := client.SendCDP(ctx, "Page.enable", tc.params)
 			checkCDPErr(t, "SendCDP", err, tc.wantErr)
 			if string(got) != tc.want {
 				t.Fatalf("SendCDP = %s, want %s", got, tc.want)
