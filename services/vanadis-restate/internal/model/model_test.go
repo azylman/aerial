@@ -68,11 +68,43 @@ func TestExtractChunkIDFromBranch(t *testing.T) {
 		{name: "no separator after vanadis", repo: "aerial", branch: "feat/aerial-pr-vanadis-c1", want: ""},
 		{name: "empty chunk id", repo: "aerial", branch: "feat/aerial-pr-vanadis--123456", want: ""},
 		{name: "invalid chunk characters", repo: "aerial", branch: "feat/aerial-pr-vanadis-c1!-012345", want: ""},
+		{name: "valid with 17 digit target id", repo: "aerial", branch: "feat/aerial-pr-vanadis-c1-t12345678901234567-012345", want: "c1"},
+		{name: "valid with 18 digit target id and refs heads", repo: "azylman/aerial", branch: "refs/heads/feat/aerial-pr-vanadis-chunk-1-router-t123456789012345678-a1b2c3", want: "chunk-1-router"},
+		{name: "valid with 20 digit target id", repo: "aerial", branch: "feat/aerial-pr-vanadis-c1-t12345678901234567890-012345", want: "c1"},
+		{name: "non snowflake target id segment kept as chunk id", repo: "aerial", branch: "feat/aerial-pr-vanadis-c1-t12345-012345", want: "c1-t12345"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			assert.Equal(t, tc.want, ExtractChunkIDFromBranch(tc.repo, tc.branch))
+		})
+	}
+}
+
+func TestExtractTargetIDFromBranch(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name, repo, branch, want string
+	}{
+		{name: "empty repo", repo: "", branch: "feat/aerial-pr-t123456789012345678-012345", want: ""},
+		{name: "empty branch", repo: "aerial", branch: "", want: ""},
+		{name: "standalone branch without target", repo: "aerial", branch: "feat/aerial-pr-20261116-123456", want: ""},
+		{name: "standalone with 17 digit target", repo: "aerial", branch: "feat/aerial-pr-t12345678901234567-012345", want: "12345678901234567"},
+		{name: "standalone with 18 digit target", repo: "aerial", branch: "feat/aerial-pr-t123456789012345678-012345", want: "123456789012345678"},
+		{name: "standalone with 20 digit target", repo: "aerial", branch: "feat/aerial-pr-t12345678901234567890-012345", want: "12345678901234567890"},
+		{name: "standalone with refs heads", repo: "azylman/aerial", branch: "refs/heads/feat/aerial-pr-t123456789012345678-012345", want: "123456789012345678"},
+		{name: "vanadis branch with 18 digit target", repo: "aerial", branch: "feat/aerial-pr-vanadis-c1-t123456789012345678-012345", want: "123456789012345678"},
+		{name: "vanadis branch without target", repo: "aerial", branch: "feat/aerial-pr-vanadis-c1-012345", want: ""},
+		{name: "target too short 16 digits", repo: "aerial", branch: "feat/aerial-pr-t1234567890123456-012345", want: ""},
+		{name: "target too long 21 digits", repo: "aerial", branch: "feat/aerial-pr-t123456789012345678901-012345", want: ""},
+		{name: "non numeric target", repo: "aerial", branch: "feat/aerial-pr-t12345678901234567a-012345", want: ""},
+		{name: "invalid suffix non-hex", repo: "aerial", branch: "feat/aerial-pr-t123456789012345678-12345g", want: ""},
+		{name: "invalid suffix too short", repo: "aerial", branch: "feat/aerial-pr-t123456789012345678-12345", want: ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tc.want, ExtractTargetIDFromBranch(tc.repo, tc.branch))
 		})
 	}
 }

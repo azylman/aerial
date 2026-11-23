@@ -2,13 +2,7 @@
 set -euo pipefail
 
 # scripts/coverage-query.sh - Query production dead code and coverage metrics from PostgreSQL
-# Usage: POSTGRES_URL=postgres://... ./scripts/coverage-query.sh [service] [days_dormant]
-
-if [ -z "${POSTGRES_URL:-}" ]; then
-    echo "usage: POSTGRES_URL=postgres://user:pass@host:5432/db $0 [service] [days_dormant]" >&2
-    echo "error: POSTGRES_URL is not set" >&2
-    exit 2
-fi
+# Usage: ./scripts/coverage-query.sh [service] [days_dormant]
 
 SERVICE="${1:-}"
 DAYS="${2:-7}"
@@ -25,4 +19,8 @@ WHERE (last_executed_at < NOW() - (:days * INTERVAL '1 day') OR last_executed_at
 ORDER BY service, file, function_name;"
 
 echo "🔍 [coverage-query] Dormant functions (unexecuted for >= $DAYS days):"
-printf '%s\n' "$SQL" | psql -A "$POSTGRES_URL" -v "service=$SERVICE" -v "days=$DAYS" -f -
+if [ -n "${POSTGRES_URL:-}" ]; then
+    printf '%s\n' "$SQL" | psql -w -A "$POSTGRES_URL" -v "service=$SERVICE" -v "days=$DAYS" -f -
+else
+    printf '%s\n' "$SQL" | psql -w -A -v "service=$SERVICE" -v "days=$DAYS" -f -
+fi
