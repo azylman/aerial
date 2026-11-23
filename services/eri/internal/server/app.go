@@ -58,10 +58,7 @@ func validateBrainStartupConfig(cur *config.ConfigData, hasInjectedStore bool) e
 	return nil
 }
 
-var (
-	onServerReady func(addr string)
-	openDefaultDB = db.New
-)
+var onServerReady func(addr string)
 
 func setupDiscordFunnel(
 	ctx context.Context,
@@ -189,7 +186,7 @@ func resolveBrainStores(cfg *config.Config, cur *config.ConfigData, opts brainAp
 	if opts.store != nil {
 		return opts.store, opts.txStore, nil, nil
 	}
-	return bootstrap.InitDefaultStores(openDefaultDB, cfg, cur, opts.agentName)
+	return bootstrap.InitDefaultStores(db.New, cfg, cur, opts.agentName)
 }
 
 func RunBrainApp(ctx context.Context, cfg *config.Config, opts ...BrainAppOption) error {
