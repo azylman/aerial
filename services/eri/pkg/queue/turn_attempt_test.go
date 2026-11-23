@@ -249,6 +249,11 @@ func TestRunBurstAttempt(t *testing.T) {
 			wantKinds: []string{AttemptKindRetry}, wantBackoff: []int64{250}, wantCalls: 1, wantRows: rowA(db.StatusProcessing, "", 1, 0),
 		},
 		{
+			name: "CapacityBlipLastOrdinalExhausted", ordinal: 3, rows: []db.Message{stepMsg("a", db.StatusProcessing, 2, 0)}, scripts: []attemptScript{errScript(attemptCapacityErr)},
+			wantKinds: []string{AttemptKindTerminal}, wantReason: attemptCapacityErr, wantCalls: 1,
+			wantRows: rowA(db.StatusFailed, "[CAPACITY_EXHAUSTED reset_in=0s] "+attemptCapacityErr, 3, 0), wantNotices: []string{"capacity"},
+		},
+		{
 			name: "YieldTrapResumesThenSucceeds", rows: fresh, runs: 2, scripts: []attemptScript{replyScript(attemptYieldReply), replyScript("all done")},
 			wantKinds: []string{AttemptKindResume, AttemptKindSuccess}, wantBackoff: []int64{0, 0}, wantCalls: 2,
 			wantRows: rowA(db.StatusCompleted, "", 1, 1), wantNotices: []string{"all done"},
