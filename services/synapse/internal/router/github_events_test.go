@@ -191,13 +191,17 @@ func checkRunPayloadTitled(name, status, conclusion, title string, withPR bool) 
 		name, ownedHead, status, conclusion, title, prs)
 }
 
-func workflowRunPayload(branch, conclusion string, withPR bool) []byte {
+func workflowRunPayloadAttempt(branch, conclusion string, attempt int, withPR bool) []byte {
 	prs := "[]"
 	if withPR {
 		prs = fmt.Sprintf(`[{"number":42,"head":{"ref":%q,"sha":%q}}]`, branch, ownedHead)
 	}
-	return fmt.Appendf(nil, `{"action":"completed","workflow_run":{"id":7,"run_attempt":1,"name":"CI","head_sha":%q,"head_branch":%q,"status":"completed","conclusion":%q,"html_url":"https://ci/wf","pull_requests":%s},"repository":{"full_name":"azylman/other-repo"}}`,
-		ownedHead, branch, conclusion, prs)
+	return fmt.Appendf(nil, `{"action":"completed","workflow_run":{"id":7,"run_attempt":%d,"name":"CI","head_sha":%q,"head_branch":%q,"status":"completed","conclusion":%q,"html_url":"https://ci/wf","pull_requests":%s},"repository":{"full_name":"azylman/other-repo"}}`,
+		attempt, ownedHead, branch, conclusion, prs)
+}
+
+func workflowRunPayload(branch, conclusion string, withPR bool) []byte {
+	return workflowRunPayloadAttempt(branch, conclusion, 1, withPR)
 }
 
 func pushPayload(ref, message string) []byte {
@@ -375,6 +379,24 @@ func restateOwnedPullRequestCases() []restateOwnedGitHubCase {
 			wantPaths: []string{ownedPRKey + "HandleSelfRegistered/send", ownedPRKey + "HandleOpened/send"}, wantBodies: []string{`"target_id":"` + ownedThread + `"`, `"event":"opened","repo":"azylman/aerial","pr_number":42,"branch":"feat","head_sha":"` + ownedHead + `","title":"Fix it","target_id":"` + ownedThread + `","status":"open"`},
 		},
 		{
+			name: "body-free pr with branch target self-registers and carries opened fact", wantPRNumber: 42, event: ghEventPullRequest, cfg: Config{DefaultOwner: true},
+			body:      prPayload("azylman/aerial", ghActionOpened, false, "feat/aerial-pr-t111111111111111111-a1b2c3", "Body without trailer", ""),
+			wantPaths: []string{ownedPRKey + "HandleSelfRegistered/send", ownedPRKey + "HandleOpened/send"},
+			wantBodies: []string{
+				`"branch":"feat/aerial-pr-t111111111111111111-a1b2c3","title":"Fix it","gate_generation":0,"reopen_epoch":0,"unmanaged":false,"build_id":"","target_id":"111111111111111111"}`,
+				`"facts":[{"event":"opened","repo":"azylman/aerial","pr_number":42,"branch":"feat/aerial-pr-t111111111111111111-a1b2c3","head_sha":"` + ownedHead + `","title":"Fix it","target_id":"111111111111111111"`,
+			},
+		},
+		{
+			name: "body-free chunk pr without branch target falls back to system channel", wantPRNumber: 42, event: ghEventPullRequest, cfg: Config{DefaultOwner: true, SystemChannelID: ownedSystem},
+			body:      prPayload("azylman/aerial", ghActionOpened, false, "feat/aerial-pr-"+("van"+"adis")+"-c1-a1b2c3", "Body without trailer", ""),
+			wantPaths: []string{ownedPRKey + "HandleSelfRegistered/send", ownedPRKey + "HandleOpened/send"},
+			wantBodies: []string{
+				`"branch":"feat/aerial-pr-` + ("van" + "adis") + `-c1-a1b2c3","title":"Fix it","gate_generation":0,"reopen_epoch":0,"unmanaged":false,"build_id":"","target_id":"` + ownedSystem + `"}`,
+				`"facts":[{"event":"opened","repo":"azylman/aerial","pr_number":42,"branch":"feat/aerial-pr-` + ("van" + "adis") + `-c1-a1b2c3","head_sha":"` + ownedHead + `","title":"Fix it","target_id":"` + ownedSystem + `"`,
+			},
+		},
+		{
 			name: "default-owned dependabot pr gets the system channel target", wantPRNumber: 42, event: ghEventPullRequest, cfg: Config{DefaultOwner: true, SystemChannelID: ownedSystem},
 			body:       prPayload("azylman/aerial", "reopened", false, "dependabot/go/x", "", ""),
 			wantPaths:  []string{ownedPRKey + "HandleSelfRegistered/send", ownedPRKey + "HandleReopened/send"},
@@ -474,6 +496,10 @@ func restateOwnedPullRequestCases() []restateOwnedGitHubCase {
 // restateOwnedCheckAndPushCases covers check_run, workflow_run, push and
 // the generic webhook rows.
 func restateOwnedCheckAndPushCases() []restateOwnedGitHubCase {
+	return append(restateOwnedCheckCases(), restateOwnedPushCases()...)
+}
+
+func restateOwnedCheckCases() []restateOwnedGitHubCase {
 	return []restateOwnedGitHubCase{
 		{
 			name: "check failure on a pr carries the ci_failed fact", wantPRNumber: 42, wantBusEvent: "github:ci_failed", event: ghEventCheckRun,
@@ -538,6 +564,22 @@ func restateOwnedCheckAndPushCases() []restateOwnedGitHubCase {
 			wantPaths: []string{ownedOther + "HandleCheckFailed/send", ownedOtherR + "HandleAutoUpdate/send"}, wantBodies: []string{`Workflow \"CI\" concluded with failure`},
 		},
 		{
+			name: "attempt-1 workflow failure with roborev-override triggers workflow rerun", wantPRNumber: 42, wantBusEvent: "github:ci_failed", event: ghEventWorkflowRun,
+			ghBody:    `[{"body":"## roborev-override for ` + ownedHead + `"}]`,
+			body:      workflowRunPayloadAttempt("feat", "failure", 1, true),
+			wantPaths: []string{ownedOtherR + "HandleWorkflowRerun/send"},
+			wantBodies: []string{
+				`"repo":"azylman/other-repo","main_sha":"","generation":0,"pr_number":42,"head_sha":"` + ownedHead + `","check_name":"CI","run_id":7`,
+			},
+		},
+		{
+			name: "attempt-2 workflow failure with roborev-override flows to check failed", wantPRNumber: 42, wantBusEvent: "github:ci_failed", event: ghEventWorkflowRun,
+			ghBody:     `[{"body":"## roborev-override for ` + ownedHead + `"}]`,
+			body:       workflowRunPayloadAttempt("feat", "failure", 2, true),
+			wantPaths:  []string{ownedOther + "HandleCheckFailed/send", ownedOtherR + "HandleAutoUpdate/send"},
+			wantBodies: []string{`Workflow \"CI\" concluded with failure`},
+		},
+		{
 			name: "dependabot failure self-registration send failure retries", event: ghEventWorkflowRun, cfg: Config{DefaultOwner: true, SystemChannelID: ownedSystem}, sendCode: http.StatusServiceUnavailable, wantErr: true,
 			body:      workflowRunPayload("dependabot/go/x", "failure", true),
 			wantPaths: []string{ownedOther + "HandleSelfRegistered/send"},
@@ -557,6 +599,11 @@ func restateOwnedCheckAndPushCases() []restateOwnedGitHubCase {
 			name: "main workflow run on a non-default owner sends nothing", wantBusEvent: "github:ci_passed", event: ghEventWorkflowRun,
 			body: workflowRunPayload("main", "success", false),
 		},
+	}
+}
+
+func restateOwnedPushCases() []restateOwnedGitHubCase {
+	return []restateOwnedGitHubCase{
 		{
 			name: "squash push records main and merges the parsed pr", wantPRNumber: 42, event: "push", ghBody: "[]",
 			body:       pushPayload("refs/heads/main", "Fix it (#42)"),
