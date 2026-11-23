@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"net"
@@ -66,6 +65,7 @@ func TestRunApp_Lifecycle(t *testing.T) {
 	go func() {
 		errCh <- RunApp(ctx, &config.Config{
 			Port:        port,
+			RestatePort: freeLoopbackPort(t),
 			DatabaseURL: dsn,
 			EriURL:      "http://127.0.0.1:59484",
 			VanadisURL:  "http://127.0.0.1:59485",
@@ -171,55 +171,6 @@ func TestNewBusFn_FastFailure(t *testing.T) {
 	}
 }
 
-func TestHaro_EventsConsumerIntegration(t *testing.T) {
-	db := testutil.NewDB(t)
-	ctx := context.Background()
-
-	if err := store.InsertEventTrigger(ctx, db, model.EventTrigger{
-		ID:        "trig-int-1",
-		ChannelID: "100000000000000001",
-		Source:    "flux",
-		Target:    "aerial",
-		EventType: "sync_success",
-		Prompt:    "Deploy succeeded",
-		Effort:    "low",
-	}); err != nil {
-		t.Fatalf("InsertEventTrigger failed: %v", err)
-	}
-
-	mockDisp := &mockDispatcher{response: dispatch.PromptDispatchResponse{Status: "ok", MessageID: "msg-ext-int"}}
-	srv := server.NewServer(tools.NewToolHandler(&config.Config{DatabaseURL: ":memory:"}, db), mockDisp)
-
-	memBus := pubsub.NewMemoryBus()
-	defer memBus.Close()
-
-	if err := pubsub.EnsureCoreStreams(ctx, memBus); err != nil {
-		t.Fatalf("EnsureCoreStreams: %v", err)
-	}
-
-	wrapped := &pubsubtest.FaultBus{Bus: memBus, Handled: make(chan error, 1)}
-	bus := initHaroJetStreamWithFactory(ctx, srv, db, "nats://mock", func(_ context.Context, _ string) (pubsub.Bus, error) {
-		return wrapped, nil
-	})
-	if bus == nil {
-		t.Fatal("expected non-nil bus")
-	}
-
-	ev := pubsub.ExternalEvent{
-		Source:        "flux",
-		EventType:     "sync_success",
-		Targets:       []string{"aerial"},
-		ContextHeader: "Deployment update",
-	}
-	if err := memBus.Publish(ctx, "aerial.events.flux.sync_success", "ev-1", ev); err != nil {
-		t.Fatalf("Publish: %v", err)
-	}
-
-	awaitBusHandled(t, wrapped.Handled, "event delivery")
-
-	verifyTriggerState(ctx, t, db, ev, false)
-}
-
 func TestHaro_EventsConsumerIntegration_RestateIngress(t *testing.T) {
 	db := testutil.NewDB(t)
 	ctx := context.Background()
@@ -297,22 +248,6 @@ func awaitBusHandled(t *testing.T, handled <-chan error, what string) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatalf("timed out waiting for %s", what)
-	}
-}
-
-func verifyTriggerState(ctx context.Context, t *testing.T, db *sql.DB, ev pubsub.ExternalEvent, wantInDB bool) {
-	t.Helper()
-	placeholders, args, ok := store.BuildEventTriggerFilterArgs(ev.Source, ev.Targets, ev.EventType)
-	if !ok {
-		t.Fatal("invalid event trigger filter args")
-	}
-	rawQuery := "SELECT EXISTS(SELECT 1 FROM event_triggers WHERE source = $1 AND event_type = $2 AND target IN (" + placeholders + "))"
-	var matched bool
-	if err := db.QueryRowContext(ctx, rawQuery, args...).Scan(&matched); err != nil {
-		t.Fatalf("query event_triggers failed: %v", err)
-	}
-	if matched != wantInDB {
-		t.Errorf("trigger in db = %v, want %v", matched, wantInDB)
 	}
 }
 
@@ -465,7 +400,7 @@ func TestHaro_InitJetStreamEdgeCases(t *testing.T) {
 	closedDB := testutil.NewClosedDB(t)
 	serverClosed := server.NewServer(tools.NewToolHandler(&config.Config{DatabaseURL: ":memory:"}, closedDB))
 	captureBus := &handlerCaptureBus{Bus: memBus}
-	if bus := initHaroJetStreamWithFactory(t.Context(), serverClosed, nil, "nats://mock", func(context.Context, string) (pubsub.Bus, error) {
+	if bus := initHaroJetStreamWithFactory(t.Context(), serverClosed, closedDB, "nats://mock", func(context.Context, string) (pubsub.Bus, error) {
 		return captureBus, nil
 	}); bus == nil || captureBus.captured == nil {
 		t.Fatal("expected captured subscribe handler")

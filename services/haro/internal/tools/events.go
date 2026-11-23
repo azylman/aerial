@@ -221,23 +221,24 @@ func (a CancelEventWatchArgs) ToMap() map[string]any {
 	return m
 }
 
-func syncHeartbeatToRestate(ctx context.Context, ingressURL, id string, enabled bool) {
+// syncHeartbeatToRestate arms heartbeat id for its tick due at dueAt, or
+// cancels it when disabled; keys name the schedule and that tick.
+func syncHeartbeatToRestate(ctx context.Context, ingressURL, id string, enabled bool, dueAt time.Time) {
 	ingressURL = strings.TrimRight(strings.TrimSpace(ingressURL), "/")
 	if ingressURL == "" || id == "" {
 		return
 	}
+	ctx = context.WithoutCancel(ctx)
 	if enabled {
-		key := fmt.Sprintf("haro:arm:%s:%s:%d", model.ScheduleTypeHeartbeat, id, time.Now().UnixNano())
 		endpoint := fmt.Sprintf("%s/HaroSchedule/%s/Arm/send", ingressURL, url.PathEscape(id))
 		payload := map[string]any{model.FieldScheduleType: model.ScheduleTypeHeartbeat}
-		if _, postErr := restateingress.Post(context.WithoutCancel(ctx), nil, endpoint, key, payload, 0); postErr != nil {
+		if _, postErr := restateingress.Post(ctx, nil, endpoint, model.ArmIdempotencyKey(model.ScheduleTypeHeartbeat, id, dueAt), payload, 0); postErr != nil {
 			log.Printf("[Haro Tools] warning: restate arm heartbeat %s failed: %v", id, postErr)
 		}
 		return
 	}
-	key := fmt.Sprintf("haro:cancel:%s:%d", id, time.Now().UnixNano())
 	endpoint := fmt.Sprintf("%s/HaroSchedule/%s/Cancel/send", ingressURL, url.PathEscape(id))
-	if _, postErr := restateingress.Post(context.WithoutCancel(ctx), nil, endpoint, key, struct{}{}, 0); postErr != nil {
+	if _, postErr := restateingress.Post(ctx, nil, endpoint, model.CancelIdempotencyKey(id, dueAt), struct{}{}, 0); postErr != nil {
 		log.Printf("[Haro Tools] warning: restate cancel heartbeat %s failed: %v", id, postErr)
 	}
 }
@@ -301,7 +302,7 @@ func HandleScheduleHeartbeat(ctx context.Context, db *sql.DB, defaultTZ string, 
 	}
 
 	if len(restateIngressURL) > 0 {
-		syncHeartbeatToRestate(ctx, restateIngressURL[0], id, true)
+		syncHeartbeatToRestate(ctx, restateIngressURL[0], id, true, nextRun)
 	}
 
 	out := map[string]any{
@@ -409,7 +410,7 @@ func HandleUpdateHeartbeat(ctx context.Context, db *sql.DB, args map[string]any,
 	}
 
 	if len(restateIngressURL) > 0 {
-		syncHeartbeatToRestate(ctx, restateIngressURL[0], id, sched.Enabled)
+		syncHeartbeatToRestate(ctx, restateIngressURL[0], id, sched.Enabled, sched.NextRunAt)
 	}
 
 	out := map[string]any{

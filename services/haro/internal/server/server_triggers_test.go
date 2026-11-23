@@ -3,7 +3,6 @@ package server
 import (
 	"context"
 	"database/sql"
-	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -11,13 +10,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/google/uuid"
-
-	"github.com/azylman/aerial/pkg/eriwire"
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/pkg/pubsubtest"
 	"github.com/azylman/aerial/services/haro/internal/config"
-	"github.com/azylman/aerial/services/haro/internal/dispatch"
 	"github.com/azylman/aerial/services/haro/internal/metrics"
 	"github.com/azylman/aerial/services/haro/internal/model"
 	"github.com/azylman/aerial/services/haro/internal/store"
@@ -292,215 +287,6 @@ func TestHandleOneShotJob_ClosedDB(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if err := HandleOneShotJob(ctx, nil, closedDB, tc.msg); (err != nil) != tc.wantErr {
 				t.Errorf("HandleOneShotJob() err = %v, wantErr %v", err, tc.wantErr)
-			}
-		})
-	}
-}
-
-// stubScenarioDispatcher records dispatched prompts for external-event tests.
-type stubScenarioDispatcher struct {
-	dispatched []dispatch.PromptDispatchRequest
-	response   dispatch.PromptDispatchResponse
-	err        error
-}
-
-func (m *stubScenarioDispatcher) DispatchPrompt(_ context.Context, req dispatch.PromptDispatchRequest) (dispatch.PromptDispatchResponse, error) {
-	m.dispatched = append(m.dispatched, req)
-	return m.response, m.err
-}
-
-func (*stubScenarioDispatcher) Dispatch(_ context.Context, _ eriwire.BrainDispatchRequest) (eriwire.DispatchEnqueueResponse, error) {
-	return eriwire.DispatchEnqueueResponse{}, nil
-}
-
-func seedExternalEventTriggers(ctx context.Context, t *testing.T, db *sql.DB) {
-	t.Helper()
-	if err := store.InsertEventTrigger(ctx, db, model.EventTrigger{
-		ID:        "trig-ext-1",
-		ChannelID: "100000000000000001",
-		Source:    "camera",
-		Target:    "driveway",
-		EventType: "vehicle_detected",
-		Prompt:    "Vehicle in driveway",
-		Effort:    "low",
-	}); err != nil {
-		t.Fatalf("InsertEventTrigger trig-ext-1 failed: %v", err)
-	}
-	if err := store.InsertEventTrigger(ctx, db, model.EventTrigger{
-		ID:        "trig-ext-fail",
-		ChannelID: "100000000000000001",
-		Source:    "camera",
-		Target:    "backyard",
-		EventType: "motion",
-		Prompt:    "Motion in backyard",
-		Effort:    "low",
-	}); err != nil {
-		t.Fatalf("InsertEventTrigger trig-ext-fail failed: %v", err)
-	}
-	if err := store.InsertEventTrigger(ctx, db, model.EventTrigger{
-		ID:        "trig-ext-healthcheck",
-		ChannelID: "100000000000000001",
-		Source:    "healthcheck",
-		Target:    "ping",
-		EventType: "ping",
-		Prompt:    "Healthcheck ping",
-		Effort:    "low",
-	}); err != nil {
-		t.Fatalf("InsertEventTrigger trig-ext-healthcheck failed: %v", err)
-	}
-	if err := store.InsertEventTrigger(ctx, db, model.EventTrigger{
-		ID:         "trig-ext-fail-persistent",
-		ChannelID:  "100000000000000001",
-		Source:     "camera",
-		Target:     "sideyard",
-		EventType:  "motion",
-		Prompt:     "Motion in sideyard",
-		Effort:     "low",
-		Persistent: true,
-	}); err != nil {
-		t.Fatalf("InsertEventTrigger trig-ext-fail-persistent failed: %v", err)
-	}
-}
-
-func verifyTriggerState(ctx context.Context, t *testing.T, db *sql.DB, ev pubsub.ExternalEvent, wantInDB bool) {
-	t.Helper()
-	placeholders, args, ok := store.BuildEventTriggerFilterArgs(ev.Source, ev.Targets, ev.EventType)
-	if !ok {
-		t.Fatal("invalid event trigger filter args")
-	}
-	rawQuery := "SELECT EXISTS(SELECT 1 FROM event_triggers WHERE source = $1 AND event_type = $2 AND target IN (" + placeholders + "))"
-	var matched bool
-	if err := db.QueryRowContext(ctx, rawQuery, args...).Scan(&matched); err != nil {
-		t.Fatalf("query event_triggers failed: %v", err)
-	}
-	if matched != wantInDB {
-		t.Errorf("trigger in db = %v, want %v", matched, wantInDB)
-	}
-}
-
-func verifyDispatchedPrompt(t *testing.T, disp *stubScenarioDispatcher, wantChannel, wantPrompt, wantMessageID string) {
-	t.Helper()
-	if len(disp.dispatched) != 1 {
-		t.Fatalf("expected 1 dispatched prompt, got %d", len(disp.dispatched))
-	}
-	if disp.dispatched[0].ChannelID != wantChannel {
-		t.Errorf("ChannelID = %s, want %s", disp.dispatched[0].ChannelID, wantChannel)
-	}
-	if disp.dispatched[0].Prompt != wantPrompt {
-		t.Errorf("Prompt = %q, want %q", disp.dispatched[0].Prompt, wantPrompt)
-	}
-	if wantMessageID != "" && disp.dispatched[0].MessageID != wantMessageID {
-		t.Errorf("MessageID = %s, want %s", disp.dispatched[0].MessageID, wantMessageID)
-	}
-}
-
-func TestHandleExternalEvent_Scenarios(t *testing.T) {
-	db := testutil.NewDB(t)
-	ctx := context.Background()
-
-	seedExternalEventTriggers(ctx, t, db)
-
-	closedDB := testutil.NewClosedDB(t)
-	serverClosed := NewServer(tools.NewToolHandler(&config.Config{DatabaseURL: ":memory:"}, closedDB))
-
-	mockDispFail := &stubScenarioDispatcher{err: errors.New("eri unavailable")}
-	mockDispOK := &stubScenarioDispatcher{response: dispatch.PromptDispatchResponse{Status: "ok", MessageID: "msg-ext-1"}}
-	serverOK := NewServer(tools.NewToolHandler(&config.Config{DatabaseURL: ":memory:"}, db), mockDispOK)
-	serverFail := NewServer(tools.NewToolHandler(&config.Config{DatabaseURL: ":memory:"}, db), mockDispFail)
-	serverNoDisp := NewServer(tools.NewToolHandler(&config.Config{DatabaseURL: ":memory:"}, db))
-
-	tests := []struct {
-		name                 string
-		server               *Server
-		ev                   pubsub.ExternalEvent
-		wantErr              bool
-		checkDBID            string
-		wantInDB             bool
-		wantImmediateReclaim bool
-		wantDispatchMsgID    string
-	}{
-		{
-			name:      "healthcheck source is no-op and leaves trigger unclaimed",
-			server:    serverOK,
-			ev:        pubsub.ExternalEvent{Source: "healthcheck", EventType: "ping", Targets: []string{"ping"}},
-			wantErr:   false,
-			checkDBID: "trig-ext-healthcheck",
-			wantInDB:  true,
-		},
-		{
-			name:    "nil db returns error from ClaimEventTriggers",
-			server:  NewServer(tools.NewToolHandler(&config.Config{DatabaseURL: ":memory:"}, nil)),
-			ev:      pubsub.ExternalEvent{Source: "camera", EventType: "vehicle_detected", Targets: []string{"driveway"}},
-			wantErr: true,
-		},
-		{
-			name:    "closed db returns error from ClaimEventTriggers",
-			server:  serverClosed,
-			ev:      pubsub.ExternalEvent{Source: "camera", EventType: "vehicle_detected", Targets: []string{"driveway"}},
-			wantErr: true,
-		},
-		{
-			name:    "no matching triggers succeeds without firing",
-			server:  serverOK,
-			ev:      pubsub.ExternalEvent{Source: "camera", EventType: "vehicle_detected", Targets: []string{"front_door"}},
-			wantErr: false,
-		},
-		{
-			name:      "dispatch failure recovers trigger to db and returns nil to avoid redelivery storm",
-			server:    serverFail,
-			ev:        pubsub.ExternalEvent{Source: "camera", EventType: "motion", Targets: []string{"backyard"}},
-			wantErr:   false,
-			checkDBID: "trig-ext-fail",
-			wantInDB:  true,
-		},
-		{
-			name:      "nil dispatcher recovers trigger to db and returns nil to avoid redelivery storm",
-			server:    serverNoDisp,
-			ev:        pubsub.ExternalEvent{Source: "camera", EventType: "motion", Targets: []string{"backyard"}},
-			wantErr:   false,
-			checkDBID: "trig-ext-fail",
-			wantInDB:  true,
-		},
-		{
-			name:                 "dispatch failure recovers persistent trigger to db",
-			server:               serverFail,
-			ev:                   pubsub.ExternalEvent{Source: "camera", EventType: "motion", Targets: []string{"sideyard"}},
-			wantErr:              false,
-			checkDBID:            "trig-ext-fail-persistent",
-			wantInDB:             true,
-			wantImmediateReclaim: true,
-		},
-		{
-			name:              "successful dispatch claims and fires trigger",
-			server:            serverOK,
-			ev:                pubsub.ExternalEvent{EventID: "evt-cam-123", Source: "camera", EventType: "vehicle_detected", Targets: []string{"driveway"}, ContextHeader: "Camera Alert"},
-			wantErr:           false,
-			checkDBID:         "trig-ext-1",
-			wantInDB:          false,
-			wantDispatchMsgID: uuid.NewSHA1(uuid.NameSpaceOID, []byte("event_watch:trig-ext-1:evt-cam-123")).String(),
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			gotErr := tc.server.HandleExternalEvent(ctx, tc.ev)
-			if (gotErr != nil) != tc.wantErr {
-				t.Fatalf("HandleExternalEvent() err = %v, wantErr = %v", gotErr, tc.wantErr)
-			}
-			if tc.checkDBID != "" {
-				verifyTriggerState(ctx, t, db, tc.ev, tc.wantInDB)
-			}
-			if tc.wantImmediateReclaim {
-				reclaimed, rErr := store.ClaimEventTriggers(ctx, db, tc.ev.Source, tc.ev.Targets, tc.ev.EventType)
-				if rErr != nil {
-					t.Fatalf("ClaimEventTriggers failed: %v", rErr)
-				}
-				if len(reclaimed) != 1 || reclaimed[0].ID != tc.checkDBID {
-					t.Fatalf("expected persistent trigger %s to be immediately reclaimable, got %v", tc.checkDBID, reclaimed)
-				}
-			}
-			if tc.wantDispatchMsgID != "" {
-				verifyDispatchedPrompt(t, mockDispOK, "100000000000000001", "Camera Alert\n\nVehicle in driveway", tc.wantDispatchMsgID)
 			}
 		})
 	}

@@ -1,9 +1,9 @@
-// Package ticker implements Haro's scheduling loop (Layer 3) and Restate Virtual Objects.
+// Package ticker hosts Haro's Restate Virtual Objects, its only firing path.
 //
-// Ticker owns schedule execution and event-watch dispatch: periodic evaluation,
-// Restate HaroSchedule and HaroEventWatch Virtual Objects, outcome timing
-// for dispatch results, monotonic heartbeat watermark advancement, and the
-// dispatch-outcome consumer handler.
+// HaroSchedule fires cron, one-shot and heartbeat schedules and HaroEventWatch
+// fires event watches. Ticker serves them, registers the deployment and arms
+// active schedules once at startup. The package also handles dispatch outcomes
+// (run timing and monotonic heartbeat watermark advancement).
 package ticker
 
 import (
@@ -20,7 +20,6 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -236,6 +235,18 @@ func fenceSchedule(ctx restate.ObjectContext, gen int64) {
 	restate.Clear(ctx, "armed_due_at")
 }
 
+// retireSchedule ends a schedule whose Fire or Arm found it gone: a deleted
+// schedule has nothing left to fence, so its object state is cleared; a
+// disabled one is fenced so it can be re-armed later.
+func retireSchedule(ctx restate.ObjectContext, scheduleID string, gen int64, loaded ScheduleRow) error {
+	if loaded.Found {
+		fenceSchedule(ctx, gen)
+	} else {
+		restate.ClearAll(ctx)
+	}
+	return scheduleGoneError(scheduleID, loaded)
+}
+
 // sendFire schedules Fire for dueAt, deduplicated per schedule, generation and due tick.
 func sendFire(ctx restate.ObjectContext, scheduleID string, gen int64, schedType string, dueAt time.Time, delay time.Duration) {
 	restate.Set(ctx, "armed_due_at", dueAt.UTC().Format(time.RFC3339Nano))
@@ -271,8 +282,7 @@ func (s *HaroSchedule) Arm(ctx restate.ObjectContext, req ArmRequest) (restate.V
 		return restate.Void{}, err
 	}
 	if !loaded.Found || !loaded.Enabled {
-		fenceSchedule(ctx, gen)
-		return restate.Void{}, scheduleGoneError(scheduleID, loaded)
+		return restate.Void{}, retireSchedule(ctx, scheduleID, gen, loaded)
 	}
 
 	schedType := strutil.FirstNonEmpty(loaded.ScheduleType, req.ScheduleType)
@@ -287,15 +297,20 @@ func (s *HaroSchedule) Fire(ctx restate.ObjectContext, req FireRequest) (restate
 	if err != nil {
 		return restate.Void{}, err
 	}
-	if req.Generation != currentGen {
-		return restate.Void{}, nil
-	}
-	// A Fire for a tick that has since been superseded (re-armed for another
-	// due time, or already fired and advanced) is a no-op.
 	armedDue, err := restate.Get[string](ctx, "armed_due_at")
 	if err != nil {
 		return restate.Void{}, err
 	}
+	// Cancel clears all state, so a pending Fire then finds no generation and
+	// no armed tick. It is allowed through and re-checks the schedule row: a
+	// deleted or disabled schedule ends there, while one re-enabled for the
+	// same tick (whose Arm Restate deduplicated) still fires.
+	cleared := currentGen == 0 && armedDue == ""
+	if req.Generation != currentGen && !cleared {
+		return restate.Void{}, nil
+	}
+	// A Fire for a tick that has since been superseded (re-armed for another
+	// due time, or already fired and advanced) is a no-op.
 	if !req.DueAt.IsZero() && armedDue != "" && armedDue != req.DueAt.UTC().Format(time.RFC3339Nano) {
 		return restate.Void{}, nil
 	}
@@ -310,8 +325,7 @@ func (s *HaroSchedule) Fire(ctx restate.ObjectContext, req FireRequest) (restate
 		return restate.Void{}, err
 	}
 	if !loaded.Found || !loaded.Enabled {
-		fenceSchedule(ctx, currentGen)
-		return restate.Void{}, scheduleGoneError(scheduleID, loaded)
+		return restate.Void{}, retireSchedule(ctx, scheduleID, currentGen, loaded)
 	}
 
 	schedType := strutil.FirstNonEmpty(loaded.ScheduleType, req.ScheduleType)
@@ -362,7 +376,7 @@ func (s *HaroSchedule) Fire(ctx restate.ObjectContext, req FireRequest) (restate
 	}
 
 	if finRes.IsOneShot {
-		fenceSchedule(ctx, currentGen)
+		restate.ClearAll(ctx)
 		return restate.Void{}, nil
 	}
 
@@ -570,52 +584,50 @@ func (s *HaroSchedule) advanceRecurringSchedule(rc restate.RunContext, loaded Sc
 	return nextRun, err
 }
 
-// Cancel increments the generation counter to fence off pending Fires.
+// Cancel clears the object's state; it is sent after the schedule row was
+// deleted or disabled. A Fire still pending re-checks the row and ends there.
 func (*HaroSchedule) Cancel(ctx restate.ObjectContext, _ struct{}) (restate.Void, error) {
-	gen, err := restate.Get[int64](ctx, "gen")
-	if err != nil {
-		return restate.Void{}, err
-	}
-	restate.Set(ctx, "gen", gen+1)
-	restate.Clear(ctx, "armed_due_at")
+	restate.ClearAll(ctx)
 	return restate.Void{}, nil
 }
 
-// Ticker periodically evaluates due schedules and coordinates Restate Virtual Objects.
+// Ticker hosts haro's Restate endpoint (HaroSchedule, HaroEventWatch). At
+// startup it registers the deployment, arms every active schedule once and
+// prunes old run records; after that all firing is driven by the Restate
+// objects themselves.
 type Ticker struct {
 	db                *sql.DB
 	dispatcher        dispatch.PromptDispatcher
-	interval          time.Duration
-	mu                sync.Mutex
-	lastPrune         time.Time
 	restatePort       string
 	ingressURL        string
 	adminURL          string
 	advertiseURL      string
 	httpClient        *http.Client
+	startupBackoff    time.Duration
 	restateRegistered bool
 	restateBackfilled bool
 }
 
-// NewTicker returns a Ticker that evaluates schedules on interval.
-// A non-positive interval defaults to 30 seconds.
-func NewTicker(db *sql.DB, dispatcher dispatch.PromptDispatcher, interval time.Duration) *Ticker {
-	if interval <= 0 {
-		interval = 30 * time.Second
-	}
+const (
+	startupInitialBackoff = time.Second
+	startupMaxBackoff     = 30 * time.Second
+	startupAttemptTimeout = 10 * time.Second
+	runRetentionCount     = 1000
+	runRetentionAge       = 30 * 24 * time.Hour
+)
+
+// NewTicker returns a Ticker serving HaroSchedule and HaroEventWatch.
+func NewTicker(db *sql.DB, dispatcher dispatch.PromptDispatcher) *Ticker {
 	return &Ticker{
-		db:         db,
-		dispatcher: dispatcher,
-		interval:   interval,
-		httpClient: http.DefaultClient,
+		db:             db,
+		dispatcher:     dispatcher,
+		httpClient:     http.DefaultClient,
+		startupBackoff: startupInitialBackoff,
 	}
 }
 
 // SetRestateConfig configures Restate server port and URLs for the Ticker.
 func (t *Ticker) SetRestateConfig(port, ingressURL, adminURL, advertiseURL string) {
-	if t == nil {
-		return
-	}
 	t.restatePort = strings.TrimSpace(port)
 	t.ingressURL = strings.TrimRight(strings.TrimSpace(ingressURL), "/")
 	t.adminURL = strings.TrimRight(strings.TrimSpace(adminURL), "/")
@@ -659,461 +671,62 @@ func RegisterDeployment(ctx context.Context, adminURL, advertiseURL string, clie
 	return nil
 }
 
-// BackfillActiveSchedules arms all active cron, one-shot, and heartbeat schedules via Restate ingress.
-func (t *Ticker) BackfillActiveSchedules(ctx context.Context) error {
-	if t == nil || t.db == nil || strings.TrimSpace(t.ingressURL) == "" {
-		return nil
-	}
-	var errs []error
-	crons, err := store.ListCronSchedules(ctx, t.db, "", "")
-	if err != nil {
-		return err
-	}
-	for _, c := range crons {
-		if !c.Enabled {
-			continue
-		}
-		key := fmt.Sprintf("haro:arm:%s:%s:%s", model.ScheduleTypeCron, c.ID, c.NextRunAt.UTC().Format(time.RFC3339Nano))
-		endpoint := fmt.Sprintf("%s/HaroSchedule/%s/Arm/send", t.ingressURL, url.PathEscape(c.ID))
-		if _, postErr := restateingress.Post(ctx, t.httpClient, endpoint, key, ArmRequest{ScheduleType: model.ScheduleTypeCron}, 0); postErr != nil {
-			log.Printf("[Haro Ticker] warning: failed to backfill cron %s: %v", c.ID, postErr)
-			errs = append(errs, postErr)
-		}
-	}
+// scheduleArm is one schedule tick the startup backfill arms.
+type scheduleArm struct {
+	scheduleType string
+	id           string
+	dueAt        time.Time
+}
 
-	oneshots, err := store.ListOneShotSchedules(ctx, t.db, "", "")
+// activeScheduleArms lists the next tick of every enabled schedule.
+func activeScheduleArms(ctx context.Context, db *sql.DB) ([]scheduleArm, error) {
+	crons, err := store.ListCronSchedules(ctx, db, "", "")
 	if err != nil {
-		return err
+		return nil, err
+	}
+	oneshots, err := store.ListOneShotSchedules(ctx, db, "", "")
+	if err != nil {
+		return nil, err
+	}
+	heartbeats, err := store.ListHeartbeatSchedules(ctx, db, "", "")
+	if err != nil {
+		return nil, err
+	}
+	arms := make([]scheduleArm, 0, len(crons)+len(oneshots)+len(heartbeats))
+	for _, c := range crons {
+		if c.Enabled {
+			arms = append(arms, scheduleArm{model.ScheduleTypeCron, c.ID, c.NextRunAt})
+		}
 	}
 	for _, o := range oneshots {
-		key := fmt.Sprintf("haro:arm:%s:%s:%s", model.ScheduleTypeOneShot, o.ID, o.RunAt.UTC().Format(time.RFC3339Nano))
-		endpoint := fmt.Sprintf("%s/HaroSchedule/%s/Arm/send", t.ingressURL, url.PathEscape(o.ID))
-		if _, postErr := restateingress.Post(ctx, t.httpClient, endpoint, key, ArmRequest{ScheduleType: model.ScheduleTypeOneShot}, 0); postErr != nil {
-			log.Printf("[Haro Ticker] warning: failed to backfill one-shot %s: %v", o.ID, postErr)
-			errs = append(errs, postErr)
+		arms = append(arms, scheduleArm{model.ScheduleTypeOneShot, o.ID, o.RunAt})
+	}
+	for _, hb := range heartbeats {
+		if hb.Enabled {
+			arms = append(arms, scheduleArm{model.ScheduleTypeHeartbeat, hb.ID, hb.NextRunAt})
 		}
 	}
+	return arms, nil
+}
 
-	heartbeats, err := store.ListHeartbeatSchedules(ctx, t.db, "", "")
+// BackfillActiveSchedules arms all active cron, one-shot, and heartbeat schedules via Restate ingress.
+func (t *Ticker) BackfillActiveSchedules(ctx context.Context) error {
+	if t.db == nil || t.ingressURL == "" {
+		return nil
+	}
+	arms, err := activeScheduleArms(ctx, t.db)
 	if err != nil {
 		return err
 	}
-	for _, hb := range heartbeats {
-		if !hb.Enabled {
-			continue
-		}
-		key := fmt.Sprintf("haro:arm:%s:%s:%s", model.ScheduleTypeHeartbeat, hb.ID, hb.NextRunAt.UTC().Format(time.RFC3339Nano))
-		endpoint := fmt.Sprintf("%s/HaroSchedule/%s/Arm/send", t.ingressURL, url.PathEscape(hb.ID))
-		if _, postErr := restateingress.Post(ctx, t.httpClient, endpoint, key, ArmRequest{ScheduleType: model.ScheduleTypeHeartbeat}, 0); postErr != nil {
-			log.Printf("[Haro Ticker] warning: failed to backfill heartbeat %s: %v", hb.ID, postErr)
+	var errs []error
+	for _, a := range arms {
+		endpoint := fmt.Sprintf("%s/HaroSchedule/%s/Arm/send", t.ingressURL, url.PathEscape(a.id))
+		if _, postErr := restateingress.Post(ctx, t.httpClient, endpoint, model.ArmIdempotencyKey(a.scheduleType, a.id, a.dueAt), ArmRequest{ScheduleType: a.scheduleType}, 0); postErr != nil {
+			log.Printf("[Haro Ticker] warning: failed to backfill %s %s: %v", a.scheduleType, a.id, postErr)
 			errs = append(errs, postErr)
 		}
 	}
-
 	return errors.Join(errs...)
-}
-
-func (t *Ticker) isRestateEnabled() bool {
-	return t != nil && t.restatePort != ""
-}
-
-// EvaluateDueSchedules fires all due cron, one-shot and heartbeat schedules
-// as of now, then prunes old schedule runs at most once per 24 hours.
-// When Restate is enabled (restatePort is configured), schedule firing is
-// managed exclusively by HaroSchedule Virtual Objects, and polling evaluation
-// is skipped to prevent duplicate dispatches. In addition, when Restate is
-// enabled, active schedules are periodically reconciled via BackfillActiveSchedules
-// to ensure schedules created or updated during transient ingress outages are armed.
-func (t *Ticker) EvaluateDueSchedules(ctx context.Context, now time.Time) {
-	if t == nil || t.db == nil || t.dispatcher == nil {
-		return
-	}
-
-	if !t.isRestateEnabled() {
-		t.evaluateDueCronSchedules(ctx, now)
-		t.evaluateDueOneShotSchedules(ctx, now)
-		t.evaluateDueHeartbeatSchedules(ctx, now)
-	} else {
-		t.ensureRegisteredAndBackfilled(ctx)
-	}
-
-	t.PruneOldScheduleRuns(ctx, now)
-}
-
-// PruneOldScheduleRuns prunes old schedule runs if at least 24h has elapsed since the last prune.
-func (t *Ticker) PruneOldScheduleRuns(ctx context.Context, now time.Time) {
-	if t == nil || t.db == nil {
-		return
-	}
-	t.mu.Lock()
-	shouldPrune := model.ShouldPruneRuns(now, t.lastPrune, 24*time.Hour)
-	if shouldPrune {
-		t.lastPrune = now
-	}
-	t.mu.Unlock()
-
-	if shouldPrune {
-		if _, pruneErr := store.PruneScheduleRuns(ctx, t.db, 1000, 30*24*time.Hour, now); pruneErr != nil {
-			log.Printf("[Haro Ticker] Error pruning schedule runs: %v", pruneErr)
-		}
-	}
-}
-
-func (t *Ticker) evaluateDueCronSchedules(ctx context.Context, now time.Time) {
-	dueCrons, err := store.GetDueCronSchedules(ctx, t.db, now)
-	if err != nil {
-		log.Printf("[Haro Ticker] Error querying due cron schedules: %v", err)
-		return
-	}
-	for _, c := range dueCrons {
-		select {
-		case <-ctx.Done():
-			return
-		default:
-		}
-		t.processDueCron(ctx, c, now)
-	}
-}
-
-func (t *Ticker) processDueCron(ctx context.Context, c model.CronSchedule, now time.Time) {
-	nextRun, calcErr := model.CalculateNextRun(c.CronExpr, c.Timezone, now)
-	if calcErr != nil {
-		log.Printf("[Haro Ticker] Failed to calculate next run for cron %s (%q): %v", c.ID, c.CronExpr, calcErr)
-		nextRun = now.Add(24 * time.Hour)
-	}
-
-	runID := deterministicScheduleRunID(model.ScheduleTypeCron, c.ID, c.NextRunAt)
-	if model.IsScheduleStale(c.NextRunAt, now, 24*time.Hour) {
-		log.Printf("[Haro Ticker] Cron %s (%q) is stale (>24h overdue: due %s, now %s). Advancing next_run_at without firing.",
-			c.ID, c.CronExpr, c.NextRunAt.Format(time.RFC3339), now.Format(time.RFC3339))
-		if advErr := store.AdvanceCronNextRun(ctx, t.db, c.ID, nextRun); advErr != nil {
-			log.Printf("[Haro Ticker] Error advancing cron %s next_run_at: %v", c.ID, advErr)
-		}
-		completedAt := now
-		staleRun := model.ScheduleRun{
-			ID:           runID,
-			ScheduleID:   c.ID,
-			ScheduleType: model.ScheduleTypeCron,
-			MessageID:    runID,
-			TargetID:     c.TargetID,
-			ThreadID:     c.TargetID,
-			Title:        c.TitlePrefix,
-			Prompt:       c.Prompt,
-			Status:       model.StatusFailed,
-			StartedAt:    now,
-			CompletedAt:  &completedAt,
-			DurationMs:   0,
-			Error:        errStaleScheduleOverdue,
-			Effort:       c.Effort,
-			Agent:        c.Agent,
-		}
-		if createErr := store.CreateScheduleRun(ctx, t.db, staleRun); createErr != nil {
-			log.Printf("[Haro Ticker] Error creating stale schedule run for cron %s: %v", c.ID, createErr)
-		}
-		metrics.RecordScheduleRun(model.ScheduleTypeCron, model.StatusStale)
-		return
-	}
-
-	if advErr := store.AdvanceCronNextRun(ctx, t.db, c.ID, nextRun); advErr != nil {
-		log.Printf("[Haro Ticker] Error advancing cron %s next_run_at: %v", c.ID, advErr)
-		return
-	}
-
-	req := dispatch.PromptDispatchRequest{
-		Prompt:    c.Prompt,
-		ChannelID: c.TargetID,
-		Title:     c.TitlePrefix,
-		MessageID: runID,
-		Effort:    c.Effort,
-		Agent:     c.Agent,
-	}
-	dispatchStart := time.Now()
-	resp, dispatchErr := dispatch.TraceFire(ctx, model.ScheduleTypeCron, c.ID, func(ctx context.Context) (dispatch.PromptDispatchResponse, error) {
-		return t.dispatcher.DispatchPrompt(ctx, req)
-	})
-	metrics.RecordScheduleDispatchDuration(model.ScheduleTypeCron, time.Since(dispatchStart).Seconds())
-	completedAt := time.Now().UTC()
-	durationMs := completedAt.Sub(now).Milliseconds()
-	status := model.StatusCompleted
-	errMsg := ""
-	threadID := resp.ChannelID
-	if threadID == "" {
-		threadID = c.TargetID
-	}
-	if dispatchErr != nil {
-		status = model.StatusFailed
-		errMsg = dispatchErr.Error()
-		log.Printf("[Haro Ticker] Dispatch error for cron %s: %v", c.ID, dispatchErr)
-	}
-	metrics.RecordScheduleRun(model.ScheduleTypeCron, status)
-	msgID := resp.MessageID
-	if msgID == "" {
-		msgID = runID
-	}
-	run := model.ScheduleRun{
-		ID:           runID,
-		ScheduleID:   c.ID,
-		ScheduleType: model.ScheduleTypeCron,
-		MessageID:    msgID,
-		TargetID:     c.TargetID,
-		ThreadID:     threadID,
-		Title:        c.TitlePrefix,
-		Prompt:       c.Prompt,
-		Status:       status,
-		StartedAt:    now,
-		CompletedAt:  &completedAt,
-		DurationMs:   durationMs,
-		Error:        errMsg,
-		Effort:       c.Effort,
-		Agent:        c.Agent,
-	}
-	if createErr := store.CreateScheduleRun(ctx, t.db, run); createErr != nil {
-		log.Printf("[Haro Ticker] Error creating schedule run for cron %s: %v", c.ID, createErr)
-	}
-}
-
-func (t *Ticker) evaluateDueOneShotSchedules(ctx context.Context, now time.Time) {
-	dueOneShots, err := store.GetDueOneShotSchedules(ctx, t.db, now)
-	if err != nil {
-		log.Printf("[Haro Ticker] Error querying due one-shot schedules: %v", err)
-		return
-	}
-	for _, s := range dueOneShots {
-		select {
-		case <-ctx.Done():
-			return
-		default:
-		}
-		t.processDueOneShot(ctx, s, now)
-	}
-}
-
-func (t *Ticker) processDueOneShot(ctx context.Context, s model.OneShotSchedule, now time.Time) {
-	deleted, delErr := store.DeleteOneShotSchedule(ctx, t.db, s.ID)
-	if delErr != nil || !deleted {
-		if delErr != nil {
-			log.Printf("[Haro Ticker] Error deleting one-shot schedule %s: %v", s.ID, delErr)
-		}
-		return
-	}
-
-	runID := deterministicScheduleRunID(model.ScheduleTypeOneShot, s.ID, s.RunAt)
-	if model.IsScheduleStale(s.RunAt, now, 24*time.Hour) {
-		log.Printf("[Haro Ticker] One-shot %s is stale (>24h overdue: due %s, now %s). Skipping dispatch.",
-			s.ID, s.RunAt.Format(time.RFC3339), now.Format(time.RFC3339))
-		completedAt := now
-		staleRun := model.ScheduleRun{
-			ID:           runID,
-			ScheduleID:   s.ID,
-			ScheduleType: model.ScheduleTypeOneShot,
-			MessageID:    runID,
-			TargetID:     s.ThreadID,
-			ThreadID:     s.ThreadID,
-			Prompt:       s.Prompt,
-			Status:       model.StatusFailed,
-			StartedAt:    now,
-			CompletedAt:  &completedAt,
-			DurationMs:   0,
-			Error:        errStaleScheduleOverdue,
-			Effort:       s.Effort,
-			Agent:        s.Agent,
-		}
-		if createErr := store.CreateScheduleRun(ctx, t.db, staleRun); createErr != nil {
-			log.Printf("[Haro Ticker] Error creating stale schedule run for one-shot %s: %v", s.ID, createErr)
-		}
-		metrics.RecordScheduleRun(model.ScheduleTypeOneShot, model.StatusStale)
-		return
-	}
-
-	req := dispatch.PromptDispatchRequest{
-		Prompt:    s.Prompt,
-		ChannelID: s.ThreadID,
-		MessageID: runID,
-		Effort:    s.Effort,
-		Agent:     s.Agent,
-	}
-	dispatchStart := time.Now()
-	resp, dispatchErr := dispatch.TraceFire(ctx, model.ScheduleTypeOneShot, s.ID, func(ctx context.Context) (dispatch.PromptDispatchResponse, error) {
-		return t.dispatcher.DispatchPrompt(ctx, req)
-	})
-	metrics.RecordScheduleDispatchDuration(model.ScheduleTypeOneShot, time.Since(dispatchStart).Seconds())
-	completedAt := time.Now().UTC()
-	durationMs := completedAt.Sub(now).Milliseconds()
-	status := model.StatusCompleted
-	errMsg := ""
-	threadID := resp.ChannelID
-	if threadID == "" {
-		threadID = s.ThreadID
-	}
-	if dispatchErr != nil {
-		status = model.StatusFailed
-		errMsg = dispatchErr.Error()
-		log.Printf("[Haro Ticker] Dispatch error for one-shot %s: %v", s.ID, dispatchErr)
-	}
-	metrics.RecordScheduleRun(model.ScheduleTypeOneShot, status)
-	msgID := resp.MessageID
-	if msgID == "" {
-		msgID = runID
-	}
-	run := model.ScheduleRun{
-		ID:           runID,
-		ScheduleID:   s.ID,
-		ScheduleType: model.ScheduleTypeOneShot,
-		MessageID:    msgID,
-		TargetID:     s.ThreadID,
-		ThreadID:     threadID,
-		Prompt:       s.Prompt,
-		Status:       status,
-		StartedAt:    now,
-		CompletedAt:  &completedAt,
-		DurationMs:   durationMs,
-		Error:        errMsg,
-		Effort:       s.Effort,
-		Agent:        s.Agent,
-	}
-	if createErr := store.CreateScheduleRun(ctx, t.db, run); createErr != nil {
-		log.Printf("[Haro Ticker] Error creating schedule run for one-shot %s: %v", s.ID, createErr)
-	}
-}
-
-func (t *Ticker) evaluateDueHeartbeatSchedules(ctx context.Context, now time.Time) {
-	dueHeartbeats, err := store.GetDueHeartbeatSchedules(ctx, t.db, now)
-	if err != nil {
-		log.Printf("[Haro Ticker] Error querying due heartbeat schedules: %v", err)
-		return
-	}
-	for _, hb := range dueHeartbeats {
-		select {
-		case <-ctx.Done():
-			return
-		default:
-		}
-		t.processDueHeartbeat(ctx, hb, now)
-	}
-}
-
-func (t *Ticker) processDueHeartbeat(ctx context.Context, hb model.HeartbeatSchedule, now time.Time) {
-	nextRun, calcErr := model.CalculateNextRun(hb.CronExpr, hb.Timezone, now)
-	if calcErr != nil {
-		log.Printf("[Haro Ticker] Failed to calculate next run for heartbeat %s (%q): %v", hb.ID, hb.CronExpr, calcErr)
-		nextRun = now.Add(24 * time.Hour)
-	}
-
-	runID := deterministicScheduleRunID(model.ScheduleTypeHeartbeat, hb.ID, hb.NextRunAt)
-	if model.IsScheduleStale(hb.NextRunAt, now, 24*time.Hour) {
-		log.Printf("[Haro Ticker] Heartbeat %s (%q) is stale (>24h overdue: due %s, now %s). Advancing next_run_at without firing.",
-			hb.ID, hb.CronExpr, hb.NextRunAt.Format(time.RFC3339), now.Format(time.RFC3339))
-		if advErr := store.AdvanceHeartbeatNextRun(ctx, t.db, hb.ID, nextRun); advErr != nil {
-			log.Printf("[Haro Ticker] Error advancing heartbeat %s next_run_at: %v", hb.ID, advErr)
-		}
-		completedAt := now
-		staleRun := model.ScheduleRun{
-			ID:           runID,
-			ScheduleID:   hb.ID,
-			ScheduleType: model.ScheduleTypeHeartbeat,
-			MessageID:    runID,
-			TargetID:     hb.TargetID,
-			ThreadID:     "heartbeat-" + hb.ID,
-			Title:        hb.TitlePrefix,
-			Prompt:       hb.Prompt,
-			Status:       model.StatusFailed,
-			StartedAt:    now,
-			CompletedAt:  &completedAt,
-			DurationMs:   0,
-			Error:        "stale heartbeat (>24h overdue)",
-			Effort:       hb.Effort,
-			Agent:        hb.Agent,
-		}
-		if createErr := store.CreateScheduleRun(ctx, t.db, staleRun); createErr != nil {
-			log.Printf("[Haro Ticker] Error creating stale schedule run for heartbeat %s: %v", hb.ID, createErr)
-		}
-		metrics.RecordScheduleRun(model.ScheduleTypeHeartbeat, model.StatusStale)
-		return
-	}
-
-	if advErr := store.AdvanceHeartbeatNextRun(ctx, t.db, hb.ID, nextRun); advErr != nil {
-		log.Printf("[Haro Ticker] Error advancing heartbeat %s next_run_at: %v", hb.ID, advErr)
-		return
-	}
-
-	sessionKey := "heartbeat-" + hb.ID
-	if active, activeErr := store.HasRunningHeartbeatRun(ctx, t.db, hb.ID, now.Add(-2*time.Hour)); activeErr == nil && active {
-		metrics.RecordScheduleRun(model.ScheduleTypeHeartbeat, model.StatusSkippedActive)
-		slog.Info("Skipping heartbeat run: schedule has an active run in progress", "id", hb.ID, "target_id", hb.TargetID, "thread_id", sessionKey)
-		return
-	}
-
-	wrappedPrompt := model.BuildHeartbeatPrompt(hb, now)
-	req := eriwire.BrainDispatchRequest{
-		ID:           runID,
-		Source:       model.ScheduleTypeHeartbeat,
-		SessionID:    "",
-		TargetID:     strings.TrimSpace(hb.TargetID),
-		Prompt:       wrappedPrompt,
-		Effort:       hb.Effort,
-		SkipIfActive: true,
-		Agent:        hb.Agent,
-	}
-
-	dispatchStart := time.Now()
-	resp, dispatchErr := dispatch.TraceFire(ctx, model.ScheduleTypeHeartbeat, hb.ID, func(ctx context.Context) (eriwire.DispatchEnqueueResponse, error) {
-		return t.dispatcher.Dispatch(ctx, req)
-	})
-	metrics.RecordScheduleDispatchDuration(model.ScheduleTypeHeartbeat, time.Since(dispatchStart).Seconds())
-	if dispatchErr == nil && resp.Status == eriwire.StatusSkippedActive {
-		metrics.RecordScheduleRun(model.ScheduleTypeHeartbeat, model.StatusSkippedActive)
-		slog.Info("Skipping heartbeat run: thread has an active turn in progress", "id", hb.ID, "target_id", hb.TargetID, "thread_id", sessionKey)
-		return
-	}
-	if dispatchErr != nil {
-		completedAt := time.Now().UTC()
-		durationMs := completedAt.Sub(now).Milliseconds()
-		log.Printf("[Haro Ticker] Dispatch error for heartbeat %s: %v", hb.ID, dispatchErr)
-		metrics.RecordScheduleRun(model.ScheduleTypeHeartbeat, model.StatusFailed)
-		run := model.ScheduleRun{
-			ID:           runID,
-			ScheduleID:   hb.ID,
-			ScheduleType: model.ScheduleTypeHeartbeat,
-			MessageID:    runID,
-			TargetID:     hb.TargetID,
-			ThreadID:     sessionKey,
-			Title:        hb.TitlePrefix,
-			Prompt:       hb.Prompt,
-			Status:       model.StatusFailed,
-			StartedAt:    now,
-			CompletedAt:  &completedAt,
-			DurationMs:   durationMs,
-			Error:        dispatchErr.Error(),
-			Effort:       hb.Effort,
-			Agent:        hb.Agent,
-		}
-		if createErr := store.CreateScheduleRun(ctx, t.db, run); createErr != nil {
-			log.Printf("[Haro Ticker] Error creating schedule run for heartbeat %s: %v", hb.ID, createErr)
-		}
-		return
-	}
-
-	msgID := strutil.FirstNonEmpty(resp.DispatchID, runID)
-	run := model.ScheduleRun{
-		ID:           runID,
-		ScheduleID:   hb.ID,
-		ScheduleType: model.ScheduleTypeHeartbeat,
-		MessageID:    msgID,
-		TargetID:     hb.TargetID,
-		ThreadID:     sessionKey,
-		Title:        hb.TitlePrefix,
-		Prompt:       hb.Prompt,
-		Status:       "running",
-		StartedAt:    now,
-		CompletedAt:  nil,
-		DurationMs:   0,
-		Error:        "",
-		Effort:       hb.Effort,
-		Agent:        hb.Agent,
-	}
-	if createErr := store.CreateScheduleRun(ctx, t.db, run); createErr != nil {
-		log.Printf("[Haro Ticker] Error creating schedule run for heartbeat %s: %v", hb.ID, createErr)
-	}
 }
 
 // calculateOutcomeTiming resolves the completed/started timestamps and the
@@ -1248,87 +861,94 @@ func (t *Ticker) startRestateServer(ctx context.Context, port string) (chan erro
 	return errChan, nil
 }
 
-func (t *Ticker) ensureRegisteredAndBackfilled(ctx context.Context) {
+// ensureRegisteredAndBackfilled registers the deployment, then arms every
+// active schedule. It reports whether both are done; a failed step is retried
+// on the next call while a finished step is skipped.
+func (t *Ticker) ensureRegisteredAndBackfilled(ctx context.Context) bool {
 	if t == nil {
-		return
+		return true
 	}
-
-	t.mu.Lock()
-	registered := t.restateRegistered
-	backfilled := t.restateBackfilled
-	t.mu.Unlock()
-
-	if !registered {
-		if t.adminURL != "" && t.advertiseURL != "" {
-			regCtx, regCancel := context.WithTimeout(ctx, 10*time.Second)
-			err := RegisterDeployment(regCtx, t.adminURL, t.advertiseURL, t.httpClient)
-			regCancel()
-			if err != nil {
-				log.Printf("[Haro Ticker] warning: failed to register deployment with restate admin: %v", err)
-				return
-			}
+	if !t.restateRegistered {
+		regCtx, regCancel := context.WithTimeout(ctx, startupAttemptTimeout)
+		err := RegisterDeployment(regCtx, t.adminURL, t.advertiseURL, t.httpClient)
+		regCancel()
+		if err != nil {
+			log.Printf("[Haro Ticker] warning: failed to register deployment with restate admin: %v", err)
+			return false
 		}
-		t.mu.Lock()
 		t.restateRegistered = true
-		t.mu.Unlock()
 	}
-
-	if !backfilled && t.ingressURL != "" {
-		backfillCtx, backfillCancel := context.WithTimeout(ctx, 10*time.Second)
-		defer backfillCancel()
-		if err := t.BackfillActiveSchedules(backfillCtx); err != nil {
+	if !t.restateBackfilled {
+		backfillCtx, backfillCancel := context.WithTimeout(ctx, startupAttemptTimeout)
+		err := t.BackfillActiveSchedules(backfillCtx)
+		backfillCancel()
+		if err != nil {
 			log.Printf("[Haro Ticker] warning: failed to backfill active schedules: %v", err)
-			return
+			return false
 		}
-		t.mu.Lock()
 		t.restateBackfilled = true
-		t.mu.Unlock()
+	}
+	return true
+}
+
+// pruneScheduleRuns drops run records past the retention window once at startup.
+func (t *Ticker) pruneScheduleRuns(ctx context.Context, now time.Time) {
+	if n, err := store.PruneScheduleRuns(ctx, t.db, runRetentionCount, runRetentionAge, now); err != nil {
+		log.Printf("[Haro Ticker] Error pruning schedule runs: %v", err)
+	} else if n > 0 {
+		log.Printf("[Haro Ticker] Pruned %d old schedule runs", n)
 	}
 }
 
-// Start boots the Restate server on restatePort (if configured), registers with Restate Admin,
-// backfills active schedules, and monitors ctx until cancellation.
-// It returns an error if the Restate server fails to listen or serve, ensuring the process
-// does not silently run with an inactive scheduler.
+// armOnStartup retries registration and the one-time backfill of arms with
+// capped doubling backoff until both succeed, then prunes old run records. It
+// stops quietly when ctx ends and returns an error if the Restate server fails.
+func (t *Ticker) armOnStartup(ctx context.Context, serverErr <-chan error) error {
+	backoff := max(t.startupBackoff, time.Millisecond)
+	for !t.ensureRegisteredAndBackfilled(ctx) {
+		timer := time.NewTimer(backoff)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil
+		case rErr := <-serverErr:
+			timer.Stop()
+			return fmt.Errorf("restate server error: %w", rErr)
+		case <-timer.C:
+		}
+		backoff = min(2*backoff, startupMaxBackoff)
+	}
+	t.pruneScheduleRuns(ctx, time.Now().UTC())
+	return nil
+}
+
+// Start boots the Restate server, registers it with Restate admin and arms all
+// active schedules (retrying both with capped doubling backoff until they
+// succeed), prunes old run records once, then serves until ctx ends. It
+// returns an error if the Restate server fails to listen or serve.
 func (t *Ticker) Start(ctx context.Context) error {
 	if t == nil {
 		return nil
 	}
-
-	port := t.restatePort
-	if port == "" {
-		port = defaultRestatePort
+	if t.db == nil {
+		return errors.New("ticker: database is required")
+	}
+	port := strutil.FirstNonEmpty(t.restatePort, defaultRestatePort)
+	errChan, err := t.startRestateServer(ctx, port)
+	if err != nil {
+		log.Printf("[Haro Ticker] failed to start Restate server: %v", err)
+		return fmt.Errorf("restate server listen on :%s: %w", port, err)
 	}
 
-	var errChan chan error
-	if t.restatePort != "" && t.db != nil {
-		var sErr error
-		errChan, sErr = t.startRestateServer(ctx, port)
-		if sErr != nil {
-			log.Printf("[Haro Ticker] failed to start Restate server: %v", sErr)
-			return fmt.Errorf("restate server listen on :%s: %w", port, sErr)
-		}
-		t.ensureRegisteredAndBackfilled(ctx)
-	} else {
-		t.EvaluateDueSchedules(ctx, time.Now().UTC())
+	if err := t.armOnStartup(ctx, errChan); err != nil {
+		return err
 	}
 
-	interval := t.interval
-	if interval <= 0 {
-		interval = 30 * time.Second
-	}
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return nil
-		case rErr := <-errChan:
-			log.Printf("[Haro Ticker] Restate server stopped with error: %v", rErr)
-			return fmt.Errorf("restate server error: %w", rErr)
-		case now := <-ticker.C:
-			t.EvaluateDueSchedules(ctx, now.UTC())
-		}
+	select {
+	case <-ctx.Done():
+		return nil
+	case rErr := <-errChan:
+		log.Printf("[Haro Ticker] Restate server stopped with error: %v", rErr)
+		return fmt.Errorf("restate server error: %w", rErr)
 	}
 }

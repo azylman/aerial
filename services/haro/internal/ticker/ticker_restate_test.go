@@ -70,6 +70,10 @@ func setupObjectMockContext(t *testing.T, key string, initialGen int64) (*mocks.
 		}
 	}).Return().Maybe()
 
+	mc.On("ClearAll").Run(func(mock.Arguments) {
+		currentGen, armedDueAt = 0, ""
+	}).Return().Maybe()
+
 	runHandler := func(fn func(restate.RunContext) (any, error), output any, _ ...restate.RunOption) restate.TerminalError {
 		res, err := fn(mockRunContext{Context: context.Background()})
 		if err != nil {
@@ -221,7 +225,7 @@ func TestHaroSchedule_Arm(t *testing.T) {
 			wantCode:     http.StatusPreconditionFailed,
 		},
 		{
-			name:         "missing schedule fences and ends terminally with 404",
+			name:         "missing schedule clears state and ends terminally with 404",
 			scheduleType: model.ScheduleTypeCron,
 			seedType:     "",
 			wantArmed:    false,
@@ -273,8 +277,11 @@ func TestHaroSchedule_Arm(t *testing.T) {
 			if got := fireKeys(mClient); len(got) != wantKeys {
 				t.Errorf("Fire sends = %v, want %d", got, wantKeys)
 			}
-			if tc.wantCode != 0 {
+			if tc.wantCode == http.StatusPreconditionFailed {
 				mc.AssertCalled(t, "Set", "gen", int64(1))
+			}
+			if got := clearedAll(mc); got != (tc.wantCode == http.StatusNotFound) {
+				t.Errorf("state cleared = %v, want %v", got, tc.wantCode == http.StatusNotFound)
 			}
 		})
 	}
@@ -342,7 +349,7 @@ func TestHaroSchedule_LoadScheduleRow(t *testing.T) {
 	}
 }
 
-func TestHaroSchedule_ArmAndCancel_ContextErrors(t *testing.T) {
+func TestHaroSchedule_ArmAndFire_ContextErrors(t *testing.T) {
 	t.Parallel()
 	mc := mocks.NewMockContext(t)
 	mc.On("Key").Return("sched-err-1").Maybe()
@@ -353,9 +360,6 @@ func TestHaroSchedule_ArmAndCancel_ContextErrors(t *testing.T) {
 	if _, err := s.Arm(objCtx, ArmRequest{ScheduleType: "cron"}); err == nil {
 		t.Error("expected error from Arm on Get failure")
 	}
-	if _, err := s.Cancel(objCtx, struct{}{}); err == nil {
-		t.Error("expected error from Cancel on Get failure")
-	}
 	if _, err := s.Fire(objCtx, FireRequest{Generation: 1}); err == nil {
 		t.Error("expected error from Fire on Get failure")
 	}
@@ -363,100 +367,92 @@ func TestHaroSchedule_ArmAndCancel_ContextErrors(t *testing.T) {
 
 func TestHaroSchedule_Cancel(t *testing.T) {
 	t.Parallel()
-	scheduleID := "cancel-test-1"
-	mc, mClient := setupObjectMockContext(t, scheduleID, 5)
-	if mClient == nil {
-		t.Fatal("expected non-nil mock client")
-	}
+	mc, mClient := setupObjectMockContext(t, "cancel-test-1", 5)
 	objCtx := restate.WithMockContext(mc)
+	restate.Set(objCtx, "armed_due_at", "2026-11-22T11:00:00Z")
 
-	s := NewHaroSchedule(nil, nil)
-	_, err := s.Cancel(objCtx, struct{}{})
-	if err != nil {
+	if _, err := NewHaroSchedule(nil, nil).Cancel(objCtx, struct{}{}); err != nil {
 		t.Fatalf("Cancel unexpected err: %v", err)
 	}
-	mc.AssertCalled(t, "Set", "gen", int64(6))
+	gen, genErr := restate.Get[int64](objCtx, "gen")
+	armed, armedErr := restate.Get[string](objCtx, "armed_due_at")
+	if genErr != nil || armedErr != nil || gen != 0 || armed != "" || !clearedAll(mc) {
+		t.Errorf("after Cancel gen=%d armed=%q cleared=%v (errs %v, %v); want all state cleared", gen, armed, clearedAll(mc), genErr, armedErr)
+	}
+	if keys := fireKeys(mClient); len(keys) != 0 {
+		t.Errorf("Cancel sent Fire %v, want none", keys)
+	}
 }
 
-func TestHaroSchedule_CancelArmFencing(t *testing.T) {
+// TestHaroSchedule_CancelThenFire runs Cancel (which clears all state), an
+// optional re-Arm, then the Fire that was pending before Cancel.
+func TestHaroSchedule_CancelThenFire(t *testing.T) {
 	t.Parallel()
-	db := openTickerTestDB(t)
-	ctx := context.Background()
-	scheduleID := "sched-fence-test"
-	now := time.Date(2026, 11, 22, 10, 0, 0, 0, time.UTC)
+	tick := time.Date(2026, 11, 22, 11, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name           string
+		id             string
+		initialGen     int64
+		seed           string
+		rearm          bool
+		fireDue        time.Time
+		wantDispatched int
+		wantCode       int
+		wantFireKeys   []string
+	}{
+		{name: "re-enabled for the same tick: pending older-generation Fire still fires", id: "c-same", initialGen: 2, seed: "enabled", fireDue: tick, wantDispatched: 1, wantFireKeys: []string{"haro:fire:c-same:0:2026-11-22T12:00:00Z"}},
+		{name: "deleted schedule: pending Fire ends terminally with 404", id: "c-gone", initialGen: 2, fireDue: tick, wantCode: http.StatusNotFound},
+		{name: "disabled schedule: pending Fire ends terminally with 412", id: "c-off", initialGen: 2, seed: "disabled", fireDue: tick, wantCode: http.StatusPreconditionFailed},
+		{name: "re-armed for a new tick: pending Fire for the old tick is a no-op", id: "c-moved", initialGen: 2, seed: "enabled", rearm: true, fireDue: tick.Add(-30 * time.Minute), wantFireKeys: []string{"haro:fire:c-moved:0:2026-11-22T11:00:00Z"}},
+		{name: "re-armed for the same tick: Arm reuses the generation-0 Fire key", id: "c-rearm", seed: "enabled", rearm: true, fireDue: tick, wantDispatched: 1, wantFireKeys: []string{"haro:fire:c-rearm:0:2026-11-22T11:00:00Z", "haro:fire:c-rearm:0:2026-11-22T12:00:00Z"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			db := openTickerTestDB(t)
+			if tc.seed != "" {
+				if err := store.InsertCronSchedule(context.Background(), db, model.CronSchedule{ID: tc.id, TargetID: "100000000000000001", CronExpr: "0 * * * *", Prompt: "Hourly check", Timezone: "UTC", NextRunAt: tick, Enabled: tc.seed == "enabled"}); err != nil {
+					t.Fatalf("InsertCronSchedule failed: %v", err)
+				}
+			}
+			mc, mClient := setupObjectMockContext(t, tc.id, tc.initialGen)
+			objCtx := restate.WithMockContext(mc)
+			restate.Set(objCtx, "armed_due_at", tc.fireDue.Format(time.RFC3339Nano))
 
-	if err := store.InsertCronSchedule(ctx, db, model.CronSchedule{
-		ID:        scheduleID,
-		TargetID:  "100000000000000001",
-		CronExpr:  "0 * * * *",
-		Prompt:    "Hourly check",
-		Timezone:  "UTC",
-		NextRunAt: now.Add(time.Hour),
-		Enabled:   true,
-	}); err != nil {
-		t.Fatalf("InsertCronSchedule failed: %v", err)
-	}
+			disp := &fakeDispatcher{response: dispatch.PromptDispatchResponse{Status: "ok", ChannelID: "100000000000000001", MessageID: "msg-cancel"}}
+			s := NewHaroSchedule(db, disp)
+			s.nowFn = func() time.Time { return tc.fireDue }
 
-	mc, mClient := setupObjectMockContext(t, scheduleID, 0)
-	if mClient == nil {
-		t.Fatal("expected non-nil mock client")
+			if _, err := s.Cancel(objCtx, struct{}{}); err != nil {
+				t.Fatalf("Cancel err: %v", err)
+			}
+			if tc.rearm {
+				if _, err := s.Arm(objCtx, ArmRequest{ScheduleType: model.ScheduleTypeCron}); err != nil {
+					t.Fatalf("Arm err: %v", err)
+				}
+			}
+			_, err := s.Fire(objCtx, FireRequest{Generation: tc.initialGen, ScheduleType: model.ScheduleTypeCron, DueAt: tc.fireDue})
+			if got := terminalCode(err); got != tc.wantCode || (err != nil && tc.wantCode == 0) {
+				t.Fatalf("Fire err = %v, want terminal code %d", err, tc.wantCode)
+			}
+			if len(disp.dispatched) != tc.wantDispatched {
+				t.Errorf("dispatched %d prompts, want %d", len(disp.dispatched), tc.wantDispatched)
+			}
+			if got := fireKeys(mClient); !reflect.DeepEqual(got, tc.wantFireKeys) {
+				t.Errorf("Fire keys = %v, want %v", got, tc.wantFireKeys)
+			}
+		})
 	}
-	objCtx := restate.WithMockContext(mc)
+}
 
-	disp := &fakeDispatcher{
-		response: dispatch.PromptDispatchResponse{
-			Status:    "ok",
-			ChannelID: "100000000000000001",
-			MessageID: "msg-fenced",
-		},
+// clearedAll reports whether the handler cleared all object state.
+func clearedAll(mc *mocks.MockContext) bool {
+	for _, call := range mc.Calls {
+		if call.Method == "ClearAll" {
+			return true
+		}
 	}
-	s := NewHaroSchedule(db, disp)
-	s.nowFn = func() time.Time { return now }
-
-	// 1. Arm schedules Fire(gen=0) for the next tick
-	if _, err := s.Arm(objCtx, ArmRequest{ScheduleType: model.ScheduleTypeCron}); err != nil {
-		t.Fatalf("first Arm err: %v", err)
-	}
-
-	// 2. Cancel bumps gen to 1, fencing the pending Fire
-	if _, err := s.Cancel(objCtx, struct{}{}); err != nil {
-		t.Fatalf("Cancel err: %v", err)
-	}
-	mc.AssertCalled(t, "Set", "gen", int64(1))
-
-	// 3. Arm again schedules Fire(gen=1) under a new key for the same tick
-	if _, err := s.Arm(objCtx, ArmRequest{ScheduleType: model.ScheduleTypeCron}); err != nil {
-		t.Fatalf("second Arm err: %v", err)
-	}
-	wantKeys := []string{"haro:fire:sched-fence-test:0:2026-11-22T11:00:00Z", "haro:fire:sched-fence-test:1:2026-11-22T11:00:00Z"}
-	if got := fireKeys(mClient); !reflect.DeepEqual(got, wantKeys) {
-		t.Errorf("Fire keys = %v, want %v", got, wantKeys)
-	}
-
-	// 4. Stale Fire with Generation=0 should be rejected (no dispatch, no error)
-	if _, err := s.Fire(objCtx, FireRequest{Generation: 0, ScheduleType: model.ScheduleTypeCron, DueAt: now.Add(time.Hour)}); err != nil {
-		t.Fatalf("stale Fire err: %v", err)
-	}
-	if len(disp.dispatched) != 0 {
-		t.Errorf("expected stale Fire(gen=0) to be rejected, but dispatched %d times", len(disp.dispatched))
-	}
-
-	// 5. Valid Fire with Generation=1 runs at its due time and dispatches
-	s.nowFn = func() time.Time { return now.Add(time.Hour) }
-	if _, err := s.Fire(objCtx, FireRequest{Generation: 1, ScheduleType: model.ScheduleTypeCron, DueAt: now.Add(time.Hour)}); err != nil {
-		t.Fatalf("valid Fire err: %v", err)
-	}
-	if len(disp.dispatched) != 1 {
-		t.Errorf("expected valid Fire(gen=1) to dispatch 1 prompt, got %d", len(disp.dispatched))
-	}
-
-	// 6. A duplicate Fire for the tick that already fired is a no-op
-	if _, err := s.Fire(objCtx, FireRequest{Generation: 1, ScheduleType: model.ScheduleTypeCron, DueAt: now.Add(time.Hour)}); err != nil {
-		t.Fatalf("duplicate Fire err: %v", err)
-	}
-	if len(disp.dispatched) != 1 {
-		t.Errorf("expected duplicate Fire to be a no-op, got %d dispatches", len(disp.dispatched))
-	}
+	return false
 }
 
 // mockRetryableCode marks a retryable Run error the object mock surfaced once
@@ -576,7 +572,7 @@ func TestBackfillActiveSchedules_PostErrors(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	tk := NewTicker(db, nil, 30*time.Second)
+	tk := NewTicker(db, nil)
 	tk.SetRestateConfig("9080", srv.URL, "", "")
 	tk.httpClient = srv.Client()
 
@@ -604,6 +600,7 @@ type fireTestCase struct {
 	wantDispatched bool
 	wantDeleted    bool
 	wantFenced     bool
+	wantCleared    bool
 	wantCode       int
 	wantRunStatus  string
 	wantRearmed    bool
@@ -744,9 +741,7 @@ func assertFireOutcome(ctx context.Context, t *testing.T, tc fireTestCase, err e
 		t.Errorf("expected next Fire to be armed, got %v", fireKeys(mClient))
 	}
 
-	if tc.wantFenced {
-		mc.AssertCalled(t, "Set", "gen", tc.generation+1)
-	}
+	assertFireState(t, tc, mc)
 
 	if tc.wantDeleted && tc.seedType == "oneshot" {
 		_, getErr := store.GetOneShotSchedule(ctx, db, scheduleID)
@@ -757,6 +752,17 @@ func assertFireOutcome(ctx context.Context, t *testing.T, tc fireTestCase, err e
 
 	if !tc.wantErr && tc.wantDispatched && (tc.scheduleType == model.ScheduleTypeCron || tc.scheduleType == model.ScheduleTypeHeartbeat) && len(fireKeys(mClient)) == 0 {
 		t.Error("expected next Fire to be armed, got none")
+	}
+}
+
+// assertFireState checks whether Fire fenced the generation or cleared all state.
+func assertFireState(t *testing.T, tc fireTestCase, mc *mocks.MockContext) {
+	t.Helper()
+	if tc.wantFenced {
+		mc.AssertCalled(t, "Set", "gen", tc.generation+1)
+	}
+	if got := clearedAll(mc); got != tc.wantCleared {
+		t.Errorf("state cleared = %v, want %v", got, tc.wantCleared)
 	}
 }
 
@@ -772,12 +778,12 @@ func fireSkipAndErrorTestCases() []fireTestCase {
 			wantDispatched: false,
 		},
 		{
-			name:         "schedule missing is fenced and ends terminally with 404",
+			name:         "schedule missing clears state and ends terminally with 404",
 			scheduleType: model.ScheduleTypeCron,
 			seedType:     "",
 			generation:   1,
 			reqGen:       1,
-			wantFenced:   true,
+			wantCleared:  true,
 			wantErr:      true,
 			wantCode:     http.StatusNotFound,
 		},
@@ -822,7 +828,7 @@ func fireSkipAndErrorTestCases() []fireTestCase {
 			stale:          true,
 			wantDispatched: false,
 			wantDeleted:    true,
-			wantFenced:     true,
+			wantCleared:    true,
 		},
 		{
 			name:           "heartbeat with active run records skipped_active and advances without dispatching",
@@ -936,7 +942,7 @@ func firePermanentFailureTestCases() []fireTestCase {
 			wantDispatched: true,
 			wantRunStatus:  model.StatusFailed,
 			wantDeleted:    true,
-			wantFenced:     true,
+			wantCleared:    true,
 		},
 	}
 }
@@ -971,7 +977,7 @@ func fireSuccessTestCases() []fireTestCase {
 			wantDispatched: true,
 		},
 		{
-			name:           "one-shot schedule success deletes schedule and fences generation",
+			name:           "one-shot schedule success deletes schedule and clears state",
 			scheduleType:   model.ScheduleTypeOneShot,
 			seedType:       "oneshot",
 			generation:     1,
@@ -979,7 +985,7 @@ func fireSuccessTestCases() []fireTestCase {
 			enabled:        true,
 			wantDispatched: true,
 			wantDeleted:    true,
-			wantFenced:     true,
+			wantCleared:    true,
 		},
 		{
 			name:           "cron schedule success advances next_run_at and arms next Fire",
@@ -1139,7 +1145,7 @@ func TestBackfillActiveSchedules(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	tk := NewTicker(db, nil, 30*time.Second)
+	tk := NewTicker(db, nil)
 	tk.SetRestateConfig("9080", srv.URL, "", "")
 	tk.httpClient = srv.Client()
 
@@ -1158,226 +1164,14 @@ func TestBackfillActiveSchedules(t *testing.T) {
 	}
 }
 
-func TestPruneOldScheduleRuns_NilCases(t *testing.T) {
-	t.Parallel()
-	var nilTk *Ticker
-	nilTk.PruneOldScheduleRuns(context.Background(), time.Now())
-	nilTk.SetRestateConfig("9080", "", "", "")
-
-	tkNoDB := NewTicker(nil, nil, 30*time.Second)
-	tkNoDB.PruneOldScheduleRuns(context.Background(), time.Now())
-}
-
-func TestTicker_EvaluateDueSchedules_RestateSkipsPolling(t *testing.T) {
-	t.Parallel()
-	db := openTickerTestDB(t)
-	ctx := context.Background()
-	now := time.Now().UTC()
-
-	if err := store.InsertCronSchedule(ctx, db, model.CronSchedule{
-		ID:        "c-due-restate-skip",
-		TargetID:  "100000000000000001",
-		CronExpr:  "0 * * * *",
-		Prompt:    "Due cron prompt",
-		NextRunAt: now.Add(-time.Minute),
-		Enabled:   true,
-	}); err != nil {
-		t.Fatalf("InsertCronSchedule failed: %v", err)
-	}
-
-	disp := &fakeDispatcher{
-		response: dispatch.PromptDispatchResponse{Status: "ok", MessageID: "msg-due"},
-	}
-
-	backfilled := 0
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		backfilled++
-		w.WriteHeader(http.StatusAccepted)
-	}))
-	defer srv.Close()
-
-	// When restatePort is configured, EvaluateDueSchedules skips polling evaluation
-	// and periodically reconciles active schedules via BackfillActiveSchedules
-	tk := NewTicker(db, disp, 30*time.Second)
-	tk.SetRestateConfig("9080", srv.URL, "", "")
-	tk.httpClient = srv.Client()
-	tk.EvaluateDueSchedules(ctx, now)
-
-	if len(disp.dispatched) > 0 {
-		t.Errorf("expected 0 dispatches when restate is enabled, got %d", len(disp.dispatched))
-	}
-	if backfilled != 1 {
-		t.Errorf("expected 1 backfill arm call, got %d", backfilled)
-	}
-
-	// When restatePort is empty, EvaluateDueSchedules evaluates due schedules
-	tkLegacy := NewTicker(db, disp, 30*time.Second)
-	tkLegacy.EvaluateDueSchedules(ctx, now)
-
-	if len(disp.dispatched) != 1 {
-		t.Errorf("expected 1 dispatch when restate is disabled, got %d", len(disp.dispatched))
-	}
-}
-
-func TestTicker_StartRestateLifecycle(t *testing.T) {
-	t.Parallel()
-	db := openTickerTestDB(t)
-	ctx, cancel := context.WithCancel(context.Background())
-
-	registered := make(chan struct{}, 1)
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		select {
-		case registered <- struct{}{}:
-		default:
-		}
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer srv.Close()
-
-	tk := NewTicker(db, &fakeDispatcher{}, 30*time.Second)
-	// Bind to port "0" (OS-assigned ephemeral port) with admin and ingress URLs configured
-	tk.SetRestateConfig("0", srv.URL, srv.URL, "http://localhost:0")
-	tk.httpClient = srv.Client()
-
-	done := make(chan struct{})
-	var startErr error
-	go func() {
-		startErr = tk.Start(ctx)
-		close(done)
-	}()
-
-	select {
-	case <-registered:
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for Start to register")
-	}
-	cancel()
-
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for Start to shut down")
-	}
-	if startErr != nil && !errors.Is(startErr, context.Canceled) {
-		t.Fatalf("unexpected start error: %v", startErr)
-	}
-}
-
-func TestTicker_EnsureRegisteredAndBackfilled_Retry(t *testing.T) {
-	t.Parallel()
-	db := openTickerTestDB(t)
-	ctx := context.Background()
-
-	var attempts atomic.Int32
-	var backfilled atomic.Int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/deployments" {
-			if attempts.Add(1) == 1 {
-				w.WriteHeader(http.StatusInternalServerError)
-				return
-			}
-			w.WriteHeader(http.StatusOK)
-			return
-		}
-		if backfilled.Add(1) == 1 {
-			w.WriteHeader(http.StatusInternalServerError)
-			return
-		}
-		w.WriteHeader(http.StatusAccepted)
-	}))
-	defer srv.Close()
-
-	tk := NewTicker(db, &fakeDispatcher{}, 30*time.Second)
-	tk.SetRestateConfig("9080", srv.URL, srv.URL, "http://localhost:9080")
-	tk.httpClient = srv.Client()
-
-	if err := store.InsertCronSchedule(ctx, db, model.CronSchedule{
-		ID:        "c-retry-reg-1",
-		TargetID:  "100000000000000001",
-		CronExpr:  "0 * * * *",
-		Prompt:    "Prompt",
-		NextRunAt: time.Now().UTC().Add(time.Hour),
-		Enabled:   true,
-	}); err != nil {
-		t.Fatalf("InsertCronSchedule failed: %v", err)
-	}
-
-	// Attempt 1: registration fails, backfill must not run
-	tk.ensureRegisteredAndBackfilled(ctx)
-	if attempts.Load() != 1 {
-		t.Errorf("expected 1 registration attempt, got %d", attempts.Load())
-	}
-	if backfilled.Load() != 0 {
-		t.Errorf("expected 0 backfill calls on failed registration, got %d", backfilled.Load())
-	}
-	if tk.restateRegistered {
-		t.Error("expected restateRegistered to be false after failure")
-	}
-	if tk.restateBackfilled {
-		t.Error("expected restateBackfilled to be false after failure")
-	}
-
-	// Attempt 2: registration succeeds, backfill fails
-	tk.ensureRegisteredAndBackfilled(ctx)
-	if attempts.Load() != 2 {
-		t.Errorf("expected 2 registration attempts, got %d", attempts.Load())
-	}
-	if backfilled.Load() != 1 {
-		t.Errorf("expected 1 backfill call, got %d", backfilled.Load())
-	}
-	if !tk.restateRegistered {
-		t.Error("expected restateRegistered to be true after success")
-	}
-	if tk.restateBackfilled {
-		t.Error("expected restateBackfilled to be false after backfill failure")
-	}
-
-	// Attempt 3: registration skipped (already registered), backfill retries and succeeds
-	tk.ensureRegisteredAndBackfilled(ctx)
-	if attempts.Load() != 2 {
-		t.Errorf("expected registration attempts to remain 2, got %d", attempts.Load())
-	}
-	if backfilled.Load() != 2 {
-		t.Errorf("expected 2 backfill calls, got %d", backfilled.Load())
-	}
-	if !tk.restateBackfilled {
-		t.Error("expected restateBackfilled to be true after backfill success")
-	}
-
-	// Attempt 4: both registration and backfill are skipped
-	tk.ensureRegisteredAndBackfilled(ctx)
-	if attempts.Load() != 2 {
-		t.Errorf("expected registration attempts to remain 2, got %d", attempts.Load())
-	}
-	if backfilled.Load() != 2 {
-		t.Errorf("expected backfill calls to remain 2, got %d", backfilled.Load())
-	}
-
-	// Nil ticker safety check
-	var nilTk *Ticker
-	nilTk.ensureRegisteredAndBackfilled(ctx)
-}
-
 func TestTicker_StartRestateServer_Error(t *testing.T) {
 	t.Parallel()
 	db := openTickerTestDB(t)
-	tk := NewTicker(db, &fakeDispatcher{}, 30*time.Second)
+	tk := NewTicker(db, &fakeDispatcher{})
 
 	_, err := tk.startRestateServer(context.Background(), "invalid-port-name")
 	if err == nil {
 		t.Error("expected listen error on invalid port, got nil")
-	}
-}
-
-func TestTicker_Start_Error(t *testing.T) {
-	t.Parallel()
-	db := openTickerTestDB(t)
-	tk := NewTicker(db, &fakeDispatcher{}, 30*time.Second)
-	tk.SetRestateConfig("invalid-port-name", "http://localhost:8080", "http://localhost:9070", "http://localhost:invalid")
-
-	err := tk.Start(context.Background())
-	if err == nil {
-		t.Fatal("expected Start to return error on invalid restate port, got nil")
 	}
 }
 
@@ -1393,4 +1187,216 @@ func fireHeartbeatAt(t *testing.T, s *HaroSchedule, scheduleID string, dueAt, no
 	if len(fireKeys(client)) != 1 {
 		t.Fatalf("Fire(%s) re-armed %v, want exactly one next Fire", dueAt.Format(time.RFC3339), fireKeys(client))
 	}
+}
+
+func TestTicker_Start(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		nilTicker bool
+		noDB      bool
+		port      string
+		wantErr   string
+	}{
+		{name: "nil ticker returns immediately", nilTicker: true},
+		{name: "missing database is an error", noDB: true, port: "0", wantErr: "database is required"},
+		{name: "invalid restate port is an error", port: "invalid-port-name", wantErr: "restate server listen"},
+		{name: "registers, arms and serves until cancelled", port: "0"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			registered := make(chan struct{}, 1)
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/deployments" {
+					select {
+					case registered <- struct{}{}:
+					default:
+					}
+				}
+				w.WriteHeader(http.StatusOK)
+			}))
+			t.Cleanup(srv.Close)
+
+			var tk *Ticker
+			if !tc.nilTicker {
+				db := openTickerTestDB(t)
+				if tc.noDB {
+					db = nil
+				}
+				tk = NewTicker(db, &fakeDispatcher{})
+				tk.SetRestateConfig(tc.port, srv.URL, srv.URL, "http://localhost:9080")
+				tk.httpClient = srv.Client()
+			}
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			done := make(chan error, 1)
+			go func() { done <- tk.Start(ctx) }()
+
+			if tc.port == "0" && !tc.noDB {
+				<-registered
+				cancel()
+			}
+			err := <-done
+			if tc.wantErr == "" && err != nil {
+				t.Fatalf("Start err = %v, want nil", err)
+			}
+			if tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)) {
+				t.Fatalf("Start err = %v, want %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+// startupStub is a Restate admin + ingress stand-in that fails the first
+// regFailures registrations and armFailures arm posts (-1 fails every one),
+// calling onRegFailure on each failed registration.
+type startupStub struct {
+	regFailures  int32
+	armFailures  int32
+	onRegFailure func()
+	regAttempts  atomic.Int32
+	armPosts     atomic.Int32
+}
+
+func (s *startupStub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path == "/deployments" {
+		s.serveRegister(w)
+		return
+	}
+	if n := s.armPosts.Add(1); s.armFailures < 0 || n <= s.armFailures {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		return
+	}
+	w.WriteHeader(http.StatusAccepted)
+}
+
+func (s *startupStub) serveRegister(w http.ResponseWriter) {
+	if n := s.regAttempts.Add(1); s.regFailures >= 0 && n > s.regFailures {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	s.onRegFailure()
+	w.WriteHeader(http.StatusInternalServerError)
+}
+
+// TestTicker_ArmOnStartup drives the startup phase against a stub Restate
+// admin/ingress that fails the first regFailures registrations and
+// armFailures arm posts (-1 fails every one).
+func TestTicker_ArmOnStartup(t *testing.T) {
+	t.Parallel()
+	now := time.Now().UTC()
+	tests := []struct {
+		name            string
+		regFailures     int32
+		armFailures     int32
+		serverErr       bool
+		cancelled       bool
+		sabotageSQL     string
+		wantErr         string
+		wantRegAttempts int32
+		wantArmPosts    int32
+		wantPruned      bool
+	}{
+		{name: "registration retried until accepted, then arms and prunes", regFailures: 2, wantRegAttempts: 3, wantArmPosts: 1, wantPruned: true},
+		{name: "backfill retried after an ingress failure without re-registering", armFailures: 1, wantRegAttempts: 1, wantArmPosts: 2, wantPruned: true},
+		{name: "restate server failure during retries is returned", regFailures: -1, serverErr: true, wantErr: "restate server error", wantRegAttempts: 1},
+		{name: "prune failure is logged and startup still completes", sabotageSQL: failTriggerSQL("schedule_runs", "DELETE", "forced prune failure"), wantRegAttempts: 1, wantArmPosts: 1},
+		{name: "cancelled context during retries stops without pruning", regFailures: -1, cancelled: true, wantRegAttempts: 1},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			db := openTickerTestDB(t)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			seedStartupRows(ctx, t, db, now, tc.sabotageSQL)
+
+			serverErr := make(chan error, 1)
+			onRegFailure := func() {}
+			if tc.serverErr {
+				onRegFailure = func() { reportOnce(serverErr, errors.New("listener closed")) }
+			}
+			if tc.cancelled {
+				onRegFailure = cancel
+			}
+			stub := &startupStub{regFailures: tc.regFailures, armFailures: tc.armFailures, onRegFailure: onRegFailure}
+			srv := httptest.NewServer(stub)
+			t.Cleanup(srv.Close)
+
+			tk := NewTicker(db, &fakeDispatcher{})
+			tk.SetRestateConfig("9080", srv.URL, srv.URL, "http://localhost:9080")
+			tk.httpClient = srv.Client()
+			tk.startupBackoff = time.Millisecond
+			if tc.regFailures < 0 {
+				// Never-ending failures must stop on the server error or cancellation, not a retry.
+				tk.startupBackoff = time.Hour
+			}
+
+			if err := tk.armOnStartup(ctx, serverErr); !errMatches(err, tc.wantErr) {
+				t.Fatalf("armOnStartup err = %v, want %q", err, tc.wantErr)
+			}
+			if got := stub.regAttempts.Load(); got != tc.wantRegAttempts {
+				t.Errorf("registration attempts = %d, want %d", got, tc.wantRegAttempts)
+			}
+			if got := stub.armPosts.Load(); got != tc.wantArmPosts {
+				t.Errorf("arm posts = %d, want %d", got, tc.wantArmPosts)
+			}
+			assertStartupPrune(t, db, tc.wantPruned)
+		})
+	}
+}
+
+// seedStartupRows inserts one active cron plus a 40-day-old and a 1-hour-old run.
+// A non-empty sabotageSQL then runs against the database.
+func seedStartupRows(ctx context.Context, t *testing.T, db *sql.DB, now time.Time, sabotageSQL string) {
+	t.Helper()
+	defer func() {
+		if sabotageSQL == "" {
+			return
+		}
+		if _, err := db.ExecContext(ctx, sabotageSQL); err != nil {
+			t.Fatalf("sabotage SQL: %v", err)
+		}
+	}()
+	if err := store.InsertCronSchedule(ctx, db, model.CronSchedule{ID: "c-startup", TargetID: "100000000000000001", CronExpr: "0 * * * *", Prompt: "Prompt", Timezone: "UTC", NextRunAt: now.Add(time.Hour), Enabled: true}); err != nil {
+		t.Fatalf("InsertCronSchedule failed: %v", err)
+	}
+	for _, run := range []model.ScheduleRun{
+		{ID: "run-old", ScheduleID: "c-startup", ScheduleType: model.ScheduleTypeCron, MessageID: "msg-old", Status: model.StatusCompleted, StartedAt: now.Add(-40 * 24 * time.Hour)},
+		{ID: "run-new", ScheduleID: "c-startup", ScheduleType: model.ScheduleTypeCron, MessageID: "msg-new", Status: model.StatusCompleted, StartedAt: now.Add(-time.Hour)},
+	} {
+		if err := store.CreateScheduleRun(ctx, db, run); err != nil {
+			t.Fatalf("CreateScheduleRun failed: %v", err)
+		}
+	}
+}
+
+// assertStartupPrune checks the old run was pruned (or kept) and the recent one kept.
+func assertStartupPrune(t *testing.T, db *sql.DB, wantPruned bool) {
+	t.Helper()
+	_, oldErr := store.GetScheduleRunByDispatchID(context.Background(), db, "msg-old")
+	if pruned := oldErr != nil; pruned != wantPruned {
+		t.Errorf("old run pruned = %v, want %v (lookup err %v)", pruned, wantPruned, oldErr)
+	}
+	if _, newErr := store.GetScheduleRunByDispatchID(context.Background(), db, "msg-new"); newErr != nil {
+		t.Errorf("recent run lookup err = %v, want kept", newErr)
+	}
+}
+
+// reportOnce sends err on ch unless a value is already pending.
+func reportOnce(ch chan<- error, err error) {
+	select {
+	case ch <- err:
+	default:
+	}
+}
+
+// errMatches reports whether err is nil when want is empty, or contains want otherwise.
+func errMatches(err error, want string) bool {
+	if want == "" {
+		return err == nil
+	}
+	return err != nil && strings.Contains(err.Error(), want)
 }

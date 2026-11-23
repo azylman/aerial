@@ -31,26 +31,46 @@ func TestPureHelpers_IsScheduleStale(t *testing.T) {
 	}
 }
 
-func TestPureHelpers_ShouldPruneRuns(t *testing.T) {
-	now := time.Date(2026, 10, 23, 12, 0, 0, 0, time.UTC)
+func TestArmIdempotencyKey(t *testing.T) {
+	t.Parallel()
+	due := time.Date(2026, 11, 23, 9, 30, 0, 0, time.FixedZone("PST", -8*3600))
 	tests := []struct {
-		name        string
-		lastPrune   time.Time
-		interval    time.Duration
-		shouldPrune bool
+		name         string
+		scheduleType string
+		id           string
+		dueAt        time.Time
+		want         string
 	}{
-		{name: "zero lastPrune triggers prune", lastPrune: time.Time{}, interval: 24 * time.Hour, shouldPrune: true},
-		{name: "interval elapsed triggers prune", lastPrune: now.Add(-25 * time.Hour), interval: 24 * time.Hour, shouldPrune: true},
-		{name: "exact interval triggers prune", lastPrune: now.Add(-24 * time.Hour), interval: 24 * time.Hour, shouldPrune: true},
-		{name: "less than interval does not trigger prune", lastPrune: now.Add(-12 * time.Hour), interval: 24 * time.Hour, shouldPrune: false},
-		{name: "zero or negative interval does not trigger prune", lastPrune: now.Add(-48 * time.Hour), interval: 0, shouldPrune: false},
+		{name: "cron tick is normalized to UTC", scheduleType: ScheduleTypeCron, id: "c-1", dueAt: due, want: "haro:arm:cron:c-1:2026-11-23T17:30:00Z"},
+		{name: "heartbeat id is trimmed", scheduleType: ScheduleTypeHeartbeat, id: "  hb-1 ", dueAt: due, want: "haro:arm:heartbeat:hb-1:2026-11-23T17:30:00Z"},
+		{name: "one-shot keeps sub-second precision", scheduleType: ScheduleTypeOneShot, id: "o-1", dueAt: time.Date(2026, 11, 23, 17, 30, 0, 500, time.UTC), want: "haro:arm:one_shot:o-1:2026-11-23T17:30:00.0000005Z"},
 	}
-
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := ShouldPruneRuns(now, tc.lastPrune, tc.interval)
-			if got != tc.shouldPrune {
-				t.Errorf("ShouldPruneRuns() = %v, want %v", got, tc.shouldPrune)
+			t.Parallel()
+			if got := ArmIdempotencyKey(tc.scheduleType, tc.id, tc.dueAt); got != tc.want {
+				t.Errorf("ArmIdempotencyKey() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestCancelIdempotencyKey(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		id    string
+		dueAt time.Time
+		want  string
+	}{
+		{name: "deletion names the schedule only", id: "c-1", want: "haro:cancel:c-1"},
+		{name: "disable names the armed tick", id: " hb-1", dueAt: time.Date(2026, 11, 23, 17, 0, 0, 0, time.UTC), want: "haro:cancel:hb-1:2026-11-23T17:00:00Z"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := CancelIdempotencyKey(tc.id, tc.dueAt); got != tc.want {
+				t.Errorf("CancelIdempotencyKey() = %q, want %q", got, tc.want)
 			}
 		})
 	}

@@ -25,10 +25,12 @@ type eventWatchTestCase struct {
 	preConsume     bool
 	closedDB       bool
 	nilDispatcher  bool
+	defaultClock   bool
 	dispatchErr    error
 	wantErr        bool
 	wantDispatched bool
 	wantDeleted    bool
+	wantCleared    bool
 	wantCode       int
 }
 
@@ -90,9 +92,10 @@ func TestHaroEventWatch_Fire(t *testing.T) {
 	t.Parallel()
 	tests := []eventWatchTestCase{
 		{
-			name:           "missing trigger ends terminally with 404",
+			name:           "missing trigger clears state and ends terminally with 404",
 			seedTrigger:    false,
 			wantDispatched: false,
+			wantCleared:    true,
 			wantErr:        true,
 			wantCode:       http.StatusNotFound,
 		},
@@ -119,11 +122,19 @@ func TestHaroEventWatch_Fire(t *testing.T) {
 			wantDeleted:    false,
 		},
 		{
-			name:           "non-persistent trigger dispatch success deletes trigger",
+			name:           "non-persistent trigger dispatch success deletes trigger and clears state",
 			seedTrigger:    true,
 			persistent:     false,
 			wantDispatched: true,
 			wantDeleted:    true,
+			wantCleared:    true,
+		},
+		{
+			name:           "persistent trigger fires on the default clock",
+			seedTrigger:    true,
+			persistent:     true,
+			defaultClock:   true,
+			wantDispatched: true,
 		},
 		{
 			name:           "persistent trigger dispatch success updates updated_at without deleting",
@@ -176,7 +187,9 @@ func TestHaroEventWatch_Fire(t *testing.T) {
 			}
 
 			w := NewHaroEventWatch(db, disp)
-			w.nowFn = func() time.Time { return now }
+			if !tc.defaultClock {
+				w.nowFn = func() time.Time { return now }
+			}
 			_, err := w.Fire(objCtx, EventWatchFireRequest{
 				TriggerID:     triggerID,
 				ContextHeader: "Flux sync",
@@ -193,6 +206,9 @@ func TestHaroEventWatch_Fire(t *testing.T) {
 				t.Errorf("terminal code = %d, want %d (err %v)", got, tc.wantCode, err)
 			}
 
+			if got := clearedAll(mc); got != tc.wantCleared {
+				t.Errorf("state cleared = %v, want %v", got, tc.wantCleared)
+			}
 			verifyEventWatchOutcome(ctx, t, db, tc, triggerID, disp)
 		})
 	}
@@ -203,6 +219,7 @@ type externalEventTestCase struct {
 	source       string
 	targets      []string
 	nilDB        bool
+	noIngress    bool
 	seedTrigger  bool
 	triggerCount int
 	statusCode   int
@@ -270,6 +287,7 @@ func TestHandleExternalEvent(t *testing.T) {
 			statusCode:  http.StatusInternalServerError,
 			wantErr:     true,
 		},
+		{name: "matching trigger without ingress URL errors", source: "flux", targets: []string{"aerial"}, seedTrigger: true, noIngress: true, wantErr: true},
 		{
 			name:         "multiple triggers continues loop on error",
 			source:       "flux",
@@ -307,7 +325,11 @@ func TestHandleExternalEvent(t *testing.T) {
 				ContextHeader: "Sync",
 			}
 
-			err := HandleExternalEvent(ctx, db, srv.URL, ev, srv.Client())
+			ingressURL := srv.URL
+			if tc.noIngress {
+				ingressURL = ""
+			}
+			err := HandleExternalEvent(ctx, db, ingressURL, ev, srv.Client())
 			if tc.wantErr && err == nil {
 				t.Fatal("expected error, got nil")
 			}
