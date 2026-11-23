@@ -298,11 +298,15 @@ func (c *GitHubClient) HeadChecksBlocked(ctx context.Context, repo, sha string) 
 }
 
 // checkRunsBlocked dedupes runs to the newest per canonical name (skipping
-// build-metadata and dependabot runs) and reports any non-gate failure or
-// any pending run.
+// build-metadata and dependabot runs) and reports any non-gate, non-cancelled
+// failure or any pending run. Cancelled runs alone do not block branch
+// updates so interrupted PRs can re-sync with main and re-trigger CI.
 func checkRunsBlocked(runs []gitHubCheckRun) bool {
 	pending := false
 	for _, cr := range dedupeLatestCheckRuns(runs) {
+		if strings.EqualFold(strings.TrimSpace(cr.Status), "completed") && strings.EqualFold(strings.TrimSpace(cr.Conclusion), "cancelled") {
+			continue
+		}
 		state := prwire.ClassifyCheckState(cr.Status, cr.Conclusion)
 		if state == prwire.CheckStateFailed && !prwire.IsGateAggregatorCheck(cr.Name) {
 			return true
