@@ -173,20 +173,25 @@ func (m *CallSessionManager) DeregisterSession(callID string) {
 	delete(m.sessions, callID)
 }
 
-// GetRecordingWAV returns and consumes the recorded WAV payload for callID, or snapshots an active session.
+// GetRecordingWAV returns the recorded WAV payload for callID, snapshotting an
+// active session. It never consumes the recording, so a retried report post
+// still carries audio; DeleteRecording drops it once the report is delivered.
 func (m *CallSessionManager) GetRecordingWAV(callID string) []byte {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 	if sess, ok := m.sessions[callID]; ok && sess != nil {
 		if wav := sess.RecordingWAV(); len(wav) > 0 {
 			return wav
 		}
 	}
-	if wav, ok := m.recordings[callID]; ok {
-		delete(m.recordings, callID)
-		return wav
-	}
-	return nil
+	return m.recordings[callID]
+}
+
+// DeleteRecording drops the stored recording for callID.
+func (m *CallSessionManager) DeleteRecording(callID string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.recordings, callID)
 }
 
 // SteerCall injects an instruction turn into an active call session.

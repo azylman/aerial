@@ -134,6 +134,13 @@ func (m *FakeStore) CreateOutboundCall(ctx context.Context, call model.VoiceCall
 	return nil
 }
 
+// DeleteCall removes a call, simulating a row deleted between report attempts.
+func (m *FakeStore) DeleteCall(callID string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.calls, callID)
+}
+
 func (m *FakeStore) CreateInboundCall(ctx context.Context, call model.VoiceCall) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()

@@ -1074,6 +1074,8 @@ spec:
               value: "4008"
             - name: CONFIG_PATH
               value: /share/aerial-config/services/coven/coven.yaml
+            - name: GOCOVERDIR
+              value: "/tmp/gocoverdir"
             - name: K8S_AUTH_ENABLED
               value: "true"
             - name: RESTATE_PORT

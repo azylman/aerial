@@ -14,7 +14,6 @@ import (
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
-	"github.com/azylman/aerial/services/eri/pkg/db/dbtest"
 	"github.com/azylman/aerial/services/eri/pkg/delivery"
 	"github.com/azylman/aerial/services/eri/pkg/runner"
 	"github.com/azylman/aerial/services/eri/pkg/session"
@@ -22,7 +21,8 @@ import (
 
 func TestWorkerPool_Accessors(t *testing.T) {
 	t.Parallel()
-	fake := setupTestStore(t)
+	// The accessor never calls the store, so a handle-less SQLStore stands in without a database.
+	fake := db.NewSQLStore(nil)
 	noopLLM := func(context.Context, string, string) (string, error) { return "", nil }
 	appCfg := config.NewFromData(&config.ConfigData{NATSURL: "nats://127.0.0.1:4222"})
 	tests := []struct {
@@ -256,7 +256,7 @@ func assertHeadlessDispatchResult(t *testing.T, store db.Store, dispID string, t
 
 func runDispatchExecutionHeadlessCase(t *testing.T, tc dispatchExecutionHeadlessCase) {
 	t.Helper()
-	store := dbtest.NewFakeStore()
+	store := db.NewSQLStore(newTestDB(t))
 
 	memBus := pubsub.NewMemoryBus()
 	defer memBus.Close()
@@ -276,7 +276,7 @@ func runDispatchExecutionHeadlessCase(t *testing.T, tc dispatchExecutionHeadless
 		CreatedAt: time.Now().UTC(),
 		UpdatedAt: time.Now().UTC(),
 	}
-	_, _ = store.InsertDispatch(context.Background(), disp)
+	seedDispatchRows(t, store, []db.Dispatch{disp})
 	if lt := runLiveDispatch(context.Background(), pool, dispatchSessionKey(disp), "turn-1", disp.ID); lt.err != nil || lt.outcome != OutcomeCompleted {
 		t.Fatalf("turn = (%s, %v), want completed", lt.outcome, lt.err)
 	}
@@ -326,10 +326,10 @@ func TestDispatchExecution_HeadlessAndNoDiscordCalls(t *testing.T) {
 
 func TestDispatchExecution_ColdStartAndRotation(t *testing.T) {
 	t.Parallel()
-	store := dbtest.NewFakeStore()
+	store := db.NewSQLStore(newTestDB(t))
 	ctx := context.Background()
 
-	_, _ = store.InsertDispatch(ctx, db.Dispatch{
+	seedDispatchRows(t, store, []db.Dispatch{{
 		ID:        "prev-run-1",
 		Source:    "heartbeat",
 		SessionID: "heartbeat-rot",
@@ -337,7 +337,7 @@ func TestDispatchExecution_ColdStartAndRotation(t *testing.T) {
 		Summary:   "checked cluster status",
 		Status:    db.StatusCompleted,
 		CreatedAt: time.Now().UTC().Add(-10 * time.Minute),
-	})
+	}})
 
 	var capturedPrompt string
 	var promptMu sync.Mutex
@@ -353,9 +353,7 @@ func TestDispatchExecution_ColdStartAndRotation(t *testing.T) {
 	})
 	defer pool.Stop()
 
-	for range session.DefaultMaxSessionTurns - 1 {
-		_, _ = store.IncrementSessionTurnCount(ctx, "heartbeat-rot")
-	}
+	seedSessionTurns(t, store, "heartbeat-rot", session.DefaultMaxSessionTurns-1)
 
 	disp := db.Dispatch{
 		ID:        "disp-rot-test",
@@ -366,7 +364,7 @@ func TestDispatchExecution_ColdStartAndRotation(t *testing.T) {
 		CreatedAt: time.Now().UTC(),
 		UpdatedAt: time.Now().UTC(),
 	}
-	_, _ = store.InsertDispatch(ctx, disp)
+	seedDispatchRows(t, store, []db.Dispatch{disp})
 	if lt := runLiveDispatch(ctx, pool, dispatchSessionKey(disp), "turn-1", disp.ID); lt.err != nil || lt.outcome != OutcomeCompleted {
 		t.Fatalf("turn = (%s, %v), want completed", lt.outcome, lt.err)
 	}
@@ -382,7 +380,10 @@ func TestDispatchExecution_ColdStartAndRotation(t *testing.T) {
 		t.Errorf("expected <SYSTEM_DIRECTIVE> in prompt, got:\n%s", p)
 	}
 
-	count, _ := store.GetSessionTurnCount(ctx, "heartbeat-rot")
+	count, err := store.GetSessionTurnCount(ctx, "heartbeat-rot")
+	if err != nil {
+		t.Fatalf("GetSessionTurnCount: %v", err)
+	}
 	if count != 0 {
 		t.Fatalf("expected session turn count to be reset after rotation, but still > 0: %d", count)
 	}
@@ -412,7 +413,7 @@ func TestDispatchExecution_RetriesAndFailure(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			store := dbtest.NewFakeStore()
+			store := db.NewSQLStore(newTestDB(t))
 			ctx := context.Background()
 
 			disp := db.Dispatch{
@@ -422,7 +423,7 @@ func TestDispatchExecution_RetriesAndFailure(t *testing.T) {
 				Prompt:    tc.prompt,
 				Status:    db.StatusPending,
 			}
-			_, _ = store.InsertDispatch(ctx, disp)
+			seedDispatchRows(t, store, []db.Dispatch{disp})
 
 			pool := New(nil, WorkerPoolConfig{
 				Store:       store,
