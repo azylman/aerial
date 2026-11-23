@@ -418,9 +418,6 @@ func (s *PRObjectService) HandleCheckFailed(ctx restate.ObjectContext, ev PREven
 	return s.mutatePREvent(ctx, ev, func(st *PRState) {
 		if strings.TrimSpace(ev.CheckName) != "" {
 			st.RecordFailedCheckRunDetailed(ev.HeadSHA, ev.CheckName)
-			if !prwire.IsRoboRevCheck(ev.CheckName) {
-				st.RecordNonRoboRevFailedSHA(ev.HeadSHA)
-			}
 		}
 		st.RecordFailedCISHA(ev.HeadSHA)
 		st.ApplyRegistryCIFailed()
@@ -432,9 +429,6 @@ func (s *PRObjectService) HandleCheckPassed(ctx restate.ObjectContext, ev PREven
 	return s.mutatePREvent(ctx, ev, func(st *PRState) {
 		if strings.TrimSpace(ev.CheckName) != "" {
 			st.ClearFailedCheckRun(ev.HeadSHA, ev.CheckName)
-		}
-		if !st.HasActiveNonRoboRevFailures(ev.HeadSHA) {
-			st.DeleteNonRoboRevFailedSHA()
 		}
 		if !st.HasActiveFailedCheckRuns(ev.HeadSHA) {
 			st.ClearFailedCISHA()
@@ -455,9 +449,7 @@ func (s *PRObjectService) HandleCheckRerunRequested(ctx restate.ObjectContext, e
 // generation-scoped EffectKey through the owner's Discord sender when
 // prstate owns the event's effects.
 func (s *PRObjectService) HandleCollaboratorAlert(ctx restate.ObjectContext, ev PREvent) error {
-	return s.mutatePREvent(ctx, ev, func(st *PRState) {
-		st.MarkCollaboratorAlerted(ev.HeadSHA)
-	})
+	return s.mutatePREvent(ctx, ev, nil)
 }
 
 // HandleConflict is the merged conflict verdict: one exclusive invocation
@@ -555,15 +547,13 @@ func applyCIRecovered(st *PRState, ev PREvent) {
 // HandleConflictResolved applies one conflict-resolved event dark.
 func (s *PRObjectService) HandleConflictResolved(ctx restate.ObjectContext, ev PREvent) error {
 	return s.mutatePREvent(ctx, ev, func(st *PRState) {
-		resolveConflict(st, ev.HeadSHA)
+		resolveConflict(st)
 	})
 }
 
-// resolveConflict clears the published conflict and the collaborator
-// conflict alert for headSHA and reopens a conflict row.
-func resolveConflict(st *PRState, headSHA string) {
+// resolveConflict clears the published conflict and reopens a conflict row.
+func resolveConflict(st *PRState) {
 	st.ClearConflictPublished()
-	st.ClearCollaboratorConflict(headSHA)
 	st.ApplyRegistryRecovered(RegistryStatusConflict)
 }
 
@@ -785,7 +775,7 @@ func (s *PRObjectService) HandleSynchronized(ctx restate.ObjectContext, ev PREve
 		// A synchronize resolves a stored conflict itself: only PRObject
 		// knows the row was in conflict, so the synapse edge never sends a
 		// follow-up HandleConflictResolved.
-		resolveConflict(st, ev.HeadSHA)
+		resolveConflict(st)
 	}
 	st.DisarmDeployFailure()
 	st.ApplyIdentity(ev.Branch, ev.Title)
@@ -798,16 +788,11 @@ func (s *PRObjectService) HandleSynchronized(ctx restate.ObjectContext, ev PREve
 	return nil
 }
 
-// HandleDeployFailed applies one deploy failure (AtomicTransitionDeployFailed)
-// or, when Acknowledged, the confirmed deploy_failed publish
-// (AcknowledgeDeployFailedPublished). Merged PRs apply it.
+// HandleDeployFailed applies one deploy failure: the PR (re-)enters
+// deploy_failed with the newest banner. Merged PRs apply it.
 func (s *PRObjectService) HandleDeployFailed(ctx restate.ObjectContext, ev PREvent) error {
 	return s.mutateRolloutEvent(ctx, ev, prwire.PRHandlerDeployFailed, func(st *PRState) {
 		st.DisarmDeployFailure()
-		if ev.Acknowledged {
-			st.AckDeployFailedPublished()
-			return
-		}
 		st.ApplyRegistryDeployFailed(ev.Banner)
 	})
 }
@@ -833,8 +818,8 @@ func (s *PRObjectService) HandleCheckStatus(ctx restate.ObjectContext, ev PREven
 }
 
 // HandleDeploySuccess is the merged deploy_success verdict: one exclusive
-// invocation resolves the publish decision from the deploy_dispatch key and
-// both dedup slots, commits them plus the deployed row status, then
+// invocation resolves the publish decision from the deploy_dispatch key,
+// commits it plus the deployed row status, then
 // publishes the deploy_success facts the event carries.
 func (s *PRObjectService) HandleDeploySuccess(ctx restate.ObjectContext, ev PREvent) (DeployDispatchDecision, error) {
 	if dropped, err := s.dropUntrackedEvent(ctx, ev, prwire.PRHandlerDeploySuccess); dropped || err != nil {
@@ -847,8 +832,8 @@ func (s *PRObjectService) HandleDeploySuccess(ctx restate.ObjectContext, ev PREv
 		})
 }
 
-// commitDeploySuccess records the deploy_dispatch key, both dedup slots and
-// the deployed row status, disarms any pending deploy-failure deadline, and
+// commitDeploySuccess records the deploy_dispatch key and the deployed row
+// status, disarms any pending deploy-failure deadline, and
 // persists them on apply. A first record indexes the PR as deployed.
 func (s *PRObjectService) commitDeploySuccess(ctx restate.ObjectContext, st *PRState, ev PREvent) error {
 	before := snapshotIndexView(st)
@@ -856,8 +841,7 @@ func (s *PRObjectService) commitDeploySuccess(ctx restate.ObjectContext, st *PRS
 	if err != nil || out.Disposition != DispositionApply {
 		return err
 	}
-	headRecovered := st.Terminal == TerminalMerged && st.HeadSHA != before.head
-	if headRecovered {
+	if st.Terminal == TerminalMerged && st.HeadSHA != before.head {
 		noteMergedHeadRecovered(ctx, st, before.head)
 	}
 	// Only a watcher-tracked rollout flips the row: it records the completed
@@ -871,12 +855,7 @@ func (s *PRObjectService) commitDeploySuccess(ctx restate.ObjectContext, st *PRS
 	}
 	st.DisarmDeployFailure()
 	restate.Set(ctx, s.stateKey, st)
-	switch {
-	case !out.Deduped:
-		sendPRIndex(ctx, st, ev, IndexDeployed)
-	case headRecovered:
-		sendPRIndex(ctx, st, ev, IndexActive)
-	}
+	sendPRIndex(ctx, st, ev, IndexDeployed)
 	return nil
 }
 
@@ -940,13 +919,11 @@ func (s *PRObjectService) GetBuildLifecycle(ctx restate.ObjectSharedContext, _ B
 	return st.BuildLifecycleView(), nil
 }
 
-// HandleMainAdvanced clears updated-for-main after RepoObject recorded a new
-// main push SHA, mirroring StateTracker.ClearUpdatedPRsForMainCommit. It is
-// the one-way target of RepoObject main-push fan-out.
+// HandleMainAdvanced is the one-way target of RepoObject main-push fan-out.
+// It applies the event to the PR row; the per-PR updated-for-main flag lives
+// in RepoState and RepoObject clears it itself on a new main push.
 func (s *PRObjectService) HandleMainAdvanced(ctx restate.ObjectContext, ev PREvent) error {
-	return s.mutatePREvent(ctx, ev, func(st *PRState) {
-		st.ClearUpdatedForMain()
-	})
+	return s.applyPREvent(ctx, ev)
 }
 
 // RepoObjectService is the RepoObject Virtual Object. Each handler builds

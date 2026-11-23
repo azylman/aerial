@@ -62,16 +62,13 @@ var (
 	errFakeSchedule = errors.New("fake recheck schedule failed")
 )
 
-func seedConflictPR(store *MemPRStore, head string, gen, epoch uint64, terminal TerminalState, conflictMark string, dispatched bool) string {
+func seedConflictPR(store *MemPRStore, head string, gen, epoch uint64, terminal TerminalState, dispatched bool) string {
 	key := prwire.PRObjectKey("azylman/aerial", 101)
 	ps := NewPRState("azylman/aerial", 101)
 	ps.HeadSHA = head
 	ps.GateGeneration = gen
 	ps.ReopenEpoch = epoch
 	ps.Terminal = terminal
-	if conflictMark != "" {
-		ps.MarkCollaboratorConflict(conflictMark)
-	}
 	if dispatched {
 		ps.MarkEffectDispatched(ps.EffectKeyFor(prwire.EffectGitHubConflictCheck, head, "", ""))
 	}
@@ -85,14 +82,13 @@ type conflictSeed struct {
 	head       string
 	gen, epoch uint64
 	terminal   TerminalState
-	mark       string
 	dispatched bool
 }
 
 // TestHandleConflictCheck pins the journaled conflict-check effect: stale,
 // terminal and malformed heads skip the checker, a dispatched key skips it
-// too, clean checks clear the mark, conflicts mark only once the recheck is
-// scheduled, and checker failures schedule a backoff recheck.
+// too, clean checks record the effect key, conflicts record it only once the
+// recheck is scheduled, and checker failures schedule a backoff recheck.
 func TestHandleConflictCheck(t *testing.T) {
 	t.Parallel()
 	rateLimited := &GitHubError{Status: 403, RateLimited: true, RetryAfter: 5 * time.Minute, Message: "rate limit"}
@@ -108,29 +104,29 @@ func TestHandleConflictCheck(t *testing.T) {
 		want             ConflictOutcome
 		wantCheckerCalls int
 		wantDelays       []time.Duration
-		wantMark         string
+		wantDispatched   bool
 	}{
 		{name: "stale head drops without effect", seed: conflictSeed{head: "abc123"}, evHead: "def456", want: ConflictOutcome{Disposition: DispositionDropStale}},
 		{name: "terminal merged absorbs", seed: conflictSeed{head: "abc123", terminal: TerminalMerged}, evHead: "abc123", want: ConflictOutcome{Disposition: DispositionAbsorbTerminal}},
 		{name: "terminal closed absorbs", seed: conflictSeed{head: "abc123", terminal: TerminalClosed}, evHead: "abc123", want: ConflictOutcome{Disposition: DispositionAbsorbTerminal}},
 		{
 			name: "reopen epoch applies after terminal", seed: conflictSeed{head: "abc123", epoch: 1, terminal: TerminalMerged}, evHead: "abc123", evEpoch: 2,
-			want: ConflictOutcome{Disposition: DispositionApply}, wantCheckerCalls: 1,
+			want: ConflictOutcome{Disposition: DispositionApply}, wantCheckerCalls: 1, wantDispatched: true,
 		},
 		{name: "empty head drops", seed: conflictSeed{head: "abc123"}, evHead: "", want: ConflictOutcome{Disposition: DispositionDropStale}},
 		{name: "zero head drops", seed: conflictSeed{head: "abc123"}, evHead: "0000000", want: ConflictOutcome{Disposition: DispositionDropStale}},
 		{
 			name: "already dispatched skips checker", seed: conflictSeed{head: "abc123", gen: 2, dispatched: true}, evHead: "abc123",
-			want: ConflictOutcome{Disposition: DispositionApply, AlreadyDispatched: true},
+			want: ConflictOutcome{Disposition: DispositionApply, AlreadyDispatched: true}, wantDispatched: true,
 		},
 		{name: "missing pr errors", evHead: "abc123", wantErr: true},
 		{
-			name: "clean check clears mark", seed: conflictSeed{head: "abc123", gen: 2, mark: "abc123"}, evHead: "abc123",
-			want: ConflictOutcome{Disposition: DispositionApply}, wantCheckerCalls: 1,
+			name: "clean check records the effect key", seed: openSeed, evHead: "abc123",
+			want: ConflictOutcome{Disposition: DispositionApply}, wantCheckerCalls: 1, wantDispatched: true,
 		},
 		{
-			name: "conflict marks and schedules recheck", seed: openSeed, evHead: "abc123", checker: fakeConflictChecker{conflicted: true},
-			want: ConflictOutcome{Disposition: DispositionApply, Conflicted: true, RecheckScheduled: true}, wantCheckerCalls: 1, wantDelays: []time.Duration{ConflictRecheckDelay}, wantMark: "abc123",
+			name: "conflict records the effect key and schedules recheck", seed: openSeed, evHead: "abc123", checker: fakeConflictChecker{conflicted: true},
+			want: ConflictOutcome{Disposition: DispositionApply, Conflicted: true, RecheckScheduled: true}, wantCheckerCalls: 1, wantDelays: []time.Duration{ConflictRecheckDelay}, wantDispatched: true,
 		},
 		{
 			name: "checker error schedules recheck and errors", seed: openSeed, evHead: "abc123", checker: fakeConflictChecker{err: errFakeCheck}, wantErr: true,
@@ -155,7 +151,7 @@ func TestHandleConflictCheck(t *testing.T) {
 			store := NewMemPRStore()
 			key := prwire.PRObjectKey("azylman/aerial", 101)
 			if tc.seed.head != "" {
-				seedConflictPR(store, tc.seed.head, tc.seed.gen, tc.seed.epoch, tc.seed.terminal, tc.seed.mark, tc.seed.dispatched)
+				seedConflictPR(store, tc.seed.head, tc.seed.gen, tc.seed.epoch, tc.seed.terminal, tc.seed.dispatched)
 			}
 			checker, sched := tc.checker, tc.sched
 			h := testConflictHandlers(t, store, &checker, &sched)
@@ -184,8 +180,8 @@ func TestHandleConflictCheck(t *testing.T) {
 			if !ok {
 				t.Fatalf("PR %q missing after check", key)
 			}
-			if ps.CollaboratorConflict != tc.wantMark {
-				t.Fatalf("conflict mark = %q, want %q", ps.CollaboratorConflict, tc.wantMark)
+			if got := ps.WasEffectDispatched(ps.EffectKeyFor(prwire.EffectGitHubConflictCheck, ps.HeadSHA, "", "")); got != tc.wantDispatched {
+				t.Fatalf("conflict check key dispatched = %v, want %v", got, tc.wantDispatched)
 			}
 		})
 	}
@@ -194,21 +190,21 @@ func TestHandleConflictCheck(t *testing.T) {
 func TestHandleConflictCheckConflictedRetry(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name          string
-		failCalls     int
-		wantFirstErr  bool
-		wantSecondErr bool
-		wantMark      string
+		name           string
+		failCalls      int
+		wantFirstErr   bool
+		wantSecondErr  bool
+		wantDispatched bool
 	}{
-		{name: "schedule fails once then retry succeeds", failCalls: 1, wantFirstErr: true, wantMark: "abc123"},
-		{name: "schedule keeps failing", failCalls: 9, wantFirstErr: true, wantSecondErr: true, wantMark: ""},
+		{name: "schedule fails once then retry succeeds", failCalls: 1, wantFirstErr: true, wantDispatched: true},
+		{name: "schedule keeps failing", failCalls: 9, wantFirstErr: true, wantSecondErr: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			ctx := context.Background()
 			store := NewMemPRStore()
-			key := seedConflictPR(store, "abc123", 2, 0, TerminalNone, "", false)
+			key := seedConflictPR(store, "abc123", 2, 0, TerminalNone, false)
 			scheduler := &fakeRescheduler{err: errFakeSchedule, failCalls: tc.failCalls}
 			h := testConflictHandlers(t, store, &fakeConflictChecker{conflicted: true}, scheduler)
 			ev := PREvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "abc123", GateGeneration: 2}
@@ -233,8 +229,8 @@ func TestHandleConflictCheckConflictedRetry(t *testing.T) {
 			if !ok {
 				t.Fatalf("PR %q missing after retry", key)
 			}
-			if ps.CollaboratorConflict != tc.wantMark {
-				t.Fatalf("conflict mark = %q, want %q", ps.CollaboratorConflict, tc.wantMark)
+			if got := ps.WasEffectDispatched(ps.EffectKeyFor(prwire.EffectGitHubConflictCheck, "abc123", "", "")); got != tc.wantDispatched {
+				t.Fatalf("conflict check key dispatched = %v, want %v", got, tc.wantDispatched)
 			}
 		})
 	}
