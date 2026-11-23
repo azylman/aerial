@@ -534,7 +534,10 @@ func TestSummarizerMultiAgentSweep(t *testing.T) {
 	}
 
 	// Verify aerial summary
-	sumAerial, markAerial, _ := readSummaryRow(t, db, "sess-aerial")
+	sumAerial, markAerial, settled := readSummaryRow(t, db, "sess-aerial")
+	if settled {
+		t.Errorf("unexpected settled")
+	}
 	if markAerial != 2 || sumAerial != "multi-agent summary" {
 		t.Errorf("aerial session: watermark = %d, summary = %q", markAerial, sumAerial)
 	}

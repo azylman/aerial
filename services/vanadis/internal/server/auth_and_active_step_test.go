@@ -86,7 +86,9 @@ func TestServer_MissingCallerInContext(t *testing.T) {
 	mem := newMemoryVanadisStore()
 	b1 := storetest.Build("b1", "1234567890", "Build 1", "Obj 1", "running")
 	c1 := storetest.Chunk("c1", "b1", 0, "Chunk 1", "Inst 1", "medium", "running")
-	_ = mem.CreateBuild(context.Background(), b1, []VanadisChunk{c1})
+	if err := mem.CreateBuild(context.Background(), b1, []VanadisChunk{c1}); err != nil {
+		t.Fatalf("CreateBuild failed: %v", err)
+	}
 
 	srv := NewVanadisServer(Config{}, RestateConfig{}, mem, nil, auth)
 
@@ -366,7 +368,10 @@ func TestProcessActiveStepUpdate_TrailingFlushAndPrune(t *testing.T) {
 	var payloadMu sync.Mutex
 	mockRestate := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req UpdateActiveStepRequest
-		_ = json.NewDecoder(r.Body).Decode(&req)
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
 		payloadMu.Lock()
 		lastPayload = req
 		payloadMu.Unlock()

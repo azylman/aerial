@@ -72,7 +72,8 @@ func newFactsUpstream(t *testing.T) *httptest.Server {
 		case q.Get("q") == "dark mode":
 			_, _ = w.Write([]byte(`{"facts":[{"id":1,"fact_text":"User prefers dark mode","reinforce_count":2,"last_reinforced_at":"2026-01-02T03:04:05Z","created_at":"2026-01-01T03:04:05Z"}],"total":1,"limit":25}`))
 		default:
-			_, _ = fmt.Fprintf(w, `{"facts":[{"id":1,"fact_text":%q,"reinforce_count":1,"created_at":"2026-01-01T03:04:05Z","agent":"aerial"}],"total":120,"limit":50}`, "query:"+r.URL.RawQuery)
+			resp := fmt.Sprintf(`{"facts":[{"id":1,"fact_text":%q,"reinforce_count":1,"created_at":"2026-01-01T03:04:05Z","agent":"aerial"}],"total":120,"limit":50}`, "query:"+r.URL.RawQuery)
+			_, _ = io.WriteString(w, resp)
 		}
 	}))
 	t.Cleanup(srv.Close)
@@ -135,7 +136,8 @@ func newSchedulesUpstream(t *testing.T) *httptest.Server {
 		case r.URL.Path == "/nil/schedules/runs":
 			_, _ = w.Write([]byte(`{"status":"ok","total":0,"limit":10,"offset":5,"runs":null}`))
 		case r.URL.Path == "/schedules/runs":
-			_, _ = fmt.Fprintf(w, scheduleRunsUpstreamFormat, "query:"+r.URL.RawQuery)
+			resp := fmt.Sprintf(scheduleRunsUpstreamFormat, "query:"+r.URL.RawQuery)
+			_, _ = io.WriteString(w, resp)
 		case r.URL.Path == "/schedules":
 			_, _ = w.Write([]byte(schedulesUpstreamBody))
 		default:
@@ -454,7 +456,10 @@ func TestVanadisHTTPClientAuthorization(t *testing.T) {
 				t.Fatalf("request failed: %v", err)
 			}
 			defer resp.Body.Close()
-			body, _ := io.ReadAll(resp.Body)
+			body, err := io.ReadAll(resp.Body)
+			if err != nil {
+				t.Fatalf("failed to read response body: %v", err)
+			}
 			if string(body) != tc.wantAuth {
 				t.Fatalf("Authorization = %q, want %q", string(body), tc.wantAuth)
 			}
