@@ -22,7 +22,10 @@ COPY services/eri-restate/ ./
 RUN --mount=type=cache,target=/root/.cache/go-build \
     --mount=type=cache,target=/go/pkg/mod \
     CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /hook-guard /src/services/eri/cmd/hook-guard && \
-    CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /transcript-search /src/services/eri/cmd/transcript-search
+    CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /transcript-search /src/services/eri/cmd/transcript-search && \
+    git clone --depth 1 --branch v0.54.0 https://github.com/bazelbuild/bazel-gazelle.git /tmp/gazelle && \
+    (cd /tmp/gazelle && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/bin/gazelle ./cmd/gazelle) && \
+    rm -rf /tmp/gazelle
 
 # -coverpkg instruments the eri and shared pkg packages linked into eri-restate too, so eri code
 # that only runs here reports prod coverage (service eri-restate) instead of looking dead.
@@ -103,6 +106,12 @@ ARG MUSE_VERSION=1.4.23-R8977.1
 ARG MUSE_SHA256=7ca9e16659f759eab3ae6c4b61c6f1e70f5f3fea1ca961ebd49044a1146956f4
 ARG LINK_CLI_VERSION=1.0.0
 ARG LINK_CLI_SHA256=40fa5fbade72cc9fde4014312fa5b7a3eeb6b7b151e0a97539991100f3e9943f
+ARG BAZELISK_VERSION=v1.30.0
+ARG BAZELISK_SHA256=a248ae2b2b62b5baebb748f6fba7203bff1a27e5d01b55399a8406744cb539e8
+ARG BUILDIFIER_VERSION=v10.2.0
+ARG BUILDIFIER_SHA256=470844069d710d0b7740e55007071c63e4d00be89a833dce5d1a91790e84dc28
+ARG CRANE_VERSION=v0.22.1
+ARG CRANE_SHA256=0ab7a1d6932a213aed964ce97666c3077fe691c8606413674a8b3e0b9ec4cda0
 
 RUN mkdir -p /out/usr/local/bin && \
     curl -fsSL https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl -o /out/usr/local/bin/kubectl && \
@@ -128,7 +137,19 @@ RUN mkdir -p /out/usr/local/bin && \
     chmod 0755 /out/usr/local/bin/muse && \
     curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 "https://github.com/stripe/link-cli/releases/download/%40stripe/link-cli%40${LINK_CLI_VERSION}/link-cli-linux-x64" -o /out/usr/local/bin/link-cli && \
     echo "${LINK_CLI_SHA256}  /out/usr/local/bin/link-cli" | sha256sum -c - && \
-    chmod 0755 /out/usr/local/bin/link-cli
+    chmod 0755 /out/usr/local/bin/link-cli && \
+    curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 "https://github.com/bazelbuild/bazelisk/releases/download/${BAZELISK_VERSION}/bazelisk-linux-amd64" -o /out/usr/local/bin/bazelisk && \
+    echo "${BAZELISK_SHA256}  /out/usr/local/bin/bazelisk" | sha256sum -c - && \
+    chmod 0755 /out/usr/local/bin/bazelisk && \
+    ln -s bazelisk /out/usr/local/bin/bazel && \
+    curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 "https://github.com/bazelbuild/buildtools/releases/download/${BUILDIFIER_VERSION}/buildifier-linux-amd64" -o /out/usr/local/bin/buildifier && \
+    echo "${BUILDIFIER_SHA256}  /out/usr/local/bin/buildifier" | sha256sum -c - && \
+    chmod 0755 /out/usr/local/bin/buildifier && \
+    curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 "https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}/go-containerregistry_Linux_x86_64.tar.gz" -o /tmp/crane.tar.gz && \
+    echo "${CRANE_SHA256}  /tmp/crane.tar.gz" | sha256sum -c - && \
+    tar -xzf /tmp/crane.tar.gz -C /out/usr/local/bin crane && \
+    chmod 0755 /out/usr/local/bin/crane && \
+    rm -f /tmp/crane.tar.gz
 
 # --- Runtime stage -------------------------------------------------------
 FROM ubuntu:24.04
@@ -227,13 +248,20 @@ RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm && \
 COPY --link --from=npm-tools /opt/npm-global /opt/npm-global
 COPY --link --from=arigaio/atlas:1.3.4 /atlas /usr/local/bin/atlas
 COPY --link --from=1password/op:2 /usr/local/bin/op /usr/local/bin/op
+COPY --link --from=builder /out/bin/* /usr/local/bin/
 COPY --link --from=cli-tools /out/usr/local/bin/ /usr/local/bin/
 
-ENV RUSTUP_HOME="/usr/local/rustup" \
+ENV BAZELISK_HOME=/opt/bazel-cache \
+    RUSTUP_HOME="/usr/local/rustup" \
     CARGO_HOME="/usr/local/cargo" \
     PATH="/opt/npm-global/bin:/usr/local/cargo/bin:/usr/local/go/bin:/root/go/bin:${PATH}"
 ENV AGY_CLI_DISABLE_AUTO_UPDATE=true
 ENV LINK_AUTH_FILE="/data/runtimes/discord/.config/link-cli-nodejs/config.json"
+
+RUN BAZELISK_HOME=/opt/bazel-cache USE_BAZEL_VERSION=9.3.3 /usr/local/bin/bazelisk version && \
+    chmod -R a+rX /opt/bazel-cache && \
+    echo 'common --config=cluster' > /etc/bazel.bazelrc && \
+    chmod 0644 /etc/bazel.bazelrc
 
 # Copy decoupled superpowers skills
 COPY --link --from=superpowers /opt/skills /opt/skills
