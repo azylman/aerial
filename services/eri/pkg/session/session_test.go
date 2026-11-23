@@ -283,10 +283,14 @@ func TestGetLastStepIndex(t *testing.T) {
 				p = tmp
 			case tc.isParentFile:
 				parentFile := filepath.Join(tmp, "not-a-dir")
-				_ = os.WriteFile(parentFile, []byte("file"), 0o644)
+				if err := os.WriteFile(parentFile, []byte("file"), 0o644); err != nil {
+					t.Fatalf("WriteFile: %v", err)
+				}
 				p = filepath.Join(parentFile, "transcript.jsonl")
 			case !tc.isMissing:
-				_ = os.WriteFile(p, []byte(tc.content), 0o644)
+				if err := os.WriteFile(p, []byte(tc.content), 0o644); err != nil {
+					t.Fatalf("WriteFile: %v", err)
+				}
 			}
 			idx, err := getLastStepIndex(p)
 			if (err != nil) != tc.wantErr {
@@ -589,13 +593,21 @@ func setupExtractErrorFixtures(t *testing.T, mgr *Manager, tc extractLastTurnErr
 	}
 	if tc.claudeTranscript != "" {
 		projDir := filepath.Join(tmp, "data", "claude", "projects", "-test-proj")
-		_ = os.MkdirAll(projDir, 0o755)
-		_ = os.WriteFile(filepath.Join(projDir, tc.convID+".jsonl"), []byte(tc.claudeTranscript), 0o644)
+		if err := os.MkdirAll(projDir, 0o755); err != nil {
+			t.Fatalf("MkdirAll: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(projDir, tc.convID+".jsonl"), []byte(tc.claudeTranscript), 0o644); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
 	}
 	if tc.museTranscript != "" {
 		museDir := filepath.Join(tmp, "data", "muse", "sessions")
-		_ = os.MkdirAll(museDir, 0o755)
-		_ = os.WriteFile(filepath.Join(museDir, tc.convID+".jsonl"), []byte(tc.museTranscript), 0o644)
+		if err := os.MkdirAll(museDir, 0o755); err != nil {
+			t.Fatalf("MkdirAll: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(museDir, tc.convID+".jsonl"), []byte(tc.museTranscript), 0o644); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
 	}
 }
 
@@ -653,18 +665,30 @@ func setupExtractResponseFixtures(t *testing.T, mgr *Manager, tc extractResponse
 	}
 	if tc.claudeTranscript != "" {
 		projDir := filepath.Join(tmp, "data", "claude", "projects", "-test-proj")
-		_ = os.MkdirAll(projDir, 0o755)
-		_ = os.WriteFile(filepath.Join(projDir, tc.convID+".jsonl"), []byte(tc.claudeTranscript), 0o644)
+		if err := os.MkdirAll(projDir, 0o755); err != nil {
+			t.Fatalf("MkdirAll: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(projDir, tc.convID+".jsonl"), []byte(tc.claudeTranscript), 0o644); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
 	}
 	if tc.museTranscript != "" {
 		museDir := filepath.Join(tmp, "data", "muse", "sessions")
-		_ = os.MkdirAll(museDir, 0o755)
-		_ = os.WriteFile(filepath.Join(museDir, tc.convID+".jsonl"), []byte(tc.museTranscript), 0o644)
+		if err := os.MkdirAll(museDir, 0o755); err != nil {
+			t.Fatalf("MkdirAll: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(museDir, tc.convID+".jsonl"), []byte(tc.museTranscript), 0o644); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
 	}
 	if tc.codexTranscript != "" {
 		codexDir := filepath.Join(tmp, "data", "codex", "sessions", "2026", "10", "19")
-		_ = os.MkdirAll(codexDir, 0o755)
-		_ = os.WriteFile(filepath.Join(codexDir, "rollout-"+tc.convID+".jsonl"), []byte(tc.codexTranscript), 0o644)
+		if err := os.MkdirAll(codexDir, 0o755); err != nil {
+			t.Fatalf("MkdirAll: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(codexDir, "rollout-"+tc.convID+".jsonl"), []byte(tc.codexTranscript), 0o644); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
 	}
 }
 
@@ -859,10 +883,16 @@ func setupSessionStorageMetrics(t *testing.T, mgr *Manager, tc sessionStorageMet
 	t.Helper()
 	convDir := filepath.Join(tmp, "conversations")
 	if tc.statErrFile {
-		_ = os.WriteFile(convDir, []byte("file"), 0o644)
+		if err := os.WriteFile(convDir, []byte("file"), 0o644); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
 		sessDir := filepath.Join(tmp, "brain", tc.sessionID)
-		_ = os.MkdirAll(sessDir, 0o755)
-		_ = os.WriteFile(filepath.Join(sessDir, ".system_generated"), []byte("file"), 0o644)
+		if err := os.MkdirAll(sessDir, 0o755); err != nil {
+			t.Fatalf("MkdirAll: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(sessDir, ".system_generated"), []byte("file"), 0o644); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
 	}
 	if tc.rtDir {
 		rtDir := filepath.Join(tmp, "runtimes", "discord", ".gemini", "antigravity-cli", "conversations")
@@ -877,31 +907,46 @@ func setupSessionStorageMetrics(t *testing.T, mgr *Manager, tc sessionStorageMet
 	setupSessionStorageTranscript(t, mgr, tc)
 }
 
+func buildTranscriptContent(stepCount, turnCount, transSize int) string {
+	if stepCount > 0 {
+		var sb strings.Builder
+		for i := range stepCount {
+			typ := "PLANNER_RESPONSE"
+			source := "MODEL"
+			if i < turnCount {
+				typ = "USER_INPUT"
+				source = "USER_EXPLICIT"
+			}
+			fmt.Fprintf(&sb, `{"step_index":%d,"source":%q,"type":%q,"content":"msg"}`+"\n", i, source, typ)
+		}
+		return sb.String()
+	}
+	if transSize > 0 {
+		return strings.Repeat("x", transSize)
+	}
+	return ""
+}
+
 func setupSessionStorageTranscript(t *testing.T, mgr *Manager, tc sessionStorageMetricsCase) {
 	t.Helper()
 	if tc.transSize > 0 || tc.zeroByteFiles {
-		sessDir, _ := mgr.EnsureSessionDir(tc.sessionID)
-		var content string
-		if tc.stepCount > 0 {
-			var sb strings.Builder
-			for i := range tc.stepCount {
-				typ := "PLANNER_RESPONSE"
-				source := "MODEL"
-				if i < tc.turnCount {
-					typ = "USER_INPUT"
-					source = "USER_EXPLICIT"
-				}
-				fmt.Fprintf(&sb, `{"step_index":%d,"source":%q,"type":%q,"content":"msg"}`+"\n", i, source, typ)
-			}
-			content = sb.String()
-		} else if tc.transSize > 0 {
-			content = strings.Repeat("x", tc.transSize)
+		sessDir, err := mgr.EnsureSessionDir(tc.sessionID)
+		if err != nil {
+			t.Fatalf("EnsureSessionDir: %v", err)
 		}
-		_ = os.WriteFile(filepath.Join(sessDir, ".system_generated", "logs", "transcript.jsonl"), []byte(content), 0o644)
+		content := buildTranscriptContent(tc.stepCount, tc.turnCount, tc.transSize)
+		if err := os.WriteFile(filepath.Join(sessDir, ".system_generated", "logs", "transcript.jsonl"), []byte(content), 0o644); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
 	}
 	if tc.fullSize > 0 {
-		sessDir, _ := mgr.EnsureSessionDir(tc.sessionID)
-		_ = os.WriteFile(filepath.Join(sessDir, ".system_generated", "logs", "transcript_full.jsonl"), []byte(strings.Repeat("y", tc.fullSize)), 0o644)
+		sessDir, err := mgr.EnsureSessionDir(tc.sessionID)
+		if err != nil {
+			t.Fatalf("EnsureSessionDir: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(sessDir, ".system_generated", "logs", "transcript_full.jsonl"), []byte(strings.Repeat("y", tc.fullSize)), 0o644); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
 	}
 }
 
@@ -1388,7 +1433,11 @@ func TestExtractClaudeErrorFromLine(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if got, _ := extractClaudeErrorFromLine(tc.line, time.Time{}); got != tc.wantError {
+			got, beforeCutoff := extractClaudeErrorFromLine(tc.line, time.Time{})
+			if beforeCutoff {
+				t.Fatalf("expected beforeCutoff to be false with zero time cutoff")
+			}
+			if got != tc.wantError {
 				t.Fatalf("extractClaudeErrorFromLine = %q, want %q", got, tc.wantError)
 			}
 		})

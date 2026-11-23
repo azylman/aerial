@@ -255,24 +255,36 @@ func TestCheckBatchWithDir_InvocationGrouping(t *testing.T) {
 	t.Parallel()
 	now := time.Now()
 	invDir := t.TempDir()
-	_ = RecordPreInvocationWithDir(Payload{ConversationID: "inv-s", InvocationNum: 1}, invDir, now)
+	if resp := RecordPreInvocationWithDir(Payload{ConversationID: "inv-s", InvocationNum: 1}, invDir, now); resp == nil {
+		t.Fatal("expected non-nil response")
+	}
 	for i := range 4 {
 		if d := CheckBatchWithDir(Payload{ConversationID: "inv-s", StepIdx: 10 + i, ToolCall: ToolCall{Name: "edit_file"}}, ToolArgs{TargetFile: "/tmp/same_turn.go"}, invDir, now.Add(time.Duration(i*3)*time.Second), mapEnv(nil)); d.Decision != DecisionAllow {
 			t.Fatalf("parallel edit %d in same invocationNum=1 should be allowed, got: %+v", i, d)
 		}
 	}
 	for i := 1; i <= 3; i++ {
-		_ = RecordPreInvocationWithDir(Payload{ConversationID: "post-s", InvocationNum: i}, invDir, now.Add(time.Duration(i*2)*time.Second))
+		if resp := RecordPreInvocationWithDir(Payload{ConversationID: "post-s", InvocationNum: i}, invDir, now.Add(time.Duration(i*2)*time.Second)); resp == nil {
+			t.Fatal("expected non-nil response")
+		}
 		if d := CheckBatchWithDir(Payload{ConversationID: "post-s", StepIdx: i, ToolCall: ToolCall{Name: "edit_file"}}, ToolArgs{TargetFile: "/tmp/rb.go"}, invDir, now.Add(time.Duration(i*2)*time.Second), mapEnv(nil)); d.Decision != DecisionAllow {
 			t.Fatalf("turn %d expected allow after rolling back turn 2 failed edit, got: %+v", i, d)
 		}
 		if i == 2 {
-			_ = RecordPostBatchWithDir(Payload{ConversationID: "post-s", StepIdx: 2, Error: "not found", ToolCall: ToolCall{Name: "edit_file"}}, ToolArgs{TargetFile: "/tmp/rb.go"}, invDir, now, mapEnv(nil))
+			if resp := RecordPostBatchWithDir(Payload{ConversationID: "post-s", StepIdx: 2, Error: "not found", ToolCall: ToolCall{Name: "edit_file"}}, ToolArgs{TargetFile: "/tmp/rb.go"}, invDir, now, mapEnv(nil)); resp == nil {
+				t.Fatal("expected non-nil response")
+			}
 		}
 	}
-	_ = RecordPostBatchWithDir(Payload{ConversationID: "post-s", StepIdx: 99, Error: "failed", ToolCall: ToolCall{Name: "edit_file"}}, ToolArgs{TargetFile: "/tmp/rb.go"}, invDir, now, mapEnv(nil))
-	_ = RecordPostBatchWithDir(Payload{ConversationID: "post-s", StepIdx: 3, Error: "", ToolCall: ToolCall{Name: "edit_file"}}, ToolArgs{TargetFile: "/tmp/rb.go"}, invDir, now, mapEnv(nil))
-	_ = RecordPostBatchWithDir(Payload{ConversationID: "post-s", StepIdx: 4, Error: "", ToolCall: ToolCall{Name: "run_command"}}, ToolArgs{CommandLine: "scripts/aerial-pr.sh submit /data/scratch/x 'feat: test'"}, invDir, now, mapEnv(nil))
+	if resp := RecordPostBatchWithDir(Payload{ConversationID: "post-s", StepIdx: 99, Error: "failed", ToolCall: ToolCall{Name: "edit_file"}}, ToolArgs{TargetFile: "/tmp/rb.go"}, invDir, now, mapEnv(nil)); resp == nil {
+		t.Fatal("expected non-nil response")
+	}
+	if resp := RecordPostBatchWithDir(Payload{ConversationID: "post-s", StepIdx: 3, Error: "", ToolCall: ToolCall{Name: "edit_file"}}, ToolArgs{TargetFile: "/tmp/rb.go"}, invDir, now, mapEnv(nil)); resp == nil {
+		t.Fatal("expected non-nil response")
+	}
+	if resp := RecordPostBatchWithDir(Payload{ConversationID: "post-s", StepIdx: 4, Error: "", ToolCall: ToolCall{Name: "run_command"}}, ToolArgs{CommandLine: "scripts/aerial-pr.sh submit /data/scratch/x 'feat: test'"}, invDir, now, mapEnv(nil)); resp == nil {
+		t.Fatal("expected non-nil response")
+	}
 }
 
 func TestCheckBatch(t *testing.T) {
