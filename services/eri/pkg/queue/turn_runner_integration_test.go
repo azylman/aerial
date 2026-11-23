@@ -684,8 +684,8 @@ func (e *itEnv) row(id string) (itRow, bool) {
 // (cross-partition send), so quiescence alone can pass in that window.
 func (e *itEnv) idle() bool {
 	for id, want := range e.tc.wantRows {
-		got, _ := e.row(id)
-		if got.status != want.status {
+		got, ok := e.row(id)
+		if !ok || got.status != want.status {
 			return false
 		}
 	}
@@ -739,8 +739,8 @@ func (e *itEnv) stateKeys() []string {
 func (e *itEnv) assertRequeued() {
 	e.t.Helper()
 	for id, retry := range e.tc.wantRequeued {
-		got, _ := e.row(id)
-		if got.status != db.StatusPending || got.retry != retry {
+		got, ok := e.row(id)
+		if !ok || got.status != db.StatusPending || got.retry != retry {
 			e.t.Errorf("row %s while waiting = {%s retry=%d}, want {PENDING retry=%d}", id, got.status, got.retry, retry)
 		}
 	}
