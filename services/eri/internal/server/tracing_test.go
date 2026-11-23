@@ -18,7 +18,6 @@ import (
 
 	"github.com/azylman/aerial/pkg/eriwire"
 	"github.com/azylman/aerial/pkg/tracing"
-	"github.com/azylman/aerial/services/eri/pkg/db/dbtest"
 	"github.com/azylman/aerial/services/eri/pkg/queue"
 )
 
@@ -98,9 +97,8 @@ channels:
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			capture := installRestateCapture(t, http.StatusOK, `{"status":"accepted"}`)
-			store := dbtest.NewFakeStore()
 			mux := http.NewServeMux()
-			mux.HandleFunc("/internal/discord/message", handleInternalDiscordMessage(newTestWorkerPool(store)))
+			mux.HandleFunc("/internal/discord/message", handleInternalDiscordMessage(newTestWorkerPool(newTestStore(t))))
 
 			req := httptest.NewRequest(http.MethodPost, "/internal/discord/message", strings.NewReader(tc.body))
 			if tc.traceparent != "" {
@@ -154,9 +152,9 @@ channels:
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			capture := installRestateCapture(t, http.StatusOK, `{"status":"accepted"}`)
-			store := dbtest.NewFakeStore()
+			// No message_id in the body, so handlePrompt never reaches the store.
 			mux := http.NewServeMux()
-			mux.HandleFunc("/prompt", handlePrompt(store, nil))
+			mux.HandleFunc("/prompt", handlePrompt(nil, nil))
 
 			req := httptest.NewRequest(http.MethodPost, "/prompt", strings.NewReader(tc.body))
 			if tc.traceparent != "" {
@@ -210,9 +208,8 @@ channels:
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			capture := installRestateCapture(t, http.StatusOK, `{"status":"accepted"}`)
-			store := dbtest.NewFakeStore()
 			mux := http.NewServeMux()
-			mux.HandleFunc("/dispatch", handleDispatch(store))
+			mux.HandleFunc("/dispatch", handleDispatch(newTestStore(t)))
 
 			req := httptest.NewRequest(http.MethodPost, "/dispatch", strings.NewReader(tc.body))
 			if tc.traceparent != "" {

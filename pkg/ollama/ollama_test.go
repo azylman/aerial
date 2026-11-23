@@ -50,8 +50,8 @@ func TestNewDynamicClient_TableDriven(t *testing.T) {
 				client = NewDynamicClient(func() Config { return tc.cfg })
 			}
 
-			if got := client.BaseURL(); got != tc.wantBaseURL {
-				t.Errorf("BaseURL() = %q, want %q", got, tc.wantBaseURL)
+			if got := client.config().BaseURL; got != tc.wantBaseURL {
+				t.Errorf("config().BaseURL = %q, want %q", got, tc.wantBaseURL)
 			}
 
 			client.SetRetryDelay(5 * time.Millisecond)

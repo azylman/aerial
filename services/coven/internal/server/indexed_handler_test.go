@@ -132,7 +132,7 @@ func TestHandleTranscriptsIndexedEvent(t *testing.T) {
 			msg := &pubsubtest.Message{Payload: data, Delivered: tc.delivered, TermErr: tc.termErr, NakErr: tc.nakErr}
 			calls := 0
 			retErr := tc.extractErr
-			extract := func(_ context.Context, _, _ string) error {
+			extract := func(_ context.Context, _, _, _ string) error {
 				calls++
 				return retErr
 			}
@@ -161,6 +161,7 @@ type mockRecordedPublishBus struct {
 	pubsub.Bus
 
 	publishedSubject string
+	publishedMsgID   string
 	publishedData    any
 	publishCalls     int
 }
@@ -168,6 +169,7 @@ type mockRecordedPublishBus struct {
 func (m *mockRecordedPublishBus) Publish(ctx context.Context, subject, msgID string, data any) error {
 	m.publishCalls++
 	m.publishedSubject = subject
+	m.publishedMsgID = msgID
 	m.publishedData = data
 	return m.Bus.Publish(ctx, subject, msgID, data)
 }
@@ -182,6 +184,7 @@ func TestNewTranscriptsIndexedHandler(t *testing.T) {
 		stack       string
 		wantPub     bool
 		wantSubject string
+		wantMsgID   string
 	}{
 		{
 			name:        "matching agent publishes coalesced job",
@@ -190,6 +193,7 @@ func TestNewTranscriptsIndexedHandler(t *testing.T) {
 			stack:       "agent-alpha",
 			wantPub:     true,
 			wantSubject: "aerial.coalesced.coven_extract.agent-alpha.th-1",
+			wantMsgID:   "coven:extract:agent-alpha:th-1:sess-1:3-7:1767225600000",
 		},
 		{
 			name:        "fallback to event stack matches",
@@ -199,6 +203,7 @@ func TestNewTranscriptsIndexedHandler(t *testing.T) {
 			stack:       "agent-beta",
 			wantPub:     true,
 			wantSubject: "aerial.coalesced.coven_extract.agent-beta.th-2",
+			wantMsgID:   "coven:extract:agent-beta:th-2:sess-1:3-7:1767225600000",
 		},
 		{
 			name:       "mismatched agent skips publishing",
@@ -218,9 +223,13 @@ func TestNewTranscriptsIndexedHandler(t *testing.T) {
 			bus := &mockRecordedPublishBus{Bus: memBus}
 			handler := newTranscriptsIndexedHandler(bus, tc.stack)
 			ev := pubsub.TranscriptsIndexedEvent{
-				Agent:    tc.eventAgent,
-				Stack:    tc.eventStack,
-				ThreadID: tc.threadID,
+				Agent:     tc.eventAgent,
+				Stack:     tc.eventStack,
+				ThreadID:  tc.threadID,
+				SessionID: "sess-1",
+				FirstStep: 3,
+				LastStep:  7,
+				FileMtime: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
 			}
 			data, err := json.Marshal(ev)
 			if err != nil {
@@ -246,6 +255,34 @@ func TestNewTranscriptsIndexedHandler(t *testing.T) {
 				if args.Agent != tc.stack || args.ThreadID != tc.threadID {
 					t.Fatalf("published args = %+v, want Agent=%q ThreadID=%q", args, tc.stack, tc.threadID)
 				}
+				if bus.publishedMsgID != tc.wantMsgID {
+					t.Fatalf("published msgID = %q, want %q", bus.publishedMsgID, tc.wantMsgID)
+				}
+			}
+		})
+	}
+}
+
+func TestExtractEventMsgID(t *testing.T) {
+	t.Parallel()
+	mtime := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name  string
+		agent string
+		ev    pubsub.TranscriptsIndexedEvent
+		want  string
+	}{
+		{name: "batch identity", agent: "aerial", ev: pubsub.TranscriptsIndexedEvent{SessionID: "s1", FirstStep: 1, LastStep: 4, FileMtime: mtime}, want: "coven:extract:aerial:th:s1:1-4:1767225600000"},
+		{name: "next batch differs", agent: "aerial", ev: pubsub.TranscriptsIndexedEvent{SessionID: "s1", FirstStep: 5, LastStep: 9, FileMtime: mtime}, want: "coven:extract:aerial:th:s1:5-9:1767225600000"},
+		{name: "final flag does not split a re-published batch", agent: "aerial", ev: pubsub.TranscriptsIndexedEvent{SessionID: "s1", FirstStep: 1, LastStep: 4, FileMtime: mtime, Final: true}, want: "coven:extract:aerial:th:s1:1-4:1767225600000"},
+		{name: "rewritten transcript gets new key", agent: "agent-alpha", ev: pubsub.TranscriptsIndexedEvent{SessionID: "s1", FirstStep: 1, LastStep: 4, FileMtime: mtime.Add(time.Second)}, want: "coven:extract:agent-alpha:th:s1:1-4:1767225601000"},
+		{name: "zero mtime is stable", agent: "aerial", ev: pubsub.TranscriptsIndexedEvent{SessionID: "s2"}, want: "coven:extract:aerial:th:s2:0-0:-62135596800000"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := extractEventMsgID(tc.agent, "th", tc.ev); got != tc.want {
+				t.Fatalf("extractEventMsgID() = %q, want %q", got, tc.want)
 			}
 		})
 	}

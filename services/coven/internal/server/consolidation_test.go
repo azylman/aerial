@@ -332,30 +332,17 @@ func TestWorker_Start(t *testing.T) {
 	cancel()
 
 	tests := []struct {
-		name         string
-		initialDelay time.Duration
-		ctx          context.Context
+		name string
+		role string
 	}{
-		{
-			name:         "CancelDuringInitialDelay",
-			initialDelay: 10 * time.Minute,
-			ctx:          canceledCtx,
-		},
-		{
-			name:         "CancelWithZeroDelay",
-			initialDelay: 0,
-			ctx:          canceledCtx,
-		},
+		{name: "ExtractorWaitsForCancel", role: "extractor"},
+		{name: "DreamerArmStopsOnCancel", role: ""},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			w := NewWorker(WorkerConfig{
-				Store:        newTestStore(t),
-				InitialDelay: tc.initialDelay,
-				TickInterval: 10 * time.Millisecond,
-			})
-			err := w.Start(tc.ctx)
+			w := NewWorker(WorkerConfig{Role: tc.role, RestateIngressURL: "http://127.0.0.1:1"})
+			err := w.Start(canceledCtx)
 			if !errors.Is(err, context.Canceled) {
 				t.Fatalf("Start() err = %v, want context.Canceled", err)
 			}
@@ -363,12 +350,13 @@ func TestWorker_Start(t *testing.T) {
 	}
 }
 
-func TestWorker_ExtractThread_NilWorkerReturnsError(t *testing.T) {
-	t.Parallel()
-	var w *Worker
-	if err := w.ExtractThread(context.Background(), "th-1"); err == nil {
-		t.Fatal("ExtractThread() expected error for nil worker, got nil")
-	}
+// dreamOnce runs one CovenDreamer consolidation pass (facts, then skills) outside Restate.
+func dreamOnce(w *Worker) error {
+	d := NewCovenDreamer(w)
+	rc := covenRunContext{Context: context.Background()}
+	_, factsErr := d.runConsolidateFacts(rc)
+	_, skillsErr := d.runConsolidateSkills(rc)
+	return errors.Join(factsErr, skillsErr)
 }
 
 // makePairwiseSimilarVectors// makePairwiseSimilarVectors returns n unit vectors whose pairwise cosine
@@ -846,27 +834,24 @@ func TestToolHandler_MemoryStore_AdmissionGate(t *testing.T) {
 	}
 }
 
-// TestWorker_RunDaily_Dreaming is serial: dreaming single-flights on the
+// TestCovenDreamer_ConsolidatePass is serial: dreaming single-flights on the
 // package-global extractionMutex.
-func TestWorker_RunDaily_Dreaming(t *testing.T) {
+func TestCovenDreamer_ConsolidatePass(t *testing.T) {
 	vecs := makePairwiseSimilarVectors(3, 0.78)
 	untouched := []string{"Fact 1:1", "Fact 2:1", "Fact 3:1"}
 	merged := []string{"Consolidated fact:1"}
 
 	tests := []struct {
-		name            string
-		nilStore        bool
-		nilOllama       bool
-		nilLLM          bool
-		sabotage        string
-		llmErr          error
-		lastDreamingAgo time.Duration
-		wantFacts       []string
+		name      string
+		nilStore  bool
+		nilOllama bool
+		nilLLM    bool
+		sabotage  string
+		llmErr    error
+		wantErr   bool
+		wantFacts []string
 	}{
 		{name: "DailyDecayAndDreamingSuccess", wantFacts: merged},
-		{name: "RecentDreamingWatermarkSkipsDuplicateRun", lastDreamingAgo: 2 * time.Hour, wantFacts: untouched},
-		{name: "ExpiredDreamingWatermarkRunsDreaming", lastDreamingAgo: 25 * time.Hour, wantFacts: merged},
-		{name: "WatermarkReadErrorRunsDreaming", sabotage: sabotageWatermarks, wantFacts: merged},
 		{name: "DailyDecayWithDreamingErrorHandled", llmErr: errors.New("dreaming llm error"), wantFacts: untouched},
 		{name: "NilOllamaSkipsDreaming", nilOllama: true, wantFacts: untouched},
 		{name: "NilLLMSkipsDreaming", nilLLM: true, wantFacts: untouched},
@@ -878,10 +863,6 @@ func TestWorker_RunDaily_Dreaming(t *testing.T) {
 			sqlStore := newTestStore(t)
 			db := sqlStore.DB()
 			seedFacts(t, sqlStore, []string{"Fact 1", "Fact 2", "Fact 3"}, vecs)
-			if tc.lastDreamingAgo > 0 {
-				at := time.Now().UTC().Add(-tc.lastDreamingAgo)
-				seedWatermark(t, db, config.DefaultStack, DreamingWatermarkThreadID, 0, &at)
-			}
 			execSQL(t, db, tc.sabotage)
 
 			var ollama store.OllamaClient = &MockOllamaClient{embedding: vecs[0]}
@@ -908,8 +889,9 @@ func TestWorker_RunDaily_Dreaming(t *testing.T) {
 				LLMClient: llm,
 			})
 
-			// Tick 60 is daily decay + dreaming
-			w.Tick(context.Background(), 60)
+			if err := dreamOnce(w); (err != nil) != tc.wantErr {
+				t.Fatalf("dreamOnce() err = %v, wantErr = %v", err, tc.wantErr)
+			}
 
 			if got := factRows(t, db); !equalStrings(got, tc.wantFacts) {
 				t.Errorf("facts = %q, want %q", got, tc.wantFacts)

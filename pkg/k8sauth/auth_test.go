@@ -146,77 +146,15 @@ func TestLRUCache_Eviction(t *testing.T) {
 	}
 }
 
-func TestLRUCache_Lifecycle(t *testing.T) {
+func TestLRUCache_DefaultsWithNilClock(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
-		name        string
-		maxEntries  int
-		ttl         time.Duration
-		useNilNow   bool
-		prepopulate []cacheEntryPair
-		deleteKey   string
-		clear       bool
-		wantLen     int
-	}{
-		{
-			name:        "delete removes entry",
-			maxEntries:  10,
-			ttl:         time.Minute,
-			prepopulate: []cacheEntryPair{{key: "k1", val: "v1"}},
-			deleteKey:   "k1",
-			wantLen:     0,
-		},
-		{
-			name:        "delete missing is no-op",
-			maxEntries:  10,
-			ttl:         time.Minute,
-			prepopulate: []cacheEntryPair{{key: "k1", val: "v1"}},
-			deleteKey:   "k2",
-			wantLen:     1,
-		},
-		{
-			name:        "clear empties cache",
-			maxEntries:  10,
-			ttl:         time.Minute,
-			prepopulate: []cacheEntryPair{{key: "k1", val: "v1"}, {key: "k2", val: "v2"}},
-			clear:       true,
-			wantLen:     0,
-		},
-		{
-			name:       "defaults with nil clock",
-			useNilNow:  true,
-			maxEntries: 0,
-			ttl:        0,
-			wantLen:    0,
-		},
-	}
+	cache := NewLRUCache[string](0, 0, nil)
+	cache.Set("k1", "v1")
 
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-
-			var nowFunc func() time.Time
-			if !tc.useNilNow {
-				nowFunc = time.Now
-			}
-
-			cache := NewLRUCache[string](tc.maxEntries, tc.ttl, nowFunc)
-			for _, p := range tc.prepopulate {
-				cache.Set(p.key, p.val)
-			}
-
-			if tc.deleteKey != "" {
-				cache.Delete(tc.deleteKey)
-			}
-			if tc.clear {
-				cache.Clear()
-			}
-
-			if gotLen := cache.Len(); gotLen != tc.wantLen {
-				t.Fatalf("cache.Len() = %d, want %d", gotLen, tc.wantLen)
-			}
-		})
+	val, ok := cache.Get("k1")
+	if !ok || val != "v1" {
+		t.Fatalf("cache.Get(%q) = (%q, %v), want (%q, true)", "k1", val, ok, "v1")
 	}
 }
 

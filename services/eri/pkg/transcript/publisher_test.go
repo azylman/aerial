@@ -64,9 +64,11 @@ func assertFirstStepsEqual(t *testing.T, got []transcriptwire.TranscriptStepBatc
 }
 
 func countPending(p *Publisher) int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	pending := 0
-	for _, s := range p.PendingSessions() {
-		pending += p.PendingCount(s)
+	for _, q := range p.queues {
+		pending += len(q)
 	}
 	return pending
 }
@@ -91,11 +93,15 @@ func TestPublisher_EnqueueCoalesces(t *testing.T) {
 			t.Parallel()
 			p := NewPublisher("aerial", nil)
 			p.Enqueue(tc.enqueue...)
-			if got := p.PendingCount(tc.session); got != tc.want {
-				t.Errorf("PendingCount(%q) = %d, want %d", tc.session, got, tc.want)
+			p.mu.Lock()
+			gotCount := len(p.queues[tc.session])
+			gotSessions := len(p.order)
+			p.mu.Unlock()
+			if gotCount != tc.want {
+				t.Errorf("PendingCount(%q) = %d, want %d", tc.session, gotCount, tc.want)
 			}
-			if got := len(p.PendingSessions()); got != tc.sessions {
-				t.Errorf("PendingSessions len = %d, want %d", got, tc.sessions)
+			if gotSessions != tc.sessions {
+				t.Errorf("PendingSessions len = %d, want %d", gotSessions, tc.sessions)
 			}
 		})
 	}
@@ -170,11 +176,15 @@ func TestPublisher_DrainEnqueueDuringDrainKeepsSingleOrderEntry(t *testing.T) {
 	if err := <-done; err == nil {
 		t.Fatalf("expected Drain error from s1 failure, got nil")
 	}
-	if got := p.PendingSessions(); len(got) != 1 || got[0] != "s1" {
-		t.Errorf("PendingSessions = %q, want exactly [s1]", got)
+	p.mu.Lock()
+	gotSessions := append([]string(nil), p.order...)
+	gotCount := len(p.queues["s1"])
+	p.mu.Unlock()
+	if len(gotSessions) != 1 || gotSessions[0] != "s1" {
+		t.Errorf("PendingSessions = %q, want exactly [s1]", gotSessions)
 	}
-	if n := p.PendingCount("s1"); n != 1 {
-		t.Errorf("PendingCount(s1) = %d, want 1", n)
+	if gotCount != 1 {
+		t.Errorf("PendingCount(s1) = %d, want 1", gotCount)
 	}
 }
 
@@ -207,11 +217,15 @@ func TestPublisher_DrainFailureKeepsBatchesEnqueuedDuringFlight(t *testing.T) {
 	if err := <-done; err == nil {
 		t.Fatalf("expected Drain error from s1 failure, got nil")
 	}
-	if got := p.PendingSessions(); len(got) != 1 || got[0] != "s1" {
-		t.Fatalf("PendingSessions = %q, want exactly [s1]", got)
+	p.mu.Lock()
+	gotSessions := append([]string(nil), p.order...)
+	gotCount := len(p.queues["s1"])
+	p.mu.Unlock()
+	if len(gotSessions) != 1 || gotSessions[0] != "s1" {
+		t.Fatalf("PendingSessions = %q, want exactly [s1]", gotSessions)
 	}
-	if n := p.PendingCount("s1"); n != 1 {
-		t.Fatalf("PendingCount(s1) = %d, want 1", n)
+	if gotCount != 1 {
+		t.Fatalf("PendingCount(s1) = %d, want 1", gotCount)
 	}
 	if err := p.Drain(context.Background()); err != nil {
 		t.Fatalf("second Drain failed: %v", err)
@@ -246,41 +260,6 @@ func assertEnvelopesEqual(t *testing.T, got []transcriptwire.TranscriptStepBatch
 		if envelopes[i] != want[i] {
 			t.Fatalf("published envelopes %v, want %v", envelopes, want)
 		}
-	}
-}
-
-func TestPublisher_EnqueueStepsSplits(t *testing.T) {
-	t.Parallel()
-	base := transcriptwire.TranscriptStepBatch{Stack: "aerial", SessionID: "s1", FileMtime: time.Unix(1000, 0).UTC()}
-	tests := []struct {
-		name  string
-		steps []transcriptwire.TranscriptStep
-		want  []publishedEnvelope
-	}{
-		{name: "empty yields one final", steps: nil, want: []publishedEnvelope{{first: 0, last: 0, final: true}}},
-		{name: "two steps one batch", steps: []transcriptwire.TranscriptStep{{StepIndex: 0}, {StepIndex: 1}}, want: []publishedEnvelope{{first: 0, last: 1, final: true}}},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			rec := &recordingPublish{failCall: -1}
-			p := NewPublisher("aerial", rec.publish)
-			if got := p.EnqueueSteps(base, tc.steps); got != len(tc.want) {
-				t.Errorf("EnqueueSteps = %d, want %d", got, len(tc.want))
-			}
-			if n := p.PendingCount("s1"); n != len(tc.want) {
-				t.Errorf("PendingCount = %d, want %d", n, len(tc.want))
-			}
-			if err := p.Drain(context.Background()); err != nil {
-				t.Fatalf("Drain failed: %v", err)
-			}
-			assertEnvelopesEqual(t, rec.published, tc.want)
-			for _, b := range rec.published {
-				if b.Stack != "aerial" || b.SessionID != "s1" {
-					t.Errorf("published batch lost envelope: stack=%q session=%q", b.Stack, b.SessionID)
-				}
-			}
-		})
 	}
 }
 
@@ -396,156 +375,6 @@ func TestPublisher_BuildSessionBatches(t *testing.T) {
 			}
 			if batches[0].LastStep != tc.wantLast {
 				t.Errorf("batch LastStep = %d, want %d", batches[0].LastStep, tc.wantLast)
-			}
-		})
-	}
-}
-
-func TestPublisher_PublishSessions(t *testing.T) {
-	t.Parallel()
-	brainDir := t.TempDir()
-	sessDir := filepath.Join(brainDir, "sess-p1")
-	if err := os.MkdirAll(sessDir, 0o755); err != nil {
-		t.Fatalf("mkdir sessDir: %v", err)
-	}
-	transcriptContent := `{"step_index":0,"type":"USER_INPUT","content":"Hello world"}
-{"step_index":1,"type":"PLANNER_RESPONSE","tool_name":"bash","content":"echo hi"}
-`
-	if err := os.WriteFile(filepath.Join(sessDir, "transcript.jsonl"), []byte(transcriptContent), 0o644); err != nil {
-		t.Fatalf("write transcript: %v", err)
-	}
-
-	tests := []struct {
-		name       string
-		pubNil     bool
-		brainDir   string
-		watermarks map[string]int
-		sessions   []string
-		wantErrSub string
-		wantCount  int
-	}{
-		{
-			name:       "nil publisher errors",
-			pubNil:     true,
-			brainDir:   brainDir,
-			sessions:   []string{"sess-p1"},
-			wantErrSub: "publisher is nil",
-		},
-		{
-			name:       "valid session publishes",
-			pubNil:     false,
-			brainDir:   brainDir,
-			watermarks: map[string]int{"sess-p1": -1},
-			sessions:   []string{"sess-p1"},
-			wantCount:  1,
-		},
-		{
-			name:       "auto-discover sessions when sessions empty",
-			pubNil:     false,
-			brainDir:   brainDir,
-			watermarks: map[string]int{"sess-p1": -1},
-			sessions:   nil,
-			wantCount:  1,
-		},
-		{
-			name:       "blank session in list skipped",
-			pubNil:     false,
-			brainDir:   brainDir,
-			watermarks: map[string]int{"sess-p1": -1},
-			sessions:   []string{"  ", "sess-p1"},
-			wantCount:  1,
-		},
-		{
-			name:       "missing session in list errors",
-			pubNil:     false,
-			brainDir:   brainDir,
-			sessions:   []string{"sess-missing"},
-			wantErrSub: "transcript file not found",
-		},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			rec := &recordingPublish{failCall: -1}
-			var p *Publisher
-			if !tc.pubNil {
-				p = NewPublisher("aerial", rec.publish)
-			}
-			err := p.PublishSessions(context.Background(), tc.brainDir, tc.watermarks, tc.sessions...)
-			if tc.wantErrSub != "" {
-				if err == nil || !strings.Contains(err.Error(), tc.wantErrSub) {
-					t.Fatalf("PublishSessions() err = %v, want substring %q", err, tc.wantErrSub)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("PublishSessions() unexpected err = %v", err)
-			}
-			if len(rec.published) != tc.wantCount {
-				t.Fatalf("published len = %d, want %d", len(rec.published), tc.wantCount)
-			}
-		})
-	}
-}
-
-func TestPublisher_PublishSession(t *testing.T) {
-	t.Parallel()
-	brainDir := t.TempDir()
-	sessDir := filepath.Join(brainDir, "sess-one")
-	if err := os.MkdirAll(sessDir, 0o755); err != nil {
-		t.Fatalf("mkdir sessDir: %v", err)
-	}
-	transcriptContent := `{"step_index":0,"type":"USER_INPUT","content":"Hello world"}`
-	if err := os.WriteFile(filepath.Join(sessDir, "transcript.jsonl"), []byte(transcriptContent), 0o644); err != nil {
-		t.Fatalf("write transcript: %v", err)
-	}
-
-	tests := []struct {
-		name       string
-		pubNil     bool
-		params     SessionBatchParams
-		wantErrSub string
-		wantCount  int
-	}{
-		{
-			name:       "nil publisher errors",
-			pubNil:     true,
-			params:     SessionBatchParams{SessionID: "sess-one", BrainDir: brainDir},
-			wantErrSub: "publisher is nil",
-		},
-		{
-			name:       "invalid session params errors",
-			pubNil:     false,
-			params:     SessionBatchParams{SessionID: "", BrainDir: brainDir},
-			wantErrSub: "session ID cannot be empty",
-		},
-		{
-			name:      "successful single session publish",
-			pubNil:    false,
-			params:    SessionBatchParams{SessionID: "sess-one", BrainDir: brainDir, Watermark: -1, Engine: "agy"},
-			wantCount: 1,
-		},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			rec := &recordingPublish{failCall: -1}
-			var p *Publisher
-			if !tc.pubNil {
-				p = NewPublisher("aerial", rec.publish)
-			}
-			err := p.PublishSession(context.Background(), tc.params)
-			if tc.wantErrSub != "" {
-				if err == nil || !strings.Contains(err.Error(), tc.wantErrSub) {
-					t.Fatalf("PublishSession() err = %v, want substring %q", err, tc.wantErrSub)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("PublishSession() unexpected err = %v", err)
-			}
-			if len(rec.published) != tc.wantCount {
-				t.Fatalf("published len = %d, want %d", len(rec.published), tc.wantCount)
 			}
 		})
 	}

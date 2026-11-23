@@ -4,6 +4,7 @@ package queue
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"slices"
@@ -21,7 +22,6 @@ import (
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
-	"github.com/azylman/aerial/services/eri/pkg/db/dbtest"
 	"github.com/azylman/aerial/services/eri/pkg/restatetest"
 	"github.com/azylman/aerial/services/eri/pkg/runner"
 )
@@ -63,14 +63,14 @@ func itErr(s string) itAgent   { return itAgent{err: s} }
 var itBlock = itAgent{block: true}
 
 // itFault fails count calls of a store method with SQLSTATE code, starting at the first call
-// (armOn "") or at the first call after the armOn point ("Method:n"). wantCalls, when set, is the
-// number of calls to method from arming to the end of the case.
+// (armOn "") or at the first call after the armOn point ("Method:n"). The failed call returns a
+// *pgconn.PgError carrying code without reaching Postgres, so classifyStoreError sees the same
+// SQLSTATE a real failure carries; every other call runs the production SQL.
 type itFault struct {
-	method    string
-	code      string
-	count     int
-	armOn     string
-	wantCalls int
+	method string
+	code   string
+	count  int
+	armOn  string
 }
 
 // itStep is a test action taken at a point: a gate ("agent:n" or "<StoreMethod>:n", the n-th
@@ -94,7 +94,7 @@ type itRow struct {
 type itCase struct {
 	name     string
 	dispatch bool     // items are dispatches on itSessionKey, else messages on itThreadKey
-	seed     []string // rows inserted PENDING straight into the store, then sent in one Append
+	seed     []string // rows inserted PENDING through the seed helper, then sent in one Append
 	enqueue  []string // items enqueued through Enqueue at the start
 	agent    []itAgent
 	preTurn  []string // scripted pre_turn answers: retry, allow (nil: no hook)
@@ -110,7 +110,7 @@ type itCase struct {
 	wantAgentCalls    int
 	wantKilled        int
 	wantMinHookGap    time.Duration
-	wantNoFailWrite   bool // no FailMessagesIfActive call at all (no row ever written FAILED)
+	wantNoFailWrite   bool // no messages row was ever written FAILED (recorded by itFailedWritesSQL)
 }
 
 func TestCoordinatorRunnerIntegration(t *testing.T) {
@@ -223,14 +223,14 @@ func turnQueueCases() []itCase {
 		},
 		{
 			name: "PostgresDownRetriesUntilRecovery", enqueue: []string{"a"}, agent: []itAgent{itReply("reply-a")},
-			faults:        []itFault{{method: "ClaimPendingMessage", code: "08006", count: 50, wantCalls: 51}},
+			faults:        []itFault{{method: "ClaimPendingMessage", code: "08006", count: 50}},
 			wantRows:      map[string]itRow{"a": {status: completed, reply: "reply-a", retry: 1}},
 			wantDone:      []TurnOutcome{OutcomeCompleted},
 			wantDelivered: []string{"reply-a"}, wantNoFailWrite: true, wantAgentCalls: 1,
 		},
 		{
 			name: "TerminalRecordStartedFailsTurn", enqueue: []string{"a"}, agent: []itAgent{itReply("reply-b")},
-			faults: []itFault{{method: "ClaimPendingMessage", code: "23505", count: 1, wantCalls: 2}},
+			faults: []itFault{{method: "ClaimPendingMessage", code: "23505", count: 1}},
 			steps:  []itStep{{at: "ClaimPendingMessage:1", do: "enqueue", ids: []string{"b"}}},
 			wantRows: map[string]itRow{
 				"a": {status: failed, errSub: "23505"},
@@ -241,7 +241,7 @@ func turnQueueCases() []itCase {
 		},
 		{
 			name: "TerminalRecordOutcomeNotRetried", enqueue: []string{"a"}, agent: []itAgent{itErr(itNonTransientErr)},
-			faults:        []itFault{{method: "GetMessagesByID", code: "23505", count: 1, armOn: "FailMessagesIfActive:1", wantCalls: 2}},
+			faults:        []itFault{{method: "GetMessagesByID", code: "23505", count: 1, armOn: "FailMessagesIfActive:1"}},
 			wantRows:      map[string]itRow{"a": {status: failed, errSub: itNonTransientErr, retry: 1}},
 			wantDone:      []TurnOutcome{OutcomeFailed},
 			wantDelivered: []string{"non-transient error"}, wantAgentCalls: 1,
@@ -276,10 +276,8 @@ func runIntegrationCase(t *testing.T, tc itCase) {
 	env.primary = env.definitions()
 	env.h = restatetest.StartWithOptions(t, restatetest.Options{Env: itServerEnv}, env.primary...)
 
-	for _, id := range tc.seed {
-		env.seed(id)
-	}
 	if len(tc.seed) > 0 {
+		env.seedRows(tc.seed)
 		env.h.Send(env.service(), env.key(), HandlerAppend, AppendRequest{IDs: tc.seed})
 	}
 	for _, id := range tc.enqueue {
@@ -297,6 +295,7 @@ type itEnv struct {
 	tc    itCase
 	h     *restatetest.Harness
 	store *itStore
+	sqlDB *sql.DB // the case's private Postgres database, for seeding and the FAILED-write audit
 	bus   pubsub.Bus
 	outs  *outcomeRecorder
 	gates map[string]*itGate
@@ -329,7 +328,10 @@ func newITEnv(t *testing.T, tc itCase) *itEnv {
 		t: t, tc: tc, bus: bus, outs: newOutcomeRecorder(t, bus),
 		gates: map[string]*itGate{}, doneByInv: map[string]TurnDoneRequest{}, enqueueStatus: map[string]string{},
 	}
-	env.store = &itStore{FakeStore: dbtest.NewFakeStore(), env: env, calls: map[string]int{}}
+	sqlStore, sqlDB := newTestStore(t)
+	execSQL(t, sqlDB, itFailedWritesSQL)
+	env.sqlDB = sqlDB
+	env.store = &itStore{Store: sqlStore, env: env, calls: map[string]int{}}
 	for _, f := range tc.faults {
 		env.store.faults = append(env.store.faults, &itFaultState{itFault: f, armed: f.armOn == ""})
 	}
@@ -475,14 +477,55 @@ func (e *itEnv) recordDone(invocationID string, req TurnDoneRequest) {
 	e.doneOrder = append(e.doneOrder, invocationID)
 }
 
-func (e *itEnv) seed(id string) {
+// seedRows inserts ids PENDING on itThreadKey through the fixture seed helper (production
+// InsertMessage on the case's database), bypassing the coordinator and the store decorator.
+func (e *itEnv) seedRows(ids []string) {
 	e.t.Helper()
-	if err := e.store.InsertMessage(context.Background(), db.Message{
-		ID: id, ThreadID: itThreadKey, ChannelID: itThreadKey, AuthorID: "user-1", AuthorName: "user",
-		Content: "hello " + id, Status: db.StatusPending, CreatedAt: time.Now().UTC(),
-	}); err != nil {
-		e.t.Fatalf("seed %s: %v", id, err)
+	msgs := make([]db.Message, 0, len(ids))
+	for _, id := range ids {
+		msgs = append(msgs, db.Message{
+			ID: id, ThreadID: itThreadKey, ChannelID: itThreadKey, AuthorID: "user-1", AuthorName: "user",
+			Content: "hello " + id, Status: db.StatusPending, CreatedAt: time.Now().UTC(),
+		})
 	}
+	sqlStore, ok := e.store.Store.(*db.SQLStore)
+	if !ok {
+		e.t.Fatalf("itStore wraps %T, want *db.SQLStore", e.store.Store)
+	}
+	seedMessageRows(e.t, sqlStore, msgs)
+}
+
+// itFailedWritesSQL records, in the case's private database, every messages row ever written
+// FAILED, so wantNoFailWrite asserts persisted history rather than store call counts.
+var itFailedWritesSQL = fmt.Sprintf(`CREATE TABLE it_failed_writes (id TEXT NOT NULL);
+CREATE FUNCTION it_record_failed_write() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+	INSERT INTO it_failed_writes (id) VALUES (NEW.id);
+	RETURN NEW;
+END $$;
+CREATE TRIGGER it_record_failed_write AFTER INSERT OR UPDATE OF status ON messages
+	FOR EACH ROW WHEN (NEW.status = '%s') EXECUTE FUNCTION it_record_failed_write();`, db.StatusFailed)
+
+// failedWrites lists the message ids ever written FAILED in this case.
+func (e *itEnv) failedWrites() []string {
+	e.t.Helper()
+	rows, err := e.sqlDB.QueryContext(context.Background(), "SELECT id FROM it_failed_writes ORDER BY id")
+	if err != nil {
+		e.t.Fatalf("query FAILED writes: %v", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			e.t.Fatalf("scan FAILED write: %v", err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		e.t.Fatalf("read FAILED writes: %v", err)
+	}
+	return ids
 }
 
 func (e *itEnv) enqueue(id string, skip bool) {
@@ -723,8 +766,8 @@ func (e *itEnv) assertCase() {
 		e.t.Errorf("published dispatch outcomes = %v, want %v", published, e.tc.wantPublished)
 	}
 	e.store.assertFaults(e.t)
-	if n := e.store.callCount("FailMessagesIfActive"); e.tc.wantNoFailWrite && n != 0 {
-		e.t.Errorf("FailMessagesIfActive called %d times, want no FAILED write", n)
+	if failed := e.failedWrites(); e.tc.wantNoFailWrite && len(failed) > 0 {
+		e.t.Errorf("rows %v were written FAILED, want no FAILED write", failed)
 	}
 }
 
@@ -800,9 +843,12 @@ func (e *itEnv) publishedStatuses() []string {
 	return out
 }
 
-// itStore is the FakeStore with scripted SQLSTATE failures and gates on the calls the cases target.
+// itStore decorates the production SQLStore over the case's private Postgres database: every read
+// and write runs the production SQL, and the decorator only schedules scripted SQLSTATE faults and
+// gates on the calls the cases target. calls numbers those calls for "Method:n" points; it is
+// never asserted on.
 type itStore struct {
-	*dbtest.FakeStore
+	db.Store
 
 	env *itEnv
 
@@ -816,10 +862,9 @@ type itFaultState struct {
 
 	armed    bool
 	injected int
-	calls    int
 }
 
-// hit counts one call, applies any armed fault, arms faults waiting on this call and passes the
+// hit numbers one call, applies any armed fault, arms faults waiting on this call and passes the
 // call's gate. A gated call whose context ended while it waited (its stream dropped) returns the
 // context error, as a real Postgres call would.
 func (s *itStore) hit(ctx context.Context, method string) error {
@@ -828,12 +873,9 @@ func (s *itStore) hit(ctx context.Context, method string) error {
 	point := method + ":" + strconv.Itoa(s.calls[method])
 	var err error
 	for _, f := range s.faults {
-		if f.armed && f.method == method {
-			f.calls++
-			if f.injected < f.count {
-				f.injected++
-				err = &pgconn.PgError{Code: f.code, Message: "scripted store failure"}
-			}
+		if f.armed && f.method == method && f.injected < f.count {
+			f.injected++
+			err = &pgconn.PgError{Code: f.code, Message: "scripted store failure"}
 		}
 	}
 	for _, f := range s.faults {
@@ -848,12 +890,6 @@ func (s *itStore) hit(ctx context.Context, method string) error {
 	return err
 }
 
-func (s *itStore) callCount(method string) int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.calls[method]
-}
-
 func (s *itStore) assertFaults(t *testing.T) {
 	t.Helper()
 	s.mu.Lock()
@@ -862,9 +898,6 @@ func (s *itStore) assertFaults(t *testing.T) {
 		if f.injected != f.count {
 			t.Errorf("fault %s/%s injected %d times, want %d", f.method, f.code, f.injected, f.count)
 		}
-		if f.wantCalls > 0 && f.calls != f.wantCalls {
-			t.Errorf("%s called %d times since its fault armed, want %d", f.method, f.calls, f.wantCalls)
-		}
 	}
 }
 
@@ -872,21 +905,21 @@ func (s *itStore) ClaimPendingMessage(ctx context.Context, id string) (bool, err
 	if err := s.hit(ctx, "ClaimPendingMessage"); err != nil {
 		return false, err
 	}
-	return s.FakeStore.ClaimPendingMessage(ctx, id)
+	return s.Store.ClaimPendingMessage(ctx, id)
 }
 
 func (s *itStore) GetMessagesByID(ctx context.Context, ids []string) ([]db.Message, error) {
 	if err := s.hit(ctx, "GetMessagesByID"); err != nil {
 		return nil, err
 	}
-	return s.FakeStore.GetMessagesByID(ctx, ids)
+	return s.Store.GetMessagesByID(ctx, ids)
 }
 
 func (s *itStore) FailMessagesIfActive(ctx context.Context, ids []string, reason string) ([]string, error) {
 	if err := s.hit(ctx, "FailMessagesIfActive"); err != nil {
 		return nil, err
 	}
-	return s.FakeStore.FailMessagesIfActive(ctx, ids, reason)
+	return s.Store.FailMessagesIfActive(ctx, ids, reason)
 }
 
 // Coordinator wrappers record every OnTurnDone a deployment receives, then run the real handler.

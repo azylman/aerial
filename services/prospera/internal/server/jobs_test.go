@@ -65,7 +65,7 @@ func setupMockReporterServer(t *testing.T) (*Server, *fakes.FakeStore, *httptest
 		AudioData:   []byte("test-audio"),
 		ContentType: "audio/wav",
 	}
-	server.reporter = delivery.NewReporter(fakes.StaticConfig{Cfg: &config.Config{BrainURL: srv.URL, DefaultDiscordChannel: "prospera"}}, store, twilioMock)
+	server.reporter = delivery.NewReporter(fakes.StaticConfig{Cfg: &config.Config{BrainURL: srv.URL, RestateIngressURL: srv.URL, DefaultDiscordChannel: "prospera"}}, store, twilioMock)
 	return server, store, srv
 }
 
@@ -200,20 +200,46 @@ func TestServer_StartJobConsumers(t *testing.T) {
 	}
 }
 
+// jobHandlerTestCase drives any AERIAL_JOBS handler with the same
+// message -> error contract.
+type jobHandlerTestCase struct {
+	name         string
+	msg          pubsub.Message
+	nilReporter  bool
+	reporterErr  bool
+	wantErr      bool
+	wantTermed   bool
+	wantNaked    bool
+	wantNakDelay time.Duration
+}
+
+func runJobHandlerCases(t *testing.T, tests []jobHandlerTestCase, handle func(*Server, context.Context, pubsub.Message) error) {
+	t.Helper()
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			server, store, srv := setupMockReporterServer(t)
+			defer srv.Close()
+
+			if tc.nilReporter {
+				server.reporter = nil
+			} else if tc.reporterErr {
+				server.reporter = delivery.NewReporter(fakes.StaticConfig{Cfg: &config.Config{BrainURL: ""}}, store, nil)
+			}
+
+			err := handle(server, context.Background(), tc.msg)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("handler err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			assertJobMsgOutcome(t, tc.msg, tc.wantTermed, tc.wantNaked, tc.wantNakDelay)
+		})
+	}
+}
+
 func TestServer_HandleReportJob(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
-		name         string
-		msg          pubsub.Message
-		nilReporter  bool
-		reporterErr  bool
-		wantErr      bool
-		wantTermed   bool
-		wantNaked    bool
-		wantNakDelay time.Duration
-		checkCallID  string
-	}{
+	tests := []jobHandlerTestCase{
 		{
 			name:    "nil message returns error",
 			wantErr: true,
@@ -260,51 +286,12 @@ func TestServer_HandleReportJob(t *testing.T) {
 			wantTermed:  true,
 		},
 		{
-			name:        "successful delivery transitions pending call report to delivered",
-			msg:         &pubsubtest.Message{Payload: []byte(`{"call_id":"call-rep-ok"}`), Delivered: 1},
-			checkCallID: "call-rep-ok",
-		},
-		{
-			name:        "retry delivery transitions previously failed call report to delivered",
-			msg:         &pubsubtest.Message{Payload: []byte(`{"call_id":"call-rep-retry"}`), Delivered: 2},
-			checkCallID: "call-rep-retry",
+			name: "accepted restate enqueue acks the job",
+			msg:  &pubsubtest.Message{Payload: []byte(`{"call_id":"call-rep-ok"}`), Delivered: 1},
 		},
 	}
 
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			server, store, srv := setupMockReporterServer(t)
-			defer srv.Close()
-
-			_ = store.CreateOutboundCall(context.Background(), model.VoiceCall{
-				CallID:       "call-rep-ok",
-				ReportStatus: "pending",
-			}, 5)
-			_ = store.CreateOutboundCall(context.Background(), model.VoiceCall{
-				CallID:       "call-rep-retry",
-				ReportStatus: "failed",
-			}, 5)
-
-			if tc.nilReporter {
-				server.reporter = nil
-			} else if tc.reporterErr {
-				server.reporter = delivery.NewReporter(fakes.StaticConfig{Cfg: &config.Config{BrainURL: ""}}, store, nil)
-			}
-
-			err := server.HandleReportJob(context.Background(), tc.msg)
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("HandleReportJob() err = %v, wantErr = %v", err, tc.wantErr)
-			}
-			assertJobMsgOutcome(t, tc.msg, tc.wantTermed, tc.wantNaked, tc.wantNakDelay)
-			if tc.checkCallID != "" {
-				call, getErr := store.GetCall(context.Background(), tc.checkCallID)
-				if getErr != nil || call.ReportStatus != "delivered" {
-					t.Fatalf("call.ReportStatus = %q, want delivered (err=%v)", call.ReportStatus, getErr)
-				}
-			}
-		})
-	}
+	runJobHandlerCases(t, tests, (*Server).HandleReportJob)
 }
 
 func TestServer_HandleVoicemailJob(t *testing.T) {
@@ -446,16 +433,7 @@ func TestServer_HandleVoicemailJob(t *testing.T) {
 func TestServer_HandleSMSJob(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
-		name         string
-		msg          pubsub.Message
-		nilReporter  bool
-		reporterErr  bool
-		wantErr      bool
-		wantTermed   bool
-		wantNaked    bool
-		wantNakDelay time.Duration
-	}{
+	tests := []jobHandlerTestCase{
 		{
 			name:    "nil message returns error",
 			wantErr: true,
@@ -497,25 +475,7 @@ func TestServer_HandleSMSJob(t *testing.T) {
 		},
 	}
 
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			server, store, srv := setupMockReporterServer(t)
-			defer srv.Close()
-
-			if tc.nilReporter {
-				server.reporter = nil
-			} else if tc.reporterErr {
-				server.reporter = delivery.NewReporter(fakes.StaticConfig{Cfg: &config.Config{BrainURL: ""}}, store, nil)
-			}
-
-			err := server.HandleSMSJob(context.Background(), tc.msg)
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("HandleSMSJob() err = %v, wantErr = %v", err, tc.wantErr)
-			}
-			assertJobMsgOutcome(t, tc.msg, tc.wantTermed, tc.wantNaked, tc.wantNakDelay)
-		})
-	}
+	runJobHandlerCases(t, tests, (*Server).HandleSMSJob)
 }
 
 type recordPublishBus struct {
@@ -678,8 +638,9 @@ func TestServer_Webhooks_FallbackToBackgroundGoroutine(t *testing.T) {
 	callID, vmCallID, smsID := triggerTwilioWebhooks(t, server, store, cfg, "fallback")
 
 	repCall, repErr := store.GetCall(context.Background(), callID)
-	if repErr != nil || repCall.ReportStatus != "delivered" {
-		t.Fatalf("fallback report call status = %q, want delivered (err=%v)", repCall.ReportStatus, repErr)
+	// Reports never fall back to in-process delivery: only ProsperaReport posts them.
+	if repErr != nil || repCall.ReportStatus != "pending" {
+		t.Fatalf("fallback report call status = %q, want pending (err=%v)", repCall.ReportStatus, repErr)
 	}
 
 	vmCall, vmErr := store.GetCall(context.Background(), vmCallID)

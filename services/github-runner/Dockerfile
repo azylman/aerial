@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-FROM golang:1.27.4-bookworm AS go-builder
+FROM golang:1.27.4-bookworm AS roborev-builder
 
 RUN mkdir -p /out/bin && \
     GOBIN=/out/bin CGO_ENABLED=0 go install golang.org/x/tools/cmd/deadcode@v0.52.0 && \
@@ -7,8 +7,11 @@ RUN mkdir -p /out/bin && \
     git clone https://github.com/azylman/roborev.git /tmp/roborev && \
     (cd /tmp/roborev && git checkout dd816f9c3f87489334c45a165ac569842594f9ba && GOBIN=/out/bin CGO_ENABLED=0 go install ./cmd/roborev) && \
     mv /out/bin/roborev /out/bin/roborev.real && \
-    rm -rf /tmp/roborev && \
-    rm -rf /usr/local/go/test /usr/local/go/doc /usr/local/go/api
+    rm -rf /tmp/roborev
+
+FROM golang:1.27.3-bookworm AS go-builder
+
+RUN rm -rf /usr/local/go/test /usr/local/go/doc /usr/local/go/api
 
 FROM ubuntu:24.04 AS rust-builder
 
@@ -150,9 +153,9 @@ RUN mkdir -p -m 755 /etc/apt/keyrings && \
     rm -rf /var/lib/apt/lists/* && \
     google-chrome --version
 
-# Pre-baked toolchain: Go 1.27.4, Rust stable, deadcode, oapi-codegen, roborev, golangci-lint, Node 22, Docker CLI + plugins
+# Pre-baked toolchain: Go 1.27.3, Rust stable, deadcode, oapi-codegen, roborev, golangci-lint, Node 22, Docker CLI + plugins
 COPY --link --from=go-builder /usr/local/go /usr/local/go
-COPY --link --from=go-builder /out/bin/* /usr/local/bin/
+COPY --link --from=roborev-builder /out/bin/* /usr/local/bin/
 COPY --link --chmod=0755 services/github-runner/roborev-wrapper.sh /usr/local/bin/roborev
 COPY --link --chmod=0644 services/github-runner/roborev-config.toml /etc/roborev/config.toml
 COPY --link --from=rust-builder /usr/local/rustup /usr/local/rustup

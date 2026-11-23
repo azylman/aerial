@@ -115,7 +115,7 @@ type queueChannelPolicyCase struct {
 
 func runQueueChannelPolicyCase(t *testing.T, tc queueChannelPolicyCase) {
 	t.Helper()
-	store := setupTestStore(t)
+	store := testStore(t)
 	var mu sync.Mutex
 	var runnerCalls, deliveryCalls, typingCalls int
 
@@ -424,7 +424,7 @@ func TestProcessBurst_SessionContinuityAndRotationMatrix(t *testing.T) {
 
 	tests := []burstTestCase{
 		{name: "GhostSessionRecovery", channelID: "chan-lounge", seedSessionID: "stale-ghost-uuid", seedTranscripts: []string{"a8b5e679-7425-40de-944b-e07fc1f90ae7"}, policy: config.ChannelPolicy{Mode: "channel"}, runnerSteps: []mockRunnerStep{{convID: "a8b5e679-7425-40de-944b-e07fc1f90ae7", response: "Hello! I am ready to help.", stderr: "warning: conversation \"stale-ghost-uuid\" not found\nStarting conversation update stream for a8b5e679-7425-40de-944b-e07fc1f90ae7\n"}}, messages: []db.Message{{ID: "msg-ghost-recovery-1", AuthorName: "Alice", Content: "<@aerial> are you awake?"}}, wantRunnerCalls: 1, wantTurnCount: 1, wantSavedSession: "a8b5e679-7425-40de-944b-e07fc1f90ae7", checkSavedSession: true},
-		{name: "MultiTurnContinuity_AfterRecovery", channelID: "chan-lounge", seedSessionID: "stale-ghost-uuid", seedTranscripts: []string{"a8b5e679-7425-40de-944b-e07fc1f90ae7"}, policy: config.ChannelPolicy{Mode: "channel"}, sequentialBursts: true, runnerSteps: []mockRunnerStep{{convID: "a8b5e679-7425-40de-944b-e07fc1f90ae7", response: "Clean reply", stderr: "warning: conversation \"stale-ghost-uuid\" not found\nStarting conversation update stream for a8b5e679-7425-40de-944b-e07fc1f90ae7\n"}}, messages: []db.Message{{ID: "msg-recov-turn-1", AuthorName: "Alice", Content: "<@aerial> hello"}, {ID: "msg-recov-turn-2", AuthorName: "Alice", Content: "<@aerial> what did I just say?"}}, wantRunnerCalls: 2, wantTurnCount: 2, wantPassedSessions: []string{"", "a8b5e679-7425-40de-944b-e07fc1f90ae7"}},
+		{name: "MultiTurnContinuity_AfterRecovery", channelID: "chan-lounge", seedSessionID: "stale-ghost-uuid", seedTranscripts: []string{"a8b5e679-7425-40de-944b-e07fc1f90ae7"}, policy: config.ChannelPolicy{Mode: "channel"}, sequentialBursts: true, runnerSteps: []mockRunnerStep{{convID: "a8b5e679-7425-40de-944b-e07fc1f90ae7", response: "Clean reply", stderr: "warning: conversation \"stale-ghost-uuid\" not found\nStarting conversation update stream for a8b5e679-7425-40de-944b-e07fc1f90ae7\n"}}, messages: []db.Message{{ID: "msg-recov-turn-1", AuthorName: "Alice", Content: "<@aerial> hello"}, {ID: "msg-recov-turn-2", AuthorName: "Alice", Content: "<@aerial> what did I just say?"}}, wantRunnerCalls: 2, wantTurnCount: 2, wantPassedSessions: []string{"stale-ghost-uuid", "a8b5e679-7425-40de-944b-e07fc1f90ae7"}},
 		{name: "ColdChannel_NoStubDirectory", channelID: "chan-cold-123", classifierJSON: `{"confidence": 0.05, "reason": "ambient chatter"}`, policy: config.ChannelPolicy{Mode: "channel", AmbientWakeThreshold: new(0.80)}, messages: []db.Message{{ID: "msg-cold-ambient-1", AuthorName: "Alice", Content: "just saying hello to everyone in the room"}}, wantRunnerCalls: 0, wantTurnCount: 0, wantSavedSession: "", checkSavedSession: true, wantNoStubDir: true},
 		{name: "Turn1ContextInjection", channelID: "chan-history", seedTranscripts: []string{"e5b7fb78-d85d-4bd6-ba9e-330f1e30596f"}, historyMessages: histMessages, policy: config.ChannelPolicy{Mode: "channel"}, sequentialBursts: true, runnerSteps: []mockRunnerStep{{convID: "e5b7fb78-d85d-4bd6-ba9e-330f1e30596f", response: "Answering wake question!"}}, messages: []db.Message{{ID: "msg-hist-turn-1", AuthorName: "Charlie", Content: "<@aerial> turn 1 wake question"}, {ID: "msg-hist-turn-2", AuthorName: "Charlie", Content: "<@aerial> turn 2 follow-up question"}}, wantRunnerCalls: 2, wantTurnCount: 2, wantPassedSessions: []string{"", "e5b7fb78-d85d-4bd6-ba9e-330f1e30596f"}, wantTurnPromptContains: map[int][]string{0: {"<CHANNEL_HISTORY>", "First historical message", "Second historical message"}, 1: {"<CHANNEL_HISTORY>", "Previous assistant response"}}},
 		{name: "ThreadsMode_WarmTurnSuppressesChannelHistory", channelID: "thread-history-suppress", seedTranscripts: []string{"e5b7fb78-d85d-4bd6-ba9e-330f1e30596f"}, historyMessages: histMessages[:1], policy: config.ChannelPolicy{Mode: "threads"}, sequentialBursts: true, runnerSteps: []mockRunnerStep{{convID: "e5b7fb78-d85d-4bd6-ba9e-330f1e30596f", response: "Answering wake question!"}}, messages: []db.Message{{ID: "msg-thread-turn-1", AuthorName: "Charlie", Content: "Hey Aerial, turn 1 thread question"}, {ID: "msg-thread-turn-2", AuthorName: "Charlie", Content: "Hey Aerial, turn 2 follow-up question"}}, wantRunnerCalls: 2, wantTurnCount: 2, wantTurnPromptContains: map[int][]string{0: {"<CHANNEL_HISTORY>"}}, wantTurnPromptExcludes: map[int][]string{1: {"<CHANNEL_HISTORY>"}}},
@@ -658,7 +658,7 @@ type processBurstQuotaPauseCase struct {
 
 func runProcessBurstQuotaPauseCase(t *testing.T, tc processBurstQuotaPauseCase) {
 	t.Helper()
-	store := setupTestStore(t)
+	store := testStore(t)
 	var runnerCalls int
 	var deliveredTexts []string
 	var mu sync.Mutex
@@ -767,7 +767,8 @@ func (s *summarySaveNotifyStore) SaveThreadSummary(ctx context.Context, threadID
 
 func TestThreadColdStartSummarization_Integration(t *testing.T) {
 	refreshEvents := make(chan string, 10)
-	store := &summarySaveNotifyStore{Store: setupTestStore(t), saved: refreshEvents}
+	baseStore := testStore(t)
+	store := &summarySaveNotifyStore{Store: baseStore, saved: refreshEvents}
 	for _, ch := range []*discordgo.Channel{
 		{ID: "thread-100", ParentID: "channel-1", Type: discordgo.ChannelTypeGuildPublicThread},
 		{ID: "channel-1", ParentID: "", Type: discordgo.ChannelTypeGuildText},
@@ -869,7 +870,8 @@ type processBurstErrorClassificationCase struct {
 
 func runProcessBurstErrorClassificationCase(t *testing.T, tt processBurstErrorClassificationCase) {
 	t.Helper()
-	tmpDir, store := t.TempDir(), setupTestStore(t)
+	store := testStore(t)
+	tmpDir := t.TempDir()
 	var validUUID string
 	if tt.seedPBFile {
 		validUUID = uuid.New().String()
@@ -959,7 +961,7 @@ func TestProcessBurst_ErrorClassificationMatrix(t *testing.T) {
 
 func TestWorkerPool_EffortRouting(t *testing.T) {
 	t.Parallel()
-	store := setupTestStore(t)
+	store := testStore(t)
 	var executedModels []string
 	var mu sync.Mutex
 

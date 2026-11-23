@@ -42,9 +42,6 @@ func dispatchCovenExtract(ctx context.Context, worker *Worker, targetAgent, thre
 	if worker == nil {
 		return nil
 	}
-	if worker.RestateIngressURL() == "" {
-		return worker.ExtractThread(ctx, threadID, targetAgent)
-	}
 
 	scopedKey := config.ScopedThreadKey(targetAgent, threadID)
 	endpoint := fmt.Sprintf("%s/CovenThread/%s/Extract/send", worker.RestateIngressURL(), url.PathEscape(scopedKey))
@@ -305,30 +302,119 @@ func startRestateServer(ctx context.Context, cfg *config.Config, thread *CovenTh
 	return restateLn, restateHTTPServer, restateErrChan, nil
 }
 
-func newExtractFn(cfg *config.Config, worker *Worker, toolHandler *ToolHandler) func(context.Context, string) error {
-	return func(extractCtx context.Context, threadID string) error {
-		if cfg.RestateIngressURL != "" {
-			var targetAgent, cleanThread string
-			if strings.Contains(threadID, "/") {
-				targetAgent, cleanThread = config.ParseScopedThreadKey(threadID)
-			} else {
-				targetAgent = cfg.EffectiveStack()
-				cleanThread = strings.TrimSpace(threadID)
-			}
-			scopedKey := config.ScopedThreadKey(targetAgent, cleanThread)
-			endpoint := fmt.Sprintf("%s/CovenThread/%s/Extract/send", strings.TrimRight(cfg.RestateIngressURL, "/"), url.PathEscape(scopedKey))
-			req := ExtractJobRequest{
-				ThreadID: cleanThread,
-				Agent:    targetAgent,
-			}
-			var client *http.Client
-			if worker != nil {
-				client = worker.HTTPClient()
-			}
-			_, postErr := restateingress.Post(extractCtx, client, endpoint, "", req, 0)
-			return postErr
+const (
+	restateRegisterInitialBackoff = time.Second
+	restateRegisterMaxBackoff     = 30 * time.Second
+	restateRegisterAttemptTimeout = 10 * time.Second
+)
+
+type restateDeploymentRequest struct {
+	URI   string `json:"uri"`
+	Force bool   `json:"force"`
+}
+
+// RegisterRestateDeployment registers coven's advertised Restate endpoint (CovenThread, CovenDreamer)
+// with the Restate admin API. force=true matches haro and prospera so a redeploy replaces the old revision.
+func RegisterRestateDeployment(ctx context.Context, client *http.Client, adminURL, advertiseURL string) error {
+	cleanAdmin := strings.TrimRight(strings.TrimSpace(adminURL), "/")
+	cleanAdv := strings.TrimSpace(advertiseURL)
+	if cleanAdmin == "" || cleanAdv == "" {
+		return nil
+	}
+	if _, err := restateingress.Post(ctx, client, cleanAdmin+"/deployments", "", restateDeploymentRequest{URI: cleanAdv, Force: true}, 1024); err != nil {
+		return fmt.Errorf("register restate deployment at %s/deployments: %w", cleanAdmin, err)
+	}
+	return nil
+}
+
+// registerRestateUntilSuccess retries RegisterRestateDeployment with doubling backoff (capped at
+// restateRegisterMaxBackoff) until it succeeds or ctx ends. It sets coven_restate_registered on success.
+func registerRestateUntilSuccess(ctx context.Context, client *http.Client, adminURL, advertiseURL string, backoff time.Duration) error {
+	if strings.TrimSpace(adminURL) == "" || strings.TrimSpace(advertiseURL) == "" {
+		log.Printf("[Coven] Restate admin or advertise URL empty; skipping deployment registration")
+		return nil
+	}
+	if backoff <= 0 {
+		backoff = restateRegisterInitialBackoff
+	}
+	for {
+		attemptCtx, cancel := context.WithTimeout(ctx, restateRegisterAttemptTimeout)
+		err := RegisterRestateDeployment(attemptCtx, client, adminURL, advertiseURL)
+		cancel()
+		if err == nil {
+			RestateRegistered.Set(1)
+			log.Printf("[Coven] Registered Restate deployment %s with %s", strings.TrimSpace(advertiseURL), strings.TrimSpace(adminURL))
+			return nil
 		}
-		return toolHandler.Extract(extractCtx, threadID)
+		log.Printf("[Coven] warning: Restate deployment registration failed: %v; retrying in %s", err, backoff)
+		timer := time.NewTimer(backoff)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+		backoff = min(2*backoff, restateRegisterMaxBackoff)
+	}
+}
+
+// runWorkerAfterRegistration registers coven with Restate, then (when startWorker) starts the worker,
+// which arms CovenDreamer. Arming before registration would hit "service not found" at ingress.
+func runWorkerAfterRegistration(ctx context.Context, client *http.Client, adminURL, advertiseURL string, backoff time.Duration, worker *Worker, startWorker bool) error {
+	if err := registerRestateUntilSuccess(ctx, client, adminURL, advertiseURL, backoff); err != nil {
+		return err
+	}
+	if !startWorker || worker == nil {
+		return nil
+	}
+	return worker.Start(ctx)
+}
+
+// errRestateIngressRequired is returned at startup when no Restate ingress URL is configured:
+// extraction and dreaming only run as Restate Virtual Objects.
+var errRestateIngressRequired = errors.New("config: restate_ingress_url is required (coven runs extraction and dreaming only through Restate)")
+
+// validateRestateIngress fails startup when the Restate ingress URL is empty.
+func validateRestateIngress(ingressURL string) error {
+	if strings.TrimSpace(ingressURL) == "" {
+		return errRestateIngressRequired
+	}
+	return nil
+}
+
+// adminExtractIdempotencyKey names an admin-triggered extraction by the caller's request ID
+// (admin:extract:<stack>:<request id>). Without a request ID the key is empty and the
+// Idempotency-Key header is omitted, so distinct admin calls are never collapsed.
+func adminExtractIdempotencyKey(stack, requestID string) string {
+	requestID = strings.TrimSpace(requestID)
+	if requestID == "" {
+		return ""
+	}
+	return fmt.Sprintf("admin:extract:%s:%s", config.NormalizeStack(stack), requestID)
+}
+
+// newExtractFn returns the admin extract hook: it sends the thread to its CovenThread object.
+func newExtractFn(cfg *config.Config, worker *Worker) func(context.Context, string, string) error {
+	return func(extractCtx context.Context, threadID, requestID string) error {
+		var targetAgent, cleanThread string
+		if strings.Contains(threadID, "/") {
+			targetAgent, cleanThread = config.ParseScopedThreadKey(threadID)
+		} else {
+			targetAgent = cfg.EffectiveStack()
+			cleanThread = strings.TrimSpace(threadID)
+		}
+		scopedKey := config.ScopedThreadKey(targetAgent, cleanThread)
+		endpoint := fmt.Sprintf("%s/CovenThread/%s/Extract/send", strings.TrimRight(cfg.RestateIngressURL, "/"), url.PathEscape(scopedKey))
+		req := ExtractJobRequest{
+			ThreadID: cleanThread,
+			Agent:    targetAgent,
+		}
+		var client *http.Client
+		if worker != nil {
+			client = worker.HTTPClient()
+		}
+		_, postErr := restateingress.Post(extractCtx, client, endpoint, adminExtractIdempotencyKey(targetAgent, requestID), req, 0)
+		return postErr
 	}
 }
 
@@ -336,6 +422,9 @@ func newExtractFn(cfg *config.Config, worker *Worker, toolHandler *ToolHandler) 
 func RunApp(ctx context.Context, cfg *config.Config) error {
 	if cfg == nil {
 		return fmt.Errorf("app: config cannot be nil")
+	}
+	if err := validateRestateIngress(cfg.RestateIngressURL); err != nil {
+		return err
 	}
 	port := strings.TrimSpace(cfg.Port)
 	if port == "" {
@@ -367,22 +456,22 @@ func RunApp(ctx context.Context, cfg *config.Config) error {
 	toolHandler := NewToolHandler(cfg, sqlStore, ollama, publisher)
 
 	worker := NewWorker(WorkerConfig{
-		Store:             sqlStore,
-		Ollama:            ollama,
-		LLMClient:         HTTPBrainLLMClient(cfg.EriLLMURL, nil),
-		Publisher:         publisher,
-		CustomSkillsDir:   cfg.CustomSkillsDir,
-		InitialDelay:      DefaultWorkerInitialDelay,
-		TickInterval:      DefaultWorkerTickInterval,
-		Role:              cfg.Role,
-		Stack:             cfg.EffectiveStack(),
-		ExtractTimeout:    cfg.ExtractTimeout(),
-		RestateIngressURL: cfg.RestateIngressURL,
+		Store:               sqlStore,
+		Ollama:              ollama,
+		LLMClient:           HTTPBrainLLMClient(cfg.EriLLMURL, nil),
+		Publisher:           publisher,
+		CustomSkillsDir:     cfg.CustomSkillsDir,
+		Role:                cfg.Role,
+		Stack:               cfg.EffectiveStack(),
+		ExtractTimeout:      cfg.ExtractTimeout(),
+		RestateIngressURL:   cfg.RestateIngressURL,
+		RestateAdminURL:     cfg.RestateAdminURL,
+		RestateAdvertiseURL: cfg.RestateAdvertiseURL,
 	})
 	workerCtx, workerCancel := context.WithCancel(ctx)
 	defer workerCancel()
 
-	extractFn := newExtractFn(cfg, worker, toolHandler)
+	extractFn := newExtractFn(cfg, worker)
 	mcpServer := NewServer(toolHandler, extractFn)
 
 	thread := NewCovenThread(worker)
@@ -406,13 +495,12 @@ func RunApp(ctx context.Context, cfg *config.Config) error {
 		}
 	}()
 
-	if !strings.EqualFold(cfg.Role, "extractor") {
-		go func() {
-			if err := worker.Start(workerCtx); err != nil && !errors.Is(err, context.Canceled) {
-				log.Printf("[Coven Worker] Background worker exited: %v", err)
-			}
-		}()
-	}
+	go func() {
+		startWorker := !strings.EqualFold(cfg.Role, "extractor")
+		if err := runWorkerAfterRegistration(workerCtx, nil, cfg.RestateAdminURL, cfg.RestateAdvertiseURL, restateRegisterInitialBackoff, worker, startWorker); err != nil && !errors.Is(err, context.Canceled) {
+			log.Printf("[Coven Worker] Background worker exited: %v", err)
+		}
+	}()
 
 	httpServer := &http.Server{
 		Addr:              ":" + port,

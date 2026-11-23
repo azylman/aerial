@@ -623,7 +623,7 @@ func TestMuseProtocol_DispatchStreamEvents(t *testing.T) {
 		claudeToolIDs: make(map[string]int),
 		stderrTail:    newTailBuffer(4096),
 	}
-	daemon.SetSessionID("root-muse-1")
+	daemon.sessionID = "root-muse-1"
 
 	daemon.dispatchMuseJSONRPCLine("")
 	daemon.dispatchMuseJSONRPCLine("not-json")
@@ -698,7 +698,7 @@ func TestMuseProtocol_ItemStartedAndErrorExtraction(t *testing.T) {
 		cfg:           DaemonConfig{Engine: "muse"},
 		claudeToolIDs: make(map[string]int),
 	}
-	daemon.SetSessionID("sess-cov-1")
+	daemon.sessionID = "sess-cov-1"
 
 	// handleMuseItemStarted nil checks
 	daemon.handleMuseItemStarted(nil, nil)

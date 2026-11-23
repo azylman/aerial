@@ -2,6 +2,7 @@ package queue
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"testing"
 
@@ -10,7 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/azylman/aerial/pkg/pubsub"
-	"github.com/azylman/aerial/services/eri/pkg/db/dbtest"
+	"github.com/azylman/aerial/services/eri/pkg/db"
 )
 
 type voiceAskTestCase struct {
@@ -18,13 +19,15 @@ type voiceAskTestCase struct {
 	deviceKey    string
 	req          VoiceSessionRequest
 	nilPool      bool
-	storeFail    bool
+	sabotageSQL  string
 	runnerReply  string
 	runnerConvID string
 	runnerErr    error
 	wantReply    string
 	wantErrorSub string
 	wantTerminal bool
+	// wantSession is the conversation persisted for the voice-<key> session ("" = no row).
+	wantSession string
 }
 
 func resolveEffectiveVoiceKey(deviceKey string, req VoiceSessionRequest) string {
@@ -43,9 +46,14 @@ func resolveEffectiveVoiceKey(deviceKey string, req VoiceSessionRequest) string 
 func runVoiceSessionAskCase(t *testing.T, tc voiceAskTestCase) {
 	t.Helper()
 	var pool *WorkerPool
-	store := dbtest.NewFakeStore()
-	if tc.storeFail {
-		store.FailNext("RotateSessionID", errors.New("store voice rotate err"))
+	// Only turns that reach the session rotation (a runner conversation ID) touch the store.
+	var store db.Store
+	var sqlStore *db.SQLStore
+	if tc.runnerConvID != "" {
+		var sqlDB *sql.DB
+		sqlStore, sqlDB = newTestStore(t)
+		execSQL(t, sqlDB, tc.sabotageSQL)
+		store = sqlStore
 	}
 
 	if !tc.nilPool {
@@ -83,6 +91,9 @@ func runVoiceSessionAskCase(t *testing.T, tc voiceAskTestCase) {
 	assert.Equal(t, tc.wantReply, res.Reply)
 	assert.Equal(t, tc.runnerConvID, res.ConversationID)
 	assert.Equal(t, resolveEffectiveVoiceKey(tc.deviceKey, tc.req), res.DeviceKey)
+	sessionID, err := sqlStore.GetSessionID(context.Background(), "voice-"+res.DeviceKey)
+	require.NoError(t, err)
+	assert.Equal(t, tc.wantSession, sessionID)
 }
 
 func TestVoiceSessionObject_Ask(t *testing.T) {
@@ -118,6 +129,7 @@ func TestVoiceSessionObject_Ask(t *testing.T) {
 			runnerReply:  "chilling",
 			runnerConvID: "conv-1",
 			wantReply:    "chilling",
+			wantSession:  "conv-1",
 		},
 		{
 			name:         "fallback from empty key to conversation id",
@@ -126,6 +138,7 @@ func TestVoiceSessionObject_Ask(t *testing.T) {
 			runnerReply:  "sup",
 			runnerConvID: "conv-2",
 			wantReply:    "sup",
+			wantSession:  "conv-2",
 		},
 		{
 			name:         "successful voice turn streams events and rotates session",
@@ -134,12 +147,13 @@ func TestVoiceSessionObject_Ask(t *testing.T) {
 			runnerReply:  "it is 6 PM",
 			runnerConvID: "conv-voice-1",
 			wantReply:    "it is 6 PM",
+			wantSession:  "conv-voice-1",
 		},
 		{
 			name:         "successful voice turn handles store rotate error gracefully",
 			deviceKey:    "kiosk-bedroom",
 			req:          VoiceSessionRequest{DeviceKey: "kiosk-bedroom", Prompt: "lights off"},
-			storeFail:    true,
+			sabotageSQL:  failTriggerSQL("sessions", "INSERT", "40001"),
 			runnerReply:  "done",
 			runnerConvID: "conv-voice-3",
 			wantReply:    "done",
