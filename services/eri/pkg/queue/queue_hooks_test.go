@@ -19,6 +19,7 @@ import (
 
 	"github.com/bwmarrin/discordgo"
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	"github.com/stretchr/testify/require"
 
 	"github.com/azylman/aerial/services/eri/pkg/classifier"
 	"github.com/azylman/aerial/services/eri/pkg/config"
@@ -75,7 +76,7 @@ func TestProcessBurst_RecordsTokensTelemetry(t *testing.T) {
 				CreatedAt:   t0,
 				UpdatedAt:   t0,
 			}
-			_ = insertMessage(store, msg)
+			require.NoError(t, insertMessage(store, msg))
 			if lt := runLiveBurst(context.Background(), pool, tc.threadID, "turn-1", msg.ID); lt.err != nil || lt.outcome != OutcomeCompleted {
 				t.Fatalf("turn = (%s, %v), want completed", lt.outcome, lt.err)
 			}
@@ -102,7 +103,8 @@ func TestThreadStatusQueueIntegration(t *testing.T) {
 	threadID := "thread-status-test-123"
 	var finalDelivered atomic.Int32
 
-	sess, _ := discordgo.New("Bot mock_token")
+	sess, err := discordgo.New("Bot mock_token")
+	require.NoError(t, err)
 	sess.Client.Transport = roundTripperFunc(func(req *http.Request) (*http.Response, error) {
 		msgJSON := `{"id":"mock-status-msg-123","channel_id":"thread-status-test-123","content":"mock status"}`
 		return &http.Response{
@@ -112,9 +114,10 @@ func TestThreadStatusQueueIntegration(t *testing.T) {
 		}, nil
 	})
 	sess.State = discordgo.NewState()
-	_ = sess.State.ChannelAdd(&discordgo.Channel{
-		ID: threadID, Name: "status-thread", Type: discordgo.ChannelTypeGuildPublicThread, ParentID: "parent-chan-1",
-	})
+	require.NoError(t, sess.State.GuildAdd(&discordgo.Guild{ID: "guild-1"}))
+	require.NoError(t, sess.State.ChannelAdd(&discordgo.Channel{
+		ID: threadID, GuildID: "guild-1", Name: "status-thread", Type: discordgo.ChannelTypeGuildPublicThread, ParentID: "parent-chan-1",
+	}))
 
 	pool := NewWorkerPool(WorkerPoolConfig{
 		Store: store, BackoffBase: 10 * time.Millisecond, MaxAttempts: 1,
@@ -131,8 +134,8 @@ func TestThreadStatusQueueIntegration(t *testing.T) {
 	})
 	pool.SetDiscordSession(sess)
 
-	msg := db.Message{ID: "msg-thread-1", ThreadID: threadID, AuthorID: "user-1", Content: "check my file", Status: db.StatusPending, CreatedAt: time.Now().UTC()}
-	_ = insertMessage(store, msg)
+	msg := db.Message{ID: "msg-thread-1", ThreadID: threadID, GuildID: "guild-1", AuthorID: "user-1", Content: "check my file", Status: db.StatusPending, CreatedAt: time.Now().UTC()}
+	require.NoError(t, insertMessage(store, msg))
 	if lt := runLiveBurst(context.Background(), pool, threadID, "turn-1", msg.ID); lt.err != nil || lt.outcome != OutcomeCompleted {
 		t.Fatalf("turn = (%s, %v), want completed", lt.outcome, lt.err)
 	}
@@ -156,7 +159,7 @@ func TestWorkerPool_HermeticByDefaultWithoutRetriever(t *testing.T) {
 		TypingFunc:   noopTyping,
 	})
 	msg := db.Message{ID: "msg-hermetic-1", ThreadID: "thread-hermetic-1", AuthorID: "user-1", Content: "Hermetic test without retriever", Status: db.StatusPending, CreatedAt: time.Now().UTC()}
-	_ = insertMessage(store, msg)
+	require.NoError(t, insertMessage(store, msg))
 	if lt := runLiveBurst(context.Background(), poolWithDB, msg.ThreadID, "turn-1", msg.ID); lt.err != nil || lt.outcome != OutcomeCompleted {
 		t.Fatalf("turn = (%s, %v), want completed", lt.outcome, lt.err)
 	}
@@ -217,7 +220,7 @@ func TestWorkerPool_NotifierInvocationMatrix(t *testing.T) {
 			t.Parallel()
 			store := testStore(t)
 			if tt.seedSessionID != "" {
-				_ = rotateSessionID(store, tt.threadID, tt.seedSessionID)
+				require.NoError(t, rotateSessionID(store, tt.threadID, tt.seedSessionID))
 			}
 			var capturedDesc, deliveredNotif string
 			var mu sync.Mutex
@@ -247,7 +250,7 @@ func TestWorkerPool_NotifierInvocationMatrix(t *testing.T) {
 			defer pool.Stop()
 
 			msg := db.Message{ID: "msg-" + tt.name, ThreadID: tt.threadID, Content: "test content", Status: db.StatusPending, CreatedAt: time.Now().UTC()}
-			_ = insertMessage(store, msg)
+			require.NoError(t, insertMessage(store, msg))
 			mustRunLiveBurst(t, pool, tt.threadID, msg.ID, tt.wantOutcome)
 
 			mu.Lock()
@@ -330,7 +333,7 @@ func runWakeHookEval(t *testing.T, hookResp *WakeResponse, hookErr error, timeou
 	for i, m := range inputMsgs {
 		m.CreatedAt = now.Add(time.Duration(i) * time.Second)
 		msgs[i] = m
-		_ = insertMessage(store, m)
+		require.NoError(t, insertMessage(store, m))
 	}
 	effID := msgs[0].ThreadID
 	if emptyEffID {
@@ -358,7 +361,9 @@ func assertWakeHookExit(t *testing.T, tc onWakeHookCase, te *turnExecution, stor
 	if te.wakeIdx != -1 {
 		t.Errorf("wakeIdx=%d, want -1", te.wakeIdx)
 	}
-	if saved, _ := getMessage(store, tc.msgs[0].ID); saved == nil || saved.Status != db.StatusCompleted {
+	saved, err := getMessage(store, tc.msgs[0].ID)
+	require.NoError(t, err)
+	if saved == nil || saved.Status != db.StatusCompleted {
 		t.Fatalf("saved msg = %+v", saved)
 	}
 }
@@ -369,7 +374,9 @@ func assertWakeHookNoExit(t *testing.T, tc onWakeHookCase, te *turnExecution, st
 		t.Errorf("wakeIdx=%d wakeInfos=%+v", te.wakeIdx, te.wakeInfos)
 	}
 	if tc.wantTurns > 0 {
-		if turnCount, _ := getSessionTurnCount(store, tc.msgs[0].ThreadID); turnCount != tc.wantTurns {
+		turnCount, err := getSessionTurnCount(store, tc.msgs[0].ThreadID)
+		require.NoError(t, err)
+		if turnCount != tc.wantTurns {
 			t.Errorf("turnCount = %d, want %d", turnCount, tc.wantTurns)
 		}
 	}
@@ -446,14 +453,16 @@ func TestOnWakeHook_FullProcessBurst(t *testing.T) {
 	})
 
 	msgDrop, msgWake := db.Message{ID: "msg-burst-drop", ThreadID: "chan-full-test", AuthorName: "user-foxtrot", Content: "drop message", Status: db.StatusPending, CreatedAt: now}, db.Message{ID: "msg-burst-wake", ThreadID: "chan-full-test", AuthorName: "user-golf", Content: "wake message", Status: db.StatusPending, CreatedAt: now.Add(time.Second)}
-	_ = insertMessage(store, msgDrop)
+	require.NoError(t, insertMessage(store, msgDrop))
 	if lt := runLiveBurst(context.Background(), pool, msgDrop.ThreadID, "turn-drop", msgDrop.ID); lt.err != nil {
 		t.Fatalf("drop turn err = %v", lt.err)
 	}
-	if savedDrop, _ := getMessage(store, "msg-burst-drop"); savedDrop == nil || savedDrop.Status != db.StatusCompleted || !strings.Contains(savedDrop.ErrorMessage, "[AMBIENT") {
+	savedDrop, err := getMessage(store, "msg-burst-drop")
+	require.NoError(t, err)
+	if savedDrop == nil || savedDrop.Status != db.StatusCompleted || !strings.Contains(savedDrop.ErrorMessage, "[AMBIENT") {
 		t.Errorf("expected drop message completed as ambient, got %+v", savedDrop)
 	}
-	_ = insertMessage(store, msgWake)
+	require.NoError(t, insertMessage(store, msgWake))
 	if lt := runLiveBurst(context.Background(), pool, msgWake.ThreadID, "turn-wake", msgWake.ID); lt.err != nil || lt.outcome != OutcomeCompleted {
 		t.Fatalf("wake turn = (%s, %v), want completed", lt.outcome, lt.err)
 	}
@@ -462,7 +471,9 @@ func TestOnWakeHook_FullProcessBurst(t *testing.T) {
 	if runnerCalls != 1 || deliveryCalls != 1 {
 		t.Errorf("runnerCalls=%d, deliveryCalls=%d, want 1, 1", runnerCalls, deliveryCalls)
 	}
-	if savedWake, _ := getMessage(store, "msg-burst-wake"); savedWake == nil || savedWake.Status != db.StatusCompleted || savedWake.ResponseText != "Bot response" {
+	savedWake, err := getMessage(store, "msg-burst-wake")
+	require.NoError(t, err)
+	if savedWake == nil || savedWake.Status != db.StatusCompleted || savedWake.ResponseText != "Bot response" {
 		t.Errorf("expected wake message completed with response, got %+v", savedWake)
 	}
 }
@@ -534,7 +545,7 @@ func runPreTurnHookBurst(t *testing.T, hookResps []*PreTurnResponse, hookErr err
 	defer pool.Stop()
 	now := time.Now().UTC()
 	msg := db.Message{ID: "msg-preturn-test", ThreadID: "chan-preturn", AuthorName: "user-alpha", Content: "test prompt for pre-turn", Status: db.StatusPending, RetryCount: initialRetry, CreatedAt: now}
-	_ = insertMessage(store, msg)
+	require.NoError(t, insertMessage(store, msg))
 	lt := runLiveBurst(context.Background(), pool, msg.ThreadID, "turn-1", msg.ID)
 	if lt.err != nil {
 		t.Fatalf("turn err = %v", lt.err)
@@ -547,7 +558,8 @@ func runPreTurnHookBurst(t *testing.T, hookResps []*PreTurnResponse, hookErr err
 
 	mu.Lock()
 	defer mu.Unlock()
-	saved, _ := getMessage(store, "msg-preturn-test")
+	saved, err := getMessage(store, "msg-preturn-test")
+	require.NoError(t, err)
 	return hookCalls, runnerCalls, capturedPrompt, capturedReq, saved
 }
 
@@ -615,7 +627,7 @@ func TestPreTurnHook_Helpers(t *testing.T) {
 	completedStatus := ""
 	pool := NewWorkerPool(WorkerPoolConfig{Store: store, OnMessageCompleted: func(msg db.Message, status string) { completedStatus = status }})
 	schedMsg := db.Message{ID: "msg-sched-abort", ThreadID: "chan-sched", Status: db.StatusPending}
-	_ = insertMessage(store, schedMsg)
+	require.NoError(t, insertMessage(store, schedMsg))
 	(&turnExecution{pool: pool, burst: []db.Message{schedMsg}, threadID: "chan-sched"}).abortBurst("manual abort")
 	if completedStatus != db.StatusCompleted {
 		t.Errorf("completedStatus=%s, want COMPLETED", completedStatus)
@@ -794,7 +806,7 @@ func TestPostTurnHook_Helpers(t *testing.T) {
 		},
 	})
 	msgDrop := db.Message{ID: "msg-preturn-dropped", ThreadID: "chan-preturn-dropped", AuthorName: "user-drop", Content: "drop me", Status: db.StatusPending, CreatedAt: time.Now().UTC()}
-	_ = insertMessage(store, msgDrop)
+	require.NoError(t, insertMessage(store, msgDrop))
 	if lt := runLiveBurst(context.Background(), pool, msgDrop.ThreadID, "turn-1", msgDrop.ID); lt.err != nil {
 		t.Fatalf("turn err = %v", lt.err)
 	}
@@ -875,8 +887,8 @@ func TestWorkerPool_MultiTurn_AlwaysDeliversFinalOutputText(t *testing.T) {
 			store := testStore(t)
 			tempDir := t.TempDir()
 			sessDir := filepath.Join(tempDir, ".gemini", "antigravity-cli", "brain", tc.convID, ".system_generated", "logs")
-			_ = os.MkdirAll(sessDir, 0o755)
-			_ = os.WriteFile(filepath.Join(sessDir, "transcript.jsonl"), []byte(tc.transcriptContent), 0o644)
+			require.NoError(t, os.MkdirAll(sessDir, 0o755))
+			require.NoError(t, os.WriteFile(filepath.Join(sessDir, "transcript.jsonl"), []byte(tc.transcriptContent), 0o644))
 
 			var deliveredText string
 			var mu sync.Mutex
@@ -896,7 +908,7 @@ func TestWorkerPool_MultiTurn_AlwaysDeliversFinalOutputText(t *testing.T) {
 			defer pool.Stop()
 
 			msg := db.Message{ID: tc.msgID, ThreadID: tc.threadID, GuildID: "guild-1", AuthorID: "user-1", AuthorName: "User", Content: "Check", Status: db.StatusPending, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
-			_ = insertMessage(store, msg)
+			require.NoError(t, insertMessage(store, msg))
 			if lt := runLiveBurst(context.Background(), pool, tc.threadID, "turn-1", tc.msgID); lt.err != nil || lt.outcome != OutcomeCompleted {
 				t.Fatalf("turn = (%s, %v), want completed", lt.outcome, lt.err)
 			}
@@ -928,10 +940,14 @@ func setupSessionRotationRunner(tc sessionRotationCase, sessionID, tPath string,
 		*attempts = append(*attempts, sID)
 		mu.Unlock()
 		if tc.postTranscriptSteps > 0 {
-			_ = os.WriteFile(tPath, []byte(fmt.Sprintf(`{"step_index": %d, "type": "PLANNER_RESPONSE"}`+"\n", tc.postTranscriptSteps)), 0o644)
+			if err := os.WriteFile(tPath, []byte(fmt.Sprintf(`{"step_index": %d, "type": "PLANNER_RESPONSE"}`+"\n", tc.postTranscriptSteps)), 0o644); err != nil {
+				return "", "", 1, err
+			}
 		}
 		if tc.postTranscriptBytes > 0 {
-			_ = os.WriteFile(tPath, make([]byte, tc.postTranscriptBytes), 0o644)
+			if err := os.WriteFile(tPath, make([]byte, tc.postTranscriptBytes), 0o644); err != nil {
+				return "", "", 1, err
+			}
 		}
 		retID := sID
 		if retID == "" {
@@ -950,20 +966,22 @@ func runSessionRotationCase(t *testing.T, tc sessionRotationCase) {
 	sessMgr := session.New(tmpDir, "")
 
 	sessionID := "sess-" + strings.ToLower(tc.name)
-	sessDir, _ := ensureTestSessionDir(sessMgr, sessionID)
+	sessDir, err := ensureTestSessionDir(sessMgr, sessionID)
+	require.NoError(t, err)
 	tPath := filepath.Join(sessDir, ".system_generated", "logs", "transcript.jsonl")
 
 	if tc.saveInitialSession {
-		_ = saveSessionID(store, tc.threadID, sessionID)
+		require.NoError(t, saveSessionID(store, tc.threadID, sessionID))
 	}
 	for range tc.seedTurns {
-		_, _ = incrementSessionTurnCount(store, tc.threadID)
+		_, err := incrementSessionTurnCount(store, tc.threadID)
+		require.NoError(t, err)
 	}
 	if tc.preTranscriptSteps > 0 {
-		_ = os.WriteFile(tPath, []byte(fmt.Sprintf(`{"step_index": %d, "type": "PLANNER_RESPONSE"}`+"\n", tc.preTranscriptSteps)), 0o644)
+		require.NoError(t, os.WriteFile(tPath, []byte(fmt.Sprintf(`{"step_index": %d, "type": "PLANNER_RESPONSE"}`+"\n", tc.preTranscriptSteps)), 0o644))
 	}
 	if tc.preTranscriptBytes > 0 {
-		_ = os.WriteFile(tPath, bytes.Repeat([]byte("A"), tc.preTranscriptBytes), 0o644)
+		require.NoError(t, os.WriteFile(tPath, bytes.Repeat([]byte("A"), tc.preTranscriptBytes), 0o644))
 	}
 
 	var mu sync.Mutex
@@ -983,7 +1001,7 @@ func runSessionRotationCase(t *testing.T, tc sessionRotationCase) {
 	pool := New(appCfg, poolCfg)
 	defer pool.Stop()
 	msg := db.Message{ID: "msg-rot-" + tc.name, ThreadID: tc.threadID, Content: "<@aerial> run", Status: db.StatusPending, CreatedAt: time.Now().UTC()}
-	_ = insertMessage(store, msg)
+	require.NoError(t, insertMessage(store, msg))
 	if lt := runLiveBurst(context.Background(), pool, tc.threadID, "turn-1", msg.ID); lt.err != nil || lt.outcome != OutcomeCompleted {
 		t.Fatalf("turn = (%s, %v), want completed", lt.outcome, lt.err)
 	}
@@ -1002,7 +1020,9 @@ func runSessionRotationCase(t *testing.T, tc sessionRotationCase) {
 		}
 	}
 	if tc.checkStoreSession {
-		if curSess, _ := getSessionID(store, tc.threadID); curSess != sessionID {
+		curSess, err := getSessionID(store, tc.threadID)
+		require.NoError(t, err)
+		if curSess != sessionID {
 			t.Errorf("store session = %q, want %q", curSess, sessionID)
 		}
 	}

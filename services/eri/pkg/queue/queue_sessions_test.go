@@ -56,7 +56,10 @@ func TestWorkerPool_Accessors(t *testing.T) {
 func TestWorkerPool_ClassifierAlertDebouncing(t *testing.T) {
 	t.Parallel()
 	appCfg := config.NewFromData(&config.ConfigData{SystemChannel: "alerts", APIKey: "k", AgyBin: "agy"})
-	dg, _ := discordgo.New("Bot fake")
+	dg, err := discordgo.New("Bot fake")
+	if err != nil {
+		t.Fatalf("discordgo.New: %v", err)
+	}
 
 	tests := []struct {
 		name, model, rawOutput, endpoint, wantParseSubstr, wantSysSubstr string
@@ -106,14 +109,19 @@ func TestWorkerPool_ClassifierAlertDebouncing(t *testing.T) {
 
 func TestWorkerPool_ResolveChannelID(t *testing.T) {
 	t.Parallel()
-	mockSess, _ := discordgo.New("Bot fake-token")
+	mockSess, err := discordgo.New("Bot fake-token")
+	if err != nil {
+		t.Fatalf("discordgo.New: %v", err)
+	}
 	mockSess.State = discordgo.NewState()
-	_ = mockSess.State.GuildAdd(&discordgo.Guild{
+	if err := mockSess.State.GuildAdd(&discordgo.Guild{
 		ID: "guild-1",
 		Channels: []*discordgo.Channel{
 			{ID: "1564150557705248879", Name: "prospera"},
 		},
-	})
+	}); err != nil {
+		t.Fatalf("GuildAdd: %v", err)
+	}
 	pool := New(nil, WorkerPoolConfig{DiscordSession: mockSess})
 	nilSessPool := New(nil, WorkerPoolConfig{})
 
