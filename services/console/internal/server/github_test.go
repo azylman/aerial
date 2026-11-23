@@ -577,7 +577,7 @@ console:
 	poller.apiBaseURL = mockGH.URL
 	poller.configPath = cfgFile
 
-	_ = poller.pollOnce(ctx)
+	poller.pollOnce(ctx)
 	if callCountAerial != 1 || callCountSidecars != 0 {
 		t.Fatalf("expected 1 aerial call, 0 sidecars calls; got aerial=%d, sidecars=%d", callCountAerial, callCountSidecars)
 	}
@@ -592,7 +592,7 @@ console:
 		t.Fatal(err)
 	}
 
-	_ = poller.pollOnce(ctx)
+	poller.pollOnce(ctx)
 	if callCountAerial != 2 || callCountSidecars != 1 {
 		t.Fatalf("expected 2 aerial calls, 1 sidecars call; got aerial=%d, sidecars=%d", callCountAerial, callCountSidecars)
 	}

@@ -51,18 +51,6 @@
     "scripts/affected/affected_test.go": {
       "blank_assigns": 1
     },
-    "services/console/internal/config/config_test.go": {
-      "blank_assigns": 3
-    },
-    "services/console/internal/server/github_test.go": {
-      "blank_assigns": 2
-    },
-    "services/console/internal/server/handlers_test.go": {
-      "blank_assigns": 3
-    },
-    "services/console/internal/server/k8s_test.go": {
-      "blank_assigns": 1
-    },
     "services/coven/internal/config/config_test.go": {
       "blank_assigns": 1
     },
@@ -91,9 +79,6 @@
       "blank_assigns": 2
     },
     "services/coven/internal/store/sqlstore_test.go": {
-      "blank_assigns": 1
-    },
-    "services/coverage-ingest/internal/server/server_test.go": {
       "blank_assigns": 1
     },
     "services/eri/cmd/hook-guard/trace_test.go": {
@@ -420,12 +405,6 @@
     "services/synapse/internal/router/workers_jetstream_test.go": {
       "blank_assigns": 1
     },
-    "services/transcripts/internal/server/server_test.go": {
-      "blank_assigns": 4
-    },
-    "services/transcripts/internal/server/summarizer_test.go": {
-      "blank_assigns": 1
-    },
     "services/vanadis-restate/internal/build/action_retry_test.go": {
       "blank_assigns": 3
     },
@@ -488,18 +467,6 @@
     },
     "services/vanadis-restate/internal/widget/discord_sender_test.go": {
       "blank_assigns": 2
-    },
-    "services/vanadis/internal/mcp/mcp_test.go": {
-      "blank_assigns": 7
-    },
-    "services/vanadis/internal/server/auth_and_active_step_test.go": {
-      "blank_assigns": 2
-    },
-    "services/vanadis/internal/server/chunks_test.go": {
-      "blank_assigns": 6
-    },
-    "services/vanadis/internal/server/server_test.go": {
-      "blank_assigns": 3
     }
   }
 }
