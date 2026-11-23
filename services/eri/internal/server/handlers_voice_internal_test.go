@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,7 +18,7 @@ import (
 
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/eri/internal/restateclient"
-	"github.com/azylman/aerial/services/eri/pkg/db/dbtest"
+	"github.com/azylman/aerial/services/eri/pkg/db"
 	"github.com/azylman/aerial/services/eri/pkg/metrics"
 	"github.com/azylman/aerial/services/eri/pkg/queue"
 )
@@ -67,8 +68,7 @@ func (w *mockHTTPResponseWriter) WriteHeader(statusCode int) {
 }
 
 func TestHandleVoiceAsk_Validation(t *testing.T) {
-	store := dbtest.NewFakeStore()
-	pool := newTestWorkerPool(store)
+	pool := newTestWorkerPool(newTestStore(t))
 	pool.Start()
 	defer pool.Stop()
 
@@ -126,8 +126,8 @@ func TestPersistVoiceConversationID(t *testing.T) {
 		nilStore    bool
 		sessionID   string
 		convID      string
-		failStore   bool
-		wantPersist bool
+		sabotageSQL string
+		wantSession string
 	}{
 		{name: "nil pool", nilPool: true, sessionID: "s1", convID: "c1"},
 		{name: "nil store in pool", nilStore: true, sessionID: "s1", convID: "c1"},
@@ -135,20 +135,21 @@ func TestPersistVoiceConversationID(t *testing.T) {
 		{name: "whitespace sessionID", sessionID: "   ", convID: "c1"},
 		{name: "empty convID", sessionID: "s1", convID: ""},
 		{name: "whitespace convID", sessionID: "s1", convID: "   "},
-		{name: "store error logged", sessionID: "s-err", convID: "c-err", failStore: true},
-		{name: "success persisted", sessionID: "s-ok", convID: "c-ok", wantPersist: true},
+		{name: "store error logged", sessionID: "s-err", convID: "c-err", sabotageSQL: failTriggerSQL("sessions", "INSERT", "40001")},
+		{name: "success persisted", sessionID: "s-ok", convID: "c-ok", wantSession: "c-ok"},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			var pool *queue.WorkerPool
-			var store *dbtest.FakeStore
+			var store *db.SQLStore
 			if !tc.nilPool {
 				if !tc.nilStore {
-					store = dbtest.NewFakeStore()
-					if tc.failStore {
-						store.FailNext("RotateSessionID", errors.New("simulated rotate failure"))
+					var database *sql.DB
+					store, database = newTestStoreDB(t)
+					if tc.sabotageSQL != "" {
+						mustExec(t, database, tc.sabotageSQL)
 					}
 					pool = newTestWorkerPool(store)
 				} else {
@@ -158,11 +159,12 @@ func TestPersistVoiceConversationID(t *testing.T) {
 				defer pool.Stop()
 			}
 			persistVoiceConversationID(context.Background(), pool, tc.sessionID, tc.convID)
-			if tc.wantPersist && store != nil {
-				got, err := store.GetSessionID(context.Background(), "voice-"+tc.sessionID)
-				if err != nil || got != tc.convID {
-					t.Fatalf("GetSessionID = %q, err = %v, want %q", got, err, tc.convID)
-				}
+			if store == nil {
+				return
+			}
+			got, err := store.GetSessionID(context.Background(), "voice-"+strings.TrimSpace(tc.sessionID))
+			if err != nil || got != tc.wantSession {
+				t.Fatalf("GetSessionID = %q, err = %v, want %q", got, err, tc.wantSession)
 			}
 		})
 	}
@@ -175,6 +177,7 @@ channels:
   default:
     mode: "threads"
 `)
+	pool := newTestWorkerPool(newTestStore(t))
 
 	tests := []struct {
 		name       string
@@ -257,8 +260,6 @@ channels:
 				restateStatus = http.StatusInternalServerError
 			}
 			installRestateCapture(t, restateStatus, `{"status":"accepted"}`)
-			store := dbtest.NewFakeStore()
-			pool := newTestWorkerPool(store)
 			handler := handleInternalDiscordMessage(pool)
 
 			req := httptest.NewRequest(tc.method, "/internal/discord/message", strings.NewReader(tc.body))
@@ -280,6 +281,7 @@ func TestHandleInternalDiscordInteraction(t *testing.T) {
 	defer activeInteractionRouter.Store(origRouter)
 	SetFunnelQuotaProvider(func() metrics.QuotaSnapshot { return metrics.QuotaSnapshot{} })
 	defer SetFunnelQuotaProvider(nil)
+	store := newTestStore(t)
 
 	tests := []struct {
 		name           string
@@ -351,7 +353,6 @@ func TestHandleInternalDiscordInteraction(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			store := dbtest.NewFakeStore()
 			pool := newTestWorkerPool(store)
 			if tc.hasPoolSession {
 				sess, _ := discordgo.New("Bot fake-token")
