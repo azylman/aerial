@@ -11,7 +11,7 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/db"
 )
 
-// Coordinator Virtual Objects (ThreadSession / DispatchSession in coordinator mode) own the
+// Coordinator Virtual Objects (ThreadSession / DispatchSession) own the
 // per-key turn order: a FIFO "pending" list of record IDs and at most one "active" turn run by
 // a TurnRunner invocation. Exclusive handlers hold the key lock for milliseconds: they never
 // wait on a turn and never retry Postgres without bound.
@@ -26,8 +26,6 @@ const (
 type coordinatorStore interface {
 	InsertMessage(ctx context.Context, msg db.Message) error
 	InsertDispatch(ctx context.Context, d db.Dispatch) (bool, error)
-	ListPendingMessageIDsForThread(ctx context.Context, threadID string) ([]string, error)
-	ListPendingDispatchIDsForSession(ctx context.Context, sessionKey string) ([]string, error)
 	FailMessagesIfActive(ctx context.Context, ids []string, reason string) ([]string, error)
 	FailMessagesIfPending(ctx context.Context, ids []string, reason string) ([]string, error)
 	FailDispatchesIfActive(ctx context.Context, ids []string, reason string) ([]string, error)
@@ -42,7 +40,6 @@ type coordinatorRecords interface {
 	runnerHandler() string
 	runnerRequest(key, turnID string, ids []string) any
 	turnCap() int
-	listPending(ctx context.Context, key string) ([]string, error)
 	failIfPending(ctx context.Context, ids []string, reason string) ([]string, error)
 	markSkipped(ctx context.Context, id string) error
 }
@@ -294,28 +291,4 @@ func (*coordinatorCore) status(ctx restate.ObjectSharedContext) (CoordinatorStat
 		return CoordinatorStatus{}, coordinatorError(err)
 	}
 	return CoordinatorStatus{Pending: st.pending, Active: st.active}, nil
-}
-
-// adoptPending is the shared AdoptPending body: it lists the key's PENDING rows outside the
-// lock and appends them (Append dedups).
-func (c *coordinatorCore) adoptPending(ctx restate.ObjectSharedContext) error {
-	key := restate.Key(ctx)
-	ids, err := restate.Run(ctx, func(rc restate.RunContext) ([]string, error) {
-		return storeCall(rc, func(sc context.Context) ([]string, error) {
-			return c.records.listPending(sc, key)
-		})
-	}, restate.WithName(StepAdoptPending))
-	if err != nil {
-		return coordinatorError(err)
-	}
-	if len(ids) == 0 {
-		return nil
-	}
-	restate.ObjectSend(ctx, c.selfService, key, HandlerAppend).Send(AppendRequest{IDs: ids})
-	return nil
-}
-
-// adoptViaShim is the RunTurn shim body for legacy payloads: it only defers to AdoptPending.
-func (c *coordinatorCore) adoptViaShim(ctx restate.ObjectContext) {
-	restate.ObjectSend(ctx, c.selfService, restate.Key(ctx), HandlerAdoptPending).Send(AdoptPendingRequest{})
 }

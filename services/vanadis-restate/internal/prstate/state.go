@@ -907,7 +907,8 @@ type RepoState struct {
 	// cascades, workflow reruns) already executed, oldest
 	// first, bounded by MaxRepoEffects.
 	RepoEffects    []string
-	UpdatedForMain map[int]bool `json:"updated_for_main,omitempty"`
+	UpdatedForMain map[int]bool   `json:"updated_for_main,omitempty"`
+	QueuePositions map[int]string `json:"queue_positions,omitempty"`
 }
 
 // MaxRepoEffects bounds the RepoObject repo-effect key history.
@@ -963,6 +964,39 @@ func (s *RepoState) ClearPRUpdatedForMain(prNumber int) {
 	delete(s.UpdatedForMain, prNumber)
 	if len(s.UpdatedForMain) == 0 {
 		s.UpdatedForMain = nil
+	}
+}
+
+// RecordPRQueuePosition records the last broadcast merge queue position for prNumber.
+// Returns true only when the stored headSHA@pos value for prNumber changed.
+func (s *RepoState) RecordPRQueuePosition(prNumber int, headSHA, pos string) bool {
+	if s == nil || prNumber <= 0 {
+		return false
+	}
+	val := strings.TrimSpace(headSHA) + "@" + strings.TrimSpace(pos)
+	if s.QueuePositions != nil && s.QueuePositions[prNumber] == val {
+		return false
+	}
+	if s.QueuePositions == nil {
+		s.QueuePositions = make(map[int]string)
+	}
+	s.QueuePositions[prNumber] = val
+	return true
+}
+
+// HasPRQueuePosition reports whether a merge queue position is recorded for prNumber.
+func (s *RepoState) HasPRQueuePosition(prNumber int) bool {
+	return s != nil && prNumber > 0 && len(s.QueuePositions) > 0 && s.QueuePositions[prNumber] != ""
+}
+
+// ClearPRQueuePosition removes the merge queue position for prNumber.
+func (s *RepoState) ClearPRQueuePosition(prNumber int) {
+	if s == nil || prNumber <= 0 || len(s.QueuePositions) == 0 {
+		return
+	}
+	delete(s.QueuePositions, prNumber)
+	if len(s.QueuePositions) == 0 {
+		s.QueuePositions = nil
 	}
 }
 
@@ -1141,6 +1175,7 @@ func (s *RepoState) ApplyPRIndex(ev PRIndexEvent) (bool, []string) {
 	}
 	if ev.Lifecycle == IndexMerged || ev.Lifecycle == IndexClosed {
 		s.ClearPRUpdatedForMain(ev.PRNumber)
+		s.ClearPRQueuePosition(ev.PRNumber)
 	}
 	if s.applyIndexLifecycle(status, ev) {
 		changed = true

@@ -1,7 +1,6 @@
 package prstate
 
 import (
-	"encoding/json"
 	"testing"
 	"time"
 
@@ -153,38 +152,22 @@ func TestPRFact(t *testing.T) {
 	}
 }
 
-// TestRepoEventAutoUpdateDecode pins that the golden synapse HandleAutoUpdate
-// payload decodes into RepoEvent with its trigger, owner, and policy intact.
-func TestRepoEventAutoUpdateDecode(t *testing.T) {
+// TestRepoEffectKey pins the generation-free match key for the auto-update
+// effect derived from a RepoEvent.
+func TestRepoEffectKey(t *testing.T) {
 	t.Parallel()
-	var fx struct {
-		Event json.RawMessage `json:"event"`
-	}
-	readPRLifecycleFixture(t, "github_effect_wire.json", &fx)
 	tests := []struct {
 		name string
-		raw  []byte
-		want RepoEvent
+		kind string
+		ev   RepoEvent
+		want string
 	}{
-		{
-			name: "golden auto-update trigger",
-			raw:  fx.Event,
-			want: RepoEvent{
-				Repo: "azylman/mirrormere", PRNumber: 1010, HeadSHA: "def5678", CheckName: "CI Gate",
-				AutoUpdate: &AutoUpdatePolicy{
-					Authors: []string{"aerial-bot", "dependabot[bot]"}, DefaultOwner: true,
-					Collaborators: []CollaboratorAlert{{Author: "octo", ChannelID: "111111111111111111", Mention: "<@42>"}},
-				},
-			},
-		},
+		{name: "auto-update trigger", kind: prwire.EffectGitHubAutoUpdate, ev: RepoEvent{Repo: "azylman/mirrormere", PRNumber: 1010, HeadSHA: "def5678", CheckName: "CI Gate"}, want: "azylman/mirrormere#1010@def5678:github_auto_update:check=ci gate"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			var got RepoEvent
-			require.NoError(t, json.Unmarshal(tc.raw, &got))
-			require.Equal(t, tc.want, got)
-			require.Equal(t, "azylman/mirrormere#1010@def5678:github_auto_update:check=ci gate", RepoEffectKey(prwire.EffectGitHubAutoUpdate, got).MatchKey())
+			require.Equal(t, tc.want, RepoEffectKey(tc.kind, tc.ev).MatchKey())
 		})
 	}
 }

@@ -64,11 +64,6 @@ func (b *NATSBridge) StartConsumers(ctx context.Context) error {
 	}
 	log.Println("[vanadis-nats] Subscribed vanadis-pr-events queue consumer to aerial.pr.>")
 
-	if _, err := b.bus.ConsumeQueue(ctx, "aerial.coalesced.widget_sync.>", "vanadis-widget", b.HandleWidgetSyncEvent); err != nil {
-		return fmt.Errorf("subscribe vanadis-widget queue: %w", err)
-	}
-	log.Println("[vanadis-nats] Subscribed vanadis-widget queue consumer to aerial.coalesced.widget_sync.>")
-
 	return nil
 }
 
@@ -110,21 +105,6 @@ func dispatchIdempotencyKey(msg pubsub.Message, ev pubsub.DispatchOutcomeEvent) 
 		}
 	}
 	return fmt.Sprintf("dispatch:%s:%s:%s", ev.DispatchID, ev.VanadisChunkID, ev.Status)
-}
-
-func widgetSyncIdempotencyKey(msg pubsub.Message, args pubsub.WidgetSyncJobArgs) string {
-	if msg != nil && msg.Header() != nil {
-		if k := strings.TrimSpace(msg.Header().Get(pubsub.HeaderMsgID)); k != "" {
-			return k
-		}
-		if k := strings.TrimSpace(msg.Header().Get("Idempotency-Key")); k != "" {
-			return k
-		}
-	}
-	if strings.TrimSpace(args.BuildID) != "" {
-		return "widget:build:" + strings.TrimSpace(args.BuildID)
-	}
-	return fmt.Sprintf("widget:pr:%s:%d", strings.TrimSpace(args.Repo), args.PRNumber)
 }
 
 func (b *NATSBridge) postRestateIngress(ctx context.Context, endpoint, idempotencyKey string, body []byte, msg pubsub.Message) error {
@@ -202,35 +182,4 @@ func (b *NATSBridge) HandleDispatchOutcomeEvent(ctx context.Context, msg pubsub.
 	}
 	key := dispatchIdempotencyKey(msg, ev)
 	return b.postRestateIngress(ctx, b.restateRouterSendPath("RouteDispatchOutcome"), key, body, msg)
-}
-
-// HandleWidgetSyncEvent processes an incoming WidgetSyncJobArgs on aerial.coalesced.widget_sync.>.
-func (b *NATSBridge) HandleWidgetSyncEvent(ctx context.Context, msg pubsub.Message) error {
-	var args pubsub.WidgetSyncJobArgs
-	if err := json.Unmarshal(msg.Data(), &args); err != nil {
-		slog.WarnContext(ctx, "[vanadis-nats] failed to unmarshal widget sync event", "error", err)
-		return nil
-	}
-
-	if buildID := strings.TrimSpace(args.BuildID); buildID != "" {
-		body, err := json.Marshal(buildID)
-		if err != nil {
-			return fmt.Errorf("marshal build widget sync body: %w", err)
-		}
-		return b.postRestateIngress(ctx, b.restateRouterSendPath("RouteBuildReconcile"), widgetSyncIdempotencyKey(msg, args), body, msg)
-	}
-
-	if repo := strings.TrimSpace(args.Repo); repo != "" && args.PRNumber > 0 {
-		body, err := json.Marshal(pubsub.PRLifecycleEvent{
-			Event:    "widget_sync",
-			Repo:     repo,
-			PRNumber: args.PRNumber,
-		})
-		if err != nil {
-			return fmt.Errorf("marshal pr widget sync body: %w", err)
-		}
-		return b.postRestateIngress(ctx, b.restateRouterSendPath("RoutePREvent"), widgetSyncIdempotencyKey(msg, args), body, msg)
-	}
-
-	return nil
 }

@@ -1,6 +1,8 @@
 [
   { "service": "eri", "context": ".", "file": "./services/eri/Dockerfile", "image_name": "aerial-eri",
     "select": { "go_roots": ["services/eri"], "inputs": ["services/eri/**"] } },
+  { "service": "redact-pattern", "context": ".", "file": "./services/eri/cmd/redact-pattern/Dockerfile", "image_name": "aerial-redact-pattern",
+    "select": { "go_roots": ["services/eri/cmd/redact-pattern"], "inputs": ["services/eri/cmd/redact-pattern/Dockerfile"] } },
   { "service": "eri-restate", "context": ".", "file": "./services/eri-restate/Dockerfile", "image_name": "aerial-eri-restate",
     "select": { "go_roots": ["services/eri-restate", "services/eri/cmd/hook-guard", "services/eri/cmd/transcript-search"], "inputs": ["services/eri-restate/**", "scripts/**", "rules/**", ".agents/**"] } },
   { "service": "haro", "context": ".", "file": "./services/haro/Dockerfile", "image_name": "aerial-haro",

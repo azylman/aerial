@@ -20,7 +20,7 @@ type threadResolver interface {
 	ResolveTargetThread(channelID, title, prompt string, now time.Time) string
 }
 
-// ThreadCoordinator is the coordinator-mode ThreadSession Virtual Object keyed by thread ID. It
+// ThreadCoordinator is the ThreadSession Virtual Object keyed by thread ID. It
 // owns the thread's turn order and its active turn; TurnRunner RunBurst executes each turn.
 type ThreadCoordinator struct {
 	store     coordinatorStore
@@ -62,10 +62,6 @@ func (threadRecords) runnerRequest(key, turnID string, ids []string) any {
 
 func (threadRecords) turnCap() int { return maxCoalescedBurstMessages }
 
-func (r threadRecords) listPending(ctx context.Context, key string) ([]string, error) {
-	return r.store.ListPendingMessageIDsForThread(ctx, key)
-}
-
 func (r threadRecords) failIfPending(ctx context.Context, ids []string, reason string) ([]string, error) {
 	return r.store.FailMessagesIfPending(ctx, ids, reason)
 }
@@ -93,19 +89,23 @@ func buildEnqueuedMessage(req ThreadEnqueueRequest, finalThreadID, fallbackID st
 		msg = *req.Message
 	} else {
 		msg = db.Message{
-			ID:         strings.TrimSpace(req.MessageID),
-			ThreadID:   finalThreadID,
-			AuthorID:   httpClientAuthorID,
-			AuthorName: "HTTP Client",
-			IsAdmin:    true,
-			Content:    req.Prompt,
-			Summary:    db.CleanTaskSummary(req.Prompt),
-			Effort:     ResolvePromptEffort(strings.TrimSpace(req.Model), strings.TrimSpace(req.Effort)),
-			ChannelID:  finalThreadID,
-			Model:      strings.TrimSpace(req.Model),
-			CreatedAt:  now,
-			UpdatedAt:  now,
+			ID:          strings.TrimSpace(req.MessageID),
+			ThreadID:    finalThreadID,
+			AuthorID:    httpClientAuthorID,
+			AuthorName:  "HTTP Client",
+			IsAdmin:     true,
+			Content:     req.Prompt,
+			Summary:     db.CleanTaskSummary(req.Prompt),
+			Effort:      ResolvePromptEffort(strings.TrimSpace(req.Model), strings.TrimSpace(req.Effort)),
+			ChannelID:   finalThreadID,
+			Model:       strings.TrimSpace(req.Model),
+			Traceparent: strings.TrimSpace(req.Traceparent),
+			CreatedAt:   now,
+			UpdatedAt:   now,
 		}
+	}
+	if strings.TrimSpace(msg.Traceparent) == "" {
+		msg.Traceparent = strings.TrimSpace(req.Traceparent)
 	}
 	if strings.TrimSpace(msg.ID) == "" {
 		msg.ID = fallbackID
@@ -228,15 +228,4 @@ func (t *ThreadCoordinator) ClearPending(ctx restate.ObjectContext, req ClearPen
 // Status returns the coordinator state.
 func (t *ThreadCoordinator) Status(ctx restate.ObjectSharedContext) (CoordinatorStatus, error) {
 	return t.core.status(ctx)
-}
-
-// AdoptPending appends the thread's PENDING rows (rows queued by the legacy path).
-func (t *ThreadCoordinator) AdoptPending(ctx restate.ObjectSharedContext, _ AdoptPendingRequest) error {
-	return t.core.adoptPending(ctx)
-}
-
-// RunTurn accepts legacy RunTurn payloads and only defers to AdoptPending.
-func (t *ThreadCoordinator) RunTurn(ctx restate.ObjectContext, _ ThreadTurnRequest) (ThreadTurnResult, error) {
-	t.core.adoptViaShim(ctx)
-	return ThreadTurnResult{Status: statusCompleted}, nil
 }

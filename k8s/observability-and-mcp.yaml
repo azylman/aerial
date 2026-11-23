@@ -1010,6 +1010,25 @@ spec:
       path: /metrics
       interval: 15s
 ---
+# Scrapes the Restate server (not the SDK runner pods) on its metrics port.
+# Discovery is label-based across all namespaces so a blue/green RestateCluster
+# rename keeps being scraped without editing this object.
+apiVersion: operator.victoriametrics.com/v1beta1
+kind: VMPodScrape
+metadata:
+  name: restate
+  namespace: default
+spec:
+  namespaceSelector:
+    any: true
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: restate
+  podMetricsEndpoints:
+    - port: metrics
+      path: /metrics
+      interval: 30s
+---
 apiVersion: operator.victoriametrics.com/v1beta1
 kind: VMSingle
 metadata:
@@ -1322,12 +1341,18 @@ spec:
 # otel-collector: the single trace-redaction checkpoint in front of VictoriaTraces.
 # Every OTLP span is masked here: registered secret values (plus their base64,
 # URL-encoded and git basic-auth variants) are replaced with [REDACTED] in resource,
-# scope, span and span-event fields. The pattern is value-only (no regexes) and is
-# generated at pod start by the redact-pattern initContainer from shared-secrets
-# plus the non-secret canary below. Secret rotation needs a pod restart: Stakater
-# Reloader (reloader.stakater.com/auto) rolls the Deployment when shared-secrets,
-# otel-collector-config or otel-collector-canary change, same as fluent-bit.
-# Flux substitution is disabled on this ConfigMap so ${file:...} reaches the collector.
+# scope, span and span-event fields. Matching is value-only (no regexes). At pod start
+# the redact-pattern initContainer (its own image, so eri releases never roll this
+# Deployment) reads shared-secrets plus the non-secret canary below and writes the
+# complete transform/redact trace_statements list to /redact/statements.yaml: values
+# are packed longest-first into groups whose OTTL literal stays under
+# -max-pattern-bytes, one statement per group per field. OTTL parse time grows
+# super-linearly with literal size, so many small literals start in seconds where one
+# huge pattern took minutes on a 1-core limit. Secret rotation needs a pod restart:
+# Stakater Reloader (reloader.stakater.com/auto) rolls the Deployment when
+# shared-secrets, otel-collector-config or otel-collector-canary change, same as
+# fluent-bit. Flux substitution is disabled on this ConfigMap so ${file:...} reaches
+# the collector.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -1352,29 +1377,15 @@ data:
         check_interval: 1s
         limit_percentage: 80
         spike_limit_percentage: 20
-      # Paths carry explicit context prefixes: unprefixed paths make OTTL log every
-      # rewritten statement at startup, which would print the secret pattern.
-      # error_mode silent keeps ignore semantics (a failing statement never drops a
-      # batch) without logging the failing statement text, which embeds the pattern.
+      # trace_statements is a whole-value ${file:...} reference, so confmap parses the
+      # generated file as YAML (a list of context blocks). Its paths carry explicit
+      # context prefixes: unprefixed paths make OTTL log every rewritten statement at
+      # startup, which would print the secret pattern. error_mode silent keeps ignore
+      # semantics (a failing statement never drops a batch) without logging the
+      # failing statement text, which embeds the pattern.
       transform/redact:
         error_mode: silent
-        trace_statements:
-          - context: resource
-            statements:
-              - 'replace_all_patterns(resource.attributes, "value", "${file:/redact/pattern}", "[REDACTED]")'
-          - context: scope
-            statements:
-              - 'replace_all_patterns(scope.attributes, "value", "${file:/redact/pattern}", "[REDACTED]")'
-              - 'replace_pattern(scope.name, "${file:/redact/pattern}", "[REDACTED]")'
-          - context: span
-            statements:
-              - 'replace_all_patterns(span.attributes, "value", "${file:/redact/pattern}", "[REDACTED]")'
-              - 'replace_pattern(span.name, "${file:/redact/pattern}", "[REDACTED]")'
-              - 'replace_pattern(span.status.message, "${file:/redact/pattern}", "[REDACTED]")'
-          - context: spanevent
-            statements:
-              - 'replace_pattern(spanevent.name, "${file:/redact/pattern}", "[REDACTED]")'
-              - 'replace_all_patterns(spanevent.attributes, "value", "${file:/redact/pattern}", "[REDACTED]")'
+        trace_statements: ${file:/redact/statements.yaml}
       batch:
         send_batch_size: 1024
         timeout: 2s
@@ -1441,13 +1452,13 @@ spec:
           type: RuntimeDefault
       initContainers:
         - name: redact-pattern
-          image: ghcr.io/azylman/aerial-eri:${TAG_AERIAL_ERI:=latest}
+          image: ghcr.io/azylman/aerial-redact-pattern:${TAG_AERIAL_REDACT_PATTERN:=latest}
           imagePullPolicy: IfNotPresent
-          command:
-            - /usr/local/bin/redact-pattern
+          args:
             - -secrets-dir=/secrets
             - -extra-file=/canary/values
-            - -out=/redact/pattern
+            - -statements-out=/redact/statements.yaml
+            - -max-pattern-bytes=1024
           resources:
             limits:
               cpu: 200m
@@ -1491,17 +1502,24 @@ spec:
             - containerPort: 13133
               name: health
               protocol: TCP
+          # Config parse (redaction statements) can be slow on a 1-core node; the
+          # startupProbe allows ~5 min before liveness takes over, so a slow start
+          # is never killed mid-parse.
+          startupProbe:
+            httpGet:
+              path: /
+              port: health
+            periodSeconds: 5
+            failureThreshold: 60
           readinessProbe:
             httpGet:
               path: /
               port: health
-            initialDelaySeconds: 3
             periodSeconds: 10
           livenessProbe:
             httpGet:
               path: /
               port: health
-            initialDelaySeconds: 15
             periodSeconds: 30
             failureThreshold: 5
           resources:

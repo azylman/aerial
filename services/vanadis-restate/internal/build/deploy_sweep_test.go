@@ -14,93 +14,23 @@ import (
 	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
 )
 
-// crossBuildSweepSpyStore is the deploy sweep store: build b1 owns
-// ownChunks; sweepErr and sweepSkip fail or skip CompletePRDeployment and
-// MarkActionRepairDeployed for that chunk ID. The cross-build sweep returns
-// crossSwept and crossRecovered (crossErr returns crossSwept with an error).
-// Reads of other builds and build status writes are recorded so tests prove
-// this runner never evaluates another build.
-type crossBuildSweepSpyStore struct {
-	store.VanadisStore
-
-	ownBuild        *model.VanadisBuild
-	ownChunks       []model.VanadisChunk
-	sweepErr        string
-	sweepSkip       string
-	crossSwept      []store.SweptChunk
-	crossErr        bool
-	crossCalled     bool
-	crossDeployJobs []string
-	ownCompleted    []string
-	ownRepaired     []string
-	statusUpdates   []string
-	foreignReads    []string
-}
-
-func (s *crossBuildSweepSpyStore) GetBuild(_ context.Context, buildID string) (*model.VanadisBuild, []model.VanadisChunk, error) {
-	if buildID == "b1" {
-		return s.ownBuild, s.ownChunks, nil
+// sweepFaults maps the sweep table's fault columns onto fakeStore errs:
+// errChunk fails and skipChunk skips both deployment writes for that chunk,
+// and crossErr fails the cross-build sweep after it returns its chunks.
+func sweepFaults(errChunk, skipChunk string, crossErr bool) map[string]error {
+	errs := map[string]error{}
+	if errChunk != "" {
+		errs["CompletePRDeployment:"+errChunk] = errors.New("sweep unavailable")
+		errs["MarkActionRepairDeployed:"+errChunk] = errors.New("repair mark unavailable")
 	}
-	s.foreignReads = append(s.foreignReads, buildID)
-	return nil, nil, store.ErrBuildNotFound
-}
-
-func (s *crossBuildSweepSpyStore) CompletePRDeployment(_ context.Context, chunkID string, _ *pubsub.PRRolloutState) error {
-	switch chunkID {
-	case s.sweepErr:
-		return errors.New("sweep unavailable")
-	case s.sweepSkip:
-		return store.ErrPRTransitionSkipped
+	if skipChunk != "" {
+		errs["CompletePRDeployment:"+skipChunk] = store.ErrPRTransitionSkipped
+		errs["MarkActionRepairDeployed:"+skipChunk] = store.ErrPRTransitionSkipped
 	}
-	for i := range s.ownChunks {
-		if s.ownChunks[i].ID != chunkID {
-			continue
-		}
-		if (s.ownChunks[i].Status == statusFailed && (s.ownChunks[i].Mode != "pr" || s.ownChunks[i].PRNumber <= 0)) || s.ownChunks[i].Status == statusCancelled || s.ownBuild.Status == statusCancelled {
-			return store.ErrPRTransitionSkipped
-		}
-		s.ownChunks[i].Status = statusCompleted
-		s.ownCompleted = append(s.ownCompleted, chunkID)
-		return nil
+	if crossErr {
+		errs["SweepEarlierDeploymentsAcrossBuilds"] = errors.New("cross build sweep unavailable")
 	}
-	return store.ErrPRTransitionSkipped
-}
-
-func (s *crossBuildSweepSpyStore) MarkActionRepairDeployed(_ context.Context, chunkID string, _ *pubsub.PRRolloutState) error {
-	switch chunkID {
-	case s.sweepErr:
-		return errors.New("repair mark unavailable")
-	case s.sweepSkip:
-		return store.ErrPRTransitionSkipped
-	}
-	for i := range s.ownChunks {
-		if s.ownChunks[i].ID == chunkID && s.ownChunks[i].Mode == "action" {
-			s.ownChunks[i].Status = statusRunning
-			s.ownRepaired = append(s.ownRepaired, chunkID)
-			return nil
-		}
-	}
-	return store.ErrPRTransitionSkipped
-}
-
-func (s *crossBuildSweepSpyStore) SweepEarlierDeploymentsAcrossBuilds(_ context.Context, deploying model.VanadisChunk) ([]store.SweptChunk, error) {
-	s.crossCalled = true
-	if deploying.RolloutState != nil {
-		s.crossDeployJobs = append([]string(nil), deploying.RolloutState.ExpectedJobs...)
-	}
-	if s.crossErr {
-		return s.crossSwept, errors.New("cross build sweep unavailable")
-	}
-	return s.crossSwept, nil
-}
-
-func (*crossBuildSweepSpyStore) CompareAndSwapBuildStatusMessageID(context.Context, string, string, string) (bool, error) {
-	return true, nil
-}
-
-func (s *crossBuildSweepSpyStore) UpdateBuildStatus(_ context.Context, buildID, status string) error {
-	s.statusUpdates = append(s.statusUpdates, buildID+"="+status)
-	return nil
+	return errs
 }
 
 // sweepEventBus is a bus whose completed vanadis_chunk events the sweep
@@ -198,7 +128,7 @@ func TestCompletePRDeploymentMutation(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			spy := &crossBuildSweepSpyStore{ownBuild: &model.VanadisBuild{ID: "b1", Status: tc.buildStatus}, ownChunks: tc.own, sweepErr: tc.sweepErr, sweepSkip: tc.sweepSkip, crossSwept: tc.crossSwept, crossErr: tc.crossErr}
+			spy := &fakeStore{builds: []model.VanadisBuild{{ID: "b1", Status: tc.buildStatus}}, chunks: tc.own, swept: tc.crossSwept, errs: sweepFaults(tc.sweepErr, tc.sweepSkip, tc.crossErr)}
 			var exec *executor.Executor
 			if tc.bus != nil {
 				exec = executor.NewExecutor("", &mockEriClient{}, tc.bus, "token", "example-owner", nil)
@@ -214,15 +144,20 @@ func TestCompletePRDeploymentMutation(t *testing.T) {
 			} else {
 				assert.NoError(t, err)
 			}
-			assert.Equal(t, tc.wantCrossCalled, spy.crossCalled)
-			assert.Equal(t, tc.wantCompleted, spy.ownCompleted)
-			assert.Equal(t, tc.wantRepaired, spy.ownRepaired)
-			deploying, _ := findDeployingChunk(spy.ownChunks, "deploying")
-			assert.Equal(t, tc.wantStatus, deploying.Status)
-			assert.Equal(t, tc.wantDeployJobs, spy.crossDeployJobs)
+			calls := spy.snapshotCalls()
+			sweeps := callArgs(spy.attemptedCalls(), "SweepEarlierDeploymentsAcrossBuilds")
+			var deployJobs []string
+			if len(sweeps) > 0 && len(sweeps[0]) > 1 {
+				deployJobs = sweeps[0][1:]
+			}
+			assert.Equal(t, tc.wantCrossCalled, len(sweeps) > 0)
+			assert.Equal(t, tc.wantCompleted, pickCalls(calls, "CompletePRDeployment", "", 0))
+			assert.Equal(t, tc.wantRepaired, pickCalls(calls, "MarkActionRepairDeployed", "", 0))
+			assert.Equal(t, tc.wantStatus, spy.chunkSnapshot("deploying").Status)
+			assert.Equal(t, tc.wantDeployJobs, deployJobs)
 			assert.Equal(t, tc.wantReconciles, crossBuild.list())
-			assert.Empty(t, spy.statusUpdates, "other builds must never be evaluated by this runner")
-			assert.Empty(t, spy.foreignReads, "other builds must never be read for local evaluation")
+			assert.Empty(t, pickCalls(calls, "UpdateBuildStatus", "=", 0, 1), "other builds must never be evaluated by this runner")
+			assert.Empty(t, spy.foreignReads("b1"), "other builds must never be read for local evaluation")
 			if tc.bus != nil {
 				assert.Equal(t, tc.wantEvents, tc.bus.completedTargets())
 			}

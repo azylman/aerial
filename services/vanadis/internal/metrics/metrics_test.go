@@ -128,9 +128,9 @@ type queueMetricsCase struct {
 }
 
 func TestCollectQueueMetrics(t *testing.T) {
-	pending := map[string]int64{"vanadis-dispatch": 2, "vanadis-pr-events": 3, "vanadis-widget": 1}
-	inflight := map[string]int64{"vanadis-dispatch": 1, "vanadis-pr-events": 0, "vanadis-widget": 4}
-	allCalls := []string{"AERIAL_EVENTS/vanadis-dispatch", "AERIAL_EVENTS/vanadis-pr-events", "AERIAL_COALESCED/vanadis-widget"}
+	pending := map[string]int64{"vanadis-dispatch": 2, "vanadis-pr-events": 3}
+	inflight := map[string]int64{"vanadis-dispatch": 1, "vanadis-pr-events": 0}
+	allCalls := []string{"AERIAL_EVENTS/vanadis-dispatch", "AERIAL_EVENTS/vanadis-pr-events"}
 	tests := []queueMetricsCase{
 		{
 			name:     "nil querier zeroes depth",
@@ -138,15 +138,15 @@ func TestCollectQueueMetrics(t *testing.T) {
 			want:     []string{`vanadis_queue_depth{state="pending"} 0`, `vanadis_queue_depth{state="in_flight"} 0`},
 		},
 		{
-			name:      "sums backlog of the three vanadis-nats consumers",
+			name:      "sums backlog of the two vanadis-nats consumers",
 			stats:     pubsubtest.ConsumerStats{Pending: pending, Inflight: inflight},
-			want:      []string{`vanadis_queue_depth{state="pending"} 6`, `vanadis_queue_depth{state="in_flight"} 5`},
+			want:      []string{`vanadis_queue_depth{state="pending"} 5`, `vanadis_queue_depth{state="in_flight"} 1`},
 			wantCalls: allCalls,
 		},
 		{
 			name:      "failed consumer is skipped and the rest still count",
 			stats:     pubsubtest.ConsumerStats{Pending: pending, Inflight: inflight, Errs: map[string]error{"vanadis-pr-events": errQueueStatsDown}},
-			want:      []string{`vanadis_queue_depth{state="pending"} 3`, `vanadis_queue_depth{state="in_flight"} 5`},
+			want:      []string{`vanadis_queue_depth{state="pending"} 2`, `vanadis_queue_depth{state="in_flight"} 1`},
 			wantCalls: allCalls,
 		},
 		{

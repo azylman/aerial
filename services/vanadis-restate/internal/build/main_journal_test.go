@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
 	restate "github.com/restatedev/sdk-go"
@@ -238,19 +239,6 @@ func setJournalOutput(output, res any) {
 	}
 }
 
-type captureCreateStore struct {
-	store.VanadisStore
-
-	build  model.VanadisBuild
-	chunks []model.VanadisChunk
-	calls  int
-}
-
-func (s *captureCreateStore) CreateBuild(ctx context.Context, b model.VanadisBuild, c []model.VanadisChunk) error {
-	s.build, s.chunks, s.calls = b, append([]model.VanadisChunk(nil), c...), s.calls+1
-	return s.VanadisStore.CreateBuild(ctx, b, c)
-}
-
 func makeCreateJournalContext(t *testing.T, key string, journal *createJournal, cursor *int, stateOut **model.BuildObjectState) restate.ObjectContext {
 	t.Helper()
 	mc := mocks.NewMockContext(t)
@@ -321,32 +309,35 @@ func TestCreate_JournaledClockIdentityAcrossReplay(t *testing.T) {
 			req := CreateBuildRequest{ID: tc.buildID, ThreadID: "th1", Objective: "Obj", Chunks: inputs}
 			st, _ := openStore(t)
 			journal := &createJournal{}
-			cap1 := &captureCreateStore{VanadisStore: st}
+			cap1 := &faultStore{VanadisStore: st}
 			bo1 := NewBuildObject("", nil).WithAuthority(cap1, nil)
 			var state1 *model.BuildObjectState
 			cursor1 := 0
 			got1, err := bo1.Create(makeCreateJournalContext(t, tc.buildID, journal, &cursor1, &state1), req)
 			require.NoError(t, err)
-			require.Equal(t, 1, cap1.calls)
+			created := callArgs(cap1.snapshotCalls(), "CreateBuild")
+			require.Len(t, created, 1)
 			require.NotNil(t, state1)
-			require.Len(t, cap1.chunks, tc.chunkCount)
+			require.Len(t, created[0], 2+2*tc.chunkCount)
 			require.True(t, journal.executed[0])
+			at := got1.CreatedAt.Format(time.RFC3339Nano)
 			assert.Equal(t, got1.CreatedAt, got1.UpdatedAt)
-			assert.Equal(t, got1.CreatedAt, cap1.build.CreatedAt)
+			assert.Equal(t, tc.buildID, created[0][0])
+			assert.Equal(t, at, created[0][1])
 			assert.Equal(t, got1.CreatedAt, state1.Build.CreatedAt)
-			for i := range cap1.chunks {
-				assert.Equal(t, got1.CreatedAt, cap1.chunks[i].CreatedAt)
-				assert.Equal(t, got1.CreatedAt, cap1.chunks[i].UpdatedAt)
+			for i := range tc.chunkCount {
+				assert.Equal(t, at, created[0][2+2*i])
+				assert.Equal(t, at, created[0][3+2*i])
 				assert.Equal(t, got1.CreatedAt, state1.Chunks[i].CreatedAt)
 			}
 			replayed := len(journal.executed)
-			cap2 := &captureCreateStore{VanadisStore: st}
+			cap2 := &faultStore{VanadisStore: st}
 			bo2 := NewBuildObject("", nil).WithAuthority(cap2, nil)
 			var state2 *model.BuildObjectState
 			cursor2 := 0
 			got2, err := bo2.Create(makeCreateJournalContext(t, tc.buildID, journal, &cursor2, &state2), req)
 			require.NoError(t, err)
-			assert.Equal(t, 0, cap2.calls)
+			assert.Empty(t, cap2.snapshotCalls())
 			assert.False(t, journal.executed[replayed])
 			require.NotNil(t, state2)
 			assert.Equal(t, got1.CreatedAt, got2.CreatedAt)
@@ -411,7 +402,7 @@ func TestReconcile_JournalCommandSequence(t *testing.T) {
 			t.Parallel()
 			var commands []string
 			ctx := makeDeferralJournalContext(t, tc.prior, tc.journaled, &commands)
-			bo := NewBuildObject("", nil).WithAuthority(&leaseStore{}, nil)
+			bo := NewBuildObject("", nil).WithAuthority(&fakeStore{}, nil)
 			_, err := bo.executeObjectTransition(restateObjectRuntime{ctx: ctx}, labelReconcileBuild, nil)
 			require.NoError(t, err)
 			assert.Equal(t, tc.want, commands)

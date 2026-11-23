@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"net/http"
-	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -196,7 +195,7 @@ func TestExecuteObjectTransition(t *testing.T) {
 		{name: "complete_chunk on action chunk", build: bld("running"), chunks: cks(action), mutation: &BuildMutationRequest{Action: "complete_chunk", ChunkID: "c1"}, prior: objState(bld("running"), action), wantStatus: "running", wantChunks: []string{"c1"}, wantReserved: []string{"c1"}, wantWidget: "running"},
 		{name: "chunk_deploy_success", build: bld("running"), chunks: cks(running), mutation: &BuildMutationRequest{Action: "chunk_deploy_success", ChunkID: "c1"}, wantStatus: statusCompleted, wantCleared: true, wantWidget: statusCompleted, wantStored: map[string]string{"c1": statusCompleted}, wantBuildRow: statusCompleted},
 		{name: "action_completed", build: bld("running"), chunks: cks(running), mutation: &BuildMutationRequest{Action: "action_completed", ChunkID: "c1"}, wantStatus: "running"},
-		{name: "chunk_failed", build: bld("running"), chunks: cks(running), mutation: &BuildMutationRequest{Action: "chunk_failed", ChunkID: "c1", Reason: "boom"}, wantStatus: statusFailed, wantFailed: []string{"c1  boom"}},
+		{name: "chunk_failed", build: bld("running"), chunks: cks(running), mutation: &BuildMutationRequest{Action: "chunk_failed", ChunkID: "c1", Reason: "boom"}, wantStatus: statusFailed, wantFailed: []string{"c1  boom"}, wantWidget: statusFailed},
 		{name: "cancelled mutation on running build", build: bld("running"), chunks: cks(running), mutation: &BuildMutationRequest{Action: "cancelled", ChunkID: "c1", Reason: "stopped"}, wantStatus: statusCancelled, wantCleared: true, wantStored: map[string]string{"c1": "running"}, wantBuildRow: statusCancelled},
 	}
 
@@ -204,7 +203,7 @@ func TestExecuteObjectTransition(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			raw := reconcileStore(t, tc.build, tc.chunks, tc.missing, tc.closed)
-			st := &leaseStore{VanadisStore: raw, failErr: tc.failErr}
+			st := &faultStore{VanadisStore: raw, errs: map[string]error{"FailChunk": tc.failErr}}
 			eri := &eritest.Client{DispatchErr: tc.dispatchErr}
 			bo := NewBuildObject("", nil)
 			if !tc.nilStore {
@@ -225,8 +224,9 @@ func TestExecuteObjectTransition(t *testing.T) {
 			if tc.wantLaunched != nil {
 				assert.Equal(t, tc.wantLaunched, rt.launched)
 			}
-			assert.Equal(t, tc.wantReserved, st.reserved)
-			assert.Equal(t, tc.wantFailed, st.failed)
+			calls := st.snapshotCalls()
+			assert.Equal(t, tc.wantReserved, pickCalls(calls, "ReserveChunkForLaunch", "", 0))
+			assert.Equal(t, tc.wantFailed, pickCalls(calls, "FailChunk", " ", 0, 2, 1))
 			assert.Equal(t, tc.wantWidget, widgetStatus(eri))
 			if tc.wantStored != nil {
 				assert.Equal(t, tc.wantStored, chunkStatuses(t, raw, "b1"))
@@ -399,46 +399,6 @@ func TestCompactStateForStorage(t *testing.T) {
 	}
 }
 
-// leaseStore records launch reservations and failures and reflects them in
-// later reads, like the PostgreSQL authority does.
-type leaseStore struct {
-	store.VanadisStore
-
-	reserved   []string
-	failed     []string
-	reserveErr error
-	failErr    error
-	skipFail   bool
-}
-
-func (s *leaseStore) ReserveChunkForLaunch(_ context.Context, chunkID string) error {
-	s.reserved = append(s.reserved, chunkID)
-	return s.reserveErr
-}
-
-func (s *leaseStore) FailChunk(_ context.Context, chunkID, reason, dispatchID string) (*model.VanadisBuild, *model.VanadisChunk, bool, error) {
-	if s.failErr != nil || s.skipFail {
-		return nil, nil, false, s.failErr
-	}
-	s.failed = append(s.failed, chunkID+" "+dispatchID+" "+reason)
-	return nil, nil, true, nil
-}
-
-func (s *leaseStore) GetBuild(ctx context.Context, buildID string) (*model.VanadisBuild, []model.VanadisChunk, error) {
-	b, chunks, err := s.VanadisStore.GetBuild(ctx, buildID)
-	if err != nil || b == nil {
-		return b, chunks, err
-	}
-	for i := range chunks {
-		for _, f := range s.failed {
-			if strings.HasPrefix(f, chunks[i].ID+" ") {
-				chunks[i].Status, b.Status = statusFailed, statusFailed
-			}
-		}
-	}
-	return b, chunks, nil
-}
-
 func openAuthorityHandlerHarness(t *testing.T) (*BuildObject, *fakeObjectRuntime) {
 	t.Helper()
 	b1 := model.VanadisBuild{ID: "b-cov", Status: "running", ThreadID: "th-1"}
@@ -512,38 +472,6 @@ func TestBuildObject_AuthorityHandlerOperations(t *testing.T) {
 			assert.Equal(t, tc.wantStatus, stored.Status)
 		})
 	}
-}
-
-type skippedCompletionStore struct {
-	store.VanadisStore
-
-	getBuildCalls int
-}
-
-func (s *skippedCompletionStore) GetBuild(ctx context.Context, buildID string) (*model.VanadisBuild, []model.VanadisChunk, error) {
-	s.getBuildCalls++
-	if s.getBuildCalls > 1 {
-		return nil, nil, errors.New("get build fail")
-	}
-	return &model.VanadisBuild{ID: buildID, Status: "running", ThreadID: "th-1"},
-		[]model.VanadisChunk{{ID: "c1", BuildID: buildID}}, nil
-}
-
-func (*skippedCompletionStore) CompleteActionChunk(ctx context.Context, chunkID, dispatchID string) (*store.VanadisAdvancementResult, error) {
-	return &store.VanadisAdvancementResult{}, nil
-}
-
-type replayFailStore struct {
-	store.VanadisStore
-}
-
-func (*replayFailStore) GetBuild(ctx context.Context, buildID string) (*model.VanadisBuild, []model.VanadisChunk, error) {
-	return &model.VanadisBuild{ID: buildID, Status: statusCompleted, ThreadID: "th-1"},
-		[]model.VanadisChunk{{ID: "c1", BuildID: buildID, Mode: "action"}}, nil
-}
-
-func (*replayFailStore) CompleteActionChunk(ctx context.Context, chunkID, dispatchID string) (*store.VanadisAdvancementResult, error) {
-	return &store.VanadisAdvancementResult{CompletionAccepted: true}, nil
 }
 
 type errDeploymentAttemptsRuntime struct {
@@ -645,7 +573,14 @@ func TestBuildObject_ReconcileErrorBranches(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, statusCompleted, outTerm.BuildStatus)
 
-	boSkip := NewBuildObject("", nil).WithAuthority(&skippedCompletionStore{}, nil)
+	skipStore := &fakeStore{
+		builds:     []model.VanadisBuild{{ID: "b-skip", Status: "running", ThreadID: "th-1"}},
+		chunks:     []model.VanadisChunk{{ID: "c1", BuildID: "b-skip"}},
+		errs:       map[string]error{"GetBuild": errors.New("get build fail")},
+		failFrom:   map[string]int{"GetBuild": 2},
+		completion: &store.VanadisAdvancementResult{},
+	}
+	boSkip := NewBuildObject("", nil).WithAuthority(skipStore, nil)
 	_, err = boSkip.executeAuthoritativeTransition(context.Background(), "b-skip", &BuildMutationRequest{Action: "action_completed", ChunkID: "c1"}, nil, nil, false)
 	assert.Error(t, err)
 
@@ -654,7 +589,12 @@ func TestBuildObject_ReconcileErrorBranches(t *testing.T) {
 	eriReplayFail.widgetFn = func(context.Context, executor.StatusWidgetRequest) (string, error) {
 		return "", errors.New("widget fail")
 	}
-	boReplayFail := NewBuildObject("", nil).WithAuthority(&replayFailStore{},
+	replayStore := &fakeStore{
+		builds:     []model.VanadisBuild{{ID: "b-replay-fail", Status: statusCompleted, ThreadID: "th-1"}},
+		chunks:     []model.VanadisChunk{{ID: "c1", BuildID: "b-replay-fail", Mode: "action"}},
+		completion: &store.VanadisAdvancementResult{CompletionAccepted: true},
+	}
+	boReplayFail := NewBuildObject("", nil).WithAuthority(replayStore,
 		executor.NewExecutor(t.TempDir(), eriReplayFail, &mockBusExecutor{}, "token", "example-owner", nil))
 	rtReplayFail := newFakeObjectRuntime("b-replay-fail")
 	_, err = boReplayFail.executeObjectTransition(rtReplayFail, labelMutateBuild,
@@ -832,7 +772,7 @@ func TestBuildObject_EvaluateBuildTerminalStatus_SkipWidgetSync(t *testing.T) {
 				},
 			}
 			exec := executor.NewExecutor(t.TempDir(), eri, pubsub.NewMemoryBus(), "token", "example-owner", nil)
-			bo := NewBuildObject("", nil).WithAuthority(&mockStoreForLaunch{}, exec)
+			bo := NewBuildObject("", nil).WithAuthority(&fakeStore{}, exec)
 			bld := model.VanadisBuild{ID: "b-test", Status: "running", StatusMessageID: "msg-123", ThreadID: "th-1"}
 			chunks := []model.VanadisChunk{{ID: "c1", Status: "running"}}
 

@@ -1,10 +1,9 @@
 package build
 
 import (
-	"context"
 	"errors"
+	"slices"
 	"strings"
-	"sync"
 	"testing"
 
 	restate "github.com/restatedev/sdk-go"
@@ -14,71 +13,14 @@ import (
 	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
 )
 
-// verdictStore is an in-memory build authority for CompleteChunk tests.
-type verdictStore struct {
-	store.VanadisStore
-
-	mu               sync.Mutex
-	build            model.VanadisBuild
-	chunks           []model.VanadisChunk
-	getBuildCalls    int
-	getBuildFailFrom int
-	completeErr      error
-}
-
-func (s *verdictStore) GetBuild(context.Context, string) (*model.VanadisBuild, []model.VanadisChunk, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.getBuildCalls++
-	if s.getBuildFailFrom > 0 && s.getBuildCalls >= s.getBuildFailFrom {
-		return nil, nil, errors.New("postgres unavailable")
+// verdictFaults fails GetBuild from call failFrom (0 never) and
+// CompleteActionChunk with completeErr.
+func verdictFaults(failFrom int, completeErr error) map[string]error {
+	errs := map[string]error{"CompleteActionChunk": completeErr}
+	if failFrom > 0 {
+		errs["GetBuild"] = errors.New("postgres unavailable")
 	}
-	bld := s.build
-	return &bld, append([]model.VanadisChunk(nil), s.chunks...), nil
-}
-
-func (s *verdictStore) CompleteActionChunk(_ context.Context, chunkID, dispatchID string) (*store.VanadisAdvancementResult, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.completeErr != nil {
-		return nil, s.completeErr
-	}
-	res := &store.VanadisAdvancementResult{Matched: true, BuildID: s.build.ID}
-	for i, c := range s.chunks {
-		if c.ID != chunkID || dispatchID != model.ActionDispatchID(c) || c.Mode != "action" {
-			continue
-		}
-		switch {
-		case c.Status == "running" && s.build.Status == "running":
-			s.chunks[i].Status = "completed"
-			res.CompletionAccepted, res.Advanced = true, true
-		case c.Status == "completed" && (s.build.Status == "running" || s.build.Status == "completed"):
-			res.CompletionAccepted = true
-		}
-	}
-	return res, nil
-}
-
-func (s *verdictStore) UpdateBuildStatus(_ context.Context, _, status string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.build.Status = status
-	return nil
-}
-
-func (*verdictStore) CompareAndSwapBuildStatusMessageID(context.Context, string, string, string) (bool, error) {
-	return true, nil
-}
-
-func (s *verdictStore) chunkStatus(id string) string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for _, c := range s.chunks {
-		if c.ID == id {
-			return c.Status
-		}
-	}
-	return ""
+	return errs
 }
 
 type completeChunkCase struct {
@@ -131,7 +73,7 @@ func TestBuildObject_CompleteChunk(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			st := &verdictStore{build: model.VanadisBuild{ID: "b1", ThreadID: "th-1", Status: tc.buildStatus, Quiet: true}, chunks: tc.chunks, getBuildFailFrom: tc.getBuildFailFrom, completeErr: tc.completeErr}
+			st := &fakeStore{builds: []model.VanadisBuild{{ID: "b1", ThreadID: "th-1", Status: tc.buildStatus, Quiet: true}}, chunks: slices.Clone(tc.chunks), errs: verdictFaults(tc.getBuildFailFrom, tc.completeErr), failFrom: map[string]int{"GetBuild": tc.getBuildFailFrom}}
 			eri, bus := &mockEriClient{}, &mockBusExecutor{}
 			var authority store.VanadisStore = st
 			if tc.noStore {
@@ -148,7 +90,7 @@ func TestBuildObject_CompleteChunk(t *testing.T) {
 	}
 }
 
-func assertCompleteChunk(t *testing.T, tc completeChunkCase, got CompleteChunkResponse, err error, st *verdictStore, eri *mockEriClient, bus *mockBusExecutor) {
+func assertCompleteChunk(t *testing.T, tc completeChunkCase, got CompleteChunkResponse, err error, st *fakeStore, eri *mockEriClient, bus *mockBusExecutor) {
 	t.Helper()
 	wantErr := tc.wantTerminal || tc.wantRetriable
 	if (err != nil) != wantErr || got != tc.want {
@@ -160,11 +102,11 @@ func assertCompleteChunk(t *testing.T, tc completeChunkCase, got CompleteChunkRe
 	if tc.wantErrText != "" && !strings.Contains(err.Error(), tc.wantErrText) {
 		t.Fatalf("err=%v, want %q", err, tc.wantErrText)
 	}
-	if c := st.chunkStatus("c1"); c != tc.wantChunk {
+	if c := st.chunkSnapshot("c1").Status; c != tc.wantChunk {
 		t.Fatalf("chunk status=%q, want %q", c, tc.wantChunk)
 	}
-	if st.build.Status != tc.wantBuild {
-		t.Fatalf("build status=%q, want %q", st.build.Status, tc.wantBuild)
+	if b := st.buildSnapshot("b1").Status; b != tc.wantBuild {
+		t.Fatalf("build status=%q, want %q", b, tc.wantBuild)
 	}
 	banner := ""
 	if eri.LastWidget != nil {

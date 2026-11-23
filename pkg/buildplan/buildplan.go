@@ -57,8 +57,6 @@ type VanadisChunk struct {
 	MergeSHA           string                 `json:"merge_sha,omitempty"`
 	RolloutState       *pubsub.PRRolloutState `json:"rollout_state,omitempty"`
 	Banner             string                 `json:"banner,omitempty"`
-	MergeAwakeableID   string                 `json:"merge_awakeable_id,omitempty"`
-	DeployAwakeableID  string                 `json:"deploy_awakeable_id,omitempty"`
 	StartedAt          time.Time              `json:"started_at,omitempty"`
 	CompletedAt        time.Time              `json:"completed_at,omitempty"`
 	CreatedAt          time.Time              `json:"created_at"`

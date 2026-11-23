@@ -37,7 +37,6 @@ const (
 // Type aliases preserving the executor public surface.
 type (
 	EriClient                = ericlient.EriClient
-	HTTPEriClient            = ericlient.HTTPEriClient
 	RestateEriClient         = ericlient.RestateEriClient
 	StatusWidgetDeliverer    = ericlient.StatusWidgetDeliverer
 	StatusWidgetChunk        = ericlient.StatusWidgetChunk
@@ -46,7 +45,6 @@ type (
 )
 
 var (
-	NewHTTPEriClient    = ericlient.NewHTTPEriClient
 	NewRestateEriClient = ericlient.NewRestateEriClient
 
 	FormatChunkActiveStep            = widget.FormatChunkActiveStep
