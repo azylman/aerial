@@ -227,10 +227,7 @@
       "status": "open",
       "title": "CI PR",
       "metadata": {
-        "agent": "aerial",
-        "ci_checks": {
-          "lint": "passed"
-        }
+        "agent": "aerial"
       }
     }
   ]

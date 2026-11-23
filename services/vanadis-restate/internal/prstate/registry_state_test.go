@@ -4,8 +4,6 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
-
-	"github.com/azylman/aerial/pkg/prwire"
 )
 
 const (
@@ -96,7 +94,6 @@ func TestPRState_ApplyRegister(t *testing.T) {
 	seeded := func(head, status string) *PRState {
 		s := rowState(head, "", status)
 		s.Title, s.Banner = "Old title", "boom"
-		s.CIChecks = map[string]string{"ci": "failed"}
 		s.BuildMetadata = meta("final", 1, 1, 10, head, 1)
 		return s
 	}
@@ -108,14 +105,13 @@ func TestPRState_ApplyRegister(t *testing.T) {
 		wantHead   string
 		wantTitle  string
 		wantBanner string
-		wantChecks map[string]string
 		wantMeta   bool
 		wantAgent  string
 	}{
 		{name: "new head clears head-scoped metadata and reopens", state: seeded("h0", RegistryStatusCIFailed), req: RegisterRequest{Branch: "feat", HeadSHA: "h1", Title: "New", Agent: "aerial", Metadata: map[string]string{"vanadis_chunk_id": "chunk-1", "widget_state": "w", "other": "x"}}, wantStatus: RegistryStatusOpen, wantHead: "h1", wantTitle: "New", wantAgent: "aerial"},
-		{name: "same head clears only banner", state: seeded("h0", RegistryStatusConflict), req: RegisterRequest{Branch: "feat", HeadSHA: "h0", BotID: "agent-alpha"}, wantStatus: RegistryStatusOpen, wantHead: "h0", wantTitle: "Old title", wantChecks: map[string]string{"ci": "failed"}, wantMeta: true, wantAgent: "agent-alpha"},
-		{name: "post-merge status and metadata are kept", state: seeded("h0", RegistryStatusDeployed), req: RegisterRequest{Branch: "feat", HeadSHA: "h1"}, wantStatus: RegistryStatusDeployed, wantHead: "h1", wantTitle: "Old title", wantBanner: "boom", wantChecks: map[string]string{"ci": "failed"}, wantMeta: true},
-		{name: "closed status reopens", state: seeded("h0", RegistryStatusClosed), req: RegisterRequest{Branch: "feat", HeadSHA: "h0"}, wantStatus: RegistryStatusOpen, wantHead: "h0", wantTitle: "Old title", wantChecks: map[string]string{"ci": "failed"}, wantMeta: true},
+		{name: "same head clears only banner", state: seeded("h0", RegistryStatusConflict), req: RegisterRequest{Branch: "feat", HeadSHA: "h0", BotID: "agent-alpha"}, wantStatus: RegistryStatusOpen, wantHead: "h0", wantTitle: "Old title", wantMeta: true, wantAgent: "agent-alpha"},
+		{name: "post-merge status and metadata are kept", state: seeded("h0", RegistryStatusDeployed), req: RegisterRequest{Branch: "feat", HeadSHA: "h1"}, wantStatus: RegistryStatusDeployed, wantHead: "h1", wantTitle: "Old title", wantBanner: "boom", wantMeta: true},
+		{name: "closed status reopens", state: seeded("h0", RegistryStatusClosed), req: RegisterRequest{Branch: "feat", HeadSHA: "h0"}, wantStatus: RegistryStatusOpen, wantHead: "h0", wantTitle: "Old title", wantMeta: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -129,7 +125,6 @@ func TestPRState_ApplyRegister(t *testing.T) {
 			require.Equal(t, tc.wantHead, s.HeadSHA)
 			require.Equal(t, tc.wantTitle, s.Title)
 			require.Equal(t, tc.wantBanner, s.Banner)
-			require.Equal(t, tc.wantChecks, s.CIChecks)
 			require.Equal(t, tc.wantMeta, s.BuildMetadata != nil)
 			require.Equal(t, tc.wantAgent, s.Agent)
 		})
@@ -141,7 +136,6 @@ func TestPRState_ApplyRegistrySync(t *testing.T) {
 	bannered := func(status string) *PRState {
 		s := rowState("h1", "", status)
 		s.Banner = "b"
-		s.CIChecks = map[string]string{"ci": "passed"}
 		return s
 	}
 	tests := []struct {
@@ -151,15 +145,14 @@ func TestPRState_ApplyRegistrySync(t *testing.T) {
 		want       bool
 		wantStatus string
 		wantBanner string
-		wantChecks map[string]string
 	}{
-		{name: "head change reopens and clears checks", state: bannered(RegistryStatusCIFailed), prev: "h0", head: "h1", want: true, wantStatus: RegistryStatusOpen, wantChecks: nil},
-		{name: "same head conflict reopens keeping checks", state: bannered(RegistryStatusConflict), prev: "h1", head: "h1", want: true, wantStatus: RegistryStatusOpen, wantChecks: map[string]string{"ci": "passed"}},
-		{name: "same head open with banner clears banner", state: bannered(RegistryStatusOpen), prev: "h1", head: "h1", want: true, wantStatus: RegistryStatusOpen, wantChecks: map[string]string{"ci": "passed"}},
+		{name: "head change reopens and clears checks", state: bannered(RegistryStatusCIFailed), prev: "h0", head: "h1", want: true, wantStatus: RegistryStatusOpen},
+		{name: "same head conflict reopens keeping checks", state: bannered(RegistryStatusConflict), prev: "h1", head: "h1", want: true, wantStatus: RegistryStatusOpen},
+		{name: "same head open with banner clears banner", state: bannered(RegistryStatusOpen), prev: "h1", head: "h1", want: true, wantStatus: RegistryStatusOpen},
 		{name: "same head clean open is a no-op", state: rowState("h1", "", RegistryStatusOpen), prev: "h1", head: "h1", want: false, wantStatus: RegistryStatusOpen},
-		{name: "locked status never syncs", state: bannered(RegistryStatusClosed), prev: "h0", head: "h1", want: false, wantStatus: RegistryStatusClosed, wantBanner: "b", wantChecks: map[string]string{"ci": "passed"}},
+		{name: "locked status never syncs", state: bannered(RegistryStatusClosed), prev: "h0", head: "h1", want: false, wantStatus: RegistryStatusClosed, wantBanner: "b"},
 		{name: "known merge sha never syncs", state: rowState("h1", "m1", RegistryStatusOpen), prev: "h0", head: "h1", want: false, wantStatus: RegistryStatusOpen},
-		{name: "zero head is ignored", state: bannered(RegistryStatusOpen), prev: "h0", head: "0000", want: false, wantStatus: RegistryStatusOpen, wantBanner: "b", wantChecks: map[string]string{"ci": "passed"}},
+		{name: "zero head is ignored", state: bannered(RegistryStatusOpen), prev: "h0", head: "0000", want: false, wantStatus: RegistryStatusOpen, wantBanner: "b"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -167,7 +160,6 @@ func TestPRState_ApplyRegistrySync(t *testing.T) {
 			require.Equal(t, tc.want, tc.state.ApplyRegistrySync(tc.prev, tc.head))
 			require.Equal(t, tc.wantStatus, tc.state.Status)
 			require.Equal(t, tc.wantBanner, tc.state.Banner)
-			require.Equal(t, tc.wantChecks, tc.state.CIChecks)
 		})
 	}
 }
@@ -289,39 +281,6 @@ func TestPRState_ApplyRegistryRecovered(t *testing.T) {
 			s := rowState("h1", "", tc.status)
 			require.Equal(t, tc.want, s.ApplyRegistryRecovered(tc.from))
 			require.Equal(t, tc.wantStatus, s.Status)
-		})
-	}
-}
-
-func TestPRState_RecordCheckState(t *testing.T) {
-	t.Parallel()
-	checked := func(head, value string) *PRState {
-		s := rowState(head, "", "")
-		s.CIChecks = map[string]string{"ci": value}
-		return s
-	}
-	tests := []struct {
-		name       string
-		state      *PRState
-		sha, check string
-		state2     string
-		want       bool
-		wantChecks map[string]string
-	}{
-		{name: "open head records", state: rowState("h1", "", ""), sha: "h1", check: "ci", state2: prwire.CheckStateFailed, want: true, wantChecks: map[string]string{"ci": "failed"}},
-		{name: "merged merge sha records", state: rowState("h1", "m1", RegistryStatusMerged), sha: "m1", check: "ci", state2: prwire.CheckStatePassed, want: true, wantChecks: map[string]string{"ci": "passed"}},
-		{name: "merged head sha is ignored", state: rowState("h1", "m1", RegistryStatusMerged), sha: "h1", check: "ci", state2: prwire.CheckStatePassed, want: false},
-		{name: "stale head is ignored", state: rowState("h1", "", RegistryStatusOpen), sha: "h0", check: "ci", state2: prwire.CheckStatePassed, want: false},
-		{name: "deploying is ignored", state: rowState("h1", "m1", RegistryStatusDeploying), sha: "m1", check: "ci", state2: prwire.CheckStatePassed, want: false},
-		{name: "blank check is ignored", state: rowState("h1", "", ""), sha: "h1", check: " ", state2: prwire.CheckStatePassed, want: false},
-		{name: "same value is a no-op", state: checked("h1", "failed"), sha: "h1", check: "ci", state2: prwire.CheckStateFailed, want: false, wantChecks: map[string]string{"ci": "failed"}},
-		{name: "new value replaces", state: checked("h1", "failed"), sha: "h1", check: "ci", state2: prwire.CheckStatePending, want: true, wantChecks: map[string]string{"ci": "pending"}},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			require.Equal(t, tc.want, tc.state.RecordCheckState(tc.sha, tc.check, tc.state2))
-			require.Equal(t, tc.wantChecks, tc.state.CIChecks)
 		})
 	}
 }

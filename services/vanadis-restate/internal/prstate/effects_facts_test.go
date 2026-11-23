@@ -863,3 +863,40 @@ func legacyPRState(t *testing.T, st *PRState) *PRState {
 	require.NoError(t, json.Unmarshal(raw, &out))
 	return &out
 }
+
+// TestPRObjectServiceHandleCheckStatus pins the facts-only check-status
+// handler: an applied event commits the row and publishes the check_updated
+// fact it carries (Vanadis records the check state from that fact), and a
+// closed PR absorbs the event without publishing.
+func TestPRObjectServiceHandleCheckStatus(t *testing.T) {
+	t.Parallel()
+	checkFact := pubsub.PRLifecycleEvent{Event: "check_updated", HeadSHA: "h1", CheckName: "lint", CheckState: "pending"}
+	ev := PREvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "h1", CheckName: "lint", CheckState: "pending", Facts: []pubsub.PRLifecycleEvent{checkFact}}
+	closed := effectPR()
+	closed.Terminal = TerminalClosed
+	tests := []struct {
+		name      string
+		state     *PRState
+		ev        PREvent
+		wantCalls []factCall
+		wantSet   bool
+	}{
+		{
+			name: "open pr publishes the check_updated fact", state: effectPR(), ev: ev, wantSet: true,
+			wantCalls: []factCall{{msgID: "prstate-644f18e690a8262e950d51cb18a18a40", fact: targeted(pinned(checkFact))}},
+		},
+		{name: "closed pr absorbs the event", state: closed, ev: ev},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			pub := &fakeFactPublisher{}
+			svc := NewPRObjectService().WithFactPublisher(pub)
+			mc, rec := prKV(t, tc.state, false, false)
+			stubRun(mc, false)
+			require.NoError(t, svc.HandleCheckStatus(restate.WithMockContext(mc), tc.ev))
+			require.Equal(t, tc.wantCalls, pub.Calls())
+			require.Equal(t, tc.wantSet, rec.setCalled)
+		})
+	}
+}

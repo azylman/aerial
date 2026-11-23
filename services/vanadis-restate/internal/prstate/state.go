@@ -62,7 +62,6 @@ type PRState struct {
 	DeploySuccessPending   bool
 	BuildMetadata          *BuildMetadata
 	Banner                 string
-	CIChecks               map[string]string
 
 	// PendingDeployFailure is the armed deploy-failure deadline for a
 	// restate-owned deploy attempt that failed; DeployFailureSeq numbers
