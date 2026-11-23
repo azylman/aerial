@@ -178,3 +178,178 @@ func TestHTTPInternalLLMClient(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, "closure-ok", got)
 }
+
+func TestServiceNames(t *testing.T) {
+	t.Parallel()
+	type row struct {
+		name         string
+		agent        string
+		wantThread   string
+		wantDispatch string
+		wantVoice    string
+		wantManager  string
+	}
+	tests := []row{
+		{
+			name:         "empty defaults to unsuffixed",
+			agent:        "",
+			wantThread:   "ThreadSession",
+			wantDispatch: "DispatchSession",
+			wantVoice:    "VoiceSession",
+			wantManager:  "SessionManager",
+		},
+		{
+			name:         "default agent aerial",
+			agent:        "aerial",
+			wantThread:   "ThreadSession",
+			wantDispatch: "DispatchSession",
+			wantVoice:    "VoiceSession",
+			wantManager:  "SessionManager",
+		},
+		{
+			name:         "custom agent name",
+			agent:        "sidecar",
+			wantThread:   "ThreadSession-sidecar",
+			wantDispatch: "DispatchSession-sidecar",
+			wantVoice:    "VoiceSession-sidecar",
+			wantManager:  "SessionManager-sidecar",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tc.wantThread, ThreadSessionServiceName(tc.agent))
+			assert.Equal(t, tc.wantDispatch, DispatchSessionServiceName(tc.agent))
+			assert.Equal(t, tc.wantVoice, VoiceSessionServiceName(tc.agent))
+			assert.Equal(t, tc.wantManager, SessionManagerServiceName(tc.agent))
+		})
+	}
+}
+
+func TestRestateMethodEndpoint(t *testing.T) {
+	t.Parallel()
+	type row struct {
+		name       string
+		restateURL string
+		service    string
+		key        string
+		method     string
+		want       string
+	}
+	tests := []row{
+		{
+			name:       "unkeyed service method",
+			restateURL: "http://restate.aerial:8080/",
+			service:    "SessionManager",
+			key:        "",
+			method:     "CancelDispatch",
+			want:       "http://restate.aerial:8080/SessionManager/CancelDispatch",
+		},
+		{
+			name:       "keyed virtual object method",
+			restateURL: "http://restate.aerial:8080",
+			service:    "ThreadSession",
+			key:        "chan-123",
+			method:     "Enqueue",
+			want:       "http://restate.aerial:8080/ThreadSession/chan-123/Enqueue",
+		},
+		{
+			name:       "escaped characters in key and service",
+			restateURL: "  http://restate.aerial:8080/// ",
+			service:    "ThreadSession-custom/v1",
+			key:        "special/key with spaces",
+			method:     "Enqueue",
+			want:       "http://restate.aerial:8080/ThreadSession-custom%2Fv1/special%2Fkey%20with%20spaces/Enqueue",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tc.want, RestateMethodEndpoint(tc.restateURL, tc.service, tc.key, tc.method))
+		})
+	}
+}
+
+func TestRestateEnqueueEnvelope_EffectiveID(t *testing.T) {
+	t.Parallel()
+	type row struct {
+		name string
+		env  RestateEnqueueEnvelope
+		want string
+	}
+	tests := []row{
+		{
+			name: "dispatch id takes precedence",
+			env:  RestateEnqueueEnvelope{DispatchID: "disp-1", MessageID: "msg-1"},
+			want: "disp-1",
+		},
+		{
+			name: "message id when dispatch id is empty",
+			env:  RestateEnqueueEnvelope{MessageID: "msg-2"},
+			want: "msg-2",
+		},
+		{
+			name: "empty when both empty",
+			env:  RestateEnqueueEnvelope{},
+			want: "",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tc.want, tc.env.EffectiveID())
+		})
+	}
+}
+
+func TestParseRestateEnqueueEnvelope(t *testing.T) {
+	t.Parallel()
+	type row struct {
+		name       string
+		body       []byte
+		want       RestateEnqueueEnvelope
+		wantErrSub string
+	}
+	tests := []row{
+		{
+			name: "nil body returns zero envelope",
+			body: nil,
+			want: RestateEnqueueEnvelope{},
+		},
+		{
+			name: "empty body returns zero envelope",
+			body: []byte(""),
+			want: RestateEnqueueEnvelope{},
+		},
+		{
+			name: "full json payload",
+			body: []byte(`{"status":"accepted","channel_id":"c1","thread_id":"t1","dispatch_id":"d1","message_id":"m1","session_id":"s1"}`),
+			want: RestateEnqueueEnvelope{
+				Status:     "accepted",
+				ChannelID:  "c1",
+				ThreadID:   "t1",
+				DispatchID: "d1",
+				MessageID:  "m1",
+				SessionID:  "s1",
+			},
+		},
+		{
+			name:       "invalid json returns error",
+			body:       []byte(`{invalid`),
+			wantErrSub: "invalid character",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := ParseRestateEnqueueEnvelope(tc.body)
+			if tc.wantErrSub != "" {
+				assert.Error(t, err)
+				assert.Contains(t, err.Error(), tc.wantErrSub)
+			} else {
+				assert.NoError(t, err)
+				assert.Equal(t, tc.want, got)
+			}
+		})
+	}
+}
