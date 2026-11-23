@@ -65,7 +65,8 @@ type SessionInfo struct {
 // SaveSessionID associates an internal session ID with a thread ID.
 func (s *SQLStore) SaveSessionID(ctx context.Context, threadID, sessionID string) error {
 	threadID = DiscordSessionID(threadID)
-	if threadID == "" || sessionID == "" {
+	sessionID = strings.TrimSpace(sessionID)
+	if threadID == "" {
 		return nil
 	}
 	agent := s.effectiveAgent()

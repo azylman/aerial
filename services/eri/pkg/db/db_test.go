@@ -220,6 +220,16 @@ func assertSessionTurnCountAndRotation(ctx context.Context, t *testing.T, store 
 	if curr != "sess-2" || prev != "sess-1" || turns != 0 {
 		t.Errorf("post-rotation: curr=%q, prev=%q, turns=%d", curr, prev, turns)
 	}
+
+	mustOK(t, store.SaveSessionID(ctx, "th-1", ""), "SaveSessionID clear empty")
+	cleared, errCleared := store.GetSessionID(ctx, "th-1")
+	mustOK(t, errCleared, "GetSessionID cleared")
+	prevAfterClear, errPrevAfterClear := store.GetPreviousSessionID(ctx, "th-1")
+	mustOK(t, errPrevAfterClear, "GetPreviousSessionID preserved")
+	if cleared != "" || prevAfterClear != "sess-1" {
+		t.Errorf("post-clear: cleared=%q, prevAfterClear=%q", cleared, prevAfterClear)
+	}
+	mustOK(t, store.SaveSessionID(ctx, "th-1", "sess-2"), "SaveSessionID restore sess-2")
 }
 
 func assertSessionEmptyKeyGuards(ctx context.Context, t *testing.T, store Store) {
