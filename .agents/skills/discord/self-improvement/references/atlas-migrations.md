@@ -16,7 +16,7 @@ All database schema modifications across `aerial` and `aerial-sidecars` use decl
 - If a migration requires data backfilling prior to a `NOT NULL` or column drop constraint, edit the generated migration `.sql` file and run `atlas migrate hash --dir "file://services/eri/pkg/db/migrations"` to recompute `atlas.sum`.
 
 ## 3. Update Hermetic Test Fixtures & Verify Integrity
-- Update any corresponding in-memory SQLite / test schema fixtures (e.g., `services/eri/pkg/db/sqlite_test_fixture_test.go`, `services/haro/db_test.go`, or `FakeStore` models) to stay in sync with `schema.sql`.
+- DB tests load the real `schema.sql` through `pkg/pgtest` (one throwaway Postgres per test binary), so no test schema copy exists to keep in sync; do not add SQLite or in-memory fake schemas.
 - Run local pre-flight verification and package tests:
   ```bash
   ./scripts/verify.sh --staged

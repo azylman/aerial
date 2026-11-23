@@ -6,7 +6,6 @@ require (
 	github.com/azylman/aerial/pkg v0.0.0
 	github.com/azylman/aerial/services/eri v0.0.0
 	github.com/bwmarrin/discordgo v0.29.0
-	github.com/prometheus/client_golang v1.25.0
 	github.com/restatedev/sdk-go v1.2.0
 	github.com/stretchr/testify v1.12.1
 	golang.org/x/sync v0.25.0
@@ -39,7 +38,7 @@ require (
 	github.com/nats-io/nkeys v0.4.17 // indirect
 	github.com/nats-io/nuid v1.0.1 // indirect
 	github.com/pb33f/ordered-map/v2 v2.3.1 // indirect
-	github.com/pgvector/pgvector-go v0.4.1 // indirect
+	github.com/prometheus/client_golang v1.25.0 // indirect
 	github.com/prometheus/client_model v0.6.3 // indirect
 	github.com/prometheus/common v0.72.0 // indirect
 	github.com/prometheus/procfs v0.22.0 // indirect
