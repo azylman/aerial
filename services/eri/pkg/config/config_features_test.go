@@ -17,8 +17,12 @@ import (
 func TestLoadInstructions_ChannelAndScope(t *testing.T) {
 	tmpDir := t.TempDir()
 	chanDir, scopeDir := filepath.Join(tmpDir, "channels"), filepath.Join(tmpDir, "scopes")
-	_ = os.MkdirAll(chanDir, 0o755)
-	_ = os.MkdirAll(scopeDir, 0o755)
+	if err := os.MkdirAll(chanDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(chanDir): %v", err)
+	}
+	if err := os.MkdirAll(scopeDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(scopeDir): %v", err)
+	}
 
 	oldChanDirs, oldScopeDirs := ChannelInstructionsDirs, ScopeInstructionsDirs
 	ChannelInstructionsDirs, ScopeInstructionsDirs = []string{chanDir}, []string{scopeDir}
@@ -67,7 +71,9 @@ func TestLoadInstructions_ChannelAndScope(t *testing.T) {
 		})
 	}
 
-	_ = os.Mkdir(filepath.Join(scopeDir, "dir-target.md"), 0o755)
+	if err := os.Mkdir(filepath.Join(scopeDir, "dir-target.md"), 0o755); err != nil {
+		t.Fatalf("Mkdir: %v", err)
+	}
 	if got := LoadScopeInstructions("dir-target"); got != "" {
 		t.Fatalf("expected non-regular directory to be skipped, got %q", got)
 	}
@@ -510,7 +516,9 @@ func runAmbientContextAccessorsTests(t *testing.T, src *AmbientContextConfig) {
 	if defData := DefaultConfigData(); defData == nil || defData.Model == "" {
 		t.Fatal("DefaultConfigData failed")
 	}
-	_ = GetRuntimeConfig()
+	if rc := GetRuntimeConfig(); rc.Model == "" {
+		t.Fatal("GetRuntimeConfig returned empty Model")
+	}
 }
 
 func TestAmbientContextConfig(t *testing.T) {
@@ -735,16 +743,24 @@ func TestRegisterConfigTokens_SharedSecrets_TableDriven(t *testing.T) {
 
 	tmpDir := t.TempDir()
 	secretsFile := filepath.Join(tmpDir, "shared-secrets.json")
-	_ = os.WriteFile(secretsFile, []byte(`{
+	if err := os.WriteFile(secretsFile, []byte(`{
 		"DYNAMIC_SHARED_SECRET": "dynamic_shared_secret_token_val_12345"
-	}`), 0o600)
+	}`), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
 
 	emptySecretsFile := filepath.Join(tmpDir, "empty-secrets.json")
-	_ = os.WriteFile(emptySecretsFile, []byte(`{}`), 0o600)
+	if err := os.WriteFile(emptySecretsFile, []byte(`{}`), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
 
 	secretsDir := filepath.Join(tmpDir, "secrets_dir")
-	_ = os.MkdirAll(secretsDir, 0o755)
-	_ = os.WriteFile(filepath.Join(secretsDir, "DYNAMIC_DIR_SECRET"), []byte("dynamic_dir_secret_token_val_67890"), 0o600)
+	if err := os.MkdirAll(secretsDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(secretsDir, "DYNAMIC_DIR_SECRET"), []byte("dynamic_dir_secret_token_val_67890"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
 
 	tests := []struct {
 		name        string

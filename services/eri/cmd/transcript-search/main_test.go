@@ -468,7 +468,10 @@ func newTranscriptsServers(t *testing.T) transcriptsServers {
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte("truncated"))
 			if hijacker, ok := w.(http.Hijacker); ok {
-				conn, _, _ := hijacker.Hijack()
+				conn, _, err := hijacker.Hijack()
+				if err != nil {
+					return
+				}
 				_ = conn.Close()
 			}
 		}),
@@ -499,8 +502,14 @@ func transcriptsEchoHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		payload = stats
 	case "/api/transcripts/steps":
-		step, _ := strconv.Atoi(q.Get("step"))
-		window, _ := strconv.Atoi(q.Get("context"))
+		step, err := strconv.Atoi(q.Get("step"))
+		if err != nil {
+			step = 0
+		}
+		window, err := strconv.Atoi(q.Get("context"))
+		if err != nil {
+			window = 0
+		}
 		payload = transcript.StepWindowResult{SessionID: q.Get("session"), CenterStep: step, Context: window, Steps: []db.TranscriptStep{
 			{
 				Stack:     q.Get("stack"),
