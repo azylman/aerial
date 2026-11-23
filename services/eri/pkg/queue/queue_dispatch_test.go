@@ -951,3 +951,29 @@ func TestExtractVanadisDispatchInfo(t *testing.T) {
 		})
 	}
 }
+
+func TestExtractVanadisBuildID(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		chunkID   string
+		sessionID string
+		targetID  string
+		want      string
+	}{
+		{name: "chunk ID with chunk suffix", chunkID: "build-1-abc-chunk-2", want: "build-1-abc"},
+		{name: "session ID with chunk suffix", chunkID: "c06a", sessionID: "vanadis-build-2-def-chunk-0", want: "build-2-def"},
+		{name: "target ID with chunk suffix", targetID: "build-3-ghi-chunk-4", want: "build-3-ghi"},
+		{name: "bare build target ID", targetID: "build-4-jkl", want: "build-4-jkl"},
+		{name: "chunk ID prefix without suffix falls through", chunkID: "build-5-mno", sessionID: "vanadis-c06a", want: ""},
+		{name: "no build reference", chunkID: "c06a", sessionID: "heartbeat-1", targetID: "1234567890", want: ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := extractVanadisBuildID(tc.chunkID, tc.sessionID, tc.targetID); got != tc.want {
+				t.Errorf("extractVanadisBuildID(%q, %q, %q) = %q, want %q", tc.chunkID, tc.sessionID, tc.targetID, got, tc.want)
+			}
+		})
+	}
+}
