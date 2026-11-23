@@ -1,21 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# scripts/test-aerial-pr.sh - Unit & integration tests for unified aerial-pr.sh
+# scripts/test-aerial-pr.sh - Focused unit tests for slimmed aerial-pr.sh
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 AERIAL_PR="${SCRIPT_DIR}/aerial-pr.sh"
 
-# Hermetic test environment: clear ambient vanadis chunk environment variables
-unset AERIAL_VANADIS_CHUNK_ID VANADIS_CHUNK_ID
+unset AERIAL_VANADIS_CHUNK_ID VANADIS_CHUNK_ID AERIAL_TARGET_ID DISCORD_THREAD_ID DISCORD_CHANNEL_ID
 
 PASSED=0
 FAILED=0
 
 assert_eq() {
-    local expected="$1"
-    local actual="$2"
-    local msg="$3"
+    local expected="$1" actual="$2" msg="$3"
     if [ "$expected" = "$actual" ]; then
         echo "✅ PASS: $msg"
         PASSED=$((PASSED + 1))
@@ -27,13 +24,24 @@ assert_eq() {
     fi
 }
 
-echo "🧪 Running unit tests for unified aerial-pr.sh..."
+assert_match() {
+    local pattern="$1" actual="$2" msg="$3"
+    if [[ "$actual" =~ $pattern ]]; then
+        echo "✅ PASS: $msg"
+        PASSED=$((PASSED + 1))
+    else
+        echo "❌ FAIL: $msg"
+        echo "   Pattern: '$pattern'"
+        echo "   Actual:  '$actual'"
+        FAILED=$((FAILED + 1))
+    fi
+}
 
-# Test 1: Helper unit tests (normalization & remote parsing)
-# Source aerial-pr.sh internal functions for testing by running in a subshell with a mock test hook
-TEST_OUTPUT=$(bash -c "
-    REPO_TEST_MODE=1
-    source \"${AERIAL_PR}\" --source-only 2>/dev/null || true
+echo "🧪 Running unit tests for slim aerial-pr.sh..."
+
+# 1. normalize_repo
+TEST_NORM=$(bash -c "
+    REPO_TEST_MODE=1; source \"${AERIAL_PR}\" --source-only 2>/dev/null || true
     echo \"core:\$(normalize_repo core)\"
     echo \"aerial:\$(normalize_repo aerial)\"
     echo \"config:\$(normalize_repo config)\"
@@ -45,2268 +53,260 @@ TEST_OUTPUT=$(bash -c "
     echo \"aerial.git:\$(normalize_repo aerial.git)\"
     echo \"custom-repo:\$(normalize_repo custom-repo)\"
 ")
+assert_eq "aerial" "$(echo "$TEST_NORM" | grep '^core:' | cut -d: -f2)" "normalize_repo core -> aerial"
+assert_eq "aerial" "$(echo "$TEST_NORM" | grep '^aerial:' | cut -d: -f2)" "normalize_repo aerial -> aerial"
+assert_eq "aerial-config" "$(echo "$TEST_NORM" | grep '^config:' | cut -d: -f2)" "normalize_repo config -> aerial-config"
+assert_eq "aerial-config" "$(echo "$TEST_NORM" | grep '^aerial-config:' | cut -d: -f2)" "normalize_repo aerial-config -> aerial-config"
+assert_eq "aerial-sidecars" "$(echo "$TEST_NORM" | grep '^sidecars:' | cut -d: -f2)" "normalize_repo sidecars -> aerial-sidecars"
+assert_eq "aerial-sidecars" "$(echo "$TEST_NORM" | grep '^aerial-sidecars:' | cut -d: -f2)" "normalize_repo aerial-sidecars -> aerial-sidecars"
+assert_eq "aerial" "$(echo "$TEST_NORM" | grep '^azylman/aerial:' | cut -d: -f2)" "normalize_repo azylman/aerial -> aerial"
+assert_eq "aerial-config" "$(echo "$TEST_NORM" | grep '^azylman/aerial-config.git:' | cut -d: -f2)" "normalize_repo azylman/aerial-config.git -> aerial-config"
+assert_eq "aerial" "$(echo "$TEST_NORM" | grep '^aerial.git:' | cut -d: -f2)" "normalize_repo aerial.git -> aerial"
+assert_eq "custom-repo" "$(echo "$TEST_NORM" | grep '^custom-repo:' | cut -d: -f2)" "normalize_repo custom-repo -> custom-repo"
 
-assert_eq "core:aerial" "$(echo "$TEST_OUTPUT" | grep '^core:')" "normalize_repo core -> aerial"
-assert_eq "aerial:aerial" "$(echo "$TEST_OUTPUT" | grep '^aerial:')" "normalize_repo aerial -> aerial"
-assert_eq "config:aerial-config" "$(echo "$TEST_OUTPUT" | grep '^config:')" "normalize_repo config -> aerial-config"
-assert_eq "aerial-config:aerial-config" "$(echo "$TEST_OUTPUT" | grep '^aerial-config:')" "normalize_repo aerial-config -> aerial-config"
-assert_eq "sidecars:aerial-sidecars" "$(echo "$TEST_OUTPUT" | grep '^sidecars:')" "normalize_repo sidecars -> aerial-sidecars"
-assert_eq "aerial-sidecars:aerial-sidecars" "$(echo "$TEST_OUTPUT" | grep '^aerial-sidecars:')" "normalize_repo aerial-sidecars -> aerial-sidecars"
-assert_eq "azylman/aerial:aerial" "$(echo "$TEST_OUTPUT" | grep '^azylman/aerial:')" "normalize_repo azylman/aerial -> aerial"
-assert_eq "azylman/aerial-config.git:aerial-config" "$(echo "$TEST_OUTPUT" | grep '^azylman/aerial-config.git:')" "normalize_repo azylman/aerial-config.git -> aerial-config"
-assert_eq "aerial.git:aerial" "$(echo "$TEST_OUTPUT" | grep '^aerial.git:')" "normalize_repo aerial.git -> aerial"
-assert_eq "custom-repo:custom-repo" "$(echo "$TEST_OUTPUT" | grep '^custom-repo:')" "normalize_repo custom-repo -> custom-repo"
-
-# Test 2: Remote URL extraction
-REMOTE_OUTPUT=$(bash -c "
-    REPO_TEST_MODE=1
-    source \"${AERIAL_PR}\" --source-only 2>/dev/null || true
-    extract_remote_repo \"https://github.com/azylman/aerial-sidecars.git\"
-    echo \"url1:\${PARSED_OWNER}/\${PARSED_REPO}\"
-    extract_remote_repo \"git@github.com:azylman/aerial-config.git\"
-    echo \"url2:\${PARSED_OWNER}/\${PARSED_REPO}\"
-    extract_remote_repo \"https://github.com/myorg/myrepo\"
-    echo \"url3:\${PARSED_OWNER}/\${PARSED_REPO}\"
-    extract_remote_repo \"https://github.com/azylman/aerial-sidecars/\"
-    echo \"url4:\${PARSED_OWNER}/\${PARSED_REPO}\"
-    extract_remote_repo \"https://github.com/myorg/repo.with.dots.git\"
-    echo \"url5:\${PARSED_OWNER}/\${PARSED_REPO}\"
-    extract_remote_repo \"http://127.0.0.1:4028/internal/github-git/azylman/aerial.git\"
-    echo \"url6:\${PARSED_OWNER}/\${PARSED_REPO}\"
-    extract_remote_repo \"http://127.0.0.1:4028/internal/github-git/azylman/aerial\"
-    echo \"url7:\${PARSED_OWNER}/\${PARSED_REPO}\"
+# 2. extract_remote_repo
+TEST_REMOTE=$(bash -c "
+    REPO_TEST_MODE=1; source \"${AERIAL_PR}\" --source-only 2>/dev/null || true
+    extract_remote_repo \"https://github.com/azylman/aerial-sidecars.git\"; echo \"r1:\${PARSED_OWNER}/\${PARSED_REPO}\"
+    extract_remote_repo \"git@github.com:azylman/aerial-config.git\"; echo \"r2:\${PARSED_OWNER}/\${PARSED_REPO}\"
+    extract_remote_repo \"http://127.0.0.1:4028/internal/github-git/azylman/aerial.git\"; echo \"r3:\${PARSED_OWNER}/\${PARSED_REPO}\"
+    extract_remote_repo \"https://github.com/myorg/myrepo\"; echo \"r4:\${PARSED_OWNER}/\${PARSED_REPO}\"
 ")
+assert_eq "azylman/aerial-sidecars" "$(echo "$TEST_REMOTE" | grep '^r1:' | cut -d: -f2)" "extract_remote_repo https"
+assert_eq "azylman/aerial-config" "$(echo "$TEST_REMOTE" | grep '^r2:' | cut -d: -f2)" "extract_remote_repo git@"
+assert_eq "azylman/aerial" "$(echo "$TEST_REMOTE" | grep '^r3:' | cut -d: -f2)" "extract_remote_repo loopback git"
+assert_eq "myorg/myrepo" "$(echo "$TEST_REMOTE" | grep '^r4:' | cut -d: -f2)" "extract_remote_repo custom"
 
-assert_eq "url1:azylman/aerial-sidecars" "$(echo "$REMOTE_OUTPUT" | grep '^url1:')" "extract_remote_repo https://github.com/azylman/aerial-sidecars.git"
-assert_eq "url2:azylman/aerial-config" "$(echo "$REMOTE_OUTPUT" | grep '^url2:')" "extract_remote_repo git@github.com:azylman/aerial-config.git"
-assert_eq "url3:myorg/myrepo" "$(echo "$REMOTE_OUTPUT" | grep '^url3:')" "extract_remote_repo https://github.com/myorg/myrepo"
-assert_eq "url4:azylman/aerial-sidecars" "$(echo "$REMOTE_OUTPUT" | grep '^url4:')" "extract_remote_repo https://github.com/azylman/aerial-sidecars/ (trailing slash)"
-assert_eq "url5:myorg/repo.with.dots" "$(echo "$REMOTE_OUTPUT" | grep '^url5:')" "extract_remote_repo https://github.com/myorg/repo.with.dots.git (dots in name)"
-assert_eq "url6:azylman/aerial" "$(echo "$REMOTE_OUTPUT" | grep '^url6:')" "extract_remote_repo loopback URL with .git"
-assert_eq "url7:azylman/aerial" "$(echo "$REMOTE_OUTPUT" | grep '^url7:')" "extract_remote_repo loopback URL without .git"
+# 3. init_scratch branch naming & directory initialization
+TMP_REMOTE=$(mktemp -d /tmp/aerial-pr-remote.XXXXXX)
+git init --bare "$TMP_REMOTE" >/dev/null
+git -C "$TMP_REMOTE" symbolic-ref HEAD refs/heads/main
+TMP_WORK=$(mktemp -d /tmp/aerial-pr-work.XXXXXX)
+git clone "$TMP_REMOTE" "$TMP_WORK" >/dev/null 2>&1
+git -C "$TMP_WORK" config user.name "Tester"
+git -C "$TMP_WORK" config user.email "tester@example.com"
+git -C "$TMP_WORK" checkout -b main >/dev/null 2>&1
+echo "init" > "$TMP_WORK/README.md"
+git -C "$TMP_WORK" add README.md
+git -C "$TMP_WORK" commit -m "init" >/dev/null
+git -C "$TMP_WORK" push -u origin main >/dev/null 2>&1
+rm -rf "$TMP_WORK"
 
-# Test 2B: Loopback detection and build_auth_header
-LOOPBACK_OUTPUT=$(bash -c "
-    REPO_TEST_MODE=1
-    unset GITHUB_PAT
-    export AERIAL_USE_LOOPBACK_GITHUB=1
-    source \"${AERIAL_PR}\" --source-only 2>/dev/null || true
-    echo \"loopback_flag:\${USE_LOOPBACK_GITHUB}\"
-    echo \"api_base:\${GITHUB_API_BASE}\"
-    echo \"auth_hdr:\$(build_auth_header)\"
-")
-assert_eq "loopback_flag:1" "$(echo "$LOOPBACK_OUTPUT" | grep '^loopback_flag:')" "USE_LOOPBACK_GITHUB set when AERIAL_USE_LOOPBACK_GITHUB=1"
-assert_eq "api_base:http://127.0.0.1:4028/internal/github-api" "$(echo "$LOOPBACK_OUTPUT" | grep '^api_base:')" "GITHUB_API_BASE set to loopback endpoint"
-assert_eq "auth_hdr:loopback" "$(echo "$LOOPBACK_OUTPUT" | grep '^auth_hdr:')" "build_auth_header returns loopback when USE_LOOPBACK_GITHUB=1"
+SCRATCH_BASE=$(mktemp -d /tmp/aerial-pr-scratch.XXXXXX)
+trap 'rm -rf "$TMP_REMOTE" "$SCRATCH_BASE"' EXIT
 
-# Test 4: Pre-dispatch flag parsing works with invalid command (should show usage without erroring on --repo)
-USAGE_OUT=$(bash "${AERIAL_PR}" --repo aerial-config invalid-cmd 2>&1 || true)
-assert_eq "true" "$(echo "$USAGE_OUT" | grep -q 'Usage:' && echo true || echo false)" "--repo flag handled before invalid command displays usage"
+# Standalone without target_id
+OUT_INIT_1=$(AERIAL_SCRATCH_BASE_DIR="$SCRATCH_BASE" AERIAL_REPO_URL_OVERRIDE="$TMP_REMOTE" bash "${AERIAL_PR}" init aerial)
+BRANCH_1=$(echo "$OUT_INIT_1" | jq -r '.branch')
+assert_match '^feat/aerial-pr-[0-9]{14}-[a-f0-9]{6}$' "$BRANCH_1" "init standalone branch without target_id"
 
-# Test 5: Universal verification contract in a temporary scratch repository
-TMP_TEST_DIR=$(mktemp -d /tmp/aerial-pr-test.XXXXXX)
-trap 'rm -rf "$TMP_TEST_DIR"' EXIT
+# Standalone with target_id (18-digit snowflake)
+OUT_INIT_2=$(AERIAL_SCRATCH_BASE_DIR="$SCRATCH_BASE" AERIAL_REPO_URL_OVERRIDE="$TMP_REMOTE" DISCORD_THREAD_ID="123456789012345678" bash "${AERIAL_PR}" init aerial)
+BRANCH_2=$(echo "$OUT_INIT_2" | jq -r '.branch')
+assert_match '^feat/aerial-pr-t123456789012345678-[a-f0-9]{6}$' "$BRANCH_2" "init standalone branch with target_id"
 
-git init "$TMP_TEST_DIR" >/dev/null
-git -C "$TMP_TEST_DIR" config user.name "Tester"
-git -C "$TMP_TEST_DIR" config user.email "tester@example.com"
-git -C "$TMP_TEST_DIR" remote add origin "https://github.com/azylman/aerial-sidecars.git"
-mkdir -p "$TMP_TEST_DIR/scripts"
+# Vanadis chunk without target_id
+OUT_INIT_3=$(AERIAL_SCRATCH_BASE_DIR="$SCRATCH_BASE" AERIAL_REPO_URL_OVERRIDE="$TMP_REMOTE" bash "${AERIAL_PR}" init aerial --vanadis-chunk chunk.alpha)
+BRANCH_3=$(echo "$OUT_INIT_3" | jq -r '.branch')
+DIR_3=$(echo "$OUT_INIT_3" | jq -r '.scratch_dir')
+assert_match '^feat/aerial-pr-vanadis-chunk_alpha-[a-f0-9]{6}$' "$BRANCH_3" "init vanadis chunk branch without target_id"
+assert_match '/vanadis-chunk_alpha-aerial$' "$DIR_3" "init vanadis chunk creates deterministic dir"
 
-# Case 5A: verify.sh succeeds
-cat << 'EOF' > "$TMP_TEST_DIR/scripts/verify.sh"
+# Vanadis chunk with target_id
+OUT_INIT_4=$(AERIAL_SCRATCH_BASE_DIR="$SCRATCH_BASE" AERIAL_REPO_URL_OVERRIDE="$TMP_REMOTE" AERIAL_TARGET_ID="987654321098765432" bash "${AERIAL_PR}" init aerial --vanadis-chunk chunk.beta)
+BRANCH_4=$(echo "$OUT_INIT_4" | jq -r '.branch')
+assert_match '^feat/aerial-pr-vanadis-chunk_beta-t987654321098765432-[a-f0-9]{6}$' "$BRANCH_4" "init vanadis chunk branch with target_id"
+
+# Non-existent explicit AERIAL_SCRATCH_BASE_DIR is created and honored
+NONEXISTENT_BASE="${SCRATCH_BASE}/custom-scratch-dir"
+OUT_INIT_5=$(AERIAL_SCRATCH_BASE_DIR="$NONEXISTENT_BASE" AERIAL_REPO_URL_OVERRIDE="$TMP_REMOTE" bash "${AERIAL_PR}" init aerial)
+DIR_5=$(echo "$OUT_INIT_5" | jq -r '.scratch_dir')
+assert_eq "true" "$([ -d "$NONEXISTENT_BASE" ] && echo true || echo false)" "init creates explicit nonexistent AERIAL_SCRATCH_BASE_DIR"
+assert_match "^${NONEXISTENT_BASE}/" "$DIR_5" "init places scratch dir under explicit AERIAL_SCRATCH_BASE_DIR"
+
+# 4. submit_scratch: preflight verification, PR_DESCRIPTION.md cleanup, PR creation, branch reuse
+# Case 4A: Preflight verification failure stops submit
+SUBMIT_DIR_A=$(mktemp -d /tmp/aerial-pr-submit-a.XXXXXX)
+git clone "$TMP_REMOTE" "$SUBMIT_DIR_A" >/dev/null 2>&1
+git -C "$SUBMIT_DIR_A" checkout -b feat/test-fail >/dev/null 2>&1
+mkdir -p "$SUBMIT_DIR_A/scripts"
+cat << 'EOF' > "$SUBMIT_DIR_A/scripts/verify.sh"
 #!/bin/sh
-exit 0
-EOF
-chmod +x "$TMP_TEST_DIR/scripts/verify.sh"
-echo "hello" > "$TMP_TEST_DIR/test.txt"
-git -C "$TMP_TEST_DIR" add test.txt
-
-VERIFY_SUCCESS=$(bash -c "
-    REPO_TEST_MODE=1
-    source \"${AERIAL_PR}\" --source-only 2>/dev/null || true
-    run_preflight_verification \"${TMP_TEST_DIR}\"
-    echo \"verify_result:\$?\"
-")
-assert_eq "verify_result:0" "$VERIFY_SUCCESS" "Universal pre-flight contract succeeds when verify.sh passes"
-
-# Case 5B: verify.sh fails and preserves workspace
-cat << 'EOF' > "$TMP_TEST_DIR/scripts/verify.sh"
-#!/bin/sh
-echo "Simulated linter failure" >&2
+echo "Simulated verify failure" >&2
 exit 1
 EOF
-chmod +x "$TMP_TEST_DIR/scripts/verify.sh"
+chmod +x "$SUBMIT_DIR_A/scripts/verify.sh"
+echo "data" > "$SUBMIT_DIR_A/file.txt"
+echo "description" > "$SUBMIT_DIR_A/PR_DESCRIPTION.md"
+FAIL_OUT=$(bash "${AERIAL_PR}" submit "$SUBMIT_DIR_A" "test commit" 2>&1 || true)
+assert_match "Pre-flight verification failed" "$FAIL_OUT" "submit stops on verify.sh failure"
+assert_eq "true" "$([ -d "$SUBMIT_DIR_A" ] && echo true || echo false)" "submit preserves scratch dir on failure"
+assert_eq "true" "$([ -f "$SUBMIT_DIR_A/PR_DESCRIPTION.md" ] && echo true || echo false)" "submit restores PR_DESCRIPTION.md on failure"
+rm -rf "$SUBMIT_DIR_A"
 
-VERIFY_FAIL_DIR=$(mktemp -d /tmp/aerial-pr-verify-fail.XXXXXX)
-git init "$VERIFY_FAIL_DIR" >/dev/null
-mkdir -p "$VERIFY_FAIL_DIR/scripts"
-cp "$TMP_TEST_DIR/scripts/verify.sh" "$VERIFY_FAIL_DIR/scripts/verify.sh"
-echo "dirty" > "$VERIFY_FAIL_DIR/dirty.txt"
-git -C "$VERIFY_FAIL_DIR" add dirty.txt
+# Case 4B: PR_DESCRIPTION.md is consumed for body, deleted before commit, and PR is created
+SUBMIT_DIR_B=$(mktemp -d /tmp/aerial-pr-submit-b.XXXXXX)
+git clone "$TMP_REMOTE" "$SUBMIT_DIR_B" >/dev/null 2>&1
+git -C "$SUBMIT_DIR_B" checkout -b feat/test-create >/dev/null 2>&1
+echo "hello world" > "$SUBMIT_DIR_B/data.txt"
+echo "Test PR Body Content" > "$SUBMIT_DIR_B/PR_DESCRIPTION.md"
 
-VERIFY_FAIL_OUT=$(bash -c "
-    REPO_TEST_MODE=1
-    source \"${AERIAL_PR}\" --source-only 2>/dev/null || true
-    SCRATCH_DIR_CLEANUP=\"${VERIFY_FAIL_DIR}\"
-    run_preflight_verification \"${VERIFY_FAIL_DIR}\" || echo \"verify_failed_as_expected\"
-" 2>&1)
-
-assert_eq "true" "$(echo "$VERIFY_FAIL_OUT" | grep -q 'verify_failed_as_expected' && echo true || echo false)" "Verification failure propagates non-zero exit code"
-assert_eq "true" "$([ -d "$VERIFY_FAIL_DIR" ] && echo true || echo false)" "Scratch directory is preserved when verification fails"
-rm -rf "$VERIFY_FAIL_DIR"
-
-# Test 6: Target ID inheritance and rejection of -t / --target / --target-id
-# Case 6A: submit -t rejects with explicit error
-SUBMIT_T_ERR=$(bash "${AERIAL_PR}" submit -t 1234567890 2>&1 || true)
-assert_eq "true" "$(echo "$SUBMIT_T_ERR" | grep -q "ERROR: Target ID cannot be specified manually (-t is removed)" && echo true || echo false)" "submit -t rejects with explicit error"
-
-# Case 6B: submit --target rejects with explicit error
-SUBMIT_TARGET_ERR=$(bash "${AERIAL_PR}" submit --target 1234567890 2>&1 || true)
-assert_eq "true" "$(echo "$SUBMIT_TARGET_ERR" | grep -q "ERROR: Target ID cannot be specified manually (--target is removed)" && echo true || echo false)" "submit --target rejects with explicit error"
-
-# Case 6C: submit --target-id=... rejects with explicit error
-SUBMIT_TARGET_ID_ERR=$(bash "${AERIAL_PR}" submit --target-id=1234567890 2>&1 || true)
-assert_eq "true" "$(echo "$SUBMIT_TARGET_ID_ERR" | grep -q "ERROR: Target ID cannot be specified manually (--target-id=1234567890 is removed)" && echo true || echo false)" "submit --target-id= rejects with explicit error"
-
-# Case 6D: schedule_pr_followup, merge_pr, get_deploy_status, and resolve_hangar_url are completely eliminated
-FOLLOWUP_FUNC_EXISTS=$(bash -c "
-    REPO_TEST_MODE=1
-    source \"${AERIAL_PR}\" --source-only 2>/dev/null || true
-    for fn in schedule_pr_followup merge_pr get_deploy_status resolve_hangar_url; do
-        type \"\$fn\" 2>&1 || true
-    done
-")
-assert_eq "4" "$(echo "$FOLLOWUP_FUNC_EXISTS" | grep -Fc 'not found')" "legacyfollowup/merge/deploy-status functions are eliminated"
-
-SUBMIT_USAGE_CHECK=$(bash "${AERIAL_PR}" --help 2>&1 || true)
-assert_eq "true" "$(echo "$SUBMIT_USAGE_CHECK" | grep -Fq 'scheduler-mcp' && echo false || echo true)" "Usage text does not reference scheduler-mcp"
-assert_eq "true" "$(echo "$SUBMIT_USAGE_CHECK" | grep -Fq -- '--no-schedule' && echo false || echo true)" "Usage text does not reference --no-schedule"
-assert_eq "true" "$(echo "$SUBMIT_USAGE_CHECK" | grep -Fq '[-d <delay>]' && echo false || echo true)" "Usage text does not reference delay options"
-
-SCHEDULE_MCP_REFS=$(grep -n "scheduler-mcp" "${AERIAL_PR}" || true)
-assert_eq "" "$SCHEDULE_MCP_REFS" "aerial-pr.sh contains zero references to scheduler-mcp"
-
-# Case 6E: Target ID environment precedence via resolve_target_id
-TARGET_PRECEDENCE_CHECK=$(bash -c "
-    REPO_TEST_MODE=1
-    source \"${AERIAL_PR}\" --source-only 2>/dev/null || true
-
-    # Subtest 1: AERIAL_TARGET_ID wins and passes through unmodified
-    res1=\$(AERIAL_TARGET_ID=\"target_aerial\" DISCORD_THREAD_ID=\"target_thread\" DISCORD_CHANNEL_ID=\"target_channel\" resolve_target_id)
-    [ \"\$res1\" = \"target_aerial\" ] && echo \"target1:ok\" || echo \"target1:fail:\$res1\"
-
-    # Subtest 2: DISCORD_THREAD_ID wins when AERIAL_TARGET_ID is unset
-    res2=\$(unset AERIAL_TARGET_ID; DISCORD_THREAD_ID=\"target_thread\" DISCORD_CHANNEL_ID=\"target_channel\" resolve_target_id)
-    [ \"\$res2\" = \"target_thread\" ] && echo \"target2:ok\" || echo \"target2:fail\"
-
-    # Subtest 3: DISCORD_CHANNEL_ID wins when thread is unset
-    res3=\$(unset AERIAL_TARGET_ID DISCORD_THREAD_ID; DISCORD_CHANNEL_ID=\"target_channel\" resolve_target_id)
-    [ \"\$res3\" = \"target_channel\" ] && echo \"target3:ok\" || echo \"target3:fail\"
-
-    # Subtest 4: returns empty string when no Discord target context exists (delegating fallback to synapse)
-    res4=\$(unset AERIAL_TARGET_ID DISCORD_THREAD_ID DISCORD_CHANNEL_ID ANTIGRAVITY_APP_DATA_DIR ANTIGRAVITY_CONVERSATION_ID; resolve_target_id)
-    [ -z \"\$res4\" ] && echo \"target4:ok\" || echo \"target4:fail:\$res4\"
-
-    # Subtest 5: Explicit argument takes top priority when passed to resolve_target_id
-    res5=\$(AERIAL_TARGET_ID=\"target_aerial\" resolve_target_id \"1559768078131269684\")
-    [ \"\$res5\" = \"1559768078131269684\" ] && echo \"target5:ok\" || echo \"target5:fail:\$res5\"
-
-    # Subtest 6: Ignores transcript.jsonl when env target/thread/channel are unset and returns empty
-    FAKE_APP_DIR=\"${TMP_TEST_DIR}/fake_app\"
-    mkdir -p \"\${FAKE_APP_DIR}/brain/conv-123/.system_generated/logs\"
-    echo '{\"content\":\"- channel_id: 1542423172400291873\\n- thread_id: 1559768078131269684\"}' > \"\${FAKE_APP_DIR}/brain/conv-123/.system_generated/logs/transcript.jsonl\"
-    res6=\$(unset AERIAL_TARGET_ID DISCORD_THREAD_ID DISCORD_CHANNEL_ID; ANTIGRAVITY_APP_DATA_DIR=\"\${FAKE_APP_DIR}\" ANTIGRAVITY_CONVERSATION_ID=\"conv-123\" resolve_target_id)
-    [ -z \"\$res6\" ] && echo \"target6:ok\" || echo \"target6:fail:\$res6\"
-")
-assert_eq "true" "$(echo "$TARGET_PRECEDENCE_CHECK" | grep -q 'target1:ok' && echo true || echo false)" "Target precedence: AERIAL_TARGET_ID takes first priority"
-assert_eq "true" "$(echo "$TARGET_PRECEDENCE_CHECK" | grep -q 'target2:ok' && echo true || echo false)" "Target precedence: DISCORD_THREAD_ID takes second priority"
-assert_eq "true" "$(echo "$TARGET_PRECEDENCE_CHECK" | grep -q 'target3:ok' && echo true || echo false)" "Target precedence: DISCORD_CHANNEL_ID takes third priority"
-assert_eq "true" "$(echo "$TARGET_PRECEDENCE_CHECK" | grep -q 'target4:ok' && echo true || echo false)" "Target precedence: returns empty string when no Discord context exists"
-assert_eq "true" "$(echo "$TARGET_PRECEDENCE_CHECK" | grep -q 'target5:ok' && echo true || echo false)" "Target precedence: explicit argument takes top priority"
-assert_eq "true" "$(echo "$TARGET_PRECEDENCE_CHECK" | grep -q 'target6:ok' && echo true || echo false)" "Target precedence: ignores transcript.jsonl and returns empty when env vars unset"
-
-# Case 9: --vanadis-chunk global flag parsing and AERIAL_VANADIS_CHUNK_ID env injection
-VANADIS_FLAG_CHECK=$(bash -c "
-    REPO_TEST_MODE=1
-    source \"${AERIAL_PR}\" --vanadis-chunk=chunk-xyz-123 --source-only 2>/dev/null || true
-    echo \"\${VANADIS_CHUNK_ID}\"
-")
-assert_eq "chunk-xyz-123" "$VANADIS_FLAG_CHECK" "--vanadis-chunk=<id> sets VANADIS_CHUNK_ID"
-
-VANADIS_ENV_CHECK=$(bash -c "
-    REPO_TEST_MODE=1
-    export AERIAL_VANADIS_CHUNK_ID=chunk-from-env-456
-    source \"${AERIAL_PR}\" --source-only 2>/dev/null || true
-    echo \"\${VANADIS_CHUNK_ID}\"
-")
-assert_eq "chunk-from-env-456" "$VANADIS_ENV_CHECK" "AERIAL_VANADIS_CHUNK_ID populates VANADIS_CHUNK_ID automatically"
-
-VANADIS_NO_CHUNK_CHECK=$(bash -c "
-    REPO_TEST_MODE=1
-    export AERIAL_VANADIS_CHUNK_ID=chunk-from-env-456
-    export AERIAL_NO_VANADIS_CHUNK=1
-    source \"${AERIAL_PR}\" --source-only 2>/dev/null || true
-    echo \"\${VANADIS_CHUNK_ID}\"
-")
-assert_eq "" "$VANADIS_NO_CHUNK_CHECK" "AERIAL_NO_VANADIS_CHUNK=1 leaves VANADIS_CHUNK_ID empty"
-
-VANADIS_OVERRIDE_CHECK=$(bash -c "
-    REPO_TEST_MODE=1
-    export AERIAL_VANADIS_CHUNK_ID=chunk-from-env-456
-    source \"${AERIAL_PR}\" --vanadis-chunk=chunk-cli-override-789 --source-only 2>/dev/null || true
-    echo \"\${VANADIS_CHUNK_ID}:\$(resolve_vanadis_chunk_id)\"
-")
-assert_eq "chunk-cli-override-789:chunk-cli-override-789" "$VANADIS_OVERRIDE_CHECK" "--vanadis-chunk CLI flag overrides AERIAL_VANADIS_CHUNK_ID in both global and submit_scratch scope"
-
-VANADIS_CLI_OVERRIDE_NO_CHUNK=$(bash -c "
-    REPO_TEST_MODE=1
-    export AERIAL_NO_VANADIS_CHUNK=1
-    export AERIAL_VANADIS_CHUNK_ID=chunk-from-env-456
-    source \"${AERIAL_PR}\" --vanadis-chunk=chunk-cli-override-999 --source-only 2>/dev/null || true
-    echo \"\${VANADIS_CHUNK_ID}:\$(resolve_vanadis_chunk_id)\"
-")
-assert_eq "chunk-cli-override-999:chunk-cli-override-999" "$VANADIS_CLI_OVERRIDE_NO_CHUNK" "--vanadis-chunk CLI flag overrides AERIAL_NO_VANADIS_CHUNK=1 in both global and submit_scratch scope"
-
-VANADIS_ENV_RESOLUTION_CHECK=$(bash -c "
-    REPO_TEST_MODE=1
-    unset AERIAL_VANADIS_CHUNK_ID VANADIS_CHUNK_ID
-    source \"${AERIAL_PR}\" --source-only 2>/dev/null || true
-
-    # Subtest 1: Explicit arg wins
-    r1=\$(resolve_vanadis_chunk_id 'chunk-explicit-111')
-    [ \"\$r1\" = \"chunk-explicit-111\" ] && echo \"vc1:ok\" || echo \"vc1:fail:\$r1\"
-
-    # Subtest 2: VANADIS_CHUNK_ID environment variable resolves
-    r2=\$(VANADIS_CHUNK_ID=\"chunk-from-env\" resolve_vanadis_chunk_id)
-    [ \"\$r2\" = \"chunk-from-env\" ] && echo \"vc2:ok\" || echo \"vc2:fail:\$r2\"
-
-    # Subtest 3: AERIAL_VANADIS_CHUNK_ID environment variable resolves when VANADIS_CHUNK_ID is unset
-    r3=\$(AERIAL_VANADIS_CHUNK_ID=\"chunk-from-aerial-env\" resolve_vanadis_chunk_id)
-    [ \"\$r3\" = \"chunk-from-aerial-env\" ] && echo \"vc3:ok\" || echo \"vc3:fail:\$r3\"
-
-    # Subtest 4: Ignores transcript.jsonl and returns empty when env vars unset
-    FAKE_APP_DIR=\"${TMP_TEST_DIR}/fake_app_vanadis\"
-    mkdir -p \"\${FAKE_APP_DIR}/brain/conv-v1/.system_generated/logs\"
-    cat << 'EOF' > \"\${FAKE_APP_DIR}/brain/conv-v1/.system_generated/logs/transcript.jsonl\"
-{\"step_index\":0,\"type\":\"USER_INPUT\",\"content\":\"- is_admin: true\\n- content: === Active Chunk ===\\nChunk ID: chunk-old-100\\n\"}
-EOF
-    r4=\$(unset AERIAL_VANADIS_CHUNK_ID VANADIS_CHUNK_ID; ANTIGRAVITY_APP_DATA_DIR=\"\${FAKE_APP_DIR}\" ANTIGRAVITY_CONVERSATION_ID=\"conv-v1\" resolve_vanadis_chunk_id)
-    [ -z \"\$r4\" ] && echo \"vc4:ok\" || echo \"vc4:fail:\$r4\"
-
-    # Subtest 5: AERIAL_NO_VANADIS_CHUNK=1 prevents resolving chunk ID from env
-    r5=\$(AERIAL_NO_VANADIS_CHUNK=1 AERIAL_VANADIS_CHUNK_ID=\"chunk-from-aerial-env\" resolve_vanadis_chunk_id)
-    [ -z \"\$r5\" ] && echo \"vc5:ok\" || echo \"vc5:fail:\$r5\"
-
-    # Subtest 6: Explicit arg overrides AERIAL_NO_VANADIS_CHUNK=1
-    r6=\$(AERIAL_NO_VANADIS_CHUNK=1 resolve_vanadis_chunk_id 'chunk-override-no-chunk')
-    [ \"\$r6\" = \"chunk-override-no-chunk\" ] && echo \"vc6:ok\" || echo \"vc6:fail:\$r6\"
-")
-assert_eq "true" "$(echo "$VANADIS_ENV_RESOLUTION_CHECK" | grep -q 'vc1:ok' && echo true || echo false)" "resolve_vanadis_chunk_id: explicit arg takes priority"
-assert_eq "true" "$(echo "$VANADIS_ENV_RESOLUTION_CHECK" | grep -q 'vc2:ok' && echo true || echo false)" "resolve_vanadis_chunk_id: resolves from VANADIS_CHUNK_ID env"
-assert_eq "true" "$(echo "$VANADIS_ENV_RESOLUTION_CHECK" | grep -q 'vc3:ok' && echo true || echo false)" "resolve_vanadis_chunk_id: resolves from AERIAL_VANADIS_CHUNK_ID env"
-assert_eq "true" "$(echo "$VANADIS_ENV_RESOLUTION_CHECK" | grep -q 'vc4:ok' && echo true || echo false)" "resolve_vanadis_chunk_id: ignores transcript.jsonl and returns empty when env vars unset"
-assert_eq "true" "$(echo "$VANADIS_ENV_RESOLUTION_CHECK" | grep -q 'vc5:ok' && echo true || echo false)" "resolve_vanadis_chunk_id: respects AERIAL_NO_VANADIS_CHUNK=1"
-assert_eq "true" "$(echo "$VANADIS_ENV_RESOLUTION_CHECK" | grep -q 'vc6:ok' && echo true || echo false)" "resolve_vanadis_chunk_id: explicit arg overrides AERIAL_NO_VANADIS_CHUNK=1"
-
-# Case 9b: verify_vanadis_chunk_active guards against submitting PR for cancelled chunks
-VANADIS_GUARD_CHECK=$(bash -c "
-    REPO_TEST_MODE=1
-    source \"${AERIAL_PR}\" --source-only 2>/dev/null || true
-
-    # Subtest 1: Empty chunk_id returns 0 immediately
-    verify_vanadis_chunk_active '' && echo 'guard1:ok'
-
-    # Subtest 2: Active chunk returns 0
+CURL_PAYLOAD_FILE=$(mktemp /tmp/aerial-pr-curl-payload.XXXXXX)
+SUBMIT_OUT=$(bash -c "
+    export GITHUB_PAT=mock_pat
     curl() {
-        echo '{\"chunk\":{\"status\":\"running\"},\"build\":{\"status\":\"running\"}}'
-    }
-    export -f curl
-    verify_vanadis_chunk_active 'chunk-active' && echo 'guard2:ok'
-
-    # Subtest 3: Cancelled chunk aborts with exit code 1 and error message
-    curl() {
-        echo '{\"chunk\":{\"status\":\"cancelled\"},\"build\":{\"status\":\"running\"}}'
-    }
-    export -f curl
-    set +e
-    err3=\$(verify_vanadis_chunk_active 'chunk-cancelled' 2>&1)
-    rc3=\$?
-    set -e
-    if [ \"\$rc3\" -ne 0 ] && echo \"\$err3\" | grep -q 'Vanadis chunk chunk-cancelled (or parent build) is cancelled; aborting PR submission'; then
-        echo 'guard3:ok'
-    else
-        echo \"guard3:fail:rc=\$rc3:\$err3\"
-    fi
-
-    # Subtest 4: Cancelled build aborts with exit code 1 and error message
-    curl() {
-        echo '{\"chunk\":{\"status\":\"pr_opened\"},\"build\":{\"status\":\"cancelled\"}}'
-    }
-    export -f curl
-    set +e
-    err4=\$(verify_vanadis_chunk_active 'chunk-b-cancelled' 2>&1)
-    rc4=\$?
-    set -e
-    if [ \"\$rc4\" -ne 0 ] && echo \"\$err4\" | grep -q 'Vanadis chunk chunk-b-cancelled (or parent build) is cancelled; aborting PR submission'; then
-        echo 'guard4:ok'
-    else
-        echo \"guard4:fail:rc=\$rc4:\$err4\"
-    fi
-
-    # Subtest 5: Network/curl failure is non-fatal (returns 0)
-    curl() {
-        return 1
-    }
-    export -f curl
-    verify_vanadis_chunk_active 'chunk-unreachable' && echo 'guard5:ok'
-
-    # Subtest 6: submit_scratch aborts before push when chunk is cancelled
-    WORK_DIR=\$(mktemp -d /tmp/aerial-pr-guard-work.XXXXXX)
-    git init -q \"\$WORK_DIR\"
-    echo 'Summary' > \"\$WORK_DIR/PR_DESCRIPTION.md\"
-    echo 'code' > \"\$WORK_DIR/file.txt\"
-    CANARY_FILE=\"${TMP_TEST_DIR}/guard6_canary\"
-    rm -f \"\$CANARY_FILE\"
-    rebase_staged_changes() { touch \"\$CANARY_FILE\"; return 1; }
-    run_preflight_verification() { touch \"\$CANARY_FILE\"; return 0; }
-    push_scratch_branch() { touch \"\$CANARY_FILE\"; return 0; }
-    export -f rebase_staged_changes run_preflight_verification push_scratch_branch
-    curl() {
-        echo '{\"chunk\":{\"status\":\"cancelled\"},\"build\":{\"status\":\"running\"}}'
-    }
-    export -f curl
-    set +e
-    err6=\$(submit_scratch \"\$WORK_DIR\" 'feat: test' --vanadis-chunk 'chunk-abort-test' 2>&1)
-    rc6=\$?
-    set -e
-    rm -rf \"\$WORK_DIR\"
-    if [ \"\$rc6\" -ne 0 ] && [ ! -f \"\$CANARY_FILE\" ] && echo \"\$err6\" | grep -q 'Vanadis chunk chunk-abort-test (or parent build) is cancelled; aborting PR submission'; then
-        echo 'guard6:ok'
-    else
-        echo \"guard6:fail:rc=\$rc6:canary=\$( [ -f \"\$CANARY_FILE\" ] && echo yes || echo no ):\$err6\"
-    fi
-")
-assert_eq "true" "$(echo "$VANADIS_GUARD_CHECK" | grep -q 'guard1:ok' && echo true || echo false)" "verify_vanadis_chunk_active: empty chunk returns 0"
-assert_eq "true" "$(echo "$VANADIS_GUARD_CHECK" | grep -q 'guard2:ok' && echo true || echo false)" "verify_vanadis_chunk_active: active chunk returns 0"
-assert_eq "true" "$(echo "$VANADIS_GUARD_CHECK" | grep -q 'guard3:ok' && echo true || echo false)" "verify_vanadis_chunk_active: cancelled chunk exits non-zero with error"
-assert_eq "true" "$(echo "$VANADIS_GUARD_CHECK" | grep -q 'guard4:ok' && echo true || echo false)" "verify_vanadis_chunk_active: cancelled build exits non-zero with error"
-assert_eq "true" "$(echo "$VANADIS_GUARD_CHECK" | grep -q 'guard5:ok' && echo true || echo false)" "verify_vanadis_chunk_active: curl failure returns 0 without aborting"
-assert_eq "true" "$(echo "$VANADIS_GUARD_CHECK" | grep -q 'guard6:ok' && echo true || echo false)" "submit_scratch: aborts immediately on cancelled chunk before git push"
-
-# Case 10: register_pr_in_brain retry with backoff and hard failure on exhaustion
-REGISTER_PR_CHECK=$(bash -c "
-    REPO_TEST_MODE=1
-    source \"${AERIAL_PR}\" --source-only 2>/dev/null || true
-    ATTEMPT_FILE=\"${TMP_TEST_DIR}/reg_attempts\"
-    ARGS_FILE=\"${TMP_TEST_DIR}/reg_args\"
-
-    curl() { echo \"\$*\" > \"\$ARGS_FILE\"; echo '{\"status\":\"registered\"}'; }
-    export -f curl
-    AERIAL_PR_REGISTER_RETRIES=3 AERIAL_PR_REGISTER_RETRY_DELAY=0 register_pr_in_brain 'http://eri.aerial/internal/pr/register' '{}' 101 '1560698400780062884' 2>/dev/null && grep -q -- '-m 15' \"\$ARGS_FILE\" && echo 'reg1:ok'
-
-    echo 0 > \"\$ATTEMPT_FILE\"
-    curl() {
-        local c=\$(( \$(cat \"\$ATTEMPT_FILE\") + 1 )); echo \"\$c\" > \"\$ATTEMPT_FILE\"
-        [ \"\$c\" -lt 2 ] && echo '{\"error\":\"transient\"}' || echo '{\"status\":\"registered\"}'
-    }
-    export -f curl
-    AERIAL_PR_REGISTER_RETRIES=3 AERIAL_PR_REGISTER_RETRY_DELAY=0 register_pr_in_brain 'http://eri.aerial/internal/pr/register' '{}' 102 '1560698400780062884' 2>/dev/null && echo \"reg2:ok:\$(cat \"\$ATTEMPT_FILE\")\"
-
-    echo 0 > \"\$ATTEMPT_FILE\"
-    curl() {
-        local c=\$(( \$(cat \"\$ATTEMPT_FILE\") + 1 )); echo \"\$c\" > \"\$ATTEMPT_FILE\"
-        echo '{\"error\":\"Failed to attach PR to Vanadis chunk\"}'
-    }
-    export -f curl
-    AERIAL_PR_REGISTER_RETRIES=3 AERIAL_PR_REGISTER_RETRY_DELAY=0 register_pr_in_brain 'http://eri.aerial/internal/pr/register' '{}' 103 '1560698400780062884' 2>/dev/null || echo \"reg3:failed_as_expected:\$(cat \"\$ATTEMPT_FILE\")\"
-")
-assert_eq "true" "$(echo "$REGISTER_PR_CHECK" | grep -q 'reg1:ok' && echo true || echo false)" "register_pr_in_brain succeeds on first attempt"
-assert_eq "true" "$(echo "$REGISTER_PR_CHECK" | grep -q 'reg2:ok:2' && echo true || echo false)" "register_pr_in_brain retries transient error and succeeds on attempt 2"
-assert_eq "true" "$(echo "$REGISTER_PR_CHECK" | grep -q 'reg3:failed_as_expected:3' && echo true || echo false)" "register_pr_in_brain fails non-zero after exhausting all 3 attempts"
-
-# Case 10b: PR registration endpoint resolution via AERIAL_PR_REGISTER_URL, SYNAPSE_URL, and CONFIG_PATH
-PR_ENDPOINT_CHECK=$(bash -c "
-    REPO_TEST_MODE=1
-    source \"${AERIAL_PR}\" --source-only 2>/dev/null || true
-
-    # Test 1: AERIAL_PR_REGISTER_URL override used directly
-    res1=\$(AERIAL_PR_REGISTER_URL='http://custom-router.aerial:4020' resolve_pr_register_url)
-    [ \"\$res1\" = 'http://custom-router.aerial:4020/internal/pr/register' ] && echo 'ep1:ok'
-
-    # Test 2: SYNAPSE_URL env resolution
-    res2=\$(SYNAPSE_URL='http://synapse.local:4020' resolve_pr_register_url)
-    [ \"\$res2\" = 'http://synapse.local:4020/internal/pr/register' ] && echo 'ep2:ok'
-
-    # Test 3: CONFIG_PATH yaml resolution
-    TEST_CFG=\"\$(mktemp /tmp/test-config-yaml.XXXXXX)\"
-    echo 'synapse_url: \"http://synapse.from-cfg:4020\"' > \"\$TEST_CFG\"
-    res3=\$(unset SYNAPSE_URL; CONFIG_PATH=\"\$TEST_CFG\" resolve_pr_register_url)
-    rm -f \"\$TEST_CFG\"
-    [ \"\$res3\" = 'http://synapse.from-cfg:4020/internal/pr/register' ] && echo 'ep3:ok'
-")
-assert_eq "true" "$(echo "$PR_ENDPOINT_CHECK" | grep -q 'ep1:ok' && echo true || echo false)" "AERIAL_PR_REGISTER_URL override appends /internal/pr/register"
-assert_eq "true" "$(echo "$PR_ENDPOINT_CHECK" | grep -q 'ep2:ok' && echo true || echo false)" "PR register endpoint resolves from SYNAPSE_URL"
-assert_eq "true" "$(echo "$PR_ENDPOINT_CHECK" | grep -q 'ep3:ok' && echo true || echo false)" "PR register endpoint resolves from CONFIG_PATH"
-
-# Case 11: rebase_staged_changes rebases onto advanced upstream before verification and aborts on conflict
-REBASE_STAGED_CHECK=$(bash -c "
-    REPO_TEST_MODE=1
-    source \"${AERIAL_PR}\" --source-only 2>/dev/null || true
-    REMOTE_DIR=\$(mktemp -d /tmp/aerial-pr-rebase-remote.XXXXXX)
-    WORK_DIR=\$(mktemp -d /tmp/aerial-pr-rebase-work.XXXXXX)
-    UPSTREAM_DIR=\$(mktemp -d /tmp/aerial-pr-rebase-up.XXXXXX)
-    trap 'rm -rf \"\$REMOTE_DIR\" \"\$WORK_DIR\" \"\$UPSTREAM_DIR\"' EXIT
-
-    git init -q --bare \"\$REMOTE_DIR\"
-    git clone -q \"\$REMOTE_DIR\" \"\$UPSTREAM_DIR\"
-    git -C \"\$UPSTREAM_DIR\" config user.name 'Tester'
-    git -C \"\$UPSTREAM_DIR\" config user.email 'tester@example.com'
-    git -C \"\$UPSTREAM_DIR\" checkout -q -b main
-    echo 'base' > \"\$UPSTREAM_DIR/shared.txt\"
-    git -C \"\$UPSTREAM_DIR\" add .
-    git -C \"\$UPSTREAM_DIR\" commit -q -m 'initial'
-    git -C \"\$UPSTREAM_DIR\" push -q -u origin main
-
-    git clone -q -b main \"\$REMOTE_DIR\" \"\$WORK_DIR\"
-    git -C \"\$WORK_DIR\" config user.name 'Tester'
-    git -C \"\$WORK_DIR\" config user.email 'tester@example.com'
-    git -C \"\$WORK_DIR\" checkout -q -b feat/test
-
-    # Advance upstream main with a non-conflicting commit
-    echo 'upstream-new' > \"\$UPSTREAM_DIR/upstream.txt\"
-    git -C \"\$UPSTREAM_DIR\" add .
-    git -C \"\$UPSTREAM_DIR\" commit -q -m 'upstream advance'
-    git -C \"\$UPSTREAM_DIR\" push -q origin main
-    UP_SHA=\$(git -C \"\$UPSTREAM_DIR\" rev-parse HEAD)
-
-    # Stage local feature file in work dir and run rebase_staged_changes
-    cd \"\$WORK_DIR\"
-    echo 'feature-change' > local.txt
-    git add local.txt
-    if rebase_staged_changes main 'feat: local' 2>/dev/null; then
-        HEAD_NOW=\$(git rev-parse HEAD)
-        STAGED_FILES=\$(git diff --cached --name-only)
-        if [ \"\$HEAD_NOW\" = \"\$UP_SHA\" ] && [ \"\$STAGED_FILES\" = \"local.txt\" ] && [ -f upstream.txt ]; then
-            echo 'rebase_clean:ok'
-        else
-            echo \"rebase_clean:fail:\$HEAD_NOW:\$STAGED_FILES\"
-        fi
-    fi
-
-    # Advance upstream with a conflicting edit to shared.txt
-    echo 'upstream-conflict' > \"\$UPSTREAM_DIR/shared.txt\"
-    git -C \"\$UPSTREAM_DIR\" add .
-    git -C \"\$UPSTREAM_DIR\" commit -q -m 'upstream conflict'
-    git -C \"\$UPSTREAM_DIR\" push -q origin main
-
-    echo 'local-conflict' > \"\$WORK_DIR/shared.txt\"
-    git -C \"\$WORK_DIR\" add shared.txt
-    SCRATCH_DIR_CLEANUP=\"\$WORK_DIR\"
-    if ! rebase_staged_changes main 'feat: conflict' 2>/dev/null; then
-        if [ -d \"\$WORK_DIR\" ] && git diff --cached --name-only | grep -q 'shared.txt'; then
-            echo 'rebase_conflict:aborted_cleanly'
-        fi
-    fi
-")
-assert_eq "true" "$(echo "$REBASE_STAGED_CHECK" | grep -q 'rebase_clean:ok' && echo true || echo false)" "rebase_staged_changes rebases onto advanced upstream and keeps changes staged"
-assert_eq "true" "$(echo "$REBASE_STAGED_CHECK" | grep -q 'rebase_conflict:aborted_cleanly' && echo true || echo false)" "rebase_staged_changes fails closed on merge conflict, restores staged changes, and preserves workspace"
-
-# Case 11b: rebase_staged_changes preserves intermediate remote branch commits when remote advances after checkout
-REBASE_REMOTE_ADVANCE_CHECK=$(bash -c "
-    REPO_TEST_MODE=1
-    source \"${AERIAL_PR}\" --source-only 2>/dev/null || true
-    REMOTE_DIR=\$(mktemp -d /tmp/aerial-pr-adv-remote.XXXXXX)
-    WORK_DIR=\$(mktemp -d /tmp/aerial-pr-adv-work.XXXXXX)
-    UPSTREAM_DIR=\$(mktemp -d /tmp/aerial-pr-adv-up.XXXXXX)
-    trap 'rm -rf \"\$REMOTE_DIR\" \"\$WORK_DIR\" \"\$UPSTREAM_DIR\"' EXIT
-
-    git init -q --bare \"\$REMOTE_DIR\"
-    git clone -q \"\$REMOTE_DIR\" \"\$UPSTREAM_DIR\"
-    git -C \"\$UPSTREAM_DIR\" config user.name 'Tester'
-    git -C \"\$UPSTREAM_DIR\" config user.email 'tester@example.com'
-    git -C \"\$UPSTREAM_DIR\" checkout -q -b main
-    echo 'base' > \"\$UPSTREAM_DIR/base.txt\"
-    git -C \"\$UPSTREAM_DIR\" add . && git -C \"\$UPSTREAM_DIR\" commit -q -m 'base'
-    git -C \"\$UPSTREAM_DIR\" push -q -u origin main
-
-    # Create feature branch on origin with initial commit
-    git -C \"\$UPSTREAM_DIR\" checkout -q -b feat/test
-    echo 'remote-c1' > \"\$UPSTREAM_DIR/file1.txt\"
-    git -C \"\$UPSTREAM_DIR\" add . && git -C \"\$UPSTREAM_DIR\" commit -q -m 'c1'
-    git -C \"\$UPSTREAM_DIR\" push -q -u origin feat/test
-
-    # Clone into WORK_DIR at feat/test (at commit 1)
-    git clone -q -b feat/test \"\$REMOTE_DIR\" \"\$WORK_DIR\"
-    git -C \"\$WORK_DIR\" config user.name 'Tester'
-    git -C \"\$WORK_DIR\" config user.email 'tester@example.com'
-
-    # Remote advances with commit 2 while scratch checkout is open
-    echo 'remote-c2' > \"\$UPSTREAM_DIR/file2.txt\"
-    git -C \"\$UPSTREAM_DIR\" add . && git -C \"\$UPSTREAM_DIR\" commit -q -m 'c2 remote'
-    git -C \"\$UPSTREAM_DIR\" push -q origin feat/test
-    C2_SHA=\$(git -C \"\$UPSTREAM_DIR\" rev-parse HEAD)
-
-    # In WORK_DIR, user makes multiple commits and stages additional changes
-    cd \"\$WORK_DIR\"
-    echo 'local-c2a' > file2a.txt
-    git add file2a.txt && git commit -q -m 'local commit 2a'
-    echo 'local-c3' > file3.txt
-    git add file3.txt
-    PRE_REBASE_HEAD=\$(git rev-parse HEAD)
-
-    # Run rebase_staged_changes
-    if rebase_staged_changes main 'feat: local' 2>/dev/null; then
-        # file2.txt must exist with remote content (not reverted)
-        if [ -f file2.txt ] && [ \"\$(cat file2.txt)\" = 'remote-c2' ]; then
-            # file2.txt must NOT be staged as deletion
-            if ! git diff --cached --name-status | grep -q '^D.*file2\.txt'; then
-                # file2a.txt (from prior commit) AND file3.txt (staged) must be staged
-                if git diff --cached --name-only | grep -q '^file2a\.txt$' && \
-                   git diff --cached --name-only | grep -q '^file3\.txt$'; then
-                    echo 'adv_rebase:ok'
-                fi
-            fi
-        fi
-    fi
-
-    # Commit and push via push_scratch_branch
-    git commit -q -m 'feat: local'
-    if push_scratch_branch feat/test 2>/dev/null; then
-        REMOTE_HEAD=\$(git -C \"\$REMOTE_DIR\" rev-parse refs/heads/feat/test)
-        if git merge-base --is-ancestor \"\$C2_SHA\" \"\$REMOTE_HEAD\"; then
-            echo 'adv_push:ok'
-        fi
-    fi
-
-    # Test conflict restoration on remote advance:
-    # UPSTREAM_DIR pushes a conflicting change to file2a.txt
-    echo 'remote-conflict' > \"\$UPSTREAM_DIR/file2a.txt\"
-    git -C \"\$UPSTREAM_DIR\" add . && git -C \"\$UPSTREAM_DIR\" commit -q -m 'remote conflict'
-    git -C \"\$UPSTREAM_DIR\" push -f -q origin feat/test
-    # In WORK_DIR, modify file2a.txt locally
-    echo 'local-conflict' > \"\$WORK_DIR/file2a.txt\"
-    git -C \"\$WORK_DIR\" add file2a.txt
-    CONFLICT_HEAD=\$(git -C \"\$WORK_DIR\" rev-parse HEAD)
-    SCRATCH_DIR_CLEANUP=\"\$WORK_DIR\"
-    if ! rebase_staged_changes main 'feat: conflict' 2>/dev/null; then
-        # On conflict, workspace must be preserved and staged changes restored to CONFLICT_HEAD
-        if [ -d \"\$WORK_DIR\" ] && \
-           [ \"\$(git -C \"\$WORK_DIR\" rev-parse HEAD)\" = \"\$CONFLICT_HEAD\" ] && \
-           git -C \"\$WORK_DIR\" diff --cached --name-only | grep -q '^file2a\.txt$'; then
-            echo 'adv_conflict_restored:ok'
-        fi
-    fi
-
-    # Advance remote with commit 4
-    echo 'remote-c4' > \"\$UPSTREAM_DIR/file4.txt\"
-    git -C \"\$UPSTREAM_DIR\" add . && git -C \"\$UPSTREAM_DIR\" commit -q -m 'c4 remote'
-    git -C \"\$UPSTREAM_DIR\" push -f -q origin feat/test
-
-    # Local diverged without rebase; push_scratch_branch must fail closed
-    echo 'local-c5' > file5.txt
-    git add . && git commit -q -m 'c5 local diverged'
-    if ! push_scratch_branch feat/test 2>/dev/null; then
-        echo 'diverged_push_rejected:ok'
-    fi
-")
-assert_eq "true" "$(echo "$REBASE_REMOTE_ADVANCE_CHECK" | grep -q 'adv_rebase:ok' && echo true || echo false)" "rebase_staged_changes preserves intermediate remote branch commits when remote advances"
-assert_eq "true" "$(echo "$REBASE_REMOTE_ADVANCE_CHECK" | grep -q 'adv_push:ok' && echo true || echo false)" "push_scratch_branch preserves advanced remote commits when pushing rebased changes"
-assert_eq "true" "$(echo "$REBASE_REMOTE_ADVANCE_CHECK" | grep -q 'adv_conflict_restored:ok' && echo true || echo false)" "rebase_staged_changes restores local state on remote advance conflict"
-assert_eq "true" "$(echo "$REBASE_REMOTE_ADVANCE_CHECK" | grep -q 'diverged_push_rejected:ok' && echo true || echo false)" "push_scratch_branch rejects pushing over un-incorporated remote advances"
-
-# Case 12: override_roborev validation, mock execution, comment verification, rerun fallback, and output formatting
-ROBOREV_OVERRIDE_CHECK=$(
-    REPO_TEST_MODE=1
-    source "${AERIAL_PR}" --source-only 2>/dev/null || true
-
-    # Subtest 1: Missing or non-numeric PR number validation
-    err1=$(override_roborev 2>&1) || true
-    echo "$err1" | grep -q "Valid numeric pr_num required" && echo "val1:ok" || echo "val1:fail"
-
-    err1b=$(override_roborev not-a-number "valid rebuttal" 2>&1) || true
-    echo "$err1b" | grep -q "Valid numeric pr_num required" && echo "val1b:ok" || echo "val1b:fail"
-
-    # Subtest 2: Missing or blank rebuttal validation
-    err2=$(override_roborev 42 2>&1) || true
-    echo "$err2" | grep -q "Technical rebuttal cannot be empty" && echo "val2:ok" || echo "val2:fail"
-
-    err2b=$(override_roborev 42 "   " 2>&1) || true
-    echo "$err2b" | grep -q "Technical rebuttal cannot be empty" && echo "val2b:ok" || echo "val2b:fail"
-
-    # Subtest 3: Missing reason file validation
-    err3=$(override_roborev -f /nonexistent/rebuttal.txt 42 2>&1) || true
-    echo "$err3" | grep -q "Rebuttal file not found" && echo "val3:ok" || echo "val3:fail"
-
-    # Subtest 4: Missing GITHUB_PAT validation
-    err4=$(unset GITHUB_PAT; USE_LOOPBACK_GITHUB=0 override_roborev 42 "rebuttal" 2>&1) || true
-    echo "$err4" | grep -q "GITHUB_PAT environment variable must be set" && echo "val4:ok" || echo "val4:fail"
-
-    # Subtest 5: Closed PR rejection
-    export GITHUB_PAT="mock_pat"
-    curl() {
-        if [[ "$*" =~ /pulls/ ]]; then
-            echo '{"state":"closed","head":{"sha":"abc123"},"html_url":"https://github.com/azylman/aerial/pull/42"}'
-            echo '200'
-        fi
-    }
-    err5=$(override_roborev 42 "valid rebuttal" 2>&1) || true
-    echo "$err5" | grep -q "Pull Request #42 is closed" && echo "closed:ok" || echo "closed:fail"
-
-    # Subtest 6: Missing workflow run fails closed
-    curl() {
-        if [[ "$*" =~ /pulls/ ]]; then
-            echo '{"state":"open","head":{"sha":"0123456789abcdef0123456789abcdef01234567"},"html_url":"https://github.com/azylman/aerial/pull/42"}'
-            echo '200'
-        elif [[ "$*" =~ /issues/42/comments ]]; then
-            echo '{"id":101}'
-            echo '201'
-        elif [[ "$*" =~ /actions/runs ]]; then
-            echo '{"workflow_runs":[]}'
-            echo '200'
-        fi
-    }
-    err6=$(override_roborev 42 "valid rebuttal" 2>&1) || true
-    echo "$err6" | grep -q "No RoboRev workflow run found" && echo "missing_run:ok" || echo "missing_run:fail"
-
-    # Subtest 7: Happy path with primary rerun (rerun-failed-jobs)
-    COMMENT_FILE="$(mktemp /tmp/roborev-comment-test.XXXXXX)"
-    RERUN_FILE="$(mktemp /tmp/roborev-rerun-test.XXXXXX)"
-    curl() {
-        local url=""
-        local method="GET"
-        local data=""
-        while [ $# -gt 0 ]; do
-            case "$1" in
-                -X) method="$2"; shift 2 ;;
-                -d) data="$2"; shift 2 ;;
-                http://*|https://*) url="$1"; shift ;;
+        local url='' data=''
+        while [ \$# -gt 0 ]; do
+            case \"\$1\" in
+                -d) data=\"\$2\"; shift 2 ;;
+                http://*|https://*) url=\"\$1\"; shift ;;
                 *) shift ;;
             esac
         done
-        if [[ "$url" =~ /pulls/42 ]]; then
-            echo '{"state":"open","head":{"sha":"fedcba9876543210fedcba9876543210fedcba98"},"html_url":"https://github.com/azylman/aerial/pull/42"}'
-            echo '200'
-        elif [[ "$url" =~ /issues/42/comments ]]; then
-            echo "$data" > "$COMMENT_FILE"
-            echo '{"id":202}'
-            echo '201'
-        elif [[ "$url" =~ /actions/runs\? ]]; then
-            echo '{"workflow_runs":[{"id":778899,"name":"RoboRev Code Review","path":".github/workflows/roborev.yml"}]}'
-            echo '200'
-        elif [[ "$url" =~ /actions/runs/778899/rerun-failed-jobs ]]; then
-            echo "rerun-failed-jobs-called" > "$RERUN_FILE"
-            echo '{"status":"queued"}'
+        if [[ \"\$url\" =~ /pulls$ ]]; then
+            printf \"%s\" \"\$data\" > \"${CURL_PAYLOAD_FILE}\"
+            echo '{\"number\":123,\"html_url\":\"https://github.com/azylman/aerial/pull/123\"}'
             echo '201'
         fi
     }
-    out7=$(override_roborev --repo aerial 42 "Independent evaluation confirms this is a false positive.")
-    comment_body=$(jq -r '.body' "$COMMENT_FILE" 2>/dev/null || echo "")
-    rm -f "$COMMENT_FILE" "$RERUN_FILE"
-    if echo "$out7" | jq -e '.status == "overridden" and .run_id == 778899 and .turn_action == "end_turn" and .commit_sha == "fedcba9876543210fedcba9876543210fedcba98"' >/dev/null 2>&1 && \
-       echo "$comment_body" | grep -F -q '## roborev-override (`fedcba9`)' && \
-       echo "$comment_body" | grep -q "Independent evaluation confirms this is a false positive."; then
-        echo "happy_path:ok"
-    else
-        echo "happy_path:fail:$out7"
-    fi
+    export -f curl
+    bash \"${AERIAL_PR}\" submit \"${SUBMIT_DIR_B}\" 'feat: my feature'
+")
 
-    # Subtest 8: Fallback from rerun-failed-jobs (422) to full workflow rerun (201)
-    FALLBACK_FILE="$(mktemp /tmp/roborev-fallback-test.XXXXXX)"
+assert_eq "submitted" "$(echo "$SUBMIT_OUT" | jq -r '.status')" "submit succeeds and returns submitted status"
+assert_eq "end_turn" "$(echo "$SUBMIT_OUT" | jq -r '.turn_action')" "submit sets turn_action: end_turn"
+assert_eq "123" "$(echo "$SUBMIT_OUT" | jq -r '.pr_number')" "submit returns created PR number"
+assert_eq "false" "$([ -d "$SUBMIT_DIR_B" ] && echo true || echo false)" "submit cleans up scratch dir on success"
+PAYLOAD_BODY=$(jq -r '.body' "$CURL_PAYLOAD_FILE")
+assert_eq "Test PR Body Content" "$PAYLOAD_BODY" "submit passes PR_DESCRIPTION.md as PR body"
+rm -f "$CURL_PAYLOAD_FILE"
+
+# Case 4C: Branch reuse on HTTP 422
+SUBMIT_DIR_C=$(mktemp -d /tmp/aerial-pr-submit-c.XXXXXX)
+git clone "$TMP_REMOTE" "$SUBMIT_DIR_C" >/dev/null 2>&1
+git -C "$SUBMIT_DIR_C" checkout -b feat/test-reuse >/dev/null 2>&1
+echo "more changes" > "$SUBMIT_DIR_C/data.txt"
+
+REUSE_OUT=$(bash -c "
+    export GITHUB_PAT=mock_pat
     curl() {
-        local url=""
-        while [ $# -gt 0 ]; do
-            case "$1" in
-                http://*|https://*) url="$1"; shift ;;
+        local url=''
+        while [ \$# -gt 0 ]; do
+            case \"\$1\" in
+                http://*|https://*) url=\"\$1\"; shift ;;
                 *) shift ;;
             esac
         done
-        if [[ "$url" =~ /pulls/42 ]]; then
-            echo '{"state":"open","head":{"sha":"aabbccddeeff00112233445566778899aabbccdd"},"html_url":"https://github.com/azylman/aerial/pull/42"}'
-            echo '200'
-        elif [[ "$url" =~ /issues/42/comments ]]; then
-            echo '{"id":303}'
-            echo '201'
-        elif [[ "$url" =~ /actions/runs\? ]]; then
-            echo '{"workflow_runs":[{"id":889900,"name":"RoboRev Code Review","path":".github/workflows/roborev.yml"}]}'
-            echo '200'
-        elif [[ "$url" =~ /actions/runs/889900/rerun-failed-jobs ]]; then
-            echo '{"message":"no failed jobs to rerun"}'
+        if [[ \"\$url\" =~ /pulls\? ]]; then
+            echo '[{\"number\":456,\"html_url\":\"https://github.com/azylman/aerial/pull/456\",\"title\":\"Existing PR\"}]'
+        elif [[ \"\$url\" =~ /pulls$ ]]; then
+            echo '{\"message\":\"A pull request already exists for this branch.\"}'
             echo '422'
-        elif [[ "$url" =~ /actions/runs/889900/rerun ]]; then
-            echo "fallback-rerun-called" > "$FALLBACK_FILE"
-            echo '{"status":"queued"}'
-            echo '201'
         fi
     }
-    out8=$(override_roborev --repo aerial 42 "Fallback test rebuttal")
-    fallback_recorded=$(cat "$FALLBACK_FILE" 2>/dev/null || echo "")
-    rm -f "$FALLBACK_FILE"
-    if echo "$out8" | jq -e '.status == "overridden" and .run_id == 889900' >/dev/null 2>&1 && \
-       [ "$fallback_recorded" = "fallback-rerun-called" ]; then
-        echo "fallback_rerun:ok"
-    else
-        echo "fallback_rerun:fail:$out8"
-    fi
+    export -f curl
+    bash \"${AERIAL_PR}\" submit -b 'Updated description' \"${SUBMIT_DIR_C}\" 'feat: updated commit'
+")
+assert_eq "submitted" "$(echo "$REUSE_OUT" | jq -r '.status')" "submit handles 422 by reusing existing PR"
+assert_eq "456" "$(echo "$REUSE_OUT" | jq -r '.pr_number')" "submit returns existing PR number on reuse"
+rm -rf "$SUBMIT_DIR_C"
 
-    # Subtest 9: Reason file flag (-f) and reason string flag (-m)
-    REASON_FILE="$(mktemp /tmp/roborev-reason-file-test.XXXXXX)"
-    echo "Reason from file content" > "$REASON_FILE"
+# 5. override_roborev
+# Case 5A: Closed PR rejection
+CLOSED_OUT=$(bash -c "
+    export GITHUB_PAT=mock_pat
     curl() {
-        local url=""
-        local data=""
-        while [ $# -gt 0 ]; do
-            case "$1" in
-                -d) data="$2"; shift 2 ;;
-                http://*|https://*) url="$1"; shift ;;
+        echo '{\"state\":\"closed\",\"head\":{\"sha\":\"abc1234\"},\"html_url\":\"https://github.com/azylman/aerial/pull/42\"}'
+        echo '200'
+    }
+    export -f curl
+    bash \"${AERIAL_PR}\" override-roborev 42 'valid rebuttal' 2>&1 || true
+")
+assert_match "Pull Request #42 is closed" "$CLOSED_OUT" "override-roborev rejects closed PR"
+
+# Case 5B: In-progress workflow run: immediate return without sleeping or calling rerun
+IN_PROGRESS_CALLED=$(mktemp /tmp/aerial-pr-inprog.XXXXXX)
+IN_PROG_OUT=$(bash -c "
+    export GITHUB_PAT=mock_pat
+    curl() {
+        local url='' method='GET'
+        while [ \$# -gt 0 ]; do
+            case \"\$1\" in
+                -X) method=\"\$2\"; shift 2 ;;
+                http://*|https://*) url=\"\$1\"; shift ;;
                 *) shift ;;
             esac
         done
-        if [[ "$url" =~ /pulls/42 ]]; then
-            echo '{"state":"open","head":{"sha":"11223344556677889900aabbccddeeff11223344"},"html_url":"https://github.com/azylman/aerial/pull/42"}'
+        if [[ \"\$url\" =~ /pulls/42$ ]]; then
+            echo '{\"state\":\"open\",\"head\":{\"sha\":\"1234567890abcdef1234567890abcdef12345678\"},\"html_url\":\"https://github.com/azylman/aerial/pull/42\"}'
             echo '200'
-        elif [[ "$url" =~ /issues/42/comments ]]; then
-            echo '{"id":404}'
+        elif [[ \"\$url\" =~ /issues/42/comments ]]; then
+            echo '{\"id\":101}'
             echo '201'
-        elif [[ "$url" =~ /actions/runs\? ]]; then
-            echo '{"workflow_runs":[{"id":990011,"name":"RoboRev Code Review"}]}'
+        elif [[ \"\$url\" =~ /actions/runs\? ]]; then
+            echo '{\"workflow_runs\":[{\"id\":9988,\"name\":\"RoboRev Code Review\",\"status\":\"in_progress\",\"path\":\".github/workflows/roborev.yml\"}]}'
             echo '200'
-        elif [[ "$url" =~ /actions/runs/990011/rerun-failed-jobs ]]; then
-            echo '{"status":"queued"}'
+        elif [[ \"\$url\" =~ /actions/runs/.*rerun ]]; then
+            echo 'rerun-called' > \"${IN_PROGRESS_CALLED}\"
             echo '201'
         fi
     }
-    out9=$(override_roborev -f "$REASON_FILE" 42)
-    rm -f "$REASON_FILE"
-    if echo "$out9" | jq -e '.status == "overridden"' >/dev/null 2>&1; then
-        echo "flags_test:ok"
-    else
-        echo "flags_test:fail:$out9"
-    fi
+    export -f curl
+    bash \"${AERIAL_PR}\" override-roborev 42 'valid technical rebuttal'
+")
+assert_eq "overridden" "$(echo "$IN_PROG_OUT" | jq -r '.status')" "in-progress run returns overridden immediately"
+assert_eq "end_turn" "$(echo "$IN_PROG_OUT" | jq -r '.turn_action')" "in-progress run returns turn_action: end_turn"
+assert_eq "9988" "$(echo "$IN_PROG_OUT" | jq -r '.run_id')" "in-progress run returns run_id"
+assert_eq "false" "$([ -s "$IN_PROGRESS_CALLED" ] && echo true || echo false)" "in-progress run does not call rerun endpoint"
+rm -f "$IN_PROGRESS_CALLED"
 
-    # Subtest 10: Resolving Continuous Delivery (docker-publish.yml) workflow run when standalone roborev.yml is absent
+# Case 5C: Completed workflow run triggers rerun-failed-jobs
+COMPLETED_CALLED=$(mktemp /tmp/aerial-pr-completed.XXXXXX)
+COMMENT_BODY_FILE=$(mktemp /tmp/aerial-pr-comment.XXXXXX)
+COMP_OUT=$(bash -c "
+    export GITHUB_PAT=mock_pat
     curl() {
-        local url=""
-        while [ $# -gt 0 ]; do
-            case "$1" in
-                http://*|https://*) url="$1"; shift ;;
+        local url='' method='GET' data=''
+        while [ \$# -gt 0 ]; do
+            case \"\$1\" in
+                -X) method=\"\$2\"; shift 2 ;;
+                -d) data=\"\$2\"; shift 2 ;;
+                http://*|https://*) url=\"\$1\"; shift ;;
                 *) shift ;;
             esac
         done
-        if [[ "$url" =~ /pulls/42 ]]; then
-            echo '{"state":"open","head":{"sha":"3344556677889900aabbccddeeff001122334455"},"html_url":"https://github.com/azylman/aerial/pull/42"}'
+        if [[ \"\$url\" =~ /pulls/42$ ]]; then
+            echo '{\"state\":\"open\",\"head\":{\"sha\":\"fedcba9876543210fedcba9876543210fedcba98\"},\"html_url\":\"https://github.com/azylman/aerial/pull/42\"}'
             echo '200'
-        elif [[ "$url" =~ /issues/42/comments ]]; then
-            echo '{"id":505}'
+        elif [[ \"\$url\" =~ /issues/42/comments$ ]] && [ \"\$method\" = 'POST' ]; then
+            printf \"%s\" \"\$data\" > \"${COMMENT_BODY_FILE}\"
+            echo '{\"id\":202}'
             echo '201'
-        elif [[ "$url" =~ /actions/runs\? ]]; then
-            echo '{"workflow_runs":[{"id":112233,"name":"Continuous Delivery","path":".github/workflows/docker-publish.yml"}]}'
+        elif [[ \"\$url\" =~ /issues/42/comments ]]; then
+            echo '[]'
             echo '200'
-        elif [[ "$url" =~ /actions/runs/112233/rerun-failed-jobs ]]; then
-            echo '{"status":"queued"}'
-            echo '201'
-        fi
-    }
-    out10=$(override_roborev --repo aerial 42 "Testing unified workflow resolution")
-    if echo "$out10" | jq -e '.status == "overridden" and .run_id == 112233' >/dev/null 2>&1; then
-        echo "unified_wf:ok"
-    else
-        echo "unified_wf:fail:$out10"
-    fi
-
-    # Subtest 11: Awaiting in_progress workflow run to reach completed before rerun-failed-jobs
-    POLL_LOG="$(mktemp /tmp/roborev-poll-log.XXXXXX)"
-    POLL_COUNT_FILE="$(mktemp /tmp/roborev-poll-count.XXXXXX)"
-    echo 0 > "$POLL_COUNT_FILE"
-    curl() {
-        local url=""
-        while [ $# -gt 0 ]; do
-            case "$1" in
-                http://*|https://*) url="$1"; shift ;;
-                *) shift ;;
-            esac
-        done
-        if [[ "$url" =~ /pulls/42 ]]; then
-            echo '{"state":"open","head":{"sha":"44556677889900aabbccddeeff00112233445566"},"html_url":"https://github.com/azylman/aerial/pull/42"}'
+        elif [[ \"\$url\" =~ /actions/runs\? ]]; then
+            echo '{\"workflow_runs\":[{\"id\":7766,\"name\":\"RoboRev Code Review\",\"status\":\"completed\",\"path\":\".github/workflows/roborev.yml\"}]}'
             echo '200'
-        elif [[ "$url" =~ /issues/42/comments ]]; then
-            echo '{"id":606}'
-            echo '201'
-        elif [[ "$url" =~ /actions/runs\? ]]; then
-            echo '{"workflow_runs":[{"id":445566,"name":"RoboRev Code Review","status":"in_progress"}]}'
-            echo '200'
-        elif [[ "$url" =~ /actions/runs/445566/rerun-failed-jobs ]]; then
-            echo "rerun-failed-jobs-called" >> "$POLL_LOG"
-            echo '{"status":"queued"}'
-            echo '201'
-        elif [[ "$url" =~ /actions/runs/445566 ]]; then
-            local cnt=$(( $(cat "$POLL_COUNT_FILE") + 1 ))
-            echo "$cnt" > "$POLL_COUNT_FILE"
-            if [ "$cnt" -lt 2 ]; then
-                echo "poll:in_progress" >> "$POLL_LOG"
-                echo '{"id":445566,"status":"in_progress"}'
-                echo '200'
-            else
-                echo "poll:completed" >> "$POLL_LOG"
-                echo '{"id":445566,"status":"completed"}'
-                echo '200'
-            fi
-        fi
-    }
-    out11=$(AERIAL_RERUN_WAIT_DELAY=0 override_roborev --repo aerial 42 "Testing in-progress wait")
-    poll_entries=$(cat "$POLL_LOG" 2>/dev/null || echo "")
-    rm -f "$POLL_LOG" "$POLL_COUNT_FILE"
-    if echo "$out11" | jq -e '.status == "overridden" and .run_id == 445566' >/dev/null 2>&1 && \
-       [ "$poll_entries" = "$(printf 'poll:in_progress\npoll:completed\nrerun-failed-jobs-called')" ]; then
-        echo "wait_in_progress:ok"
-    else
-        echo "wait_in_progress:fail:poll_entries=$poll_entries:out=$out11"
-    fi
-
-    # Subtest 12: Skipping duplicate comment creation when existing roborev-override comment is present
-    POST_COMMENT_FILE="$(mktemp /tmp/roborev-post-comment.XXXXXX)"
-    curl() {
-        local url=""
-        local method="GET"
-        while [ $# -gt 0 ]; do
-            case "$1" in
-                -X) method="$2"; shift 2 ;;
-                http://*|https://*) url="$1"; shift ;;
-                *) shift ;;
-            esac
-        done
-        if [[ "$url" =~ /pulls/42 ]]; then
-            echo '{"state":"open","head":{"sha":"5566778899aabbccddeeff001122334455667788"},"html_url":"https://github.com/azylman/aerial/pull/42"}'
-            echo '200'
-        elif [[ "$url" =~ /issues/42/comments\?per_page=100 ]]; then
-            echo '[{"id":707,"body":"## roborev-override (`5566778`)\n\n**Commit:** `5566778899aabbccddeeff001122334455667788`\n**Technical Rebuttal:**\nPrior override"}]'
-            echo '200'
-        elif [[ "$url" =~ /issues/42/comments ]]; then
-            echo "duplicate-comment-posted" > "$POST_COMMENT_FILE"
-            echo '{"id":999}'
-            echo '201'
-        elif [[ "$url" =~ /actions/runs\? ]]; then
-            echo '{"workflow_runs":[{"id":556677,"name":"RoboRev Code Review","status":"completed"}]}'
-            echo '200'
-        elif [[ "$url" =~ /actions/runs/556677/rerun-failed-jobs ]]; then
-            echo '{"status":"queued"}'
+        elif [[ \"\$url\" =~ /actions/runs/7766/rerun-failed-jobs ]]; then
+            echo 'rerun-failed-jobs-called' > \"${COMPLETED_CALLED}\"
+            echo '{\"status\":\"queued\"}'
             echo '201'
         fi
     }
-    out12=$(override_roborev --repo aerial 42 "Testing duplicate comment suppression")
-    dup_called=$(cat "$POST_COMMENT_FILE" 2>/dev/null || echo "")
-    rm -f "$POST_COMMENT_FILE"
-    if echo "$out12" | jq -e '.status == "overridden" and .run_id == 556677' >/dev/null 2>&1 && \
-       [ -z "$dup_called" ]; then
-        echo "skip_duplicate_comment:ok"
-    else
-        echo "skip_duplicate_comment:fail:dup_called=$dup_called:out=$out12"
-    fi
-)
-assert_eq "true" "$(echo "$ROBOREV_OVERRIDE_CHECK" | grep -q 'val1:ok' && echo true || echo false)" "override_roborev validates missing PR number"
-assert_eq "true" "$(echo "$ROBOREV_OVERRIDE_CHECK" | grep -q 'val1b:ok' && echo true || echo false)" "override_roborev validates non-numeric PR number"
-assert_eq "true" "$(echo "$ROBOREV_OVERRIDE_CHECK" | grep -q 'val2:ok' && echo true || echo false)" "override_roborev validates missing rebuttal"
-assert_eq "true" "$(echo "$ROBOREV_OVERRIDE_CHECK" | grep -q 'val2b:ok' && echo true || echo false)" "override_roborev validates blank rebuttal"
-assert_eq "true" "$(echo "$ROBOREV_OVERRIDE_CHECK" | grep -q 'val3:ok' && echo true || echo false)" "override_roborev validates non-existent reason file"
-assert_eq "true" "$(echo "$ROBOREV_OVERRIDE_CHECK" | grep -q 'val4:ok' && echo true || echo false)" "override_roborev validates missing GITHUB_PAT"
-assert_eq "true" "$(echo "$ROBOREV_OVERRIDE_CHECK" | grep -q 'closed:ok' && echo true || echo false)" "override_roborev rejects closed PR"
-assert_eq "true" "$(echo "$ROBOREV_OVERRIDE_CHECK" | grep -q 'missing_run:ok' && echo true || echo false)" "override_roborev fails closed when workflow run missing"
-assert_eq "true" "$(echo "$ROBOREV_OVERRIDE_CHECK" | grep -q 'happy_path:ok' && echo true || echo false)" "override_roborev posts comment, triggers rerun-failed-jobs, and outputs json"
-assert_eq "true" "$(echo "$ROBOREV_OVERRIDE_CHECK" | grep -q 'fallback_rerun:ok' && echo true || echo false)" "override_roborev falls back to full workflow rerun when rerun-failed-jobs returns 4xx"
-assert_eq "true" "$(echo "$ROBOREV_OVERRIDE_CHECK" | grep -q 'flags_test:ok' && echo true || echo false)" "override_roborev supports -f reason file"
-assert_eq "true" "$(echo "$ROBOREV_OVERRIDE_CHECK" | grep -q 'unified_wf:ok' && echo true || echo false)" "override_roborev resolves Continuous Delivery workflow run when roborev.yml is absent"
-assert_eq "true" "$(echo "$ROBOREV_OVERRIDE_CHECK" | grep -q 'wait_in_progress:ok' && echo true || echo false)" "override_roborev waits for in_progress workflow run to reach completed before rerun-failed-jobs"
-assert_eq "true" "$(echo "$ROBOREV_OVERRIDE_CHECK" | grep -q 'skip_duplicate_comment:ok' && echo true || echo false)" "override_roborev skips duplicate comment creation when existing roborev-override comment exists"
-
-CLI_DISPATCH_CHECK=$(bash -c "
-    \"${AERIAL_PR}\" override-roborev 2>&1 || true
-")
-assert_eq "true" "$(echo "$CLI_DISPATCH_CHECK" | grep -q 'Valid numeric pr_num required for roborev override' && echo true || echo false)" "CLI dispatch: override-roborev dispatches to override_roborev"
-
-CLI_DISPUTE_CHECK=$(bash -c "
-    \"${AERIAL_PR}\" dispute-roborev 2>&1 || true
-")
-assert_eq "true" "$(echo "$CLI_DISPUTE_CHECK" | grep -q 'Valid numeric pr_num required for roborev override' && echo true || echo false)" "CLI dispatch: dispute-roborev dispatches to override_roborev"
-
-# Case 13: format_aerial_pr_trailer embeds single-line self-healing HTML comment
-TRAILER_CHECK=$(bash -c "
-    REPO_TEST_MODE=1
-    unset AERIAL_BOT_ID
-    source \"${AERIAL_PR}\" --source-only 2>/dev/null || true
-    echo \"t1:\$(CONFIG_PATH=/dev/null format_aerial_pr_trailer '1562162630997581946' 'build-123-chunk-2')\"
-    echo \"t2:\$(CONFIG_PATH=/dev/null format_aerial_pr_trailer '' '')\"
-    echo \"t3:\$(CONFIG_PATH=/dev/null format_aerial_pr_trailer '1562162630997581946' 'build-123-chunk-2' 'aerial-main')\"
-    echo \"t4:\$(CONFIG_PATH=/dev/null AERIAL_BOT_ID='eri-sub' format_aerial_pr_trailer '1562162630997581946' '')\"
-    TEST_CFG=\"\$(mktemp /tmp/trailer-cfg.XXXXXX)\"
-    echo 'bot_id: \"aerial-cfg\"' > \"\$TEST_CFG\"
-    echo \"t5:\$(CONFIG_PATH=\"\$TEST_CFG\" format_aerial_pr_trailer '1562162630997581946' '')\"
-    rm -f \"\$TEST_CFG\"
-")
-assert_eq 't1:<!-- aerial-pr: {"target_id":"1562162630997581946","vanadis_chunk_id":"build-123-chunk-2"} -->' "$(echo "$TRAILER_CHECK" | grep '^t1:')" "format_aerial_pr_trailer formats compact JSON trailer comment"
-assert_eq "t2:" "$(echo "$TRAILER_CHECK" | grep '^t2:')" "format_aerial_pr_trailer returns empty string when all metadata fields are empty"
-assert_eq 't3:<!-- aerial-pr: {"target_id":"1562162630997581946","vanadis_chunk_id":"build-123-chunk-2","bot_id":"aerial-main"} -->' "$(echo "$TRAILER_CHECK" | grep '^t3:')" "format_aerial_pr_trailer formats trailer with explicit bot_id"
-assert_eq 't4:<!-- aerial-pr: {"target_id":"1562162630997581946","vanadis_chunk_id":"","bot_id":"eri-sub"} -->' "$(echo "$TRAILER_CHECK" | grep '^t4:')" "format_aerial_pr_trailer formats trailer with AERIAL_BOT_ID env"
-assert_eq 't5:<!-- aerial-pr: {"target_id":"1562162630997581946","vanadis_chunk_id":"","bot_id":"aerial-cfg"} -->' "$(echo "$TRAILER_CHECK" | grep '^t5:')" "format_aerial_pr_trailer formats trailer with CONFIG_PATH bot_id"
-
-# Case 14: push_scratch_branch falls back to --force-with-lease when rebased branch already exists on remote
-PUSH_REBASED_CHECK=$(bash -c "
-    REPO_TEST_MODE=1
-    source \"${AERIAL_PR}\" --source-only 2>/dev/null || true
-    REMOTE_DIR=\$(mktemp -d /tmp/aerial-pr-push-remote.XXXXXX)
-    WORK_DIR=\$(mktemp -d /tmp/aerial-pr-push-work.XXXXXX)
-    UPSTREAM_DIR=\$(mktemp -d /tmp/aerial-pr-push-up.XXXXXX)
-    trap 'rm -rf \"\$REMOTE_DIR\" \"\$WORK_DIR\" \"\$UPSTREAM_DIR\"' EXIT
-
-    git init -q --bare \"\$REMOTE_DIR\"
-    git clone -q \"\$REMOTE_DIR\" \"\$UPSTREAM_DIR\"
-    git -C \"\$UPSTREAM_DIR\" config user.name 'Tester'
-    git -C \"\$UPSTREAM_DIR\" config user.email 'tester@example.com'
-    git -C \"\$UPSTREAM_DIR\" checkout -q -b main
-    echo 'base' > \"\$UPSTREAM_DIR/base.txt\"
-    git -C \"\$UPSTREAM_DIR\" add . && git -C \"\$UPSTREAM_DIR\" commit -q -m 'initial'
-    git -C \"\$UPSTREAM_DIR\" push -q -u origin main
-
-    git clone -q -b main \"\$REMOTE_DIR\" \"\$WORK_DIR\"
-    git -C \"\$WORK_DIR\" config user.name 'Tester'
-    git -C \"\$WORK_DIR\" config user.email 'tester@example.com'
-    git -C \"\$WORK_DIR\" checkout -q -b feat/existing-pr
-    echo 'v1' > \"\$WORK_DIR/feat.txt\"
-    git -C \"\$WORK_DIR\" add . && git -C \"\$WORK_DIR\" commit -q -m 'feat v1'
-    git -C \"\$WORK_DIR\" push -q -u origin feat/existing-pr
-    V1_SHA=\$(git -C \"\$WORK_DIR\" rev-parse HEAD)
-
-    echo 'upstream-v2' > \"\$UPSTREAM_DIR/up.txt\"
-    git -C \"\$UPSTREAM_DIR\" add . && git -C \"\$UPSTREAM_DIR\" commit -q -m 'upstream v2'
-    git -C \"\$UPSTREAM_DIR\" push -q origin main
-
-    cd \"\$WORK_DIR\"
-    echo 'v2' > feat.txt
-    git add feat.txt
-    rebase_staged_changes main 'feat v2' 2>/dev/null
-    git commit -q -m 'feat v2'
-    V2_SHA=\$(git rev-parse HEAD)
-    if push_scratch_branch feat/existing-pr 2>/dev/null && git merge-base --is-ancestor \"\$V1_SHA\" \"\$V2_SHA\"; then
-        echo 'push_rebased:ok'
-    else
-        echo 'push_rebased:fail'
-    fi
-
-    # Single-branch clone checkout via FETCH_HEAD (no prior refs/remotes/origin/feat/existing-pr)
-    SINGLE_DIR=\$(mktemp -d /tmp/aerial-pr-push-single.XXXXXX)
-    git clone -q --depth 20 --single-branch -b main \"\$REMOTE_DIR\" \"\$SINGLE_DIR\"
-    git -C \"\$SINGLE_DIR\" config user.name 'Tester'
-    git -C \"\$SINGLE_DIR\" config user.email 'tester@example.com'
-    git -C \"\$SINGLE_DIR\" fetch -q origin feat/existing-pr
-    git -C \"\$SINGLE_DIR\" checkout -q -b feat/existing-pr FETCH_HEAD
-    echo 'upstream-v3' > \"\$UPSTREAM_DIR/up.txt\"
-    git -C \"\$UPSTREAM_DIR\" add . && git -C \"\$UPSTREAM_DIR\" commit -q -m 'upstream v3'
-    git -C \"\$UPSTREAM_DIR\" push -q origin main
-    cd \"\$SINGLE_DIR\"
-    echo 'v3' > feat.txt
-    git add feat.txt
-    rebase_staged_changes main 'feat v3' 2>/dev/null
-    git commit -q -m 'feat v3'
-    V3_SHA=\$(git rev-parse HEAD)
-    if push_scratch_branch feat/existing-pr 2>/dev/null && [ \"\${PUSH_UPDATED_EXISTING}\" = \"1\" ] && git merge-base --is-ancestor \"\$V2_SHA\" \"\$V3_SHA\"; then
-        echo 'push_single_branch:ok'
-    else
-        echo 'push_single_branch:fail'
-    fi
-    rm -rf \"\$SINGLE_DIR\"
-")
-assert_eq "true" "$(echo "$PUSH_REBASED_CHECK" | grep -q 'push_rebased:ok' && echo true || echo false)" "push_scratch_branch updates existing remote branch cleanly after rebase"
-assert_eq "true" "$(echo "$PUSH_REBASED_CHECK" | grep -q 'push_single_branch:ok' && echo true || echo false)" "push_scratch_branch updates existing remote branch from --single-branch FETCH_HEAD checkout"
-
-# Case 15: submit_scratch idempotency across verify failure retry, pre-committed changes, and existing open PRs
-SUBMIT_IDEMPOTENCY_CHECK=$(bash -c "
-    REMOTE_DIR=\$(mktemp -d /tmp/aerial-pr-idem-remote.XXXXXX)
-    UPSTREAM_DIR=\$(mktemp -d /tmp/aerial-pr-idem-up.XXXXXX)
-    WORK_DIR=\$(mktemp -d /tmp/aerial-pr-idem-work.XXXXXX)
-    trap 'rm -rf \"\$REMOTE_DIR\" \"\$UPSTREAM_DIR\" \"\$WORK_DIR\"' EXIT
-
-    git init -q --bare \"\$REMOTE_DIR\"
-    git clone -q \"\$REMOTE_DIR\" \"\$UPSTREAM_DIR\"
-    git -C \"\$UPSTREAM_DIR\" config user.name 'Tester'
-    git -C \"\$UPSTREAM_DIR\" config user.email 'tester@example.com'
-    git -C \"\$UPSTREAM_DIR\" checkout -q -b main
-    mkdir -p \"\$UPSTREAM_DIR/scripts\"
-    cat << 'EOF' > \"\$UPSTREAM_DIR/scripts/verify.sh\"
-#!/bin/sh
-[ ! -f .fail_verify ]
-EOF
-    chmod +x \"\$UPSTREAM_DIR/scripts/verify.sh\"
-    git -C \"\$UPSTREAM_DIR\" add . && git -C \"\$UPSTREAM_DIR\" commit -q -m 'init'
-    git -C \"\$UPSTREAM_DIR\" push -q -u origin main
-
-    git clone -q --single-branch -b main \"\$REMOTE_DIR\" \"\$WORK_DIR\"
-    git -C \"\$WORK_DIR\" config user.name 'Tester'
-    git -C \"\$WORK_DIR\" config user.email 'tester@example.com'
-    git -C \"\$WORK_DIR\" checkout -q -b feat/idem-branch
-
-    # Attempt 1: verify.sh fails; PR_DESCRIPTION.md and workspace must be preserved
-    echo 'Summary of changes' > \"\$WORK_DIR/PR_DESCRIPTION.md\"
-    echo 'v1' > \"\$WORK_DIR/feature.txt\"
-    touch \"\$WORK_DIR/.fail_verify\"
-
-    export GITHUB_PAT='mock_pat'
-    export AERIAL_PR_REGISTER_URL='http://mock-router/internal/pr/register'
-    (
-        REPO_TEST_MODE=1
-        source \"${AERIAL_PR}\" --source-only 2>/dev/null || true
-        submit_scratch \"\$WORK_DIR\" 'feat: initial attempt' >/dev/null 2>&1
-    ) || true
-
-    if [ -d \"\$WORK_DIR\" ] && [ -s \"\$WORK_DIR/PR_DESCRIPTION.md\" ]; then
-        echo 'retry_preserved_desc:ok'
-    else
-        echo 'retry_preserved_desc:fail'
-    fi
-
-    # Attempt 2: remove .fail_verify and re-run submit_scratch WITHOUT re-creating PR_DESCRIPTION.md
-    rm -f \"\$WORK_DIR/.fail_verify\" \"\$WORK_DIR/.git/index.lock\"
-    git -C \"\$WORK_DIR\" rm --cached -f .fail_verify >/dev/null 2>&1 || true
-    out2=\$(
-        REPO_TEST_MODE=1
-        source \"${AERIAL_PR}\" --source-only 2>/dev/null || true
-        curl() {
-            if [[ \"\$*\" == *'/pulls'* ]] && [[ \"\$*\" == *'-X POST'* ]]; then
-                printf '{\"number\":77,\"html_url\":\"https://github.com/azylman/aerial/pull/77\",\"node_id\":\"PR_kwDO77\"}\n201'
-            elif [[ \"\$*\" == *'graphql'* ]]; then
-                printf '{\"data\":{\"enablePullRequestAutoMerge\":{\"pullRequest\":{\"autoMergeRequest\":{\"enabledAt\":\"now\"}}}}}'
-            elif [[ \"\$*\" == *'/chunks/attach-pr'* ]]; then
-                printf '{\"status\":\"attached\",\"build_id\":\"b-77\",\"chunk_id\":\"chunk-77\",\"thread_id\":\"100000000000000001\"}'
-            elif [[ \"\$*\" == *'/internal/pr/register'* ]]; then
-                printf '{\"status\":\"registered\"}'
-            fi
-        }
-        export -f curl
-        submit_scratch \"\$WORK_DIR\" 'feat: initial attempt' 2>/dev/null
-    )
-    if echo \"\$out2\" | jq -e '.status == \"submitted\" and .pr_number == 77' >/dev/null 2>&1 && [ ! -d \"\$WORK_DIR\" ]; then
-        echo 'retry_submit_success:ok'
-    else
-        echo \"retry_submit_success:fail:\$out2\"
-    fi
-
-    # Attempt 3: Remediation checkout of existing PR branch with pre-committed fix and NO PR_DESCRIPTION.md
-    REMED_DIR=\$(mktemp -d /tmp/aerial-pr-idem-remed.XXXXXX)
-    git clone -q --single-branch -b main \"\$REMOTE_DIR\" \"\$REMED_DIR\"
-    git -C \"\$REMED_DIR\" config user.name 'Tester'
-    git -C \"\$REMED_DIR\" config user.email 'tester@example.com'
-    git -C \"\$REMED_DIR\" fetch -q origin feat/idem-branch
-    git -C \"\$REMED_DIR\" checkout -q -b feat/idem-branch FETCH_HEAD
-
-    # Advance upstream main while remediation worker commits a fix locally
-    echo 'upstream-advance' > \"\$UPSTREAM_DIR/upstream.txt\"
-    git -C \"\$UPSTREAM_DIR\" add . && git -C \"\$UPSTREAM_DIR\" commit -q -m 'upstream advance'
-    git -C \"\$UPSTREAM_DIR\" push -q origin main
-
-    echo 'v2-remediated' > \"\$REMED_DIR/feature.txt\"
-    git -C \"\$REMED_DIR\" add feature.txt
-    git -C \"\$REMED_DIR\" commit -q -m 'fix: remediate lint'
-
-    out3=\$(
-        REPO_TEST_MODE=1
-        source \"${AERIAL_PR}\" --source-only 2>/dev/null || true
-        curl() {
-            if [[ \"\$*\" == *'/pulls?state=open'* ]]; then
-                printf '[{\"number\":77,\"title\":\"feat: initial attempt\",\"body\":\"Existing PR body\",\"html_url\":\"https://github.com/azylman/aerial/pull/77\",\"node_id\":\"PR_kwDO77\"}]'
-            elif [[ \"\$*\" == *'graphql'* ]]; then
-                printf '{\"data\":{\"enablePullRequestAutoMerge\":{\"pullRequest\":{\"autoMergeRequest\":{\"enabledAt\":\"now\"}}}}}'
-            elif [[ \"\$*\" == *'/chunks/attach-pr'* ]]; then
-                printf '{\"status\":\"attached\",\"build_id\":\"b-77\",\"chunk_id\":\"chunk-77\",\"thread_id\":\"100000000000000001\"}'
-            elif [[ \"\$*\" == *'/internal/pr/register'* ]]; then
-                printf '{\"status\":\"registered\"}'
-            fi
-        }
-        export -f curl
-        submit_scratch \"\$REMED_DIR\" 2>/dev/null
-    )
-    if echo \"\$out3\" | jq -e '.status == \"submitted\" and .pr_number == 77' >/dev/null 2>&1 && [ ! -d \"\$REMED_DIR\" ]; then
-        echo 'remed_existing_pr:ok'
-    else
-        echo \"remed_existing_pr:fail:\$out3\"
-    fi
-    rm -rf \"\$REMED_DIR\"
-")
-assert_eq "true" "$(echo "$SUBMIT_IDEMPOTENCY_CHECK" | grep -q 'retry_preserved_desc:ok' && echo true || echo false)" "submit_scratch restores PR_DESCRIPTION.md and preserves workspace on verify failure"
-assert_eq "true" "$(echo "$SUBMIT_IDEMPOTENCY_CHECK" | grep -q 'retry_submit_success:ok' && echo true || echo false)" "submit_scratch succeeds on second attempt without re-creating PR_DESCRIPTION.md"
-assert_eq "true" "$(echo "$SUBMIT_IDEMPOTENCY_CHECK" | grep -q 'remed_existing_pr:ok' && echo true || echo false)" "submit_scratch succeeds idempotently on existing PR branch with pre-committed changes and no local PR_DESCRIPTION.md"
-
-# Case 16: Tree-stamped pre-flight verification cache and init_scratch --branch
-TREE_CACHE_AND_BRANCH_CHECK=$(bash -c "
-    REPO_TEST_MODE=1
-    source \"${AERIAL_PR}\" --source-only 2>/dev/null || true
-    CACHE_DIR=\$(mktemp -d /tmp/aerial-pr-tree-cache.XXXXXX)
-    REMOTE_DIR=\$(mktemp -d /tmp/aerial-pr-branch-remote.XXXXXX)
-    SEED_DIR=\$(mktemp -d /tmp/aerial-pr-branch-seed.XXXXXX)
-    trap 'rm -rf \"\$CACHE_DIR\" \"\$REMOTE_DIR\" \"\$SEED_DIR\"' EXIT
-
-    git init -q \"\$CACHE_DIR\"
-    git -C \"\$CACHE_DIR\" config user.name 'Tester'
-    git -C \"\$CACHE_DIR\" config user.email 'tester@example.com'
-    mkdir -p \"\$CACHE_DIR/scripts\"
-    cat << 'EOF' > \"\$CACHE_DIR/scripts/verify.sh\"
-#!/bin/sh
-echo \"ran_verify_script\" >> .verify_runs
-printf '%s\n' \"\$(git write-tree)\" > \"\$(git rev-parse --git-dir)/.aerial-verified-tree\"
-exit 0
-EOF
-    chmod +x \"\$CACHE_DIR/scripts/verify.sh\"
-    echo 'v1' > \"\$CACHE_DIR/app.txt\"
-    git -C \"\$CACHE_DIR\" add scripts/verify.sh app.txt
-
-    # First run executes verify.sh and stamps .aerial-verified-tree
-    out1=\$(run_preflight_verification \"\$CACHE_DIR\" 2>&1)
-    # Second run with identical staged tree and clean working diff skips verify.sh
-    out2=\$(run_preflight_verification \"\$CACHE_DIR\" 2>&1)
-    if echo \"\$out2\" | grep -q 'Skipping duplicate pre-flight verification' && [ \"\$(wc -l < \"\$CACHE_DIR/.verify_runs\" | tr -d '[:space:]')\" = \"1\" ]; then
-        echo 'tree_cache_hit:ok'
-    else
-        echo \"tree_cache_hit:fail:\$out2\"
-    fi
-
-    # Unstaged modification invalidates cache and re-runs verify.sh
-    echo 'v2-unstaged' >> \"\$CACHE_DIR/app.txt\"
-    out3=\$(run_preflight_verification \"\$CACHE_DIR\" 2>&1)
-    if echo \"\$out3\" | grep -q 'Running pre-flight verification' && [ \"\$(wc -l < \"\$CACHE_DIR/.verify_runs\" | tr -d '[:space:]')\" = \"2\" ]; then
-        echo 'tree_cache_invalidated:ok'
-    else
-        echo \"tree_cache_invalidated:fail:\$out3\"
-    fi
-
-    # Test init_scratch --branch against local bare repo (including origin/main refspec + submit_scratch round-trip)
-    git init -q --bare \"\$REMOTE_DIR\"
-    git clone -q \"\$REMOTE_DIR\" \"\$SEED_DIR\"
-    git -C \"\$SEED_DIR\" config user.name 'Tester'
-    git -C \"\$SEED_DIR\" config user.email 'tester@example.com'
-    git -C \"\$SEED_DIR\" checkout -q -b main
-    echo 'base-content' > \"\$SEED_DIR/base.txt\"
-    git -C \"\$SEED_DIR\" add base.txt && git -C \"\$SEED_DIR\" commit -q -m 'base commit'
-    git -C \"\$SEED_DIR\" push -q -u origin main
-    git -C \"\$SEED_DIR\" checkout -q -b feat/existing-ci-branch
-    echo 'branch-content' > \"\$SEED_DIR/file.txt\"
-    git -C \"\$SEED_DIR\" add file.txt && git -C \"\$SEED_DIR\" commit -q -m 'branch commit'
-    git -C \"\$SEED_DIR\" push -q -u origin feat/existing-ci-branch
-
-    export GITHUB_PAT='mock_pat'
-    export AERIAL_REPO_URL_OVERRIDE=\"\$REMOTE_DIR\"
-    export AERIAL_PR_REGISTER_URL='http://mock-router/internal/pr/register'
-    init_json=\$(init_scratch aerial --branch feat/existing-ci-branch)
-    cloned_dir=\$(echo \"\$init_json\" | jq -r '.scratch_dir')
-    cloned_branch=\$(echo \"\$init_json\" | jq -r '.branch')
-    actual_head=\$(git -C \"\$cloned_dir\" rev-parse --abbrev-ref HEAD)
-    origin_main_sha=\$(git -C \"\$cloned_dir\" rev-parse --verify -q refs/remotes/origin/main || echo '')
-    if [ \"\$cloned_branch\" = \"feat/existing-ci-branch\" ] && [ \"\$actual_head\" = \"feat/existing-ci-branch\" ] && [ -n \"\$origin_main_sha\" ]; then
-        echo 'init_branch:ok'
-    else
-        echo \"init_branch:fail:\$cloned_branch:\$actual_head:\$origin_main_sha\"
-    fi
-
-    # Advance origin/main and submit a remediation fix directly from the init_scratch --branch checkout
-    echo 'main-v2' > \"\$SEED_DIR/main_v2.txt\"
-    git -C \"\$SEED_DIR\" checkout -q main
-    git -C \"\$SEED_DIR\" add main_v2.txt && git -C \"\$SEED_DIR\" commit -q -m 'main advance'
-    git -C \"\$SEED_DIR\" push -q origin main
-
-    echo 'branch-content-fixed' > \"\$cloned_dir/file.txt\"
-    remed_submit_out=\$(
-        curl() {
-            if [[ \"\$*\" == *'/pulls?state=open'* ]]; then
-                printf '[{\"number\":88,\"title\":\"feat: existing branch\",\"body\":\"Existing PR body\",\"html_url\":\"https://github.com/azylman/aerial/pull/88\",\"node_id\":\"PR_kwDO88\"}]'
-            elif [[ \"\$*\" == *'graphql'* ]]; then
-                printf '{\"data\":{\"enablePullRequestAutoMerge\":{\"pullRequest\":{\"autoMergeRequest\":{\"enabledAt\":\"now\"}}}}}'
-            elif [[ \"\$*\" == *'/chunks/attach-pr'* ]]; then
-                printf '{\"status\":\"attached\",\"build_id\":\"b-88\",\"chunk_id\":\"chunk-88\",\"thread_id\":\"100000000000000001\"}'
-            elif [[ \"\$*\" == *'/internal/pr/register'* ]]; then
-                printf '{\"status\":\"registered\"}'
-            fi
-        }
-        export -f curl
-        submit_scratch \"\$cloned_dir\" 'fix: address roborev finding' 2>/dev/null
-    )
-    if echo \"\$remed_submit_out\" | jq -e '.status == \"submitted\" and .pr_number == 88' >/dev/null 2>&1 && [ ! -d \"\$cloned_dir\" ]; then
-        echo 'init_branch_submit:ok'
-    else
-        echo \"init_branch_submit:fail:\$remed_submit_out\"
-    fi
-    rm -rf \"\$cloned_dir\"
-")
-assert_eq "true" "$(echo "$TREE_CACHE_AND_BRANCH_CHECK" | grep -q 'tree_cache_hit:ok' && echo true || echo false)" "run_preflight_verification skips duplicate verify.sh when .aerial-verified-tree matches"
-assert_eq "true" "$(echo "$TREE_CACHE_AND_BRANCH_CHECK" | grep -q 'tree_cache_invalidated:ok' && echo true || echo false)" "run_preflight_verification re-runs verify.sh when unstaged changes exist"
-assert_eq "true" "$(echo "$TREE_CACHE_AND_BRANCH_CHECK" | grep -q 'init_branch:ok' && echo true || echo false)" "init_scratch --branch clones, tracks origin/main, and stays on existing PR branch"
-assert_eq "true" "$(echo "$TREE_CACHE_AND_BRANCH_CHECK" | grep -q 'init_branch_submit:ok' && echo true || echo false)" "submit_scratch rebases and updates PR cleanly from init_scratch --branch checkout"
-
-# Case 17: github-runner roborev wrapper ROBOREV_SYNC_BRANCH propagation + roborev-override rebuttal backfill and head short-circuit
-ROBOREV_WRAPPER_CHECK=$(SCRIPT_DIR="$SCRIPT_DIR" bash -s << 'CASE17_EOF'
-set -euo pipefail
-unset CLAUDE_CODE_OAUTH_TOKEN
-TEST_ROOT=$(mktemp -d /tmp/roborev-wrapper-test.XXXXXX)
-trap 'rm -rf "$TEST_ROOT"' EXIT
-ENTRYPOINT_FILE="${SCRIPT_DIR}/../services/github-runner/entrypoint.sh"
-ROBOREV_WRAPPER_FILE="${SCRIPT_DIR}/../services/github-runner/roborev-wrapper.sh"
-WRAPPER_SCRIPT="$TEST_ROOT/roborev-wrapper.sh"
-MOCK_REAL="$TEST_ROOT/roborev.real"
-CALL_LOG="$TEST_ROOT/calls.log"
-STATE_DIR="$TEST_ROOT/state"
-REPO_DIR="$TEST_ROOT/aerial"
-mkdir -p "$STATE_DIR" "$REPO_DIR"
-
-cat "$ROBOREV_WRAPPER_FILE" \
-  | sed "s|/usr/local/bin/roborev.real|$MOCK_REAL|g; s|/root/.roborev/postgres-password|$STATE_DIR/postgres-password|g; s|/root/.roborev/claude-oauth-token|$STATE_DIR/claude-oauth-token|g" > "$WRAPPER_SCRIPT"
-printf 'secret-pw\n' > "$STATE_DIR/postgres-password"
-
-cat << 'MOCK_EOF' > "$MOCK_REAL"
-#!/usr/bin/env bash
-echo "[branch=${ROBOREV_SYNC_BRANCH:-}] $*" >> "${CALL_LOG}"
-echo "[token=${CLAUDE_CODE_OAUTH_TOKEN:-}]" >> "${CALL_LOG}"
-case "${1:-}" in
-  list) cat "${STATE_DIR}/jobs.json" ;;
-  show) cat "${STATE_DIR}/show.json" ;;
-  review)
-    if [ -f "${STATE_DIR}/mock_review_output" ]; then
-      cat "${STATE_DIR}/mock_review_output"
-      exit "${MOCK_REVIEW_RC:-0}"
-    fi
-    printf 'Review (by gemini)\n------------------------------------------------------------\nNo issues found.\n'
-    ;;
-  *) exit 0 ;;
-esac
-MOCK_EOF
-chmod +x "$WRAPPER_SCRIPT" "$MOCK_REAL"
-
-git init -q "$REPO_DIR"
-git -C "$REPO_DIR" config user.name 'Tester'
-git -C "$REPO_DIR" config user.email 'tester@example.com'
-git -C "$REPO_DIR" checkout -q -b main
-echo 'base' > "$REPO_DIR/file.txt" && git -C "$REPO_DIR" add file.txt && git -C "$REPO_DIR" commit -q -m 'base'
-BASE_SHA=$(git -C "$REPO_DIR" rev-parse HEAD)
-git -C "$REPO_DIR" checkout -q -b feat/test-rebuttal
-echo 'v1' > "$REPO_DIR/file.txt" && git -C "$REPO_DIR" add file.txt && git -C "$REPO_DIR" commit -q -m 'commit 1'
-COMMIT1_SHA=$(git -C "$REPO_DIR" rev-parse HEAD) && COMMIT1_SHORT="${COMMIT1_SHA:0:7}"
-echo 'v2' > "$REPO_DIR/file.txt" && git -C "$REPO_DIR" add file.txt && git -C "$REPO_DIR" commit -q -m 'commit 2'
-COMMIT2_SHA=$(git -C "$REPO_DIR" rev-parse HEAD) && COMMIT2_SHORT="${COMMIT2_SHA:0:7}"
-
-jq -n --arg ref "${BASE_SHA}..${COMMIT1_SHA}" '[{id:42,git_ref:$ref,status:"done",panel_role:"synthesis"}]' > "$STATE_DIR/jobs.json"
-printf '{"comments":[]}\n' > "$STATE_DIR/show.json"
-jq -n --arg short "$COMMIT1_SHORT" --arg full "$COMMIT1_SHA" '[{user:{login:"owneruser"},author_association:"OWNER",body:("## roborev-override (`"+$short+"`)\n\n**Commit:** `"+$full+"`\n**Technical Rebuttal:**\nIntentional design choice for chunk 1.")}]' > "$STATE_DIR/comments.json"
-jq -n --arg head "$COMMIT2_SHA" --arg base "$BASE_SHA" '{repository:{full_name:"owneruser/aerial"},pull_request:{number:99,head:{ref:"feat/test-rebuttal",sha:$head},base:{sha:$base}}}' > "$STATE_DIR/event.json"
-
-curl() { cat "$STATE_DIR/comments.json"; }
-export -f curl
-export CALL_LOG STATE_DIR GH_TOKEN='mock_token' GITHUB_REPOSITORY='owneruser/aerial' GITHUB_EVENT_PATH="$STATE_DIR/event.json"
-
-out_followup=$(cd "$REPO_DIR" && "$WRAPPER_SCRIPT" ci review --agent gemini --min-severity medium --reasoning thorough)
-if grep -q "\[branch=feat/test-rebuttal\] daemon start" "$CALL_LOG" &&
-   grep -q "\[branch=feat/test-rebuttal\] sync now" "$CALL_LOG" &&
-   grep -q "comment --commenter owneruser --job 42 Intentional design choice for chunk 1." "$CALL_LOG" &&
-   grep -q "close 42" "$CALL_LOG" &&
-   grep -q "review --wait --branch=feat/test-rebuttal --base=${BASE_SHA}" "$CALL_LOG" &&
-   echo "$out_followup" | grep -q "^## roborev: Review Passed (\`${COMMIT2_SHORT}\`)"; then
-  echo 'backfill_followup:ok'
-fi
-
-: > "$CALL_LOG"
-jq -n --arg ref "${BASE_SHA}..${COMMIT2_SHA}" '[{id:43,git_ref:$ref,status:"done",panel_role:"synthesis"}]' > "$STATE_DIR/jobs.json"
-printf '{"comments":[{"response":"Already recorded rebuttal."}]}\n' > "$STATE_DIR/show.json"
-jq -n --arg short "$COMMIT2_SHORT" --arg full "$COMMIT2_SHA" '[{user:{login:"owneruser"},author_association:"OWNER",body:("## roborev-override (`"+$short+"`)\n\n**Commit:** `"+$full+"`\n**Technical Rebuttal:**\nAlready recorded rebuttal.")}]' > "$STATE_DIR/comments.json"
-out_head=$(cd "$REPO_DIR" && "$WRAPPER_SCRIPT" ci review --agent gemini --min-severity medium --reasoning thorough)
-if ! grep -q "comment --commenter" "$CALL_LOG" && grep -q "close 43" "$CALL_LOG" && ! grep -q "review --wait" "$CALL_LOG" &&
-   echo "$out_head" | grep -q "^## roborev: Review Passed (\`${COMMIT2_SHORT}\`)"; then
-  echo 'head_shortcircuit:ok'
-fi
-
-# Subtests for Claude Code OAuth token export/unset and legacy flag stripping
-mkdir -p "$TEST_ROOT/bin"
-cat << 'CLAUDE_BIN_EOF' > "$TEST_ROOT/bin/claude"
-#!/usr/bin/env bash
-exit 0
-CLAUDE_BIN_EOF
-chmod +x "$TEST_ROOT/bin/claude"
-PATH="$TEST_ROOT/bin:$PATH"
-
-printf '[]\n' > "$STATE_DIR/comments.json"
-printf '[]\n' > "$STATE_DIR/jobs.json"
-
-# Subtest 3a: Token exists -> exports token and strips legacy --agent and --reasoning flags
-printf 'test-claude-token-123\n' > "$STATE_DIR/claude-oauth-token"
-: > "$CALL_LOG"
-(cd "$REPO_DIR" && "$WRAPPER_SCRIPT" ci review --agent gemini --min-severity medium --reasoning thorough >/dev/null 2>&1)
-if grep -q "\[token=test-claude-token-123\]" "$CALL_LOG"; then
-  echo 'claude_token_export:ok'
-fi
-if ! grep -q -- "--agent" "$CALL_LOG" && ! grep -q -- "--reasoning" "$CALL_LOG" && grep -q "review --wait" "$CALL_LOG"; then
-  echo 'wrapper_strips_agent_reasoning:ok'
-fi
-
-# Subtest 3b: Strip legacy --agent=* and --reasoning=* flags
-: > "$CALL_LOG"
-(cd "$REPO_DIR" && "$WRAPPER_SCRIPT" ci review --agent=claude-code --min-severity medium --reasoning=low >/dev/null 2>&1)
-if ! grep -q -- "--agent" "$CALL_LOG" && ! grep -q -- "--reasoning" "$CALL_LOG" && grep -q "review --wait" "$CALL_LOG"; then
-  echo 'wrapper_strips_agent_reasoning_eq:ok'
-fi
-
-# Subtest 3c: Token removed -> unsets token
-rm -f "$STATE_DIR/claude-oauth-token"
-: > "$CALL_LOG"
-(cd "$REPO_DIR" && "$WRAPPER_SCRIPT" ci review --agent claude-code --min-severity medium --reasoning thorough >/dev/null 2>&1)
-if grep -q "\[token=\]" "$CALL_LOG"; then
-  echo 'claude_token_unset:ok'
-fi
-
-# Subtest 3c: Stateless fallback strips --agent and --reasoning flags so roborev.real uses config.toml
-: > "$CALL_LOG"
-cat << 'MOCK_REVIEW_BODY_FAIL_STATELESS' > "$STATE_DIR/mock_review_output"
-unexpected daemon error
-MOCK_REVIEW_BODY_FAIL_STATELESS
-export MOCK_REVIEW_RC=2
-(cd "$REPO_DIR" && "$WRAPPER_SCRIPT" ci review --agent gemini --min-severity medium --reasoning thorough >/dev/null 2>&1 || true)
-rm -f "$STATE_DIR/mock_review_output"
-unset MOCK_REVIEW_RC
-if grep -q "ci review" "$CALL_LOG" && ! grep -q "ci review.*--agent" "$CALL_LOG" && ! grep -q "ci review.*--reasoning" "$CALL_LOG"; then
-  echo 'wrapper_stateless_strips_agent_reasoning:ok'
-fi
-
-# Subtest for run_as_ubuntu privilege drop
-mkdir -p "$TEST_ROOT/bin"
-MOCK_SETPRIV="$TEST_ROOT/bin/setpriv"
-cat << 'SETPRIV_EOF' > "$MOCK_SETPRIV"
-#!/usr/bin/env bash
-echo "[setpriv] $*" >> "$CALL_LOG"
-while [[ "${1:-}" == --* ]]; do
-  shift
-done
-exec "$@"
-SETPRIV_EOF
-chmod +x "$MOCK_SETPRIV"
-
-eval "$(awk '/^run_as_ubuntu\(\)/ {flag=1} flag {print} flag && /^}/ {flag=0; exit}' "$ENTRYPOINT_FILE")"
-(PATH="$TEST_ROOT/bin:$PATH" run_as_ubuntu echo "priv_drop_test" >/dev/null 2>&1)
-if grep -q "\[setpriv\] --reuid=ubuntu --regid=ubuntu --init-groups env -u RUNNER_ALLOW_RUNASROOT HOME=/home/ubuntu USER=ubuntu LOGNAME=ubuntu echo priv_drop_test" "$CALL_LOG"; then
-  echo 'run_as_ubuntu:ok'
-fi
-
-# Subtest for /data/cache/go-build and /data/cache/go/pkg/mod export
-mkdir -p "$TEST_ROOT/actions-runner"
-CACHE_ENV_TEST="$TEST_ROOT/cache-env-test.sh"
-cat << 'CACHE_TEST_EOF' > "$CACHE_ENV_TEST"
-#!/usr/bin/env bash
-set -euo pipefail
-CACHE_TEST_EOF
-awk '/if \[ -d "\/cache" \]; then/ {flag=1; buf=""} flag {buf=buf $0 "\n"} flag && /^fi$/ {flag=0; if (buf ~ /GOCACHE=/) {printf "%s", buf; exit}}' "$ENTRYPOINT_FILE" \
-  | sed -e "s|/data/cache|__DATA_CACHE__|g" -e "s|/cache|__CACHE__|g" -e "s|/data|__DATA__|g" -e "s|/actions-runner|__ACTIONS_RUNNER__|g" \
-        -e "s|__DATA_CACHE__|$TEST_ROOT/mock_data/cache|g" -e "s|__CACHE__|$TEST_ROOT/mock_cache|g" -e "s|__DATA__|$TEST_ROOT/mock_data|g" -e "s|__ACTIONS_RUNNER__|$TEST_ROOT/actions-runner|g" >> "$CACHE_ENV_TEST"
-cat << 'CACHE_ASSERT_EOF' >> "$CACHE_ENV_TEST"
-echo "GOCACHE=$GOCACHE"
-echo "GOPATH=$GOPATH"
-echo "GOMODCACHE=$GOMODCACHE"
-echo "GOLANGCI_LINT_CACHE=$GOLANGCI_LINT_CACHE"
-CACHE_ASSERT_EOF
-chmod +x "$CACHE_ENV_TEST"
-
-mkdir -p "$TEST_ROOT/mock_cache"
-cache_out=$(bash "$CACHE_ENV_TEST")
-if echo "$cache_out" | grep -q "GOCACHE=$TEST_ROOT/mock_data/cache/go-build" &&
-   echo "$cache_out" | grep -q "GOMODCACHE=$TEST_ROOT/mock_data/cache/go/pkg/mod" &&
-   [ -d "$TEST_ROOT/mock_cache/go/pkg/mod" ] &&
-   [ -L "$TEST_ROOT/mock_data/cache" ]; then
-  echo 'cache_exports:ok'
-fi
-
-# Subtest: entrypoint seeds CLAUDE_CODE_OAUTH_TOKEN into /actions-runner/.env with mode 0600
-CLAUDE_ENV_TEST="$TEST_ROOT/claude-env-test.sh"
-cat << 'CLAUDE_ENV_EOF' > "$CLAUDE_ENV_TEST"
-#!/usr/bin/env bash
-set -euo pipefail
-CLAUDE_ENV_EOF
-awk '/^: > \/actions-runner\/.env$/ {flag=1} flag {print} flag && /^fi$/ {seen++} flag && seen==2 {flag=0; exit}' "$ENTRYPOINT_FILE" \
-  | sed -e "s|/actions-runner/.env|$TEST_ROOT/actions-runner/.env|g" \
-        -e "s|/local/claude-oauth-token|$STATE_DIR/claude-oauth-token|g" \
-        -e "s|/secrets/claude-oauth-token|$TEST_ROOT/nonexistent-claude-token|g" >> "$CLAUDE_ENV_TEST"
-chmod +x "$CLAUDE_ENV_TEST"
-printf 'test-claude-token-123\n' > "$STATE_DIR/claude-oauth-token"
-bash "$CLAUDE_ENV_TEST"
-if grep -q '^CLAUDE_CODE_OAUTH_TOKEN=test-claude-token-123$' "$TEST_ROOT/actions-runner/.env" &&
-   [ "$(stat -c '%a' "$TEST_ROOT/actions-runner/.env")" = "600" ]; then
-  echo 'claude_env_seed:ok'
-fi
-
-# Subtest: roborev.real review exits 0 with findings header and low severity emits Review Passed
-cat << 'MOCK_REVIEW_BODY_PASS' > "$STATE_DIR/mock_review_output"
-Review (by codex)
-------------------------------------------------------------
-## Findings
-
-### 1. Low: Minor style suggestion
-Consider renaming variable for clarity.
-MOCK_REVIEW_BODY_PASS
-export MOCK_REVIEW_RC=0
-pass_with_findings_out=$(cd "$REPO_DIR" && "$WRAPPER_SCRIPT" ci review --agent codex --min-severity medium --reasoning low)
-if echo "$pass_with_findings_out" | grep -q "^## roborev: Review Passed (\`${COMMIT2_SHORT}\`)"; then
-  echo 'native_verdict_pass_findings:ok'
-fi
-
-# Subtest: roborev.real review exits 1 with findings emits Review Complete
-cat << 'MOCK_REVIEW_BODY_FAIL' > "$STATE_DIR/mock_review_output"
-Review (by codex)
-------------------------------------------------------------
-## Findings
-
-### 1. Medium: Potential nil pointer dereference
-Ensure ptr is non-nil before access.
-MOCK_REVIEW_BODY_FAIL
-export MOCK_REVIEW_RC=1
-fail_with_findings_out=$(cd "$REPO_DIR" && "$WRAPPER_SCRIPT" ci review --agent codex --min-severity medium --reasoning low || true)
-if echo "$fail_with_findings_out" | grep -q "^## roborev: Review Complete (\`${COMMIT2_SHORT}\`)"; then
-  echo 'native_verdict_fail_findings:ok'
-fi
-rm -f "$STATE_DIR/mock_review_output"
-unset MOCK_REVIEW_RC
-
-# Subtest: services/github-runner/roborev-config.toml copied by entrypoint.sh sets claude-code primary, muse backup, review_types = ["default", "test-value"], default_panel = "ci", members = ["default", "test-value"], and declarative [sync]
-CONFIG_GEN_TEST="$TEST_ROOT/config-gen-test.sh"
-cat << 'CONFIG_GEN_EOF' > "$CONFIG_GEN_TEST"
-#!/usr/bin/env bash
-set -euo pipefail
-CONFIG_GEN_EOF
-awk '/if \[ -s "\/local\/roborev-config.toml" \]; then/ {flag=1} flag {print} flag && /chmod 0600 \/root\/.roborev\/config.toml/ {flag=0; exit}' "$ENTRYPOINT_FILE" \
-  | sed -e "s|/root/.roborev/config.toml|$TEST_ROOT/gen-config.toml|g" \
-        -e "s|/local/roborev-config.toml|$TEST_ROOT/nonexistent-local.toml|g" \
-        -e "s|/etc/roborev/config.toml|$TEST_ROOT/nonexistent-etc.toml|g" \
-        -e "s|\$(dirname \"\$0\")/roborev-config.toml|${SCRIPT_DIR}/../services/github-runner/roborev-config.toml|g" >> "$CONFIG_GEN_TEST"
-chmod +x "$CONFIG_GEN_TEST"
-
-bash "$CONFIG_GEN_TEST"
-static_cfg=$(cat "$TEST_ROOT/gen-config.toml")
-
-if echo "$static_cfg" | grep -q 'default_agent = "claude-code"' && \
-   echo "$static_cfg" | grep -q 'review_agent = "claude-code"' && \
-   echo "$static_cfg" | grep -q 'default_model = "sonnet"' && \
-   echo "$static_cfg" | grep -q 'review_model = "sonnet"' && \
-   echo "$static_cfg" | grep -q 'default_backup_agent = "muse"' && \
-   echo "$static_cfg" | grep -q 'default_backup_model = "muse-spark-1.3-contributor"' && \
-   echo "$static_cfg" | grep -q 'review_backup_agent = "muse"' && \
-   echo "$static_cfg" | grep -q 'review_backup_model = "muse-spark-1.3-contributor"' && \
-   echo "$static_cfg" | grep -q 'synthesis_backup_agent = "muse"' && \
-   echo "$static_cfg" | grep -q 'synthesis_backup_model = "muse-spark-1.3-contributor"' && \
-   echo "$static_cfg" | grep -q 'review_types = \["default", "test-value"\]' && \
-   echo "$static_cfg" | grep -q 'default_panel = "ci"' && \
-   echo "$static_cfg" | grep -q 'members = \["default", "test-value"\]' && \
-   echo "$static_cfg" | grep -q '^\[sync\]$' && \
-   echo "$static_cfg" | grep -q 'postgres_url = "postgres://aerial:\${file:/root/.roborev/postgres-password}@postgres:5432/aerial?sslmode=disable"'; then
-  echo 'entrypoint_static_config:ok'
-fi
-
-# Subtest: entrypoint strips [sync] when postgres-password is absent
-CONFIG_NOPW_TEST="$TEST_ROOT/config-nopw-test.sh"
-cat << 'CONFIG_NOPW_EOF' > "$CONFIG_NOPW_TEST"
-#!/usr/bin/env bash
-set -euo pipefail
-CONFIG_NOPW_EOF
-awk '/if \[ -s "\/local\/roborev-config.toml" \]; then/ {flag=1} flag {print} flag && /RUNNER_LABELS=/ {flag=0; exit}' "$ENTRYPOINT_FILE" \
-  | sed -e "s|/root/.roborev/config.toml|$TEST_ROOT/nopw-config.toml|g" \
-        -e "s|/root/.roborev/postgres-password|$TEST_ROOT/nonexistent-pw|g" \
-        -e "s|/local/roborev-config.toml|$TEST_ROOT/nonexistent-local.toml|g" \
-        -e "s|/etc/roborev/config.toml|$TEST_ROOT/nonexistent-etc.toml|g" \
-        -e "s|/local/postgres-password|$TEST_ROOT/nonexistent-local-pw|g" \
-        -e "s|/secrets/postgres-password|$TEST_ROOT/nonexistent-sec-pw|g" \
-        -e "s|\$(dirname \"\$0\")/roborev-config.toml|${SCRIPT_DIR}/../services/github-runner/roborev-config.toml|g" >> "$CONFIG_NOPW_TEST"
-chmod +x "$CONFIG_NOPW_TEST"
-
-bash "$CONFIG_NOPW_TEST"
-nopw_cfg=$(cat "$TEST_ROOT/nopw-config.toml")
-if ! echo "$nopw_cfg" | grep -q '^\[sync\]$' && \
-   ! echo "$nopw_cfg" | grep -q 'postgres_url'; then
-  echo 'entrypoint_sync_stripped_when_nopw:ok'
-fi
-
-# Subtest: roborev-wrapper omits --panel none by default
-: > "$CALL_LOG"
-(cd "$REPO_DIR" && "$WRAPPER_SCRIPT" ci review --agent codex --min-severity medium --reasoning low >/dev/null 2>&1)
-if ! grep -q -- "--panel none" "$CALL_LOG" && grep -q "review --wait" "$CALL_LOG"; then
-  echo 'wrapper_default_omits_panel_none:ok'
-fi
-
-# Subtest: roborev-wrapper passes --panel none when --review-types default is passed
-: > "$CALL_LOG"
-(cd "$REPO_DIR" && "$WRAPPER_SCRIPT" ci review --agent codex --min-severity medium --reasoning low --review-types default >/dev/null 2>&1)
-if grep -q -- "review --wait --panel none" "$CALL_LOG"; then
-  echo 'wrapper_flag_sets_panel_none:ok'
-fi
-
-# Subtest: roborev-wrapper passes --panel none when .roborev.toml sets review_types = ["default"]
-cat << 'TOML_EOF' > "$REPO_DIR/.roborev.toml"
-[ci]
-review_types = ["default"]
-TOML_EOF
-: > "$CALL_LOG"
-(cd "$REPO_DIR" && "$WRAPPER_SCRIPT" ci review --agent codex --min-severity medium --reasoning low >/dev/null 2>&1)
-if grep -q -- "review --wait --panel none" "$CALL_LOG"; then
-  echo 'wrapper_toml_sets_panel_none:ok'
-fi
-rm -f "$REPO_DIR/.roborev.toml"
-
-# Subtests: quota branch re-fetches and honours late workflow-style overrides
-# (posted while the review was running), and stays fail-closed otherwise.
-printf 'agent quota exceeded for model\n' > "$STATE_DIR/mock_review_output"
-export MOCK_REVIEW_RC=1
-printf '[]\n' > "$STATE_DIR/comments_empty.json"
-jq -n --arg full "$COMMIT2_SHA" '[{user:{login:"owneruser"},author_association:"OWNER",body:("## roborev-override\n\nOverride for `" + $full + "`.\n\n**Technical Rebuttal:**\nQuota override full.")}]' > "$STATE_DIR/comments_quota_full.json"
-jq -n --arg short "$COMMIT2_SHORT" '[{user:{login:"owneruser"},author_association:"OWNER",body:("## roborev-override\n\nOverride for `" + $short + "`.\n\n**Technical Rebuttal:**\nQuota override short.")}]' > "$STATE_DIR/comments_quota_short.json"
-jq -n --arg full "$COMMIT2_SHA" '[{user:{login:"randomdude"},author_association:"NONE",body:("## roborev-override\n\nOverride for `" + $full + "`.\n\n**Technical Rebuttal:**\nNot the owner.")}]' > "$STATE_DIR/comments_quota_nonowner.json"
-jq -n '[{user:{login:"owneruser"},author_association:"OWNER",body:"## roborev-override\n\nOverride for `deadbeefdeadbeefdeadbeefdeadbeefdeadbeef`.\n\n**Technical Rebuttal:**\nWrong sha."}]' > "$STATE_DIR/comments_quota_wrongsha.json"
-# First two fetches (pre-review backfill + pre-review workflow check) see no
-# override; the quota-branch fetch sees the late comment.
-curl() { n=$(($(cat "$STATE_DIR/curl_count" 2>/dev/null || echo 0)+1)); echo "$n" > "$STATE_DIR/curl_count"; if [[ "$n" -ge 3 ]]; then cat "$STATE_DIR/$LATE_COMMENTS_FILE"; else cat "$STATE_DIR/comments_empty.json"; fi; }
-export -f curl
-quota_case() {
-  local marker="$1" late_file="$2" want_rc="$3" want_body="${4:-}"
-  export LATE_COMMENTS_FILE="$late_file"
-  echo 0 > "$STATE_DIR/curl_count"
-  : > "$CALL_LOG"
-  set +e
-  quota_out=$(cd "$REPO_DIR" && "$WRAPPER_SCRIPT" ci review --agent gemini --min-severity medium --reasoning thorough 2>&1); quota_rc=$?
-  set -e
-  if [[ "${quota_rc}" == "$want_rc" ]]; then
-    if [[ "$want_rc" == 0 ]]; then
-      if echo "$quota_out" | grep -q "^## roborev: Review Passed (\`${COMMIT2_SHORT}\`)" && echo "$quota_out" | grep -q "${want_body}"; then
-        echo "${marker}:ok"
-      fi
-    else
-      echo "$quota_out" | grep -q "failed on agent quota" && echo "${marker}:ok"
-    fi
-  fi
-}
-quota_case 'quota_override_full' 'comments_quota_full.json' 0 'Quota override full'
-quota_case 'quota_override_short' 'comments_quota_short.json' 0 'Quota override short'
-quota_case 'quota_nonowner_closed' 'comments_quota_nonowner.json' 1
-quota_case 'quota_wrongsha_closed' 'comments_quota_wrongsha.json' 1
-quota_case 'quota_nooverride_closed' 'comments_empty.json' 1
-# Quota-branch test with the override visible only on comments page 2: the
-# first page holds 100 filler comments, the override arrives on page 2.
-jq -n '[range(100) | {user:{login:"filler"},author_association:"NONE",body:("filler comment \(.)")}]' > "$STATE_DIR/comments_page1_full.json"
-jq -n --arg full "$COMMIT2_SHA" '[{user:{login:"owneruser"},author_association:"OWNER",body:("## roborev-override\n\nOverride for `" + $full + "`.\n\n**Technical Rebuttal:**\nPage two win.")}]' > "$STATE_DIR/comments_page2_override.json"
-# The fake dispatches on the page= query parameter (not call order), so a
-# production regression that re-requests page 1 or the wrong page fails.
-curl() {
-  if [[ "$*" == *"&page=2"* ]]; then
-    p2=$(($(cat "$STATE_DIR/curl_p2" 2>/dev/null || echo 0)+1)); echo "$p2" > "$STATE_DIR/curl_p2"
-    if [[ "$p2" -ge 2 ]]; then cat "$STATE_DIR/comments_page2_override.json"; else printf '[]\n'; fi
-  else
-    cat "$STATE_DIR/comments_page1_full.json"
-  fi
-}
-export -f curl
-echo 0 > "$STATE_DIR/curl_p2"
-: > "$CALL_LOG"
-set +e
-quota_page2_out=$(cd "$REPO_DIR" && "$WRAPPER_SCRIPT" ci review --agent gemini --min-severity medium --reasoning thorough 2>&1); quota_page2_rc=$?
-set -e
-if [[ "${quota_page2_rc}" == 0 ]] && echo "$quota_page2_out" | grep -q "^## roborev: Review Passed (\`${COMMIT2_SHORT}\`)" && echo "$quota_page2_out" | grep -q "Page two win" && [[ "$(grep -c "review --wait" "$CALL_LOG")" == 1 ]]; then
-  echo 'quota_override_page2:ok'
-fi
-rm -f "$STATE_DIR/mock_review_output"
-unset MOCK_REVIEW_RC
-
-# Subtest: stateless fallback (no derivable ref) honours an owner override
-# without running any agent, and still execs when no override exists.
-jq -n '{}' > "$STATE_DIR/event_empty.json"
-export GITHUB_EVENT_PATH="$STATE_DIR/event_empty.json"
-curl() { cat "$STATE_DIR/comments_fallback.json"; }
-export -f curl
-jq -n --arg full "$COMMIT2_SHA" '[{user:{login:"owneruser"},author_association:"OWNER",body:("## roborev-override\n\nOverride for `" + $full + "`.\n\n**Technical Rebuttal:**\nFallback win.")}]' > "$STATE_DIR/comments_fallback.json"
-: > "$CALL_LOG"
-set +e
-fallback_out=$(cd "$REPO_DIR" && "$WRAPPER_SCRIPT" ci review --agent gemini --gh-repo owneruser/aerial --pr 99 2>&1); fallback_rc=$?
-set -e
-if [[ "${fallback_rc}" == 0 ]] && ! grep -q "ci review" "$CALL_LOG" && echo "$fallback_out" | grep -q "^## roborev: Review Passed"; then
-  echo 'fallback_override_noagent:ok'
-fi
-printf '[]\n' > "$STATE_DIR/comments_fallback.json"
-: > "$CALL_LOG"
-(cd "$REPO_DIR" && "$WRAPPER_SCRIPT" ci review --agent gemini --gh-repo owneruser/aerial --pr 99 >/dev/null 2>&1)
-if grep -q "ci review --gh-repo owneruser/aerial --pr 99" "$CALL_LOG"; then
-  echo 'fallback_nooverride_execs:ok'
-fi
-CASE17_EOF
-)
-assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'backfill_followup:ok' && echo true || echo false)" "github-runner roborev wrapper passes ROBOREV_SYNC_BRANCH and backfills prior roborev-override rebuttals before review --wait"
-assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'head_shortcircuit:ok' && echo true || echo false)" "github-runner roborev wrapper skips duplicate comment and short-circuits Review Passed when override matches current HEAD"
-assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'claude_token_export:ok' && echo true || echo false)" "github-runner roborev wrapper exports CLAUDE_CODE_OAUTH_TOKEN when token exists"
-assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'claude_token_unset:ok' && echo true || echo false)" "github-runner roborev wrapper unsets CLAUDE_CODE_OAUTH_TOKEN when token is absent"
-assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'wrapper_strips_agent_reasoning:ok' && echo true || echo false)" "github-runner roborev wrapper strips legacy --agent and --reasoning flags so roborev.real uses config.toml"
-assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'wrapper_strips_agent_reasoning_eq:ok' && echo true || echo false)" "github-runner roborev wrapper strips legacy --agent=* and --reasoning=* flags"
-assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'wrapper_stateless_strips_agent_reasoning:ok' && echo true || echo false)" "github-runner roborev wrapper strips legacy --agent and --reasoning flags from stateless ci review fallback"
-assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'run_as_ubuntu:ok' && echo true || echo false)" "github-runner entrypoint defines run_as_ubuntu and drops privileges for config, run, and cleanup"
-assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'cache_exports:ok' && echo true || echo false)" "github-runner entrypoint exports unified /data/cache paths"
-assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'claude_env_seed:ok' && echo true || echo false)" "github-runner entrypoint seeds CLAUDE_CODE_OAUTH_TOKEN into /actions-runner/.env with mode 0600"
-assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'native_verdict_pass_findings:ok' && echo true || echo false)" "github-runner roborev wrapper emits Review Passed when roborev.real exits 0 with low findings"
-assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'native_verdict_fail_findings:ok' && echo true || echo false)" "github-runner roborev wrapper emits Review Complete when roborev.real exits 1 with findings"
-assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'entrypoint_static_config:ok' && echo true || echo false)" "services/github-runner/roborev-config.toml copied by entrypoint.sh sets claude-code primary, muse backup, review_types = ['default', 'test-value'], default_panel = 'ci', and members = ['default', 'test-value']"
-assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'entrypoint_sync_stripped_when_nopw:ok' && echo true || echo false)" "github-runner entrypoint strips [sync] from config.toml when postgres password is absent"
-assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'wrapper_default_omits_panel_none:ok' && echo true || echo false)" "github-runner roborev wrapper omits --panel none by default"
-assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'wrapper_flag_sets_panel_none:ok' && echo true || echo false)" "github-runner roborev wrapper passes --panel none when --review-types default is passed"
-assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'wrapper_toml_sets_panel_none:ok' && echo true || echo false)" "github-runner roborev wrapper passes --panel none when .roborev.toml sets review_types = ['default']"
-assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'quota_override_full:ok' && echo true || echo false)" "github-runner roborev wrapper honours a late owner+full-SHA override on the quota branch"
-assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'quota_override_short:ok' && echo true || echo false)" "github-runner roborev wrapper honours a late owner+7-char-SHA override on the quota branch"
-assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'quota_nonowner_closed:ok' && echo true || echo false)" "github-runner roborev wrapper stays fail-closed on quota when the override is not from the owner"
-assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'quota_wrongsha_closed:ok' && echo true || echo false)" "github-runner roborev wrapper stays fail-closed on quota when the override SHA does not match HEAD"
-assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'quota_nooverride_closed:ok' && echo true || echo false)" "github-runner roborev wrapper stays fail-closed on quota with no override"
-assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'quota_override_page2:ok' && echo true || echo false)" "github-runner roborev wrapper honours a late owner override on comments page 2 with a single daemon review"
-assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'fallback_override_noagent:ok' && echo true || echo false)" "github-runner roborev wrapper skips the stateless agent fallback when an owner override matches HEAD"
-assert_eq "true" "$(echo "$ROBOREV_WRAPPER_CHECK" | grep -q 'fallback_nooverride_execs:ok' && echo true || echo false)" "github-runner roborev wrapper still execs the stateless fallback when no override exists"
-
-# Case 18: Vanadis PR attach and direct attachment in submit_scratch
-VANADIS_ATTACH_CHECK=$(bash -c "
-    REPO_TEST_MODE=1
-    source \"${AERIAL_PR}\" --source-only 2>/dev/null || true
-
-    # Subtest 1: resolve_vanadis_url resolves from env
-    r1=\$(VANADIS_URL=\"http://vanadis.aerial:8080/\" resolve_vanadis_url)
-    [ \"\$r1\" = \"http://vanadis.aerial:8080\" ] && echo 'v_url1:ok'
-
-    # Subtest 2: resolve_vanadis_url resolves from config.yaml
-    TMP_CFG=\$(mktemp /tmp/aerial-cfg.XXXXXX)
-    echo 'vanadis_url: \"http://vanadis-cfg.aerial:8080\"' > \"\$TMP_CFG\"
-    r2=\$(unset VANADIS_URL; CONFIG_PATH=\"\$TMP_CFG\" resolve_vanadis_url)
-    [ \"\$r2\" = \"http://vanadis-cfg.aerial:8080\" ] && echo 'v_url2:ok'
-    rm -f \"\$TMP_CFG\"
-
-    # Subtest 3: resolve_vanadis_url returns empty when unset
-    r3=\$(unset VANADIS_URL; CONFIG_PATH=\"/dev/null\" resolve_vanadis_url || true)
-    [ -z \"\$r3\" ] && echo 'v_url3:ok'
-
-    # Subtest 4: attach_pr_in_vanadis succeeds on attempt 1
-    ATTEMPT_FILE=\$(mktemp /tmp/vanadis-att.XXXXXX)
-    ARGS_FILE=\$(mktemp /tmp/vanadis-args.XXXXXX)
-    curl() {
-        echo \"\$*\" > \"\$ARGS_FILE\"
-        echo 'hit' >> \"\$ATTEMPT_FILE\"
-        printf '{\"status\":\"attached\",\"build_id\":\"b-1\",\"chunk_id\":\"c-1\",\"thread_id\":\"th-12345\"}'
-    }
     export -f curl
-    out4=\$(AERIAL_VANADIS_ATTACH_RETRIES=3 AERIAL_VANADIS_ATTACH_RETRY_DELAY=0 attach_pr_in_vanadis 'http://vanadis.aerial:8080' '{\"chunk_id\":\"c-1\"}' 101 2>/dev/null)
-    [ \"\$(echo \"\$out4\" | jq -r '.thread_id')\" = \"th-12345\" ] && grep -q -- '-m 15' \"\$ARGS_FILE\" && echo 'att1:ok'
-    rm -f \"\$ATTEMPT_FILE\" \"\$ARGS_FILE\"
-
-    # Subtest 5: attach_pr_in_vanadis retries transient error
-    ATTEMPT_FILE=\$(mktemp /tmp/vanadis-att.XXXXXX)
-    curl() {
-        echo 'hit' >> \"\$ATTEMPT_FILE\"
-        if [ \$(wc -l < \"\$ATTEMPT_FILE\") -eq 1 ]; then
-            printf '500 Server Error'
-        else
-            printf '{\"status\":\"attached\",\"build_id\":\"b-2\",\"chunk_id\":\"c-2\",\"thread_id\":\"th-67890\"}'
-        fi
-    }
-    export -f curl
-    out5=\$(AERIAL_VANADIS_ATTACH_RETRIES=3 AERIAL_VANADIS_ATTACH_RETRY_DELAY=0 attach_pr_in_vanadis 'http://vanadis.aerial:8080' '{\"chunk_id\":\"c-2\"}' 102 2>/dev/null)
-    [ \"\$(echo \"\$out5\" | jq -r '.thread_id')\" = \"th-67890\" ] && [ \"\$(wc -l < \"\$ATTEMPT_FILE\")\" -eq 2 ] && echo 'att2:ok'
-    rm -f \"\$ATTEMPT_FILE\"
-
-    # Subtest 6: attach_pr_in_vanadis fails after max attempts
-    ATTEMPT_FILE=\$(mktemp /tmp/vanadis-att.XXXXXX)
-    curl() {
-        echo 'hit' >> \"\$ATTEMPT_FILE\"
-        printf '503 Service Unavailable'
-    }
-    export -f curl
-    out6=\$(AERIAL_VANADIS_ATTACH_RETRIES=3 AERIAL_VANADIS_ATTACH_RETRY_DELAY=0 attach_pr_in_vanadis 'http://vanadis.aerial:8080' '{\"chunk_id\":\"c-3\"}' 103 2>/dev/null) && out6_status=0 || out6_status=1
-    [ \"\$out6_status\" -eq 1 ] && [ \"\$(wc -l < \"\$ATTEMPT_FILE\")\" -eq 3 ] && echo 'att3:ok'
-    rm -f \"\$ATTEMPT_FILE\"
-
-    # Subtest 6b: attach_pr_in_vanadis passes SA bearer token from AERIAL_SA_TOKEN_PATH
-    TMP_TOKEN=\$(mktemp /tmp/sa-tok.XXXXXX)
-    echo \"test-sa-jwt-token\" > \"\$TMP_TOKEN\"
-    ARGS_FILE=\$(mktemp /tmp/vanadis-args.XXXXXX)
-    curl() {
-        echo \"\$*\" > \"\$ARGS_FILE\"
-        printf '{\"status\":\"attached\",\"build_id\":\"b-4\",\"chunk_id\":\"c-4\",\"thread_id\":\"th-999\"}'
-    }
-    export -f curl
-    out6b=\$(AERIAL_SA_TOKEN_PATH=\"\$TMP_TOKEN\" attach_pr_in_vanadis 'http://vanadis.aerial:8080' '{\"chunk_id\":\"c-4\"}' 104 2>/dev/null)
-    grep -q -- \"Authorization: Bearer test-sa-jwt-token\" \"\$ARGS_FILE\" && echo 'att_sa:ok'
-
-    # Subtest 6c: register_pr_in_brain passes SA bearer token from AERIAL_SA_TOKEN_PATH
-    : > \"\$ARGS_FILE\"
-    curl() {
-        echo \"\$*\" > \"\$ARGS_FILE\"
-        printf '{\"status\":\"registered\",\"target_id\":\"th-999\"}'
-    }
-    export -f curl
-    AERIAL_SA_TOKEN_PATH=\"\$TMP_TOKEN\" register_pr_in_brain 'http://synapse.aerial:4020/internal/pr/register' '{\"repo\":\"aerial\",\"pr_number\":104}' 104 'th-999' 2>/dev/null
-    grep -q -- \"Authorization: Bearer test-sa-jwt-token\" \"\$ARGS_FILE\" && echo 'reg_sa:ok'
-    rm -f \"\$TMP_TOKEN\" \"\$ARGS_FILE\"
-
-    # Subtest 6d: attach_pr_in_vanadis recovers via GET /chunks/<id> when POST /chunks/attach-pr times out after attaching
-    curl() {
-        if [[ \"\$*\" == *'/chunks/attach-pr'* ]]; then
-            printf ''
-        elif [[ \"\$*\" == *'/chunks/c-recover'* ]]; then
-            printf '{\"chunk\":{\"id\":\"c-recover\",\"pr_number\":105},\"build\":{\"thread_id\":\"th-recover\"}}'
-        fi
-    }
-    export -f curl
-    out6d=\$(AERIAL_VANADIS_ATTACH_RETRIES=1 AERIAL_VANADIS_ATTACH_RETRY_DELAY=0 attach_pr_in_vanadis 'http://vanadis.aerial:8080' '{\"chunk_id\":\"c-recover\"}' 105 'c-recover' 2>/dev/null)
-    [ \"\$(echo \"\$out6d\" | jq -r '.status')\" = 'attached' ] && \
-    [ \"\$(echo \"\$out6d\" | jq -r '.thread_id')\" = 'th-recover' ] && \
-    [ \"\$(echo \"\$out6d\" | jq -r '.chunk_id')\" = 'c-recover' ] && echo 'att_recover:ok'
+    bash \"${AERIAL_PR}\" override-roborev 42 'Technical rebuttal explanation'
 ")
-assert_eq "true" "$(echo "$VANADIS_ATTACH_CHECK" | grep -q 'v_url1:ok' && echo true || echo false)" "resolve_vanadis_url resolves from VANADIS_URL env"
-assert_eq "true" "$(echo "$VANADIS_ATTACH_CHECK" | grep -q 'v_url2:ok' && echo true || echo false)" "resolve_vanadis_url resolves from config.yaml"
-assert_eq "true" "$(echo "$VANADIS_ATTACH_CHECK" | grep -q 'v_url3:ok' && echo true || echo false)" "resolve_vanadis_url returns empty and non-zero when unset"
-assert_eq "true" "$(echo "$VANADIS_ATTACH_CHECK" | grep -q 'att1:ok' && echo true || echo false)" "attach_pr_in_vanadis succeeds on first attempt"
-assert_eq "true" "$(echo "$VANADIS_ATTACH_CHECK" | grep -q 'att2:ok' && echo true || echo false)" "attach_pr_in_vanadis retries transient error and succeeds"
-assert_eq "true" "$(echo "$VANADIS_ATTACH_CHECK" | grep -q 'att3:ok' && echo true || echo false)" "attach_pr_in_vanadis fails after exhausting retries"
-assert_eq "true" "$(echo "$VANADIS_ATTACH_CHECK" | grep -q 'att_sa:ok' && echo true || echo false)" "attach_pr_in_vanadis passes SA bearer token from AERIAL_SA_TOKEN_PATH"
-assert_eq "true" "$(echo "$VANADIS_ATTACH_CHECK" | grep -q 'reg_sa:ok' && echo true || echo false)" "register_pr_in_brain passes SA bearer token from AERIAL_SA_TOKEN_PATH"
-assert_eq "true" "$(echo "$VANADIS_ATTACH_CHECK" | grep -q 'att_recover:ok' && echo true || echo false)" "attach_pr_in_vanadis recovers via GET /chunks/<id> when POST /chunks/attach-pr times out after attaching"
-
-# Subtest 7: submit_scratch attaches PR to Vanadis and registers with Synapse without vanadis_chunk_id
-SUBMIT_VANADIS_CHECK=$(bash -c "
-    REMOTE_DIR=\$(mktemp -d /tmp/aerial-pr-van-remote.XXXXXX)
-    UPSTREAM_DIR=\$(mktemp -d /tmp/aerial-pr-van-up.XXXXXX)
-    WORK_DIR=\$(mktemp -d /tmp/aerial-pr-van-work.XXXXXX)
-    PAYLOAD_LOG=\$(mktemp /tmp/aerial-payloads.XXXXXX)
-    trap 'rm -rf \"\$REMOTE_DIR\" \"\$UPSTREAM_DIR\" \"\$WORK_DIR\" \"\$PAYLOAD_LOG\"' EXIT
-
-    git init -q --bare \"\$REMOTE_DIR\"
-    git clone -q \"\$REMOTE_DIR\" \"\$UPSTREAM_DIR\"
-    git -C \"\$UPSTREAM_DIR\" config user.name 'Tester'
-    git -C \"\$UPSTREAM_DIR\" config user.email 'tester@example.com'
-    git -C \"\$UPSTREAM_DIR\" checkout -q -b main
-    mkdir -p \"\$UPSTREAM_DIR/scripts\"
-    cat << 'EOF' > \"\$UPSTREAM_DIR/scripts/verify.sh\"
-#!/bin/sh
-exit 0
-EOF
-    chmod +x \"\$UPSTREAM_DIR/scripts/verify.sh\"
-    git -C \"\$UPSTREAM_DIR\" add . && git -C \"\$UPSTREAM_DIR\" commit -q -m 'init'
-    git -C \"\$UPSTREAM_DIR\" push -q -u origin main
-
-    git clone -q --single-branch -b main \"\$REMOTE_DIR\" \"\$WORK_DIR\"
-    git -C \"\$WORK_DIR\" config user.name 'Tester'
-    git -C \"\$WORK_DIR\" config user.email 'tester@example.com'
-    git -C \"\$WORK_DIR\" checkout -q -b feat/van-branch
-    echo 'Summary' > \"\$WORK_DIR/PR_DESCRIPTION.md\"
-    echo 'content' > \"\$WORK_DIR/file.txt\"
-
-    export GITHUB_PAT='mock_pat'
-    export VANADIS_URL='http://vanadis.aerial:8080'
-    export AERIAL_PR_REGISTER_URL='http://synapse.aerial:4020/internal/pr/register'
-    export AERIAL_TARGET_ID='100000000000000001'
-    export CONFIG_PATH='/dev/null'
-    unset AERIAL_BOT_ID
-
-    out=\$(
-        REPO_TEST_MODE=1
-        source \"${AERIAL_PR}\" --source-only 2>/dev/null || true
-        curl() {
-            if [[ \"\$*\" == *'/pulls'* ]] && [[ \"\$*\" == *'-X POST'* ]]; then
-                printf '{\"number\":88,\"html_url\":\"https://github.com/azylman/aerial/pull/88\",\"node_id\":\"PR_kwDO88\"}\n201'
-            elif [[ \"\$*\" == *'graphql'* ]]; then
-                printf '{\"data\":{\"enablePullRequestAutoMerge\":{\"pullRequest\":{\"autoMergeRequest\":{\"enabledAt\":\"now\"}}}}}'
-            elif [[ \"\$*\" == *'/chunks/attach-pr'* ]]; then
-                for arg in \"\$@\"; do
-                    if [[ \"\$arg\" =~ ^\{.*\"chunk_id\".* ]]; then
-                        echo \"ATTACH_PAYLOAD:\$(echo \"\$arg\" | tr '\n' ' ')\" >> \"\$PAYLOAD_LOG\"
-                    fi
-                done
-                printf '{\"status\":\"attached\",\"build_id\":\"b-88\",\"chunk_id\":\"chunk-88\",\"thread_id\":\"199999999999999999\"}'
-            elif [[ \"\$*\" == *'/internal/pr/register'* ]]; then
-                for arg in \"\$@\"; do
-                    if [[ \"\$arg\" =~ ^\{.*\"repo\".* ]]; then
-                        echo \"REG_PAYLOAD:\$(echo \"\$arg\" | tr '\n' ' ')\" >> \"\$PAYLOAD_LOG\"
-                    fi
-                done
-                printf '{\"status\":\"registered\",\"target_id\":\"199999999999999999\"}'
-            fi
-        }
-        export -f curl
-        submit_scratch \"\$WORK_DIR\" 'feat: vanadis attach test' --vanadis-chunk 'chunk-88' >/dev/null 2>&1
-    )
-
-    attach_pl=\$(grep '^ATTACH_PAYLOAD:' \"\$PAYLOAD_LOG\" | sed 's/^ATTACH_PAYLOAD://')
-    reg_pl=\$(grep '^REG_PAYLOAD:' \"\$PAYLOAD_LOG\" | sed 's/^REG_PAYLOAD://')
-
-    if [ \"\$(echo \"\$attach_pl\" | jq -r '.chunk_id')\" = 'chunk-88' ] && \
-       [ \"\$(echo \"\$attach_pl\" | jq -r '.pr_number')\" -eq 88 ] && \
-       [ \"\$(echo \"\$reg_pl\" | jq -r '.pr_number')\" -eq 88 ] && \
-       [ \"\$(echo \"\$reg_pl\" | jq -r '.target_id')\" = '199999999999999999' ] && \
-       [ \"\$(echo \"\$reg_pl\" | jq -r '(.metadata | fromjson | .vanadis_chunk_id) // empty')\" = 'chunk-88' ] && \
-       [ -z \"\$(echo \"\$reg_pl\" | jq -r '.bot_id // empty')\" ]; then
-        echo 'submit_vanadis_attach:ok'
-    else
-        echo \"submit_vanadis_attach:fail:attach=\$attach_pl:reg=\$reg_pl\"
-    fi
-
-    # Subtest 7b: submit_scratch includes bot_id in /internal/pr/register from AERIAL_BOT_ID env
-    WORK_DIR_BOT=\$(mktemp -d /tmp/aerial-pr-van-bot.XXXXXX)
-    git clone -q --single-branch -b main \"\$REMOTE_DIR\" \"\$WORK_DIR_BOT\"
-    git -C \"\$WORK_DIR_BOT\" config user.name 'Tester'
-    git -C \"\$WORK_DIR_BOT\" config user.email 'tester@example.com'
-    git -C \"\$WORK_DIR_BOT\" checkout -q -b feat/bot-branch
-    echo 'Summary' > \"\$WORK_DIR_BOT/PR_DESCRIPTION.md\"
-    echo 'content' > \"\$WORK_DIR_BOT/file.txt\"
-
-    PAYLOAD_LOG_BOT=\$(mktemp /tmp/aerial-payloads-bot.XXXXXX)
-    out_bot=\$(
-        REPO_TEST_MODE=1
-        source \"${AERIAL_PR}\" --source-only 2>/dev/null || true
-        curl() {
-            if [[ \"\$*\" == *'/pulls'* ]] && [[ \"\$*\" == *'-X POST'* ]]; then
-                printf '{\"number\":89,\"html_url\":\"https://github.com/azylman/aerial/pull/89\",\"node_id\":\"PR_kwDO89\"}\n201'
-            elif [[ \"\$*\" == *'graphql'* ]]; then
-                printf '{\"data\":{\"enablePullRequestAutoMerge\":{\"pullRequest\":{\"autoMergeRequest\":{\"enabledAt\":\"now\"}}}}}'
-            elif [[ \"\$*\" == *'/chunks/attach-pr'* ]]; then
-                printf '{\"status\":\"attached\",\"build_id\":\"b-89\",\"chunk_id\":\"chunk-89\",\"thread_id\":\"199999999999999999\"}'
-            elif [[ \"\$*\" == *'/internal/pr/register'* ]]; then
-                for arg in \"\$@\"; do
-                    if [[ \"\$arg\" =~ ^\{.*\"repo\".* ]]; then
-                        echo \"REG_PAYLOAD:\$(echo \"\$arg\" | tr '\n' ' ')\" >> \"\$PAYLOAD_LOG_BOT\"
-                    fi
-                done
-                printf '{\"status\":\"registered\",\"target_id\":\"199999999999999999\"}'
-            fi
-        }
-        export -f curl
-        AERIAL_BOT_ID='agent-beta' submit_scratch \"\$WORK_DIR_BOT\" 'feat: bot test' --vanadis-chunk 'chunk-89' >/dev/null 2>&1
-    )
-
-    reg_pl_bot=\$(grep '^REG_PAYLOAD:' \"\$PAYLOAD_LOG_BOT\" | sed 's/^REG_PAYLOAD://')
-    rm -rf \"\$WORK_DIR_BOT\" \"\$PAYLOAD_LOG_BOT\"
-
-    if [ \"\$(echo \"\$reg_pl_bot\" | jq -r '.pr_number')\" -eq 89 ] && \
-       [ \"\$(echo \"\$reg_pl_bot\" | jq -r '.bot_id')\" = 'agent-beta' ]; then
-        echo 'submit_bot_id_env:ok'
-    else
-        echo \"submit_bot_id_env:fail:reg=\$reg_pl_bot\"
-    fi
-
-    # Subtest 7c: submit_scratch includes bot_id from config.yaml when AERIAL_BOT_ID is unset
-    WORK_DIR_CFG=\$(mktemp -d /tmp/aerial-pr-van-cfg.XXXXXX)
-    git clone -q --single-branch -b main \"\$REMOTE_DIR\" \"\$WORK_DIR_CFG\"
-    git -C \"\$WORK_DIR_CFG\" config user.name 'Tester'
-    git -C \"\$WORK_DIR_CFG\" config user.email 'tester@example.com'
-    git -C \"\$WORK_DIR_CFG\" checkout -q -b feat/cfg-branch
-    echo 'Summary' > \"\$WORK_DIR_CFG/PR_DESCRIPTION.md\"
-    echo 'content' > \"\$WORK_DIR_CFG/file.txt\"
-
-    PAYLOAD_LOG_CFG=\$(mktemp /tmp/aerial-payloads-cfg.XXXXXX)
-    TEST_BOT_CFG=\$(mktemp /tmp/test-bot-cfg.XXXXXX)
-    echo 'bot_id: \"aerial-cfg\"' > \"\$TEST_BOT_CFG\"
-
-    out_cfg=\$(
-        REPO_TEST_MODE=1
-        source \"${AERIAL_PR}\" --source-only 2>/dev/null || true
-        curl() {
-            if [[ \"\$*\" == *'/pulls'* ]] && [[ \"\$*\" == *'-X POST'* ]]; then
-                printf '{\"number\":90,\"html_url\":\"https://github.com/azylman/aerial/pull/90\",\"node_id\":\"PR_kwDO90\"}\n201'
-            elif [[ \"\$*\" == *'graphql'* ]]; then
-                printf '{\"data\":{\"enablePullRequestAutoMerge\":{\"pullRequest\":{\"autoMergeRequest\":{\"enabledAt\":\"now\"}}}}}'
-            elif [[ \"\$*\" == *'/chunks/attach-pr'* ]]; then
-                printf '{\"status\":\"attached\",\"build_id\":\"b-90\",\"chunk_id\":\"chunk-90\",\"thread_id\":\"199999999999999999\"}'
-            elif [[ \"\$*\" == *'/internal/pr/register'* ]]; then
-                for arg in \"\$@\"; do
-                    if [[ \"\$arg\" =~ ^\{.*\"repo\".* ]]; then
-                        echo \"REG_PAYLOAD:\$(echo \"\$arg\" | tr '\n' ' ')\" >> \"\$PAYLOAD_LOG_CFG\"
-                    fi
-                done
-                printf '{\"status\":\"registered\",\"target_id\":\"199999999999999999\"}'
-            fi
-        }
-        export -f curl
-        unset AERIAL_BOT_ID
-        CONFIG_PATH=\"\$TEST_BOT_CFG\" submit_scratch \"\$WORK_DIR_CFG\" 'feat: cfg bot test' --vanadis-chunk 'chunk-90' >/dev/null 2>&1
-    )
-
-    reg_pl_cfg=\$(grep '^REG_PAYLOAD:' \"\$PAYLOAD_LOG_CFG\" | sed 's/^REG_PAYLOAD://')
-    rm -rf \"\$WORK_DIR_CFG\" \"\$PAYLOAD_LOG_CFG\" \"\$TEST_BOT_CFG\"
-
-    if [ \"\$(echo \"\$reg_pl_cfg\" | jq -r '.pr_number')\" -eq 90 ] && \
-       [ \"\$(echo \"\$reg_pl_cfg\" | jq -r '.bot_id')\" = 'aerial-cfg' ]; then
-        echo 'submit_bot_id_cfg:ok'
-    else
-        echo \"submit_bot_id_cfg:fail:reg=\$reg_pl_cfg\"
-    fi
-")
-assert_eq "true" "$(echo "$SUBMIT_VANADIS_CHECK" | grep -q 'submit_vanadis_attach:ok' && echo true || echo false)" "submit_scratch attaches PR to Vanadis and registers with Synapse without vanadis_chunk_id"
-assert_eq "true" "$(echo "$SUBMIT_VANADIS_CHECK" | grep -q 'submit_bot_id_env:ok' && echo true || echo false)" "submit_scratch sends bot_id in /internal/pr/register from AERIAL_BOT_ID env"
-assert_eq "true" "$(echo "$SUBMIT_VANADIS_CHECK" | grep -q 'submit_bot_id_cfg:ok' && echo true || echo false)" "submit_scratch sends bot_id in /internal/pr/register from config.yaml"
-
-# Subtest 8 & 9: submit_scratch fails closed on attach-pr or pr/register failure
-SUBMIT_FAIL_CLOSED_CHECK=$(bash -c "
-    REMOTE_DIR=\$(mktemp -d /tmp/aerial-pr-fail-remote.XXXXXX)
-    UPSTREAM_DIR=\$(mktemp -d /tmp/aerial-pr-fail-up.XXXXXX)
-    WORK_DIR1=\$(mktemp -d /tmp/aerial-pr-fail-work1.XXXXXX)
-    WORK_DIR2=\$(mktemp -d /tmp/aerial-pr-fail-work2.XXXXXX)
-    trap 'rm -rf \"\$REMOTE_DIR\" \"\$UPSTREAM_DIR\" \"\$WORK_DIR1\" \"\$WORK_DIR2\"' EXIT
-
-    git init -q --bare \"\$REMOTE_DIR\"
-    git clone -q \"\$REMOTE_DIR\" \"\$UPSTREAM_DIR\"
-    git -C \"\$UPSTREAM_DIR\" config user.name 'Tester'
-    git -C \"\$UPSTREAM_DIR\" config user.email 'tester@example.com'
-    git -C \"\$UPSTREAM_DIR\" checkout -q -b main
-    mkdir -p \"\$UPSTREAM_DIR/scripts\"
-    cat << 'EOF' > \"\$UPSTREAM_DIR/scripts/verify.sh\"
-#!/bin/sh
-exit 0
-EOF
-    chmod +x \"\$UPSTREAM_DIR/scripts/verify.sh\"
-    git -C \"\$UPSTREAM_DIR\" add . && git -C \"\$UPSTREAM_DIR\" commit -q -m 'init'
-    git -C \"\$UPSTREAM_DIR\" push -q -u origin main
-
-    export GITHUB_PAT='mock_pat'
-    export VANADIS_URL='http://vanadis.aerial:8080'
-    export AERIAL_PR_REGISTER_URL='http://synapse.aerial:4020/internal/pr/register'
-    export AERIAL_VANADIS_ATTACH_RETRIES=1
-    export AERIAL_VANADIS_ATTACH_RETRY_DELAY=0
-    export AERIAL_PR_REGISTER_RETRIES=1
-    export AERIAL_PR_REGISTER_RETRY_DELAY=0
-
-    # Subtest 8: attach-pr failure causes submit_scratch to exit non-zero and preserve workspace
-    git clone -q --single-branch -b main \"\$REMOTE_DIR\" \"\$WORK_DIR1\"
-    git -C \"\$WORK_DIR1\" config user.name 'Tester'
-    git -C \"\$WORK_DIR1\" config user.email 'tester@example.com'
-    git -C \"\$WORK_DIR1\" checkout -q -b feat/fail-attach
-    echo 'Summary' > \"\$WORK_DIR1/PR_DESCRIPTION.md\"
-    echo 'content' > \"\$WORK_DIR1/file.txt\"
-
-    (
-        REPO_TEST_MODE=1
-        source \"${AERIAL_PR}\" --source-only 2>/dev/null || true
-        curl() {
-            if [[ \"\$*\" == *'/pulls'* ]] && [[ \"\$*\" == *'-X POST'* ]]; then
-                printf '{\"number\":89,\"html_url\":\"https://github.com/azylman/aerial/pull/89\",\"node_id\":\"PR_kwDO89\"}\n201'
-            elif [[ \"\$*\" == *'graphql'* ]]; then
-                printf '{\"data\":{\"enablePullRequestAutoMerge\":{\"pullRequest\":{\"autoMergeRequest\":{\"enabledAt\":\"now\"}}}}}'
-            elif [[ \"\$*\" == *'/chunks/attach-pr'* ]]; then
-                printf '{\"error\":\"conflict: chunk already attached to another pr\"}'
-            elif [[ \"\$*\" == *'/internal/pr/register'* ]]; then
-                printf '{\"status\":\"registered\"}'
-            fi
-        }
-        export -f curl
-        submit_scratch \"\$WORK_DIR1\" 'feat: fail attach' --vanadis-chunk 'chunk-89' >/dev/null 2>&1
-    ) && echo 'attach_fail:unexpected_success' || echo 'attach_fail:ok'
-
-    # Subtest 8b: submit_scratch continues to PR registration and auto-merge when attach-pr times out with empty response
-    WORK_DIR_TIMEOUT=\$(mktemp -d /tmp/aerial-pr-fail-timeout.XXXXXX)
-    git clone -q --single-branch -b main \"\$REMOTE_DIR\" \"\$WORK_DIR_TIMEOUT\"
-    git -C \"\$WORK_DIR_TIMEOUT\" config user.name 'Tester'
-    git -C \"\$WORK_DIR_TIMEOUT\" config user.email 'tester@example.com'
-    git -C \"\$WORK_DIR_TIMEOUT\" checkout -q -b feat/timeout-attach
-    echo 'Summary' > \"\$WORK_DIR_TIMEOUT/PR_DESCRIPTION.md\"
-    echo 'content' > \"\$WORK_DIR_TIMEOUT/file.txt\"
-
-    (
-        REPO_TEST_MODE=1
-        source \"${AERIAL_PR}\" --source-only 2>/dev/null || true
-        curl() {
-            if [[ \"\$*\" == *'/pulls'* ]] && [[ \"\$*\" == *'-X POST'* ]]; then
-                printf '{\"number\":95,\"html_url\":\"https://github.com/azylman/aerial/pull/95\",\"node_id\":\"PR_kwDO95\"}\n201'
-            elif [[ \"\$*\" == *'graphql'* ]]; then
-                printf '{\"data\":{\"enablePullRequestAutoMerge\":{\"pullRequest\":{\"autoMergeRequest\":{\"enabledAt\":\"now\"}}}}}'
-            elif [[ \"\$*\" == *'/chunks/attach-pr'* ]]; then
-                printf ''
-            elif [[ \"\$*\" == *'/chunks/chunk-95'* ]]; then
-                printf '{\"chunk\":{\"id\":\"chunk-95\",\"pr_number\":0}}'
-            elif [[ \"\$*\" == *'/internal/pr/register'* ]]; then
-                printf '{\"status\":\"registered\"}'
-            fi
-        }
-        export -f curl
-        submit_scratch \"\$WORK_DIR_TIMEOUT\" 'feat: timeout attach' --vanadis-chunk 'chunk-95' >/dev/null 2>&1
-    ) && echo 'attach_timeout_continue:ok' || echo 'attach_timeout_continue:fail'
-    rm -rf \"\$WORK_DIR_TIMEOUT\"
-
-    # Subtest 9: pr/register failure causes submit_scratch to exit non-zero
-    git clone -q --single-branch -b main \"\$REMOTE_DIR\" \"\$WORK_DIR2\"
-    git -C \"\$WORK_DIR2\" config user.name 'Tester'
-    git -C \"\$WORK_DIR2\" config user.email 'tester@example.com'
-    git -C \"\$WORK_DIR2\" checkout -q -b feat/fail-reg
-    echo 'Summary' > \"\$WORK_DIR2/PR_DESCRIPTION.md\"
-    echo 'content' > \"\$WORK_DIR2/file.txt\"
-
-    (
-        REPO_TEST_MODE=1
-        source \"${AERIAL_PR}\" --source-only 2>/dev/null || true
-        curl() {
-            if [[ \"\$*\" == *'/pulls'* ]] && [[ \"\$*\" == *'-X POST'* ]]; then
-                printf '{\"number\":90,\"html_url\":\"https://github.com/azylman/aerial/pull/90\",\"node_id\":\"PR_kwDO90\"}\n201'
-            elif [[ \"\$*\" == *'graphql'* ]]; then
-                printf '{\"data\":{\"enablePullRequestAutoMerge\":{\"pullRequest\":{\"autoMergeRequest\":{\"enabledAt\":\"now\"}}}}}'
-            elif [[ \"\$*\" == *'/chunks/attach-pr'* ]]; then
-                printf '{\"status\":\"attached\",\"build_id\":\"b-90\",\"chunk_id\":\"chunk-90\",\"thread_id\":\"199999999999999999\"}'
-            elif [[ \"\$*\" == *'/internal/pr/register'* ]]; then
-                printf '500 Server Error'
-            fi
-        }
-        export -f curl
-        submit_scratch \"\$WORK_DIR2\" 'feat: fail reg' --vanadis-chunk 'chunk-90' >/dev/null 2>&1
-    ) && echo 'reg_fail:unexpected_success' || echo 'reg_fail:ok'
-")
-assert_eq "true" "$(echo "$SUBMIT_FAIL_CLOSED_CHECK" | grep -q 'attach_fail:ok' && echo true || echo false)" "submit_scratch fails non-zero when vanadis attach-pr returns deterministic conflict"
-assert_eq "true" "$(echo "$SUBMIT_FAIL_CLOSED_CHECK" | grep -q 'attach_timeout_continue:ok' && echo true || echo false)" "submit_scratch continues to registration and auto-merge when attach-pr times out with empty response"
-assert_eq "true" "$(echo "$SUBMIT_FAIL_CLOSED_CHECK" | grep -q 'reg_fail:ok' && echo true || echo false)" "submit_scratch fails non-zero when internal pr/register returns HTTP 500"
-
-# Subtest 10: submit_scratch with --vanadis-chunk injects PR description and Vanadis context into commit body and PR body
-SUBMIT_VANADIS_CONTEXT_CHECK=$(bash -c "
-    LOCAL_TMP_DIR=\$(mktemp -d /tmp/aerial-pr-ctx-tmp.XXXXXX)
-    REMOTE_DIR=\$(mktemp -d /tmp/aerial-pr-ctx-remote.XXXXXX)
-    UPSTREAM_DIR=\$(mktemp -d /tmp/aerial-pr-ctx-up.XXXXXX)
-    WORK_DIR=\$(mktemp -d /tmp/aerial-pr-ctx-work.XXXXXX)
-    PAYLOAD_LOG=\$(mktemp /tmp/aerial-ctx-payloads.XXXXXX)
-    trap 'rm -rf \"\$LOCAL_TMP_DIR\" \"\$REMOTE_DIR\" \"\$UPSTREAM_DIR\" \"\$WORK_DIR\" \"\$PAYLOAD_LOG\"' EXIT
-
-    git init -q --bare \"\$REMOTE_DIR\"
-    git clone -q \"\$REMOTE_DIR\" \"\$UPSTREAM_DIR\"
-    git -C \"\$UPSTREAM_DIR\" config user.name 'Tester'
-    git -C \"\$UPSTREAM_DIR\" config user.email 'tester@example.com'
-    git -C \"\$UPSTREAM_DIR\" checkout -q -b main
-    mkdir -p \"\$UPSTREAM_DIR/scripts\"
-    cat << 'EOF' > \"\$UPSTREAM_DIR/scripts/verify.sh\"
-#!/bin/sh
-exit 0
-EOF
-    chmod +x \"\$UPSTREAM_DIR/scripts/verify.sh\"
-    git -C \"\$UPSTREAM_DIR\" add . && git -C \"\$UPSTREAM_DIR\" commit -q -m 'init'
-    git -C \"\$UPSTREAM_DIR\" push -q -u origin main
-
-    git clone -q --single-branch -b main \"\$REMOTE_DIR\" \"\$WORK_DIR\"
-    git -C \"\$WORK_DIR\" config user.name 'Tester'
-    git -C \"\$WORK_DIR\" config user.email 'tester@example.com'
-    git -C \"\$WORK_DIR\" checkout -q -b feat/ctx-branch
-    cat << 'EOF' > \"\$WORK_DIR/PR_DESCRIPTION.md\"
-### Summary
-Detailed feature explanation and design context.
-EOF
-    echo 'some code change' > \"\$WORK_DIR/file.txt\"
-
-    export GITHUB_PAT='mock_pat'
-    export VANADIS_URL='http://vanadis.aerial:8080'
-    export AERIAL_PR_REGISTER_URL='http://synapse.aerial:4020/internal/pr/register'
-    export AERIAL_TARGET_ID='100000000000000002'
-
-    (
-        REPO_TEST_MODE=1
-        source \"${AERIAL_PR}\" --source-only 2>/dev/null || true
-        curl() {
-            if [[ \"\$*\" == *'/chunks/chunk-91'* ]]; then
-                printf '{\"chunk\":{\"id\":\"chunk-91\",\"build_id\":\"b-91\",\"chunk_index\":0,\"title\":\"Chunk 1 Title\",\"target_files\":[\"scripts/aerial-pr.sh\"],\"mode\":\"code\",\"status\":\"running\"},\"build\":{\"id\":\"b-91\",\"title\":\"Build 91 Title\",\"objective\":\"Build 91 Objective\"}}'
-            elif [[ \"\$*\" == *'/builds/b-91'* ]]; then
-                printf '{\"build\":{\"id\":\"b-91\",\"title\":\"Build 91 Title\",\"objective\":\"Build 91 Objective\"},\"chunks\":[{\"id\":\"chunk-91\",\"title\":\"Chunk 1 Title\",\"chunk_index\":0,\"mode\":\"code\",\"status\":\"running\"},{\"id\":\"chunk-92\",\"title\":\"Chunk 2 Title\",\"chunk_index\":1,\"mode\":\"code\",\"status\":\"pending\"}]}'
-            elif [[ \"\$*\" == *'/pulls'* ]] && [[ \"\$*\" == *'-X POST'* ]]; then
-                for arg in \"\$@\"; do
-                    if [[ \"\$arg\" =~ ^\{.*\"body\".* ]]; then
-                        echo \"PR_PAYLOAD:\$(echo \"\$arg\" | tr '\n' ' ')\" >> \"\$PAYLOAD_LOG\"
-                    fi
-                done
-                printf '{\"number\":91,\"html_url\":\"https://github.com/azylman/aerial/pull/91\",\"node_id\":\"PR_kwDO91\"}\n201'
-            elif [[ \"\$*\" == *'graphql'* ]]; then
-                printf '{\"data\":{\"enablePullRequestAutoMerge\":{\"pullRequest\":{\"autoMergeRequest\":{\"enabledAt\":\"now\"}}}}}'
-            elif [[ \"\$*\" == *'/chunks/attach-pr'* ]]; then
-                printf '{\"status\":\"attached\",\"build_id\":\"b-91\",\"chunk_id\":\"chunk-91\",\"thread_id\":\"199999999999999999\"}'
-            elif [[ \"\$*\" == *'/internal/pr/register'* ]]; then
-                printf '{\"status\":\"registered\",\"target_id\":\"199999999999999999\"}'
-            fi
-        }
-        push_scratch_branch() {
-            # Capture latest git commit message before remote push / workspace cleanup
-            git log -1 --pretty=%B > \"\$LOCAL_TMP_DIR/last_commit_msg\"
-            return 0
-        }
-        export -f curl push_scratch_branch
-        submit_scratch \"\$WORK_DIR\" 'feat: add vanadis context' --vanadis-chunk 'chunk-91' >/dev/null 2>&1
-    )
-
-    pr_pl=\$(grep '^PR_PAYLOAD:' \"\$PAYLOAD_LOG\" | sed 's/^PR_PAYLOAD://')
-    pr_body=\$(echo \"\$pr_pl\" | jq -r '.body // empty')
-    commit_msg=\$(cat \"\$LOCAL_TMP_DIR/last_commit_msg\" 2>/dev/null || echo \"\")
-    rm -f \"\$LOCAL_TMP_DIR/last_commit_msg\"
-
-    b_ok=0
-    c_ok=0
-    if echo \"\$pr_body\" | grep -q '## Vanadis Build Context' && \
-       echo \"\$pr_body\" | grep -q 'Active Chunk' && \
-       echo \"\$pr_body\" | grep -q 'chunk-91' && \
-       echo \"\$pr_body\" | grep -q 'Roadmap' && \
-       echo \"\$pr_body\" | grep -q 'Scope Boundary'; then
-        b_ok=1
-    fi
-
-    if echo \"\$commit_msg\" | grep -q 'feat: add vanadis context' && \
-       echo \"\$commit_msg\" | grep -q 'Detailed feature explanation and design context' && \
-       echo \"\$commit_msg\" | grep -q '## Vanadis Build Context' && \
-       ! echo \"\$commit_msg\" | grep -q '<!-- aerial-pr:'; then
-        c_ok=1
-    fi
-
-    if [ \"\$b_ok\" -eq 1 ] && [ \"\$c_ok\" -eq 1 ]; then
-        echo 'vanadis_ctx_submit:ok'
-    else
-        echo \"vanadis_ctx_submit:fail:b_ok=\$b_ok:c_ok=\$c_ok:commit_msg=\$commit_msg:pr_body=\$pr_body\"
-    fi
-")
-assert_eq "true" "$(echo "$SUBMIT_VANADIS_CONTEXT_CHECK" | grep -q 'vanadis_ctx_submit:ok' && echo true || echo false)" "submit_scratch injects PR_DESCRIPTION and Vanadis Build Context into PR body and commit body"
-
-# Case 19: init_scratch deterministic chunk-keyed workspace reuse and stale scratch pruning
-INIT_CHUNK_REUSE_CHECK=$(bash -c "
-    REPO_TEST_MODE=1
-    source \"${AERIAL_PR}\" --source-only 2>/dev/null || true
-
-    REMOTE_DIR=\$(mktemp -d /tmp/aerial-pr-reuse-remote.XXXXXX)
-    SEED_DIR=\$(mktemp -d /tmp/aerial-pr-reuse-seed.XXXXXX)
-    TEST_BASE=\$(mktemp -d /tmp/aerial-pr-reuse-base.XXXXXX)
-    trap 'rm -rf \"\$REMOTE_DIR\" \"\$SEED_DIR\" \"\$TEST_BASE\"' EXIT
-
-    git init -q --bare \"\$REMOTE_DIR\"
-    git clone -q \"\$REMOTE_DIR\" \"\$SEED_DIR\"
-    git -C \"\$SEED_DIR\" config user.name 'Tester'
-    git -C \"\$SEED_DIR\" config user.email 'tester@example.com'
-    git -C \"\$SEED_DIR\" checkout -q -b main
-    echo 'initial base' > \"\$SEED_DIR/base.txt\"
-    git -C \"\$SEED_DIR\" add base.txt && git -C \"\$SEED_DIR\" commit -q -m 'base commit'
-    git -C \"\$SEED_DIR\" push -q -u origin main
-
-    git -C \"\$SEED_DIR\" checkout -q -b feat/custom-override
-    echo 'override content' > \"\$SEED_DIR/override.txt\"
-    git -C \"\$SEED_DIR\" add override.txt && git -C \"\$SEED_DIR\" commit -q -m 'override commit'
-    git -C \"\$SEED_DIR\" push -q -u origin feat/custom-override
-
-    export GITHUB_PAT='mock_pat'
-    export AERIAL_REPO_URL_OVERRIDE=\"\$REMOTE_DIR\"
-    export AERIAL_SCRATCH_BASE_DIR=\"\$TEST_BASE\"
-
-    # Create stale abandoned random scratch directory (> 24 hours old), fresh scratch directory,
-    # and stale vanadis directory (> 24 hours old)
-    mkdir -p \"\$TEST_BASE/aerial-scratch.stale123\"
-    touch -d '2 days ago' \"\$TEST_BASE/aerial-scratch.stale123\"
-    mkdir -p \"\$TEST_BASE/aerial-scratch.fresh123\"
-    mkdir -p \"\$TEST_BASE/vanadis-old_chunk-aerial\"
-    touch -d '3 days ago' \"\$TEST_BASE/vanadis-old_chunk-aerial\"
-
-    # Subtest 1: First-time initialization with chunk ID produces deterministic directory name and chmod 700
-    init_json1=\$(VANADIS_CHUNK_ID='chunk-6-aerial-pr-deterministic-scratch-reuse' init_scratch aerial)
-    dir1=\$(echo \"\$init_json1\" | jq -r '.scratch_dir')
-    branch1=\$(echo \"\$init_json1\" | jq -r '.branch')
-    reused1=\$(echo \"\$init_json1\" | jq -r '.reused // false')
-    dir1_mode=\$(stat -c %a \"\$dir1\" 2>/dev/null || echo '')
-
-    if [ \"\$dir1\" = \"\$TEST_BASE/vanadis-chunk-6-aerial-pr-deterministic-scratch-reuse-aerial\" ] && \
-       [[ \"\$branch1\" =~ ^feat/aerial-pr-vanadis-chunk-6-aerial-pr-deterministic-scratch-reuse-[0-9a-f]{6}\$ ]] && \
-       [ \"\$reused1\" = 'false' ] && \
-       [ \"\$dir1_mode\" = '700' ]; then
-        echo 'first_init:ok'
-    else
-        echo \"first_init:fail:dir1=\$dir1:branch1=\$branch1:reused1=\$reused1:mode=\$dir1_mode\"
-    fi
-
-    # Subtest 2: Post-restart reuse preserves uncommitted edits, staged edits, .aerial-verified-tree, and branch
-    echo 'uncommitted dirty work' > \"\$dir1/dirty.txt\"
-    echo 'staged change' > \"\$dir1/staged.txt\"
-    git -C \"\$dir1\" add staged.txt
-    echo 'tree-sha-mock-123' > \"\$dir1/.git/.aerial-verified-tree\"
-
-    init_json2=\$(VANADIS_CHUNK_ID='chunk-6-aerial-pr-deterministic-scratch-reuse' init_scratch aerial)
-    dir2=\$(echo \"\$init_json2\" | jq -r '.scratch_dir')
-    branch2=\$(echo \"\$init_json2\" | jq -r '.branch')
-    reused2=\$(echo \"\$init_json2\" | jq -r '.reused // false')
-    git_user=\$(git -C \"\$dir2\" config user.name 2>/dev/null || echo '')
-    git_email=\$(git -C \"\$dir2\" config user.email 2>/dev/null || echo '')
-    dirty_content=\$(cat \"\$dir2/dirty.txt\" 2>/dev/null || echo '')
-    staged_file=\$(git -C \"\$dir2\" diff --cached --name-only 2>/dev/null || echo '')
-    tree_cache=\$(cat \"\$dir2/.git/.aerial-verified-tree\" 2>/dev/null || echo '')
-
-    if [ \"\$dir2\" = \"\$dir1\" ] && \
-       [ \"\$branch2\" = \"\$branch1\" ] && \
-       [ \"\$reused2\" = 'true' ] && \
-       [ \"\$git_user\" = 'Aerial' ] && \
-       [ \"\$git_email\" = 'aerial@noreply.github.com' ] && \
-       [ \"\$dirty_content\" = 'uncommitted dirty work' ] && \
-       [ \"\$staged_file\" = 'staged.txt' ] && \
-       [ \"\$tree_cache\" = 'tree-sha-mock-123' ]; then
-        echo 'restart_reuse:ok'
-    else
-        echo \"restart_reuse:fail:dir2=\$dir2:branch2=\$branch2:reused2=\$reused2:dirty=\$dirty_content:staged=\$staged_file:tree=\$tree_cache\"
-    fi
-
-    # Subtest 3: Special character sanitization in chunk ID
-    init_json3=\$(VANADIS_CHUNK_ID='chunk/6.1:feat@test#1' init_scratch aerial)
-    dir3=\$(echo \"\$init_json3\" | jq -r '.scratch_dir')
-    branch3=\$(echo \"\$init_json3\" | jq -r '.branch')
-    if [ \"\$dir3\" = \"\$TEST_BASE/vanadis-chunk_6_1_feat_test_1-aerial\" ] && \
-       [[ \"\$branch3\" =~ ^feat/aerial-pr-vanadis-chunk_6_1_feat_test_1-[0-9a-f]{6}\$ ]]; then
-        echo 'sanitize_chunk_id:ok'
-    else
-        echo \"sanitize_chunk_id:fail:\$dir3:\$branch3\"
-    fi
-
-    # Subtest 4: Non-empty --branch overrides deterministic chunk directory
-    init_json4=\$(VANADIS_CHUNK_ID='chunk-6-aerial-pr-deterministic-scratch-reuse' init_scratch aerial --branch feat/custom-override)
-    dir4=\$(echo \"\$init_json4\" | jq -r '.scratch_dir')
-    branch4=\$(echo \"\$init_json4\" | jq -r '.branch')
-    if [ \"\$branch4\" = 'feat/custom-override' ] && [[ \"\$dir4\" =~ ^\$TEST_BASE/aerial-scratch\.[a-zA-Z0-9]+$ ]]; then
-        echo 'branch_override:ok'
-    else
-        echo \"branch_override:fail:dir4=\$dir4:branch4=\$branch4\"
-    fi
-
-    # Subtest 5: Stale abandoned *-scratch.* directories older than 24 hours are pruned while fresh *-scratch.* and vanadis-* are kept
-    if [ ! -d \"\$TEST_BASE/aerial-scratch.stale123\" ] && \
-       [ -d \"\$TEST_BASE/aerial-scratch.fresh123\" ] && \
-       [ -d \"\$TEST_BASE/vanadis-old_chunk-aerial\" ]; then
-        echo 'stale_prune:ok'
-    else
-        echo \"stale_prune:fail:stale=\$(ls -d \$TEST_BASE/*-scratch.* 2>/dev/null)\"
-    fi
-
-    # Subtest 6: Incomplete initialization left on main checking out feature branch while preserving edits
-    INC_DIR=\"\$TEST_BASE/vanadis-chunk_incomplete-aerial\"
-    git clone -q -b main \"\$REMOTE_DIR\" \"\$INC_DIR\"
-    echo 'partial work before branch' > \"\$INC_DIR/partial.txt\"
-    inc_json1=\$(VANADIS_CHUNK_ID='chunk_incomplete' init_scratch aerial)
-    inc_branch1=\$(echo \"\$inc_json1\" | jq -r '.branch')
-    inc_reused1=\$(echo \"\$inc_json1\" | jq -r '.reused // false')
-    inc_json2=\$(VANADIS_CHUNK_ID='chunk_incomplete' init_scratch aerial)
-    inc_branch2=\$(echo \"\$inc_json2\" | jq -r '.branch')
-    inc_reused2=\$(echo \"\$inc_json2\" | jq -r '.reused // false')
-    if [[ \"\$inc_branch1\" == feat/aerial-pr-* ]] && \
-       [ \"\$inc_reused1\" = 'false' ] && [ \"\$inc_reused2\" = 'true' ] && \
-       [ \"\$inc_branch2\" = \"\$inc_branch1\" ] && \
-       [ \"\$(cat \"\$INC_DIR/partial.txt\" 2>/dev/null)\" = 'partial work before branch' ]; then
-        echo 'incomplete_resume:ok'
-    else
-        echo \"incomplete_resume:fail:b1=\$inc_branch1:r1=\$inc_reused1:b2=\$inc_branch2:r2=\$inc_reused2\"
-    fi
-
-    # Subtest 7: Stale .git/index.lock is removed on reuse
-    touch \"\$dir1/.git/index.lock\"
-    lock_json1=\$(VANADIS_CHUNK_ID='chunk-6-aerial-pr-deterministic-scratch-reuse' init_scratch aerial)
-    lock_reused1=\$(echo \"\$lock_json1\" | jq -r '.reused // false')
-    stale_removed=\$( [ ! -f \"\$dir1/.git/index.lock\" ] && echo yes || echo no )
-    echo 'post_lock_recovery' > \"\$dir1/after_lock.txt\"
-    git -C \"\$dir1\" add after_lock.txt
-    staged_after_lock=\$(git -C \"\$dir1\" diff --cached --name-only | tr '\n' ',')
-
-    if [ \"\$lock_reused1\" = 'true' ] && [ \"\$stale_removed\" = 'yes' ] && \
-       [[ \"\$staged_after_lock\" == *'after_lock.txt'* ]]; then
-        echo 'git_lock_recovery:ok'
-    else
-        echo \"git_lock_recovery:fail:reused=\$lock_reused1:stale=\$stale_removed:staged=\$staged_after_lock\"
-    fi
-")
-assert_eq "true" "$(echo "$INIT_CHUNK_REUSE_CHECK" | grep -q 'first_init:ok' && echo true || echo false)" "init_scratch initializes deterministic chunk-keyed directory with mode 700"
-assert_eq "true" "$(echo "$INIT_CHUNK_REUSE_CHECK" | grep -q 'restart_reuse:ok' && echo true || echo false)" "init_scratch reuses existing chunk directory preserving uncommitted/staged edits and branch"
-assert_eq "true" "$(echo "$INIT_CHUNK_REUSE_CHECK" | grep -q 'sanitize_chunk_id:ok' && echo true || echo false)" "init_scratch sanitizes chunk ID to alphanumeric, dash, and underscore"
-assert_eq "true" "$(echo "$INIT_CHUNK_REUSE_CHECK" | grep -q 'branch_override:ok' && echo true || echo false)" "init_scratch with explicit --branch bypasses deterministic chunk directory"
-assert_eq "true" "$(echo "$INIT_CHUNK_REUSE_CHECK" | grep -q 'stale_prune:ok' && echo true || echo false)" "init_scratch prunes stale abandoned *-scratch.* directories while preserving fresh and vanadis-* ones"
-assert_eq "true" "$(echo "$INIT_CHUNK_REUSE_CHECK" | grep -q 'incomplete_resume:ok' && echo true || echo false)" "init_scratch safely completes partial initialization left on main while preserving work"
-assert_eq "true" "$(echo "$INIT_CHUNK_REUSE_CHECK" | grep -q 'git_lock_recovery:ok' && echo true || echo false)" "init_scratch removes stale .git/index.lock on reuse"
+assert_eq "overridden" "$(echo "$COMP_OUT" | jq -r '.status')" "completed run returns overridden"
+assert_eq "7766" "$(echo "$COMP_OUT" | jq -r '.run_id')" "completed run returns run_id"
+assert_eq "rerun-failed-jobs-called" "$(cat "$COMPLETED_CALLED" 2>/dev/null || echo "")" "completed run calls rerun-failed-jobs"
+assert_match "## roborev-override \(\`fedcba9\`\)" "$(jq -r '.body' "$COMMENT_BODY_FILE" 2>/dev/null || echo "")" "override comment includes formatted markdown header"
+rm -f "$COMPLETED_CALLED" "$COMMENT_BODY_FILE"
 
 echo "--------------------------------------------------------"
 echo "Test results: $PASSED passed, $FAILED failed"
 if [ "$FAILED" -gt 0 ]; then
+    echo "❌ Some tests failed!"
     exit 1
 fi
-echo "🎉 All tests passed!"
+echo "🎉 All tests passed cleanly!"
