@@ -19,11 +19,12 @@ import (
 // SQLOptions tunes the *sql.DB pool OpenSQL returns. A zero field keeps the
 // database/sql default.
 type SQLOptions struct {
-	MaxOpenConns    int
-	MaxIdleConns    int
-	ConnMaxLifetime time.Duration
-	ConnMaxIdleTime time.Duration
-	RetryBase       time.Duration
+	MaxOpenConns      int
+	MaxIdleConns      int
+	ConnMaxLifetime   time.Duration
+	ConnMaxIdleTime   time.Duration
+	RetryBase         time.Duration
+	DefaultSearchPath string
 }
 
 // connector holds the connection retry policy OpenSQL applies.
@@ -60,6 +61,7 @@ func (c connector) open(ctx context.Context, dsn string, opts SQLOptions) (*sql.
 	if trimmed == "" {
 		return nil, errors.New("connection string cannot be empty")
 	}
+	trimmed = WithSearchPath(trimmed, opts.DefaultSearchPath)
 	if !strings.HasPrefix(trimmed, "postgres://") && !strings.HasPrefix(trimmed, "postgresql://") {
 		return nil, fmt.Errorf("unsupported database scheme in %q: only postgres:// or postgresql:// supported", RedactDSN(trimmed))
 	}

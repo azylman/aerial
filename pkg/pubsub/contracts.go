@@ -36,7 +36,6 @@ const (
 	SubjectTranscriptsStepsPrefix  = "aerial.transcripts.steps."
 	SubjectVoiceStreamPrefix       = "voice.stream."
 	SubjectAerialTurnCompleted     = "aerial.turn.completed"
-	SubjectCovenExtractPrefix      = "aerial.coalesced.coven_extract."
 	SubjectProsperaReportJob       = "aerial.jobs.prospera.report"
 	SubjectProsperaVoicemailJob    = "aerial.jobs.prospera.voicemail"
 	SubjectProsperaSMSJob          = "aerial.jobs.prospera.sms"
@@ -101,18 +100,6 @@ func EnsureCoreStreams(ctx context.Context, bus Bus) error {
 		return errors.New("pubsub: bus is nil")
 	}
 	return bus.EnsureCoreStreams(ctx)
-}
-
-// CheckHealth reports the bus's connection health. Buses that do not implement
-// HealthChecker are treated as healthy; a nil bus is unhealthy.
-func CheckHealth(bus Bus) error {
-	if bus == nil {
-		return errors.New("pubsub: bus is nil")
-	}
-	if hc, ok := bus.(HealthChecker); ok {
-		return hc.Healthy()
-	}
-	return nil
 }
 
 // ErrConnectionClosed is returned by Healthy once the NATS connection has
@@ -281,11 +268,6 @@ func sanitizeToken(token string) string {
 	return res
 }
 
-// SubjectTranscriptsSteps returns the step-batch subject for a session's transcript.
-func SubjectTranscriptsSteps(sessionID string) string {
-	return SubjectTranscriptsStepsPrefix + sanitizeToken(sessionID)
-}
-
 // SubjectTranscriptsStepsForAgent returns the step-batch subject for a specific agent and session.
 func SubjectTranscriptsStepsForAgent(agent, sessionID string) string {
 	cleanAgent := sanitizeToken(agent)
@@ -313,11 +295,6 @@ func ParseTranscriptsStepsSubject(subject string) (agent, sessionID string, ok b
 		return "", "", false
 	}
 	return "", tokens[3], true
-}
-
-// SubjectCovenExtractCoalesced returns the coalesced subject for a thread's fact extraction.
-func SubjectCovenExtractCoalesced(threadID string) string {
-	return SubjectCovenExtractPrefix + strings.ReplaceAll(cleanSubjectToken(threadID), ".", "-")
 }
 
 // SubjectCovenExtractCoalescedForAgent returns the coalesced extraction subject scoped by agent.

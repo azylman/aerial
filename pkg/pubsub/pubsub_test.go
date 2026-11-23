@@ -984,23 +984,21 @@ func TestJetStreamBus_Healthy(t *testing.T) {
 
 	tests := []struct {
 		name       string
-		bus        Bus
+		bus        *JetStreamBus
 		wantErr    bool
 		wantClosed bool
 	}{
 		{"nil bus", nil, true, false},
-		{"nil jetstream bus", (*JetStreamBus)(nil), true, false},
 		{"bus without connection", newJetStreamBusWithContext(nil, &mockJetStream{}), true, false},
 		{"open connection", openBus, false, false},
 		{"permanently closed connection", closedBus, true, true},
-		{"memory bus without health checker", NewMemoryBus(), false, false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			err := CheckHealth(tc.bus)
+			err := tc.bus.Healthy()
 			if (err != nil) != tc.wantErr {
-				t.Fatalf("CheckHealth err = %v, wantErr %v", err, tc.wantErr)
+				t.Fatalf("Healthy err = %v, wantErr %v", err, tc.wantErr)
 			}
 			if errors.Is(err, ErrConnectionClosed) != tc.wantClosed {
 				t.Errorf("errors.Is(err, ErrConnectionClosed) = %v, want %v (err %v)", errors.Is(err, ErrConnectionClosed), tc.wantClosed, err)

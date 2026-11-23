@@ -16,16 +16,27 @@ import (
 type fakeDriver struct {
 	mu       sync.Mutex
 	failures map[string]int
+	opened   map[string]int
 }
 
 func (d *fakeDriver) Open(name string) (driver.Conn, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	if d.opened == nil {
+		d.opened = make(map[string]int)
+	}
+	d.opened[name]++
 	if d.failures[name] > 0 {
 		d.failures[name]--
 		return nil, errors.New("fake: connection refused")
 	}
 	return fakeConn{}, nil
+}
+
+func (d *fakeDriver) wasOpened(name string) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.opened[name] > 0
 }
 
 type fakeConn struct{}
@@ -35,9 +46,10 @@ func (fakeConn) Close() error                        { return nil }
 func (fakeConn) Begin() (driver.Tx, error)           { return nil, errors.New("fake: no transactions") }
 
 var testDriver = &fakeDriver{failures: map[string]int{
-	"postgres://retry@db/app":     2,
-	"postgres://exhausted@db/app": 100,
-	"postgres://cancel@db/app":    100,
+	"postgres://retry@db/app":        2,
+	"postgres://custom-retry@db/app": 2,
+	"postgres://exhausted@db/app":    100,
+	"postgres://cancel@db/app":       100,
 }}
 
 func init() {
@@ -92,12 +104,14 @@ func TestConnectorOpen(t *testing.T) {
 		wantMaxOpen      int
 		wantCanceled     bool
 		wantFirstBackoff time.Duration
+		wantDSN          string
 	}{
 		{name: "empty", driver: "pgutil-fake", ctx: context.Background(), dsn: "  ", wantErr: "connection string cannot be empty"},
 		{name: "bad scheme redacts dsn", driver: "pgutil-fake", ctx: context.Background(), dsn: "mysql://u:hunter2@db/app?password=x", wantErr: `unsupported database scheme in "mysql://u:xxxxx@db/app": only postgres:// or postgresql:// supported`},
-		{name: "first attempt succeeds with defaults", driver: "pgutil-fake", ctx: context.Background(), dsn: " postgresql://ok@db/app ", wantMaxOpen: 0},
-		{name: "retry then success applies options", driver: "pgutil-fake", ctx: context.Background(), dsn: "postgres://retry@db/app", opts: SQLOptions{MaxOpenConns: 10, MaxIdleConns: 5, ConnMaxLifetime: 30 * time.Minute, ConnMaxIdleTime: 5 * time.Minute}, wantMaxOpen: 10},
-		{name: "custom retry base overrides default", driver: "pgutil-fake", ctx: context.Background(), dsn: "postgres://retry@db/app", opts: SQLOptions{RetryBase: 25 * time.Millisecond}, wantFirstBackoff: 25 * time.Millisecond},
+		{name: "first attempt succeeds with defaults", driver: "pgutil-fake", ctx: context.Background(), dsn: " postgresql://ok@db/app ", wantMaxOpen: 0, wantDSN: "postgresql://ok@db/app"},
+		{name: "search path applied via options", driver: "pgutil-fake", ctx: context.Background(), dsn: "postgresql://searchpath@db/app", opts: SQLOptions{DefaultSearchPath: "custom_schema"}, wantMaxOpen: 0, wantDSN: "postgresql://searchpath@db/app?search_path=custom_schema"},
+		{name: "retry then success applies options", driver: "pgutil-fake", ctx: context.Background(), dsn: "postgres://retry@db/app", opts: SQLOptions{MaxOpenConns: 10, MaxIdleConns: 5, ConnMaxLifetime: 30 * time.Minute, ConnMaxIdleTime: 5 * time.Minute}, wantMaxOpen: 10, wantDSN: "postgres://retry@db/app"},
+		{name: "custom retry base overrides default", driver: "pgutil-fake", ctx: context.Background(), dsn: "postgres://custom-retry@db/app", opts: SQLOptions{RetryBase: 25 * time.Millisecond}, wantFirstBackoff: 25 * time.Millisecond, wantDSN: "postgres://custom-retry@db/app"},
 		{name: "exhausted retries", driver: "pgutil-fake", ctx: context.Background(), dsn: "postgres://exhausted@db/app", wantErr: "failed to connect to PostgreSQL after 3 attempts: fake: connection refused"},
 		{name: "unknown driver exhausts retries", driver: "pgutil-missing", ctx: context.Background(), dsn: "postgres://ok@db/app", wantErr: `failed to connect to PostgreSQL after 3 attempts: sql: unknown driver "pgutil-missing"`},
 		{name: "ctx cancel stops retrying", driver: "pgutil-fake", ctx: cancelled, neverFire: true, dsn: "postgres://cancel@db/app", wantErr: "gave up waiting for PostgreSQL after 1 attempts", wantCanceled: true},
@@ -122,6 +136,9 @@ func TestConnectorOpen(t *testing.T) {
 			}
 			if tc.wantFirstBackoff != 0 && gotFirstBackoff != tc.wantFirstBackoff {
 				t.Fatalf("firstBackoff = %v, want %v", gotFirstBackoff, tc.wantFirstBackoff)
+			}
+			if tc.wantDSN != "" && !testDriver.wasOpened(tc.wantDSN) {
+				t.Fatalf("driver was not opened with %q", tc.wantDSN)
 			}
 		})
 	}
