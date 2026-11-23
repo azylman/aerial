@@ -28,85 +28,6 @@ import (
 	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
 )
 
-// checkStatusSpyStore backs the deploy gate, deployment-start/deadline and
-// remediation-deferral tests: it records lifecycle status, budget increments
-// and chunk failures, and accepts every other PR write.
-type checkStatusSpyStore struct {
-	store.VanadisStore
-
-	lifecycleStatus string
-	getBuildErr     error
-	chunks          []model.VanadisChunk
-	failed          []string
-	failCountCalls  []string
-	failCount       int
-}
-
-func (s *checkStatusSpyStore) chunk(chunkID string) *model.VanadisChunk {
-	for i := range s.chunks {
-		if s.chunks[i].ID == chunkID {
-			return &s.chunks[i]
-		}
-	}
-	s.chunks = append(s.chunks, model.VanadisChunk{ID: chunkID, BuildID: "b1", Effort: effortMedium, CIFailCount: s.failCount})
-	return &s.chunks[len(s.chunks)-1]
-}
-
-func (s *checkStatusSpyStore) IncrementChunkCIFailCount(_ context.Context, chunkID, banner string, headSHA ...string) (int, error) {
-	s.failCountCalls = append(s.failCountCalls, chunkID+":"+banner)
-	s.failCount++
-	c := s.chunk(chunkID)
-	c.CIFailCount = s.failCount
-	if len(headSHA) > 0 && strings.TrimSpace(headSHA[0]) != "" {
-		c.RemediatedSHA = strings.TrimSpace(headSHA[0])
-	}
-	return s.failCount, nil
-}
-
-func (s *checkStatusSpyStore) GetBuild(_ context.Context, buildID string) (*model.VanadisBuild, []model.VanadisChunk, error) {
-	if s.getBuildErr != nil {
-		return nil, nil, s.getBuildErr
-	}
-	chunks := s.chunks
-	if len(chunks) == 0 {
-		chunks = []model.VanadisChunk{{ID: "c1", BuildID: buildID, Effort: effortMedium, CIFailCount: s.failCount}}
-	}
-	return &model.VanadisBuild{ID: buildID, Status: statusRunning, ThreadID: "th-1"}, chunks, nil
-}
-
-func (*checkStatusSpyStore) RecordPRCheckStatus(context.Context, string, string, string, string) error {
-	return nil
-}
-
-func (s *checkStatusSpyStore) ResetPRCheckState(_ context.Context, chunkID, headSHA, _ string) error {
-	if sha := strings.TrimSpace(headSHA); sha != "" {
-		s.chunk(chunkID).HeadSHA = sha
-	}
-	return nil
-}
-
-func (s *checkStatusSpyStore) UpdatePRLifecycleStatus(_ context.Context, _ string, status string) error {
-	s.lifecycleStatus = status
-	return nil
-}
-
-func (s *checkStatusSpyStore) FailChunk(_ context.Context, chunkID, reason, _ string) (*model.VanadisBuild, *model.VanadisChunk, bool, error) {
-	s.failed = append(s.failed, chunkID+":"+reason)
-	return &model.VanadisBuild{ID: "b1", Status: statusRunning, Objective: "Obj", ThreadID: "th-1"}, &model.VanadisChunk{ID: chunkID, BuildID: "b1", Status: statusFailed}, true, nil
-}
-
-func (*checkStatusSpyStore) UpdateChunkBannerAndStatus(context.Context, string, string, string) error {
-	return nil
-}
-
-func (*checkStatusSpyStore) CompareAndSwapBuildStatusMessageID(context.Context, string, string, string) (bool, error) {
-	return true, nil
-}
-
-func (*checkStatusSpyStore) GetChunkByPR(_ context.Context, _ string, _ int) (*store.VanadisChunkPRLookup, error) {
-	return &store.VanadisChunkPRLookup{ChunkID: "c1", BuildID: "b1", Matched: true}, nil
-}
-
 func TestBuildObject_ExecutorErrorBranches(t *testing.T) {
 	t.Parallel()
 	b1 := model.VanadisBuild{ID: "b-err", Status: "running", ThreadID: "th-1"}
@@ -162,7 +83,7 @@ func TestBuildObject_ExecutorErrorBranches(t *testing.T) {
 	_ = boStoreErr.OnPREvent(ctx, pubsub.PRLifecycleEvent{Repo: "aerial", PRNumber: 101, Event: "check_failed", RolloutState: &pubsub.PRRolloutState{}})
 }
 
-func newRemediationTestHarness(t *testing.T, spy *checkStatusSpyStore, dispatchErr, notifyErr error) (*BuildObject, *mockEriClient) {
+func newRemediationTestHarness(t *testing.T, spy *fakeStore, dispatchErr, notifyErr error) (*BuildObject, *mockEriClient) {
 	t.Helper()
 	eri := &mockEriClient{}
 	var active bool
@@ -256,7 +177,8 @@ func TestBuildObject_OnPREvent_RemediationDeferralAndRetry(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			spy := &checkStatusSpyStore{
+			spy := &fakeStore{
+				builds: []model.VanadisBuild{{ID: "b1", Status: statusRunning, ThreadID: "th-1"}},
 				chunks: []model.VanadisChunk{{
 					ID:            "c1",
 					BuildID:       "b1",
@@ -271,8 +193,9 @@ func TestBuildObject_OnPREvent_RemediationDeferralAndRetry(t *testing.T) {
 			ctx := makeObjectMockContext(t, "b1")
 			err := bo.OnPREvent(ctx, tc.ev)
 			assert.Equal(t, tc.wantErr, err != nil)
-			assert.Empty(t, spy.failCountCalls)
-			assert.Empty(t, spy.failed)
+			calls := spy.snapshotCalls()
+			assert.Empty(t, pickCalls(calls, "IncrementChunkCIFailCount", ":", 0, 1))
+			assert.Empty(t, pickCalls(calls, "FailChunk", ":", 0, 1))
 			assert.Empty(t, eri.LastCancel)
 		})
 	}
@@ -442,44 +365,6 @@ func TestBuildObject_AuthoritativeFailureContinuation(t *testing.T) {
 	assert.Equal(t, map[string]string{"c1": statusFailed}, chunkStatuses(t, storeFailChunkOk, "b-failed"))
 }
 
-// deadlineLifecycleStore applies lifecycle, banner and rollout writes to the
-// spy's chunks; writeErr fails RecordPRRolloutState.
-type deadlineLifecycleStore struct {
-	*checkStatusSpyStore
-
-	writeErr error
-}
-
-func (s *deadlineLifecycleStore) GetBuild(ctx context.Context, id string) (*model.VanadisBuild, []model.VanadisChunk, error) {
-	b, c, err := s.checkStatusSpyStore.GetBuild(ctx, id)
-	return b, append([]model.VanadisChunk(nil), c...), err
-}
-
-func (s *deadlineLifecycleStore) UpdateChunkBannerAndStatus(_ context.Context, id, status, banner string) error {
-	c := s.chunk(id)
-	c.Status = status
-	c.Banner = banner
-	return nil
-}
-
-func (s *deadlineLifecycleStore) UpdatePRLifecycleStatus(_ context.Context, id, status string) error {
-	c := s.chunk(id)
-	c.Status = status
-	return nil
-}
-
-func (s *deadlineLifecycleStore) RecordPRRolloutState(_ context.Context, id, status string, rollout *pubsub.PRRolloutState) error {
-	if s.writeErr != nil {
-		return s.writeErr
-	}
-	c := s.chunk(id)
-	if status != "" {
-		c.Status = status
-	}
-	c.RolloutState = rollout
-	return nil
-}
-
 // deploymentGateFakeRuntime is an in-memory deploygate.Runtime for deployment
 // gate tests that exercise BuildObject wrappers end to end.
 type deploymentGateFakeRuntime struct {
@@ -543,7 +428,9 @@ func TestRecordDeploymentPREvent(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			st := &deadlineLifecycleStore{writeErr: tc.writeErr, checkStatusSpyStore: &checkStatusSpyStore{chunks: []model.VanadisChunk{tc.chunk}}}
+			chunk := tc.chunk
+			chunk.BuildID = "b1"
+			st := &fakeStore{builds: []model.VanadisBuild{{ID: "b1", Status: statusRunning, ThreadID: "th-1"}}, chunks: []model.VanadisChunk{chunk}, errs: map[string]error{"RecordPRRolloutState": tc.writeErr}}
 			ev := pubsub.PRLifecycleEvent{Event: prEventDeployStarted, Repo: "owner/repo", PRNumber: 1, MergeSHA: "sha", RolloutState: tc.rollout}
 			_, err := (&BuildObject{store: st}).recordDeploymentPREvent(restatetest.MockRunContext{Context: context.Background()}, "b1", ev)
 			if tc.wantErr != "" {
@@ -551,9 +438,10 @@ func TestRecordDeploymentPREvent(t *testing.T) {
 			} else {
 				require.NoError(t, err)
 			}
-			assert.Equal(t, tc.wantStatus, st.chunks[0].Status)
-			assert.Equal(t, tc.wantBanner, st.chunks[0].Banner)
-			assert.Equal(t, tc.wantRollout, st.chunks[0].RolloutState)
+			got := st.chunkSnapshot("c1")
+			assert.Equal(t, tc.wantStatus, got.Status)
+			assert.Equal(t, tc.wantBanner, got.Banner)
+			assert.Equal(t, tc.wantRollout, got.RolloutState)
 		})
 	}
 }
@@ -565,21 +453,21 @@ func TestDeploymentDeadlineRepeatedMerge(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	rt := &deploymentGateFakeRuntime{fakeObjectRuntime: newFakeObjectRuntime("b"), now: now}
-	st := &deadlineLifecycleStore{checkStatusSpyStore: &checkStatusSpyStore{chunks: []model.VanadisChunk{{ID: "c1", PRNumber: 1, Repo: "owner/repo", MergeSHA: "sha", Status: statusMerged}}}}
+	st := &fakeStore{builds: []model.VanadisBuild{{ID: "b", Status: statusRunning, ThreadID: "th-1"}}, chunks: []model.VanadisChunk{{ID: "c1", BuildID: "b", PRNumber: 1, Repo: "owner/repo", MergeSHA: "sha", Status: statusMerged}}}
 	b := &BuildObject{store: st}
 	ev := pubsub.PRLifecycleEvent{Event: prEventDeployStarted, Repo: "owner/repo", PRNumber: 1, MergeSHA: "sha", OccurredAt: now}
 	rc := restatetest.MockRunContext{Context: context.Background()}
-	_, err := b.recordDeploymentPREvent(rc, "b1", ev)
+	_, err := b.recordDeploymentPREvent(rc, "b", ev)
 	require.NoError(t, err)
 	require.NoError(t, b.armDeploymentStart(rt, "b", ev))
 	require.Equal(t, now.Add(15*time.Minute), rt.attempts["c1"].Deadline)
 	require.NoError(t, b.handlePREventType(rc, "b", "c1", "merged", pubsub.PRLifecycleEvent{MergeSHA: "sha"}))
-	require.Equal(t, statusMerged, st.chunks[0].Status)
+	require.Equal(t, statusMerged, st.chunkSnapshot("c1").Status)
 	eri := &mockEriClient{}
 	b.executor = &executor.Executor{EriClient: eri}
 	rt.now = now.Add(15 * time.Minute)
 	require.NoError(t, b.expireDeploymentDeadline(rt, deploygate.DeploymentDeadlineRequest{ChunkID: "c1", Revision: "sha", Generation: 1}))
-	require.Equal(t, statusDeployFailed, st.chunks[0].Status)
+	require.Equal(t, statusDeployFailed, st.chunkSnapshot("c1").Status)
 	require.NotNil(t, eri.LastDispatch)
 	require.True(t, rt.attempts["c1"].Delivered)
 }
@@ -653,7 +541,7 @@ func TestBuildObject_OnPREvent_UnattachedPRResolution(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			spy := &unattachedPREventSpyStore{chunks: slices.Clone(chunks), attachErr: tc.attachErr}
+			spy := &fakeStore{builds: []model.VanadisBuild{{ID: "b1", Status: statusRunning, ThreadID: "th-1"}}, chunks: slices.Clone(chunks), errs: map[string]error{"AttachChunkPR": tc.attachErr}}
 			api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				if tc.ghStatus != 0 {
 					w.WriteHeader(tc.ghStatus)
@@ -672,14 +560,17 @@ func TestBuildObject_OnPREvent_UnattachedPRResolution(t *testing.T) {
 			} else {
 				require.NoError(t, err)
 			}
-			assert.Equal(t, tc.wantAttached, spy.attachedChunkID)
-			assert.Empty(t, spy.failedChunkID)
+			calls := spy.snapshotCalls()
+			attached := callArgs(calls, "AttachChunkPR")
+			assert.Equal(t, tc.wantAttached, strings.Join(pickCalls(calls, "AttachChunkPR", "", 0), ""))
+			assert.Empty(t, pickCalls(calls, "FailChunk", ":", 0, 1))
 			if tc.wantAttached != "" {
-				assert.Equal(t, 101, spy.attachedPR)
-				assert.Equal(t, "external/aerial", spy.attachedRepo)
+				require.Len(t, attached, 1)
+				assert.Equal(t, "101", attached[0][1])
+				assert.Equal(t, "external/aerial", attached[0][2])
 			}
 			if tc.wantWidgetSync {
-				assert.Positive(t, spy.syncWidgetCalls)
+				assert.NotEmpty(t, callArgs(calls, "CompareAndSwapBuildStatusMessageID"))
 			}
 		})
 	}
@@ -713,7 +604,7 @@ func TestBuildObject_OnDispatchOutcome_CIFixupTurnEnded(t *testing.T) {
 		openPR    = `{"state":"open","merged":false,"head":{"sha":"abcdef1234567"}}`
 		movedPR   = `{"state":"open","merged":false,"head":{"sha":"fedcba7654321"}}`
 		pauseMsg  = "🛑 [aerial#42] CI fix-up turn ended without pushing a fix, recording an override, or calling fail_chunk. Chunk paused for a decision."
-		buildWake = "[VANADIS BUILD FAILED]\nBuild ID: b1\nObjective: Fix CI\n\nBuild encountered failures.\nChunk 1 failed [c1]"
+		buildWake = "[VANADIS BUILD FAILED]\nBuild ID: b1\nObjective: Fix CI\n\nBuild encountered failures.\nChunk 1 failed: ci_remediation_no_outcome [c1]"
 	)
 	ciFailed := model.VanadisChunk{ID: "c1", BuildID: "b1", Mode: "pr", Status: "ci_failed", PRNumber: 42, CIFailCount: 2, Repo: "aerial", Title: "Chunk 1"}
 	tests := []struct {
@@ -744,7 +635,7 @@ func TestBuildObject_OnDispatchOutcome_CIFixupTurnEnded(t *testing.T) {
 			t.Cleanup(api.Close)
 			build := model.VanadisBuild{ID: "b1", Status: statusRunning, ThreadID: "thread", Objective: "Fix CI"}
 			pgStore, _ := seededStore(t, []model.VanadisBuild{build}, []model.VanadisChunk{ciFailed})
-			st := &noPRFailStore{VanadisStore: pgStore}
+			st := &faultStore{VanadisStore: pgStore}
 			var prompts []string
 			eri := &mockEriClient{promptFn: func(_ context.Context, _, prompt string) error {
 				prompts = append(prompts, prompt)
@@ -759,7 +650,7 @@ func TestBuildObject_OnDispatchOutcome_CIFixupTurnEnded(t *testing.T) {
 			if !tc.wantTerminal {
 				require.NoError(t, err)
 			}
-			assert.Equal(t, tc.wantFailReason, st.failReason)
+			assert.Equal(t, tc.wantFailReason, strings.Join(pickCalls(st.snapshotCalls(), "FailChunk", "", 1), ""))
 			assert.Equal(t, tc.wantMsg, eri.LastMsgCont)
 			assert.Equal(t, tc.wantPrompts, prompts)
 			assert.Equal(t, tc.wantGitHubCalls, calls.Load())
