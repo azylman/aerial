@@ -1162,20 +1162,20 @@ func TestChannelCacheAndMessageEffort(t *testing.T) {
 	}
 }
 
-func TestWorkerPool_ProcessBurstEdgeCases(t *testing.T) {
-	t.Parallel()
+type burstEdgeCase struct {
+	name, runnerOut, runnerErrOut, wantMsgStatus string
+	msg                                          db.Message
+	trailing                                     *db.Message
+	runnerCode                                   int
+	runnerErr, claimErr                          error
+	policy                                       *config.ChannelPolicy
+	nilClassifier, unclaimed                     bool
+}
+
+func burstEdgeCases() []burstEdgeCase {
 	now := time.Now().UTC()
 	f05 := 0.5
-
-	tests := []struct {
-		name, runnerOut, runnerErrOut, wantMsgStatus string
-		msg                                          db.Message
-		trailing                                     *db.Message
-		runnerCode                                   int
-		runnerErr, claimErr                          error
-		policy                                       *config.ChannelPolicy
-		nilClassifier, unclaimed                     bool
-	}{
+	return []burstEdgeCase{
 		{name: "claim_error_aborts_burst", msg: db.Message{ID: "m-err-claim", ThreadID: "t-claim", Status: db.StatusPending, CreatedAt: now}, claimErr: errors.New("db lock error")},
 		{name: "unclaimed_message_skipped", msg: db.Message{ID: "m-unclaimed", ThreadID: "t-unclaimed", Status: db.StatusPending, CreatedAt: now}, unclaimed: true},
 		{name: "ignored_channel_completes_schedule_run", msg: db.Message{ID: "m-ign-extra", ThreadID: "t-ign-extra", AuthorID: "u1", Content: "ignored prompt", Status: db.StatusPending, CreatedAt: now}, policy: &config.ChannelPolicy{Mode: "ignore"}, wantMsgStatus: db.StatusCompleted},
@@ -1183,40 +1183,76 @@ func TestWorkerPool_ProcessBurstEdgeCases(t *testing.T) {
 		{name: "rate_limit_fails_schedule_run", msg: db.Message{ID: "m-rate-1", ThreadID: "t-rate", AuthorID: "u1", Content: "query", Status: db.StatusPending, CreatedAt: now}, runnerErrOut: "Resource has been exhausted: rate limit exceeded 429", runnerCode: 1, runnerErr: errors.New("exit 1"), wantMsgStatus: db.StatusFailed},
 		{name: "trailing_query_with_nil_classifier_and_default_policy", msg: db.Message{ID: "m-w-lead", ThreadID: "t-trail-noclass", AuthorID: "u1", Content: "<@aerial> start", Status: db.StatusPending, CreatedAt: now}, trailing: &db.Message{ID: "m-trail-query", ThreadID: "t-trail-noclass", AuthorID: "u1", Content: "why is the ocean blue", Status: db.StatusPending, CreatedAt: now}, runnerOut: mockJSONResponse("", "OK"), policy: &config.ChannelPolicy{Mode: "channel", WakeMode: "classifier", AmbientWakeThreshold: &f05}, nilClassifier: true, wantMsgStatus: db.StatusCompleted},
 	}
-	for _, tc := range tests {
+}
+
+// setupBurstEdgeCase seeds tc's rows and builds its pool; it returns the store to read back and
+// the burst in order.
+func setupBurstEdgeCase(t *testing.T, tc burstEdgeCase) (*WorkerPool, db.Store, []db.Message) {
+	t.Helper()
+	fake := setupTestStore(t)
+	_ = insertMessage(fake, tc.msg)
+	burst := []db.Message{tc.msg}
+	if tc.trailing != nil {
+		_ = insertMessage(fake, *tc.trailing)
+		burst = append(burst, *tc.trailing)
+	}
+	var store db.Store = fake
+	if tc.claimErr != nil || tc.unclaimed {
+		store = &mockClaimStore{Store: fake, claimed: !tc.unclaimed, claimErr: tc.claimErr}
+	}
+	pool := New(nil, WorkerPoolConfig{
+		Store: store, MaxAttempts: 1, BackoffBase: time.Millisecond,
+		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+			return tc.runnerOut, tc.runnerErrOut, tc.runnerCode, tc.runnerErr
+		},
+	})
+	if tc.nilClassifier {
+		pool.cfg.Classifier = nil
+	}
+	if tc.policy != nil {
+		pol := *tc.policy
+		pool.cfg.ResolveChannelPolicy = func(c, n string) config.ChannelPolicy { return pol }
+	}
+	t.Cleanup(pool.Stop)
+	return pool, fake, burst
+}
+
+func assertBurstEdgeCase(t *testing.T, tc burstEdgeCase, store db.Store) {
+	t.Helper()
+	if tc.wantMsgStatus == "" {
+		return
+	}
+	if gotMsg, err := getMessage(store, tc.msg.ID); err != nil || gotMsg == nil || gotMsg.Status != tc.wantMsgStatus {
+		t.Errorf("msg %s status = %v (err=%v), want %s", tc.msg.ID, gotMsg, err, tc.wantMsgStatus)
+	}
+}
+
+func TestWorkerPool_ProcessBurstEdgeCases(t *testing.T) {
+	t.Parallel()
+	for _, tc := range burstEdgeCases() {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			fake := setupTestStore(t)
-			_ = insertMessage(fake, tc.msg)
-			burst := []db.Message{tc.msg}
-			if tc.trailing != nil {
-				_ = insertMessage(fake, *tc.trailing)
-				burst = append(burst, *tc.trailing)
+			pool, store, burst := setupBurstEdgeCase(t, tc)
+			ids := make([]string, len(burst))
+			for i, m := range burst {
+				ids[i] = m.ID
 			}
-			var store db.Store = fake
-			if tc.claimErr != nil || tc.unclaimed {
-				store = &mockClaimStore{Store: fake, claimed: !tc.unclaimed, claimErr: tc.claimErr}
-			}
-			pool := New(nil, WorkerPoolConfig{
-				Store: store, MaxAttempts: 1, BackoffBase: time.Millisecond,
-				RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
-					return tc.runnerOut, tc.runnerErrOut, tc.runnerCode, tc.runnerErr
-				},
-			})
-			if tc.nilClassifier {
-				pool.cfg.Classifier = nil
-			}
-			if tc.policy != nil {
-				pol := *tc.policy
-				pool.cfg.ResolveChannelPolicy = func(c, n string) config.ChannelPolicy { return pol }
-			}
-			pool.processBurst(burst)
+			_ = runLiveBurst(context.Background(), pool, tc.msg.ThreadID, "turn-1", ids...)
+			assertBurstEdgeCase(t, tc, store)
+		})
+	}
+}
 
-			if tc.wantMsgStatus != "" {
-				if gotMsg, err := getMessage(fake, tc.msg.ID); err != nil || gotMsg == nil || gotMsg.Status != tc.wantMsgStatus {
-					t.Errorf("msg %s status = %v (err=%v), want %s", tc.msg.ID, gotMsg, err, tc.wantMsgStatus)
-				}
-			}
+// TestWorkerPool_ProcessBurstEdgeCases_LegacyQueue runs burstEdgeCases through the legacy
+// processBurst path; it exists only while that path does (c06b deletes both).
+func TestWorkerPool_ProcessBurstEdgeCases_LegacyQueue(t *testing.T) {
+	t.Parallel()
+	for _, tc := range burstEdgeCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			pool, store, burst := setupBurstEdgeCase(t, tc)
+			pool.processBurst(burst)
+			assertBurstEdgeCase(t, tc, store)
 		})
 	}
 }

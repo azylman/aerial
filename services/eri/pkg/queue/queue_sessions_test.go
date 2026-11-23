@@ -5,7 +5,6 @@ import (
 	"errors"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -305,7 +304,7 @@ type dispatchExecutionHeadlessCase struct {
 	wantRespText string
 }
 
-func setupHeadlessWorkerPool(t *testing.T, tc dispatchExecutionHeadlessCase, store db.Store, doneCh chan struct{}, bus pubsub.Bus) *WorkerPool {
+func setupHeadlessWorkerPool(t *testing.T, tc dispatchExecutionHeadlessCase, store db.Store, bus pubsub.Bus) *WorkerPool {
 	t.Helper()
 	return NewWorkerPool(WorkerPoolConfig{
 		Store:    store,
@@ -319,7 +318,6 @@ func setupHeadlessWorkerPool(t *testing.T, tc dispatchExecutionHeadlessCase, sto
 			return func() {}
 		},
 		RunnerWithOptionsFunc: func(ctx context.Context, agyBin, prompt, sID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
-			defer close(doneCh)
 			return tc.respJSON, "", 0, nil
 		},
 	})
@@ -342,7 +340,6 @@ func assertHeadlessDispatchResult(t *testing.T, store db.Store, dispID string, t
 func runDispatchExecutionHeadlessCase(t *testing.T, tc dispatchExecutionHeadlessCase) {
 	t.Helper()
 	store := dbtest.NewFakeStore()
-	doneCh := make(chan struct{})
 
 	memBus := pubsub.NewMemoryBus()
 	defer memBus.Close()
@@ -350,7 +347,7 @@ func runDispatchExecutionHeadlessCase(t *testing.T, tc dispatchExecutionHeadless
 		t.Fatalf("EnsureCoreStreams: %v", err)
 	}
 
-	pool := setupHeadlessWorkerPool(t, tc, store, doneCh, memBus)
+	pool := setupHeadlessWorkerPool(t, tc, store, memBus)
 	defer pool.Stop()
 
 	disp := db.Dispatch{
@@ -363,16 +360,9 @@ func runDispatchExecutionHeadlessCase(t *testing.T, tc dispatchExecutionHeadless
 		UpdatedAt: time.Now().UTC(),
 	}
 	_, _ = store.InsertDispatch(context.Background(), disp)
-	pool.EnqueueDispatch(disp)
-
-	select {
-	case <-doneCh:
-	case <-time.After(3 * time.Second):
-		t.Fatalf("timeout waiting for dispatch runner execution")
+	if lt := runLiveDispatch(context.Background(), pool, dispatchSessionKey(disp), "turn-1", disp.ID); lt.err != nil || lt.outcome != OutcomeCompleted {
+		t.Fatalf("turn = (%s, %v), want completed", lt.outcome, lt.err)
 	}
-
-	waitPoolIdle(t, pool, 3*time.Second)
-	pool.Stop()
 
 	assertHeadlessDispatchResult(t, store, disp.ID, tc)
 }
@@ -434,7 +424,6 @@ func TestDispatchExecution_ColdStartAndRotation(t *testing.T) {
 
 	var capturedPrompt string
 	var promptMu sync.Mutex
-	doneCh := make(chan struct{})
 
 	pool := NewWorkerPool(WorkerPoolConfig{
 		Store: store,
@@ -442,7 +431,6 @@ func TestDispatchExecution_ColdStartAndRotation(t *testing.T) {
 			promptMu.Lock()
 			capturedPrompt = prompt
 			promptMu.Unlock()
-			defer close(doneCh)
 			return `{"conversation_id":"77777777-7777-7777-7777-777777777777","status":"SUCCESS","response":"done"}`, "", 0, nil
 		},
 	})
@@ -462,12 +450,8 @@ func TestDispatchExecution_ColdStartAndRotation(t *testing.T) {
 		UpdatedAt: time.Now().UTC(),
 	}
 	_, _ = store.InsertDispatch(ctx, disp)
-	pool.EnqueueDispatch(disp)
-
-	select {
-	case <-doneCh:
-	case <-time.After(3 * time.Second):
-		t.Fatalf("timeout waiting for dispatch execution")
+	if lt := runLiveDispatch(ctx, pool, dispatchSessionKey(disp), "turn-1", disp.ID); lt.err != nil || lt.outcome != OutcomeCompleted {
+		t.Fatalf("turn = (%s, %v), want completed", lt.outcome, lt.err)
 	}
 
 	promptMu.Lock()
@@ -480,9 +464,6 @@ func TestDispatchExecution_ColdStartAndRotation(t *testing.T) {
 	if !strings.Contains(p, "<SYSTEM_DIRECTIVE>") || !strings.Contains(p, "This is a headless dispatch turn; your response will not be delivered to Discord.") {
 		t.Errorf("expected <SYSTEM_DIRECTIVE> in prompt, got:\n%s", p)
 	}
-
-	waitPoolIdle(t, pool, 3*time.Second)
-	pool.Stop()
 
 	count, _ := store.GetSessionTurnCount(ctx, "heartbeat-rot")
 	if count != 0 {
@@ -584,31 +565,19 @@ func TestDispatchExecution_RetriesAndFailure(t *testing.T) {
 			}
 			_, _ = store.InsertDispatch(ctx, disp)
 
-			exhausted := make(chan struct{})
-			var attempts atomic.Int32
 			pool := New(nil, WorkerPoolConfig{
 				Store:       store,
 				MaxAttempts: 2,
 				BackoffBase: 1 * time.Millisecond,
 				RunnerWithOptionsFunc: func(ctx context.Context, agyBin, prompt, sID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
-					if attempts.Add(1) == 2 {
-						close(exhausted)
-					}
 					return "", "fatal error", 1, errors.New("simulated dispatch execution error")
 				},
 			})
 			defer pool.Stop()
 
-			pool.EnqueueDispatch(disp)
-
-			select {
-			case <-exhausted:
-			case <-time.After(3 * time.Second):
-				t.Fatalf("timeout waiting for retries to exhaust")
+			if lt := runLiveDispatch(ctx, pool, dispatchSessionKey(disp), "turn-1", disp.ID); lt.err != nil || lt.outcome != OutcomeFailed {
+				t.Fatalf("turn = (%s, %v), want failed", lt.outcome, lt.err)
 			}
-
-			waitPoolIdle(t, pool, 3*time.Second)
-			pool.Stop()
 
 			d, err := store.GetDispatch(ctx, disp.ID)
 			if err != nil || d == nil {
@@ -622,4 +591,13 @@ func TestDispatchExecution_RetriesAndFailure(t *testing.T) {
 			}
 		})
 	}
+}
+
+// dispatchSessionKey is the coordinator session key a dispatch runs under: its session, or its
+// own ID when it has none.
+func dispatchSessionKey(d db.Dispatch) string {
+	if d.SessionID != "" {
+		return d.SessionID
+	}
+	return "dispatch-" + d.ID
 }

@@ -578,6 +578,70 @@ func runStatefulEvictionCase(t *testing.T, tc statefulEvictionTestCase) {
 	var mu sync.Mutex
 	var promptsSeen []string
 	var invCount atomic.Int32
+
+	origPrompt := "[VANADIS BUILD CHUNK EXECUTION] Chunk execution test"
+
+	pool := NewWorkerPool(WorkerPoolConfig{
+		Store:          store,
+		SessionManager: sessMgr,
+		RunnerWithOptionsFunc: func(ctx context.Context, agyBin, prompt, sID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
+			mu.Lock()
+			promptsSeen = append(promptsSeen, prompt)
+			mu.Unlock()
+
+			inv := invCount.Add(1)
+			if tc.yieldTrap && inv == 1 {
+				return `{"conversation_id":"` + sessUUID + `","status":"SUCCESS","response":"Waiting for task to complete"}`, "terminating 1 background task(s)", 0, nil
+			}
+			return `{"conversation_id":"` + sessUUID + `","status":"SUCCESS","response":"chunk executed successfully"}`, "", 0, nil
+		},
+	})
+	defer pool.Stop()
+
+	disp := db.Dispatch{
+		ID:           uuid.New().String(),
+		Source:       "vanadis",
+		SessionID:    tc.sessionID,
+		Prompt:       origPrompt,
+		RestartCount: tc.restartCount,
+		Status:       db.StatusPending,
+		CreatedAt:    time.Now().UTC(),
+		UpdatedAt:    time.Now().UTC(),
+	}
+	_, _ = store.InsertDispatch(ctx, disp)
+	if lt := runLiveDispatch(ctx, pool, tc.sessionID, "turn-1", disp.ID); lt.err != nil {
+		t.Fatalf("turn err = %v", lt.err)
+	}
+	pool.Stop()
+
+	mu.Lock()
+	seen := append([]string(nil), promptsSeen...)
+	mu.Unlock()
+
+	assertStatefulEvictionResults(ctx, t, tc, store, disp.ID, sessUUID, pool, seen)
+}
+
+// runStatefulEvictionCaseLegacyQueue drives the dispatch through the legacy EnqueueDispatch path.
+func runStatefulEvictionCaseLegacyQueue(t *testing.T, tc statefulEvictionTestCase) {
+	t.Helper()
+	store := dbtest.NewFakeStore()
+	ctx := context.Background()
+	tmpHome := t.TempDir()
+	tempData := t.TempDir()
+	sessMgr := session.New(tmpHome, tempData)
+
+	sessUUID := "33333333-3333-3333-3333-333333333333"
+	if tc.hasExistingTranscript {
+		sessDir, _ := ensureTestSessionDir(sessMgr, sessUUID)
+		_ = os.MkdirAll(filepath.Join(sessDir, ".system_generated", "logs"), 0o755)
+		_ = os.WriteFile(filepath.Join(sessDir, ".system_generated", "logs", "transcript.jsonl"), []byte(`{"step_index":0}
+`), 0o644)
+		_ = store.SaveSessionID(ctx, tc.sessionID, sessUUID)
+	}
+
+	var mu sync.Mutex
+	var promptsSeen []string
+	var invCount atomic.Int32
 	doneCh := make(chan struct{})
 
 	origPrompt := "[VANADIS BUILD CHUNK EXECUTION] Chunk execution test"
@@ -629,39 +693,51 @@ func runStatefulEvictionCase(t *testing.T, tc statefulEvictionTestCase) {
 	assertStatefulEvictionResults(ctx, t, tc, store, disp.ID, sessUUID, pool, seen)
 }
 
+var statefulEvictionCases = []statefulEvictionTestCase{
+	{
+		name:                   "stateful dispatch evicts active pool session while preserving conversation in store",
+		sessionID:              "vanadis-chunk-1",
+		restartCount:           0,
+		hasExistingTranscript:  false,
+		yieldTrap:              false,
+		wantStatus:             db.StatusCompleted,
+		wantEvictedFromPool:    true,
+		wantSessionInStore:     true,
+		wantContinuationPrompt: false,
+		wantYieldTrapPrompt:    false,
+	},
+	{
+		name:                   "restarted stateful dispatch sends continuation prompt and transitions to yield trap resume",
+		sessionID:              "vanadis-chunk-2",
+		restartCount:           1,
+		hasExistingTranscript:  true,
+		yieldTrap:              true,
+		wantStatus:             db.StatusCompleted,
+		wantEvictedFromPool:    true,
+		wantSessionInStore:     true,
+		wantContinuationPrompt: true,
+		wantYieldTrapPrompt:    true,
+	},
+}
+
 func TestWorker_ProcessDispatch_StatefulEvictionAndRestartContinuation(t *testing.T) {
 	t.Parallel()
-	tests := []statefulEvictionTestCase{
-		{
-			name:                   "stateful dispatch evicts active pool session while preserving conversation in store",
-			sessionID:              "vanadis-chunk-1",
-			restartCount:           0,
-			hasExistingTranscript:  false,
-			yieldTrap:              false,
-			wantStatus:             db.StatusCompleted,
-			wantEvictedFromPool:    true,
-			wantSessionInStore:     true,
-			wantContinuationPrompt: false,
-			wantYieldTrapPrompt:    false,
-		},
-		{
-			name:                   "restarted stateful dispatch sends continuation prompt and transitions to yield trap resume",
-			sessionID:              "vanadis-chunk-2",
-			restartCount:           1,
-			hasExistingTranscript:  true,
-			yieldTrap:              true,
-			wantStatus:             db.StatusCompleted,
-			wantEvictedFromPool:    true,
-			wantSessionInStore:     true,
-			wantContinuationPrompt: true,
-			wantYieldTrapPrompt:    true,
-		},
-	}
-
-	for _, tc := range tests {
+	for _, tc := range statefulEvictionCases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			runStatefulEvictionCase(t, tc)
+		})
+	}
+}
+
+// TestWorker_ProcessDispatch_StatefulEviction_LegacyQueue runs statefulEvictionCases through the
+// legacy EnqueueDispatch path; it exists only while that path does (c06b deletes both).
+func TestWorker_ProcessDispatch_StatefulEviction_LegacyQueue(t *testing.T) {
+	t.Parallel()
+	for _, tc := range statefulEvictionCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			runStatefulEvictionCaseLegacyQueue(t, tc)
 		})
 	}
 }
