@@ -536,3 +536,64 @@ func TestRecordRestateSend(t *testing.T) {
 		})
 	}
 }
+
+func TestBucketGitHubIngressEvent(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		event string
+		want  string
+	}{
+		{name: "ping is kept", event: "ping", want: "ping"},
+		{name: "pull_request is kept", event: "pull_request", want: "pull_request"},
+		{name: "check_run is kept", event: "check_run", want: "check_run"},
+		{name: "workflow_run is kept", event: "workflow_run", want: "workflow_run"},
+		{name: "push is kept", event: "push", want: "push"},
+		{name: "blank buckets to unknown", event: "", want: "unknown"},
+		{name: "unhandled event buckets to unknown", event: "issues", want: "unknown"},
+		{name: "attacker-controlled value buckets to unknown", event: "pull_request\x00evil-label-injection", want: "unknown"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := BucketGitHubIngressEvent(tc.event); got != tc.want {
+				t.Errorf("BucketGitHubIngressEvent(%q) = %q, want %q", tc.event, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestRecordGitHubIngress(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		event       string
+		outcome     string
+		wantEvent   string
+		wantOutcome string
+	}{
+		{name: "accepted is recorded", event: "pull_request", outcome: GitHubIngressAccepted, wantEvent: "pull_request", wantOutcome: "accepted"},
+		{name: "signature rejection is recorded", event: "push", outcome: GitHubIngressSignatureRejected, wantEvent: "push", wantOutcome: "signature_rejected"},
+		{name: "missing header is recorded", event: "", outcome: GitHubIngressMissingEventHeader, wantEvent: "unknown", wantOutcome: "missing_event_header"},
+		{name: "body read failure is recorded", event: "ping", outcome: GitHubIngressBodyReadFailed, wantEvent: "ping", wantOutcome: "body_read_failed"},
+		{name: "bus unavailable is recorded", event: "check_run", outcome: GitHubIngressBusUnavailable, wantEvent: "check_run", wantOutcome: "bus_unavailable"},
+		{name: "publish failure is recorded", event: "workflow_run", outcome: GitHubIngressPublishFailed, wantEvent: "workflow_run", wantOutcome: "publish_failed"},
+		{name: "unhandled event buckets to unknown", event: "issues", outcome: GitHubIngressAccepted, wantEvent: "unknown", wantOutcome: "accepted"},
+		{name: "blank outcome falls back to unknown", event: "ping", outcome: "", wantEvent: "ping", wantOutcome: "unknown"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			counter := GitHubIngressTotal.WithLabelValues(tc.wantEvent, tc.wantOutcome)
+			before := testutil.ToFloat64(counter)
+			RecordGitHubIngress(tc.event, tc.outcome)
+			if got, want := testutil.ToFloat64(counter), before+1; got != want {
+				t.Errorf("github ingress = %v, want %v", got, want)
+			}
+		})
+	}
+}

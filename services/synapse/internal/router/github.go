@@ -18,6 +18,7 @@ import (
 	"github.com/azylman/aerial/pkg/strutil"
 	"github.com/azylman/aerial/services/synapse/internal/buildmeta"
 	"github.com/azylman/aerial/services/synapse/internal/github"
+	"github.com/azylman/aerial/services/synapse/internal/metrics"
 	"github.com/azylman/aerial/services/synapse/internal/model"
 )
 
@@ -328,6 +329,9 @@ func verifyGitHubWebhookSignature(secret, signatureHeader string, body []byte) b
 func (s *RouterServer) handleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
 	event := r.Header.Get("X-Github-Event")
 	if strings.TrimSpace(event) == "" {
+		metrics.RecordGitHubIngress(event, metrics.GitHubIngressMissingEventHeader)
+		slog.WarnContext(r.Context(), "[synapse] [github] webhook rejected: missing event header",
+			"event", event, "delivery", r.Header.Get("X-Github-Delivery"), "outcome", metrics.GitHubIngressMissingEventHeader)
 		httpkit.WriteJSON(w, http.StatusBadRequest, map[string]string{fieldError: "missing X-GitHub-Event header"})
 		return
 	}
@@ -335,6 +339,9 @@ func (s *RouterServer) handleGitHubWebhook(w http.ResponseWriter, r *http.Reques
 
 	body, ok := readWebhookBody(w, r, 5<<20)
 	if !ok {
+		metrics.RecordGitHubIngress(event, metrics.GitHubIngressBodyReadFailed)
+		slog.WarnContext(r.Context(), "[synapse] [github] webhook rejected: body read failed",
+			"event", event, "delivery", delivery, "outcome", metrics.GitHubIngressBodyReadFailed)
 		return
 	}
 	var webhookSecret string
@@ -342,19 +349,29 @@ func (s *RouterServer) handleGitHubWebhook(w http.ResponseWriter, r *http.Reques
 		webhookSecret = s.cfgSrc.Current().GitHubWebhookSecret
 	}
 	if !verifyGitHubWebhookSignature(webhookSecret, r.Header.Get("X-Hub-Signature-256"), body) {
+		metrics.RecordGitHubIngress(event, metrics.GitHubIngressSignatureRejected)
+		slog.WarnContext(r.Context(), "[synapse] [github] webhook rejected: invalid signature",
+			"event", event, "delivery", delivery, "outcome", metrics.GitHubIngressSignatureRejected)
 		httpkit.WriteJSON(w, http.StatusUnauthorized, map[string]string{fieldError: "invalid github webhook signature"})
 		return
 	}
 	if s.bus == nil {
-		slog.ErrorContext(r.Context(), "[synapse] [github] event bus not initialized")
+		metrics.RecordGitHubIngress(event, metrics.GitHubIngressBusUnavailable)
+		slog.ErrorContext(r.Context(), "[synapse] [github] event bus not initialized",
+			"event", event, "delivery", delivery, "outcome", metrics.GitHubIngressBusUnavailable)
 		httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{fieldError: "event bus not initialized"})
 		return
 	}
 	if err := s.publishJetStreamJob(r.Context(), GitHubWebhookArgs{Event: event, Delivery: delivery, Body: body}); err != nil {
-		slog.ErrorContext(r.Context(), "[synapse] [github] failed to publish job to jetstream", "error", err)
+		metrics.RecordGitHubIngress(event, metrics.GitHubIngressPublishFailed)
+		slog.ErrorContext(r.Context(), "[synapse] [github] failed to publish job to jetstream",
+			"event", event, "delivery", delivery, "outcome", metrics.GitHubIngressPublishFailed, "error", err)
 		httpkit.WriteJSON(w, http.StatusInternalServerError, map[string]string{fieldError: "failed to persist webhook"})
 		return
 	}
+	metrics.RecordGitHubIngress(event, metrics.GitHubIngressAccepted)
+	slog.InfoContext(r.Context(), "[synapse] [github] webhook accepted",
+		"event", event, "delivery", delivery, "outcome", metrics.GitHubIngressAccepted)
 	httpkit.WriteJSON(w, http.StatusOK, map[string]any{
 		fieldStatus: statusAccepted,
 		fieldEvent:  event,
