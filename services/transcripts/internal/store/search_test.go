@@ -100,9 +100,12 @@ func TestBuildStepsQuery(t *testing.T) {
 		wantArgs       []any
 	}{
 		{"content uses fts index", "", "hello", "", "", 20, time.Time{}, "t.fts_tokens @@ websearch_to_tsquery('simple', $1)", "LIKE", []any{"hello", 20}},
+		{"content order uses fts rank", "", "hello", "", "", 20, time.Time{}, "ORDER BY ts_rank_cd(t.fts_tokens, websearch_to_tsquery('simple', $1)) DESC, t.created_at DESC", "", []any{"hello", 20}},
 		{"filters keep placeholders", "aerial", "hello", "sess-a", "bash", 10, time.Time{}, "t.agent = $2 AND t.session_id = $3", "LIKE", []any{"hello", "aerial", "sess-a", "bash", 10}},
+		{"mcp tool filter uses like", "", "", "", "mcp", 20, time.Time{}, "t.tool_kind LIKE $1", "OR t.tool_name", []any{"mcp:%", 20}},
 		{"comma-separated sessions in IN clause", "", "hello", "sess-a,sess-b", "", 20, time.Time{}, "t.session_id IN ($2, $3)", "LIKE", []any{"hello", "sess-a", "sess-b", 20}},
 		{"since clause added", "", "hello", "", "", 20, epoch, "t.created_at >= $2", "LIKE", []any{"hello", epoch, 20}},
+		{"since without query uses greater than and asc order", "", "", "", "", 20, epoch, "WHERE t.created_at > $1 ORDER BY t.created_at ASC, t.step_index ASC", "", []any{epoch, 20}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -271,8 +274,12 @@ func TestSearchStepsToolFilter(t *testing.T) {
 	epoch := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
 	batch := testBatch("sess-a", epoch, 0, 2, false, false)
 	batch.Steps[0].ToolName = "bash"
+	batch.Steps[1].ToolName = "read_file"
 	if _, err := store.ApplyBatch(ctx, batch); err != nil {
 		t.Fatalf("seed: %v", err)
+	}
+	if _, err := store.db.ExecContext(ctx, `UPDATE transcript_steps SET tool_kind = 'mcp:fs' WHERE agent = 'aerial' AND session_id = 'sess-a' AND step_index = 1`); err != nil {
+		t.Fatalf("update tool_kind: %v", err)
 	}
 	got, err := store.SearchSteps(ctx, "", "", "", "bash", 20)
 	if err != nil {
@@ -280,6 +287,13 @@ func TestSearchStepsToolFilter(t *testing.T) {
 	}
 	if len(got) != 1 {
 		t.Errorf("SearchSteps(tool=bash) = %d rows, want 1", len(got))
+	}
+	got, err = store.SearchSteps(ctx, "", "", "", "mcp", 20)
+	if err != nil {
+		t.Fatalf("SearchSteps(tool=mcp) err = %v", err)
+	}
+	if len(got) != 1 {
+		t.Errorf("SearchSteps(tool=mcp) = %d rows, want 1", len(got))
 	}
 	got, err = store.SearchSteps(ctx, "", "", "", "bash", 0)
 	if err != nil {

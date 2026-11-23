@@ -367,17 +367,19 @@ func RunApp(ctx context.Context, cfg *config.Config) error {
 	toolHandler := NewToolHandler(cfg, sqlStore, ollama, publisher)
 
 	worker := NewWorker(WorkerConfig{
-		Store:             sqlStore,
-		Ollama:            ollama,
-		LLMClient:         HTTPBrainLLMClient(cfg.EriLLMURL, nil),
-		Publisher:         publisher,
-		CustomSkillsDir:   cfg.CustomSkillsDir,
-		InitialDelay:      DefaultWorkerInitialDelay,
-		TickInterval:      DefaultWorkerTickInterval,
-		Role:              cfg.Role,
-		Stack:             cfg.EffectiveStack(),
-		ExtractTimeout:    cfg.ExtractTimeout(),
-		RestateIngressURL: cfg.RestateIngressURL,
+		Store:               sqlStore,
+		Ollama:              ollama,
+		LLMClient:           HTTPBrainLLMClient(cfg.EriLLMURL, nil),
+		Publisher:           publisher,
+		CustomSkillsDir:     cfg.CustomSkillsDir,
+		InitialDelay:        DefaultWorkerInitialDelay,
+		TickInterval:        DefaultWorkerTickInterval,
+		Role:                cfg.Role,
+		Stack:               cfg.EffectiveStack(),
+		ExtractTimeout:      cfg.ExtractTimeout(),
+		RestateIngressURL:   cfg.RestateIngressURL,
+		RestateAdminURL:     cfg.RestateAdminURL,
+		RestateAdvertiseURL: cfg.RestateAdvertiseURL,
 	})
 	workerCtx, workerCancel := context.WithCancel(ctx)
 	defer workerCancel()
