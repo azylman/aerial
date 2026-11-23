@@ -294,9 +294,9 @@ func formatOpenCIChecks(checks map[string]string) string {
 	if pos, qTotal, ok := parseMergeQueuePosition(checks[mergeQueueCheckKey]); ok {
 		switch {
 		case passed == total && pos == 1:
-			return fmt.Sprintf("Updating branch with main (#1 of %d · %d/%d passed)", qTotal, passed, total)
+			return fmt.Sprintf("Updating branch with main (#1 of %d)", qTotal)
 		case passed == total && pos > 1:
-			return fmt.Sprintf("Waiting in merge queue (#%d of %d · %d/%d passed)", pos, qTotal, passed, total)
+			return fmt.Sprintf("Waiting in merge queue (#%d of %d)", pos, qTotal)
 		case passed < total:
 			return fmt.Sprintf("Waiting on CI (%d/%d passed · #%d of %d in merge queue)", passed, total, pos, qTotal)
 		}
