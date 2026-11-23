@@ -15,7 +15,6 @@ import (
 
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
-	"github.com/azylman/aerial/services/eri/pkg/db/dbtest"
 	"github.com/azylman/aerial/services/eri/pkg/runner"
 	"github.com/azylman/aerial/services/eri/pkg/session"
 )
@@ -207,7 +206,7 @@ func TestTurnExecution_FinalizeInterruptedTurn(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			store := dbtest.NewFakeStore()
+			store := testStore(t)
 			ctx := context.Background()
 			pool := New(config.NewFromData(&config.ConfigData{}), WorkerPoolConfig{Store: store})
 			te := &turnExecution{pool: pool, threadID: "t-int"}
@@ -461,7 +460,7 @@ func assertStatefulEvictionResults(ctx context.Context, t *testing.T, tc statefu
 
 func runStatefulEvictionCase(t *testing.T, tc statefulEvictionTestCase) {
 	t.Helper()
-	store := dbtest.NewFakeStore()
+	store := testStore(t)
 	ctx := context.Background()
 	tmpHome := t.TempDir()
 	tempData := t.TempDir()

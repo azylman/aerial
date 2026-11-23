@@ -27,7 +27,6 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/classifier"
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
-	"github.com/azylman/aerial/services/eri/pkg/db/dbtest"
 	"github.com/azylman/aerial/services/eri/pkg/metrics"
 	"github.com/azylman/aerial/services/eri/pkg/runner"
 	"github.com/azylman/aerial/services/eri/pkg/session"
@@ -269,7 +268,7 @@ func setupVoiceTestPool(t *testing.T, tt *voiceTurnTestCase, h *voiceTraceHarnes
 	}
 	if tt.runnerOut != "" || tt.runnerErr != nil || tt.runnerCode != 0 {
 		p := New(appCfg, WorkerPoolConfig{
-			LowEffortModel: "low-effort-fast-model", Store: dbtest.NewFakeStore(), TracerProvider: h.tp, ActiveTurns: h.registry,
+			LowEffortModel: "low-effort-fast-model", TracerProvider: h.tp, ActiveTurns: h.registry,
 			RunnerWithOptionsFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
 				return tt.runnerOut, tt.runnerErrOut, tt.runnerCode, tt.runnerErr
 			},
@@ -768,9 +767,9 @@ func TestWorkerPool_ExecuteVoiceTurn_MockVoiceProcessPool(t *testing.T) {
 
 func TestTurnExecution_StoreDelegates(t *testing.T) {
 	t.Parallel()
-	fake := setupTestStore(t)
-	closedFake := setupTestStore(t)
-	_ = closedFake.Close()
+	fake := testStore(t)
+	closedFake, closedDB := newTestStore(t)
+	_ = closedDB.Close()
 	memBus := pubsub.NewMemoryBus()
 	t.Cleanup(func() { _ = memBus.Close() })
 	if err := pubsub.EnsureCoreStreams(context.Background(), memBus); err != nil {
@@ -818,7 +817,7 @@ func TestTurnExecution_StoreDelegates(t *testing.T) {
 
 func TestSummarizeAndHistoryHelpers(t *testing.T) {
 	t.Parallel()
-	fake := setupTestStore(t)
+	fake := testStore(t)
 	now := time.Now().UTC()
 	_ = insertMessage(fake, db.Message{ID: "msg-fast-1", ThreadID: "thread-fast-1", AuthorID: "user-1", AuthorName: "Alice", Content: "Hello fast path", CreatedAt: now})
 
@@ -906,7 +905,7 @@ func TestSummarizeAndHistoryHelpers(t *testing.T) {
 
 func TestWorkerPool_RunnerFallbackAdaptersAndLifecycle(t *testing.T) {
 	t.Parallel()
-	fake := setupTestStore(t)
+	fake := testStore(t)
 	ctx := context.Background()
 
 	tests := []struct {
@@ -1164,7 +1163,7 @@ func burstEdgeCases() []burstEdgeCase {
 // the burst in order.
 func setupBurstEdgeCase(t *testing.T, tc burstEdgeCase) (*WorkerPool, db.Store, []db.Message) {
 	t.Helper()
-	fake := setupTestStore(t)
+	fake := testStore(t)
 	_ = insertMessage(fake, tc.msg)
 	burst := []db.Message{tc.msg}
 	if tc.trailing != nil {
