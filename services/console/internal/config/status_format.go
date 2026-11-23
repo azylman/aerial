@@ -12,6 +12,8 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/azylman/aerial/pkg/docketwire"
 )
 
 const (
@@ -1169,48 +1171,16 @@ type BuildDetailAPIResponse struct {
 }
 
 // DocketTaskSummaryDTO mirrors docket-mcp's TaskSummary.
-type DocketTaskSummaryDTO struct {
-	ID        int64   `json:"id"`
-	Title     string  `json:"title"`
-	Status    string  `json:"status"`
-	ParentID  *int64  `json:"parent_id,omitempty"`
-	BlockedBy []int64 `json:"blocked_by,omitempty"`
-	Blocks    []int64 `json:"blocks,omitempty"`
-}
+type DocketTaskSummaryDTO = docketwire.TaskSummary
 
 // DocketScoredTaskDTO mirrors docket-mcp's ScoredTaskSummary.
-type DocketScoredTaskDTO struct {
-	ID       int64   `json:"id"`
-	Title    string  `json:"title"`
-	Status   string  `json:"status"`
-	ParentID *int64  `json:"parent_id,omitempty"`
-	Score    float64 `json:"score"`
-}
+type DocketScoredTaskDTO = docketwire.ScoredTaskSummary
 
 // DocketTaskCommentDTO mirrors docket-mcp's TaskComment.
-type DocketTaskCommentDTO struct {
-	ID        int64     `json:"id"`
-	Author    string    `json:"author,omitempty"`
-	Comment   string    `json:"comment"`
-	CreatedAt time.Time `json:"created_at"`
-}
+type DocketTaskCommentDTO = docketwire.TaskComment
 
 // DocketTaskDTO mirrors docket-mcp's HydratedTask.
-type DocketTaskDTO struct {
-	ID          int64                  `json:"id"`
-	Title       string                 `json:"title"`
-	Status      string                 `json:"status"`
-	Description string                 `json:"description,omitempty"`
-	CreatedAt   time.Time              `json:"created_at"`
-	UpdatedAt   time.Time              `json:"updated_at"`
-	ClosedAt    *time.Time             `json:"closed_at,omitempty"`
-	Parent      *DocketTaskSummaryDTO  `json:"parent,omitempty"`
-	Subtasks    []DocketTaskSummaryDTO `json:"subtasks,omitempty"`
-	Blocks      []DocketTaskSummaryDTO `json:"blocks,omitempty"`
-	BlockedBy   []DocketTaskSummaryDTO `json:"blocked_by,omitempty"`
-	Related     []DocketTaskSummaryDTO `json:"related,omitempty"`
-	Comments    []DocketTaskCommentDTO `json:"comments,omitempty"`
-}
+type DocketTaskDTO = docketwire.HydratedTask
 
 // DocketTasksAPIResponse is the console envelope for GET /api/docket/tasks.
 type DocketTasksAPIResponse struct {

@@ -36,14 +36,9 @@ func (r restateObjectRuntime) ScheduleDeadline(req deploygate.DeploymentDeadline
 	_ = restate.ObjectSend(r.ctx, r.serviceName(), r.Key(), "DeploymentDeadline").Send(req, restate.WithDelay(delay))
 }
 
-// RunStep bridges the build journal to the deploygate step payload. The two
-// payload structs stay field-identical so conversion is direct.
+// RunStep bridges the deployment gate step journal to the build step runner.
 func (r restateObjectRuntime) RunStep(name string, fn func(ctx context.Context) (deploygate.StepOutput, error)) (deploygate.StepOutput, error) {
-	out, err := r.RunReconcileStep(name, func(ctx context.Context) (reconcileStepOutput, error) {
-		o, e := fn(ctx)
-		return reconcileStepOutput(o), e
-	})
-	return deploygate.StepOutput(out), err
+	return r.RunReconcileStep(name, fn)
 }
 
 // gate binds the deployment gate to this object's durable authority.

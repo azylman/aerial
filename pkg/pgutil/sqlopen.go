@@ -23,6 +23,7 @@ type SQLOptions struct {
 	MaxIdleConns    int
 	ConnMaxLifetime time.Duration
 	ConnMaxIdleTime time.Duration
+	RetryBase       time.Duration
 }
 
 // connector holds the connection retry policy OpenSQL applies.
@@ -66,6 +67,9 @@ func (c connector) open(ctx context.Context, dsn string, opts SQLOptions) (*sql.
 	var database *sql.DB
 	var err error
 	backoff := c.retryBase
+	if opts.RetryBase > 0 {
+		backoff = opts.RetryBase
+	}
 	for attempt := 1; attempt <= c.maxAttempts; attempt++ {
 		database, err = c.ping(ctx, trimmed)
 		if err == nil {
@@ -139,4 +143,30 @@ func RedactDSN(dsn string) string {
 	u.Fragment = ""
 	u.RawFragment = ""
 	return u.Redacted()
+}
+
+// WithSearchPath appends search_path=defaultSearchPath to a PostgreSQL URL or
+// key=value DSN when search_path is not already present.
+func WithSearchPath(connStr, defaultSearchPath string) string {
+	trimmed := strings.TrimSpace(connStr)
+	sp := strings.TrimSpace(defaultSearchPath)
+	if trimmed == "" || sp == "" {
+		return connStr
+	}
+	if strings.HasPrefix(trimmed, "postgres://") || strings.HasPrefix(trimmed, "postgresql://") {
+		u, err := url.Parse(trimmed)
+		if err != nil {
+			return connStr
+		}
+		q := u.Query()
+		if q.Get("search_path") == "" {
+			q.Set("search_path", sp)
+			u.RawQuery = q.Encode()
+		}
+		return u.String()
+	}
+	if !strings.Contains(trimmed, "search_path=") {
+		return trimmed + " search_path=" + sp
+	}
+	return connStr
 }

@@ -187,11 +187,7 @@ func (f *fakeObjectRuntime) ScheduleDeadline(req deploygate.DeploymentDeadlineRe
 }
 
 func (f *fakeObjectRuntime) RunStep(name string, fn func(ctx context.Context) (deploygate.StepOutput, error)) (deploygate.StepOutput, error) {
-	out, err := f.RunReconcileStep(name, func(ctx context.Context) (reconcileStepOutput, error) {
-		o, runErr := fn(ctx)
-		return reconcileStepOutput(o), runErr
-	})
-	return deploygate.StepOutput(out), err
+	return f.RunReconcileStep(name, fn)
 }
 
 func TestBuildObject_ReflectionAndInterface(t *testing.T) {
