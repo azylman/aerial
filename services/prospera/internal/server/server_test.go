@@ -1184,7 +1184,6 @@ type triggerPostCallReportTestCase struct {
 	wantIngress   bool
 	wantPath      string
 	wantKey       string
-	wantDelivered bool
 	wantErr       bool
 }
 
@@ -1235,11 +1234,7 @@ func runTriggerPostCallReportTest(t *testing.T, tc triggerPostCallReportTestCase
 	if !tc.noReporter {
 		rep = delivery.NewReporter(fakes.StaticConfig{Cfg: cfg}, st, &fakes.FakeTwilio{})
 	}
-	var serverOpts []ServerOption
-	if tc.name != "successful restate ingress invocation" {
-		serverOpts = append(serverOpts, WithServerHTTPClient(srv.Client()))
-	}
-	server := NewServer(newTestConfigSource(cfg), st, &fakes.FakeTwilio{}, nil, nil, rep, serverOpts...)
+	server := NewServer(newTestConfigSource(cfg), st, &fakes.FakeTwilio{}, nil, nil, rep)
 
 	err := server.triggerPostCallReport(context.Background(), tc.callID)
 	if (err != nil) != tc.wantErr {
@@ -1263,11 +1258,9 @@ func runTriggerPostCallReportTest(t *testing.T, tc triggerPostCallReportTestCase
 		t.Errorf("key = %q, want %q", key, tc.wantKey)
 	}
 
-	if tc.wantDelivered {
-		call, _ := st.GetCall(context.Background(), tc.callID)
-		if call.ReportStatus != "delivered" {
-			t.Errorf("call report status = %q, want delivered", call.ReportStatus)
-		}
+	// Only the ProsperaReport object delivers; triggering never posts directly.
+	if call, _ := st.GetCall(context.Background(), tc.callID); call != nil && call.ReportStatus != "pending" {
+		t.Errorf("call report status = %q, want pending", call.ReportStatus)
 	}
 }
 
@@ -1275,43 +1268,11 @@ func TestServer_TriggerPostCallReport_RestateIngress(t *testing.T) {
 	t.Parallel()
 
 	tests := []triggerPostCallReportTestCase{
-		{
-			name:          "empty call id returns nil",
-			callID:        "   ",
-			ingressStatus: http.StatusOK,
-			wantIngress:   false,
-			wantDelivered: false,
-		},
-		{
-			name:          "successful restate ingress invocation",
-			callID:        "call-restate-ok",
-			ingressStatus: http.StatusOK,
-			wantIngress:   true,
-			wantPath:      "/ProsperaReport/call-restate-ok/DeliverReport/send",
-			wantKey:       "prospera:report:call-restate-ok",
-		},
-		{
-			name:          "restate ingress failure falls back to direct delivery",
-			callID:        "call-restate-fail",
-			ingressStatus: http.StatusInternalServerError,
-			wantIngress:   true,
-			wantDelivered: true,
-		},
-		{
-			name:          "empty restate ingress url delivers directly",
-			callID:        "call-no-ingress",
-			emptyIngress:  true,
-			wantIngress:   false,
-			wantDelivered: true,
-		},
-		{
-			name:         "no delivery mechanism available returns error and logs in triggerPostCallReportIfPending",
-			callID:       "call-no-mech",
-			emptyIngress: true,
-			noReporter:   true,
-			wantIngress:  false,
-			wantErr:      true,
-		},
+		{name: "empty call id returns nil", callID: "   "},
+		{name: "successful restate ingress invocation", callID: "call-restate-ok", wantIngress: true, wantPath: "/ProsperaReport/call-restate-ok/DeliverReport/send", wantKey: "prospera:report:call-restate-ok"},
+		{name: "restate ingress failure without a bus returns error", callID: "call-restate-fail", ingressStatus: http.StatusInternalServerError, wantIngress: true, wantKey: "prospera:report:call-restate-fail", wantErr: true},
+		{name: "empty restate ingress url returns error", callID: "call-no-ingress", emptyIngress: true, wantErr: true},
+		{name: "no reporter returns error", callID: "call-no-mech", noReporter: true, wantErr: true},
 	}
 
 	for _, tc := range tests {
@@ -1327,7 +1288,7 @@ type handleReportJobTestCase struct {
 	callID        string
 	ingressStatus int
 	wantIngress   bool
-	wantDelivered bool
+	wantErr       bool
 }
 
 func runHandleReportJobTest(t *testing.T, tc handleReportJobTestCase) {
@@ -1370,8 +1331,8 @@ func runHandleReportJobTest(t *testing.T, tc handleReportJobTestCase) {
 		Payload: []byte(`{"call_id":"` + tc.callID + `"}`),
 	}
 	err := server.HandleReportJob(context.Background(), msg)
-	if err != nil {
-		t.Fatalf("HandleReportJob() err = %v", err)
+	if (err != nil) != tc.wantErr {
+		t.Fatalf("HandleReportJob() err = %v, wantErr = %v", err, tc.wantErr)
 	}
 
 	mu.Lock()
@@ -1381,9 +1342,8 @@ func runHandleReportJobTest(t *testing.T, tc handleReportJobTestCase) {
 		t.Errorf("calledIngress = %v, want %v", gotIngress, tc.wantIngress)
 	}
 
-	call, _ := st.GetCall(context.Background(), tc.callID)
-	if (call.ReportStatus == "delivered") != tc.wantDelivered {
-		t.Errorf("call report status = %q, wantDelivered = %v", call.ReportStatus, tc.wantDelivered)
+	if call, _ := st.GetCall(context.Background(), tc.callID); call.ReportStatus != "pending" {
+		t.Errorf("call report status = %q, want pending", call.ReportStatus)
 	}
 }
 
@@ -1391,20 +1351,8 @@ func TestServer_HandleReportJob_RestateIngress(t *testing.T) {
 	t.Parallel()
 
 	tests := []handleReportJobTestCase{
-		{
-			name:          "restate ingress succeeds without fallback",
-			callID:        "call-job-restate-ok",
-			ingressStatus: http.StatusOK,
-			wantIngress:   true,
-			wantDelivered: false,
-		},
-		{
-			name:          "restate ingress failure falls back to direct reporter delivery",
-			callID:        "call-job-restate-fallback",
-			ingressStatus: http.StatusInternalServerError,
-			wantIngress:   true,
-			wantDelivered: true,
-		},
+		{name: "restate ingress accepts the report", callID: "call-job-restate-ok", ingressStatus: http.StatusOK, wantIngress: true},
+		{name: "restate ingress failure naks for redelivery", callID: "call-job-restate-fail", ingressStatus: http.StatusInternalServerError, wantIngress: true, wantErr: true},
 	}
 
 	for _, tc := range tests {

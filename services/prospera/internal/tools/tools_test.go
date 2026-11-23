@@ -276,10 +276,10 @@ func TestToolHandler_EndCall(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name:             "existing call with pending report still ends",
+			name:             "existing call with pending report leaves delivery to ProsperaReport",
 			callID:           "call-active-1",
 			reportStatus:     "pending",
-			wantReportStatus: "failed",
+			wantReportStatus: "pending",
 			wantErr:          false,
 		},
 	}
