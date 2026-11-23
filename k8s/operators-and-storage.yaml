@@ -270,7 +270,7 @@ metadata:
 spec:
   backupOwnerReference: self
   cluster:
-    name: postgres-19
+    name: postgres
   method: barmanObjectStore
   schedule: 0 0 3 * * *
 ---
@@ -281,7 +281,7 @@ metadata:
   namespace: default
 spec:
   cluster:
-    name: postgres-19
+    name: postgres
   databaseReclaimPolicy: retain
   ensure: present
   extensions:
@@ -297,7 +297,7 @@ metadata:
   namespace: default
 spec:
   cluster:
-    name: postgres-19
+    name: postgres
   databaseReclaimPolicy: retain
   ensure: present
   name: infisical
@@ -310,7 +310,7 @@ metadata:
   namespace: default
 spec:
   cluster:
-    name: postgres-19
+    name: postgres
   databaseReclaimPolicy: retain
   ensure: present
   name: grafana
@@ -320,6 +320,76 @@ apiVersion: postgresql.cnpg.io/v1
 kind: Database
 metadata:
   name: postgres-docket
+  namespace: default
+spec:
+  cluster:
+    name: postgres
+  databaseReclaimPolicy: retain
+  ensure: present
+  extensions:
+    - ensure: present
+      name: vector
+  name: docket
+  owner: aerial
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: ScheduledBackup
+metadata:
+  name: postgres-19-nightly-backup
+  namespace: default
+spec:
+  backupOwnerReference: self
+  cluster:
+    name: postgres-19
+  method: barmanObjectStore
+  schedule: 0 0 3 * * *
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: Database
+metadata:
+  name: postgres-19-aerial
+  namespace: default
+spec:
+  cluster:
+    name: postgres-19
+  databaseReclaimPolicy: retain
+  ensure: present
+  extensions:
+    - ensure: present
+      name: vector
+  name: aerial
+  owner: aerial
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: Database
+metadata:
+  name: postgres-19-infisical
+  namespace: default
+spec:
+  cluster:
+    name: postgres-19
+  databaseReclaimPolicy: retain
+  ensure: present
+  name: infisical
+  owner: aerial
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: Database
+metadata:
+  name: postgres-19-grafana
+  namespace: default
+spec:
+  cluster:
+    name: postgres-19
+  databaseReclaimPolicy: retain
+  ensure: present
+  name: grafana
+  owner: aerial
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: Database
+metadata:
+  name: postgres-19-docket
   namespace: default
 spec:
   cluster:
@@ -337,6 +407,7 @@ kind: Job
 metadata:
   annotations:
     kustomize.toolkit.fluxcd.io/force: enabled
+    kustomize.toolkit.fluxcd.io/substitute: disabled
   labels:
     app.kubernetes.io/name: postgres-19-cutover-drain
   name: postgres-19-cutover-drain
