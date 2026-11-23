@@ -13,6 +13,7 @@ import (
 	restate "github.com/restatedev/sdk-go"
 
 	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/pkg/restatetest"
 	"github.com/azylman/aerial/services/haro/internal/dispatch"
 	"github.com/azylman/aerial/services/haro/internal/model"
 	"github.com/azylman/aerial/services/haro/internal/store"
@@ -168,11 +169,7 @@ func TestHaroEventWatch_Fire(t *testing.T) {
 			now := time.Now().UTC()
 			seedEventWatchTriggerForTest(ctx, t, db, tc, triggerID, now)
 
-			mc, mClient := setupObjectMockContext(t, triggerID, 0)
-			if mClient == nil {
-				t.Fatal("expected non-nil mock client")
-			}
-			objCtx := restate.WithMockContext(mc)
+			h := restatetest.NewObjectHarness(t, triggerID)
 
 			var disp dispatch.PromptDispatcher
 			if !tc.nilDispatcher {
@@ -190,7 +187,7 @@ func TestHaroEventWatch_Fire(t *testing.T) {
 			if !tc.defaultClock {
 				w.nowFn = func() time.Time { return now }
 			}
-			_, err := w.Fire(objCtx, EventWatchFireRequest{
+			_, err := w.Fire(h.ObjCtx, EventWatchFireRequest{
 				TriggerID:     triggerID,
 				ContextHeader: "Flux sync",
 				EventID:       "ev-1",
@@ -202,11 +199,11 @@ func TestHaroEventWatch_Fire(t *testing.T) {
 			if !tc.wantErr && err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
-			if got := terminalCode(err); got != tc.wantCode {
+			if got := restatetest.TerminalCode(err); got != tc.wantCode {
 				t.Errorf("terminal code = %d, want %d (err %v)", got, tc.wantCode, err)
 			}
 
-			if got := clearedAll(mc); got != tc.wantCleared {
+			if got := h.ClearedAll(); got != tc.wantCleared {
 				t.Errorf("state cleared = %v, want %v", got, tc.wantCleared)
 			}
 			verifyEventWatchOutcome(ctx, t, db, tc, triggerID, disp)

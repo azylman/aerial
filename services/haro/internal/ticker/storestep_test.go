@@ -10,6 +10,8 @@ import (
 
 	"github.com/jackc/pgx/v5/pgconn"
 	restate "github.com/restatedev/sdk-go"
+
+	"github.com/azylman/aerial/pkg/restatetest"
 )
 
 func TestClassifyStoreError(t *testing.T) {
@@ -38,7 +40,7 @@ func TestClassifyStoreError(t *testing.T) {
 			if (got != nil) != tc.wantErr {
 				t.Fatalf("classifyStoreError(%v) = %v, wantErr %v", tc.err, got, tc.wantErr)
 			}
-			if code := terminalCode(got); code != tc.wantCode {
+			if code := restatetest.TerminalCode(got); code != tc.wantCode {
 				t.Errorf("terminal code = %d, want %d", code, tc.wantCode)
 			}
 		})

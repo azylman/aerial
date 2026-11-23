@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -20,90 +19,11 @@ import (
 	"github.com/stretchr/testify/mock"
 
 	"github.com/azylman/aerial/pkg/eriwire"
+	"github.com/azylman/aerial/pkg/restatetest"
 	"github.com/azylman/aerial/services/haro/internal/dispatch"
 	"github.com/azylman/aerial/services/haro/internal/model"
 	"github.com/azylman/aerial/services/haro/internal/store"
 )
-
-type mockRunContext struct {
-	context.Context
-}
-
-func (mockRunContext) Log() *slog.Logger         { return slog.Default() }
-func (mockRunContext) Request() *restate.Request { return &restate.Request{ID: "req-1"} }
-
-func setupObjectMockContext(t *testing.T, key string, initialGen int64) (*mocks.MockContext, *mocks.MockClient) {
-	t.Helper()
-	mc := mocks.NewMockContext(t)
-	mc.On("Key").Return(key).Maybe()
-	mc.On("Request").Return(&restate.Request{ID: "inv-" + key}).Maybe()
-
-	currentGen := initialGen
-	mc.On("Get", "gen", mock.Anything).Run(func(args mock.Arguments) {
-		if outPtr, ok := args.Get(1).(*int64); ok && outPtr != nil {
-			*outPtr = currentGen
-		}
-	}).Return(true, nil).Maybe()
-
-	mc.On("Set", "gen", mock.Anything).Run(func(args mock.Arguments) {
-		if val, ok := args.Get(1).(int64); ok {
-			currentGen = val
-		}
-	}).Return().Maybe()
-
-	var armedDueAt string
-	mc.On("Get", "armed_due_at", mock.Anything).Run(func(args mock.Arguments) {
-		if outPtr, ok := args.Get(1).(*string); ok && outPtr != nil {
-			*outPtr = armedDueAt
-		}
-	}).Return(true, nil).Maybe()
-
-	mc.On("Set", "armed_due_at", mock.Anything).Run(func(args mock.Arguments) {
-		if val, ok := args.Get(1).(string); ok {
-			armedDueAt = val
-		}
-	}).Return().Maybe()
-
-	mc.On("Clear", mock.Anything).Run(func(args mock.Arguments) {
-		if key, ok := args.Get(0).(string); ok && key == "armed_due_at" {
-			armedDueAt = ""
-		}
-	}).Return().Maybe()
-
-	mc.On("ClearAll").Run(func(mock.Arguments) {
-		currentGen, armedDueAt = 0, ""
-	}).Return().Maybe()
-
-	runHandler := func(fn func(restate.RunContext) (any, error), output any, _ ...restate.RunOption) restate.TerminalError {
-		res, err := fn(mockRunContext{Context: context.Background()})
-		if err != nil {
-			if restate.IsTerminalError(err) {
-				return restate.AsTerminalError(err)
-			}
-			// Real Restate retries a non-terminal Run error; the mock surfaces it once.
-			return restate.ToTerminalError(err, restate.WithErrorCode(mockRetryableCode))
-		}
-		if output != nil && res != nil {
-			outVal := reflect.ValueOf(output)
-			resVal := reflect.ValueOf(res)
-			if outVal.Kind() == reflect.Pointer && !outVal.IsNil() && outVal.Elem().Type() == resVal.Type() {
-				outVal.Elem().Set(resVal)
-			}
-		}
-		return nil
-	}
-	mc.On("Run", mock.Anything, mock.Anything).Return(runHandler).Maybe()
-	mc.On("Run", mock.Anything, mock.Anything, mock.Anything).Return(runHandler).Maybe()
-
-	mClient := mocks.NewMockClient(t)
-	mInv := mocks.NewMockInvocation(t)
-	mc.On("Object", mock.Anything, mock.Anything, mock.Anything).Return(mClient).Maybe()
-	mClient.On("Send", mock.Anything).Return(mInv).Maybe()
-	mClient.On("Send", mock.Anything, mock.Anything).Return(mInv).Maybe()
-	mClient.On("Send", mock.Anything, mock.Anything, mock.Anything).Return(mInv).Maybe()
-
-	return mc, mClient
-}
 
 // fireKeys returns the idempotency keys of every Fire self-send recorded on client.
 func fireKeys(client *mocks.MockClient) []string {
@@ -121,15 +41,19 @@ func fireKeys(client *mocks.MockClient) []string {
 	return keys
 }
 
-// seedArmSchedule inserts a schedule of seedType ("cron", "oneshot", "heartbeat"; "" seeds nothing) due at runAt.
-func seedArmSchedule(ctx context.Context, t *testing.T, db *sql.DB, seedType, scheduleID string, runAt time.Time, enabled bool) {
+// seedSchedule inserts a schedule of seedType ("cron", "oneshot", "heartbeat"; "" seeds nothing) due at runAt.
+func seedSchedule(ctx context.Context, t *testing.T, db *sql.DB, seedType, scheduleID string, runAt time.Time, enabled, invalidCron, hasActiveHB bool) {
 	t.Helper()
+	cronExpr := "0 * * * *"
+	if invalidCron {
+		cronExpr = "not-a-cron"
+	}
 	switch seedType {
 	case "cron":
 		if err := store.InsertCronSchedule(ctx, db, model.CronSchedule{
 			ID:        scheduleID,
 			TargetID:  "100000000000000001",
-			CronExpr:  "0 * * * *",
+			CronExpr:  cronExpr,
 			Prompt:    "Check hourly",
 			Timezone:  "UTC",
 			NextRunAt: runAt,
@@ -147,16 +71,32 @@ func seedArmSchedule(ctx context.Context, t *testing.T, db *sql.DB, seedType, sc
 			t.Fatalf("InsertOneShotSchedule failed: %v", err)
 		}
 	case "heartbeat":
+		if !invalidCron {
+			cronExpr = "*/5 * * * *"
+		}
 		if err := store.InsertHeartbeatSchedule(ctx, db, model.HeartbeatSchedule{
 			ID:        scheduleID,
 			TargetID:  "100000000000000003",
-			CronExpr:  "*/5 * * * *",
+			CronExpr:  cronExpr,
 			Prompt:    "Heartbeat check",
 			Timezone:  "UTC",
 			NextRunAt: runAt,
 			Enabled:   enabled,
 		}); err != nil {
 			t.Fatalf("InsertHeartbeatSchedule failed: %v", err)
+		}
+		if hasActiveHB {
+			if err := store.CreateScheduleRun(ctx, db, model.ScheduleRun{
+				ID:           "run-active-" + scheduleID,
+				ScheduleID:   scheduleID,
+				ScheduleType: model.ScheduleTypeHeartbeat,
+				TargetID:     "100000000000000003",
+				ThreadID:     "thread-active",
+				Status:       "running",
+				StartedAt:    runAt.Add(-2 * time.Minute),
+			}); err != nil {
+				t.Fatalf("CreateScheduleRun failed: %v", err)
+			}
 		}
 	}
 }
@@ -254,10 +194,9 @@ func TestHaroSchedule_Arm(t *testing.T) {
 				runAt = now.Add(-time.Minute)
 			}
 
-			seedArmSchedule(ctx, t, db, tc.seedType, scheduleID, runAt, tc.enabled)
+			seedSchedule(ctx, t, db, tc.seedType, scheduleID, runAt, tc.enabled, false, false)
 
-			mc, mClient := setupObjectMockContext(t, scheduleID, 0)
-			objCtx := restate.WithMockContext(mc)
+			h := restatetest.NewObjectHarness(t, scheduleID)
 
 			dispatcher := &fakeDispatcher{}
 			s := NewHaroSchedule(db, dispatcher)
@@ -265,8 +204,8 @@ func TestHaroSchedule_Arm(t *testing.T) {
 				s.nowFn = func() time.Time { return now }
 			}
 
-			_, err := s.Arm(objCtx, ArmRequest{ScheduleType: tc.scheduleType})
-			if got := terminalCode(err); got != tc.wantCode || (err != nil && tc.wantCode == 0) {
+			_, err := s.Arm(h.ObjCtx, ArmRequest{ScheduleType: tc.scheduleType})
+			if got := restatetest.TerminalCode(err); got != tc.wantCode || (err != nil && tc.wantCode == 0) {
 				t.Fatalf("Arm err = %v, want terminal code %d", err, tc.wantCode)
 			}
 
@@ -274,13 +213,13 @@ func TestHaroSchedule_Arm(t *testing.T) {
 			if tc.wantArmed {
 				wantKeys = 1
 			}
-			if got := fireKeys(mClient); len(got) != wantKeys {
+			if got := fireKeys(h.Client); len(got) != wantKeys {
 				t.Errorf("Fire sends = %v, want %d", got, wantKeys)
 			}
 			if tc.wantCode == http.StatusPreconditionFailed {
-				mc.AssertCalled(t, "Set", "gen", int64(1))
+				h.Context.AssertCalled(t, "Set", "gen", int64(1))
 			}
-			if got := clearedAll(mc); got != (tc.wantCode == http.StatusNotFound) {
+			if got := h.ClearedAll(); got != (tc.wantCode == http.StatusNotFound) {
 				t.Errorf("state cleared = %v, want %v", got, tc.wantCode == http.StatusNotFound)
 			}
 		})
@@ -306,8 +245,7 @@ func TestHaroSchedule_Arm_Idempotent(t *testing.T) {
 		t.Fatalf("InsertCronSchedule failed: %v", err)
 	}
 
-	mc, mClient := setupObjectMockContext(t, scheduleID, 0)
-	objCtx := restate.WithMockContext(mc)
+	h := restatetest.NewObjectHarness(t, scheduleID)
 
 	s := NewHaroSchedule(db, &fakeDispatcher{})
 	s.nowFn = func() time.Time { return now }
@@ -316,15 +254,15 @@ func TestHaroSchedule_Arm_Idempotent(t *testing.T) {
 	// same key, so Restate dedupes a pending Fire and re-creates a lost one. The
 	// generation is never bumped, so the pending Fire stays valid.
 	for range 2 {
-		if _, err := s.Arm(objCtx, ArmRequest{ScheduleType: model.ScheduleTypeCron}); err != nil {
+		if _, err := s.Arm(h.ObjCtx, ArmRequest{ScheduleType: model.ScheduleTypeCron}); err != nil {
 			t.Fatalf("Arm err: %v", err)
 		}
 	}
 	want := []string{"haro:fire:arm-idempotent:0:2026-11-22T11:00:00Z", "haro:fire:arm-idempotent:0:2026-11-22T11:00:00Z"}
-	if got := fireKeys(mClient); !reflect.DeepEqual(got, want) {
+	if got := fireKeys(h.Client); !reflect.DeepEqual(got, want) {
 		t.Errorf("Fire keys = %v, want %v", got, want)
 	}
-	mc.AssertNotCalled(t, "Set", "gen", mock.Anything)
+	h.Context.AssertNotCalled(t, "Set", "gen", mock.Anything)
 }
 
 func TestHaroSchedule_LoadScheduleRow(t *testing.T) {
@@ -367,19 +305,18 @@ func TestHaroSchedule_ArmAndFire_ContextErrors(t *testing.T) {
 
 func TestHaroSchedule_Cancel(t *testing.T) {
 	t.Parallel()
-	mc, mClient := setupObjectMockContext(t, "cancel-test-1", 5)
-	objCtx := restate.WithMockContext(mc)
-	restate.Set(objCtx, "armed_due_at", "2026-11-22T11:00:00Z")
+	h := restatetest.NewObjectHarness(t, "cancel-test-1", restatetest.WithInitialState("gen", int64(5)))
+	restate.Set(h.ObjCtx, "armed_due_at", "2026-11-22T11:00:00Z")
 
-	if _, err := NewHaroSchedule(nil, nil).Cancel(objCtx, struct{}{}); err != nil {
+	if _, err := NewHaroSchedule(nil, nil).Cancel(h.ObjCtx, struct{}{}); err != nil {
 		t.Fatalf("Cancel unexpected err: %v", err)
 	}
-	gen, genErr := restate.Get[int64](objCtx, "gen")
-	armed, armedErr := restate.Get[string](objCtx, "armed_due_at")
-	if genErr != nil || armedErr != nil || gen != 0 || armed != "" || !clearedAll(mc) {
-		t.Errorf("after Cancel gen=%d armed=%q cleared=%v (errs %v, %v); want all state cleared", gen, armed, clearedAll(mc), genErr, armedErr)
+	gen, genErr := restate.Get[int64](h.ObjCtx, "gen")
+	armed, armedErr := restate.Get[string](h.ObjCtx, "armed_due_at")
+	if genErr != nil || armedErr != nil || gen != 0 || armed != "" || !h.ClearedAll() {
+		t.Errorf("after Cancel gen=%d armed=%q cleared=%v (errs %v, %v); want all state cleared", gen, armed, h.ClearedAll(), genErr, armedErr)
 	}
-	if keys := fireKeys(mClient); len(keys) != 0 {
+	if keys := fireKeys(h.Client); len(keys) != 0 {
 		t.Errorf("Cancel sent Fire %v, want none", keys)
 	}
 }
@@ -415,59 +352,33 @@ func TestHaroSchedule_CancelThenFire(t *testing.T) {
 					t.Fatalf("InsertCronSchedule failed: %v", err)
 				}
 			}
-			mc, mClient := setupObjectMockContext(t, tc.id, tc.initialGen)
-			objCtx := restate.WithMockContext(mc)
-			restate.Set(objCtx, "armed_due_at", tc.fireDue.Format(time.RFC3339Nano))
+			h := restatetest.NewObjectHarness(t, tc.id, restatetest.WithInitialState("gen", tc.initialGen))
+			restate.Set(h.ObjCtx, "armed_due_at", tc.fireDue.Format(time.RFC3339Nano))
 
 			disp := &fakeDispatcher{response: dispatch.PromptDispatchResponse{Status: "ok", ChannelID: "100000000000000001", MessageID: "msg-cancel"}}
 			s := NewHaroSchedule(db, disp)
 			s.nowFn = func() time.Time { return tc.fireDue }
 
-			if _, err := s.Cancel(objCtx, struct{}{}); err != nil {
+			if _, err := s.Cancel(h.ObjCtx, struct{}{}); err != nil {
 				t.Fatalf("Cancel err: %v", err)
 			}
 			if tc.rearm {
-				if _, err := s.Arm(objCtx, ArmRequest{ScheduleType: model.ScheduleTypeCron}); err != nil {
+				if _, err := s.Arm(h.ObjCtx, ArmRequest{ScheduleType: model.ScheduleTypeCron}); err != nil {
 					t.Fatalf("Arm err: %v", err)
 				}
 			}
-			_, err := s.Fire(objCtx, FireRequest{Generation: tc.initialGen, ScheduleType: model.ScheduleTypeCron, DueAt: tc.fireDue})
-			if got := terminalCode(err); got != tc.wantCode || (err != nil && tc.wantCode == 0) {
+			_, err := s.Fire(h.ObjCtx, FireRequest{Generation: tc.initialGen, ScheduleType: model.ScheduleTypeCron, DueAt: tc.fireDue})
+			if got := restatetest.TerminalCode(err); got != tc.wantCode || (err != nil && tc.wantCode == 0) {
 				t.Fatalf("Fire err = %v, want terminal code %d", err, tc.wantCode)
 			}
 			if len(disp.dispatched) != tc.wantDispatched {
 				t.Errorf("dispatched %d prompts, want %d", len(disp.dispatched), tc.wantDispatched)
 			}
-			if got := fireKeys(mClient); !reflect.DeepEqual(got, tc.wantFireKeys) {
+			if got := fireKeys(h.Client); !reflect.DeepEqual(got, tc.wantFireKeys) {
 				t.Errorf("Fire keys = %v, want %v", got, tc.wantFireKeys)
 			}
 		})
 	}
-}
-
-// clearedAll reports whether the handler cleared all object state.
-func clearedAll(mc *mocks.MockContext) bool {
-	for _, call := range mc.Calls {
-		if call.Method == "ClearAll" {
-			return true
-		}
-	}
-	return false
-}
-
-// mockRetryableCode marks a retryable Run error the object mock surfaced once
-// (real Restate would keep retrying it).
-const mockRetryableCode = 599
-
-// terminalCode returns the Restate terminal code of err, or 0 when err is nil or retryable.
-func terminalCode(err error) int {
-	if err == nil || !restate.IsTerminalError(err) {
-		return 0
-	}
-	if code := int(restate.AsTerminalError(err).Code()); code != mockRetryableCode {
-		return code
-	}
-	return 0
 }
 
 func TestHaroSchedule_RecordRunStep(t *testing.T) {
@@ -493,7 +404,7 @@ func TestHaroSchedule_RecordRunStep(t *testing.T) {
 			}
 			s := NewHaroSchedule(db, nil)
 			now := time.Date(2026, 11, 22, 10, 0, 0, 0, time.UTC)
-			rc := mockRunContext{Context: context.Background()}
+			rc := restatetest.NewRunContext(context.Background())
 			dispRes := DispatchStepResult{Status: tc.status, SkippedActive: tc.skipped, DispatchedAt: now, Error: "boom"}
 			loaded := ScheduleRow{ScheduleType: model.ScheduleTypeCron, TargetID: "100000000000000001"}
 			runID := deterministicScheduleRunID(model.ScheduleTypeCron, "rec-"+tc.name, now)
@@ -501,7 +412,7 @@ func TestHaroSchedule_RecordRunStep(t *testing.T) {
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("recordRunStep err = %v, wantErr %v", err, tc.wantErr)
 			}
-			if got := terminalCode(err); got != tc.wantCode {
+			if got := restatetest.TerminalCode(err); got != tc.wantCode {
 				t.Errorf("terminal code = %d, want %d", got, tc.wantCode)
 			}
 		})
@@ -532,55 +443,19 @@ func TestHaroSchedule_FinalizeStep(t *testing.T) {
 				_ = db.Close()
 			}
 			s := NewHaroSchedule(db, nil)
-			rc := mockRunContext{Context: context.Background()}
+			rc := restatetest.NewRunContext(context.Background())
 			loaded := ScheduleRow{ScheduleType: tc.schedType, CronExpr: "0 * * * *", Timezone: "UTC"}
 			res, err := s.finalizeStep(rc, loaded, tc.schedType, "missing-"+tc.name, time.Date(2026, 11, 22, 10, 0, 0, 0, time.UTC))
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("finalizeStep err = %v, wantErr %v", err, tc.wantErr)
 			}
-			if got := terminalCode(err); got != tc.wantCode {
+			if got := restatetest.TerminalCode(err); got != tc.wantCode {
 				t.Errorf("terminal code = %d, want %d", got, tc.wantCode)
 			}
 			if res.IsOneShot != tc.wantOneShot {
 				t.Errorf("IsOneShot = %v, want %v", res.IsOneShot, tc.wantOneShot)
 			}
 		})
-	}
-}
-
-func TestBackfillActiveSchedules_PostErrors(t *testing.T) {
-	t.Parallel()
-	db := openTickerTestDB(t)
-	ctx := context.Background()
-	now := time.Now().UTC()
-
-	if err := store.InsertCronSchedule(ctx, db, model.CronSchedule{
-		ID:        "c-backfill-fail",
-		TargetID:  "100000000000000001",
-		CronExpr:  "0 * * * *",
-		Prompt:    "Cron prompt",
-		NextRunAt: now.Add(time.Hour),
-		Enabled:   true,
-	}); err != nil {
-		t.Fatalf("InsertCronSchedule failed: %v", err)
-	}
-
-	var hits atomic.Int64
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		hits.Add(1)
-		w.WriteHeader(http.StatusInternalServerError)
-	}))
-	defer srv.Close()
-
-	tk := NewTicker(db, nil)
-	tk.SetRestateConfig("9080", srv.URL, "", "")
-	tk.httpClient = srv.Client()
-
-	if err := tk.BackfillActiveSchedules(ctx); err == nil {
-		t.Fatal("expected error on post failure, got nil")
-	}
-	if got := hits.Load(); got != 1 {
-		t.Errorf("expected 1 post attempt, got %d", got)
 	}
 }
 
@@ -605,66 +480,6 @@ type fireTestCase struct {
 	wantRunStatus  string
 	wantRearmed    bool
 	superseded     bool
-}
-
-func seedScheduleForFireTest(ctx context.Context, t *testing.T, db *sql.DB, tc fireTestCase, now time.Time, scheduleID string, runAt time.Time) {
-	t.Helper()
-	switch tc.seedType {
-	case "cron":
-		cronExpr := "*/5 * * * *"
-		if strings.Contains(tc.name, "invalid cron expr") {
-			cronExpr = "not-a-cron"
-		}
-		if err := store.InsertCronSchedule(ctx, db, model.CronSchedule{
-			ID:        scheduleID,
-			TargetID:  "100000000000000001",
-			CronExpr:  cronExpr,
-			Prompt:    "Prompt cron",
-			Timezone:  "UTC",
-			NextRunAt: runAt,
-			Enabled:   tc.enabled,
-		}); err != nil {
-			t.Fatalf("InsertCronSchedule failed: %v", err)
-		}
-	case "oneshot":
-		if err := store.InsertOneShotSchedule(ctx, db, model.OneShotSchedule{
-			ID:       scheduleID,
-			ThreadID: "100000000000000002",
-			Prompt:   "Prompt oneshot",
-			RunAt:    runAt,
-		}); err != nil {
-			t.Fatalf("InsertOneShotSchedule failed: %v", err)
-		}
-	case "heartbeat":
-		cronExpr := "*/5 * * * *"
-		if strings.Contains(tc.name, "invalid cron expr") {
-			cronExpr = "not-a-cron"
-		}
-		if err := store.InsertHeartbeatSchedule(ctx, db, model.HeartbeatSchedule{
-			ID:        scheduleID,
-			TargetID:  "100000000000000003",
-			CronExpr:  cronExpr,
-			Prompt:    "Prompt heartbeat",
-			Timezone:  "UTC",
-			NextRunAt: runAt,
-			Enabled:   tc.enabled,
-		}); err != nil {
-			t.Fatalf("InsertHeartbeatSchedule failed: %v", err)
-		}
-		if tc.hasActiveHB {
-			if err := store.CreateScheduleRun(ctx, db, model.ScheduleRun{
-				ID:           "run-active-" + scheduleID,
-				ScheduleID:   scheduleID,
-				ScheduleType: model.ScheduleTypeHeartbeat,
-				TargetID:     "100000000000000003",
-				ThreadID:     "thread-active",
-				Status:       "running",
-				StartedAt:    now.Add(-2 * time.Minute),
-			}); err != nil {
-				t.Fatalf("CreateScheduleRun failed: %v", err)
-			}
-		}
-	}
 }
 
 func verifyFireDispatches(t *testing.T, tc fireTestCase, disp dispatch.PromptDispatcher) {
@@ -714,7 +529,7 @@ func buildFireDispatcher(tc fireTestCase, runAt *time.Time) dispatch.PromptDispa
 	return fDisp
 }
 
-func assertFireOutcome(ctx context.Context, t *testing.T, tc fireTestCase, err error, mc *mocks.MockContext, mClient *mocks.MockClient, db *sql.DB, scheduleID string, disp dispatch.PromptDispatcher) {
+func assertFireOutcome(ctx context.Context, t *testing.T, tc fireTestCase, err error, h *restatetest.ObjectHarness, db *sql.DB, scheduleID string, disp dispatch.PromptDispatcher) {
 	t.Helper()
 	if tc.wantErr && err == nil {
 		t.Fatal("expected error, got nil")
@@ -722,7 +537,7 @@ func assertFireOutcome(ctx context.Context, t *testing.T, tc fireTestCase, err e
 	if !tc.wantErr && err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if got := terminalCode(err); got != tc.wantCode {
+	if got := restatetest.TerminalCode(err); got != tc.wantCode {
 		t.Errorf("terminal code = %d, want %d (err %v)", got, tc.wantCode, err)
 	}
 
@@ -737,11 +552,11 @@ func assertFireOutcome(ctx context.Context, t *testing.T, tc fireTestCase, err e
 			t.Errorf("run status = %q, want %q", run.Status, tc.wantRunStatus)
 		}
 	}
-	if tc.wantRearmed && len(fireKeys(mClient)) != 1 {
-		t.Errorf("expected next Fire to be armed, got %v", fireKeys(mClient))
+	if tc.wantRearmed && len(fireKeys(h.Client)) != 1 {
+		t.Errorf("expected next Fire to be armed, got %v", fireKeys(h.Client))
 	}
 
-	assertFireState(t, tc, mc)
+	assertFireState(t, tc, h)
 
 	if tc.wantDeleted && tc.seedType == "oneshot" {
 		_, getErr := store.GetOneShotSchedule(ctx, db, scheduleID)
@@ -750,18 +565,18 @@ func assertFireOutcome(ctx context.Context, t *testing.T, tc fireTestCase, err e
 		}
 	}
 
-	if !tc.wantErr && tc.wantDispatched && (tc.scheduleType == model.ScheduleTypeCron || tc.scheduleType == model.ScheduleTypeHeartbeat) && len(fireKeys(mClient)) == 0 {
+	if !tc.wantErr && tc.wantDispatched && (tc.scheduleType == model.ScheduleTypeCron || tc.scheduleType == model.ScheduleTypeHeartbeat) && len(fireKeys(h.Client)) == 0 {
 		t.Error("expected next Fire to be armed, got none")
 	}
 }
 
 // assertFireState checks whether Fire fenced the generation or cleared all state.
-func assertFireState(t *testing.T, tc fireTestCase, mc *mocks.MockContext) {
+func assertFireState(t *testing.T, tc fireTestCase, h *restatetest.ObjectHarness) {
 	t.Helper()
 	if tc.wantFenced {
-		mc.AssertCalled(t, "Set", "gen", tc.generation+1)
+		h.Context.AssertCalled(t, "Set", "gen", tc.generation+1)
 	}
-	if got := clearedAll(mc); got != tc.wantCleared {
+	if got := h.ClearedAll(); got != tc.wantCleared {
 		t.Errorf("state cleared = %v, want %v", got, tc.wantCleared)
 	}
 }
@@ -1029,25 +844,24 @@ func TestHaroSchedule_Fire(t *testing.T) {
 				runAt = now.Add(-25 * time.Hour)
 			}
 
-			seedScheduleForFireTest(ctx, t, db, tc, now, scheduleID, runAt)
+			seedSchedule(ctx, t, db, tc.seedType, scheduleID, runAt, tc.enabled, strings.Contains(tc.name, "invalid cron expr"), tc.hasActiveHB)
 
-			mc, mClient := setupObjectMockContext(t, scheduleID, tc.generation)
-			objCtx := restate.WithMockContext(mc)
+			h := restatetest.NewObjectHarness(t, scheduleID, restatetest.WithInitialState("gen", tc.generation))
 			if tc.superseded {
-				restate.Set(objCtx, "armed_due_at", runAt.Add(time.Hour).Format(time.RFC3339Nano))
+				restate.Set(h.ObjCtx, "armed_due_at", runAt.Add(time.Hour).Format(time.RFC3339Nano))
 			}
 
 			disp := buildFireDispatcher(tc, &runAt)
 			s := NewHaroSchedule(db, disp)
 			s.nowFn = func() time.Time { return now }
 
-			_, err := s.Fire(objCtx, FireRequest{
+			_, err := s.Fire(h.ObjCtx, FireRequest{
 				Generation:   tc.reqGen,
 				ScheduleType: tc.scheduleType,
 				DueAt:        runAt,
 			})
 
-			assertFireOutcome(ctx, t, tc, err, mc, mClient, db, scheduleID, disp)
+			assertFireOutcome(ctx, t, tc, err, h, db, scheduleID, disp)
 		})
 	}
 }
@@ -1157,6 +971,24 @@ func TestBackfillActiveSchedules(t *testing.T) {
 		t.Errorf("expected 3 arm calls, got %d", called)
 	}
 
+	// Post failure branch folded from TestBackfillActiveSchedules_PostErrors
+	var failHits atomic.Int64
+	failSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		failHits.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer failSrv.Close()
+
+	failTk := NewTicker(db, nil)
+	failTk.SetRestateConfig("9080", failSrv.URL, "", "")
+	failTk.httpClient = failSrv.Client()
+	if err := failTk.BackfillActiveSchedules(ctx); err == nil {
+		t.Fatal("expected error on post failure, got nil")
+	}
+	if got := failHits.Load(); got != 3 {
+		t.Errorf("expected 3 post attempts, got %d", got)
+	}
+
 	// Failure branch on closed DB
 	_ = db.Close()
 	if err := tk.BackfillActiveSchedules(ctx); err == nil {
@@ -1178,14 +1010,14 @@ func TestTicker_StartRestateServer_Error(t *testing.T) {
 // fireHeartbeatAt runs one HaroSchedule.Fire for a heartbeat due at dueAt with the clock at now.
 func fireHeartbeatAt(t *testing.T, s *HaroSchedule, scheduleID string, dueAt, now time.Time) {
 	t.Helper()
-	mc, client := setupObjectMockContext(t, scheduleID, 1)
+	h := restatetest.NewObjectHarness(t, scheduleID, restatetest.WithInitialState("gen", int64(1)))
 	s.nowFn = func() time.Time { return now }
-	if _, err := s.Fire(restate.WithMockContext(mc), FireRequest{Generation: 1, ScheduleType: model.ScheduleTypeHeartbeat, DueAt: dueAt}); err != nil {
+	if _, err := s.Fire(h.ObjCtx, FireRequest{Generation: 1, ScheduleType: model.ScheduleTypeHeartbeat, DueAt: dueAt}); err != nil {
 		t.Fatalf("Fire(%s) error = %v", dueAt.Format(time.RFC3339), err)
 	}
 	// Every heartbeat tick, dispatched or skipped, re-arms the next Fire.
-	if len(fireKeys(client)) != 1 {
-		t.Fatalf("Fire(%s) re-armed %v, want exactly one next Fire", dueAt.Format(time.RFC3339), fireKeys(client))
+	if len(fireKeys(h.Client)) != 1 {
+		t.Fatalf("Fire(%s) re-armed %v, want exactly one next Fire", dueAt.Format(time.RFC3339), fireKeys(h.Client))
 	}
 }
 
