@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/azylman/aerial/pkg/pgtest"
 	"github.com/azylman/aerial/pkg/pgutil"
 	"github.com/azylman/aerial/pkg/transcriptwire"
@@ -411,16 +413,111 @@ func TestSummaryLockKey(t *testing.T) {
 	}
 }
 
-func TestDestroyConn(t *testing.T) {
+func TestExtractPgxConn(t *testing.T) {
 	t.Parallel()
-	store := newTestStore(t, "aerial")
-	conn, err := store.db.Conn(context.Background())
+	fakePgx := &pgx.Conn{}
+	wrapper := &fakeConnWrapper{conn: fakePgx}
+	tests := []struct {
+		name    string
+		input   any
+		wantNil bool
+	}{
+		{"nil input", nil, true},
+		{"unrelated type", "not-a-conn", true},
+		{"direct pgx conn", fakePgx, false},
+		{"wrapper conn", wrapper, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := extractPgxConn(tc.input)
+			if tc.wantNil && got != nil {
+				t.Fatalf("extractPgxConn() = %v, want nil", got)
+			}
+			if !tc.wantNil && got != fakePgx {
+				t.Fatalf("extractPgxConn() = %v, want %v", got, fakePgx)
+			}
+		})
+	}
+}
+
+type fakeConnWrapper struct {
+	conn *pgx.Conn
+}
+
+func (w *fakeConnWrapper) Conn() *pgx.Conn {
+	return w.conn
+}
+
+func runDestroyConnCase(ctx context.Context, t *testing.T, store *Store, name string, holdLock, closeBefore bool) {
+	t.Helper()
+	conn, err := store.db.Conn(ctx)
 	if err != nil {
 		t.Fatalf("conn: %v", err)
 	}
+	lockKey := "test-destroy-conn-" + name
+	if holdLock {
+		if _, lockErr := conn.ExecContext(ctx, `SELECT pg_advisory_lock(hashtext($1))`, lockKey); lockErr != nil {
+			t.Fatalf("acquire lock: %v", lockErr)
+		}
+	}
+	if closeBefore {
+		if closeErr := conn.Close(); closeErr != nil {
+			t.Fatalf("close: %v", closeErr)
+		}
+	}
 	destroyConn(conn)
-	if err := conn.Close(); err == nil {
+	if closeErr := conn.Close(); closeErr == nil {
 		t.Errorf("expected error closing destroyed conn")
+	}
+	if !holdLock {
+		return
+	}
+	probeConn, err := store.db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("probe conn: %v", err)
+	}
+	defer probeConn.Close()
+
+	deadline := time.Now().Add(5 * time.Second)
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		var acquired bool
+		if queryErr := probeConn.QueryRowContext(ctx, `SELECT pg_try_advisory_lock(hashtext($1))`, lockKey).Scan(&acquired); queryErr == nil && acquired {
+			if _, unlockErr := probeConn.ExecContext(ctx, `SELECT pg_advisory_unlock(hashtext($1))`, lockKey); unlockErr != nil {
+				t.Fatalf("unlock advisory lock: %v", unlockErr)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for advisory lock release after destroyConn")
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatalf("context cancelled: %v", ctx.Err())
+		case <-ticker.C:
+		}
+	}
+}
+
+func TestDestroyConn(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		holdLock    bool
+		closeBefore bool
+	}{
+		{name: "already closed", holdLock: false, closeBefore: true},
+		{name: "live holding advisory lock", holdLock: true, closeBefore: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			store := newTestStore(t, "aerial")
+			runDestroyConnCase(context.Background(), t, store, tc.name, tc.holdLock, tc.closeBefore)
+		})
 	}
 }
 
