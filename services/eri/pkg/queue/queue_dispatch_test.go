@@ -371,8 +371,13 @@ func TestExtractVerifiedDiskSessionID(t *testing.T) {
 	sessMgr := session.New(tempDir, "")
 	validSessID := "11111111-1111-1111-1111-111111111111"
 	missingSessID := "22222222-2222-2222-2222-222222222222"
-	sessDir, _ := ensureTestSessionDir(sessMgr, validSessID)
-	_ = os.WriteFile(filepath.Join(sessDir, ".system_generated", "logs", "transcript.jsonl"), []byte("{\"step_index\":0}\n"), 0o644)
+	sessDir, err := ensureTestSessionDir(sessMgr, validSessID)
+	if err != nil {
+		t.Fatalf("ensureTestSessionDir failed: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sessDir, ".system_generated", "logs", "transcript.jsonl"), []byte("{\"step_index\":0}\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile failed: %v", err)
+	}
 
 	pool := &WorkerPool{sessionMgr: sessMgr}
 

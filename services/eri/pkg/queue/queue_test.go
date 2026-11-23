@@ -21,6 +21,7 @@ import (
 
 	"github.com/bwmarrin/discordgo"
 	"github.com/google/uuid"
+	"github.com/stretchr/testify/require"
 
 	"github.com/azylman/aerial/services/eri/pkg/classifier"
 	"github.com/azylman/aerial/services/eri/pkg/config"
@@ -67,13 +68,16 @@ func mockJSONResponse(convID, responseText string) string {
 	if convID == "" {
 		convID = uuid.New().String()
 	}
-	payload, _ := json.Marshal(map[string]any{
+	payload, err := json.Marshal(map[string]any{
 		"conversation_id":  convID,
 		"status":           "SUCCESS",
 		"response":         responseText,
 		"duration_seconds": 1.0,
 		"num_turns":        1,
 	})
+	if err != nil {
+		panic(err)
+	}
 	return string(payload)
 }
 
@@ -160,9 +164,9 @@ func runQueueChannelPolicyCase(t *testing.T, tc queueChannelPolicyCase) {
 	pool := NewWorkerPool(cfg)
 	if tc.seedSpamThread {
 		dg := &discordgo.Session{State: discordgo.NewState()}
-		_ = dg.State.GuildAdd(&discordgo.Guild{ID: "guild-1"})
-		_ = dg.State.ChannelAdd(&discordgo.Channel{ID: "parent-spam-id", GuildID: "guild-1", Name: "spam", Type: discordgo.ChannelTypeGuildText})
-		_ = dg.State.ChannelAdd(&discordgo.Channel{ID: "thread-in-spam-id", GuildID: "guild-1", ParentID: "parent-spam-id", Name: "Spam Discussion Thread", Type: discordgo.ChannelTypeGuildPublicThread})
+		require.NoError(t, dg.State.GuildAdd(&discordgo.Guild{ID: "guild-1"}))
+		require.NoError(t, dg.State.ChannelAdd(&discordgo.Channel{ID: "parent-spam-id", GuildID: "guild-1", Name: "spam", Type: discordgo.ChannelTypeGuildText}))
+		require.NoError(t, dg.State.ChannelAdd(&discordgo.Channel{ID: "thread-in-spam-id", GuildID: "guild-1", ParentID: "parent-spam-id", Name: "Spam Discussion Thread", Type: discordgo.ChannelTypeGuildPublicThread}))
 		pool.SetDiscordSession(dg)
 	}
 
@@ -175,7 +179,7 @@ func runQueueChannelPolicyCase(t *testing.T, tc queueChannelPolicyCase) {
 	if msg.Status == "" {
 		msg.Status = db.StatusPending
 	}
-	_ = insertMessage(store, msg)
+	require.NoError(t, insertMessage(store, msg))
 	if lt := runLiveBurst(context.Background(), pool, msg.ThreadID, "turn-1", msg.ID); lt.err != nil {
 		t.Fatalf("turn err = %v", lt.err)
 	}
@@ -294,12 +298,16 @@ func testResolveEffectiveChannelConcurrent(t *testing.T, tc resolveEffectiveChan
 	var reqCount atomic.Int32
 	reqEntered, releaseReq := make(chan struct{}), make(chan struct{})
 	var once sync.Once
-	s, _ := discordgo.New("Bot fake-token")
+	s, err := discordgo.New("Bot fake-token")
+	require.NoError(t, err)
 	s.Client = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
 		reqCount.Add(1)
 		once.Do(func() { close(reqEntered) })
 		<-releaseReq
-		data, _ := json.Marshal(tc.restChannel)
+		data, err := json.Marshal(tc.restChannel)
+		if err != nil {
+			return nil, err
+		}
 		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(bytes.NewReader(data)), Header: make(http.Header)}, nil
 	})}
 	id := tc.inputIDs[0]
@@ -353,8 +361,8 @@ func runResolveEffectiveChannelCase(t *testing.T, tc resolveEffectiveChannelCase
 	if !tc.nilSession {
 		s = &discordgo.Session{State: discordgo.NewState()}
 		if tc.stateChannel != nil {
-			_ = s.State.GuildAdd(&discordgo.Guild{ID: tc.stateChannel.GuildID})
-			_ = s.State.ChannelAdd(tc.stateChannel)
+			require.NoError(t, s.State.GuildAdd(&discordgo.Guild{ID: tc.stateChannel.GuildID}))
+			require.NoError(t, s.State.ChannelAdd(tc.stateChannel))
 		}
 	}
 	if tc.testInvalidate {
@@ -591,7 +599,7 @@ func runResolveBotRoleIDsCase(t *testing.T, tc resolveBotRoleIDsCase) {
 	s := &discordgo.Session{State: discordgo.NewState()}
 	s.State.User = &discordgo.User{ID: tc.botID, Username: "Aerial"}
 	if tc.addGuild {
-		_ = s.State.GuildAdd(&discordgo.Guild{ID: tc.guildID, Roles: tc.guildRoles, Members: tc.guildMembers})
+		require.NoError(t, s.State.GuildAdd(&discordgo.Guild{ID: tc.guildID, Roles: tc.guildRoles, Members: tc.guildMembers}))
 	}
 
 	wantSorted := append([]string(nil), tc.wantRoles...)
@@ -691,7 +699,7 @@ func runProcessBurstQuotaPauseCase(t *testing.T, tc processBurstQuotaPauseCase) 
 	for i, m := range tc.messages {
 		m.ThreadID, m.Status, m.CreatedAt, m.UpdatedAt = tc.threadID, db.StatusPending, t0.Add(time.Duration(i*100)*time.Millisecond), t0.Add(time.Duration(i*100)*time.Millisecond)
 		msgs[i] = m
-		_ = insertMessage(store, m)
+		require.NoError(t, insertMessage(store, m))
 	}
 	ids := make([]string, len(msgs))
 	for i, m := range msgs {
@@ -728,7 +736,8 @@ func runProcessBurstQuotaPauseCase(t *testing.T, tc processBurstQuotaPauseCase) 
 			t.Errorf("RunAt delay = %v, want >= %v", time.Until(oneShots[0].RunAt), tc.wantMinRunAtDelay)
 		}
 	}
-	lastMsg, _ := getMessage(store, msgs[len(msgs)-1].ID)
+	lastMsg, err := getMessage(store, msgs[len(msgs)-1].ID)
+	require.NoError(t, err)
 	if lastMsg.Status != tc.wantLastMsgStatus {
 		t.Errorf("lastMsg status = %s, want %s", lastMsg.Status, tc.wantLastMsgStatus)
 	}
@@ -765,6 +774,42 @@ func (s *summarySaveNotifyStore) SaveThreadSummary(ctx context.Context, threadID
 	return err
 }
 
+type coldStartStep struct {
+	name, wantPromptContains, wantPromptExcludes, wantRefreshEvent string
+	msg                                                            db.Message
+	wantLLMDelta                                                   int
+}
+
+func runColdStartStep(t *testing.T, st coldStartStep, store db.Store, pool *WorkerPool, refreshEvents <-chan string, getCalls func() (string, int)) {
+	t.Helper()
+	_, prevCalls := getCalls()
+	msg := st.msg
+	msg.Status, msg.CreatedAt = db.StatusPending, time.Now().UTC()
+	require.NoError(t, insertMessage(store, msg))
+	mustRunLiveBurst(t, pool, msg.ThreadID, msg.ID, OutcomeCompleted)
+	if st.wantRefreshEvent != "" {
+		select {
+		case got := <-refreshEvents:
+			if got != st.wantRefreshEvent {
+				t.Errorf("turn-end refresh event = %q, want %q", got, st.wantRefreshEvent)
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatalf("timed out waiting for turn-end refresh event %q", st.wantRefreshEvent)
+		}
+	}
+
+	prompt, calls := getCalls()
+	if calls-prevCalls != st.wantLLMDelta {
+		t.Errorf("LLM call delta = %d, want %d", calls-prevCalls, st.wantLLMDelta)
+	}
+	if st.wantPromptContains != "" && !strings.Contains(prompt, st.wantPromptContains) {
+		t.Errorf("prompt missing %q:\n%s", st.wantPromptContains, prompt)
+	}
+	if st.wantPromptExcludes != "" && strings.Contains(prompt, st.wantPromptExcludes) {
+		t.Errorf("prompt should not contain %q:\n%s", st.wantPromptExcludes, prompt)
+	}
+}
+
 func TestThreadColdStartSummarization_Integration(t *testing.T) {
 	refreshEvents := make(chan string, 10)
 	baseStore := testStore(t)
@@ -777,7 +822,7 @@ func TestThreadColdStartSummarization_Integration(t *testing.T) {
 	} {
 		CacheDiscordChannel(ch)
 	}
-	_ = saveThreadSummary(store.Store, "thread-cached", "<THREAD_SUMMARY>\n- Existing cached summary\n</THREAD_SUMMARY>", "msg-hist-1")
+	require.NoError(t, saveThreadSummary(store.Store, "thread-cached", "<THREAD_SUMMARY>\n- Existing cached summary\n</THREAD_SUMMARY>", "msg-hist-1"))
 
 	var mu sync.Mutex
 	var lastPromptReceived string
@@ -812,12 +857,14 @@ func TestThreadColdStartSummarization_Integration(t *testing.T) {
 	})
 	defer pool.Stop()
 
+	getCalls := func() (string, int) {
+		mu.Lock()
+		defer mu.Unlock()
+		return lastPromptReceived, llmCallCount
+	}
+
 	// Cold starts never call the summarizer; the turn-end refresh after delivery does.
-	steps := []struct {
-		name, wantPromptContains, wantPromptExcludes, wantRefreshEvent string
-		msg                                                            db.Message
-		wantLLMDelta                                                   int
-	}{
+	steps := []coldStartStep{
 		{name: "New Thread Runs On Lookback And Turn End Creates Summary", msg: db.Message{ID: "m1", ThreadID: "thread-100", Content: "Hello thread"}, wantLLMDelta: 1, wantPromptContains: "<CHANNEL_HISTORY>", wantPromptExcludes: "<THREAD_SUMMARY>", wantRefreshEvent: "saved:msg-hist-1"},
 		{name: "Main Channel Does Not Summarize", msg: db.Message{ID: "m2", ThreadID: "channel-1", Content: "Hello main channel"}, wantPromptExcludes: "<THREAD_SUMMARY>"},
 		{name: "Thread Cold Start Injects Saved Summary", msg: db.Message{ID: "m3", ThreadID: "thread-cached", Content: "Cached test"}, wantPromptContains: "Existing cached summary"},
@@ -825,40 +872,13 @@ func TestThreadColdStartSummarization_Integration(t *testing.T) {
 	}
 	for _, st := range steps {
 		t.Run(st.name, func(t *testing.T) {
-			mu.Lock()
-			prevCalls := llmCallCount
-			mu.Unlock()
-			msg := st.msg
-			msg.Status, msg.CreatedAt = db.StatusPending, time.Now().UTC()
-			_ = insertMessage(store, msg)
-			mustRunLiveBurst(t, pool, msg.ThreadID, msg.ID, OutcomeCompleted)
-			if st.wantRefreshEvent != "" {
-				select {
-				case got := <-refreshEvents:
-					if got != st.wantRefreshEvent {
-						t.Errorf("turn-end refresh event = %q, want %q", got, st.wantRefreshEvent)
-					}
-				case <-time.After(3 * time.Second):
-					t.Fatalf("timed out waiting for turn-end refresh event %q", st.wantRefreshEvent)
-				}
-			}
-
-			mu.Lock()
-			prompt, calls := lastPromptReceived, llmCallCount
-			mu.Unlock()
-			if calls-prevCalls != st.wantLLMDelta {
-				t.Errorf("LLM call delta = %d, want %d", calls-prevCalls, st.wantLLMDelta)
-			}
-			if st.wantPromptContains != "" && !strings.Contains(prompt, st.wantPromptContains) {
-				t.Errorf("prompt missing %q:\n%s", st.wantPromptContains, prompt)
-			}
-			if st.wantPromptExcludes != "" && strings.Contains(prompt, st.wantPromptExcludes) {
-				t.Errorf("prompt should not contain %q:\n%s", st.wantPromptExcludes, prompt)
-			}
+			runColdStartStep(t, st, store, pool, refreshEvents, getCalls)
 		})
 	}
-	if sum, _, _ := getThreadSummary(store.Store, "thread-fail-llm"); sum != "" {
-		t.Errorf("failed turn-end refresh saved summary %q", sum)
+	sum, msgID, err := getThreadSummary(store.Store, "thread-fail-llm")
+	require.NoError(t, err)
+	if sum != "" || msgID != "" {
+		t.Errorf("failed turn-end refresh saved summary %q, msgID %q", sum, msgID)
 	}
 }
 
@@ -876,11 +896,11 @@ func runProcessBurstErrorClassificationCase(t *testing.T, tt processBurstErrorCl
 	if tt.seedPBFile {
 		validUUID = uuid.New().String()
 		pbPath := filepath.Join(tmpDir, ".gemini", "antigravity", "conversations", validUUID+".pb")
-		_ = os.MkdirAll(filepath.Dir(pbPath), 0o755)
-		_ = os.WriteFile(pbPath, []byte("protobuf-data"), 0o644)
+		require.NoError(t, os.MkdirAll(filepath.Dir(pbPath), 0o755))
+		require.NoError(t, os.WriteFile(pbPath, []byte("protobuf-data"), 0o644))
 	}
 	if tt.existingSession {
-		_ = saveSessionID(store, tt.threadID, uuid.New().String())
+		require.NoError(t, saveSessionID(store, tt.threadID, uuid.New().String()))
 	}
 
 	var mu sync.Mutex
@@ -913,7 +933,7 @@ func runProcessBurstErrorClassificationCase(t *testing.T, tt processBurstErrorCl
 	defer pool.Stop()
 
 	msg := db.Message{ID: "msg-" + tt.name, ThreadID: tt.threadID, Content: "prompt " + tt.name, Status: db.StatusPending, CreatedAt: time.Now().UTC()}
-	_ = insertMessage(store, msg)
+	require.NoError(t, insertMessage(store, msg))
 	if lt := runLiveBurst(context.Background(), pool, tt.threadID, "turn-1", msg.ID); lt.err != nil {
 		t.Fatalf("turn err = %v", lt.err)
 	}
@@ -923,12 +943,19 @@ func runProcessBurstErrorClassificationCase(t *testing.T, tt processBurstErrorCl
 	if attempts != tt.expectedAttempts {
 		t.Errorf("attempts = %d, want %d", attempts, tt.expectedAttempts)
 	}
-	dbMsg, _ := getMessage(store, msg.ID)
+	dbMsg, err := getMessage(store, msg.ID)
+	if err != nil {
+		t.Fatalf("getMessage failed: %v", err)
+	}
 	if dbMsg.Status != tt.expectedStatus {
 		t.Errorf("status = %s, want %s", dbMsg.Status, tt.expectedStatus)
 	}
 	if tt.checkLatchedCleared {
-		if s, _ := getSessionID(store, tt.threadID); s != "" {
+		s, err := getSessionID(store, tt.threadID)
+		if err != nil {
+			t.Fatalf("getSessionID failed: %v", err)
+		}
+		if s != "" {
 			t.Errorf("latched session not cleared: %q", s)
 		}
 	}
@@ -987,7 +1014,7 @@ func TestWorkerPool_EffortRouting(t *testing.T) {
 	}
 	for _, c := range cases {
 		msg := db.Message{ID: c.msgID, ThreadID: c.threadID, AuthorID: "scheduler", AuthorName: "Scheduler", Content: "Run routine", Status: db.StatusPending, Effort: c.effort, CreatedAt: time.Now().UTC()}
-		_ = insertMessage(store, msg)
+		require.NoError(t, insertMessage(store, msg))
 		if lt := runLiveBurst(context.Background(), pool, c.threadID, "turn-"+c.msgID, c.msgID); lt.err != nil || lt.outcome != OutcomeCompleted {
 			t.Fatalf("turn %s = (%s, %v), want completed", c.msgID, lt.outcome, lt.err)
 		}
