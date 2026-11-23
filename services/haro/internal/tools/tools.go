@@ -129,21 +129,11 @@ func (h *ToolHandler) RestateIngressURL() string {
 	return ""
 }
 
-func (h *ToolHandler) armSchedule(ctx context.Context, scheduleType, id string) {
-	ingressURL := h.RestateIngressURL()
-	id = strings.TrimSpace(id)
-	if ingressURL == "" || id == "" {
-		return
-	}
-	idempotencyKey := fmt.Sprintf("haro:arm:%s:%s:%d", scheduleType, id, time.Now().UnixNano())
-	endpoint := fmt.Sprintf("%s/HaroSchedule/%s/Arm/send", ingressURL, url.PathEscape(id))
-	payload := map[string]any{model.FieldScheduleType: scheduleType}
-	client := http.DefaultClient
-	if h != nil && h.httpClient != nil {
-		client = h.httpClient
-	}
-	if _, postErr := restateingress.Post(ctx, client, endpoint, idempotencyKey, payload, 0); postErr != nil {
-		log.Printf("[Haro Tools] warning: restate arm schedule %s failed: %v", id, postErr)
+// armSchedule asks HaroSchedule to arm id for its tick due at dueAt, logging
+// an ingress failure (startup backfill re-arms anything missed).
+func (h *ToolHandler) armSchedule(ctx context.Context, scheduleType, id string, dueAt time.Time) {
+	if err := h.ArmScheduleTick(ctx, scheduleType, id, dueAt); err != nil {
+		log.Printf("[Haro Tools] warning: restate arm schedule %s failed: %v", strings.TrimSpace(id), err)
 	}
 }
 
@@ -157,29 +147,21 @@ func (h *ToolHandler) ArmScheduleTick(ctx context.Context, scheduleType, id stri
 	if ingressURL == "" || id == "" {
 		return nil
 	}
-	idempotencyKey := fmt.Sprintf("haro:arm:%s:%s:%s", scheduleType, id, dueAt.UTC().Format(time.RFC3339Nano))
 	endpoint := fmt.Sprintf("%s/HaroSchedule/%s/Arm/send", ingressURL, url.PathEscape(id))
-	client := http.DefaultClient
-	if h.httpClient != nil {
-		client = h.httpClient
-	}
-	_, err := restateingress.Post(ctx, client, endpoint, idempotencyKey, map[string]any{model.FieldScheduleType: scheduleType}, 0)
+	_, err := restateingress.Post(ctx, h.httpClient, endpoint, model.ArmIdempotencyKey(scheduleType, id, dueAt), map[string]any{model.FieldScheduleType: scheduleType}, 0)
 	return err
 }
 
-func (h *ToolHandler) cancelSchedule(ctx context.Context, id string) {
+// cancelSchedule asks HaroSchedule to clear id's state after its row was
+// deleted (zero dueAt) or disabled while armed for dueAt.
+func (h *ToolHandler) cancelSchedule(ctx context.Context, id string, dueAt time.Time) {
 	ingressURL := h.RestateIngressURL()
 	id = strings.TrimSpace(id)
 	if ingressURL == "" || id == "" {
 		return
 	}
-	idempotencyKey := fmt.Sprintf("haro:cancel:%s:%d", id, time.Now().UnixNano())
 	endpoint := fmt.Sprintf("%s/HaroSchedule/%s/Cancel/send", ingressURL, url.PathEscape(id))
-	client := http.DefaultClient
-	if h != nil && h.httpClient != nil {
-		client = h.httpClient
-	}
-	if _, postErr := restateingress.Post(ctx, client, endpoint, idempotencyKey, struct{}{}, 0); postErr != nil {
+	if _, postErr := restateingress.Post(ctx, h.httpClient, endpoint, model.CancelIdempotencyKey(id, dueAt), struct{}{}, 0); postErr != nil {
 		log.Printf("[Haro Tools] warning: restate cancel schedule %s failed: %v", id, postErr)
 	}
 }
@@ -202,6 +184,8 @@ type ScheduleRecurringOutput struct {
 	ChannelID      string `json:"channel_id"`
 	Effort         string `json:"effort"`
 	Message        string `json:"message"`
+
+	dueAt time.Time
 }
 
 func handleScheduleRecurring(ctx context.Context, database *sql.DB, defaultTZ string, args ScheduleRecurringArgs) (ScheduleRecurringOutput, error) {
@@ -238,7 +222,7 @@ func handleScheduleRecurring(ctx context.Context, database *sql.DB, defaultTZ st
 	return ScheduleRecurringOutput{
 		Status: model.StatusSuccess, ScheduleID: id, CronExpression: args.CronExpression,
 		NextRunAt: nextRun.Format(time.RFC3339), ChannelID: args.ChannelID, Effort: args.Effort,
-		Message: "Recurring schedule created successfully.",
+		Message: "Recurring schedule created successfully.", dueAt: nextRun,
 	}, nil
 }
 
@@ -251,7 +235,7 @@ func (h *ToolHandler) ScheduleRecurring(ctx context.Context, args ScheduleRecurr
 	}
 	out, err := handleScheduleRecurring(ctx, db, tz, args)
 	if err == nil && h != nil {
-		h.armSchedule(ctx, model.ScheduleTypeCron, out.ScheduleID)
+		h.armSchedule(ctx, model.ScheduleTypeCron, out.ScheduleID, out.dueAt)
 	}
 	return out, err
 }
@@ -272,6 +256,8 @@ type ScheduleOnceOutput struct {
 	RunAt      string `json:"run_at"`
 	Effort     string `json:"effort"`
 	Message    string `json:"message"`
+
+	dueAt time.Time
 }
 
 func handleScheduleOnce(ctx context.Context, database *sql.DB, args ScheduleOnceArgs) (ScheduleOnceOutput, error) {
@@ -315,7 +301,7 @@ func handleScheduleOnce(ctx context.Context, database *sql.DB, args ScheduleOnce
 
 	return ScheduleOnceOutput{
 		Status: model.StatusSuccess, ScheduleID: id, RunAt: targetTime.Format(time.RFC3339),
-		Effort: effort, Message: "One-shot reminder scheduled successfully.",
+		Effort: effort, Message: "One-shot reminder scheduled successfully.", dueAt: targetTime,
 	}, nil
 }
 
@@ -327,7 +313,7 @@ func (h *ToolHandler) ScheduleOnce(ctx context.Context, args ScheduleOnceArgs) (
 	}
 	out, err := handleScheduleOnce(ctx, db, args)
 	if err == nil && h != nil {
-		h.armSchedule(ctx, model.ScheduleTypeOneShot, out.ScheduleID)
+		h.armSchedule(ctx, model.ScheduleTypeOneShot, out.ScheduleID, out.dueAt)
 	}
 	return out, err
 }
@@ -459,7 +445,7 @@ func (h *ToolHandler) CancelSchedule(ctx context.Context, args CancelScheduleArg
 		return CancelScheduleOutput{}, fmt.Errorf("schedule with ID %q not found", id)
 	}
 	if h != nil {
-		h.cancelSchedule(ctx, id)
+		h.cancelSchedule(ctx, id, time.Time{})
 	}
 	return CancelScheduleOutput{Status: model.StatusSuccess, ScheduleID: id, Message: "Schedule cancelled successfully."}, nil
 }
@@ -502,11 +488,13 @@ func (h *ToolHandler) UpdateCronSchedule(ctx context.Context, args UpdateCronSch
 	}
 
 	if h != nil {
-		sched, getErr := store.GetCronSchedule(ctx, h.DB, id)
-		if getErr == nil && !sched.Enabled {
-			h.cancelSchedule(ctx, id)
-		} else {
-			h.armSchedule(ctx, model.ScheduleTypeCron, id)
+		switch sched, getErr := store.GetCronSchedule(ctx, h.DB, id); {
+		case getErr != nil:
+			log.Printf("[Haro Tools] warning: reload cron schedule %s to re-arm failed: %v", id, getErr)
+		case !sched.Enabled:
+			h.cancelSchedule(ctx, id, sched.NextRunAt)
+		default:
+			h.armSchedule(ctx, model.ScheduleTypeCron, id, sched.NextRunAt)
 		}
 	}
 

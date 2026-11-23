@@ -721,164 +721,6 @@ func TestUpdateHeartbeatSchedule(t *testing.T) {
 	}
 }
 
-func seedDueSchedules(ctx context.Context, t *testing.T, db *sql.DB, past, future time.Time) {
-	t.Helper()
-	for _, c := range []model.CronSchedule{
-		{ID: "c-due", TargetID: "t", CronExpr: "0 0 * * *", Prompt: "p", Timezone: "UTC", NextRunAt: past, Enabled: true},
-		{ID: "c-future", TargetID: "t", CronExpr: "0 0 * * *", Prompt: "p", Timezone: "UTC", NextRunAt: future, Enabled: true},
-		{ID: "c-off", TargetID: "t", CronExpr: "0 0 * * *", Prompt: "p", Timezone: "UTC", NextRunAt: past, Enabled: false},
-	} {
-		mustInsertCron(ctx, t, db, c)
-	}
-	for _, h := range []model.HeartbeatSchedule{
-		{ID: "h-due", TargetID: "t", CronExpr: "0 * * * *", Prompt: "p", Timezone: "UTC", NextRunAt: past, Enabled: true},
-		{ID: "h-future", TargetID: "t", CronExpr: "0 * * * *", Prompt: "p", Timezone: "UTC", NextRunAt: future, Enabled: true},
-	} {
-		mustInsertHeartbeat(ctx, t, db, h)
-	}
-	for _, s := range []model.OneShotSchedule{
-		{ID: "s-due", ThreadID: "th", Prompt: "p", RunAt: past},
-		{ID: "s-future", ThreadID: "th", Prompt: "p", RunAt: future},
-	} {
-		mustInsertOneShot(ctx, t, db, s)
-	}
-}
-
-func TestGetDueSchedules(t *testing.T) {
-	now := time.Date(2026, 3, 4, 5, 6, 7, 0, time.UTC)
-	tests := []struct {
-		name   string
-		kind   string
-		wantID string
-	}{
-		{"due cron", "cron", "c-due"},
-		{"due heartbeat", "heartbeat", "h-due"},
-		{"due oneshot", "oneshot", "s-due"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			db := openStoreTestDB(t)
-			ctx := context.Background()
-			seedDueSchedules(ctx, t, db, now.Add(-time.Hour), now.Add(time.Hour))
-			if gotID := fetchDueID(ctx, t, db, tc.kind, now); gotID != tc.wantID {
-				t.Errorf("due ID = %q, want %q", gotID, tc.wantID)
-			}
-		})
-	}
-}
-
-func TestGetDueCronSchedulesErrors(t *testing.T) {
-	now := time.Date(2026, 3, 4, 5, 6, 7, 0, time.UTC)
-	tests := []struct {
-		name     string
-		badSQL   string
-		nilDB    bool
-		closedDB bool
-		wantErr  string
-	}{
-		{name: "nil db", nilDB: true, wantErr: "database is nil"},
-		{name: "closed db", closedDB: true, wantErr: "database is closed"},
-		{
-			name:    "bad row fails scan",
-			badSQL:  `ALTER TABLE cron_schedules ALTER COLUMN created_at TYPE TEXT; INSERT INTO cron_schedules (id, target_id, title_prefix, cron_expr, prompt, timezone, next_run_at, enabled, created_at, effort) VALUES ('c-bad', 't1', '', '0 0 * * *', 'p', 'UTC', '2026-01-01T00:00:00Z', TRUE, 'not-a-date', 'medium')`,
-			wantErr: "Scan error",
-		},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			db := openStoreTestDB(t)
-			ctx := context.Background()
-			if tc.badSQL != "" {
-				if _, err := db.ExecContext(ctx, tc.badSQL); err != nil {
-					t.Fatalf("insert bad row err = %v", err)
-				}
-			}
-			_, err := GetDueCronSchedules(ctx, scheduleCaseDB(db, tc.nilDB, tc.closedDB), now)
-			assertScheduleErr(t, err, tc.wantErr)
-		})
-	}
-}
-
-func TestGetDueHeartbeatSchedulesErrors(t *testing.T) {
-	now := time.Date(2026, 3, 4, 5, 6, 7, 0, time.UTC)
-	tests := []struct {
-		name    string
-		badSQL  string
-		nilDB   bool
-		wantErr string
-	}{
-		{name: "nil db", nilDB: true, wantErr: "database is nil"},
-		{
-			name:    "bad row fails scan",
-			badSQL:  `ALTER TABLE heartbeat_schedules ALTER COLUMN created_at TYPE TEXT; INSERT INTO heartbeat_schedules (id, target_id, title_prefix, cron_expr, prompt, timezone, effort, next_run_at, enabled, created_at) VALUES ('h-bad', 't1', '', '0 0 * * *', 'p', 'UTC', 'low', '2026-01-01T00:00:00Z', TRUE, 'not-a-date')`,
-			wantErr: "Scan error",
-		},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			db := openStoreTestDB(t)
-			ctx := context.Background()
-			if tc.badSQL != "" {
-				if _, err := db.ExecContext(ctx, tc.badSQL); err != nil {
-					t.Fatalf("insert bad row err = %v", err)
-				}
-			}
-			_, err := GetDueHeartbeatSchedules(ctx, scheduleCaseDB(db, tc.nilDB, false), now)
-			assertScheduleErr(t, err, tc.wantErr)
-		})
-	}
-}
-
-func TestGetDueOneShotSchedulesErrors(t *testing.T) {
-	tests := []struct {
-		name    string
-		nilDB   bool
-		wantErr string
-	}{
-		{name: "nil db", nilDB: true, wantErr: "database is nil"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			db := openStoreTestDB(t)
-			_, err := GetDueOneShotSchedules(context.Background(), scheduleCaseDB(db, tc.nilDB, false), time.Now().UTC())
-			assertScheduleErr(t, err, tc.wantErr)
-		})
-	}
-}
-
-func fetchDueID(ctx context.Context, t *testing.T, db *sql.DB, kind string, now time.Time) string {
-	t.Helper()
-	switch kind {
-	case "cron":
-		dues, err := GetDueCronSchedules(ctx, db, now)
-		if err != nil {
-			t.Fatalf("GetDueCronSchedules err = %v", err)
-		}
-		if len(dues) != 1 {
-			t.Fatalf("GetDueCronSchedules = %+v, want one row", dues)
-		}
-		return dues[0].ID
-	case "heartbeat":
-		dues, err := GetDueHeartbeatSchedules(ctx, db, now)
-		if err != nil {
-			t.Fatalf("GetDueHeartbeatSchedules err = %v", err)
-		}
-		if len(dues) != 1 {
-			t.Fatalf("GetDueHeartbeatSchedules = %+v, want one row", dues)
-		}
-		return dues[0].ID
-	default:
-		dues, err := GetDueOneShotSchedules(ctx, db, now)
-		if err != nil {
-			t.Fatalf("GetDueOneShotSchedules err = %v", err)
-		}
-		if len(dues) != 1 {
-			t.Fatalf("GetDueOneShotSchedules = %+v, want one row", dues)
-		}
-		return dues[0].ID
-	}
-}
-
 type advanceNextRunCase struct {
 	name    string
 	id      string
@@ -889,57 +731,62 @@ type advanceNextRunCase struct {
 // advanceNextRunCases are the shared rows for the cron and heartbeat Advance*NextRun wrappers.
 func advanceNextRunCases(dueID, kind string) []advanceNextRunCase {
 	return []advanceNextRunCase{
-		{name: "advance clears due", id: dueID},
+		{name: "advance moves next run", id: dueID},
 		{name: "missing", id: "missing", wantErr: kind + ` schedule "missing" not found`},
 		{name: "empty id", wantErr: "schedule_id cannot be empty"},
 		{name: "nil db", id: dueID, nilDB: true, wantErr: "database is nil"},
 	}
 }
 
-func assertNoneDue(t *testing.T, due int, err error) {
+// seedAdvanceSchedules inserts one cron (c-due) and one heartbeat (h-due) due at past.
+func seedAdvanceSchedules(ctx context.Context, t *testing.T, db *sql.DB, past time.Time) {
 	t.Helper()
-	if err != nil || due != 0 {
-		t.Errorf("due schedules after advance = %d, err %v; want none", due, err)
+	mustInsertCron(ctx, t, db, model.CronSchedule{ID: "c-due", TargetID: "t", CronExpr: "0 0 * * *", Prompt: "p", Timezone: "UTC", NextRunAt: past, Enabled: true})
+	mustInsertHeartbeat(ctx, t, db, model.HeartbeatSchedule{ID: "h-due", TargetID: "t", CronExpr: "0 * * * *", Prompt: "p", Timezone: "UTC", NextRunAt: past, Enabled: true})
+}
+
+// runAdvanceNextRunCases moves dueID's next run with advance and reads it back with read.
+func runAdvanceNextRunCases(t *testing.T, dueID, kind string, advance func(context.Context, *sql.DB, string, time.Time) error, read func(context.Context, *sql.DB, string) (time.Time, error)) {
+	t.Helper()
+	now := time.Date(2026, 3, 4, 5, 6, 7, 0, time.UTC)
+	for _, tc := range advanceNextRunCases(dueID, kind) {
+		t.Run(tc.name, func(t *testing.T) {
+			db := openStoreTestDB(t)
+			ctx := context.Background()
+			seedAdvanceSchedules(ctx, t, db, now.Add(-time.Hour))
+			future := now.Add(time.Hour)
+			if assertScheduleErr(t, advance(ctx, scheduleCaseDB(db, tc.nilDB, false), tc.id, future), tc.wantErr) {
+				return
+			}
+			got, err := read(ctx, db, tc.id)
+			if err != nil {
+				t.Fatalf("read %s schedule err = %v", kind, err)
+			}
+			if !got.Equal(future) {
+				t.Errorf("NextRunAt = %v, want %v", got, future)
+			}
+		})
 	}
 }
 
 func TestAdvanceCronNextRun(t *testing.T) {
-	now := time.Date(2026, 3, 4, 5, 6, 7, 0, time.UTC)
-	for _, tc := range advanceNextRunCases("c-due", "cron") {
-		t.Run(tc.name, func(t *testing.T) {
-			db := openStoreTestDB(t)
-			ctx := context.Background()
-			seedDueSchedules(ctx, t, db, now.Add(-time.Hour), now.Add(time.Hour))
-			if !assertScheduleErr(t, AdvanceCronNextRun(ctx, scheduleCaseDB(db, tc.nilDB, false), tc.id, now.Add(time.Hour)), tc.wantErr) {
-				dues, err := GetDueCronSchedules(ctx, db, now)
-				assertNoneDue(t, len(dues), err)
-			}
-		})
-	}
+	runAdvanceNextRunCases(t, "c-due", "cron", AdvanceCronNextRun, func(ctx context.Context, db *sql.DB, id string) (time.Time, error) {
+		c, err := GetCronSchedule(ctx, db, id)
+		if err != nil {
+			return time.Time{}, err
+		}
+		return c.NextRunAt, nil
+	})
 }
 
 func TestAdvanceHeartbeatNextRun(t *testing.T) {
-	now := time.Date(2026, 3, 4, 5, 6, 7, 0, time.UTC)
-	for _, tc := range advanceNextRunCases("h-due", "heartbeat") {
-		t.Run(tc.name, func(t *testing.T) {
-			db := openStoreTestDB(t)
-			ctx := context.Background()
-			seedDueSchedules(ctx, t, db, now.Add(-time.Hour), now.Add(time.Hour))
-			future := now.Add(time.Hour)
-			if assertScheduleErr(t, AdvanceHeartbeatNextRun(ctx, scheduleCaseDB(db, tc.nilDB, false), tc.id, future), tc.wantErr) {
-				return
-			}
-			dues, err := GetDueHeartbeatSchedules(ctx, db, now)
-			assertNoneDue(t, len(dues), err)
-			got, err := GetHeartbeatSchedule(ctx, db, tc.id)
-			if err != nil {
-				t.Fatalf("GetHeartbeatSchedule err = %v", err)
-			}
-			if !got.NextRunAt.Equal(future) {
-				t.Errorf("NextRunAt = %v, want %v", got.NextRunAt, future)
-			}
-		})
-	}
+	runAdvanceNextRunCases(t, "h-due", "heartbeat", AdvanceHeartbeatNextRun, func(ctx context.Context, db *sql.DB, id string) (time.Time, error) {
+		hb, err := GetHeartbeatSchedule(ctx, db, id)
+		if err != nil {
+			return time.Time{}, err
+		}
+		return hb.NextRunAt, nil
+	})
 }
 
 func seedWatermarkHeartbeat(ctx context.Context, t *testing.T, db *sql.DB, now time.Time, preset bool) {

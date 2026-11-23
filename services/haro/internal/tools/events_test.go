@@ -516,10 +516,11 @@ func TestHeartbeatTools_RestateArming(t *testing.T) {
 	db := openToolsTestDB(t)
 	ctx := context.Background()
 
-	var capturedPaths []string
+	var captured []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		capturedPaths = append(capturedPaths, r.URL.Path)
-		w.WriteHeader(http.StatusAccepted)
+		captured = append(captured, r.URL.Path+" key="+r.Header.Get("Idempotency-Key"))
+		// A failed arm or cancel is only logged; every tool call still succeeds.
+		w.WriteHeader(http.StatusServiceUnavailable)
 	}))
 	defer srv.Close()
 
@@ -545,6 +546,10 @@ func TestHeartbeatTools_RestateArming(t *testing.T) {
 	if !ok {
 		t.Fatal("expected schedule_id to be string")
 	}
+	nextRunAt, ok := parsed["next_run_at"].(string)
+	if !ok {
+		t.Fatal("expected next_run_at to be string")
+	}
 
 	// 2. Update heartbeat enabled=true with restateIngressURL
 	_, err = HandleUpdateHeartbeat(ctx, db, map[string]any{
@@ -565,18 +570,13 @@ func TestHeartbeatTools_RestateArming(t *testing.T) {
 		t.Fatalf("HandleUpdateHeartbeat error: %v", err)
 	}
 
-	wantArmPath := "/HaroSchedule/" + hbID + "/Arm/send"
-	wantCancelPath := "/HaroSchedule/" + hbID + "/Cancel/send"
-	if len(capturedPaths) != 3 {
-		t.Fatalf("captured %d requests, want 3", len(capturedPaths))
+	tick := utcTick(t, nextRunAt)
+	want := []string{
+		"/HaroSchedule/" + hbID + "/Arm/send key=haro:arm:heartbeat:" + hbID + ":" + tick,
+		"/HaroSchedule/" + hbID + "/Arm/send key=haro:arm:heartbeat:" + hbID + ":" + tick,
+		"/HaroSchedule/" + hbID + "/Cancel/send key=haro:cancel:" + hbID + ":" + tick,
 	}
-	if capturedPaths[0] != wantArmPath {
-		t.Errorf("req 0 path = %q, want %q", capturedPaths[0], wantArmPath)
-	}
-	if capturedPaths[1] != wantArmPath {
-		t.Errorf("req 1 path = %q, want %q", capturedPaths[1], wantArmPath)
-	}
-	if capturedPaths[2] != wantCancelPath {
-		t.Errorf("req 2 path = %q, want %q", capturedPaths[2], wantCancelPath)
+	if strings.Join(captured, "\n") != strings.Join(want, "\n") {
+		t.Errorf("ingress requests =\n%s\nwant\n%s", strings.Join(captured, "\n"), strings.Join(want, "\n"))
 	}
 }
