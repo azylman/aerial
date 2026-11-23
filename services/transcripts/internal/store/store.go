@@ -373,14 +373,14 @@ func (s *Store) AcquireThreadSummaryLock(ctx context.Context, threadID string) (
 	}, nil
 }
 
-// extractPgxConn extracts a *pgx.Conn from a driver connection dc, either
-// through the stdlib.Conn provider interface or directly from a *pgx.Conn.
+// extractPgxConn inspects a database/sql driver connection and returns the
+// underlying *pgx.Conn if present, either directly or by unwrapping *stdlib.Conn.
 func extractPgxConn(dc any) *pgx.Conn {
-	if provider, ok := dc.(interface{ Conn() *pgx.Conn }); ok {
-		return provider.Conn()
+	if pc, ok := dc.(*pgx.Conn); ok {
+		return pc
 	}
-	if rawConn, ok := dc.(*pgx.Conn); ok {
-		return rawConn
+	if uc, ok := dc.(interface{ Conn() *pgx.Conn }); ok {
+		return uc.Conn()
 	}
 	return nil
 }

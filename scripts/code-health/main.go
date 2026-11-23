@@ -44,7 +44,8 @@ var (
 
 // FileMetrics records ratcheted file-level watermarks.
 type FileMetrics struct {
-	Lines int `json:"lines,omitempty"`
+	Lines        int `json:"lines,omitempty"`
+	BlankAssigns int `json:"blank_assigns,omitempty"`
 }
 
 // FuncMetrics records ratcheted function-level watermarks.
@@ -331,8 +332,15 @@ func buildBaseline(absRoot string, targets []string, r rules) (Baseline, error) 
 		if fa.skipped {
 			continue
 		}
+		var fm FileMetrics
 		if fa.metrics.Lines > r.maxFileLines {
-			b.Files[rel] = fa.metrics
+			fm.Lines = fa.metrics.Lines
+		}
+		if r.testRuleEnabled(ruleBlankErrorDiscard) && fa.metrics.BlankAssigns > 0 {
+			fm.BlankAssigns = fa.metrics.BlankAssigns
+		}
+		if fm.Lines > 0 || fm.BlankAssigns > 0 {
+			b.Files[rel] = fm
 		}
 		for fnName, m := range fa.funcs {
 			if entry, ok := outlierFuncMetrics(m, r.maxDepth); ok {
@@ -356,11 +364,8 @@ func outlierFuncMetrics(m FuncMetrics, depthCeiling int) (FuncMetrics, bool) {
 	return entry, entry.Depth > 0
 }
 
-func checkTargets(absRoot string, targets, testTargets []string, base Baseline, r rules, fix bool) ([]string, error) {
+func checkRootPackageViolations(targets []string, base Baseline) []string {
 	var violations []string
-	var allFuncSigs []funcCloneSig
-	var allStructSigs []structCloneSig
-
 	rootCounts := countRootPackageFiles(targets)
 	dirs := make([]string, 0, len(rootCounts))
 	for dir := range rootCounts {
@@ -374,6 +379,15 @@ func checkTargets(absRoot string, targets, testTargets []string, base Baseline, 
 			violations = append(violations, fmt.Sprintf("%s: root package has %d Go files, exceeds limit %d (ceiling %d: main.go, main_test.go, goleak_test.go); move domain logic and tests into internal/* subpackages", dir, count, limit, maxRootMainFiles))
 		}
 	}
+	return violations
+}
+
+func checkTargets(absRoot string, targets, testTargets []string, base Baseline, r rules, fix bool) ([]string, error) {
+	var violations []string
+	var allFuncSigs []funcCloneSig
+	var allStructSigs []structCloneSig
+
+	violations = append(violations, checkRootPackageViolations(targets, base)...)
 
 	for _, rel := range targets {
 		if isBannedGrabBagFilename(rel) {
@@ -400,6 +414,9 @@ func checkTargets(absRoot string, targets, testTargets []string, base Baseline, 
 		fileLimit := max(r.maxFileLines, base.Files[rel].Lines)
 		if fa.metrics.Lines > fileLimit {
 			violations = append(violations, fmt.Sprintf("%s: file length %d exceeds limit %d (ceiling %d)", rel, fa.metrics.Lines, fileLimit, r.maxFileLines))
+		}
+		if strings.HasSuffix(rel, "_test.go") && r.testRuleEnabled(ruleBlankErrorDiscard) && fa.metrics.BlankAssigns > base.Files[rel].BlankAssigns {
+			violations = append(violations, fmt.Sprintf("%s: test blank-identifier call discard count %d exceeds limit %d (ceiling 0); assert or handle returned errors instead of assigning to '_'", rel, fa.metrics.BlankAssigns, base.Files[rel].BlankAssigns))
 		}
 		violations = append(violations, checkFuncMetrics(rel, fa.funcs, base.Functions, r.maxDepth)...)
 		allFuncSigs = append(allFuncSigs, fa.funcSigs...)
@@ -644,13 +661,94 @@ func analyzeFile(fullPath, rel string) (fileAnalysis, error) {
 	if !strings.HasSuffix(rel, "_test.go") {
 		structSigs = collectStructCloneSigs(f, rel, pkgKey)
 	}
+	fm := FileMetrics{Lines: lines}
+	if strings.HasSuffix(rel, "_test.go") {
+		fm.BlankAssigns = countTestBlankCallAssigns(f)
+	}
 	return fileAnalysis{
-		metrics:          FileMetrics{Lines: lines},
+		metrics:          fm,
 		funcs:            fns,
 		funcSigs:         sigs,
 		structSigs:       structSigs,
 		nolintViolations: nolintViolations,
 	}, nil
+}
+
+var exemptBlankCallSelectors = map[string]bool{
+	"Close":       true,
+	"Encode":      true,
+	"Write":       true,
+	"WriteHeader": true,
+	"WriteString": true,
+	"Flush":       true,
+	"Remove":      true,
+	"RemoveAll":   true,
+	"Setenv":      true,
+	"Unsetenv":    true,
+	"Chdir":       true,
+	"Unsubscribe": true,
+	"Stop":        true,
+	"Cancel":      true,
+}
+
+func isCleanupCall(call *ast.CallExpr) bool {
+	if sel, ok := call.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == "Cleanup" {
+		return true
+	}
+	return false
+}
+
+func isNonExemptBlankCall(lhs, rhs ast.Expr) bool {
+	ident, ok := lhs.(*ast.Ident)
+	if !ok || ident.Name != "_" {
+		return false
+	}
+	call, ok := rhs.(*ast.CallExpr)
+	if !ok {
+		return false
+	}
+	if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+		if exemptBlankCallSelectors[sel.Sel.Name] {
+			return false
+		}
+	}
+	return true
+}
+
+func hasNonExemptBlankCallAssign(assign *ast.AssignStmt) bool {
+	if len(assign.Lhs) > 0 && len(assign.Rhs) == 1 {
+		return isNonExemptBlankCall(assign.Lhs[len(assign.Lhs)-1], assign.Rhs[0])
+	}
+	if len(assign.Rhs) == len(assign.Lhs) {
+		for i := range assign.Lhs {
+			if isNonExemptBlankCall(assign.Lhs[i], assign.Rhs[i]) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func countTestBlankCallAssigns(f *ast.File) int {
+	var count int
+	for _, decl := range f.Decls {
+		ast.Inspect(decl, func(n ast.Node) bool {
+			if n == nil {
+				return true
+			}
+			if _, ok := n.(*ast.DeferStmt); ok {
+				return false
+			}
+			if call, ok := n.(*ast.CallExpr); ok && isCleanupCall(call) {
+				return false
+			}
+			if assign, ok := n.(*ast.AssignStmt); ok && hasNonExemptBlankCallAssign(assign) {
+				count++
+			}
+			return true
+		})
+	}
+	return count
 }
 
 func appendNodeCloneTokens(tokens []string, n ast.Node) []string {

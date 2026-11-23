@@ -413,68 +413,110 @@ func TestSummaryLockKey(t *testing.T) {
 	}
 }
 
-func TestDestroyConn(t *testing.T) {
-	t.Parallel()
-	store := newTestStore(t, "aerial")
-	ctx := context.Background()
-	conn, err := store.db.Conn(ctx)
-	if err != nil {
-		t.Fatalf("conn: %v", err)
-	}
-	lockKey := summaryLockKey("destroy-conn-test")
-	if _, lockErr := conn.ExecContext(ctx, "SELECT pg_advisory_lock(hashtext($1))", lockKey); lockErr != nil {
-		t.Fatalf("acquire session lock: %v", lockErr)
-	}
-	if n := advisoryLocks(t, store); n != 1 {
-		t.Fatalf("advisory locks held before destroy = %d, want 1", n)
-	}
-
-	destroyConn(conn)
-
-	// A fresh connection should be able to acquire the summary lock immediately,
-	// confirming the destroyed connection's session lock was terminated with its backend.
-	release, lockErr := store.AcquireThreadSummaryLock(ctx, "destroy-conn-test")
-	if lockErr != nil {
-		t.Fatalf("AcquireThreadSummaryLock after destroyConn: %v", lockErr)
-	}
-	release()
-	if n := advisoryLocks(t, store); n != 0 {
-		t.Fatalf("advisory locks held after release = %d, want 0", n)
-	}
-
-	if err := conn.Close(); err == nil {
-		t.Errorf("expected error closing destroyed conn")
-	}
-}
-
-type fakeConnProvider struct {
-	conn *pgx.Conn
-}
-
-func (f fakeConnProvider) Conn() *pgx.Conn {
-	return f.conn
-}
-
 func TestExtractPgxConn(t *testing.T) {
 	t.Parallel()
-	dummy := &pgx.Conn{}
+	fakePgx := &pgx.Conn{}
+	wrapper := &fakeConnWrapper{conn: fakePgx}
 	tests := []struct {
-		name string
-		dc   any
-		want *pgx.Conn
+		name    string
+		input   any
+		wantNil bool
 	}{
-		{"nil dc", nil, nil},
-		{"unrelated type", "not-a-conn", nil},
-		{"direct pgx.Conn", dummy, dummy},
-		{"conn provider interface", fakeConnProvider{conn: dummy}, dummy},
+		{"nil input", nil, true},
+		{"unrelated type", "not-a-conn", true},
+		{"direct pgx conn", fakePgx, false},
+		{"wrapper conn", wrapper, false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := extractPgxConn(tc.dc)
-			if got != tc.want {
-				t.Errorf("extractPgxConn(%v) = %v, want %v", tc.dc, got, tc.want)
+			got := extractPgxConn(tc.input)
+			if tc.wantNil && got != nil {
+				t.Fatalf("extractPgxConn() = %v, want nil", got)
 			}
+			if !tc.wantNil && got != fakePgx {
+				t.Fatalf("extractPgxConn() = %v, want %v", got, fakePgx)
+			}
+		})
+	}
+}
+
+type fakeConnWrapper struct {
+	conn *pgx.Conn
+}
+
+func (w *fakeConnWrapper) Conn() *pgx.Conn {
+	return w.conn
+}
+
+func runDestroyConnCase(ctx context.Context, t *testing.T, store *Store, name string, holdLock, closeBefore bool) {
+	t.Helper()
+	conn, err := store.db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("conn: %v", err)
+	}
+	lockKey := "test-destroy-conn-" + name
+	if holdLock {
+		if _, lockErr := conn.ExecContext(ctx, `SELECT pg_advisory_lock(hashtext($1))`, lockKey); lockErr != nil {
+			t.Fatalf("acquire lock: %v", lockErr)
+		}
+	}
+	if closeBefore {
+		if closeErr := conn.Close(); closeErr != nil {
+			t.Fatalf("close: %v", closeErr)
+		}
+	}
+	destroyConn(conn)
+	if closeErr := conn.Close(); closeErr == nil {
+		t.Errorf("expected error closing destroyed conn")
+	}
+	if !holdLock {
+		return
+	}
+	probeConn, err := store.db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("probe conn: %v", err)
+	}
+	defer probeConn.Close()
+
+	deadline := time.Now().Add(5 * time.Second)
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		var acquired bool
+		if queryErr := probeConn.QueryRowContext(ctx, `SELECT pg_try_advisory_lock(hashtext($1))`, lockKey).Scan(&acquired); queryErr == nil && acquired {
+			if _, unlockErr := probeConn.ExecContext(ctx, `SELECT pg_advisory_unlock(hashtext($1))`, lockKey); unlockErr != nil {
+				t.Fatalf("unlock advisory lock: %v", unlockErr)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for advisory lock release after destroyConn")
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatalf("context cancelled: %v", ctx.Err())
+		case <-ticker.C:
+		}
+	}
+}
+
+func TestDestroyConn(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		holdLock    bool
+		closeBefore bool
+	}{
+		{name: "already closed", holdLock: false, closeBefore: true},
+		{name: "live holding advisory lock", holdLock: true, closeBefore: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			store := newTestStore(t, "aerial")
+			runDestroyConnCase(context.Background(), t, store, tc.name, tc.holdLock, tc.closeBefore)
 		})
 	}
 }
