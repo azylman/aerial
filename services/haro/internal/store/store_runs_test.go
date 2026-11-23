@@ -12,9 +12,9 @@ import (
 
 func verifyScheduleRun(ctx context.Context, t *testing.T, db *sql.DB, id, wantEffort, wantStatus string, wantEcho bool) {
 	t.Helper()
-	got, err := GetScheduleRun(ctx, db, id)
+	got, err := getRunByID(ctx, db, id)
 	if err != nil {
-		t.Fatalf("GetScheduleRun err = %v", err)
+		t.Fatalf("getRunByID err = %v", err)
 	}
 	if got.Effort != wantEffort {
 		t.Errorf("Effort = %q, want %q", got.Effort, wantEffort)
@@ -26,7 +26,7 @@ func verifyScheduleRun(ctx context.Context, t *testing.T, db *sql.DB, id, wantEf
 		t.Error("StartedAt is zero, want defaulted")
 	}
 	if wantEcho && (got.MessageID != "m" || got.Status != "completed" || got.DurationMs != 42 || got.Model != "m1") {
-		t.Errorf("GetScheduleRun = %+v, want echoed fields", got)
+		t.Errorf("getRunByID = %+v, want echoed fields", got)
 	}
 }
 
@@ -78,22 +78,46 @@ func TestCreateScheduleRun(t *testing.T) {
 	}
 }
 
-func TestGetScheduleRunErrors(t *testing.T) {
+// getRunByID reads one schedule run by its row ID through the production scanner.
+func getRunByID(ctx context.Context, db *sql.DB, id string) (*model.ScheduleRun, error) {
+	return getScheduleRunWhere(ctx, db, "run id", id, `SELECT `+scheduleRunColumns+` FROM schedule_runs WHERE id = $1`)
+}
+
+func TestGetScheduleRunByDispatchID(t *testing.T) {
+	base := time.Date(2026, 11, 22, 10, 0, 0, 0, time.UTC)
+	seed := []model.ScheduleRun{
+		{ID: "11111111-1111-5111-8111-111111111111", ScheduleID: "hb-1", ScheduleType: "heartbeat", MessageID: "heartbeat:hb-1:2026-11-22T10:00:00Z", Status: "running", StartedAt: base},
+		{ID: "22222222-2222-5222-8222-222222222222", ScheduleID: "hb-1", ScheduleType: "heartbeat", MessageID: "heartbeat:hb-1:2026-11-22T10:05:00Z", Status: "completed", StartedAt: base.Add(5 * time.Minute)},
+		{ID: "33333333-3333-5333-8333-333333333333", ScheduleID: "hb-2", ScheduleType: "heartbeat", MessageID: "heartbeat:hb-2:2026-11-22T10:00:00Z", Status: "running", StartedAt: base},
+		{ID: "44444444-4444-5444-8444-444444444444", ScheduleID: "hb-2", ScheduleType: "heartbeat", MessageID: "heartbeat:hb-2:2026-11-22T10:00:00Z", Status: "running", StartedAt: base.Add(time.Minute)},
+	}
 	tests := []struct {
-		name     string
-		id       string
-		nilDB    bool
-		closedDB bool
-		wantErr  string
+		name       string
+		dispatchID string
+		nilDB      bool
+		closedDB   bool
+		wantID     string
+		wantStatus string
+		wantErr    string
 	}{
-		{"empty id", "", false, false, "run id cannot be empty"},
-		{"not found", "missing", false, false, `schedule run "missing" not found`},
-		{"closed db", "r-1", false, true, "database is closed"},
-		{"nil db", "r-1", true, false, "database is nil"},
+		{"resolves uuid row by dispatch id", "heartbeat:hb-1:2026-11-22T10:00:00Z", false, false, "11111111-1111-5111-8111-111111111111", "running", ""},
+		{"distinguishes due ticks of one schedule", "heartbeat:hb-1:2026-11-22T10:05:00Z", false, false, "22222222-2222-5222-8222-222222222222", "completed", ""},
+		{"duplicate dispatch id picks newest run", " heartbeat:hb-2:2026-11-22T10:00:00Z ", false, false, "44444444-4444-5444-8444-444444444444", "running", ""},
+		{"run row id is not a dispatch id", "11111111-1111-5111-8111-111111111111", false, false, "", "", "not found"},
+		{"unknown dispatch id", "heartbeat:hb-9:2026-11-22T10:00:00Z", false, false, "", "", "not found"},
+		{"empty dispatch id", "  ", false, false, "", "", "dispatch id cannot be empty"},
+		{"closed db", "heartbeat:hb-1:2026-11-22T10:00:00Z", false, true, "", "", "database is closed"},
+		{"nil db", "heartbeat:hb-1:2026-11-22T10:00:00Z", true, false, "", "", "database is nil"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
 			db := openStoreTestDB(t)
+			for _, r := range seed {
+				if err := CreateScheduleRun(ctx, db, r); err != nil {
+					t.Fatalf("CreateScheduleRun(%s): %v", r.ID, err)
+				}
+			}
 			database := db
 			if tc.nilDB {
 				database = nil
@@ -101,9 +125,18 @@ func TestGetScheduleRunErrors(t *testing.T) {
 			if tc.closedDB {
 				_ = db.Close()
 			}
-			_, err := GetScheduleRun(context.Background(), database, tc.id)
-			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
-				t.Errorf("GetScheduleRun err = %v, want %q", err, tc.wantErr)
+			got, err := GetScheduleRunByDispatchID(ctx, database, tc.dispatchID)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("GetScheduleRunByDispatchID err = %v, want %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("GetScheduleRunByDispatchID err = %v", err)
+			}
+			if got.ID != tc.wantID || got.Status != tc.wantStatus {
+				t.Errorf("got run %s/%s, want %s/%s", got.ID, got.Status, tc.wantID, tc.wantStatus)
 			}
 		})
 	}
@@ -168,12 +201,12 @@ func seedOutcomeRun(ctx context.Context, t *testing.T, db *sql.DB, now time.Time
 
 func verifyOutcomeRun(ctx context.Context, t *testing.T, db *sql.DB, completed time.Time) {
 	t.Helper()
-	got, err := GetScheduleRun(ctx, db, "r-1")
+	got, err := getRunByID(ctx, db, "r-1")
 	if err != nil {
-		t.Fatalf("GetScheduleRun err = %v", err)
+		t.Fatalf("getRunByID err = %v", err)
 	}
 	if got.Status != "completed" || got.DurationMs != 60000 {
-		t.Errorf("GetScheduleRun = %+v, want completed/60000", got)
+		t.Errorf("getRunByID = %+v, want completed/60000", got)
 	}
 	if got.CompletedAt == nil || !got.CompletedAt.Equal(completed) {
 		t.Errorf("CompletedAt = %v, want %v", got.CompletedAt, completed)
@@ -280,8 +313,8 @@ func seedPruneRuns(ctx context.Context, t *testing.T, db *sql.DB, now time.Time)
 func verifyPruneKept(ctx context.Context, t *testing.T, db *sql.DB, wantKept []string) {
 	t.Helper()
 	for _, id := range wantKept {
-		if _, err := GetScheduleRun(ctx, db, id); err != nil {
-			t.Errorf("GetScheduleRun(%q) err = %v, want kept", id, err)
+		if _, err := getRunByID(ctx, db, id); err != nil {
+			t.Errorf("getRunByID(%q) err = %v, want kept", id, err)
 		}
 	}
 }
