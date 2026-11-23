@@ -6,8 +6,8 @@
 // and fan-out sends. The two objects talk only through one-way sends.
 //
 // Authority invariants frozen here:
-//   - Postgres pr_registry is a read-only projection; authority never reads
-//     it. SHA->PR routing uses the RepoObject durable index, never the table.
+//   - Restate K/V is the only copy of PR lifecycle state. SHA->PR routing
+//     uses the RepoObject durable index.
 //   - PRObject and RepoObject exchange only one-way sends, never
 //     request-response between exclusive handlers.
 //   - Every external effect runs as a journaled step keyed by EffectKey;

@@ -228,7 +228,6 @@
       "title": "CI PR",
       "metadata": {
         "agent": "aerial",
-        "bot_id": "aerial",
         "ci_checks": {
           "lint": "passed"
         }

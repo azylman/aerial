@@ -4,16 +4,15 @@ package prstate
 // testdata/prlifecycle/parity/ holds one PR lifecycle as the event stream
 // synapse sends Restate, the effect multiset
 // legacy synapse performs for the same lifecycle (by kind and
-// generation-free match key), and the hand-derived final pr_registry rows.
+// generation-free match key), and the hand-derived final registry rows.
 // This test replays the stream through the real PRObject and RepoObject
 // handlers on a hermetic in-memory Restate: K/V round-trips through JSON
 // like the real journal, journaled runs execute once, and every one-way
-// send (index updates, forwards, projection writes, delayed deadlines) is
+// send (index updates, forwards, delayed deadlines) is
 // delivered after the invocation that made it, delayed sends once the
 // immediate ones drain. Fakes stand in for the fact bus, eri, GitHub,
-// Kubernetes and the pr_registry writer. synapse's restate_parity_test.go
-// drives the legacy router over the same files and must land on the same
-// effects and rows.
+// and Kubernetes. Each tracked PR's committed PRObject state must end on
+// its golden row.
 
 import (
 	"context"
@@ -56,17 +55,34 @@ type parityFactState struct {
 	RolloutState *pubsub.PRRolloutState `json:"rollout_state"`
 }
 
-// parityRow is the pr_registry row a lifecycle ends on.
+// goldenMetadata is the per-PR registry state a golden row pins beyond its
+// columns. Empty values are absent keys in the goldens.
+type goldenMetadata struct {
+	Agent                  string                          `json:"agent,omitempty"`
+	Banner                 string                          `json:"banner,omitempty"`
+	BuildMetadata          *BuildMetadata                  `json:"build_metadata,omitempty"`
+	CIChecks               map[string]string               `json:"ci_checks,omitempty"`
+	DeployFailedPublished  bool                            `json:"deploy_failed_published,omitempty"`
+	DeploySuccessPending   bool                            `json:"deploy_success_pending,omitempty"`
+	DeployedJobs           []string                        `json:"deployed_jobs,omitempty"`
+	DeployedKustomizations []string                        `json:"deployed_kustomizations,omitempty"`
+	JobStates              map[string]string               `json:"job_states,omitempty"`
+	Jobs                   []string                        `json:"jobs,omitempty"`
+	KustomizationRequests  map[string]KustomizationRequest `json:"kustomization_requests,omitempty"`
+	StartedJobs            []string                        `json:"started_jobs,omitempty"`
+}
+
+// parityRow is the registry row a lifecycle ends on.
 type parityRow struct {
-	Repo     string             `json:"repo"`
-	PRNumber int                `json:"pr_number"`
-	Branch   string             `json:"branch"`
-	HeadSHA  string             `json:"head_sha"`
-	MergeSHA string             `json:"merge_sha"`
-	TargetID string             `json:"target_id"`
-	Status   string             `json:"status"`
-	Title    string             `json:"title"`
-	Metadata ProjectionMetadata `json:"metadata"`
+	Repo     string         `json:"repo"`
+	PRNumber int            `json:"pr_number"`
+	Branch   string         `json:"branch"`
+	HeadSHA  string         `json:"head_sha"`
+	MergeSHA string         `json:"merge_sha"`
+	TargetID string         `json:"target_id"`
+	Status   string         `json:"status"`
+	Title    string         `json:"title"`
+	Metadata goldenMetadata `json:"metadata"`
 }
 
 // parityScenario is one golden file; synapse-only fields are ignored here.
@@ -145,17 +161,15 @@ type paritySim struct {
 	seen     map[string]bool
 	effects  []parityEffect
 	facts    []parityFactState
-	rows     map[string]ProjectionSnapshot
 }
 
 func newParitySim(t *testing.T) *paritySim {
 	t.Helper()
-	sim := &paritySim{t: t, kv: map[string][]byte{}, rows: map[string]ProjectionSnapshot{}}
-	pr := NewPRObjectService().WithProjection(sim).WithFactPublisher(sim).WithEriEffector(sim).WithGitHub(sim).WithKube(sim)
+	sim := &paritySim{t: t, kv: map[string][]byte{}}
+	pr := NewPRObjectService().WithFactPublisher(sim).WithEriEffector(sim).WithGitHub(sim).WithKube(sim)
 	repo := NewRepoObjectService().WithGitHub(sim).WithKube(sim)
 	sim.handlers = map[string]simHandler{
 		"PRObject/" + "Register":                             bindOut(pr.Register),
-		"PRObject/" + PRHandlerProject:                       bindErr(pr.Project),
 		"PRObject/" + prwire.PRHandlerCheckFailed:            bindErr(pr.HandleCheckFailed),
 		"PRObject/" + prwire.PRHandlerCheckPassed:            bindErr(pr.HandleCheckPassed),
 		"PRObject/" + prwire.PRHandlerCIRecovered:            bindOut(pr.HandleCIRecovered),
@@ -305,11 +319,6 @@ func (s *paritySim) DeliverEri(_ context.Context, _ string, key EffectKey, _ Eri
 	return nil
 }
 
-func (s *paritySim) UpsertProjection(_ context.Context, snap ProjectionSnapshot) error {
-	s.rows[prwire.PRObjectKey(snap.Repo, snap.PRNumber)] = snap
-	return nil
-}
-
 func (s *paritySim) ListOpenPRs(context.Context, string) ([]GitHubPR, *GitHubError) {
 	s.record(prwire.EffectGitHubAutoUpdate, s.currentRepoKey(prwire.EffectGitHubAutoUpdate))
 	return nil, nil
@@ -368,17 +377,47 @@ func sortedEffects(in []parityEffect) []parityEffect {
 	return out
 }
 
-// rowOf projects a written snapshot onto the golden row shape.
-func rowOf(snap ProjectionSnapshot) parityRow {
-	return parityRow{
-		Repo: snap.Repo, PRNumber: snap.PRNumber, Branch: snap.Branch, HeadSHA: snap.HeadSHA, MergeSHA: snap.MergeSHA,
-		TargetID: snap.TargetID, Status: snap.Status, Title: snap.Title, Metadata: snap.Metadata,
+// nilIfEmpty maps an empty map to nil, the absent golden key.
+func nilIfEmpty[V any](m map[string]V) map[string]V {
+	if len(m) == 0 {
+		return nil
 	}
+	return m
+}
+
+// finalRows decodes every committed PRObject state in the sim and maps each
+// tracked PR (one with a target thread) onto the golden row shape.
+func (s *paritySim) finalRows() map[string]parityRow {
+	rows := map[string]parityRow{}
+	prefix := prwire.PRObjectServiceName + "/"
+	suffix := "/" + prObjectStateKey
+	for slot, raw := range s.kv {
+		if !strings.HasPrefix(slot, prefix) || !strings.HasSuffix(slot, suffix) {
+			continue
+		}
+		st, err := decodeInput[PRState](raw)
+		require.NoError(s.t, err)
+		if strings.TrimSpace(st.TargetID) == "" {
+			continue
+		}
+		rows[strings.TrimSuffix(strings.TrimPrefix(slot, prefix), suffix)] = parityRow{
+			Repo: st.Repo, PRNumber: st.PRNumber, Branch: st.Branch, HeadSHA: st.HeadSHA, MergeSHA: st.MergeSHA,
+			TargetID: st.TargetID, Status: st.RegistryStatus(), Title: st.Title,
+			Metadata: goldenMetadata{
+				Agent: st.Agent, Banner: st.Banner, BuildMetadata: st.BuildMetadata, CIChecks: nilIfEmpty(st.CIChecks),
+				DeployFailedPublished: st.DeployFailedPublished, DeploySuccessPending: st.DeploySuccessPending,
+				DeployedJobs: cleanStrings(st.DeployedJobs), DeployedKustomizations: cleanStrings(st.DeployedKustomizations),
+				JobStates: nilIfEmpty(st.JobStates), Jobs: cleanStrings(st.Jobs),
+				KustomizationRequests: nilIfEmpty(st.KustomizationRequests), StartedJobs: cleanStrings(st.StartedJobs),
+			},
+		}
+	}
+	return rows
 }
 
 // TestRestateOwnershipParity replays every golden lifecycle and asserts PRObject/RepoObject perform exactly the
 // legacy effect multiset, publish facts with the legacy rollout states and
-// write exactly the legacy final rows.
+// commit exactly the golden final registry state.
 func TestRestateOwnershipParity(t *testing.T) {
 	t.Parallel()
 	tests := loadParityScenarios(t)
@@ -395,20 +434,7 @@ func TestRestateOwnershipParity(t *testing.T) {
 			for _, r := range tc.Rows {
 				wantRows[prwire.PRObjectKey(r.Repo, r.PRNumber)] = r
 			}
-			gotRows := make(map[string]parityRow, len(sim.rows))
-			for key, snap := range sim.rows {
-				gotRows[key] = rowOf(snap)
-				require.Equal(t, strings.TrimSpace(firstOwner(snap.Metadata)), snap.Agent, "row owner column follows metadata")
-			}
-			require.Equal(t, wantRows, gotRows)
+			require.Equal(t, wantRows, sim.finalRows())
 		})
 	}
-}
-
-// firstOwner is the owner a row's metadata names (agent, else bot_id).
-func firstOwner(m ProjectionMetadata) string {
-	if m.Agent != "" {
-		return m.Agent
-	}
-	return m.BotID
 }

@@ -154,8 +154,7 @@
       "status": "open",
       "title": "Conflict PR",
       "metadata": {
-        "agent": "aerial",
-        "bot_id": "aerial"
+        "agent": "aerial"
       }
     }
   ]

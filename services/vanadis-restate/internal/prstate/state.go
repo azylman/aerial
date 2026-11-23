@@ -55,15 +55,14 @@ type PRState struct {
 	DeployPRDispatched   bool
 	DeploySHAJob         map[string]bool
 
-	// Registry row: everything a pr_registry row holds, so PRObject can
-	// become its single writer. See registry_state.go for the transitions.
+	// Registry row: the per-PR registry fields PRObject owns. See
+	// registry_state.go for the transitions.
 	Registered             bool
 	Branch                 string
 	MergeSHA               string
 	TargetID               string
 	Title                  string
 	Status                 string
-	BotID                  string
 	Jobs                   []string
 	StartedJobs            []string
 	DeployedJobs           []string
@@ -75,13 +74,6 @@ type PRState struct {
 	BuildMetadata          *BuildMetadata
 	Banner                 string
 	CIChecks               map[string]string
-	CIFailCount            int
-	VanadisChunkID         string
-	WidgetState            string
-
-	// ProjectedKey is the ProjectionJournalKey of the last pr_registry row
-	// PRObject.Project wrote, so an identical snapshot is never rewritten.
-	ProjectedKey string
 
 	// PendingDeployFailure is the armed deploy-failure deadline for a
 	// restate-owned deploy attempt that failed; DeployFailureSeq numbers
@@ -211,7 +203,7 @@ func (s *PRState) GetFailedCISHA() (string, bool) {
 }
 
 // IsCIFailedForSHA reports whether the PR is CI-failed for the given head
-// SHA from the Restate-owned failure slots. It mirrors the projection's
+// SHA from the Restate-owned failure slots. It mirrors the registry
 // ci_failed status: a recorded failed-CI SHA or any active failed check run
 // on the queried head. An empty query matches any recorded failure; a zero
 // SHA never matches.

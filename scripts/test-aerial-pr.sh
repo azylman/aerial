@@ -1990,7 +1990,7 @@ EOF
         submit_scratch \"\$WORK_DIR1\" 'feat: fail attach' --vanadis-chunk 'chunk-89' >/dev/null 2>&1
     ) && echo 'attach_fail:unexpected_success' || echo 'attach_fail:ok'
 
-    # Subtest 8b: submit_scratch continues to pr_registry and auto-merge when attach-pr times out with empty response
+    # Subtest 8b: submit_scratch continues to PR registration and auto-merge when attach-pr times out with empty response
     WORK_DIR_TIMEOUT=\$(mktemp -d /tmp/aerial-pr-fail-timeout.XXXXXX)
     git clone -q --single-branch -b main \"\$REMOTE_DIR\" \"\$WORK_DIR_TIMEOUT\"
     git -C \"\$WORK_DIR_TIMEOUT\" config user.name 'Tester'

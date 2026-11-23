@@ -95,15 +95,15 @@ type rolloutRenderCase struct {
 	RolloutState *pubsub.PRRolloutState `json:"rollout_state"`
 }
 
-// rolloutRow is the part of a golden pr_registry row the rollout render
+// rolloutRow is the part of a golden registry row the rollout render
 // reads; the fixture's other row keys are ignored.
 type rolloutRow struct {
-	Repo     string             `json:"repo"`
-	PRNumber int                `json:"pr_number"`
-	HeadSHA  string             `json:"head_sha"`
-	MergeSHA string             `json:"merge_sha"`
-	Status   string             `json:"status"`
-	Metadata ProjectionMetadata `json:"metadata"`
+	Repo     string         `json:"repo"`
+	PRNumber int            `json:"pr_number"`
+	HeadSHA  string         `json:"head_sha"`
+	MergeSHA string         `json:"merge_sha"`
+	Status   string         `json:"status"`
+	Metadata goldenMetadata `json:"metadata"`
 }
 
 // state seeds a fresh PRState with the row's rollout inputs.
