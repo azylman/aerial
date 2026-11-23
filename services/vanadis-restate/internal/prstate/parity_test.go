@@ -177,7 +177,6 @@ func newParitySim(t *testing.T) *paritySim {
 		"PRObject/" + prwire.PRHandlerDeployFailed:           bindErr(pr.HandleDeployFailed),
 		"PRObject/" + "HandleDeployObserved":                 bindErr(pr.HandleDeployObserved),
 		"PRObject/" + "HandleReadinessRetry":                 bindErr(pr.HandleReadinessRetry),
-		"PRObject/" + "HandleDeploySuccessPublished":         bindOut(pr.HandleDeploySuccessPublished),
 		"RepoObject/" + prwire.RepoHandlerPRIndex:            bindErr(repo.HandlePRIndex),
 		"RepoObject/" + "HandleMainPush":                     bindErr(repo.HandleMainPush),
 		"RepoObject/" + prwire.RepoHandlerAutoUpdate:         bindErr(repo.HandleAutoUpdate),

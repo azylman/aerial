@@ -312,7 +312,7 @@ func (s *PRObjectService) HandleBranchConflict(ctx restate.ObjectContext, ev PRE
 		restate.Set(ctx, s.stateKey, st)
 		return nil
 	}
-	if _, err := s.commitConflictPublished(ctx, st, ev); err != nil {
+	if err := s.commitConflictPublished(ctx, st, ev); err != nil {
 		return err
 	}
 	s.runFacts(ctx, st, []pubsub.PRLifecycleEvent{prFact(st, FactEventConflict, ev.Branch, ev.HeadSHA, journaledNow(ctx))})

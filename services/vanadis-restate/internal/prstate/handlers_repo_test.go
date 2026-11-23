@@ -381,7 +381,7 @@ func TestRepoHandlers_RouteBySHA(t *testing.T) {
 		{name: "expiry schedule failure persists nothing", failSched: true, kind: SHAKindCheckRun, ev: heldCheck("m2"), wantErr: true, wantSelf: []selfCall{{kind: "expiry", repo: "azylman/aerial", id: 1, delay: 30 * time.Minute}}},
 		{name: "forward failure surfaces", seed: repoSeed{index: indexed}, failPR: 101, kind: SHAKindCheckRun, ev: heldCheck("abc123"), wantErr: true, wantSent: []sentPR{{handler: prwire.PRHandlerCheckFailed, ev: PREvent{Event: "check_failed", Repo: "azylman/aerial", PRNumber: 101, Branch: "feat-a", HeadSHA: "abc123", CheckName: "ci"}}}},
 		{name: "load error surfaces", loadErr: true, kind: SHAKindCheckRun, ev: heldCheck("abc123"), wantErr: true},
-		{name: "verdict handler is not routable", kind: SHAKindCheckRun, ev: SHAEvent{Repo: "azylman/aerial", SHA: "abc123", Handler: "HandleCIRecovery"}, wantErr: true, wantInvalid: true},
+		{name: "verdict handler is not routable", kind: SHAKindCheckRun, ev: SHAEvent{Repo: "azylman/aerial", SHA: "abc123", Handler: prwire.PRHandlerCIRecovered}, wantErr: true, wantInvalid: true},
 		{name: "handler outside the kind allowlist is invalid", kind: SHAKindImageReady, ev: SHAEvent{Repo: "azylman/aerial", SHA: "abc123", Handler: prwire.PRHandlerCheckFailed}, wantErr: true, wantInvalid: true},
 		{name: "zero sha is invalid", kind: SHAKindCheckRun, ev: heldCheck("0000000"), wantErr: true, wantInvalid: true},
 		{name: "empty repo is invalid", kind: SHAKindCheckRun, ev: SHAEvent{SHA: "abc123", Handler: prwire.PRHandlerCheckFailed}, wantErr: true, wantInvalid: true},

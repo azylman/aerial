@@ -106,7 +106,7 @@ func TestRepoObjectService_HandleAutoUpdate(t *testing.T) {
 			ev: RepoEvent{Repo: "azylman/aerial", MainSHA: "m1", AutoUpdate: policy}, wantErr: true,
 		},
 		{
-			name: "unstamped cascade executes", gh: &fakeGitHub{},
+			name: "cascade executes", gh: &fakeGitHub{},
 			ev: RepoEvent{Repo: "azylman/aerial", MainSHA: "m1", AutoUpdate: policy}, wantSet: true, wantRun: true,
 		},
 		{

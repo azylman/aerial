@@ -128,9 +128,8 @@ func init() {
 	registerCollector(untrackedEventsTotal)
 }
 
-// dropUntrackedRollout drops one rollout event for an untracked PR, the way
-// the legacy registry's deploy transitions return no target and record
-// nothing when no row exists: it counts and logs the drop, persists nothing
+// dropUntrackedRollout drops one rollout event for an untracked PR: it
+// counts and logs the drop, persists nothing
 // for a state this event created, and sends no index update, fact or
 // reconcile. A stored untracked state with rollout residue (created before
 // this guard) is cleaned instead (cleanUntrackedResidue). Returns true when
@@ -454,8 +453,7 @@ func (s *PRObjectService) HandleConflict(ctx restate.ObjectContext, ev PREvent) 
 	return runVerdict(s, ctx, ev, ResolveConflictDispatchDecision,
 		func(d ConflictDispatchDecision) bool { return d.ShouldPublish },
 		func(st *PRState) error {
-			_, err := s.commitConflictPublished(ctx, st, ev)
-			return err
+			return s.commitConflictPublished(ctx, st, ev)
 		})
 }
 
@@ -486,46 +484,14 @@ func runVerdict[D any](s *PRObjectService, ctx restate.ObjectContext, ev PREvent
 
 // commitConflictPublished records the published conflict SHA and the
 // conflict row status, and persists them on apply.
-func (s *PRObjectService) commitConflictPublished(ctx restate.ObjectContext, st *PRState, ev PREvent) (ConflictPublishedOutcome, error) {
+func (s *PRObjectService) commitConflictPublished(ctx restate.ObjectContext, st *PRState, ev PREvent) error {
 	out, err := RecordConflictPublished(st, ev)
 	if err != nil || out.Disposition != DispositionApply {
-		return out, err
+		return err
 	}
 	st.ApplyRegistryConflict()
 	restate.Set(ctx, s.stateKey, st)
-	return out, nil
-}
-
-// HandleConflictDetected is the old shared verdict read, a thin delegate of
-// the HandleConflict decision that records nothing. synapse's legacy registry
-// pipeline still names it until r2 deletes that pipeline, so it stays
-// registered until r2b; like every handler it rejects a legacy stamp.
-func (s *PRObjectService) HandleConflictDetected(ctx restate.ObjectSharedContext, ev PREvent) (ConflictDispatchDecision, error) {
-	st, err := s.loadOrCreatePRState(ctx, ev)
-	if err != nil {
-		return ConflictDispatchDecision{}, err
-	}
-	return ResolveConflictDispatchDecision(st, ev)
-}
-
-// HandleConflictPublished is the old publish ack, an idempotent delegate of
-// the HandleConflict commit. synapse's legacy registry
-// pipeline still names it until r2 deletes that pipeline, so it stays
-// registered until r2b; like every handler it rejects a legacy stamp.
-func (s *PRObjectService) HandleConflictPublished(ctx restate.ObjectContext, ev PREvent) (ConflictPublishedOutcome, error) {
-	if strings.TrimSpace(ev.Repo) == "" || ev.PRNumber <= 0 {
-		return ConflictPublishedOutcome{}, nil
-	}
-	st, err := s.loadOrCreatePRState(ctx, ev)
-	if err != nil {
-		return ConflictPublishedOutcome{}, err
-	}
-	out, err := s.commitConflictPublished(ctx, st, ev)
-	if err != nil || out.Disposition != DispositionApply {
-		return out, err
-	}
-	s.afterCommit(ctx, st)
-	return out, nil
+	return nil
 }
 
 // HandleCIRecovered is the merged CI-recovery verdict: when the Restate
@@ -547,8 +513,8 @@ func (s *PRObjectService) HandleCIRecovered(ctx restate.ObjectContext, ev PREven
 // forwardRecoveredAutoUpdate re-triggers the open-PR auto-update cascade for
 // an applied CI recovery that carries an auto-update policy (restate-owned
 // check_run recoveries only). Only PRObject knows the PR was CI-failed, so
-// it replaces legacy synapse's recovered-check trigger; RepoObject keys the
-// effect on the PR head and check, exactly as the legacy trigger did.
+// it owns the recovered-check trigger; RepoObject keys the effect on the PR
+// head and check.
 func forwardRecoveredAutoUpdate(ctx restate.ObjectContext, st *PRState, ev PREvent) {
 	if ev.AutoUpdate == nil {
 		return
@@ -571,18 +537,6 @@ func applyCIRecovered(st *PRState, ev PREvent) {
 	st.ApplyRegistryRecovered(RegistryStatusCIFailed)
 }
 
-// HandleCIRecovery is the old shared CI-failed read, a thin delegate of the
-// HandleCIRecovered decision that records nothing. synapse's legacy registry
-// pipeline still names it until r2 deletes that pipeline, so it stays
-// registered until r2b; like every handler it rejects a legacy stamp.
-func (s *PRObjectService) HandleCIRecovery(ctx restate.ObjectSharedContext, ev PREvent) (CIRecoveryDecision, error) {
-	st, err := s.loadOrCreatePRState(ctx, ev)
-	if err != nil {
-		return CIRecoveryDecision{}, err
-	}
-	return ResolveCIRecovery(st, ev)
-}
-
 // HandleConflictResolved applies one conflict-resolved event dark.
 func (s *PRObjectService) HandleConflictResolved(ctx restate.ObjectContext, ev PREvent) error {
 	return s.mutatePREvent(ctx, ev, func(st *PRState) {
@@ -601,8 +555,8 @@ func resolveConflict(st *PRState, headSHA string) {
 // HandleMerged applies one merge event. A squash-merge push that arrives
 // before pull_request.closed merges the PR on its merge SHA; the later
 // closed event for the same merge SHA no longer changes state but still runs
-// its carried facts, because legacy synapse publishes a merged fact for both
-// (each keyed on its own head SHA, so true redeliveries still dedupe). That
+// its carried facts: each merge event publishes its own merged fact (keyed
+// on its own head SHA, so true redeliveries still dedupe). That
 // closed event carries the real PR head, so it also repairs a head PRObject
 // left stale by a missed synchronize (RecoverMergedHead). The first merge
 // of an open PR applies on its merge SHA even when PRObject's head is stale
@@ -712,10 +666,8 @@ func (s *PRObjectService) HandleOpened(ctx restate.ObjectContext, ev PREvent) er
 }
 
 // HandleSelfRegistered applies synapse's pull_request self-registration
-// (the EnsurePRRegistered upsert, see PRState.ApplySelfRegistration). Synapse
-// journals it before the legacy write in shadow mode and sends it in the
-// restate-owned path, carrying the target legacy resolves, the title and the
-// PR-body owner. It is neither opened (no owner claim on a tracked PR, no
+// (see PRState.ApplySelfRegistration). Synapse sends it carrying the
+// resolved target, the title and the PR-body owner. It is neither opened (no owner claim on a tracked PR, no
 // fact) nor a synchronize (the head only fills when empty, so a later
 // HandleSynchronized still sees the head change and clears head-scoped
 // state). The agent is the insert's owner seed, not a lifecycle hint, so it
@@ -752,7 +704,7 @@ func (s *PRObjectService) HandleSelfRegistered(ctx restate.ObjectContext, ev PRE
 //
 // A carried rollout_updated fact publishes only while the rollout is still
 // deploying: once the last Kustomization flips the PR to deployed, the
-// deploy_success verdict publishes instead, exactly like the legacy watcher.
+// deploy_success verdict publishes instead.
 func (s *PRObjectService) HandleRolloutProgress(ctx restate.ObjectContext, ev PREvent) error {
 	return s.mutateRolloutPhaseEvent(ctx, ev, prwire.PRHandlerRolloutProgress, func(st *PRState, ev *PREvent) {
 		st.MarkJobsDeployed(ev.DeployedJobs)
@@ -816,9 +768,9 @@ func (s *PRObjectService) HandleSynchronized(ctx restate.ObjectContext, ev PREve
 	st.SetHead(ev.HeadSHA)
 	st.ApplyRegistrySync(prevHead, st.HeadSHA)
 	if wasConflict {
-		// A synchronize resolves a stored conflict (legacy's follow-up
-		// HandleConflictResolved): only PRObject knows the row was in
-		// conflict, so a restate-owned edge never sends that follow-up.
+		// A synchronize resolves a stored conflict itself: only PRObject
+		// knows the row was in conflict, so the synapse edge never sends a
+		// follow-up HandleConflictResolved.
 		resolveConflict(st, ev.HeadSHA)
 	}
 	st.DisarmDeployFailure()
@@ -857,8 +809,8 @@ func (s *PRObjectService) HandleBuildMetadata(ctx restate.ObjectContext, ev PREv
 
 // HandleCheckStatus records one ci_checks value (RecordPRCheckStatus): the
 // check state on an open PR's head SHA or a merged/synced PR's merge SHA.
-// Synapse sends it exactly where the legacy registry records a check
-// status (pending and passed runs, never gate aggregators). Merged PRs
+// Synapse sends it for pending and passed check runs, never for gate
+// aggregators. Merged PRs
 // apply it; closed PRs absorb it.
 func (s *PRObjectService) HandleCheckStatus(ctx restate.ObjectContext, ev PREvent) error {
 	return s.mutateDeployEvent(ctx, ev, func(st *PRState) {
@@ -877,27 +829,26 @@ func (s *PRObjectService) HandleDeploySuccess(ctx restate.ObjectContext, ev PREv
 	return runVerdict(s, ctx, ev, ResolveDeployDispatchDecision,
 		func(d DeployDispatchDecision) bool { return d.ShouldPublish },
 		func(st *PRState) error {
-			_, err := s.commitDeploySuccess(ctx, st, ev)
-			return err
+			return s.commitDeploySuccess(ctx, st, ev)
 		})
 }
 
 // commitDeploySuccess records the deploy_dispatch key, both dedup slots and
 // the deployed row status, disarms any pending deploy-failure deadline, and
 // persists them on apply. A first record indexes the PR as deployed.
-func (s *PRObjectService) commitDeploySuccess(ctx restate.ObjectContext, st *PRState, ev PREvent) (DeployPublishedOutcome, error) {
+func (s *PRObjectService) commitDeploySuccess(ctx restate.ObjectContext, st *PRState, ev PREvent) error {
 	before := snapshotIndexView(st)
 	out, err := RecordDeployPublished(st, ev)
 	if err != nil || out.Disposition != DispositionApply {
-		return out, err
+		return err
 	}
 	headRecovered := st.Terminal == TerminalMerged && st.HeadSHA != before.head
 	if headRecovered {
 		noteMergedHeadRecovered(ctx, st, before.head)
 	}
-	// Only a watcher-tracked rollout flips the row: legacy records the
-	// completed Kustomization and clears deploy_success_pending, while direct
-	// alert and sync deploys never touch the registry status.
+	// Only a watcher-tracked rollout flips the row: it records the completed
+	// Kustomization and clears deploy_success_pending, while direct alert and
+	// sync deploys never touch the registry status.
 	if len(st.KustomizationRequests) > 0 {
 		st.MarkKustomizationsDeployed([]string{ev.JobName})
 		if st.Status == RegistryStatusDeployed {
@@ -912,42 +863,7 @@ func (s *PRObjectService) commitDeploySuccess(ctx restate.ObjectContext, st *PRS
 	case headRecovered:
 		sendPRIndex(ctx, st, ev, IndexActive)
 	}
-	return out, nil
-}
-
-// HandleDeployDispatched is the old shared verdict read, a thin delegate of
-// the HandleDeploySuccess decision that records nothing. synapse's legacy registry
-// pipeline still names it until r2 deletes that pipeline, so it stays
-// registered until r2b; like every handler it rejects a legacy stamp.
-func (s *PRObjectService) HandleDeployDispatched(ctx restate.ObjectSharedContext, ev PREvent) (DeployDispatchDecision, error) {
-	st, err := s.loadOrCreatePRState(ctx, ev)
-	if err != nil {
-		return DeployDispatchDecision{}, err
-	}
-	return ResolveDeployDispatchDecision(st, ev)
-}
-
-// HandleDeploySuccessPublished is the old publish ack, an idempotent
-// delegate of the HandleDeploySuccess commit. synapse's legacy registry
-// pipeline still names it until r2 deletes that pipeline, so it stays
-// registered until r2b; like every handler it rejects a legacy stamp.
-func (s *PRObjectService) HandleDeploySuccessPublished(ctx restate.ObjectContext, ev PREvent) (DeployPublishedOutcome, error) {
-	if strings.TrimSpace(ev.Repo) == "" || ev.PRNumber <= 0 {
-		return DeployPublishedOutcome{}, nil
-	}
-	st, stored, err := s.loadPRState(ctx, ev)
-	if err != nil {
-		return DeployPublishedOutcome{}, err
-	}
-	if s.dropUntrackedRollout(ctx, st, stored, "HandleDeploySuccessPublished") {
-		return DeployPublishedOutcome{}, nil
-	}
-	out, err := s.commitDeploySuccess(ctx, st, ev)
-	if err != nil || out.Disposition != DispositionApply {
-		return out, err
-	}
-	s.afterCommit(ctx, st)
-	return out, nil
+	return nil
 }
 
 // Register is the request-response PR register: it fences the existing

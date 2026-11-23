@@ -159,7 +159,7 @@ func TestRegisterPRStateServices(t *testing.T) {
 	require.NotNil(t, gotRepo)
 	assert.Equal(t, "PRObject", gotPR.ServiceName())
 	assert.Equal(t, "RepoObject", gotRepo.ServiceName())
-	assert.Equal(t, "DropUntracked,GetBuildLifecycle,GetDeployView,HandleBranchConflict,HandleBuildMetadata,HandleCIRecovered,HandleCIRecovery,HandleCheckFailed,HandleCheckPassed,HandleCheckRerunRequested,HandleCheckStatus,HandleClosed,HandleCollaboratorAlert,HandleConflict,HandleConflictCheck,HandleConflictDetected,HandleConflictPublished,HandleConflictResolved,HandleDeployAttemptFailed,HandleDeployDispatched,HandleDeployFailed,HandleDeployFailureDeadline,HandleDeployObserved,HandleDeploySuccess,HandleDeploySuccessPublished,HandleHeadRefMissing,HandleKustomizationRequested,HandleMainAdvanced,HandleMerged,HandleOpened,HandleReadinessRetry,HandleReconcileLost,HandleReopened,HandleRolloutProgress,HandleSelfRegistered,HandleSynchronized,Project,Register,RetryEriEffect,RetryFactEffect,RetryFluxReconcile,RetryReadiness", sortedHandlerNames(restate.Reflect(gotPR)))
+	assert.Equal(t, "DropUntracked,GetBuildLifecycle,GetDeployView,HandleBranchConflict,HandleBuildMetadata,HandleCIRecovered,HandleCheckFailed,HandleCheckPassed,HandleCheckRerunRequested,HandleCheckStatus,HandleClosed,HandleCollaboratorAlert,HandleConflict,HandleConflictCheck,HandleConflictResolved,HandleDeployAttemptFailed,HandleDeployFailed,HandleDeployFailureDeadline,HandleDeployObserved,HandleDeploySuccess,HandleHeadRefMissing,HandleKustomizationRequested,HandleMainAdvanced,HandleMerged,HandleOpened,HandleReadinessRetry,HandleReconcileLost,HandleReopened,HandleRolloutProgress,HandleSelfRegistered,HandleSynchronized,Project,Register,RetryEriEffect,RetryFactEffect,RetryFluxReconcile,RetryReadiness", sortedHandlerNames(restate.Reflect(gotPR)))
 	assert.Equal(t, "HandleAutoUpdate,HandleCheckRunBySHA,HandleFanout,HandleGitPush,HandleHeldExpiry,HandleHeldReplay,HandleImagePromotion,HandleImageReadyBySHA,HandleKustomizationStatus,HandleMainPush,HandlePRIndex,HandlePushBySHA,HandleRolloutIndex,HandleWorkflowRerun,HandleWorkflowRunBySHA,ListRollouts,ResolvePRBySHA", sortedHandlerNames(restate.Reflect(gotRepo)))
 }
 
@@ -353,214 +353,6 @@ func TestPRObjectService_HandleCheckPassed(t *testing.T) {
 	}
 }
 
-// TestPRObjectService_ConflictResolve pins the conflict-republish verdict
-// wiring: the decision applies without persisting and K/V failures surface.
-// TestResolveConflictDispatchDecision owns the dedupe/terminal verdicts.
-func TestPRObjectService_ConflictResolve(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name              string
-		failGet           bool
-		wantShouldPublish bool
-		wantErr           bool
-	}{
-		{name: "fresh state publishes", wantShouldPublish: true},
-		{name: "state load error surfaces", failGet: true, wantErr: true},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			mc, rec := prKV(t, nil, tc.failGet, false)
-			ev := PREvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "abc123", Event: "conflict_detected"}
-			got, err := NewPRObjectService().HandleConflictDetected(restate.WithMockContext(mc), ev)
-			if tc.wantErr && err == nil {
-				t.Fatal("HandleConflictDetected err = nil, want kv error")
-			}
-			if !tc.wantErr && err != nil {
-				t.Fatalf("HandleConflictDetected err = %v, want nil", err)
-			}
-			if !tc.wantErr && (got.ShouldPublish != tc.wantShouldPublish || got.Deduped) {
-				t.Fatalf("ShouldPublish/Deduped = %v/%v, want %v/false", got.ShouldPublish, got.Deduped, tc.wantShouldPublish)
-			}
-			if rec.setCalled {
-				t.Fatal("resolve persisted state, want no record")
-			}
-		})
-	}
-}
-
-// TestPRObjectService_ConflictPublishedAck pins the publish-recorded ack
-// wiring: applied publishes persist, terminal states absorb without
-// persisting, malformed input drops before K/V and K/V failures surface.
-// TestRecordConflictPublished owns the re-ack and overwrite verdicts.
-func TestPRObjectService_ConflictPublishedAck(t *testing.T) {
-	t.Parallel()
-	terminalState := NewPRState("azylman/aerial", 101)
-	terminalState.MarkTerminal(TerminalMerged)
-	tests := []struct {
-		name          string
-		repo          string
-		pr            int
-		existing      *PRState
-		failGet       bool
-		expectNoKV    bool
-		wantRecorded  bool
-		wantSet       bool
-		wantErr       bool
-		wantPublished string
-	}{
-		{name: "fresh publish records and persists", repo: "azylman/aerial", pr: 101, wantRecorded: true, wantSet: true, wantPublished: "abc123"},
-		{name: "terminal absorbs without persisting", repo: "azylman/aerial", pr: 101, existing: terminalState},
-		{name: "state load error surfaces", repo: "azylman/aerial", pr: 101, failGet: true, wantErr: true},
-		{name: "empty repo drops before kv", repo: "", pr: 101, expectNoKV: true},
-		{name: "zero pr drops before kv", repo: "azylman/aerial", pr: 0, expectNoKV: true},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			mc, rec := prKV(t, tc.existing, tc.failGet, tc.expectNoKV)
-			ev := PREvent{Repo: tc.repo, PRNumber: tc.pr, HeadSHA: "abc123", Event: "conflict_detected"}
-			got, err := NewPRObjectService().HandleConflictPublished(restate.WithMockContext(mc), ev)
-			if tc.wantErr && err == nil {
-				t.Fatal("HandleConflictPublished err = nil, want kv error")
-			}
-			if !tc.wantErr && err != nil {
-				t.Fatalf("HandleConflictPublished err = %v, want nil", err)
-			}
-			if !tc.wantErr && (got.Recorded != tc.wantRecorded || got.Deduped) {
-				t.Fatalf("Recorded/Deduped = %v/%v, want %v/false", got.Recorded, got.Deduped, tc.wantRecorded)
-			}
-			if rec.setCalled != tc.wantSet {
-				t.Fatalf("setCalled = %v, want %v", rec.setCalled, tc.wantSet)
-			}
-			if tc.wantSet && rec.saved.ConflictPublished != tc.wantPublished {
-				t.Fatalf("saved ConflictPublished = %q, want %q", rec.saved.ConflictPublished, tc.wantPublished)
-			}
-		})
-	}
-}
-
-// TestPRObjectService_DeployDispatched pins the deploy_success publish verdict
-// wiring: the decision never persists, so a failed publish resolves
-// should_publish again on the next invocation.
-func TestPRObjectService_DeployDispatched(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name              string
-		existing          *PRState
-		evHead            string
-		failGet           bool
-		wantShouldPublish bool
-		wantDeduped       bool
-		wantErr           bool
-	}{
-		{name: "fresh dispatch publishes", evHead: "abc123", wantShouldPublish: true},
-		{name: "recorded dispatch dedupes", existing: decisionState(101, "", 0, TerminalNone, true, true, true, "abc123", "deploy-job"), evHead: "abc123", wantDeduped: true},
-		{name: "state load error surfaces", failGet: true, evHead: "abc123", wantErr: true},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			mc, rec := prKV(t, tc.existing, tc.failGet, false)
-			ev := PREvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: tc.evHead, JobName: "deploy-job", Event: "deploy_dispatched"}
-			got, err := NewPRObjectService().HandleDeployDispatched(restate.WithMockContext(mc), ev)
-			require.Equal(t, tc.wantErr, err != nil, "err = %v", err)
-			if !tc.wantErr && (got.ShouldPublish != tc.wantShouldPublish || got.Deduped != tc.wantDeduped) {
-				t.Fatalf("ShouldPublish/Deduped = %v/%v, want %v/%v", got.ShouldPublish, got.Deduped, tc.wantShouldPublish, tc.wantDeduped)
-			}
-			require.False(t, rec.setCalled, "decision persisted state")
-		})
-	}
-}
-
-// TestPRObjectService_DeploySuccessPublishedAck pins the deploy_success ack:
-// it persists once per applied publish, re-acks a recorded publish, and
-// drops stale heads, untracked PRs and malformed input without persisting.
-func TestPRObjectService_DeploySuccessPublishedAck(t *testing.T) {
-	t.Parallel()
-	terminalState := NewPRState("azylman/aerial", 101)
-	terminalState.MarkTerminal(TerminalClosed)
-
-	tests := []struct {
-		name         string
-		repo         string
-		pr           int
-		existing     *PRState
-		evHead       string
-		evGen        uint64
-		failGet      bool
-		expectNoKV   bool
-		wantRecorded bool
-		wantDeduped  bool
-		wantSet      bool
-		wantErr      bool
-	}{
-		{name: "fresh publish records and persists", repo: "azylman/aerial", pr: 101, existing: svcRow("abc123", "", RegistryStatusOpen, TerminalNone), evHead: "abc123", wantRecorded: true, wantSet: true},
-		{name: "recorded publish replays idempotent", repo: "azylman/aerial", pr: 101, existing: decisionState(101, "aaa111", 2, TerminalNone, true, true, true, "aaa111", "deploy-job"), evHead: "aaa111", evGen: 2, wantRecorded: true, wantDeduped: true, wantSet: true},
-		{name: "stale head drops without persisting", repo: "azylman/aerial", pr: 101, existing: decisionState(101, "aaa111", 2, TerminalNone, false, false, false, "zzz999", "deploy-job"), evHead: "zzz999", evGen: 2},
-		{name: "untracked pr drops without persisting", repo: "azylman/aerial", pr: 101, evHead: "abc123", wantSet: false},
-		{name: "empty repo drops before kv", repo: "", pr: 101, evHead: "abc123", expectNoKV: true, wantSet: false},
-		{name: "zero pr drops before kv", repo: "azylman/aerial", pr: 0, evHead: "abc123", expectNoKV: true, wantSet: false},
-		{name: "closed terminal absorbs without persisting", repo: "azylman/aerial", pr: 101, existing: terminalState, evHead: "abc123", wantSet: false},
-		{name: "state load error surfaces", repo: "azylman/aerial", pr: 101, failGet: true, evHead: "abc123", wantErr: true},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			mc, rec := prKV(t, tc.existing, tc.failGet, tc.expectNoKV)
-			stubRun(mc, true)
-			ev := PREvent{Repo: tc.repo, PRNumber: tc.pr, HeadSHA: tc.evHead, JobName: "deploy-job", GateGeneration: tc.evGen, Event: "deploy_success"}
-			got, err := NewPRObjectService().HandleDeploySuccessPublished(restate.WithMockContext(mc), ev)
-			require.Equal(t, tc.wantErr, err != nil, "err = %v", err)
-			if !tc.wantErr && (got.Recorded != tc.wantRecorded || got.Deduped != tc.wantDeduped) {
-				t.Fatalf("Recorded/Deduped = %v/%v, want %v/%v", got.Recorded, got.Deduped, tc.wantRecorded, tc.wantDeduped)
-			}
-			if rec.setCalled != tc.wantSet {
-				t.Fatalf("setCalled = %v, want %v", rec.setCalled, tc.wantSet)
-			}
-		})
-	}
-}
-
-// TestPRObjectService_CIRecoveryResolve pins the CI-recovery verdict wiring:
-// the resolve applies without persisting and K/V failures surface.
-// TestResolveCIRecovery owns the mismatch and clean-state verdicts.
-func TestPRObjectService_CIRecoveryResolve(t *testing.T) {
-	t.Parallel()
-	failedState := NewPRState("azylman/aerial", 101)
-	failedState.RecordFailedCISHA("abc123")
-	tests := []struct {
-		name       string
-		existing   *PRState
-		failGet    bool
-		wantFailed bool
-		wantErr    bool
-	}{
-		{name: "recorded failure recovers", existing: failedState, wantFailed: true},
-		{name: "state load error surfaces", failGet: true, wantErr: true},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			mc, rec := prKV(t, tc.existing, tc.failGet, false)
-			ev := PREvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "abc123", Event: "check_success"}
-			got, err := NewPRObjectService().HandleCIRecovery(restate.WithMockContext(mc), ev)
-			if tc.wantErr && err == nil {
-				t.Fatal("HandleCIRecovery err = nil, want kv error")
-			}
-			if !tc.wantErr && err != nil {
-				t.Fatalf("HandleCIRecovery err = %v, want nil", err)
-			}
-			if !tc.wantErr && got.CIFailed != tc.wantFailed {
-				t.Fatalf("CIFailed = %v, want %v", got.CIFailed, tc.wantFailed)
-			}
-			if rec.setCalled {
-				t.Fatal("resolve persisted state, want no record")
-			}
-		})
-	}
-}
-
 func prIndexSend(idx PRIndexEvent) sentCall {
 	return sentCall{service: "RepoObject", key: "azylman/aerial", method: "HandlePRIndex", input: idx}
 }
@@ -613,9 +405,9 @@ func TestPRObjectService_IndexSends(t *testing.T) {
 	closedAgain.Terminal = TerminalClosed
 	closedKustMc, closedKustRec := newStateMock(t, closedAgain)
 	svc := NewPRObjectService()
-	_, mergedDeployErr := svc.HandleDeploySuccessPublished(restate.WithMockContext(mergedDeployMc), PREvent{Repo: "azylman/aerial", PRNumber: 101, JobName: "eri", MergeSHA: "m1"})
-	_, deployErr := svc.HandleDeploySuccessPublished(restate.WithMockContext(deployMc), PREvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "abc123", JobName: "eri", MergeSHA: "m1"})
-	_, dedupErr := svc.HandleDeploySuccessPublished(restate.WithMockContext(dedupMc), PREvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "abc123", JobName: "eri"})
+	_, mergedDeployErr := svc.HandleDeploySuccess(restate.WithMockContext(mergedDeployMc), PREvent{Repo: "azylman/aerial", PRNumber: 101, JobName: "eri", MergeSHA: "m1"})
+	_, deployErr := svc.HandleDeploySuccess(restate.WithMockContext(deployMc), PREvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "abc123", JobName: "eri", MergeSHA: "m1"})
+	_, dedupErr := svc.HandleDeploySuccess(restate.WithMockContext(dedupMc), PREvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "abc123", JobName: "eri"})
 	tests := []struct {
 		name      string
 		got       error
@@ -750,7 +542,7 @@ func TestRepoObjectService_Handlers(t *testing.T) {
 		{name: "workflow run miss holds with delayed expiry", got: svc.HandleWorkflowRunBySHA(restate.WithMockContext(missMc), heldCheck("abc123")), rec: missRec, wantSet: true, wantSends: []sentCall{{service: "RepoObject", key: "azylman/aerial", method: "HandleHeldExpiry", input: HeldExpiryRequest{ID: 1}, delayed: true}}},
 		{name: "push hit forwards merged", got: svc.HandlePushBySHA(restate.WithMockContext(pushHitMc), SHAEvent{Repo: "azylman/aerial", SHA: "m1", Handler: prwire.PRHandlerMerged, Event: PREvent{Event: "merged"}}), rec: pushHitRec, wantSends: []sentCall{prObjectSend(101, "HandleMerged", PREvent{Event: "merged", Repo: "azylman/aerial", PRNumber: 101, Branch: "feat-a", MergeSHA: "m1"})}},
 		{name: "image ready miss at capacity evicts and holds", got: svc.HandleImageReadyBySHA(restate.WithMockContext(fullMc), SHAEvent{Repo: "azylman/aerial", SHA: "m2", Handler: prwire.PRHandlerRolloutProgress}), rec: fullRec, wantSet: true, wantSends: []sentCall{{service: "RepoObject", key: "azylman/aerial", method: "HandleHeldExpiry", input: HeldExpiryRequest{ID: 65}, delayed: true}}},
-		{name: "unroutable handler fails terminally", got: svc.HandleImageReadyBySHA(restate.WithMockContext(badRouteMc), SHAEvent{Repo: "azylman/aerial", SHA: "m2", Handler: "HandleDeployDispatched"}), rec: badRouteRec, wantErr: true, wantTerminal: true},
+		{name: "unroutable handler fails terminally", got: svc.HandleImageReadyBySHA(restate.WithMockContext(badRouteMc), SHAEvent{Repo: "azylman/aerial", SHA: "m2", Handler: "HandleUnknown"}), rec: badRouteRec, wantErr: true, wantTerminal: true},
 		{name: "route load error surfaces", got: svc.HandleCheckRunBySHA(restate.WithMockContext(errRouteMc), heldCheck("abc123")), rec: &stateCapture[*RepoState]{}, wantErr: true, wantTerminal: true},
 		{name: "held replay forwards resolved events", got: svc.HandleHeldReplay(restate.WithMockContext(replayMc), HeldReplayRequest{SHA: "abc123"}), rec: replayRec, wantSet: true, wantSends: []sentCall{prObjectSend(101, "HandleCheckFailed", forwardedCheck)}},
 		{name: "held replay without sha fails terminally", got: svc.HandleHeldReplay(restate.WithMockContext(badReplayMc), HeldReplayRequest{}), rec: badReplayRec, wantErr: true, wantTerminal: true},
