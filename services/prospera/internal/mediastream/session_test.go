@@ -114,7 +114,7 @@ func TestMediaStreamBridge_Lifecycle(t *testing.T) {
 		geminiReceivedMessages = append(geminiReceivedMessages, s)
 	}
 
-	geminiWSURL, _ := setupLifecycleGeminiServer(t, recordGeminiMsg)
+	geminiWSURL := setupLifecycleGeminiServer(t, recordGeminiMsg)
 
 	cfg := &config.Config{
 		GeminiLiveModel:     "gemini-3.8-live",
@@ -189,7 +189,7 @@ func TestMediaStreamBridge_Lifecycle(t *testing.T) {
 		t.Fatalf("ProviderCallSID() = %q, want CA_twilio_123 from start event", got)
 	}
 
-	injectTwilioAudioFrames(twilioWS)
+	injectTwilioAudioFrames(t, twilioWS)
 
 	exerciseBridgeSteerAndAMD(t, sessionMgr, "call-test-bridge", "CA_twilio_123")
 
@@ -218,7 +218,7 @@ func TestMediaStreamBridge_Lifecycle(t *testing.T) {
 	}
 }
 
-func setupLifecycleGeminiServer(t *testing.T, recordGeminiMsg func(string)) (string, *httptest.Server) {
+func setupLifecycleGeminiServer(t *testing.T, recordGeminiMsg func(string)) string {
 	t.Helper()
 	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
 
@@ -235,7 +235,9 @@ func setupLifecycleGeminiServer(t *testing.T, recordGeminiMsg func(string)) (str
 		}
 		recordGeminiMsg(string(setupBytes))
 
-		_ = conn.WriteJSON(map[string]any{"setupComplete": map[string]any{}})
+		if err := conn.WriteJSON(map[string]any{"setupComplete": map[string]any{}}); err != nil {
+			return
+		}
 
 		for {
 			_, msgBytes, err := conn.ReadMessage()
@@ -249,14 +251,14 @@ func setupLifecycleGeminiServer(t *testing.T, recordGeminiMsg func(string)) (str
 		}
 	}))
 	t.Cleanup(geminiServer.Close)
-	return "ws" + strings.TrimPrefix(geminiServer.URL, "http"), geminiServer
+	return "ws" + strings.TrimPrefix(geminiServer.URL, "http")
 }
 
 func respondLifecycleGeminiEvent(conn *websocket.Conn, msgStr string) {
 	switch {
 	case strings.Contains(msgStr, "Call connected"):
 		pcm24 := make([]byte, 4800)
-		_ = conn.WriteJSON(map[string]any{
+		if err := conn.WriteJSON(map[string]any{
 			"serverContent": map[string]any{
 				"modelTurn": map[string]any{
 					"parts": []map[string]any{
@@ -277,9 +279,11 @@ func respondLifecycleGeminiEvent(conn *websocket.Conn, msgStr string) {
 				},
 				"turnComplete": true,
 			},
-		})
+		}); err != nil {
+			return
+		}
 	case strings.Contains(msgStr, "test_dtmf_trigger"):
-		_ = conn.WriteJSON(map[string]any{
+		if err := conn.WriteJSON(map[string]any{
 			"toolCall": map[string]any{
 				"functionCalls": []map[string]any{
 					{
@@ -289,9 +293,11 @@ func respondLifecycleGeminiEvent(conn *websocket.Conn, msgStr string) {
 					},
 				},
 			},
-		})
+		}); err != nil {
+			return
+		}
 	case strings.Contains(msgStr, "test_calendar_trigger"):
-		_ = conn.WriteJSON(map[string]any{
+		if err := conn.WriteJSON(map[string]any{
 			"toolCall": map[string]any{
 				"functionCalls": []map[string]any{
 					{
@@ -301,9 +307,11 @@ func respondLifecycleGeminiEvent(conn *websocket.Conn, msgStr string) {
 					},
 				},
 			},
-		})
+		}); err != nil {
+			return
+		}
 	case strings.Contains(msgStr, "test_memory_trigger"):
-		_ = conn.WriteJSON(map[string]any{
+		if err := conn.WriteJSON(map[string]any{
 			"toolCall": map[string]any{
 				"functionCalls": []map[string]any{
 					{
@@ -313,9 +321,11 @@ func respondLifecycleGeminiEvent(conn *websocket.Conn, msgStr string) {
 					},
 				},
 			},
-		})
+		}); err != nil {
+			return
+		}
 	case strings.Contains(msgStr, "test_end_trigger"):
-		_ = conn.WriteJSON(map[string]any{
+		if err := conn.WriteJSON(map[string]any{
 			"toolCall": map[string]any{
 				"functionCalls": []map[string]any{
 					{
@@ -325,11 +335,14 @@ func respondLifecycleGeminiEvent(conn *websocket.Conn, msgStr string) {
 					},
 				},
 			},
-		})
+		}); err != nil {
+			return
+		}
 	}
 }
 
-func injectTwilioAudioFrames(ws *websocket.Conn) {
+func injectTwilioAudioFrames(t *testing.T, ws *websocket.Conn) {
+	t.Helper()
 	quietUlaw := make([]byte, 160)
 	for i := range quietUlaw {
 		quietUlaw[i] = 0xFE
@@ -342,22 +355,26 @@ func injectTwilioAudioFrames(ws *websocket.Conn) {
 	loudPayload := base64.StdEncoding.EncodeToString(loudUlaw)
 
 	for range 15 {
-		_ = ws.WriteJSON(map[string]any{
+		if err := ws.WriteJSON(map[string]any{
 			"event":     "media",
 			"streamSid": "MZ123",
 			"media": map[string]any{
 				"payload": loudPayload,
 			},
-		})
+		}); err != nil {
+			t.Fatalf("WriteJSON media frame failed: %v", err)
+		}
 	}
 	for range 31 {
-		_ = ws.WriteJSON(map[string]any{
+		if err := ws.WriteJSON(map[string]any{
 			"event":     "media",
 			"streamSid": "MZ123",
 			"media": map[string]any{
 				"payload": quietPayload,
 			},
-		})
+		}); err != nil {
+			t.Fatalf("WriteJSON media frame failed: %v", err)
+		}
 	}
 }
 
@@ -365,7 +382,9 @@ func waitForHangupMark(t *testing.T, ws *websocket.Conn) bool {
 	t.Helper()
 	var receivedMedia bool
 	for {
-		_ = ws.SetReadDeadline(time.Now().Add(3 * time.Second))
+		if err := ws.SetReadDeadline(time.Now().Add(3 * time.Second)); err != nil {
+			t.Fatalf("SetReadDeadline failed: %v", err)
+		}
 		_, data, err := ws.ReadMessage()
 		if err != nil {
 			t.Fatalf("reading from Twilio WS failed before hangup mark: %v", err)
@@ -381,11 +400,13 @@ func waitForHangupMark(t *testing.T, ws *websocket.Conn) bool {
 			}
 		}
 		if markObj, ok := evt["mark"].(map[string]any); ok && evt["event"] == "mark" && markObj["name"] == "hangup" {
-			_ = ws.WriteJSON(map[string]any{
+			if err := ws.WriteJSON(map[string]any{
 				"event":     "mark",
 				"streamSid": "MZ123",
 				"mark":      map[string]any{"name": "hangup"},
-			})
+			}); err != nil {
+				t.Fatalf("WriteJSON hangup mark failed: %v", err)
+			}
 			return receivedMedia
 		}
 	}
@@ -413,7 +434,10 @@ func TestMediaStream_TransparentReconnect(t *testing.T) {
 		c := connCount
 		countMu.Unlock()
 
-		_, _, _ = conn.ReadMessage()
+		_, _, err = conn.ReadMessage()
+		if err != nil {
+			return
+		}
 
 		if c == 1 {
 			_ = conn.Close()
@@ -424,7 +448,9 @@ func TestMediaStream_TransparentReconnect(t *testing.T) {
 			close(reconnected)
 		})
 
-		_ = conn.WriteJSON(map[string]any{"setupComplete": map[string]any{}})
+		if err := conn.WriteJSON(map[string]any{"setupComplete": map[string]any{}}); err != nil {
+			return
+		}
 		for {
 			_, _, err := conn.ReadMessage()
 			if err != nil {
@@ -456,7 +482,10 @@ func TestMediaStream_TransparentReconnect(t *testing.T) {
 		WithSessionFactory(newBridgeTestSession),
 	)
 
-	token, _ := tokenMgr.Issue("call-reconnect", 30*time.Second)
+	token, err := tokenMgr.Issue("call-reconnect", 30*time.Second)
+	if err != nil {
+		t.Fatalf("Issue failed: %v", err)
+	}
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		sessionMgr.HandleMediaWebSocket(w, r)
@@ -473,11 +502,13 @@ func TestMediaStream_TransparentReconnect(t *testing.T) {
 	}
 	defer twilioWS.Close()
 
-	_ = twilioWS.WriteJSON(map[string]any{
+	if err := twilioWS.WriteJSON(map[string]any{
 		"event":     "start",
 		"streamSid": "MZ_recon",
 		"start":     map[string]any{"streamSid": "MZ_recon", "callSid": "CA_recon"},
-	})
+	}); err != nil {
+		t.Fatalf("WriteJSON start failed: %v", err)
+	}
 
 	select {
 	case <-reconnected:
@@ -506,10 +537,15 @@ func TestMediaStream_BargeInAndVoicemail(t *testing.T) {
 		}
 		defer conn.Close()
 
-		_, _, _ = conn.ReadMessage()
-		_ = conn.WriteJSON(map[string]any{"setupComplete": map[string]any{}})
+		_, _, err = conn.ReadMessage()
+		if err != nil {
+			return
+		}
+		if err := conn.WriteJSON(map[string]any{"setupComplete": map[string]any{}}); err != nil {
+			return
+		}
 
-		_ = conn.WriteJSON(map[string]any{
+		if err := conn.WriteJSON(map[string]any{
 			"serverContent": map[string]any{
 				"interrupted": true,
 				"modelTurn": map[string]any{
@@ -522,7 +558,9 @@ func TestMediaStream_BargeInAndVoicemail(t *testing.T) {
 					},
 				},
 			},
-		})
+		}); err != nil {
+			return
+		}
 
 		for {
 			_, _, err := conn.ReadMessage()
@@ -556,7 +594,10 @@ func TestMediaStream_BargeInAndVoicemail(t *testing.T) {
 		WithSessionFactory(bridgeFactory),
 	)
 
-	token, _ := tokenMgr.Issue("call-bargein", 30*time.Second)
+	token, err := tokenMgr.Issue("call-bargein", 30*time.Second)
+	if err != nil {
+		t.Fatalf("Issue failed: %v", err)
+	}
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		sessionMgr.HandleMediaWebSocket(w, r)
@@ -573,11 +614,13 @@ func TestMediaStream_BargeInAndVoicemail(t *testing.T) {
 	}
 	defer twilioWS.Close()
 
-	_ = twilioWS.WriteJSON(map[string]any{
+	if err := twilioWS.WriteJSON(map[string]any{
 		"event":     "start",
 		"streamSid": "MZ_barge",
 		"start":     map[string]any{"streamSid": "MZ_barge", "callSid": "CA_barge"},
-	})
+	}); err != nil {
+		t.Fatalf("WriteJSON start failed: %v", err)
+	}
 
 	sess := requireBridgeSession(t, bridgeRan)
 
@@ -644,7 +687,9 @@ func executeBargeInToolCalls(ctx context.Context, sess *MediaStreamSession) {
 
 func waitForClearEvent(ws *websocket.Conn) bool {
 	for range 20 {
-		_ = ws.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+		if err := ws.SetReadDeadline(time.Now().Add(100 * time.Millisecond)); err != nil {
+			return false
+		}
 		_, data, err := ws.ReadMessage()
 		if err != nil {
 			break
@@ -718,17 +763,22 @@ func TestHandleMediaWebSocket_LifecycleModes(t *testing.T) {
 	}
 }
 
-func runMediaWebSocketModeCase(t *testing.T, tc mediaWebSocketModeTestCase) {
+func newMockGeminiEchoServer(t *testing.T) *httptest.Server {
 	t.Helper()
 	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
-	geminiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
 			return
 		}
 		defer conn.Close()
-		_, _, _ = conn.ReadMessage()
-		_ = conn.WriteJSON(map[string]any{"setupComplete": map[string]any{}})
+		_, _, err = conn.ReadMessage()
+		if err != nil {
+			return
+		}
+		if err := conn.WriteJSON(map[string]any{"setupComplete": map[string]any{}}); err != nil {
+			return
+		}
 		for {
 			_, _, err := conn.ReadMessage()
 			if err != nil {
@@ -736,10 +786,16 @@ func runMediaWebSocketModeCase(t *testing.T, tc mediaWebSocketModeTestCase) {
 			}
 		}
 	}))
-	t.Cleanup(geminiServer.Close)
+	t.Cleanup(server.Close)
+	return server
+}
+
+func runMediaWebSocketModeCase(t *testing.T, tc mediaWebSocketModeTestCase) {
+	t.Helper()
+	geminiServer := newMockGeminiEchoServer(t)
 
 	st := testutil.SetUpTestStore(t)
-	setupMediaWebSocketStoreCall(context.Background(), st, tc)
+	setupMediaWebSocketStoreCall(t, st, tc)
 
 	geminiWSURL := "ws" + strings.TrimPrefix(geminiServer.URL, "http")
 	tokenMgr := twilio.NewStreamTokenManager(time.Now, nil)
@@ -757,7 +813,10 @@ func runMediaWebSocketModeCase(t *testing.T, tc mediaWebSocketModeTestCase) {
 		WithSessionFactory(bridgeFactory),
 	)
 
-	token, _ := tokenMgr.Issue(tc.callID, 30*time.Second)
+	token, err := tokenMgr.Issue(tc.callID, 30*time.Second)
+	if err != nil {
+		t.Fatalf("Issue failed: %v", err)
+	}
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		sessionMgr.HandleMediaWebSocket(w, r)
@@ -774,11 +833,13 @@ func runMediaWebSocketModeCase(t *testing.T, tc mediaWebSocketModeTestCase) {
 	}
 	defer twilioWS.Close()
 
-	_ = twilioWS.WriteJSON(map[string]any{
+	if err := twilioWS.WriteJSON(map[string]any{
 		"event":     "start",
 		"streamSid": tc.streamSID,
 		"start":     map[string]any{"streamSid": tc.streamSID, "callSid": tc.providerSID},
-	})
+	}); err != nil {
+		t.Fatalf("WriteJSON start failed: %v", err)
+	}
 
 	sess := requireBridgeSession(t, bridgeRan)
 
@@ -795,10 +856,12 @@ func runMediaWebSocketModeCase(t *testing.T, tc mediaWebSocketModeTestCase) {
 		t.Fatal("timed out waiting for start")
 	}
 
-	_ = twilioWS.WriteJSON(map[string]any{
+	if err := twilioWS.WriteJSON(map[string]any{
 		"event": "stop",
 		"stop":  map[string]any{"callSid": tc.providerSID},
-	})
+	}); err != nil {
+		t.Fatalf("WriteJSON stop failed: %v", err)
+	}
 
 	select {
 	case <-sess.Done():
@@ -832,10 +895,12 @@ func exerciseBridgeSteerAndAMD(t *testing.T, sessionMgr *CallSessionManager, cal
 	}
 }
 
-func setupMediaWebSocketStoreCall(ctx context.Context, st *store.PGStore, tc mediaWebSocketModeTestCase) {
+func setupMediaWebSocketStoreCall(t *testing.T, st *store.PGStore, tc mediaWebSocketModeTestCase) {
+	t.Helper()
+	ctx := t.Context()
 	switch tc.direction {
 	case "outbound":
-		_ = st.CreateOutboundCall(ctx, model.VoiceCall{
+		if err := st.CreateOutboundCall(ctx, model.VoiceCall{
 			CallID:     tc.callID,
 			Direction:  "outbound",
 			State:      "initiated",
@@ -848,9 +913,11 @@ func setupMediaWebSocketStoreCall(ctx context.Context, st *store.PGStore, tc med
 			},
 			StartedAt: time.Now().UTC(),
 			UpdatedAt: time.Now().UTC(),
-		}, 5)
+		}, 5); err != nil {
+			t.Fatalf("CreateOutboundCall failed: %v", err)
+		}
 	case "inbound":
-		_ = st.CreateInboundCall(ctx, model.VoiceCall{
+		if err := st.CreateInboundCall(ctx, model.VoiceCall{
 			CallID:     tc.callID,
 			Direction:  "inbound",
 			State:      "in-progress",
@@ -858,6 +925,8 @@ func setupMediaWebSocketStoreCall(ctx context.Context, st *store.PGStore, tc med
 			ToNumber:   "+15105550100",
 			StartedAt:  time.Now().UTC(),
 			UpdatedAt:  time.Now().UTC(),
-		})
+		}); err != nil {
+			t.Fatalf("CreateInboundCall failed: %v", err)
+		}
 	}
 }
