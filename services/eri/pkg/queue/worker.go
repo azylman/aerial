@@ -309,8 +309,11 @@ func (te *turnExecution) acquirePoolAndLease() bool {
 		return false
 	}
 	if leaseErr != nil {
-		te.failBurst(fmt.Errorf("queue: failed to acquire session lease for thread %s: %w", te.threadID, leaseErr))
-		return false
+		te.logf("[TurnRunner] Warning: prep lease acquisition failed for %s (deferring to attempt runner): %v", te.threadID, leaseErr)
+		te.activeSessionMu.Lock()
+		te.isCold = !te.isEphemeral && (te.currentSessionID == "" || te.turnCount <= 1)
+		te.activeSessionMu.Unlock()
+		return true
 	}
 	return true
 }

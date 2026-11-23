@@ -316,6 +316,7 @@ func TestPrepareBurstTurn(t *testing.T) {
 		wantRows      map[string]rowWant
 		sabotageSQL   string
 		closeDB       bool
+		failLease     bool
 		wantErr       bool
 	}{
 		{
@@ -380,6 +381,13 @@ func TestPrepareBurstTurn(t *testing.T) {
 			wantRows:      map[string]rowWant{"a": {status: db.StatusProcessing}},
 		},
 		{
+			name: "LeaseErrorDeferredToAttemptRunner", mode: "thread", runs: 1, failLease: true,
+			rows:          []db.Message{stepMsg("a", db.StatusProcessing, 0, 0)},
+			wantDecision:  TurnDecisionRun,
+			wantPromptSub: "hello a",
+			wantRows:      map[string]rowWant{"a": {status: db.StatusProcessing}},
+		},
+		{
 			name: "TerminalRowsFinishedWithoutWrites", mode: "thread", hooked: true, runs: 1,
 			rows:         []db.Message{doneMsg("a", db.StatusCompleted, "", "done")},
 			preResp:      &PreTurnResponse{Allow: false, Reason: "never called"},
@@ -396,7 +404,7 @@ func TestPrepareBurstTurn(t *testing.T) {
 				policy.Hooks.PreTurn = preTurn
 			}
 			preResp, preErr := tc.preResp, tc.preErr
-			pool := New(nil, WorkerPoolConfig{
+			cfg := WorkerPoolConfig{
 				Store: store, MaxAttempts: 3,
 				ResolveChannelPolicy: func(string, string) config.ChannelPolicy { return policy },
 				WebhookDispatcher: &mockWebhookDispatcher{callPreTurnHookFunc: func(context.Context, *config.WebhookEndpoint, *PreTurnRequest) (*PreTurnResponse, error) {
@@ -405,7 +413,11 @@ func TestPrepareBurstTurn(t *testing.T) {
 				RunnerFunc: func(context.Context, string, string, string, string, string, int) (string, string, int, error) {
 					return "", "", 0, errors.New("prep must not run the agent")
 				},
-			})
+			}
+			if tc.failLease {
+				cfg.ProcessPool = &mockAcquireLeaseFailPool{}
+			}
+			pool := New(nil, cfg)
 			pool.Start()
 			defer pool.Stop()
 			ids := make([]string, len(tc.rows))
@@ -438,9 +450,11 @@ func TestPrepareDispatchTurn(t *testing.T) {
 		wantErr       bool
 		wantTerminal  bool
 		noAgent       bool
+		failLease     bool
 		wantStatus    string
 	}{
 		{name: "SessionLeaseUnavailableFinished", status: db.StatusProcessing, sessionID: "sess-1", seed: true, noAgent: true, wantDecision: TurnDecisionFinished, wantStatus: db.StatusFailed},
+		{name: "SessionLeaseErrorDeferredToAttemptRunner", status: db.StatusProcessing, sessionID: "sess-1", seed: true, failLease: true, wantDecision: TurnDecisionRun, wantPromptSub: "do the thing", wantStatus: db.StatusProcessing},
 		{name: "ReadErrorTerminal", status: db.StatusProcessing, seed: true, sabotageSQL: renameColumnSQL("dispatches"), wantErr: true, wantTerminal: true, wantStatus: db.StatusProcessing},
 		{name: "NoStoreTerminal", noStore: true, wantErr: true, wantTerminal: true},
 		{name: "EphemeralBuildsPrompt", status: db.StatusProcessing, seed: true, wantDecision: TurnDecisionRun, wantPromptSub: "do the thing"},
@@ -462,6 +476,9 @@ func TestPrepareDispatchTurn(t *testing.T) {
 			}}
 			if tc.noAgent {
 				cfg.RunnerFunc = nil
+			}
+			if tc.failLease {
+				cfg.ProcessPool = &mockAcquireLeaseFailPool{}
 			}
 			pool := New(nil, cfg)
 			pool.Start()

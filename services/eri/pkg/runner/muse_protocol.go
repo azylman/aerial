@@ -73,6 +73,7 @@ func (d *StreamingDaemon) tryResumeMuseSession(ctx context.Context, reader *bufi
 		return "", false, nil
 	}
 	if resp.Error != nil {
+		log.Printf("eri: [muse] session/resume rejected for %s: %s", trimmedSess, resp.Error.Message)
 		return "", false, nil
 	}
 	sessID := extractMuseSessionID(resp.Result, trimmedSess)
@@ -138,8 +139,10 @@ func (d *StreamingDaemon) waitForMuseHandshake(ctx context.Context, reader *bufi
 		if baseModel != "" {
 			startParams["modelId"] = baseModel
 		}
-		if trimmedSess != "" && isUUIDv7(trimmedSess) {
+		fallbackSess := ""
+		if !d.cfg.ResumeSession && trimmedSess != "" && isUUIDv7(trimmedSess) {
 			startParams[fieldSessionID] = trimmedSess
+			fallbackSess = trimmedSess
 		}
 		startReq := codexRPCRequest{
 			JSONRPC: codexRPCVersion,
@@ -151,7 +154,7 @@ func (d *StreamingDaemon) waitForMuseHandshake(ctx context.Context, reader *bufi
 		if err != nil {
 			return err
 		}
-		sessID = extractMuseSessionID(resp.Result, trimmedSess)
+		sessID = extractMuseSessionID(resp.Result, fallbackSess)
 	}
 
 	if sessID == "" {
