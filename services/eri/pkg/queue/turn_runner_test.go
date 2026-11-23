@@ -208,8 +208,13 @@ func (j *runnerJournal) execute(name string, fn func(restate.RunContext) (any, e
 }
 
 func setJournalValue(output, res any) {
-	b, _ := json.Marshal(res)
-	_ = json.Unmarshal(b, output)
+	b, err := json.Marshal(res)
+	if err != nil {
+		panic(err)
+	}
+	if err := json.Unmarshal(b, output); err != nil {
+		panic(err)
+	}
 }
 
 func (j *runnerJournal) context(t *testing.T) restate.Context {
