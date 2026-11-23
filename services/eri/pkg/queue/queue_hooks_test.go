@@ -798,6 +798,64 @@ func TestPostTurnHook_HelperEdgeCases(t *testing.T) {
 	if postHookFired {
 		t.Errorf("post_turn hook must NOT fire when pre_turn dropped turn")
 	}
+
+	var postHookCompletedFired bool
+	poolCompleted := NewWorkerPool(WorkerPoolConfig{
+		Store: store, MaxAttempts: 1,
+		WebhookDispatcher: &mockWebhookDispatcher{
+			callPostTurnHookFunc: func(ctx context.Context, endpoint *config.WebhookEndpoint, req *PostTurnRequest) (*PostTurnResponse, error) {
+				postHookCompletedFired = true
+				return &PostTurnResponse{Acknowledged: true}, nil
+			},
+		},
+		ResolveChannelPolicy: func(channelID, channelName string) config.ChannelPolicy {
+			return config.ChannelPolicy{Mode: "channel", WakeMode: "all", Hooks: config.ChannelHooksConfig{
+				PostTurn: &config.WebhookEndpoint{URL: "http://sidecar.local/post-turn"},
+			}}
+		},
+	})
+	msgCompleted := db.Message{ID: "msg-already-completed", ThreadID: "chan-completed", Status: db.StatusCompleted, ResponseText: "done", CreatedAt: time.Now().UTC()}
+	if err := insertMessage(store, msgCompleted); err != nil {
+		t.Fatalf("insert message: %v", err)
+	}
+	if err := poolCompleted.FailBurstTurn(context.Background(), "turn-completed", []string{msgCompleted.ID}, "late error", map[string]string{"lease_id": "test"}); err != nil {
+		t.Fatalf("FailBurstTurn error: %v", err)
+	}
+	if postHookCompletedFired {
+		t.Errorf("post_turn hook must NOT fire when messages are already terminal")
+	}
+
+	var postHookReplayCount int
+	poolReplay := NewWorkerPool(WorkerPoolConfig{
+		Store: store, MaxAttempts: 1,
+		WebhookDispatcher: &mockWebhookDispatcher{
+			callPostTurnHookFunc: func(ctx context.Context, endpoint *config.WebhookEndpoint, req *PostTurnRequest) (*PostTurnResponse, error) {
+				postHookReplayCount++
+				return &PostTurnResponse{Acknowledged: true}, nil
+			},
+		},
+		ResolveChannelPolicy: func(channelID, channelName string) config.ChannelPolicy {
+			return config.ChannelPolicy{Mode: "channel", WakeMode: "all", Hooks: config.ChannelHooksConfig{
+				PostTurn: &config.WebhookEndpoint{URL: "http://sidecar.local/post-turn"},
+			}}
+		},
+	})
+	msgActive := db.Message{ID: "msg-replay-active", ThreadID: "chan-replay", Status: db.StatusProcessing, RetryCount: 1, CreatedAt: time.Now().UTC()}
+	if err := insertMessage(store, msgActive); err != nil {
+		t.Fatalf("insert message: %v", err)
+	}
+	if err := poolReplay.FailBurstTurn(context.Background(), "turn-replay", []string{msgActive.ID}, "runner panic", map[string]string{"lease_id": "test"}); err != nil {
+		t.Fatalf("FailBurstTurn error: %v", err)
+	}
+	if postHookReplayCount != 1 {
+		t.Fatalf("expected post_turn to fire once, got %d", postHookReplayCount)
+	}
+	if err := poolReplay.FailBurstTurn(context.Background(), "turn-replay", []string{msgActive.ID}, "runner panic", map[string]string{"lease_id": "test"}); err != nil {
+		t.Fatalf("FailBurstTurn error: %v", err)
+	}
+	if postHookReplayCount != 1 {
+		t.Errorf("post_turn hook must NOT fire again on replay, count = %d", postHookReplayCount)
+	}
 }
 
 func TestWorkerPool_MultiTurn_AlwaysDeliversFinalOutputText(t *testing.T) {

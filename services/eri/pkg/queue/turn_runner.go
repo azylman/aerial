@@ -135,6 +135,7 @@ type turnProgress struct {
 	delayMs      int64
 	hookMetadata map[string]string
 	last         AttemptResult
+	hookRan      bool
 }
 
 type burstRunner struct {
@@ -288,6 +289,9 @@ func (s *TurnRunnerService) executeTurn(ctx restate.Context, subj runnerSubject,
 		if _, err := runStep(ctx, step.name, func(rc context.Context) (struct{}, error) { return struct{}{}, step.fn(rc) }); err != nil {
 			return err
 		}
+		if step.name == StepPostTurnHook {
+			t.hookRan = true
+		}
 	}
 	return nil
 }
@@ -434,8 +438,12 @@ func endOnTerminal(ctx restate.Context, subj runnerSubject, coordinator, key, tu
 	} else {
 		reason := cause.Error()
 		log.Printf("[TurnRunner] Turn %s for %s/%s failed: %s", turnID, coordinator, key, reason)
+		var meta map[string]string
+		if !t.hookRan {
+			meta = t.hookMetadata
+		}
 		_, stepErr = runStep(ctx, StepFailTurn, func(rc context.Context) (struct{}, error) {
-			return struct{}{}, subj.fail(rc, turnID, ids, reason, t.hookMetadata)
+			return struct{}{}, subj.fail(rc, turnID, ids, reason, meta)
 		})
 	}
 	sendTurnDone(ctx, coordinator, key, TurnDoneRequest{TurnID: turnID, Outcome: outcome})
