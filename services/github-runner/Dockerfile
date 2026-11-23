@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-FROM golang:1.27.4-bookworm AS go-builder
+FROM golang:1.27.3-bookworm AS go-builder
 
 RUN mkdir -p /out/bin && \
     GOBIN=/out/bin CGO_ENABLED=0 go install golang.org/x/tools/cmd/deadcode@v0.52.0 && \
@@ -150,7 +150,7 @@ RUN mkdir -p -m 755 /etc/apt/keyrings && \
     rm -rf /var/lib/apt/lists/* && \
     google-chrome --version
 
-# Pre-baked toolchain: Go 1.27.4, Rust stable, deadcode, oapi-codegen, roborev, golangci-lint, Node 22, Docker CLI + plugins
+# Pre-baked toolchain: Go 1.27.3, Rust stable, deadcode, oapi-codegen, roborev, golangci-lint, Node 22, Docker CLI + plugins
 COPY --link --from=go-builder /usr/local/go /usr/local/go
 COPY --link --from=go-builder /out/bin/* /usr/local/bin/
 COPY --link --chmod=0755 services/github-runner/roborev-wrapper.sh /usr/local/bin/roborev

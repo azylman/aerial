@@ -4,8 +4,9 @@ set -eu
 root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
 fixture=$(mktemp -d)
 trap 'rm -rf "$fixture"' EXIT HUP INT TERM
-mkdir -p "$fixture/scripts" "$fixture/pkg" "$fixture/bin"
+mkdir -p "$fixture/scripts/lib" "$fixture/pkg" "$fixture/bin"
 cp "$root/scripts/check-coverage.sh" "$fixture/scripts/"
+cp "$root/scripts/lib/hermetic-go-env.sh" "$fixture/scripts/lib/"
 : > "$fixture/pkg/go.mod"
 # Extract the actual function, leaving verify's top-level orchestration unexecuted.
 sed -n '/^run_go_pkg_coverage() {$/,/^}$/p' "$root/scripts/verify.sh" > "$fixture/staged.sh"
@@ -24,7 +25,7 @@ while read -r covered total expected; do
     for gate in staged ci; do
         actual=0
         if [ "$gate" = staged ]; then
-            sh -c 'has_cmd() { command -v "$1" >/dev/null; }; . "$1/staged.sh"; run_go_pkg_coverage "$1/pkg" .' sh "$fixture" > "$fixture/log" 2>&1 || actual=$?
+            sh -c 'has_cmd() { command -v "$1" >/dev/null; }; . "$1/scripts/lib/hermetic-go-env.sh"; . "$1/staged.sh"; run_go_pkg_coverage "$1/pkg" .' sh "$fixture" > "$fixture/log" 2>&1 || actual=$?
         else
             sh "$fixture/scripts/check-coverage.sh" --check --summary --profile-dir "$fixture/results" > "$fixture/log" 2>&1 || actual=$?
         fi
