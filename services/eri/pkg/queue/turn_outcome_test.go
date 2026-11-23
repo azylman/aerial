@@ -74,7 +74,9 @@ func runCapacityBlipCase(t *testing.T, tt capacityBlipCase) {
 	threadID, msgID := "thread-"+strings.ToLower(tt.name), "msg-"+strings.ToLower(tt.name)
 	CacheDiscordChannel(&discordgo.Channel{ID: threadID, Type: discordgo.ChannelTypeGuildPublicThread, Name: threadID})
 	msg := db.Message{ID: msgID, ThreadID: threadID, Content: "hello " + tt.name, Status: db.StatusPending}
-	_ = insertMessage(store, msg)
+	if err := insertMessage(store, msg); err != nil {
+		t.Fatalf("insertMessage failed: %v", err)
+	}
 	if lt := runLiveBurst(context.Background(), pool, threadID, "turn-1", msgID); lt.err != nil {
 		t.Fatalf("turn = (%s, %v), want no step error", lt.outcome, lt.err)
 	}
@@ -86,7 +88,10 @@ func runCapacityBlipCase(t *testing.T, tt capacityBlipCase) {
 	if attempts != tt.wantAttempts {
 		t.Fatalf("attempts = %d, want %d", attempts, tt.wantAttempts)
 	}
-	dbMsg, _ := store.GetMessage(context.Background(), msgID)
+	dbMsg, err := store.GetMessage(context.Background(), msgID)
+	if err != nil {
+		t.Fatalf("GetMessage failed: %v", err)
+	}
 	if dbMsg.Status != tt.wantFinalStatus {
 		t.Errorf("status = %s, want %s", dbMsg.Status, tt.wantFinalStatus)
 	}
@@ -233,8 +238,12 @@ func TestWorker_DualPool_YieldTrapFallback(t *testing.T) {
 	tmpHome, tempData := t.TempDir(), t.TempDir()
 	sessID := "f1111111-2222-3333-4444-555555555555"
 	sessDir := filepath.Join(tempData, "brain", sessID, ".system_generated", "logs")
-	_ = os.MkdirAll(sessDir, 0o755)
-	_ = os.WriteFile(filepath.Join(sessDir, "transcript.jsonl"), []byte(`{"step_index":0}`+"\n"), 0o644)
+	if err := os.MkdirAll(sessDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll failed: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sessDir, "transcript.jsonl"), []byte(`{"step_index":0}`+"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile failed: %v", err)
+	}
 
 	var turnCount atomic.Int32
 	primarySpawner := newScriptedDaemonSpawner(sessID,
@@ -254,11 +263,17 @@ func TestWorker_DualPool_YieldTrapFallback(t *testing.T) {
 
 	cfg := newTestConfig(func(d *config.ConfigData) { d.DataDir = tempData })
 	threadID := "thread-yield-fallback"
-	_ = store.SaveSessionID(context.Background(), threadID, sessID)
+	if err := store.SaveSessionID(context.Background(), threadID, sessID); err != nil {
+		t.Fatalf("SaveSessionID failed: %v", err)
+	}
 
 	taskDir := filepath.Join(tempData, "brain", "d1111111-2222-3333-4444-555555555555", ".system_generated", "tasks")
-	_ = os.MkdirAll(taskDir, 0o755)
-	_ = os.WriteFile(filepath.Join(taskDir, "bg-task-in-low-pool.log"), []byte("done"), 0o644)
+	if err := os.MkdirAll(taskDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll failed: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(taskDir, "bg-task-in-low-pool.log"), []byte("done"), 0o644); err != nil {
+		t.Fatalf("WriteFile failed: %v", err)
+	}
 
 	pool := New(cfg, WorkerPoolConfig{
 		ProcessPool: primaryPool, LowEffortProcessPool: lowPool,
@@ -277,7 +292,9 @@ func TestWorker_DualPool_YieldTrapFallback(t *testing.T) {
 	}
 
 	msg := db.Message{ID: "msg-yield-fb-1", ThreadID: threadID, Content: "run command and wait", Status: db.StatusPending, CreatedAt: time.Now()}
-	_ = store.InsertMessage(ctx, msg)
+	if err := store.InsertMessage(ctx, msg); err != nil {
+		t.Fatalf("InsertMessage failed: %v", err)
+	}
 	if lt := runLiveBurst(ctx, pool, threadID, "turn-1", msg.ID); lt.err != nil || lt.outcome != OutcomeCompleted {
 		t.Fatalf("turn = (%s, %v), want completed", lt.outcome, lt.err)
 	}
@@ -303,11 +320,20 @@ func runYieldTrapCase(t *testing.T, tc yieldTrapCase) {
 	var deliveredText string
 
 	sessMgr := session.New(tmpHome, "")
-	sessDir, _ := ensureTestSessionDir(sessMgr, tc.sessionID)
-	_ = os.MkdirAll(filepath.Join(sessDir, ".system_generated", "logs"), 0o755)
-	_ = os.WriteFile(filepath.Join(sessDir, ".system_generated", "logs", "transcript.jsonl"), []byte(`{"step_index":0}`+"\n"), 0o644)
+	sessDir, err := ensureTestSessionDir(sessMgr, tc.sessionID)
+	if err != nil {
+		t.Fatalf("ensureTestSessionDir failed: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(sessDir, ".system_generated", "logs"), 0o755); err != nil {
+		t.Fatalf("MkdirAll failed: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sessDir, ".system_generated", "logs", "transcript.jsonl"), []byte(`{"step_index":0}`+"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile failed: %v", err)
+	}
 	now := time.Now()
-	_ = os.Chtimes(sessDir, now, now)
+	if err := os.Chtimes(sessDir, now, now); err != nil {
+		t.Fatalf("Chtimes failed: %v", err)
+	}
 
 	pool := NewWorkerPool(WorkerPoolConfig{
 		SessionManager: sessMgr, Store: store, BackoffBase: 10 * time.Millisecond, MaxAttempts: 3,
@@ -316,7 +342,9 @@ func runYieldTrapCase(t *testing.T, tc yieldTrapCase) {
 			promptsSeenMu.Lock()
 			promptsSeen = append(promptsSeen, prompt)
 			promptsSeenMu.Unlock()
-			_ = os.Chtimes(sessDir, time.Now(), time.Now())
+			if err := os.Chtimes(sessDir, time.Now(), time.Now()); err != nil {
+				return "", "", 1, err
+			}
 			if int(inv) <= tc.maxYields {
 				msg := fmt.Sprintf("Still waiting turn %d", inv)
 				if tc.maxYields == 1 {
@@ -338,7 +366,9 @@ func runYieldTrapCase(t *testing.T, tc yieldTrapCase) {
 	defer pool.Stop()
 
 	msg := db.Message{ID: tc.msgID, ThreadID: tc.threadID, GuildID: "guild-1", AuthorID: "user-1", AuthorName: "test-user", Content: "Run task", Status: db.StatusPending, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
-	_ = insertMessage(store, msg)
+	if err := insertMessage(store, msg); err != nil {
+		t.Fatalf("insertMessage failed: %v", err)
+	}
 	model := pool.GetRuntimeConfig()
 	initialMetric := testutil.ToFloat64(metrics.YieldTrapEventsTotal.WithLabelValues(tc.metricOutcome, tc.metricSignature, model))
 	if lt := runLiveBurst(context.Background(), pool, tc.threadID, "turn-1", tc.msgID); lt.err != nil || lt.outcome != OutcomeCompleted {
@@ -494,7 +524,9 @@ func TestWorker_GlobalQuotaLockout_SilentAndDeliveryTarget_TableDriven(t *testin
 				Status:    db.StatusProcessing,
 				ChannelID: tc.channelID,
 			}
-			_ = store.InsertMessage(context.Background(), msg)
+			if err := store.InsertMessage(context.Background(), msg); err != nil {
+				t.Fatalf("InsertMessage failed: %v", err)
+			}
 
 			var d *db.Dispatch
 			if tc.silent {
@@ -579,12 +611,16 @@ func runCustomSessionTargetCase(t *testing.T, tc customSessionTargetCase) {
 		Status:    db.StatusProcessing,
 		ChannelID: tc.channelID,
 	}
-	_ = store.InsertMessage(context.Background(), msg)
+	if err := store.InsertMessage(context.Background(), msg); err != nil {
+		t.Fatalf("InsertMessage failed: %v", err)
+	}
 
 	var d *db.Dispatch
 	if tc.silent {
 		d = &db.Dispatch{ID: "d-silent", Source: "webhook", Status: db.StatusProcessing}
-		_, _ = store.InsertDispatch(context.Background(), *d)
+		if _, err := store.InsertDispatch(context.Background(), *d); err != nil {
+			t.Fatalf("InsertDispatch failed: %v", err)
+		}
 	}
 
 	te := &turnExecution{
@@ -614,9 +650,9 @@ func runCustomSessionTargetCase(t *testing.T, tc customSessionTargetCase) {
 		CacheReadTokens: 1,
 		TotalTokens:     17,
 	}
-	ok, _ := te.deliverSuccessAndFinalize(resp, accumulated, "test-model", 1, 1)
-	if !ok {
-		t.Fatalf("deliverSuccessAndFinalize returned false")
+	ok, deliverErr := te.deliverSuccessAndFinalize(resp, accumulated, "test-model", 1, 1)
+	if !ok || deliverErr != "" {
+		t.Fatalf("deliverSuccessAndFinalize returned false or error: ok=%v, err=%q", ok, deliverErr)
 	}
 	if tc.wantDelivered && deliveredTo != tc.wantTargetChan {
 		t.Fatalf("deliveredTo = %q, want %q", deliveredTo, tc.wantTargetChan)
@@ -738,7 +774,9 @@ func TestTurnExecution_InlineReplyOnNewerMessages(t *testing.T) {
 			store := testStore(t)
 			for i, m := range tc.stored {
 				m.CreatedAt = time.Now().UTC().Add(time.Duration(i) * time.Second)
-				_ = store.InsertMessage(context.Background(), m)
+				if err := store.InsertMessage(context.Background(), m); err != nil {
+					t.Fatalf("InsertMessage failed: %v", err)
+				}
 			}
 			var gotReplyTo string
 			pool := New(config.NewFromData(&config.ConfigData{}), WorkerPoolConfig{
@@ -983,9 +1021,13 @@ func TestTurnExecution_ResolveTurnOutcome_TranscriptGuard(t *testing.T) {
 			tempHome, tempData := t.TempDir(), t.TempDir()
 			sessMgr := session.New(tempHome, tempData)
 			sessDir := filepath.Join(tempData, "brain", sessID, ".system_generated", "logs")
-			_ = os.MkdirAll(sessDir, 0o755)
+			if err := os.MkdirAll(sessDir, 0o755); err != nil {
+				t.Fatalf("MkdirAll failed: %v", err)
+			}
 			if tc.transcriptErr != "" {
-				_ = os.WriteFile(filepath.Join(sessDir, "transcript.jsonl"), []byte(fmt.Sprintf(`{"step_index":1,"source":"MODEL","type":"ERROR_MESSAGE","status":"ERROR","content":%q,"created_at":%q}`+"\n", tc.transcriptErr, time.Now().UTC().Format(time.RFC3339))), 0o644)
+				if err := os.WriteFile(filepath.Join(sessDir, "transcript.jsonl"), []byte(fmt.Sprintf(`{"step_index":1,"source":"MODEL","type":"ERROR_MESSAGE","status":"ERROR","content":%q,"created_at":%q}`+"\n", tc.transcriptErr, time.Now().UTC().Format(time.RFC3339))), 0o644); err != nil {
+					t.Fatalf("WriteFile failed: %v", err)
+				}
 			}
 			pool := New(config.NewFromData(&config.ConfigData{}), WorkerPoolConfig{
 				SessionManager: sessMgr,
@@ -1051,9 +1093,13 @@ func TestTurnExecution_EnrichFailureFromTranscript_TranscriptGuard(t *testing.T)
 			tempHome, tempData := t.TempDir(), t.TempDir()
 			sessMgr := session.New(tempHome, tempData)
 			sessDir := filepath.Join(tempData, "brain", sessID, ".system_generated", "logs")
-			_ = os.MkdirAll(sessDir, 0o755)
+			if err := os.MkdirAll(sessDir, 0o755); err != nil {
+				t.Fatalf("MkdirAll failed: %v", err)
+			}
 			if tc.transcriptErr != "" {
-				_ = os.WriteFile(filepath.Join(sessDir, "transcript.jsonl"), []byte(fmt.Sprintf(`{"step_index":1,"source":"MODEL","type":"ERROR_MESSAGE","status":"ERROR","content":%q,"created_at":%q}`+"\n", tc.transcriptErr, time.Now().UTC().Format(time.RFC3339))), 0o644)
+				if err := os.WriteFile(filepath.Join(sessDir, "transcript.jsonl"), []byte(fmt.Sprintf(`{"step_index":1,"source":"MODEL","type":"ERROR_MESSAGE","status":"ERROR","content":%q,"created_at":%q}`+"\n", tc.transcriptErr, time.Now().UTC().Format(time.RFC3339))), 0o644); err != nil {
+					t.Fatalf("WriteFile failed: %v", err)
+				}
 			}
 			pool := New(config.NewFromData(&config.ConfigData{}), WorkerPoolConfig{
 				SessionManager: sessMgr,

@@ -29,6 +29,63 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/session"
 )
 
+type recentThreadMessagesCase struct {
+	name, firstID, firstAuthor string
+	wantLastContent            string
+	dg                         *discordgo.Session
+	burst                      []db.Message
+	limit, wantCount           int
+	wantErr                    bool
+}
+
+func marshalMockDiscordMessages(msgs []*discordgo.Message) []byte {
+	payload := make([]any, len(msgs))
+	for i, m := range msgs {
+		if m == nil {
+			payload[i] = nil
+			continue
+		}
+		payload[i] = struct {
+			*discordgo.Message
+
+			Components []discordgo.MessageComponent `json:"components,omitempty"`
+		}{
+			Message:    m,
+			Components: m.Components,
+		}
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		panic(err)
+	}
+	return body
+}
+
+func runRecentThreadMessagesCase(t *testing.T, tc recentThreadMessagesCase) {
+	t.Helper()
+	pool := &WorkerPool{cfg: WorkerPoolConfig{DiscordSession: tc.dg}}
+	te := &turnExecution{pool: pool, burst: tc.burst}
+	msgs, err := te.getRecentThreadMessages("1552732003076669460", tc.limit)
+	if tc.wantErr {
+		if err == nil {
+			t.Fatalf("expected error, got nil")
+		}
+		return
+	}
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(msgs) != tc.wantCount {
+		t.Fatalf("expected %d messages, got %d", tc.wantCount, len(msgs))
+	}
+	if tc.wantCount > 0 && (msgs[0].ID != tc.firstID || msgs[0].AuthorName != tc.firstAuthor) {
+		t.Errorf("mismatch on first message: got %+v, want ID=%s Author=%s", msgs[0], tc.firstID, tc.firstAuthor)
+	}
+	if tc.wantLastContent != "" && msgs[len(msgs)-1].Content != tc.wantLastContent {
+		t.Errorf("last message content mismatch: got %q, want %q", msgs[len(msgs)-1].Content, tc.wantLastContent)
+	}
+}
+
 func TestTurnExecution_GetRecentThreadMessages(t *testing.T) {
 	t.Parallel()
 	now := time.Now().UTC()
@@ -62,49 +119,32 @@ func TestTurnExecution_GetRecentThreadMessages(t *testing.T) {
 		{ID: "1552732003076669000", ChannelID: "1552732003076669460", Content: "Webhook notification", WebhookID: "hook-123"},
 		{ID: "1552732003076669099", ChannelID: "1552732003076669460", Content: "Current burst msg", Timestamp: now},
 	}
-	marshalMockMessages := func(msgs []*discordgo.Message) []byte {
-		payload := make([]any, len(msgs))
-		for i, m := range msgs {
-			if m == nil {
-				payload[i] = nil
-				continue
-			}
-			payload[i] = struct {
-				*discordgo.Message
-
-				Components []discordgo.MessageComponent `json:"components,omitempty"`
-			}{
-				Message:    m,
-				Components: m.Components,
-			}
-		}
-		body, _ := json.Marshal(payload)
-		return body
+	mockBody := marshalMockDiscordMessages(mockDiscordMsgs)
+	dgSuccess, err := discordgo.New("Bot test-token")
+	if err != nil {
+		t.Fatalf("discordgo.New failed: %v", err)
 	}
-	mockBody := marshalMockMessages(mockDiscordMsgs)
-	dgSuccess, _ := discordgo.New("Bot test-token")
 	dgSuccess.Client.Transport = roundTripperFunc(func(req *http.Request) (*http.Response, error) {
 		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(bytes.NewReader(mockBody))}, nil
 	})
 	var flakyCalls atomic.Int32
-	dgFlaky, _ := discordgo.New("Bot test-flaky")
+	dgFlaky, err := discordgo.New("Bot test-flaky")
+	if err != nil {
+		t.Fatalf("discordgo.New failed: %v", err)
+	}
 	dgFlaky.Client.Transport = roundTripperFunc(func(req *http.Request) (*http.Response, error) {
 		if flakyCalls.Add(1) == 1 {
 			return nil, errors.New("transient 502")
 		}
 		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(bytes.NewReader(mockBody))}, nil
 	})
-	dgFail, _ := discordgo.New("Bot test")
+	dgFail, err := discordgo.New("Bot test")
+	if err != nil {
+		t.Fatalf("discordgo.New failed: %v", err)
+	}
 	dgFail.Client.Transport = roundTripperFunc(func(req *http.Request) (*http.Response, error) { return nil, errors.New("simulated error") })
 
-	tests := []struct {
-		name, firstID, firstAuthor string
-		wantLastContent            string
-		dg                         *discordgo.Session
-		burst                      []db.Message
-		limit, wantCount           int
-		wantErr                    bool
-	}{
+	tests := []recentThreadMessagesCase{
 		{
 			name:            "DiscordAPI_Success",
 			dg:              dgSuccess,
@@ -131,27 +171,7 @@ func TestTurnExecution_GetRecentThreadMessages(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			pool := &WorkerPool{cfg: WorkerPoolConfig{DiscordSession: tc.dg}}
-			te := &turnExecution{pool: pool, burst: tc.burst}
-			msgs, err := te.getRecentThreadMessages("1552732003076669460", tc.limit)
-			if tc.wantErr {
-				if err == nil {
-					t.Fatalf("expected error, got nil")
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if len(msgs) != tc.wantCount {
-				t.Fatalf("expected %d messages, got %d", tc.wantCount, len(msgs))
-			}
-			if tc.wantCount > 0 && (msgs[0].ID != tc.firstID || msgs[0].AuthorName != tc.firstAuthor) {
-				t.Errorf("mismatch on first message: got %+v, want ID=%s Author=%s", msgs[0], tc.firstID, tc.firstAuthor)
-			}
-			if tc.wantLastContent != "" && msgs[len(msgs)-1].Content != tc.wantLastContent {
-				t.Errorf("last message content mismatch: got %q, want %q", msgs[len(msgs)-1].Content, tc.wantLastContent)
-			}
+			runRecentThreadMessagesCase(t, tc)
 		})
 	}
 }
@@ -163,7 +183,9 @@ func TestWorker_RotateSessionID_EvictsDaemons(t *testing.T) {
 	defer procPool.Close()
 
 	ctx := context.Background()
-	_, _ = procPool.GetOrCreate(ctx, "thread-evict-1", "")
+	if _, err := procPool.GetOrCreate(ctx, "thread-evict-1", ""); err != nil {
+		t.Fatalf("procPool.GetOrCreate failed: %v", err)
+	}
 	te := &turnExecution{pool: &WorkerPool{cfg: WorkerPoolConfig{Store: fakeStore}, pools: map[PoolKey]runner.AgentPool{{Ephemeral: false, Effort: "high"}: procPool}}, threadID: "thread-evict-1"}
 
 	te.rotateSessionID("thread-evict-1", "new-sess-1")
@@ -172,7 +194,11 @@ func TestWorker_RotateSessionID_EvictsDaemons(t *testing.T) {
 	}
 
 	te.rotateSessionID("thread-evict-1", "")
-	if storedSess, _ := fakeStore.GetSessionID(ctx, "thread-evict-1"); storedSess != "" {
+	storedSess, err := fakeStore.GetSessionID(ctx, "thread-evict-1")
+	if err != nil {
+		t.Fatalf("GetSessionID failed: %v", err)
+	}
+	if storedSess != "" {
 		t.Errorf("expected empty session in store after rotation, got %q", storedSess)
 	}
 
@@ -196,12 +222,16 @@ func execSessionDBRotationStep(tc sessionDBRotationCase, sessionID, oldSess, con
 		return "", "RESOURCE_EXHAUSTED (code 429): You have exhausted your capacity on this model. Resets in 30s.", 1, errors.New("exit code 1")
 	}
 	if tc.postHeavyDB {
-		_ = os.WriteFile(filepath.Join(convDir, oldSess+".db"), make([]byte, session.DefaultMaxSessionDBBytes+500), 0o644)
+		if err := os.WriteFile(filepath.Join(convDir, oldSess+".db"), make([]byte, session.DefaultMaxSessionDBBytes+500), 0o644); err != nil {
+			return "", "", 1, err
+		}
 		return mockJSONResponse(oldSess, "heavy output"), "", 0, nil
 	}
 	if tc.retryTransient {
 		if cur == 1 {
-			_ = os.WriteFile(filepath.Join(convDir, oldSess+".db"), make([]byte, session.DefaultMaxSessionDBBytes+1024), 0o644)
+			if err := os.WriteFile(filepath.Join(convDir, oldSess+".db"), make([]byte, session.DefaultMaxSessionDBBytes+1024), 0o644); err != nil {
+				return "", "", 1, err
+			}
 			return `{"status": "ERROR", "error": "temporary network timeout"}`, "", 0, nil
 		}
 		return mockJSONResponse(sessionID, "Recovered"), "", 0, nil
@@ -215,17 +245,27 @@ func runSessionDBRotationCase(t *testing.T, tc sessionDBRotationCase) {
 	tmpDir := t.TempDir()
 	sessMgr := session.New(tmpDir, tmpDir)
 	oldSess, convDir := "sess-"+tc.name, filepath.Join(tmpDir, "conversations")
-	_ = os.MkdirAll(convDir, 0o755)
+	if err := os.MkdirAll(convDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll failed: %v", err)
+	}
 	if tc.preWriteDBBytes > 0 {
-		_ = os.WriteFile(filepath.Join(convDir, oldSess+".db"), make([]byte, tc.preWriteDBBytes), 0o644)
+		if err := os.WriteFile(filepath.Join(convDir, oldSess+".db"), make([]byte, tc.preWriteDBBytes), 0o644); err != nil {
+			t.Fatalf("WriteFile failed: %v", err)
+		}
 	}
 	if tc.preWriteWALBytes > 0 {
-		_ = os.WriteFile(filepath.Join(convDir, oldSess+".db-wal"), make([]byte, tc.preWriteWALBytes), 0o644)
+		if err := os.WriteFile(filepath.Join(convDir, oldSess+".db-wal"), make([]byte, tc.preWriteWALBytes), 0o644); err != nil {
+			t.Fatalf("WriteFile failed: %v", err)
+		}
 	}
 
 	threadID := "thread-" + tc.name
-	_ = saveSessionID(store, threadID, oldSess)
-	_, _ = incrementSessionTurnCount(store, threadID)
+	if err := saveSessionID(store, threadID, oldSess); err != nil {
+		t.Fatalf("saveSessionID failed: %v", err)
+	}
+	if _, err := incrementSessionTurnCount(store, threadID); err != nil {
+		t.Fatalf("incrementSessionTurnCount failed: %v", err)
+	}
 
 	var mu sync.Mutex
 	var attempts []string
@@ -246,7 +286,9 @@ func runSessionDBRotationCase(t *testing.T, tc sessionDBRotationCase) {
 	defer pool.Stop()
 
 	msg := db.Message{ID: "msg-" + tc.name, ThreadID: threadID, Content: "<@aerial> test message", Status: db.StatusPending}
-	_ = insertMessage(store, msg)
+	if err := insertMessage(store, msg); err != nil {
+		t.Fatalf("insertMessage failed: %v", err)
+	}
 	if lt := runLiveBurst(context.Background(), pool, threadID, "turn-1", msg.ID); lt.err != nil {
 		t.Fatalf("turn = (%s, %v), want no step error", lt.outcome, lt.err)
 	}
@@ -256,7 +298,11 @@ func runSessionDBRotationCase(t *testing.T, tc sessionDBRotationCase) {
 	if gotAttempts != tc.wantAttempts {
 		t.Fatalf("attempts = %d, want %d", gotAttempts, tc.wantAttempts)
 	}
-	if curSess, _ := getSessionID(store, threadID); curSess != oldSess {
+	curSess, err := getSessionID(store, threadID)
+	if err != nil {
+		t.Fatalf("getSessionID failed: %v", err)
+	}
+	if curSess != oldSess {
 		t.Errorf("session %q != %q", curSess, oldSess)
 	}
 }
@@ -295,12 +341,18 @@ func runSessionRotationInjectCase(t *testing.T, tt sessionRotationInjectCase) {
 	tmpHome, tempData := t.TempDir(), t.TempDir()
 	validUUID := uuid.New().String()
 	sessDir := filepath.Join(tempData, "brain", validUUID, ".system_generated", "logs")
-	_ = os.MkdirAll(sessDir, 0o755)
-	_ = os.WriteFile(filepath.Join(sessDir, "transcript.jsonl"), []byte(`{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","content":"investigate"}`+"\n"), 0o644)
+	if err := os.MkdirAll(sessDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll failed: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(sessDir, "transcript.jsonl"), []byte(`{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","content":"investigate"}`+"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile failed: %v", err)
+	}
 
 	cfg := newTestConfig(func(d *config.ConfigData) { d.DataDir = tempData })
 	threadID := "thread-rot-" + strings.ToLower(tt.name)
-	_ = store.SaveSessionID(context.Background(), threadID, validUUID)
+	if err := store.SaveSessionID(context.Background(), threadID, validUUID); err != nil {
+		t.Fatalf("SaveSessionID failed: %v", err)
+	}
 
 	var mu sync.Mutex
 	var recordedPrompts, recordedSessions []string
@@ -320,7 +372,9 @@ func runSessionRotationInjectCase(t *testing.T, tt sessionRotationInjectCase) {
 {"step_index":2,"source":"TOOL","type":"GENERIC","status":"DONE","content":"CONTAINER ID aerial-brain MEM USAGE 120MiB"}
 {"step_index":%d,"source":"MODEL","type":"ERROR_MESSAGE","status":"ERROR","content":%q,"created_at":%q}
 `, session.DefaultMaxSessionSteps, tt.triggerErr, time.Now().UTC().Format(time.RFC3339))
-				_ = os.WriteFile(filepath.Join(sessDir, "transcript.jsonl"), []byte(transcriptContent), 0o644)
+				if err := os.WriteFile(filepath.Join(sessDir, "transcript.jsonl"), []byte(transcriptContent), 0o644); err != nil {
+					return "", "", 1, err
+				}
 				return "", tt.triggerErr, 1, errors.New("simulated error")
 			}
 			return mockJSONResponse(uuid.New().String(), "Completed"), "", 0, nil
@@ -332,7 +386,9 @@ func runSessionRotationInjectCase(t *testing.T, tt sessionRotationInjectCase) {
 	defer pool.Stop()
 
 	msg := db.Message{ID: "msg-rot-" + strings.ToLower(tt.name), ThreadID: threadID, Content: "run investigation", Status: db.StatusPending, CreatedAt: time.Now()}
-	_ = store.InsertMessage(context.Background(), msg)
+	if err := store.InsertMessage(context.Background(), msg); err != nil {
+		t.Fatalf("InsertMessage failed: %v", err)
+	}
 	if lt := runLiveBurst(context.Background(), pool, threadID, "turn-1", msg.ID); lt.err != nil || lt.outcome != OutcomeCompleted {
 		t.Fatalf("turn = (%s, %v), want completed", lt.outcome, lt.err)
 	}
@@ -572,9 +628,15 @@ func TestWorker_RotatedSession_TreatsTurnOneAsColdStart(t *testing.T) {
 	sessMgr := session.New(tmpDir, tmpDir)
 	threadID, oldSessionID, newSessionID := "thread-rotated-cold-test", "11111111-1111-1111-1111-111111111111", "22222222-2222-2222-2222-222222222222"
 
-	_ = store.SaveSessionID(context.Background(), threadID, oldSessionID)
-	_ = store.RotateSessionID(context.Background(), threadID, newSessionID)
-	_ = store.SaveThreadSummary(context.Background(), threadID, "<THREAD_SUMMARY>Discussed earlier deployment</THREAD_SUMMARY>", "msg-pre-rot")
+	if err := store.SaveSessionID(context.Background(), threadID, oldSessionID); err != nil {
+		t.Fatalf("SaveSessionID failed: %v", err)
+	}
+	if err := store.RotateSessionID(context.Background(), threadID, newSessionID); err != nil {
+		t.Fatalf("RotateSessionID failed: %v", err)
+	}
+	if err := store.SaveThreadSummary(context.Background(), threadID, "<THREAD_SUMMARY>Discussed earlier deployment</THREAD_SUMMARY>", "msg-pre-rot"); err != nil {
+		t.Fatalf("SaveThreadSummary failed: %v", err)
+	}
 
 	CacheDiscordChannel(&discordgo.Channel{ID: threadID, GuildID: "g1", ParentID: "parent-chan", Type: discordgo.ChannelTypeGuildPublicThread})
 
@@ -606,7 +668,9 @@ func TestWorker_RotatedSession_TreatsTurnOneAsColdStart(t *testing.T) {
 		{ID: "msg-post-rot-1", ThreadID: threadID, Content: "what was discussed earlier?", Status: db.StatusPending},
 		{ID: "msg-post-rot-2", ThreadID: threadID, Content: "follow-up question", Status: db.StatusPending},
 	} {
-		_ = insertMessage(store, m)
+		if err := insertMessage(store, m); err != nil {
+			t.Fatalf("insertMessage failed: %v", err)
+		}
 		if lt := runLiveBurst(context.Background(), pool, threadID, "turn-"+m.ID, m.ID); lt.err != nil || lt.outcome != OutcomeCompleted {
 			t.Fatalf("turn %s = (%s, %v), want completed", m.ID, lt.outcome, lt.err)
 		}
@@ -661,7 +725,9 @@ func TestResolveThreadColdStartSummary_LoadOnly(t *testing.T) {
 
 			store := testStore(t)
 			if tc.cachedSum != "" {
-				_ = store.SaveThreadSummary(context.Background(), "th-test", tc.cachedSum, tc.cachedMsgID)
+				if err := store.SaveThreadSummary(context.Background(), "th-test", tc.cachedSum, tc.cachedMsgID); err != nil {
+					t.Fatalf("SaveThreadSummary failed: %v", err)
+				}
 			}
 			rec, tp, ctx, root := newPromptBuildRecorder()
 			pool := &WorkerPool{ctx: context.Background(), cfg: WorkerPoolConfig{
@@ -694,7 +760,10 @@ func TestResolveThreadColdStartSummary_LoadOnly(t *testing.T) {
 			if len(llmPrompts) != 0 {
 				t.Errorf("cold start sent %d summarizer prompts, want 0", len(llmPrompts))
 			}
-			sum, msgID, _ := store.GetThreadSummary(context.Background(), "th-test")
+			sum, msgID, err := store.GetThreadSummary(context.Background(), "th-test")
+			if err != nil {
+				t.Fatalf("GetThreadSummary failed: %v", err)
+			}
 			if sum != tc.wantSavedSummary || msgID != tc.wantSavedMsgID {
 				t.Errorf("stored summary = (%q, %q), want (%q, %q)", sum, msgID, tc.wantSavedSummary, tc.wantSavedMsgID)
 			}
@@ -814,7 +883,9 @@ func runTurnEndRefreshCase(t *testing.T, tc turnEndRefreshCase, llmOut string) {
 	var llmPrompts, fetchBeforeIDs []string
 	store := testStore(t)
 	if tc.cachedSum != "" {
-		_ = store.SaveThreadSummary(context.Background(), "th-end", tc.cachedSum, tc.cachedMsgID)
+		if err := store.SaveThreadSummary(context.Background(), "th-end", tc.cachedSum, tc.cachedMsgID); err != nil {
+			t.Fatalf("SaveThreadSummary failed: %v", err)
+		}
 	}
 	rec, tp, ctx, root := newPromptBuildRecorder()
 	pool := &WorkerPool{ctx: context.Background(), cfg: WorkerPoolConfig{
@@ -860,7 +931,10 @@ func runTurnEndRefreshCase(t *testing.T, tc turnEndRefreshCase, llmOut string) {
 	for _, p := range llmPrompts {
 		assertSubstrings(t, "summarizer prompt", p, tc.wantPromptContains, tc.wantPromptExcludes)
 	}
-	sum, msgID, _ := store.GetThreadSummary(context.Background(), "th-end")
+	sum, msgID, err := store.GetThreadSummary(context.Background(), "th-end")
+	if err != nil {
+		t.Fatalf("GetThreadSummary failed: %v", err)
+	}
 	if sum != tc.wantSum || msgID != tc.wantMsgID {
 		t.Errorf("stored summary = (%q, %q), want (%q, %q)", sum, msgID, tc.wantSum, tc.wantMsgID)
 	}

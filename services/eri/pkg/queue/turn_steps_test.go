@@ -641,7 +641,10 @@ func TestRecordDispatchOutcome(t *testing.T) {
 			if tc.closeDB {
 				return
 			}
-			d, _ := store.GetDispatch(context.Background(), "d1")
+			d, err := store.GetDispatch(context.Background(), "d1")
+			if err != nil {
+				t.Fatalf("GetDispatch failed: %v", err)
+			}
 			if d == nil || d.Status != tc.wantStatus || d.ErrorMessage != tc.wantErrMsg {
 				t.Errorf("dispatch = %+v, want status=%s err=%q", d, tc.wantStatus, tc.wantErrMsg)
 			}
@@ -741,7 +744,10 @@ func TestPublishDispatchOutcome(t *testing.T) {
 			if tc.noBus {
 				cfg.EventBus = nil
 			}
-			pool, _ := stepPool(t, stepFixture{disps: []db.Dispatch{{ID: "d1", Source: "vanadis", Prompt: "p", Status: db.StatusCompleted, DurationMs: 10}}, closeDB: tc.closeDB}, cfg)
+			pool, store := stepPool(t, stepFixture{disps: []db.Dispatch{{ID: "d1", Source: "vanadis", Prompt: "p", Status: db.StatusCompleted, DurationMs: 10}}, closeDB: tc.closeDB}, cfg)
+			if store == nil {
+				t.Fatal("expected non-nil store")
+			}
 			id := "d1"
 			if tc.dispatchID != "" {
 				id = tc.dispatchID
@@ -895,7 +901,10 @@ func TestStopDispatchTurn(t *testing.T) {
 			if tc.noStore {
 				return
 			}
-			d, _ := store.GetDispatch(context.Background(), "d1")
+			d, err := store.GetDispatch(context.Background(), "d1")
+			if err != nil {
+				t.Fatalf("GetDispatch failed: %v", err)
+			}
 			if d == nil || d.Status != tc.wantStatus || d.ErrorMessage != tc.wantErrMsg {
 				t.Errorf("dispatch = %+v, want status=%s err=%q", d, tc.wantStatus, tc.wantErrMsg)
 			}
@@ -931,7 +940,11 @@ func TestFailDispatchTurn(t *testing.T) {
 			err := pool.FailDispatchTurn(context.Background(), "turn-d", tc.ids, "integrity violation")
 			assertStepErr(t, err, tc.wantErr, tc.noStore)
 			if !tc.noStore {
-				if d, _ := store.GetDispatch(context.Background(), "d1"); d == nil || d.Status != tc.wantStatus {
+				d, err := store.GetDispatch(context.Background(), "d1")
+				if err != nil {
+					t.Fatalf("GetDispatch failed: %v", err)
+				}
+				if d == nil || d.Status != tc.wantStatus {
 					t.Errorf("dispatch = %+v, want status=%s", d, tc.wantStatus)
 				}
 			}
@@ -963,7 +976,10 @@ func TestRefreshBurstThreadSummary(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			pool, _ := stepPool(t, stepFixture{noStore: tc.noStore, msgs: tc.rows, closeDB: tc.closeDB}, WorkerPoolConfig{})
+			pool, store := stepPool(t, stepFixture{noStore: tc.noStore, msgs: tc.rows, closeDB: tc.closeDB}, WorkerPoolConfig{})
+			if (store == nil) != tc.noStore {
+				t.Fatalf("store nil = %v, want %v", store == nil, tc.noStore)
+			}
 			err := pool.RefreshBurstThreadSummary(context.Background(), "thread-steps", []string{"a"}, tc.outcome)
 			assertStepErr(t, err, tc.wantErr, tc.noStore)
 		})
@@ -1110,7 +1126,9 @@ func newTurnTraceMockSpawner(convID string, onTurn func()) *mockDaemonSpawner {
 			errR, errW := io.Pipe()
 			defer errW.Close()
 			go func() {
-				_, _ = fmt.Fprintf(outW, `{"event":"init","conversation_id":%q}`+"\n", convID)
+				if _, err := fmt.Fprintf(outW, `{"event":"init","conversation_id":%q}`+"\n", convID); err != nil {
+					return
+				}
 				scanner := bufio.NewScanner(inR)
 				for scanner.Scan() {
 					_, _ = outW.Write([]byte(`{"event":"step_update","step_update":{"step_index":1,"type":"tool_call","tool_name":"run_command"}}` + "\n"))
@@ -1283,7 +1301,9 @@ func TestTurnRunner_EmitsTurnTraceAndRegistersActiveTurn(t *testing.T) {
 				defer onTurnMu.Unlock()
 				if daemon, _, ok := registry.DaemonByConversation(convID); ok {
 					capturedDaemon = daemon
-					duringTurnSpan, _ = registry.Get(daemon)
+					if span, ok := registry.Get(daemon); ok {
+						duringTurnSpan = span
+					}
 				}
 			})
 

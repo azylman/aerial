@@ -456,27 +456,77 @@ func runBehindOrphan(ctx context.Context, t *testing.T, pool *WorkerPool, store 
 	return o.res, o.err
 }
 
+type dispatchAttemptCase struct {
+	name        string
+	status      string
+	retry       int
+	restart     int
+	scripts     []attemptScript
+	wantKind    string
+	wantCode    int
+	wantStatus  string
+	wantRetry   int
+	wantCalls   int
+	sabotageSQL string
+	closeDB     bool
+	noStore     bool
+	chunkID     string
+	noAgent     bool
+	heldTurn    bool // another closure of the turn holds it and the caller's context is done
+	wantCancel  bool
+}
+
+func runDispatchAttemptCase(t *testing.T, tc dispatchAttemptCase) {
+	t.Helper()
+	fx := stepFixture{noStore: tc.noStore, sabotageSQL: tc.sabotageSQL, closeDB: tc.closeDB}
+	if tc.status != "" {
+		fx.disps = []db.Dispatch{{ID: "d1", Source: "test", Prompt: "do the thing", Status: tc.status, RetryCount: tc.retry, RestartCount: tc.restart, VanadisChunkID: tc.chunkID}}
+	}
+	store := openStepDB(t, fx).store
+	notices := &noticeRecorder{}
+	sr := &scriptedAttemptRunner{scripts: tc.scripts}
+	pool := newAttemptPool(t, store, sr, notices, tc.noAgent)
+	sr.onStop = func() { pool.Turns().Stop("turn-d", "operator stop") }
+	ctx := context.Background()
+	if tc.heldTurn {
+		release, ok := pool.Turns().Begin(ctx, "turn-d", &turnExecution{})
+		if !ok {
+			t.Fatal("expected turn begin to succeed")
+		}
+		defer release()
+		cctx, cancel := context.WithCancel(ctx)
+		cancel()
+		ctx = cctx
+	}
+	got, err := pool.RunDispatchAttempt(ctx, AttemptInput{SessionKey: "dispatch-d1", TurnID: "turn-d", IDs: []string{"d1"}, Prep: TurnPrep{Decision: TurnDecisionRun, Prompt: "do the thing"}, Ordinal: 1})
+	assertAttemptErr(t, err, tc.wantCode, tc.wantCancel)
+	var d *db.Dispatch
+	if !tc.noStore && !tc.closeDB {
+		var err error
+		d, err = store.GetDispatch(context.Background(), "d1")
+		if err != nil {
+			t.Fatalf("GetDispatch failed: %v", err)
+		}
+	}
+	var status string
+	var retry int
+	if d != nil {
+		status, retry = d.Status, d.RetryCount
+	}
+	if got.Kind != tc.wantKind || status != tc.wantStatus || retry != tc.wantRetry {
+		t.Errorf("kind = %s, dispatch = %+v; want kind %s status %s retry %d", got.Kind, d, tc.wantKind, tc.wantStatus, tc.wantRetry)
+	}
+	if c := sr.callCount(); c != tc.wantCalls {
+		t.Errorf("agent runs = %d, want %d", c, tc.wantCalls)
+	}
+	if n := notices.all(); len(n) != 0 {
+		t.Errorf("dispatch deliveries = %q, want none", n)
+	}
+}
+
 func TestRunDispatchAttempt(t *testing.T) {
 	t.Parallel()
-	tests := []struct {
-		name        string
-		status      string
-		retry       int
-		restart     int
-		scripts     []attemptScript
-		wantKind    string
-		wantCode    int
-		wantStatus  string
-		wantRetry   int
-		wantCalls   int
-		sabotageSQL string
-		closeDB     bool
-		noStore     bool
-		chunkID     string
-		noAgent     bool
-		heldTurn    bool // another closure of the turn holds it and the caller's context is done
-		wantCancel  bool
-	}{
+	tests := []dispatchAttemptCase{
 		{name: "SuccessCompletesSilently", status: db.StatusProcessing, scripts: []attemptScript{replyScript("chunk done")}, wantKind: AttemptKindSuccess, wantStatus: db.StatusCompleted, wantRetry: 1, wantCalls: 1},
 		{name: "RecordedShortCircuit", status: db.StatusFailed, wantKind: AttemptKindRecorded, wantStatus: db.StatusFailed},
 		{name: "CrashLoopCapFails", status: db.StatusProcessing, retry: 1, restart: 2, wantKind: AttemptKindTerminal, wantStatus: db.StatusFailed, wantRetry: 1},
@@ -493,43 +543,7 @@ func TestRunDispatchAttempt(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			fx := stepFixture{noStore: tc.noStore, sabotageSQL: tc.sabotageSQL, closeDB: tc.closeDB}
-			if tc.status != "" {
-				fx.disps = []db.Dispatch{{ID: "d1", Source: "test", Prompt: "do the thing", Status: tc.status, RetryCount: tc.retry, RestartCount: tc.restart, VanadisChunkID: tc.chunkID}}
-			}
-			store := openStepDB(t, fx).store
-			notices := &noticeRecorder{}
-			sr := &scriptedAttemptRunner{scripts: tc.scripts}
-			pool := newAttemptPool(t, store, sr, notices, tc.noAgent)
-			sr.onStop = func() { pool.Turns().Stop("turn-d", "operator stop") }
-			ctx := context.Background()
-			if tc.heldTurn {
-				release, _ := pool.Turns().Begin(ctx, "turn-d", &turnExecution{})
-				defer release()
-				cctx, cancel := context.WithCancel(ctx)
-				cancel()
-				ctx = cctx
-			}
-			got, err := pool.RunDispatchAttempt(ctx, AttemptInput{SessionKey: "dispatch-d1", TurnID: "turn-d", IDs: []string{"d1"}, Prep: TurnPrep{Decision: TurnDecisionRun, Prompt: "do the thing"}, Ordinal: 1})
-			assertAttemptErr(t, err, tc.wantCode, tc.wantCancel)
-			var d *db.Dispatch
-			if !tc.noStore && !tc.closeDB {
-				d, _ = store.GetDispatch(context.Background(), "d1")
-			}
-			var status string
-			var retry int
-			if d != nil {
-				status, retry = d.Status, d.RetryCount
-			}
-			if got.Kind != tc.wantKind || status != tc.wantStatus || retry != tc.wantRetry {
-				t.Errorf("kind = %s, dispatch = %+v; want kind %s status %s retry %d", got.Kind, d, tc.wantKind, tc.wantStatus, tc.wantRetry)
-			}
-			if c := sr.callCount(); c != tc.wantCalls {
-				t.Errorf("agent runs = %d, want %d", c, tc.wantCalls)
-			}
-			if n := notices.all(); len(n) != 0 {
-				t.Errorf("dispatch deliveries = %q, want none", n)
-			}
+			runDispatchAttemptCase(t, tc)
 		})
 	}
 }

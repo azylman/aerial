@@ -79,7 +79,8 @@ func runVoiceSessionAskCase(t *testing.T, tc voiceAskTestCase) {
 	}
 
 	obj := NewVoiceSessionObject(pool, "aerial")
-	mc, _ := setupActorMockContext(t, tc.deviceKey, "")
+	mc, state := setupActorMockContext(t, tc.deviceKey, "")
+	require.NotNil(t, state)
 
 	res, err := obj.Ask(restate.WithMockContext(mc), tc.req)
 	if tc.wantErrorSub != "" {
