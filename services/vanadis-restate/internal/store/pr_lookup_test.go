@@ -66,7 +66,7 @@ func TestPostgresVanadisStore_LookupPRChunk(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			st, _ := bmOpen(t, tc.db)
+			st := bmOpenStore(t, tc.db)
 			route, chunkID, err := st.LookupPRChunk(context.Background(), tc.repo, tc.pr)
 			if !assertStoreErr(t, err, tc.wantErrIs, tc.wantErr) && (route != tc.wantRoute || chunkID != tc.wantChunk) {
 				t.Errorf("LookupPRChunk = (%+v, %q), want (%+v, %q)", route, chunkID, tc.wantRoute, tc.wantChunk)
@@ -94,7 +94,7 @@ func TestPostgresVanadisStore_LookupChunkBuildID(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			st, _ := bmOpen(t, tc.db)
+			st := bmOpenStore(t, tc.db)
 			route, err := st.LookupChunkBuildID(context.Background(), tc.chunkID)
 			if !assertStoreErr(t, err, tc.wantErrIs, tc.wantErr) && route != tc.wantRoute {
 				t.Errorf("LookupChunkBuildID = %+v, want %+v", route, tc.wantRoute)
@@ -127,7 +127,7 @@ func TestPostgresVanadisStore_GetChunkByPR(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			st, _ := bmOpen(t, tc.db)
+			st := bmOpenStore(t, tc.db)
 			got, err := st.GetChunkByPR(context.Background(), tc.repo, tc.pr)
 			if assertStoreErr(t, err, nil, tc.wantErr) {
 				return
@@ -371,7 +371,7 @@ func TestPostgresVanadisStore_LookupUnattachedChunkByThreadAndRepo(t *testing.T)
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			st, _ := bmOpen(t, tc.db)
+			st := bmOpenStore(t, tc.db)
 			route, cID, err := st.LookupUnattachedChunkByThreadAndRepo(context.Background(), tc.threadID, tc.repo)
 			if assertStoreErr(t, err, tc.wantErrIs, tc.wantErr) {
 				return

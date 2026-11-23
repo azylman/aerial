@@ -86,7 +86,10 @@ func (s *RouterServer) processOwnedPullRequest(ctx context.Context, delivery str
 	}
 	populatePullRequestEvent(&p, res)
 	slog.InfoContext(ctx, "[synapse] [restate] pull_request", "repo", res.Repo, "pr", res.PRNumber, "action", res.Action, "head_sha", res.HeadSHA, "merge_sha", res.MergeSHA, "delivery", delivery)
-	meta := ParseAerialPRMetadata(p.PullRequest.GetBody())
+	meta := ResolveAerialPRMetadata(res.Repo, res.Branch, p.PullRequest.GetBody())
+	if meta.TargetID == "" && ExtractChunkIDFromBranch(res.Repo, res.Branch) != "" && s.currentConfig().DefaultOwner {
+		meta.TargetID = s.systemChannelTarget()
+	}
 	if s.isForeignBotEvent(meta) || res.PRNumber <= 0 {
 		return res, nil
 	}
@@ -267,6 +270,20 @@ func (s *RouterServer) processOwnedWorkflowRun(ctx context.Context, delivery str
 			return nil, err
 		}
 		return res, nil
+	}
+	if p.Action == ghStatusCompleted && strings.EqualFold(res.Conclusion, conclusionFailure) && res.PRNumber > 0 && p.WorkflowRun.ID > 0 && p.WorkflowRun.RunAttempt == 1 {
+		if strings.Contains(s.fetchLatestRoboRevComment(ctx, res.Repo, res.PRNumber, res.HeadSHA), "## roborev-override") {
+			if err := s.sendOwnedRepo(ctx, prwire.RepoHandlerWorkflowRerun, prwire.RepoEvent{
+				Repo:      res.Repo,
+				PRNumber:  res.PRNumber,
+				HeadSHA:   res.HeadSHA,
+				CheckName: res.CheckName,
+				RunID:     p.WorkflowRun.ID,
+			}); err != nil {
+				return nil, err
+			}
+			return res, nil
+		}
 	}
 	details := fmt.Sprintf("Workflow %q concluded with %s", p.WorkflowRun.Name, p.WorkflowRun.Conclusion)
 	if err := s.sendOwnedCheckOutcome(ctx, res, p.Action, details, strings.TrimSpace(p.WorkflowRun.HTMLURL), prwire.RepoHandlerWorkflowRunBySHA); err != nil {
@@ -633,7 +650,10 @@ func (s *RouterServer) dependabotSelfRegistration(res *ResolvedGitHubEvent, p Gi
 // body snowflake or, for a headless session key, the system channel, with
 // its title and the PR-body owner.
 func (s *RouterServer) metadataSelfRegistration(res *ResolvedGitHubEvent, pr GitHubPullRequest) (prSelfRegistration, bool) {
-	meta := ParseAerialPRMetadata(pr.GetBody())
+	meta := ResolveAerialPRMetadata(res.Repo, res.Branch, pr.GetBody())
+	if meta.TargetID == "" && ExtractChunkIDFromBranch(res.Repo, res.Branch) != "" && s.currentConfig().DefaultOwner {
+		meta.TargetID = s.systemChannelTarget()
+	}
 	if res.PRNumber <= 0 || s.isForeignBotEvent(meta) || (meta.BotID == "" && !s.currentConfig().DefaultOwner) ||
 		(res.Action == ghActionClosed && !pr.Merged) {
 		return prSelfRegistration{}, false

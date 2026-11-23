@@ -35,7 +35,9 @@ func (w *isolationWakes) client() *mockEriClient {
 		if w.err != nil {
 			return w.err
 		}
-		header, _, _ := strings.Cut(prompt, "\n")
+		header, rest, ok := strings.Cut(prompt, "\n")
+		_ = rest
+		_ = ok
 		w.headers = append(w.headers, header)
 		return nil
 	}}
@@ -163,7 +165,8 @@ func TestEvaluateBuildTerminalStatus(t *testing.T) {
 			assert.Equal(t, tc.wantStatus, got)
 			assert.Equal(t, tc.wantHeaders, wakes.headers)
 			assert.Equal(t, tc.wantNotified, tc.notified)
-			stored, _ := loadBuild(t, st, "b1")
+			stored, chunks := loadBuild(t, st, "b1")
+			assert.Empty(t, chunks)
 			assert.Equal(t, tc.wantStored, stored.Status)
 		})
 	}
@@ -208,7 +211,7 @@ func TestExecuteAuthoritativeTransition_FailureIsolation(t *testing.T) {
 			t.Parallel()
 			wakes := &isolationWakes{}
 			bld := model.VanadisBuild{ID: "b1", Status: tc.buildStatus, ThreadID: "th-1"}
-			st, _ := seededStore(t, []model.VanadisBuild{bld}, isolationSeed(tc.chunks))
+			st := seededStoreOnly(t, []model.VanadisBuild{bld}, isolationSeed(tc.chunks))
 			bo := NewBuildObject("", nil).WithAuthority(st, executor.NewExecutor("", wakes.client(), pubsub.NewMemoryBus(), "token", "example-owner", nil))
 			out, err := bo.executeAuthoritativeTransition(context.Background(), "b1", nil, tc.prior, nil, false)
 			require.NoError(t, err)
@@ -219,7 +222,8 @@ func TestExecuteAuthoritativeTransition_FailureIsolation(t *testing.T) {
 			assert.Equal(t, tc.wantIsolation, out.State.FailureIsolation)
 			assert.Equal(t, tc.wantNotified, out.State.FailureNotified)
 			assert.Equal(t, tc.wantStored, chunkStatuses(t, st, "b1"))
-			stored, _ := loadBuild(t, st, "b1")
+			stored, chunks := loadBuild(t, st, "b1")
+			require.Len(t, chunks, len(tc.chunks))
 			assert.Equal(t, tc.wantBuild, stored.Status)
 		})
 	}
