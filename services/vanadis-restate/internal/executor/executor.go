@@ -42,6 +42,7 @@ type (
 	StatusWidgetChunk        = ericlient.StatusWidgetChunk
 	StatusWidgetRequest      = ericlient.StatusWidgetRequest
 	SyncChunkPRWidgetRequest = ericlient.SyncChunkPRWidgetRequest
+	CIFailureResolution      = cilog.CIFailureResolution
 )
 
 var (
@@ -58,6 +59,8 @@ var (
 	FormatDeployFailureBanner        = prompt.FormatDeployFailureBanner
 	FormatDeployFailurePrompt        = prompt.FormatDeployFailurePrompt
 	ExtractCIFailureDetails          = cilog.ExtractCIFailureDetails
+	IsWorkflowRunFailure             = cilog.IsWorkflowRunFailure
+	ExtractActionsRunID              = cilog.ExtractActionsRunID
 )
 
 // Executor coordinates chunk dispatch, widget sync, CI logs, prompts, and event publishing.
@@ -457,4 +460,9 @@ func (e *Executor) PublishExternalEvent(ctx context.Context, source, eventType s
 // returning a retryable error when a GitHub API call fails with a transport error or retryable HTTP status.
 func (e *Executor) ResolveCIFailureDetailsChecked(ctx context.Context, repo string, prNumber int, checkName, headSHA, checkURL, details string) (string, error) {
 	return e.ciClient().ResolveCIFailureDetailsChecked(ctx, repo, prNumber, checkName, headSHA, checkURL, details)
+}
+
+// ResolveCIFailureChecked resolves CI failure details and failed checks across all jobs in a workflow run.
+func (e *Executor) ResolveCIFailureChecked(ctx context.Context, repo string, prNumber int, checkName, headSHA, checkURL, details string) (CIFailureResolution, error) {
+	return e.ciClient().ResolveCIFailureChecked(ctx, repo, prNumber, checkName, headSHA, checkURL, details)
 }
