@@ -47,7 +47,6 @@ func TestNATSBridge_StartConsumers(t *testing.T) {
 	t.Parallel()
 
 	const dispatch, pr = "aerial.dispatch.* vanadis-dispatch", "aerial.pr.> vanadis-pr-events"
-	const widget = "aerial.coalesced.widget_sync.> vanadis-widget"
 	errBoom := errors.New("boom")
 	tests := []struct {
 		name       string
@@ -67,13 +66,7 @@ func TestNATSBridge_StartConsumers(t *testing.T) {
 			bus:     newConsumerBus(t, nil, map[string]error{"aerial.pr.>": errBoom}),
 			wantErr: "subscribe vanadis-pr-events queue: boom", wantQueues: []string{dispatch},
 		},
-		{
-			name:       "consume queue widget-events error",
-			bus:        newConsumerBus(t, nil, map[string]error{"aerial.coalesced.widget_sync.>": errBoom}),
-			wantErr:    "subscribe vanadis-widget queue: boom",
-			wantQueues: []string{dispatch, pr},
-		},
-		{name: "successful consumers registration", bus: newConsumerBus(t, nil, nil), wantQueues: []string{dispatch, pr, widget}},
+		{name: "successful consumers registration", bus: newConsumerBus(t, nil, nil), wantQueues: []string{dispatch, pr}},
 	}
 
 	for _, tc := range tests {
@@ -287,69 +280,6 @@ func TestHandleDispatchOutcomeEvent(t *testing.T) {
 	}
 }
 
-func TestHandleWidgetSyncEvent(t *testing.T) {
-	t.Parallel()
-
-	const buildPath, prPath = "/BuildRouter/RouteBuildReconcile/send", "/BuildRouter/RoutePREvent/send"
-	const prArgs = `{"repo":"example/repo","pr_number":42}`
-	closed := closedIngressURL(t)
-	tests := []ingressCase{
-		{name: "malformed json returns nil", data: "{not-valid-json"},
-		{name: "empty args returns nil", data: `{}`},
-		{name: "repo without positive pr_number returns nil", data: `{"repo":"example/repo","pr_number":0}`},
-		{name: "pr_number without repo returns nil", data: `{"repo":"","pr_number":42}`},
-		{
-			name:     "build_id routes to reconcile with fallback key",
-			data:     `{"build_id":" build-987 "}`,
-			wantPath: buildPath, wantKey: "widget:build:build-987", wantBody: `"build-987"`,
-		},
-		{
-			name:     "special characters in build_id are preserved in body and key",
-			data:     `{"build_id":"build/987#special"}`,
-			wantPath: buildPath, wantKey: "widget:build:build/987#special", wantBody: `"build/987#special"`,
-		},
-		{
-			name: "build_id with MsgID header precedence",
-			data: `{"build_id":"build-987"}`, header: msgIDHeader("custom-build-msgid"),
-			wantPath: buildPath, wantKey: "custom-build-msgid", wantBody: `"build-987"`,
-		},
-		{
-			name:     "build_id with Idempotency-Key header precedence",
-			data:     `{"build_id":"build-987"}`,
-			header:   nats.Header{"Idempotency-Key": []string{"custom-build-idem"}},
-			wantPath: buildPath, wantKey: "custom-build-idem", wantBody: `"build-987"`,
-		},
-		{
-			name:     "repo and pr_number route to RoutePREvent with fallback key",
-			data:     prArgs,
-			wantPath: prPath, wantKey: "widget:pr:example/repo:42", wantBody: prBody("widget_sync", 42),
-		},
-		{
-			name: "repo and pr_number with MsgID header precedence",
-			data: prArgs, header: msgIDHeader("custom-pr-msgid"),
-			wantPath: prPath, wantKey: "custom-pr-msgid", wantBody: prBody("widget_sync", 42),
-		},
-		{
-			name: "500 naks with backoff",
-			data: prArgs, delivered: 2, status: http.StatusInternalServerError,
-			wantErr: "restate ingress error (status 500)", wantCalls: []string{"nak 2s"}, wantPath: prPath, wantKey: "widget:pr:example/repo:42",
-			wantBody: prBody("widget_sync", 42),
-		},
-		{
-			name: "transport error naks with backoff",
-			data: `{"build_id":"build-err"}`, delivered: 1, url: closed,
-			wantErr: "post to restate ingress " + closed + buildPath, wantCalls: []string{"nak 1s"},
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			runIngressCase(t, (*NATSBridge).HandleWidgetSyncEvent, tc)
-		})
-	}
-}
-
 func TestSettleFailedDelivery_Direct(t *testing.T) {
 	t.Parallel()
 
@@ -434,28 +364,6 @@ func TestDispatchIdempotencyKey(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			assert.Equal(t, tc.want, dispatchIdempotencyKey(tc.msg, tc.ev))
-		})
-	}
-}
-
-func TestWidgetSyncIdempotencyKey(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name string
-		msg  pubsub.Message
-		args pubsub.WidgetSyncJobArgs
-		want string
-	}{
-		{"MsgID beats Idempotency-Key", keyMsg(bothKeyHeaders), pubsub.WidgetSyncJobArgs{BuildID: "b-1"}, "msg-id-1"},
-		{"nil message build fallback", nil, pubsub.WidgetSyncJobArgs{BuildID: " b-1 ", Repo: "example/repo", PRNumber: 7}, "widget:build:b-1"},
-		{"blank build_id pr fallback", keyMsg(nil), pubsub.WidgetSyncJobArgs{BuildID: " ", Repo: " repo ", PRNumber: 7}, "widget:pr:repo:7"},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			assert.Equal(t, tc.want, widgetSyncIdempotencyKey(tc.msg, tc.args))
 		})
 	}
 }

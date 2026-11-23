@@ -7,24 +7,57 @@ import (
 	"fmt"
 	"log"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync/atomic"
 	"time"
 
+	restate "github.com/restatedev/sdk-go"
+	restateserver "github.com/restatedev/sdk-go/server"
+
 	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/pkg/k8sauth"
 	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/pkg/restateingress"
 	"github.com/azylman/aerial/services/coven/internal/config"
 	"github.com/azylman/aerial/services/coven/internal/store"
 )
 
-var newCovenBusFn = func(ctx context.Context, url string) (pubsub.Bus, error) {
-	return pubsub.NewJetStreamBus(ctx, url)
+var newCovenBusFn = func(ctx context.Context, busURL string) (pubsub.Bus, error) {
+	return pubsub.NewJetStreamBus(ctx, busURL)
 }
 
 func initCovenJetStream(ctx context.Context, worker *Worker, natsURL string) pubsub.Bus {
 	return initCovenJetStreamWithFactory(ctx, worker, natsURL, newCovenBusFn)
+}
+
+// dispatchCovenExtract forwards thread fact extraction to the CovenThread Virtual Object.
+// Invocations are dispatched asynchronously to Restate (/send) with a message-scoped idempotency key
+// (coven:extract:<scopedKey>:<msgID>), so slow extractions never cause HTTP client timeouts or duplicate
+// in-flight runs on redelivery. When no stable message ID is present, the Idempotency-Key header is omitted
+// so distinct events are never collapsed.
+func dispatchCovenExtract(ctx context.Context, worker *Worker, targetAgent, threadID string, msgKey ...string) error {
+	if worker == nil {
+		return nil
+	}
+	if worker.RestateIngressURL() == "" {
+		return worker.ExtractThread(ctx, threadID, targetAgent)
+	}
+
+	scopedKey := config.ScopedThreadKey(targetAgent, threadID)
+	endpoint := fmt.Sprintf("%s/CovenThread/%s/Extract/send", worker.RestateIngressURL(), url.PathEscape(scopedKey))
+	req := ExtractJobRequest{
+		ThreadID: threadID,
+		Agent:    targetAgent,
+	}
+	var idempotencyKey string
+	if len(msgKey) > 0 && strings.TrimSpace(msgKey[0]) != "" {
+		idempotencyKey = fmt.Sprintf("coven:extract:%s:%s", scopedKey, strings.TrimSpace(msgKey[0]))
+	}
+	_, err := restateingress.Post(ctx, worker.HTTPClient(), endpoint, idempotencyKey, req, 0)
+	return err
 }
 
 func handleCovenExtractJob(ctx context.Context, msg pubsub.Message, worker *Worker) error {
@@ -63,15 +96,15 @@ func handleCovenExtractJob(ctx context.Context, msg pubsub.Message, worker *Work
 			return nil
 		}
 	}
-	if err := worker.ExtractThread(ctx, threadID, targetAgent); err != nil {
-		if errors.Is(err, store.ErrAdvisoryLockBusy) {
-			if nakErr := msg.NakWithDelay(5 * time.Second); nakErr != nil {
-				slog.WarnContext(ctx, "[Coven] error naking coven extract job on advisory lock busy", "error", nakErr)
+	var msgKey string
+	if msg != nil && msg.Header() != nil {
+		msgKey = strings.TrimSpace(msg.Header().Get(pubsub.HeaderMsgID))
+	}
+	if err := dispatchCovenExtract(ctx, worker, targetAgent, threadID, msgKey); err != nil {
+		if msg != nil {
+			if nakErr := msg.NakWithDelay(pubsub.NakBackoff(msg.NumDelivered(), covenMaxNakDelay)); nakErr != nil {
+				slog.WarnContext(ctx, "[Coven] error naking coven extract job", "error", nakErr)
 			}
-			return err
-		}
-		if nakErr := msg.NakWithDelay(pubsub.NakBackoff(msg.NumDelivered(), covenMaxNakDelay)); nakErr != nil {
-			slog.WarnContext(ctx, "[Coven] error naking coven extract job", "error", nakErr)
 		}
 		return err
 	}
@@ -195,7 +228,7 @@ func retrySubscribeCovenConsumers(ctx context.Context, b pubsub.Bus, worker *Wor
 	}
 }
 
-func initCovenJetStreamWithFactory(ctx context.Context, worker *Worker, natsURL string, factory func(ctx context.Context, url string) (pubsub.Bus, error)) pubsub.Bus {
+func initCovenJetStreamWithFactory(ctx context.Context, worker *Worker, natsURL string, factory func(ctx context.Context, busURL string) (pubsub.Bus, error)) pubsub.Bus {
 	natsURL = strings.TrimSpace(natsURL)
 	if natsURL == "" {
 		return nil
@@ -213,6 +246,90 @@ func initCovenJetStreamWithFactory(ctx context.Context, worker *Worker, natsURL 
 		}
 	}
 	return b
+}
+
+// NewRestateServer binds the Coven Virtual Objects and returns a Restate server.
+func NewRestateServer(thread *CovenThread, dreamer *CovenDreamer) *restateserver.Restate {
+	tenMin := []restate.ServiceDefinitionOption{
+		restate.WithInactivityTimeout(10 * time.Minute),
+		restate.WithAbortTimeout(10 * time.Minute),
+	}
+	srv := restateserver.NewRestate()
+	if thread != nil {
+		srv = srv.Bind(restate.Reflect(thread, tenMin...))
+	}
+	if dreamer != nil {
+		srv = srv.Bind(restate.Reflect(dreamer, tenMin...))
+	}
+	return srv
+}
+
+func startRestateServer(ctx context.Context, cfg *config.Config, thread *CovenThread, dreamer *CovenDreamer) (net.Listener, *http.Server, <-chan error, error) {
+	restateSrv := NewRestateServer(thread, dreamer)
+	restateHandler, err := restateSrv.Handler()
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("create restate handler: %w", err)
+	}
+
+	restatePort := strings.TrimSpace(cfg.RestatePort)
+	if restatePort == "" {
+		restatePort = config.DefaultRestatePort
+	}
+
+	var restateProtocols http.Protocols
+	restateProtocols.SetHTTP1(true)
+	restateProtocols.SetUnencryptedHTTP2(true)
+
+	restateHTTPServer := &http.Server{
+		Addr:              ":" + restatePort,
+		Handler:           restateHandler,
+		Protocols:         &restateProtocols,
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+
+	var lc net.ListenConfig
+	restateLn, err := lc.Listen(ctx, "tcp", ":"+restatePort)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("listen on restate port %s: %w", restatePort, err)
+	}
+
+	restateErrChan := make(chan error, 1)
+	go func() {
+		log.Printf("Coven Restate Server listening on %s", restateLn.Addr().String())
+		if sErr := restateHTTPServer.Serve(restateLn); sErr != nil && sErr != http.ErrServerClosed {
+			restateErrChan <- sErr
+		}
+		close(restateErrChan)
+	}()
+
+	return restateLn, restateHTTPServer, restateErrChan, nil
+}
+
+func newExtractFn(cfg *config.Config, worker *Worker, toolHandler *ToolHandler) func(context.Context, string) error {
+	return func(extractCtx context.Context, threadID string) error {
+		if cfg.RestateIngressURL != "" {
+			var targetAgent, cleanThread string
+			if strings.Contains(threadID, "/") {
+				targetAgent, cleanThread = config.ParseScopedThreadKey(threadID)
+			} else {
+				targetAgent = cfg.EffectiveStack()
+				cleanThread = strings.TrimSpace(threadID)
+			}
+			scopedKey := config.ScopedThreadKey(targetAgent, cleanThread)
+			endpoint := fmt.Sprintf("%s/CovenThread/%s/Extract/send", strings.TrimRight(cfg.RestateIngressURL, "/"), url.PathEscape(scopedKey))
+			req := ExtractJobRequest{
+				ThreadID: cleanThread,
+				Agent:    targetAgent,
+			}
+			var client *http.Client
+			if worker != nil {
+				client = worker.HTTPClient()
+			}
+			_, postErr := restateingress.Post(extractCtx, client, endpoint, "", req, 0)
+			return postErr
+		}
+		return toolHandler.Extract(extractCtx, threadID)
+	}
 }
 
 // RunApp bootstraps the coven MCP HTTP server with graceful shutdown.
@@ -248,22 +365,37 @@ func RunApp(ctx context.Context, cfg *config.Config) error {
 		EriURL:          cfg.EriURL,
 	})
 	toolHandler := NewToolHandler(cfg, sqlStore, ollama, publisher)
-	server := NewServer(toolHandler)
 
 	worker := NewWorker(WorkerConfig{
-		Store:           sqlStore,
-		Ollama:          ollama,
-		LLMClient:       HTTPBrainLLMClient(cfg.EriLLMURL, nil),
-		Publisher:       publisher,
-		CustomSkillsDir: cfg.CustomSkillsDir,
-		InitialDelay:    DefaultWorkerInitialDelay,
-		TickInterval:    DefaultWorkerTickInterval,
-		Role:            cfg.Role,
-		Stack:           cfg.EffectiveStack(),
-		ExtractTimeout:  cfg.ExtractTimeout(),
+		Store:             sqlStore,
+		Ollama:            ollama,
+		LLMClient:         HTTPBrainLLMClient(cfg.EriLLMURL, nil),
+		Publisher:         publisher,
+		CustomSkillsDir:   cfg.CustomSkillsDir,
+		InitialDelay:      DefaultWorkerInitialDelay,
+		TickInterval:      DefaultWorkerTickInterval,
+		Role:              cfg.Role,
+		Stack:             cfg.EffectiveStack(),
+		ExtractTimeout:    cfg.ExtractTimeout(),
+		RestateIngressURL: cfg.RestateIngressURL,
 	})
 	workerCtx, workerCancel := context.WithCancel(ctx)
 	defer workerCancel()
+
+	extractFn := newExtractFn(cfg, worker, toolHandler)
+	mcpServer := NewServer(toolHandler, extractFn)
+
+	thread := NewCovenThread(worker)
+	dreamer := NewCovenDreamer(worker)
+	restateLn, restateHTTPServer, restateErrChan, err := startRestateServer(ctx, cfg, thread, dreamer)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if closeErr := restateLn.Close(); closeErr != nil && !errors.Is(closeErr, net.ErrClosed) {
+			log.Printf("[Coven] restate listener close error: %v", closeErr)
+		}
+	}()
 
 	bus := initCovenJetStream(ctx, worker, cfg.NATSURL)
 	defer func() {
@@ -284,7 +416,7 @@ func RunApp(ctx context.Context, cfg *config.Config) error {
 
 	httpServer := &http.Server{
 		Addr:              ":" + port,
-		Handler:           server.Routes(),
+		Handler:           mcpServer.Routes(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
@@ -301,15 +433,19 @@ func RunApp(ctx context.Context, cfg *config.Config) error {
 	case <-ctx.Done():
 	case err := <-errChan:
 		return err
+	case err := <-restateErrChan:
+		return err
 	}
 
-	log.Println("Shutting down Coven MCP server gracefully...")
+	log.Println("Shutting down Coven MCP and Restate servers gracefully...")
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer shutdownCancel()
 
 	if err := httpServer.Shutdown(shutdownCtx); err != nil {
 		log.Printf("HTTP server shutdown error: %v", err)
-		return err
+	}
+	if err := restateHTTPServer.Shutdown(shutdownCtx); err != nil {
+		log.Printf("Restate server shutdown error: %v", err)
 	}
 	log.Println("Coven MCP server stopped cleanly")
 	return nil

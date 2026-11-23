@@ -613,7 +613,6 @@ type consolidateFactClustersCase struct {
 	nilStore            bool
 	nilOllama           bool
 	nilLLM              bool
-	lockMutex           bool
 	sabotage            string
 	facts               []string
 	seedWatermark       int64
@@ -636,7 +635,6 @@ func consolidateFactClustersBasicCases(validJSON string) []consolidateFactCluste
 		{name: "NilStoreError", nilStore: true, facts: consolidationSourceFacts, wantErr: true, wantFacts: untouched, wantWatermark: "0"},
 		{name: "NilOllamaError", nilOllama: true, wantErr: true, wantWatermark: "0"},
 		{name: "NilLLMError", nilLLM: true, wantErr: true, wantWatermark: "0"},
-		{name: "LockContentionSkipped", lockMutex: true, facts: consolidationSourceFacts, llmResp: validJSON, wantFacts: untouched, wantWatermark: "0"},
 		{name: "StoreGetAllFactsError", sabotage: sabotageFacts, wantErr: true, wantWatermark: "0"},
 		{name: "NoFactsInStore", wantWatermark: "0"},
 		{name: "LLMErrorContinuesWithoutDeletion", facts: consolidationSourceFacts, llmErr: errors.New("llm down"), wantFacts: untouched, wantWatermark: "0"},
@@ -766,11 +764,6 @@ func runConsolidateFactClustersCase(t *testing.T, tc consolidateFactClustersCase
 			}
 			return tc.llmResp, nil
 		}
-	}
-
-	if tc.lockMutex {
-		extractionMutex.Lock()
-		defer extractionMutex.Unlock()
 	}
 
 	count, err := ConsolidateFactClusters(ctx, s, client, llm)
