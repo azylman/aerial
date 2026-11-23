@@ -13,10 +13,6 @@ COPY services/eri/ ./
 RUN --mount=type=cache,target=/root/.cache/go-build \
     --mount=type=cache,target=/go/pkg/mod \
     CGO_ENABLED=0 GOOS=linux go build -cover -covermode=atomic -trimpath -ldflags="-s -w" -o /app/eri .
-# redact-pattern runs once per OTel Collector pod start (initContainer); built without -cover.
-RUN --mount=type=cache,target=/root/.cache/go-build \
-    --mount=type=cache,target=/go/pkg/mod \
-    CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /app/redact-pattern ./cmd/redact-pattern
 
 FROM alpine:3.24
 
@@ -26,7 +22,6 @@ RUN apk add --no-cache ca-certificates curl tzdata && \
     adduser -u 10001 -S appuser -G appgroup
 
 COPY --link --from=builder /app/eri /app/eri
-COPY --link --from=builder /app/redact-pattern /usr/local/bin/redact-pattern
 
 USER 10001:10001
 

@@ -259,11 +259,39 @@ func (f *Flow) handleCIFailureAtCap(ctx context.Context, buildID, chunkID, banne
 }
 
 // HandleCIRemediationCapReached fails the chunk once CI remediation attempts
-// are exhausted and fans out the human-review alert.
+// are exhausted and dispatches an in-line thread remediation prompt to the build's source thread.
 func (f *Flow) HandleCIRemediationCapReached(ctx context.Context, chunkID string, failCount int, ev pubsub.PRLifecycleEvent) error {
-	content := fmt.Sprintf("🛑 [%s#%d] CI check %q failed %d times (remediation cap %d/%d reached). Automatic fix loop paused for human review.", ev.Repo, ev.PRNumber, ev.CheckName, failCount, executor.MaxCIRemediationAttempts, executor.MaxCIRemediationAttempts)
-	capBanner := fmt.Sprintf("CI remediation cap (%d/%d) reached — awaiting human review", executor.MaxCIRemediationAttempts, executor.MaxCIRemediationAttempts)
-	return f.pauseChunk(ctx, chunkID, "ci_remediation_cap_reached", content, capBanner)
+	if f == nil || f.Store == nil {
+		return nil
+	}
+	bld, chk, failed, err := f.Store.FailChunk(ctx, chunkID, "ci_remediation_cap_reached", "")
+	if err != nil {
+		return err
+	}
+	if !isFailureNotificationEligible(chk, failed, "ci_remediation_cap_reached") || bld == nil || f.Exec == nil {
+		return nil
+	}
+	if strings.TrimSpace(bld.Agent) != "" {
+		ctx = ericlient.WithAgent(ctx, bld.Agent)
+	}
+	details, err := f.Exec.ResolveCIFailureDetailsChecked(ctx, ev.Repo, ev.PRNumber, ev.CheckName, ev.HeadSHA, ev.CheckURL, ev.Details)
+	if err != nil {
+		return err
+	}
+	if cErr := f.Exec.CancelChunkDispatch(ctx, chunkID); cErr != nil {
+		slog.WarnContext(ctx, "[vanadis-restate] cancel chunk dispatch failed", "chunk_id", chunkID, "error", cErr)
+	}
+	prompt := executor.FormatInlineCapRemediationPrompt(ev, details, chunkID, failCount, executor.MaxCIRemediationAttempts)
+	promptErr := f.Exec.DispatchWakePrompt(ctx, strings.TrimSpace(bld.ThreadID), prompt)
+	banner := fmt.Sprintf("CI remediation cap (%d/%d) reached — inline thread remediation in progress", executor.MaxCIRemediationAttempts, executor.MaxCIRemediationAttempts)
+	chunks := []model.VanadisChunk{}
+	if chk != nil {
+		chunks = append(chunks, *chk)
+	}
+	if _, sErr := f.Exec.SyncBuildWidget(ctx, f.Store, *bld, chunks, banner); sErr != nil {
+		slog.WarnContext(ctx, "[vanadis-restate] sync build widget warning", "error", sErr)
+	}
+	return promptErr
 }
 
 // CIRemediationNoOutcomeReason is the failure reason for a CI fix-up turn that
@@ -383,7 +411,7 @@ func (f *Flow) HandleConflictEvent(ctx context.Context, buildID, chunkID string,
 		return ErrPRTransitionSkipped
 	}
 	switch strings.TrimSpace(chunk.Status) {
-	case statusMerged, statusSynced, statusDeploying, statusDeployed, statusDeployFailed, "completed", statusFailed, "cancelled":
+	case statusMerged, statusSynced, statusDeploying, statusDeployed, statusDeployFailed, "completed", "cancelled":
 		return ErrPRTransitionSkipped
 	}
 	if head := strings.TrimSpace(ev.HeadSHA); head != "" && chunk.HeadSHA != "" && !strings.EqualFold(chunk.HeadSHA, head) {

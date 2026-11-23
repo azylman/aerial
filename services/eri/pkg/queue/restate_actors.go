@@ -54,6 +54,7 @@ type ThreadEnqueueRequest struct {
 	Model        string      `json:"model,omitempty"`
 	Effort       string      `json:"effort,omitempty"`
 	SkipIfActive bool        `json:"skip_if_active,omitempty"`
+	Traceparent  string      `json:"traceparent,omitempty"`
 }
 
 // ThreadEnqueueResponse defines the response after enqueuing a thread message.

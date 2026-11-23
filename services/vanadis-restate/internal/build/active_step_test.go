@@ -3,6 +3,7 @@ package build
 import (
 	"context"
 	"errors"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -17,25 +18,6 @@ import (
 	"github.com/azylman/aerial/services/vanadis-restate/internal/restatetest"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
 )
-
-type mockActiveStepStore struct {
-	store.VanadisStore
-
-	build  *model.VanadisBuild
-	chunks []model.VanadisChunk
-	getErr error
-}
-
-func (m *mockActiveStepStore) GetBuild(_ context.Context, _ string) (*model.VanadisBuild, []model.VanadisChunk, error) {
-	if m.getErr != nil {
-		return nil, nil, m.getErr
-	}
-	return m.build, m.chunks, nil
-}
-
-func (*mockActiveStepStore) CompareAndSwapBuildStatusMessageID(context.Context, string, string, string) (bool, error) {
-	return true, nil
-}
 
 var (
 	testActiveBuild = &model.VanadisBuild{
@@ -56,6 +38,28 @@ var (
 		UpdatedAt: time.Now().UTC(),
 	}
 )
+
+// observedActiveSteps maps chunk ID to the active step the update published:
+// the synced widget's chunks when a widget was sent, else the executor's live
+// overlay on the stored chunks.
+func observedActiveSteps(eri *mockEriClient, exec *executor.Executor, buildID string, stored []model.VanadisChunk) map[string]string {
+	out := map[string]string{}
+	if eri.LastWidget != nil {
+		for _, ch := range eri.LastWidget.Chunks {
+			out[ch.ID] = ch.ActiveStep
+		}
+		return out
+	}
+	chunks := slices.Clone(stored)
+	for i := range chunks {
+		chunks[i].ActiveStep = ""
+	}
+	exec.OverlayActiveSteps(buildID, chunks)
+	for _, ch := range chunks {
+		out[ch.ID] = ch.ActiveStep
+	}
+	return out
+}
 
 type updateActiveStepTestCase struct {
 	name            string
@@ -94,10 +98,9 @@ func executeUpdateActiveStepTestCase(t *testing.T, tc updateActiveStepTestCase) 
 	if tc.nilStore {
 		bo = NewBuildObject("", nil)
 	} else {
-		st := &mockActiveStepStore{
-			build:  tc.storeBuild,
-			chunks: tc.storeChunks,
-			getErr: tc.storeGetErr,
+		st := &fakeStore{chunks: slices.Clone(tc.storeChunks), errs: map[string]error{"GetBuild": tc.storeGetErr}}
+		if tc.storeBuild != nil {
+			st.builds = []model.VanadisBuild{*tc.storeBuild}
 		}
 		bo = NewBuildObject("", nil).WithAuthority(st, exec)
 	}
@@ -116,16 +119,17 @@ func executeUpdateActiveStepTestCase(t *testing.T, tc updateActiveStepTestCase) 
 	}
 	require.NoError(t, err)
 	assert.Equal(t, AckResponse{Status: "ok"}, resp)
+	observed := observedActiveSteps(eri, exec, tc.buildID, tc.storeChunks)
 	if tc.expectCleared {
 		for i := range tc.storeChunks {
-			assert.Empty(t, tc.storeChunks[i].ActiveStep)
+			assert.Empty(t, observed[tc.storeChunks[i].ID])
 		}
 	} else {
 		if tc.expectStep != "" && len(tc.storeChunks) > 0 {
-			assert.Equal(t, tc.expectStep, tc.storeChunks[0].ActiveStep)
+			assert.Equal(t, tc.expectStep, observed[tc.storeChunks[0].ID])
 		}
 		if tc.expectOtherStep != "" && len(tc.storeChunks) > 1 {
-			assert.Equal(t, tc.expectOtherStep, tc.storeChunks[1].ActiveStep)
+			assert.Equal(t, tc.expectOtherStep, observed[tc.storeChunks[1].ID])
 		}
 	}
 	if tc.expectWidget {
@@ -326,10 +330,7 @@ func TestUpdateActiveStep_ConcurrentCoalesce(t *testing.T) {
 				{ID: tc.chunk1, BuildID: tc.buildID, Title: "Chunk 1", Status: "running"},
 				{ID: tc.chunk2, BuildID: tc.buildID, Title: "Chunk 2", Status: "running"},
 			}
-			st := &mockActiveStepStore{
-				build:  bld,
-				chunks: chunks,
-			}
+			st := &fakeStore{builds: []model.VanadisBuild{*bld}, chunks: chunks}
 
 			var (
 				mu           sync.Mutex
@@ -403,7 +404,7 @@ func TestUpdateActiveStep_ConcurrentCoalesce(t *testing.T) {
 func assertSyncedWidgetStep(t *testing.T, eri *mockEriClient, chunkID, expectStep string, expectCleared ...bool) {
 	t.Helper()
 	require.NotNil(t, eri.LastWidget)
-	assert.True(t, eri.LastWidget.SkipSink, "active step widget sync must set SkipSink = true")
+	assert.False(t, eri.LastWidget.SkipSink, "active step widget sync must allow widget sinking for non-quiet builds")
 	if len(expectCleared) > 0 && expectCleared[0] {
 		for _, ch := range eri.LastWidget.Chunks {
 			assert.Empty(t, ch.ActiveStep, "expected chunk %s active step to be cleared", ch.ID)

@@ -300,6 +300,69 @@ func TestFormatCIFailurePrompt(t *testing.T) {
 	}
 }
 
+func TestFormatInlineCapRemediationPrompt(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name         string
+		ev           pubsub.PRLifecycleEvent
+		details      string
+		chunkID      string
+		failCount    int
+		maxAttempts  int
+		wantContains []string
+		wantMissing  []string
+	}{
+		{
+			name:        "ci check cap reached instructs source thread remediation",
+			ev:          pubsub.PRLifecycleEvent{Repo: "acme/aerial", PRNumber: 123, CheckName: "test-unit", Branch: "feat/test", HeadSHA: "abcdef1", CheckURL: "https://ci.example.com/build/1"},
+			details:     "extracted failure details",
+			chunkID:     "chunk-a",
+			failCount:   5,
+			maxAttempts: 5,
+			wantContains: []string{
+				`CI check "test-unit" failed 5 times for PR #123 on acme/aerial (chunk: chunk-a, head commit: abcdef1; worker remediation cap 5/5 reached).`,
+				"Branch: feat/test",
+				"Check URL: https://ci.example.com/build/1",
+				"extracted failure details",
+				"[VANADIS INLINE THREAD CI REMEDIATION — MANDATORY]",
+				"source-thread agent running in-line on the thread's high-effort model with full thread context",
+				"/share/aerial/scripts/aerial-pr.sh init aerial --branch feat/test",
+				`/share/aerial/scripts/aerial-pr.sh submit <scratch_dir> "<commit_msg>"`,
+				"recovers the paused chunk to pr_opened and resumes the build",
+			},
+			wantMissing: []string{"critically evaluate each RoboRev finding", "override-roborev"},
+		},
+		{
+			name:        "roborev check cap reached includes rebuttal directive",
+			ev:          pubsub.PRLifecycleEvent{Repo: "aerial", PRNumber: 101, CheckName: "roborev", HeadSHA: "abcdef1"},
+			details:     "roborev finding",
+			chunkID:     "chunk-b",
+			failCount:   5,
+			maxAttempts: 5,
+			wantContains: []string{
+				`CI check "roborev" failed 5 times for PR #101 on aerial (chunk: chunk-b, head commit: abcdef1; worker remediation cap 5/5 reached).`,
+				"[VANADIS INLINE THREAD CI REMEDIATION — MANDATORY]",
+				"critically evaluating each RoboRev finding against codebase reality and full thread context",
+				"/share/aerial/scripts/aerial-pr.sh --repo aerial override-roborev 101 '<technical_rebuttal>'",
+				"recovers the paused chunk to pr_opened and resumes the build",
+			},
+			wantMissing: []string{"Branch:", "Check URL:"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := FormatInlineCapRemediationPrompt(tc.ev, tc.details, tc.chunkID, tc.failCount, tc.maxAttempts)
+			for _, want := range tc.wantContains {
+				assert.Contains(t, got, want)
+			}
+			for _, missing := range tc.wantMissing {
+				assert.NotContains(t, got, missing)
+			}
+		})
+	}
+}
+
 func TestFormatConflictPrompt(t *testing.T) {
 	t.Parallel()
 	const tail = ", merge origin/main to resolve conflicts, verify locally, and push to update the PR via " +
