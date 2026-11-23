@@ -980,6 +980,13 @@ func runLiveTurn(ctx context.Context, subj runnerSubject, maxAttempts int, turnI
 		res, err := subj.attempt(ctx, in)
 		lt.kinds, lt.last = append(lt.kinds, res.Kind), res
 		if err != nil {
+			if restate.IsTerminalError(err) {
+				lt.outcome = OutcomeFailed
+				if failErr := subj.fail(ctx, turnID, tp.ids, err.Error(), tp.hookMetadata); failErr != nil {
+					lt.err = failErr
+				}
+				return lt
+			}
 			lt.err = err
 			return lt
 		}

@@ -619,11 +619,12 @@ func TestPreTurnHook_HelperEdgeCases(t *testing.T) {
 	}
 }
 
-func runPostTurnHookBurst(t *testing.T, preResp *PreTurnResponse, runnerStderr string, runnerErr error) *PostTurnRequest {
+func runPostTurnHookBurst(t *testing.T, preResp *PreTurnResponse, runnerStderr string, runnerErr error, runnerPanic string) (*PostTurnRequest, string) {
 	t.Helper()
 	store := setupTestStore(t)
 	var mu sync.Mutex
 	var postCalled bool
+	var postCallCount int
 	var postReqReceived *PostTurnRequest
 	expectedUsage := runner.TokenUsage{InputTokens: 100, OutputTokens: 50, ThinkingTokens: 10, CacheReadTokens: 5, TotalTokens: 150}
 
@@ -639,6 +640,7 @@ func runPostTurnHookBurst(t *testing.T, preResp *PreTurnResponse, runnerStderr s
 			callPostTurnHookFunc: func(ctx context.Context, endpoint *config.WebhookEndpoint, req *PostTurnRequest) (*PostTurnResponse, error) {
 				mu.Lock()
 				postCalled = true
+				postCallCount++
 				reqCopy := *req
 				postReqReceived = &reqCopy
 				mu.Unlock()
@@ -646,6 +648,9 @@ func runPostTurnHookBurst(t *testing.T, preResp *PreTurnResponse, runnerStderr s
 			},
 		},
 		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
+			if runnerPanic != "" {
+				panic(runnerPanic)
+			}
 			if runnerErr != nil {
 				return "", runnerStderr, 1, runnerErr
 			}
@@ -664,7 +669,9 @@ func runPostTurnHookBurst(t *testing.T, preResp *PreTurnResponse, runnerStderr s
 	})
 	defer pool.Stop()
 	msg := db.Message{ID: "msg-postturn-test", ThreadID: "chan-postturn-test", AuthorName: "user-alpha", Content: "run postturn test", Status: db.StatusPending, CreatedAt: time.Now().UTC()}
-	_ = insertMessage(store, msg)
+	if err := insertMessage(store, msg); err != nil {
+		t.Fatalf("insert message: %v", err)
+	}
 	if lt := runLiveBurst(context.Background(), pool, msg.ThreadID, "turn-1", msg.ID); lt.err != nil {
 		t.Fatalf("turn err = %v", lt.err)
 	}
@@ -674,25 +681,58 @@ func runPostTurnHookBurst(t *testing.T, preResp *PreTurnResponse, runnerStderr s
 	if !postCalled || postReqReceived == nil {
 		t.Fatalf("expected post_turn hook to be called")
 	}
-	return postReqReceived
+	if postCallCount != 1 {
+		t.Fatalf("expected post_turn hook to be called exactly once, got %d", postCallCount)
+	}
+	var msgStatus string
+	if dbMsg, err := store.GetMessage(context.Background(), msg.ID); err == nil && dbMsg != nil {
+		msgStatus = dbMsg.Status
+	}
+	return postReqReceived, msgStatus
 }
 
 func TestPostTurnHook_Lifecycle(t *testing.T) {
 	t.Parallel()
 	expectedUsage := runner.TokenUsage{InputTokens: 100, OutputTokens: 50, ThinkingTokens: 10, CacheReadTokens: 5, TotalTokens: 150}
 	tests := []struct {
-		name, runnerStderr, wantStatus, wantErrSub string
-		preResp                                    *PreTurnResponse
-		runnerErr                                  error
-		checkMeta                                  bool
+		name, runnerStderr, wantStatus, wantErrSub, runnerPanic string
+		preResp                                                 *PreTurnResponse
+		runnerErr                                               error
+		checkMeta                                               bool
+		wantMetaKey                                             string
+		wantMetaVal                                             string
+		wantMsgStatus                                           string
 	}{
-		{name: "SuccessfulTurnWithMetadata", preResp: &PreTurnResponse{Allow: true, Metadata: map[string]any{"lease_id": "lease-abc", "turn_epoch": float64(42)}}, wantStatus: "success", checkMeta: true},
-		{name: "FailedTurn_AgyError", runnerStderr: "non-transient runner failed: syntax error in script", runnerErr: fmt.Errorf("exit status 1"), wantStatus: "failed", wantErrSub: "syntax error"},
+		{
+			name:          "SuccessfulTurnWithMetadata",
+			preResp:       &PreTurnResponse{Allow: true, Metadata: map[string]any{"lease_id": "lease-abc", "turn_epoch": float64(42)}},
+			wantStatus:    "success",
+			checkMeta:     true,
+			wantMsgStatus: db.StatusCompleted,
+		},
+		{
+			name:          "FailedTurn_AgyError",
+			runnerStderr:  "non-transient runner failed: syntax error in script",
+			runnerErr:     fmt.Errorf("exit status 1"),
+			wantStatus:    "failed",
+			wantErrSub:    "syntax error",
+			wantMsgStatus: db.StatusFailed,
+		},
+		{
+			name:          "RunnerPanicRecovery",
+			runnerPanic:   "simulated runner crash inside runner function",
+			preResp:       &PreTurnResponse{Allow: true, Metadata: map[string]any{"lease_id": "lease-panic"}},
+			wantStatus:    "failed",
+			wantErrSub:    "simulated runner crash",
+			wantMetaKey:   "lease_id",
+			wantMetaVal:   "lease-panic",
+			wantMsgStatus: db.StatusFailed,
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			req := runPostTurnHookBurst(t, tc.preResp, tc.runnerStderr, tc.runnerErr)
+			req, msgStatus := runPostTurnHookBurst(t, tc.preResp, tc.runnerStderr, tc.runnerErr, tc.runnerPanic)
 			if req.ChannelID != "chan-postturn-test" || req.ThreadID != "chan-postturn-test" || req.DurationMs < 0 {
 				t.Errorf("postReq metadata: %+v", req)
 			}
@@ -704,6 +744,12 @@ func TestPostTurnHook_Lifecycle(t *testing.T) {
 			}
 			if tc.wantErrSub != "" && !strings.Contains(req.Error, tc.wantErrSub) {
 				t.Errorf("Error=%q, want %q", req.Error, tc.wantErrSub)
+			}
+			if tc.wantMetaKey != "" && req.Metadata[tc.wantMetaKey] != tc.wantMetaVal {
+				t.Errorf("Metadata[%q]=%v, want %v", tc.wantMetaKey, req.Metadata[tc.wantMetaKey], tc.wantMetaVal)
+			}
+			if tc.wantMsgStatus != "" && msgStatus != tc.wantMsgStatus {
+				t.Errorf("Message status=%q, want %q", msgStatus, tc.wantMsgStatus)
 			}
 		})
 	}

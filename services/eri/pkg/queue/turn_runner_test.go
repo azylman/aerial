@@ -114,7 +114,7 @@ func (f *fakeTurnSteps) StopBurstTurn(_ context.Context, _ string, ids []string)
 	return f.call("stop", strings.Join(ids, ","))
 }
 
-func (f *fakeTurnSteps) FailBurstTurn(_ context.Context, _ string, ids []string, reason string) error {
+func (f *fakeTurnSteps) FailBurstTurn(_ context.Context, _ string, ids []string, reason string, _ ...map[string]string) error {
 	return f.call("fail", strings.Join(ids, ",")+" "+reason)
 }
 
