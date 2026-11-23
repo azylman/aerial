@@ -21,6 +21,7 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/interactions"
 	"github.com/azylman/aerial/services/eri/pkg/metrics"
 	"github.com/azylman/aerial/services/eri/pkg/queue"
+	"github.com/azylman/aerial/services/eri/pkg/runner"
 )
 
 var (
@@ -187,7 +188,7 @@ func resolveNewThreadTitle(ctx context.Context, content, msgID string, shouldSum
 			case titleSummarizeSem <- struct{}{}:
 				sumCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 				var sumErr error
-				title, sumErr = cls.SummarizeThreadTitle(sumCtx, content)
+				title, sumErr = cls.SummarizeThreadTitle(runner.WithLLMCallerKey(sumCtx, classifier.TitleCallerKey(msgID)), content)
 				cancel()
 				<-titleSummarizeSem
 				if sumErr != nil {

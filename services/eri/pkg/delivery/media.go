@@ -54,6 +54,23 @@ var (
 	AllowedInternalHosts = map[string]bool{}
 )
 
+// internalFetchStatusError classifies an internal media fetch status: 200 is
+// success; 408, 429 and 5xx are transient and stay retryable; any other 4xx is
+// deterministic for the URL and wraps ErrInvalidInternalAttachment (terminal);
+// anything else (1xx/2xx/3xx that is not 200) stays retryable.
+func internalFetchStatusError(status int) error {
+	switch {
+	case status == http.StatusOK:
+		return nil
+	case status == http.StatusRequestTimeout, status == http.StatusTooManyRequests:
+		return fmt.Errorf("unexpected http status %d", status)
+	case status >= 400 && status < 500:
+		return fmt.Errorf("%w: unexpected http status %d", ErrInvalidInternalAttachment, status)
+	default:
+		return fmt.Errorf("unexpected http status %d", status)
+	}
+}
+
 // ErrInvalidInternalAttachment signals that an internal attachment request specifies an invalid URL,
 // disallowed redirect target, or malformed filename, or that the upstream answered with a 4xx status.
 var ErrInvalidInternalAttachment = errors.New("invalid internal attachment")
@@ -635,12 +652,8 @@ func ResolveAndFetchInternalAttachment(ctx context.Context, rawURL, filename str
 		_ = resp.Body.Close()
 	}()
 
-	if resp.StatusCode >= 400 && resp.StatusCode < 500 {
-		// A 4xx answer is deterministic for this URL; retrying cannot fix it.
-		return nil, fmt.Errorf("%w: unexpected http status %d", ErrInvalidInternalAttachment, resp.StatusCode)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("unexpected http status %d", resp.StatusCode)
+	if statusErr := internalFetchStatusError(resp.StatusCode); statusErr != nil {
+		return nil, statusErr
 	}
 
 	data, err := io.ReadAll(io.LimitReader(resp.Body, MaxAttachmentSizeBytes+1))

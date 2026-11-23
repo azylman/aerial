@@ -773,6 +773,12 @@ func TestResolveAndFetchInternalImage_Validation(t *testing.T) {
 			http.Redirect(w, r, "/media/pic.png", http.StatusFound)
 		case "/media/unavailable.png":
 			w.WriteHeader(http.StatusServiceUnavailable)
+		case "/media/timeout.png":
+			w.WriteHeader(http.StatusRequestTimeout)
+		case "/media/throttled.png":
+			w.WriteHeader(http.StatusTooManyRequests)
+		case "/media/forbidden.png":
+			w.WriteHeader(http.StatusForbidden)
 		default:
 			http.NotFound(w, r)
 		}
@@ -868,6 +874,9 @@ func TestResolveAndFetchInternalImage_Validation(t *testing.T) {
 		},
 		{name: "upstream 404 is an invalid attachment", rawURL: server.URL + "/media/missing.png", wantErr: true, wantErrSentinel: ErrInvalidInternalAttachment},
 		{name: "upstream 503 stays retryable", rawURL: server.URL + "/media/unavailable.png", wantErr: true, wantNotSentinel: true},
+		{name: "upstream 408 stays retryable", rawURL: server.URL + "/media/timeout.png", wantErr: true, wantNotSentinel: true},
+		{name: "upstream 429 stays retryable", rawURL: server.URL + "/media/throttled.png", wantErr: true, wantNotSentinel: true},
+		{name: "upstream 403 is an invalid attachment", rawURL: server.URL + "/media/forbidden.png", wantErr: true, wantErrSentinel: ErrInvalidInternalAttachment},
 		{
 			name:            "allowed redirect target",
 			rawURL:          server.URL + "/media/redirect-allowed",
@@ -916,4 +925,39 @@ func TestSanitizeIntermediateStatus_HarnessChatter(t *testing.T) {
 			want:  "- **coven**: cpu = 100\n- **hangar**: cpu = 100",
 		},
 	})
+}
+
+func TestInternalFetchStatusError(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name         string
+		status       int
+		wantErr      bool
+		wantTerminal bool
+	}{
+		{name: "200 ok", status: 200},
+		{name: "204 retryable", status: 204, wantErr: true},
+		{name: "302 retryable", status: 302, wantErr: true},
+		{name: "400 terminal", status: 400, wantErr: true, wantTerminal: true},
+		{name: "404 terminal", status: 404, wantErr: true, wantTerminal: true},
+		{name: "408 retryable", status: 408, wantErr: true},
+		{name: "410 terminal", status: 410, wantErr: true, wantTerminal: true},
+		{name: "429 retryable", status: 429, wantErr: true},
+		{name: "499 terminal", status: 499, wantErr: true, wantTerminal: true},
+		{name: "500 retryable", status: 500, wantErr: true},
+		{name: "502 retryable", status: 502, wantErr: true},
+		{name: "504 retryable", status: 504, wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			err := internalFetchStatusError(tc.status)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("internalFetchStatusError(%d) error = %v, wantErr %v", tc.status, err, tc.wantErr)
+			}
+			if got := errors.Is(err, ErrInvalidInternalAttachment); got != tc.wantTerminal {
+				t.Errorf("internalFetchStatusError(%d) terminal = %v, want %v", tc.status, got, tc.wantTerminal)
+			}
+		})
+	}
 }
