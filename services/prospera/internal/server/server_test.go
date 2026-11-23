@@ -69,32 +69,21 @@ func TestTwilioVoiceWebhook_ThreeTierInbound(t *testing.T) {
 	mux := server.Routes()
 
 	// Pre-populate outbound call dialed 3 days ago for Tier 2 test
-	_ = store.CreateOutboundCall(context.Background(), model.VoiceCall{
-		CallID:       "call-out-prior",
-		Direction:    "outbound",
-		FromNumber:   cfg.TwilioFromNumber,
-		ToNumber:     "+15105550222",
-		State:        "completed",
-		ReportStatus: "delivered",
-		StartedAt:    time.Now().UTC().Add(-72 * time.Hour),
-		UpdatedAt:    time.Now().UTC().Add(-72 * time.Hour),
-		Brief: model.CallBrief{
-			Task: "Dentist appointment confirmation",
-		},
-	}, 5)
+	if err := store.CreateOutboundCall(context.Background(), model.VoiceCall{
+		CallID: "call-out-prior", Direction: "outbound", FromNumber: cfg.TwilioFromNumber, ToNumber: "+15105550222",
+		State: "completed", ReportStatus: "delivered", StartedAt: time.Now().UTC().Add(-72 * time.Hour), UpdatedAt: time.Now().UTC().Add(-72 * time.Hour),
+		Brief: model.CallBrief{Task: "Dentist appointment confirmation"},
+	}, 5); err != nil {
+		t.Fatalf("CreateOutboundCall(call-out-prior): %v", err)
+	}
 
 	// Pre-populate an outbound call waiting for connect
-	_ = store.CreateOutboundCall(context.Background(), model.VoiceCall{
-		CallID:          "call-out-active",
-		ProviderCallSID: "CA-out-123",
-		Direction:       "outbound",
-		FromNumber:      cfg.TwilioFromNumber,
-		ToNumber:        "+15105550333",
-		State:           "initiated",
-		ReportStatus:    "pending",
-		StartedAt:       time.Now().UTC(),
-		UpdatedAt:       time.Now().UTC(),
-	}, 5)
+	if err := store.CreateOutboundCall(context.Background(), model.VoiceCall{
+		CallID: "call-out-active", ProviderCallSID: "CA-out-123", Direction: "outbound", FromNumber: cfg.TwilioFromNumber,
+		ToNumber: "+15105550333", State: "initiated", ReportStatus: "pending", StartedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}, 5); err != nil {
+		t.Fatalf("CreateOutboundCall(call-out-active): %v", err)
+	}
 
 	tests := []threeTierInboundTestCase{
 		{
@@ -238,17 +227,13 @@ func TestTwilioStatusAndVoicemailOrder(t *testing.T) {
 	// Tier 3 inbound call created in awaiting_recording status
 	callID := "call-vm-ordering-test"
 	providerSID := "CA-ordering-123"
-	_ = store.CreateInboundCall(context.Background(), model.VoiceCall{
-		CallID:          callID,
-		ProviderCallSID: providerSID,
-		Direction:       "inbound",
-		FromNumber:      "+15105550999",
-		ToNumber:        cfg.TwilioFromNumber,
-		State:           "in-progress",
-		ReportStatus:    "awaiting_recording",
-		StartedAt:       time.Now().UTC(),
-		UpdatedAt:       time.Now().UTC(),
-	})
+	if err := store.CreateInboundCall(context.Background(), model.VoiceCall{
+		CallID: callID, ProviderCallSID: providerSID, Direction: "inbound", FromNumber: "+15105550999",
+		ToNumber: cfg.TwilioFromNumber, State: "in-progress", ReportStatus: "awaiting_recording",
+		StartedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("CreateInboundCall: %v", err)
+	}
 
 	// Step 1: /status webhook arrives first with CallStatus=completed
 	statusForm := url.Values{
@@ -270,7 +255,10 @@ func TestTwilioStatusAndVoicemailOrder(t *testing.T) {
 	}
 	server.Wait()
 
-	callAfterStatus, _ := store.GetCall(context.Background(), callID)
+	callAfterStatus, err := store.GetCall(context.Background(), callID)
+	if err != nil {
+		t.Fatalf("GetCall: %v", err)
+	}
 	if callAfterStatus.State != "completed" {
 		t.Fatalf("call state = %s, want completed", callAfterStatus.State)
 	}
@@ -306,14 +294,12 @@ func TestTwilioWebhook_AMD(t *testing.T) {
 	server, store, cfg := setupTestServer()
 	mux := server.Routes()
 
-	_ = store.CreateOutboundCall(context.Background(), model.VoiceCall{
-		CallID:          "call-amd-test",
-		ProviderCallSID: "CA-amd-1",
-		Direction:       "outbound",
-		FromNumber:      cfg.TwilioFromNumber,
-		ToNumber:        "+15105550888",
-		State:           "in-progress",
-	}, 5)
+	if err := store.CreateOutboundCall(context.Background(), model.VoiceCall{
+		CallID: "call-amd-test", ProviderCallSID: "CA-amd-1", Direction: "outbound",
+		FromNumber: cfg.TwilioFromNumber, ToNumber: "+15105550888", State: "in-progress",
+	}, 5); err != nil {
+		t.Fatalf("CreateOutboundCall: %v", err)
+	}
 
 	form := url.Values{
 		"CallSid":    []string{"CA-amd-1"},
@@ -334,7 +320,10 @@ func TestTwilioWebhook_AMD(t *testing.T) {
 		t.Fatalf("amd returned %d, want 200", rec.Code)
 	}
 
-	c, _ := store.GetCall(context.Background(), "call-amd-test")
+	c, err := store.GetCall(context.Background(), "call-amd-test")
+	if err != nil {
+		t.Fatalf("GetCall: %v", err)
+	}
 	if c.AnsweredBy != "machine_start" {
 		t.Fatalf("answered by = %s, want machine_start", c.AnsweredBy)
 	}
@@ -346,12 +335,11 @@ func TestTwilioWebhook_SMS(t *testing.T) {
 	server, store, cfg := setupTestServer()
 	mux := server.Routes()
 
-	_ = store.CreateOutboundCall(context.Background(), model.VoiceCall{
-		CallID:     "call-prior-sms",
-		Direction:  "outbound",
-		FromNumber: cfg.TwilioFromNumber,
-		ToNumber:   "+15105550888",
-	}, 5)
+	if err := store.CreateOutboundCall(context.Background(), model.VoiceCall{
+		CallID: "call-prior-sms", Direction: "outbound", FromNumber: cfg.TwilioFromNumber, ToNumber: "+15105550888",
+	}, 5); err != nil {
+		t.Fatalf("CreateOutboundCall: %v", err)
+	}
 
 	form := url.Values{
 		"MessageSid": []string{"SM-test-1"},
@@ -376,7 +364,10 @@ func TestTwilioWebhook_SMS(t *testing.T) {
 		t.Fatalf("sms returned %d, want 200", rec.Code)
 	}
 
-	msgs, _ := store.ListVoiceMessages(context.Background(), 10)
+	msgs, err := store.ListVoiceMessages(context.Background(), 10)
+	if err != nil {
+		t.Fatalf("ListVoiceMessages: %v", err)
+	}
 	if len(msgs) == 0 || msgs[0].MessageSID != "SM-test-1" {
 		t.Fatalf("expected saved message SM-test-1, got %v", msgs)
 	}
@@ -453,11 +444,13 @@ func TestServer_ToWSSAndRouteGuards(t *testing.T) {
 
 	t.Run("voicemail webhook resolves call id from call sid", func(t *testing.T) {
 		t.Parallel()
-		_ = store.CreateInboundCall(context.Background(), model.VoiceCall{
+		if err := store.CreateInboundCall(context.Background(), model.VoiceCall{
 			CallID:          "call-vm-by-sid",
 			ProviderCallSID: "CA-vm-sid-1",
 			ReportStatus:    "awaiting_recording",
-		})
+		}); err != nil {
+			t.Fatalf("CreateInboundCall: %v", err)
+		}
 
 		form := url.Values{
 			"CallSid":      []string{"CA-vm-sid-1"},
@@ -711,11 +704,13 @@ func TestServer_TokenIssueFailures(t *testing.T) {
 	mux := server.Routes()
 
 	// 1. Outbound connect token issue failure -> 500
-	_ = store.CreateOutboundCall(context.Background(), model.VoiceCall{
+	if err := store.CreateOutboundCall(context.Background(), model.VoiceCall{
 		CallID:          "call-out-err",
 		ProviderCallSID: "CA-out-err",
 		Direction:       "outbound",
-	}, 5)
+	}, 5); err != nil {
+		t.Fatalf("CreateOutboundCall: %v", err)
+	}
 	formOut := url.Values{
 		"CallSid":   []string{"CA-out-err"},
 		"Direction": []string{"outbound-api"},
@@ -796,11 +791,13 @@ func TestServer_UnnormalizedPhonesAndReporterErrors(t *testing.T) {
 	serverFailRep, storeFail, cfgFail := setupTestServer()
 	serverFailRep.reporter = delivery.NewReporter(fakes.StaticConfig{Cfg: &config.Config{BrainURL: ""}}, storeFail, nil)
 	muxFail := serverFailRep.Routes()
-	_ = storeFail.CreateOutboundCall(context.Background(), model.VoiceCall{
+	if err := storeFail.CreateOutboundCall(context.Background(), model.VoiceCall{
 		CallID:          "call-stat-failrep",
 		ProviderCallSID: "CA-stat-failrep",
 		ReportStatus:    "pending",
-	}, 5)
+	}, 5); err != nil {
+		t.Fatalf("CreateOutboundCall: %v", err)
+	}
 	statForm := url.Values{
 		"CallSid":    []string{"CA-stat-failrep"},
 		"CallStatus": []string{"completed"},
@@ -839,16 +836,12 @@ func TestTwilioVoiceWebhook_CallIDResolutionAndNotFound(t *testing.T) {
 	mux := server.Routes()
 
 	// 1. Unbound outbound call arrives before BindProviderCallSID commits.
-	_ = store.CreateOutboundCall(context.Background(), model.VoiceCall{
-		CallID:          "call-out-unbound",
-		ProviderCallSID: "",
-		Direction:       "outbound",
-		FromNumber:      cfg.TwilioFromNumber,
-		ToNumber:        "+15105550777",
-		State:           "initiated",
-		StartedAt:       time.Now().UTC(),
-		UpdatedAt:       time.Now().UTC(),
-	}, 5)
+	if err := store.CreateOutboundCall(context.Background(), model.VoiceCall{
+		CallID: "call-out-unbound", Direction: "outbound", FromNumber: cfg.TwilioFromNumber, ToNumber: "+15105550777",
+		State: "initiated", StartedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}, 5); err != nil {
+		t.Fatalf("CreateOutboundCall: %v", err)
+	}
 
 	form := url.Values{
 		"CallSid":   []string{"CA-fast-arrival"},
@@ -877,16 +870,12 @@ func TestTwilioVoiceWebhook_CallIDResolutionAndNotFound(t *testing.T) {
 	}
 
 	// 1b. Unbound outbound call with call_id in form body
-	_ = store.CreateOutboundCall(context.Background(), model.VoiceCall{
-		CallID:          "call-out-unbound-form",
-		ProviderCallSID: "",
-		Direction:       "outbound",
-		FromNumber:      cfg.TwilioFromNumber,
-		ToNumber:        "+15105550778",
-		State:           "initiated",
-		StartedAt:       time.Now().UTC(),
-		UpdatedAt:       time.Now().UTC(),
-	}, 5)
+	if err := store.CreateOutboundCall(context.Background(), model.VoiceCall{
+		CallID: "call-out-unbound-form", Direction: "outbound", FromNumber: cfg.TwilioFromNumber, ToNumber: "+15105550778",
+		State: "initiated", StartedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}, 5); err != nil {
+		t.Fatalf("CreateOutboundCall: %v", err)
+	}
 
 	formB := url.Values{
 		"CallSid":   []string{"CA-fast-arrival-form"},
@@ -934,14 +923,12 @@ func TestTwilioStatusAndAMD_CallIDResolution(t *testing.T) {
 	mux := server.Routes()
 
 	// 1. Status webhook with unbound SID resolves by call_id query param
-	_ = store.CreateOutboundCall(context.Background(), model.VoiceCall{
-		CallID:          "call-unbound-stat",
-		ProviderCallSID: "",
-		Direction:       "outbound",
-		State:           "initiated",
-		StartedAt:       time.Now().UTC(),
-		UpdatedAt:       time.Now().UTC(),
-	}, 5)
+	if err := store.CreateOutboundCall(context.Background(), model.VoiceCall{
+		CallID: "call-unbound-stat", Direction: "outbound", State: "initiated",
+		StartedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}, 5); err != nil {
+		t.Fatalf("CreateOutboundCall: %v", err)
+	}
 
 	statForm := url.Values{
 		"CallSid":    []string{"CA-stat-unbound"},
@@ -961,23 +948,21 @@ func TestTwilioStatusAndAMD_CallIDResolution(t *testing.T) {
 		t.Fatalf("status webhook with call_id code = %d, want 200", recStat.Code)
 	}
 
-	boundStatCall, err := store.GetCall(context.Background(), "call-unbound-stat")
-	if err != nil || boundStatCall == nil || boundStatCall.ProviderCallSID != "CA-stat-unbound" {
-		t.Fatalf("status call not bound to CA-stat-unbound: %+v, err: %v", boundStatCall, err)
+	boundStatCall, statErr := store.GetCall(context.Background(), "call-unbound-stat")
+	if statErr != nil || boundStatCall == nil || boundStatCall.ProviderCallSID != "CA-stat-unbound" {
+		t.Fatalf("status call not bound to CA-stat-unbound: %+v, err: %v", boundStatCall, statErr)
 	}
 	if boundStatCall.State != "in-progress" {
 		t.Fatalf("status call state = %q, want in-progress", boundStatCall.State)
 	}
 
 	// 2. AMD webhook with unbound SID resolves by call_id query param
-	_ = store.CreateOutboundCall(context.Background(), model.VoiceCall{
-		CallID:          "call-unbound-amd",
-		ProviderCallSID: "",
-		Direction:       "outbound",
-		State:           "in-progress",
-		StartedAt:       time.Now().UTC(),
-		UpdatedAt:       time.Now().UTC(),
-	}, 5)
+	if err := store.CreateOutboundCall(context.Background(), model.VoiceCall{
+		CallID: "call-unbound-amd", Direction: "outbound", State: "in-progress",
+		StartedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}, 5); err != nil {
+		t.Fatalf("CreateOutboundCall: %v", err)
+	}
 
 	sess := mediastream.NewMediaStreamSession(mediastream.MediaStreamSessionConfig{
 		CallID: "call-unbound-amd",
@@ -1002,9 +987,9 @@ func TestTwilioStatusAndAMD_CallIDResolution(t *testing.T) {
 		t.Fatalf("amd webhook with call_id code = %d, want 200", recAMD.Code)
 	}
 
-	boundAMDCall, err := store.GetCall(context.Background(), "call-unbound-amd")
-	if err != nil || boundAMDCall == nil || boundAMDCall.ProviderCallSID != "CA-amd-unbound" {
-		t.Fatalf("amd call not bound to CA-amd-unbound: %+v, err: %v", boundAMDCall, err)
+	boundAMDCall, amdErr := store.GetCall(context.Background(), "call-unbound-amd")
+	if amdErr != nil || boundAMDCall == nil || boundAMDCall.ProviderCallSID != "CA-amd-unbound" {
+		t.Fatalf("amd call not bound to CA-amd-unbound: %+v, err: %v", boundAMDCall, amdErr)
 	}
 	if boundAMDCall.AnsweredBy != "human" {
 		t.Fatalf("amd call AnsweredBy = %q, want human", boundAMDCall.AnsweredBy)
@@ -1103,9 +1088,16 @@ func TestServer_RoutesMediaStreamUpgrade(t *testing.T) {
 
 			token := "bad-token"
 			if tc.validToken {
-				token, _ = tokenMgr.Issue("call-upgrade", 30*time.Second)
+				var issueErr error
+				token, issueErr = tokenMgr.Issue("call-upgrade", 30*time.Second)
+				if issueErr != nil {
+					t.Fatalf("tokenMgr.Issue: %v", issueErr)
+				}
 			}
-			conn, resp, _ := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(srv.URL, "http")+"/api/webhooks/twilio/stream/"+token, nil)
+			conn, resp, dialErr := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(srv.URL, "http")+"/api/webhooks/twilio/stream/"+token, nil)
+			if (dialErr != nil) != !tc.validToken {
+				t.Fatalf("Dial() error = %v, wantErr = %v", dialErr, !tc.validToken)
+			}
 			if conn != nil {
 				_ = conn.Close()
 			}
@@ -1225,10 +1217,12 @@ func runTriggerPostCallReportTest(t *testing.T, tc triggerPostCallReportTestCase
 	}
 	st := fakes.NewFakeStore()
 	if strings.TrimSpace(tc.callID) != "" {
-		_ = st.CreateOutboundCall(context.Background(), model.VoiceCall{
+		if err := st.CreateOutboundCall(context.Background(), model.VoiceCall{
 			CallID:       tc.callID,
 			ReportStatus: "pending",
-		}, 5)
+		}, 5); err != nil {
+			t.Fatalf("CreateOutboundCall: %v", err)
+		}
 	}
 	var rep *delivery.Reporter
 	if !tc.noReporter {
@@ -1259,7 +1253,11 @@ func runTriggerPostCallReportTest(t *testing.T, tc triggerPostCallReportTestCase
 	}
 
 	// Only the ProsperaReport object delivers; triggering never posts directly.
-	if call, _ := st.GetCall(context.Background(), tc.callID); call != nil && call.ReportStatus != "pending" {
+	call, err := st.GetCall(context.Background(), tc.callID)
+	if err != nil {
+		t.Fatalf("GetCall: %v", err)
+	}
+	if call != nil && call.ReportStatus != "pending" {
 		t.Errorf("call report status = %q, want pending", call.ReportStatus)
 	}
 }
@@ -1319,10 +1317,12 @@ func runHandleReportJobTest(t *testing.T, tc handleReportJobTestCase) {
 		DefaultDiscordChannel: "prospera",
 	}
 	st := fakes.NewFakeStore()
-	_ = st.CreateOutboundCall(context.Background(), model.VoiceCall{
+	if err := st.CreateOutboundCall(context.Background(), model.VoiceCall{
 		CallID:       tc.callID,
 		ReportStatus: "pending",
-	}, 5)
+	}, 5); err != nil {
+		t.Fatalf("CreateOutboundCall: %v", err)
+	}
 
 	rep := delivery.NewReporter(fakes.StaticConfig{Cfg: cfg}, st, &fakes.FakeTwilio{})
 	server := NewServer(newTestConfigSource(cfg), st, &fakes.FakeTwilio{}, nil, nil, rep, WithServerHTTPClient(srv.Client()))
@@ -1342,7 +1342,11 @@ func runHandleReportJobTest(t *testing.T, tc handleReportJobTestCase) {
 		t.Errorf("calledIngress = %v, want %v", gotIngress, tc.wantIngress)
 	}
 
-	if call, _ := st.GetCall(context.Background(), tc.callID); call.ReportStatus != "pending" {
+	call, err := st.GetCall(context.Background(), tc.callID)
+	if err != nil {
+		t.Fatalf("GetCall: %v", err)
+	}
+	if call.ReportStatus != "pending" {
 		t.Errorf("call report status = %q, want pending", call.ReportStatus)
 	}
 }
@@ -1375,7 +1379,10 @@ func TestServer_HangupActiveSessions(t *testing.T) {
 	emptyS.Drain(context.Background())
 
 	// 2. Active sessions have hangup initiated
-	server, _, _ := setupTestServer()
+	server, _, cfg := setupTestServer()
+	if cfg == nil {
+		t.Fatal("setupTestServer returned nil config")
+	}
 	server.Drain(nil)
 	server.Drain(context.Background())
 
@@ -1403,9 +1410,11 @@ func TestServer_ResolveAndBindCall_ErrorBranches(t *testing.T) {
 	// 2. BindProviderCallSID error logs warning
 	st := fakes.NewFakeStore()
 	st.BindErr = errors.New("bind failure")
-	_ = st.CreateOutboundCall(context.Background(), model.VoiceCall{
+	if err := st.CreateOutboundCall(context.Background(), model.VoiceCall{
 		CallID: "call-bind-err",
-	}, 5)
+	}, 5); err != nil {
+		t.Fatalf("CreateOutboundCall: %v", err)
+	}
 	server := NewServer(newTestConfigSource(&config.Config{}), st, nil, nil, nil, nil)
 	reqBind := httptest.NewRequest(http.MethodGet, "/?call_id=call-bind-err", http.NoBody)
 	call := server.resolveAndBindCall(context.Background(), reqBind, "CA-bind-err")
