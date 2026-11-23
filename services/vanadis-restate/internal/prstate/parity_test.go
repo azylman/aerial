@@ -62,7 +62,6 @@ type goldenMetadata struct {
 	Banner                 string                          `json:"banner,omitempty"`
 	BuildMetadata          *BuildMetadata                  `json:"build_metadata,omitempty"`
 	CIChecks               map[string]string               `json:"ci_checks,omitempty"`
-	DeployFailedPublished  bool                            `json:"deploy_failed_published,omitempty"`
 	DeploySuccessPending   bool                            `json:"deploy_success_pending,omitempty"`
 	DeployedJobs           []string                        `json:"deployed_jobs,omitempty"`
 	DeployedKustomizations []string                        `json:"deployed_kustomizations,omitempty"`
@@ -405,8 +404,8 @@ func (s *paritySim) finalRows() map[string]parityRow {
 			TargetID: st.TargetID, Status: st.RegistryStatus(), Title: st.Title,
 			Metadata: goldenMetadata{
 				Agent: st.Agent, Banner: st.Banner, BuildMetadata: st.BuildMetadata, CIChecks: nilIfEmpty(st.CIChecks),
-				DeployFailedPublished: st.DeployFailedPublished, DeploySuccessPending: st.DeploySuccessPending,
-				DeployedJobs: cleanStrings(st.DeployedJobs), DeployedKustomizations: cleanStrings(st.DeployedKustomizations),
+				DeploySuccessPending: st.DeploySuccessPending,
+				DeployedJobs:         cleanStrings(st.DeployedJobs), DeployedKustomizations: cleanStrings(st.DeployedKustomizations),
 				JobStates: nilIfEmpty(st.JobStates), Jobs: cleanStrings(st.Jobs),
 				KustomizationRequests: nilIfEmpty(st.KustomizationRequests), StartedJobs: cleanStrings(st.StartedJobs),
 			},

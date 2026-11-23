@@ -2,6 +2,7 @@ package prstate
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"sync"
 	"testing"
@@ -341,7 +342,6 @@ func TestPRObjectServiceHandleDeploySuccess(t *testing.T) {
 	deduped := func() *PRState {
 		st := deployingMergedPR()
 		st.MarkEffectDispatched(st.EffectKeyFor(prwire.EffectDeployDispatch, "", "eri", ""))
-		st.RecordDeployedPR()
 		return st
 	}
 	ev := func() PREvent {
@@ -393,7 +393,7 @@ func TestPRObjectServiceHandleDeploySuccess(t *testing.T) {
 				// No Kustomization requests: a direct-alert deploy never
 				// flips the registry status, matching legacy synapse.
 				require.Equal(t, RegistryStatusDeploying, rec.saved.Status)
-				require.True(t, rec.saved.WasDeployedPR())
+				require.True(t, rec.saved.WasEffectDispatched(rec.saved.EffectKeyFor(prwire.EffectDeployDispatch, "", "eri", "")))
 				require.Nil(t, rec.saved.PendingDeployFailure)
 				require.Equal(t, tc.wantDispatched, rec.saved.WasEffectDispatched(factKey("pr_fact_deploy_success", "m1", "eri")))
 			}
@@ -663,9 +663,11 @@ func TestPRObjectServiceHandleDeployAttemptFailed(t *testing.T) {
 }
 
 // TestPRObjectServiceHandleDeployFailureDeadline pins the deadline: the
-// current attempt applies deploy_failed with its banner, publishes the
-// captured fact, and acknowledges it; a failed publish schedules a retry;
-// stale, superseded, and unfailable deadlines only disarm or do nothing.
+// current attempt applies deploy_failed and publishes the captured fact; a
+// PR already in deploy_failed re-enters it and publishes the newest failure,
+// while a fact whose effect key already fired is not sent again; a failed
+// publish schedules a retry; stale, superseded, and unfailable deadlines
+// only disarm or do nothing.
 func TestPRObjectServiceHandleDeployFailureDeadline(t *testing.T) {
 	t.Parallel()
 	armed := func(status string, gen uint64) *PRState {
@@ -675,26 +677,37 @@ func TestPRObjectServiceHandleDeployFailureDeadline(t *testing.T) {
 		st.GateGeneration = gen
 		return st
 	}
+	redelivered := armed(RegistryStatusDeployFailed, 0)
+	redelivered.MarkEffectDispatched(factKey("pr_fact_deploy_failed", "m1", ""))
+	legacyAcked := legacyPRState(t, armed(RegistryStatusDeployFailed, 0))
 	tests := []struct {
-		name          string
-		state         *PRState
-		failGet       bool
-		seq           uint64
-		pub           *fakeFactPublisher
-		wantErr       bool
-		wantCalls     []factCall
-		wantSet       bool
-		wantStatus    string
-		wantPublished bool
-		wantSends     []sentCall
+		name       string
+		state      *PRState
+		failGet    bool
+		seq        uint64
+		pub        *fakeFactPublisher
+		wantErr    bool
+		wantCalls  []factCall
+		wantSet    bool
+		wantStatus string
+		wantSends  []sentCall
 	}{
 		{
-			name: "current attempt fails publishes and acknowledges", state: armed(RegistryStatusDeploying, 0), seq: 1, pub: &fakeFactPublisher{},
-			wantCalls: []factCall{{msgID: testFailedIdem, fact: pinned(failedFact())}}, wantSet: true, wantStatus: RegistryStatusDeployFailed, wantPublished: true,
+			name: "current attempt fails and publishes", state: armed(RegistryStatusDeploying, 0), seq: 1, pub: &fakeFactPublisher{},
+			wantCalls: []factCall{{msgID: testFailedIdem, fact: pinned(failedFact())}}, wantSet: true, wantStatus: RegistryStatusDeployFailed,
+		},
+		{
+			name: "repeated failure on a deploy failed pr publishes the newest failure", state: armed(RegistryStatusDeployFailed, 0), seq: 1, pub: &fakeFactPublisher{},
+			wantCalls: []factCall{{msgID: testFailedIdem, fact: pinned(failedFact())}}, wantSet: true, wantStatus: RegistryStatusDeployFailed,
+		},
+		{name: "redelivered failure sends no duplicate notification", state: redelivered, seq: 1, pub: &fakeFactPublisher{}, wantSet: true, wantStatus: RegistryStatusDeployFailed},
+		{
+			name: "old blob with a published deploy failure still publishes the newest failure", state: legacyAcked, seq: 1, pub: &fakeFactPublisher{},
+			wantCalls: []factCall{{msgID: testFailedIdem, fact: pinned(failedFact())}}, wantSet: true, wantStatus: RegistryStatusDeployFailed,
 		},
 		{
 			name: "failed publish schedules a retry", state: armed(RegistryStatusDeploying, 0), seq: 1, pub: &fakeFactPublisher{err: errFakeBus},
-			wantCalls: []factCall{{msgID: testFailedIdem, fact: pinned(failedFact())}}, wantSet: true, wantStatus: RegistryStatusDeployFailed, wantPublished: true,
+			wantCalls: []factCall{{msgID: testFailedIdem, fact: pinned(failedFact())}}, wantSet: true, wantStatus: RegistryStatusDeployFailed,
 			wantSends: []sentCall{{service: "PRObject", key: "azylman/aerial", method: PRHandlerRetryFactEffect, input: FactEffectRetry{Fact: pinned(failedFact()), Attempt: 1}, delayed: true}},
 		},
 		{name: "moved generation only disarms", state: armed(RegistryStatusDeploying, 1), seq: 1, pub: &fakeFactPublisher{}, wantSet: true, wantStatus: RegistryStatusDeploying},
@@ -716,7 +729,6 @@ func TestPRObjectServiceHandleDeployFailureDeadline(t *testing.T) {
 			if tc.wantSet {
 				require.Nil(t, rec.saved.PendingDeployFailure)
 				require.Equal(t, tc.wantStatus, rec.saved.Status)
-				require.Equal(t, tc.wantPublished, rec.saved.DeployFailedPublished)
 			}
 			require.Equal(t, tc.wantSends, rec.sends.snapshot())
 		})
@@ -828,4 +840,26 @@ func TestPRObjectServiceLifecycleFacts(t *testing.T) {
 func targeted(f pubsub.PRLifecycleEvent) pubsub.PRLifecycleEvent {
 	f.TargetID = testTarget
 	return f
+}
+
+// legacyPRState round-trips st through the Restate JSON codec with every
+// field the old in-memory tracker stored, as an old stored blob carries
+// them: removed fields must decode cleanly and change nothing.
+func legacyPRState(t *testing.T, st *PRState) *PRState {
+	t.Helper()
+	//nolint:musttag // PRState is Restate-owned state with intentionally untagged fields; this mirrors the stored K/V blob.
+	raw, err := json.Marshal(st)
+	require.NoError(t, err)
+	var blob map[string]any
+	require.NoError(t, json.Unmarshal(raw, &blob))
+	blob["NonRoboRevSHA"], blob["CancelledSHA"] = "h1", "h1"
+	blob["CollaboratorAlerted"], blob["CollaboratorConflict"] = "h1", "h1"
+	blob["UpdatedForMain"], blob["DeployPRDispatched"], blob["DeployFailedPublished"] = true, true, true
+	blob["DeploySHAJob"] = map[string]bool{"sha:azylman/aerial:eri:h1": true}
+	raw, err = json.Marshal(blob)
+	require.NoError(t, err)
+	var out PRState
+	//nolint:musttag // PRState is Restate-owned state with intentionally untagged fields; this mirrors the stored K/V blob.
+	require.NoError(t, json.Unmarshal(raw, &out))
+	return &out
 }
