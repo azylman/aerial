@@ -128,6 +128,11 @@ func (e *Executor) HasRoboRevOverride(ctx context.Context, repo string, number i
 	return e.ciClient().HasRoboRevOverrideChecked(ctx, repo, number, headSHA)
 }
 
+// HasActiveOrRecoveredChecks reports whether the commit has active or passing CI checks.
+func (e *Executor) HasActiveOrRecoveredChecks(ctx context.Context, repo, headSHA string) (bool, error) {
+	return e.ciClient().HasActiveOrRecoveredChecksChecked(ctx, repo, headSHA)
+}
+
 func isTrustedPRAuthor(login, association, owner string) bool {
 	if cleanLogin := strings.TrimSpace(login); cleanLogin != "" && strings.EqualFold(cleanLogin, owner) {
 		return true

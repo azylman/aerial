@@ -483,6 +483,35 @@ func TestFlow_HandleDeployFailureEvent(t *testing.T) {
 	}
 }
 
+func newMockTurnEndedServer(t *testing.T, prStatus int, prBody, commentsBody string, checkRunsStatus int, checkRunsBody string) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/repos/example-owner/aerial/pulls/42":
+			w.WriteHeader(prStatus)
+			_, _ = w.Write([]byte(prBody))
+		case "/repos/example-owner/aerial/issues/42/comments":
+			if commentsBody == "" {
+				w.WriteHeader(http.StatusBadGateway)
+				return
+			}
+			_, _ = w.Write([]byte(commentsBody))
+		case "/repos/example-owner/aerial/commits/abcdef1234567/check-runs":
+			status := checkRunsStatus
+			body := checkRunsBody
+			if status == 0 && body == "" {
+				status = http.StatusOK
+				body = `{"check_runs":[{"name":"unit-tests","status":"completed","conclusion":"failure"}]}`
+			}
+			w.WriteHeader(status)
+			_, _ = w.Write([]byte(body))
+		default:
+			t.Errorf("unexpected GitHub request %s", r.URL.Path)
+			w.WriteHeader(http.StatusTeapot)
+		}
+	}))
+}
+
 func TestFlow_HandleCIRemediationTurnEnded(t *testing.T) {
 	t.Parallel()
 	const (
@@ -501,18 +530,20 @@ func TestFlow_HandleCIRemediationTurnEnded(t *testing.T) {
 		return model.VanadisChunk{ID: "c1", BuildID: "b1", Repo: "aerial", Status: statusCIFailed, PRNumber: 42, CIFailCount: 2, CIChecks: checks, Banner: banner}
 	}
 	tests := []struct {
-		name         string
-		dispatchID   string
-		chunk        model.VanadisChunk
-		quiet        bool
-		prStatus     int
-		prBody       string
-		commentsBody string
-		wantErr      bool
-		wantFailed   []string
-		wantMsg      string
-		wantCancel   string
-		wantWidget   string
+		name            string
+		dispatchID      string
+		chunk           model.VanadisChunk
+		quiet           bool
+		prStatus        int
+		prBody          string
+		commentsBody    string
+		checkRunsStatus int
+		checkRunsBody   string
+		wantErr         bool
+		wantFailed      []string
+		wantMsg         string
+		wantCancel      string
+		wantWidget      string
 	}{
 		{name: "head same pauses with alert and banner", dispatchID: executor.CIRemediationDispatchID("c1", head, 2), chunk: ciFailed(nil, `CI check "unit-tests" failed`), prStatus: 200, prBody: openPR, wantFailed: []string{pauseFail}, wantMsg: pauseMsg, wantCancel: "c1", wantWidget: pauseNote},
 		{name: "quiet build pauses without alert", dispatchID: executor.CIRemediationDispatchID("c1", head, 2), chunk: ciFailed(nil, ""), quiet: true, prStatus: 200, prBody: openPR, wantFailed: []string{pauseFail}, wantCancel: "c1", wantWidget: pauseNote},
@@ -534,30 +565,17 @@ func TestFlow_HandleCIRemediationTurnEnded(t *testing.T) {
 		{name: "mixed roborev and lint failure pauses even with override", dispatchID: executor.CIRemediationDispatchID("c1", head, 2), chunk: ciFailed(map[string]string{"roborev": "failed", "lint": "failed"}, ""), prStatus: 200, prBody: openPR, commentsBody: override, wantFailed: []string{pauseFail}, wantMsg: pauseMsg, wantCancel: "c1", wantWidget: pauseNote},
 		{name: "roborev with underscore key is handled", dispatchID: executor.CIRemediationDispatchID("c1", head, 2), chunk: ciFailed(map[string]string{"_": "pending", "roborev": "failed"}, ""), prStatus: 200, prBody: openPR, commentsBody: override},
 		{name: "override lookup outage stays retryable", dispatchID: executor.CIRemediationDispatchID("c1", head, 2), chunk: ciFailed(map[string]string{"roborev": "failed"}, ""), prStatus: 200, prBody: openPR, wantErr: true},
+		{name: "active queued check run is a no-op", dispatchID: executor.CIRemediationDispatchID("c1", head, 2), chunk: ciFailed(map[string]string{"unit-tests": "failed"}, ""), prStatus: 200, prBody: openPR, checkRunsStatus: 200, checkRunsBody: `{"check_runs":[{"name":"unit-tests","status":"queued","conclusion":""}]}`},
+		{name: "active in_progress check run is a no-op", dispatchID: executor.CIRemediationDispatchID("c1", head, 2), chunk: ciFailed(map[string]string{"unit-tests": "failed"}, ""), prStatus: 200, prBody: openPR, checkRunsStatus: 200, checkRunsBody: `{"check_runs":[{"name":"unit-tests","status":"in_progress","conclusion":""}]}`},
+		{name: "all check runs recovered is a no-op", dispatchID: executor.CIRemediationDispatchID("c1", head, 2), chunk: ciFailed(map[string]string{"unit-tests": "failed"}, ""), prStatus: 200, prBody: openPR, checkRunsStatus: 200, checkRunsBody: `{"check_runs":[{"name":"unit-tests","status":"completed","conclusion":"success"}]}`},
+		{name: "local pending check in chunk is a no-op", dispatchID: executor.CIRemediationDispatchID("c1", head, 2), chunk: ciFailed(map[string]string{"unit-tests": "pending"}, "")},
+		{name: "local running check in chunk is a no-op", dispatchID: executor.CIRemediationDispatchID("c1", head, 2), chunk: ciFailed(map[string]string{"unit-tests": "running"}, "")},
+		{name: "check-runs outage stays retryable", dispatchID: executor.CIRemediationDispatchID("c1", head, 2), chunk: ciFailed(map[string]string{"unit-tests": "failed"}, ""), prStatus: 200, prBody: openPR, checkRunsStatus: 502, checkRunsBody: `{}`, wantErr: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				switch r.URL.Path {
-				case "/repos/example-owner/aerial/pulls/42":
-					w.WriteHeader(tc.prStatus)
-					if _, err := w.Write([]byte(tc.prBody)); err != nil {
-						t.Errorf("write response: %v", err)
-					}
-				case "/repos/example-owner/aerial/issues/42/comments":
-					if tc.commentsBody == "" {
-						w.WriteHeader(http.StatusBadGateway)
-						return
-					}
-					if _, err := w.Write([]byte(tc.commentsBody)); err != nil {
-						t.Errorf("write response: %v", err)
-					}
-				default:
-					t.Errorf("unexpected GitHub request %s", r.URL.Path)
-					w.WriteHeader(http.StatusTeapot)
-				}
-			}))
+			api := newMockTurnEndedServer(t, tc.prStatus, tc.prBody, tc.commentsBody, tc.checkRunsStatus, tc.checkRunsBody)
 			t.Cleanup(api.Close)
 			eri := &eritest.Client{}
 			exec := executor.NewExecutor(t.TempDir(), eri, nil, "token", "example-owner", api.Client())
