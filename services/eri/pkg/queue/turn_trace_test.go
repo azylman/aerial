@@ -2,7 +2,6 @@ package queue
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -14,7 +13,6 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/azylman/aerial/pkg/tracing"
-	"github.com/azylman/aerial/services/eri/pkg/db"
 	"github.com/azylman/aerial/services/eri/pkg/runner"
 )
 
@@ -117,18 +115,15 @@ func TestStartTurnSpan(t *testing.T) {
 	t.Parallel()
 	pickup := time.Date(2026, 11, 13, 8, 0, 10, 0, time.UTC)
 	enq := pickup.Add(-3 * time.Second)
-	poolStart := pickup.Add(-5 * time.Second)
 	firstEnq := pickup.Add(-40 * time.Minute)
-	staleUpdate := firstEnq.Add(time.Minute) // recovery bumps RestartCount without touching UpdatedAt
 	tests := []startTurnSpanCase{
 		{name: "single message parents to its traceparent", items: []queuedTurnItem{{traceparent: traceparA, createdAt: enq}}, wantTrace: traceA, wantWait: true, wantStart: enq, agentName: "aerial", wantAgent: true},
 		{name: "burst links the rest", items: []queuedTurnItem{{traceparent: traceparA, createdAt: enq}, {traceparent: traceparB, createdAt: enq}, {traceparent: malformedTP}, {traceparent: traceparC}}, wantTrace: traceA, wantLinks: []string{traceB, traceC}, wantWait: true, wantStart: enq},
 		{name: "untraced first message starts a root and links the others", items: []queuedTurnItem{{createdAt: enq}, {traceparent: traceparB}}, wantLinks: []string{traceB}, wantWait: true, wantStart: enq},
 		{name: "no enqueue time skips queue wait", items: []queuedTurnItem{{traceparent: traceparA}}, wantTrace: traceA, wantStart: pickup},
 		{name: "clock skew skips queue wait", items: []queuedTurnItem{{traceparent: traceparA, createdAt: pickup.Add(time.Second)}}, wantTrace: traceA, wantStart: pickup},
-		{name: "first attempt dispatch waits from creation", items: []queuedTurnItem{dispatchTraceItem(db.Dispatch{Traceparent: traceparA, CreatedAt: enq, UpdatedAt: enq, RetryCount: 1}, poolStart)}, wantTrace: traceA, wantWait: true, wantStart: enq, wantRetries: 1},
-		{name: "resumed dispatch with stale updated_at waits from pool start", items: []queuedTurnItem{dispatchTraceItem(db.Dispatch{Traceparent: traceparA, CreatedAt: firstEnq, UpdatedAt: staleUpdate, RestartCount: 1, RetryCount: 2}, poolStart)}, wantTrace: traceA, wantWait: true, wantStart: poolStart, wantRestarts: 1, wantRetries: 2, wantResumed: true, wantFirstMs: firstEnq.UnixMilli()},
-		{name: "resumed burst waits from its requeue", items: burstTraceItems([]db.Message{{Traceparent: traceparA, CreatedAt: firstEnq, UpdatedAt: enq, RestartCount: 2}, {Traceparent: traceparB, CreatedAt: firstEnq}}, poolStart), wantTrace: traceA, wantLinks: []string{traceB}, wantWait: true, wantStart: enq, wantRestarts: 2, wantResumed: true, wantFirstMs: firstEnq.UnixMilli()},
+		{name: "first attempt dispatch waits from creation", items: []queuedTurnItem{{traceparent: traceparA, createdAt: enq, retryCount: 1}}, wantTrace: traceA, wantWait: true, wantStart: enq, wantRetries: 1},
+		{name: "resumed burst waits from its requeue", items: []queuedTurnItem{{traceparent: traceparA, createdAt: firstEnq, requeuedAt: enq, restartCount: 2}, {traceparent: traceparB, createdAt: firstEnq}}, wantTrace: traceA, wantLinks: []string{traceB}, wantWait: true, wantStart: enq, wantRestarts: 2, wantResumed: true, wantFirstMs: firstEnq.UnixMilli()},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -221,34 +216,6 @@ func TestEndTurnSpanContent(t *testing.T) {
 			}
 			if got := have[tracing.AttrGenAIOutputMessages].AsString(); got != tc.wantOutput {
 				t.Errorf("output = %q, want %q", got, tc.wantOutput)
-			}
-		})
-	}
-}
-
-func TestLateSinkUsage(t *testing.T) {
-	t.Parallel()
-	killed := runner.AgyUsage{InputTokens: 34606, OutputTokens: 198, CacheReadTokens: 391188, CacheCreationTokens: 34588, TotalTokens: 34804}
-	closedOnKill := runner.NewTracingTurnSink(context.Background(), nil)
-	closedOnKill.OnError(&runner.TurnError{Err: errors.New("daemon closed while turn was in-flight"), Usage: killed})
-	cancelled, cancel := context.WithCancel(context.Background())
-	cancel()
-	tests := []struct {
-		name string
-		sink *runner.TracingTurnSink
-		ctx  context.Context
-		want runner.TokenUsage
-	}{
-		{"no attempt ran", nil, context.Background(), runner.TokenUsage{}},
-		{"killed turn reports consumed usage", closedOnKill, context.Background(), killed},
-		{"turn never closed before the grace ran out", runner.NewTracingTurnSink(context.Background(), nil), cancelled, runner.TokenUsage{}},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			te := &turnExecution{traceSink: tc.sink}
-			if got := te.lateSinkUsage(tc.ctx); got != tc.want {
-				t.Errorf("lateSinkUsage = %+v, want %+v", got, tc.want)
 			}
 		})
 	}

@@ -3,7 +3,6 @@ package queue
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -18,7 +17,6 @@ import (
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
-	"github.com/azylman/aerial/services/eri/pkg/runner"
 )
 
 type trackingBus struct {
@@ -131,6 +129,7 @@ func TestWorkerPool_PublishDispatchOutcome_JetStream(t *testing.T) {
 		chunkID       string
 		dispatchID    string
 		source        string
+		wantErr       bool
 		wantPublishes []string
 		wantDelivered []deliveredOutcome
 	}{
@@ -166,6 +165,7 @@ func TestWorkerPool_PublishDispatchOutcome_JetStream(t *testing.T) {
 			chunkID:    "chunk-empty-status",
 			dispatchID: "disp-empty-status",
 			source:     "vanadis",
+			wantErr:    true,
 		},
 	}
 
@@ -178,184 +178,17 @@ func TestWorkerPool_PublishDispatchOutcome_JetStream(t *testing.T) {
 			trackBus := &trackingBus{Bus: memBus}
 			recorder := newOutcomeRecorder(t, memBus)
 
-			poolCtx, cancelPool := context.WithCancel(context.Background())
-			defer cancelPool()
-			restateSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				w.WriteHeader(http.StatusOK)
-			}))
-			defer restateSrv.Close()
-
-			pool := &WorkerPool{
-				ctx:      poolCtx,
-				cancel:   cancelPool,
-				eventBus: trackBus,
-				cfg: WorkerPoolConfig{
-					EventBus:          trackBus,
-					RestateIngressURL: restateSrv.URL,
-				},
-			}
-
+			pool := &WorkerPool{eventBus: trackBus, cfg: WorkerPoolConfig{EventBus: trackBus}}
 			disp := outcomeDispatch(tc.dispatchID, tc.source, tc.chunkID)
-			te := &turnExecution{
-				pool:        pool,
-				dispatch:    &disp,
-				threadID:    "dispatch-" + disp.ID,
-				triggerType: "dispatch:" + tc.source,
-				execStart:   time.Now().UTC().Add(-100 * time.Millisecond),
-				turnStatus:  tc.turnStatus,
-				turnError:   tc.turnError,
-				turnCtx:     poolCtx,
+			completedAt := time.Now().UTC()
+			err := pool.publishDispatchOutcome(context.Background(), disp, tc.turnStatus, tc.turnError, completedAt.Add(-100*time.Millisecond), completedAt)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("publishDispatchOutcome error = %v, wantErr %v", err, tc.wantErr)
 			}
-
-			cleanup := pool.setupDispatchTurn(disp, te)
-			cleanup()
 
 			delivered := recorder.waitFor(len(tc.wantDelivered))
 			assertAttemptedPublishes(t, trackBus.dispatchPublishes(), tc.wantPublishes)
 			assertDeliveredOutcomes(t, delivered, tc.wantDelivered)
-		})
-	}
-}
-
-type retryFailingBus struct {
-	pubsub.Bus
-
-	mu           sync.Mutex
-	attempts     int
-	failAttempts int
-	afterAttempt func(att int)
-}
-
-func (r *retryFailingBus) Publish(ctx context.Context, subject, msgID string, payload any) error {
-	if !strings.HasPrefix(subject, pubsub.SubjectAerialDispatchPrefix) {
-		return r.Bus.Publish(ctx, subject, msgID, payload)
-	}
-	r.mu.Lock()
-	r.attempts++
-	att := r.attempts
-	cb := r.afterAttempt
-	r.mu.Unlock()
-	if cb != nil {
-		cb(att)
-	}
-	if att <= r.failAttempts {
-		return errors.New("simulated jetstream publish error")
-	}
-	return r.Bus.Publish(ctx, subject, msgID, payload)
-}
-
-func TestWorkerPool_SetupDispatchTurn_OutcomePublishRetries(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name          string
-		failAttempts  int
-		cancelPool    bool
-		cancelBefore  bool
-		wantAttempts  int
-		wantPublishes []string
-	}{
-		{
-			name:          "outcome publish succeeds on first attempt",
-			failAttempts:  0,
-			wantAttempts:  1,
-			wantPublishes: []string{"aerial.dispatch.completed"},
-		},
-		{
-			name:          "outcome publish retries and succeeds after transient error",
-			failAttempts:  1,
-			wantAttempts:  2,
-			wantPublishes: []string{"aerial.dispatch.completed"},
-		},
-		{
-			name:          "outcome publish exhausts 3 attempts on continuous error",
-			failAttempts:  5,
-			wantAttempts:  3,
-			wantPublishes: nil,
-		},
-		{
-			name:          "cancelled pool context aborts publish retries",
-			failAttempts:  5,
-			cancelPool:    true,
-			wantAttempts:  1,
-			wantPublishes: nil,
-		},
-		{
-			name:          "cancelled pool context before cleanup still publishes first attempt",
-			failAttempts:  0,
-			cancelBefore:  true,
-			wantAttempts:  1,
-			wantPublishes: []string{"aerial.dispatch.completed"},
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-
-			memBus := pubsub.NewMemoryBus()
-			defer memBus.Close()
-			failingBus := &retryFailingBus{Bus: memBus, failAttempts: tc.failAttempts}
-			recorder := newOutcomeRecorder(t, memBus)
-
-			poolCtx, cancelPool := context.WithCancel(context.Background())
-			defer cancelPool()
-
-			restateSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				w.WriteHeader(http.StatusOK)
-			}))
-			defer restateSrv.Close()
-
-			pool := &WorkerPool{
-				ctx:      poolCtx,
-				cancel:   cancelPool,
-				eventBus: failingBus,
-				cfg: WorkerPoolConfig{
-					EventBus:           failingBus,
-					RetryDelayOverride: 1 * time.Millisecond,
-					RestateIngressURL:  restateSrv.URL,
-				},
-			}
-
-			if tc.cancelBefore {
-				cancelPool()
-			}
-			if tc.cancelPool {
-				failingBus.afterAttempt = func(att int) {
-					if att == 1 {
-						cancelPool()
-					}
-				}
-			}
-
-			disp := outcomeDispatch("disp-retry-"+strings.ReplaceAll(tc.name, " ", "-"), "vanadis", "chunk-retry")
-			te := &turnExecution{
-				pool:        pool,
-				dispatch:    &disp,
-				threadID:    "dispatch-" + disp.ID,
-				triggerType: "dispatch:vanadis",
-				execStart:   time.Now().UTC().Add(-100 * time.Millisecond),
-				turnStatus:  "success",
-				turnCtx:     poolCtx,
-			}
-
-			cleanup := pool.setupDispatchTurn(disp, te)
-			cleanup()
-
-			failingBus.mu.Lock()
-			gotAttempts := failingBus.attempts
-			failingBus.mu.Unlock()
-
-			if gotAttempts != tc.wantAttempts {
-				t.Fatalf("publish attempts = %d, want %d", gotAttempts, tc.wantAttempts)
-			}
-
-			if len(tc.wantPublishes) > 0 {
-				delivered := recorder.waitFor(len(tc.wantPublishes))
-				if len(delivered) != len(tc.wantPublishes) {
-					t.Fatalf("delivered count = %d, want %d", len(delivered), len(tc.wantPublishes))
-				}
-			}
 		})
 	}
 }
@@ -717,186 +550,6 @@ func TestWorkerPool_VanadisHTTPClient(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			runVanadisHTTPClientCase(t, tc)
-		})
-	}
-}
-
-type setupDispatchActiveStepCase struct {
-	name             string
-	source           string
-	chunkID          string
-	targetID         string
-	prompt           string
-	dispatchStatus   string
-	serverStatus     int
-	emitToolCommand  string
-	expectUpdater    bool
-	expectDirtyAfter bool
-	wantFlushes      []string
-}
-
-func verifyUpdaterStep(t *testing.T, u *StatusUpdater, cmd string, expectDirty bool) {
-	t.Helper()
-	if cmd == "" {
-		return
-	}
-	// The constructor auto-starts the background flush loop, which would race this
-	// explicit flush (a failed send re-marks dirty, so both goroutines could forward the
-	// step). Stop it first so this flush is the only one; cleanup's Stop is idempotent.
-	u.Stop()
-	u.HandleStep(&runner.StepUpdateEvent{
-		StepType: "tool",
-		ToolName: "run_command",
-		State:    "ACTIVE",
-		ToolInfo: &runner.StepToolInfo{
-			Parameters: runner.StepToolParameters{CommandLine: cmd},
-		},
-	})
-	u.flush()
-	if !expectDirty {
-		return
-	}
-	u.mu.Lock()
-	dirty := u.dirty
-	u.mu.Unlock()
-	if !dirty {
-		t.Error("expected statusUpdater to remain dirty after server error")
-	}
-}
-
-func runSetupDispatchActiveStepCase(t *testing.T, tc setupDispatchActiveStepCase) {
-	t.Helper()
-
-	var flushedSteps []string
-	var flushedMu sync.Mutex
-
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var p updateActiveStepPayload
-		_ = json.NewDecoder(r.Body).Decode(&p)
-		flushedMu.Lock()
-		flushedSteps = append(flushedSteps, p.ActiveStep)
-		flushedMu.Unlock()
-
-		status := tc.serverStatus
-		if status == 0 {
-			status = http.StatusOK
-		}
-		w.WriteHeader(status)
-		_, _ = w.Write([]byte(`{"status":"ok"}`))
-	}))
-	defer srv.Close()
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	pool := &WorkerPool{
-		ctx:    ctx,
-		cancel: cancel,
-		cfg: WorkerPoolConfig{
-			RestateIngressURL: srv.URL,
-		},
-	}
-
-	disp := db.Dispatch{
-		ID:             "disp-" + strings.ReplaceAll(tc.name, " ", "-"),
-		Source:         tc.source,
-		SessionID:      tc.source + "-sess",
-		TargetID:       tc.targetID,
-		VanadisChunkID: tc.chunkID,
-		Prompt:         tc.prompt,
-		Status:         tc.dispatchStatus,
-		CreatedAt:      time.Now().UTC(),
-		UpdatedAt:      time.Now().UTC(),
-	}
-
-	te := &turnExecution{
-		pool:        pool,
-		dispatch:    &disp,
-		threadID:    "dispatch-" + disp.ID,
-		triggerType: "dispatch:" + tc.source,
-		turnCtx:     ctx,
-	}
-
-	cleanup := pool.setupDispatchTurn(disp, te)
-	if !tc.expectUpdater {
-		if te.statusUpdater != nil {
-			t.Fatal("expected statusUpdater to be nil for non-vanadis dispatch")
-		}
-	} else {
-		if te.statusUpdater == nil {
-			t.Fatal("expected statusUpdater to be non-nil")
-		}
-		verifyUpdaterStep(t, te.statusUpdater, tc.emitToolCommand, tc.expectDirtyAfter)
-	}
-
-	cleanup()
-
-	flushedMu.Lock()
-	got := append([]string(nil), flushedSteps...)
-	flushedMu.Unlock()
-
-	if len(got) != len(tc.wantFlushes) {
-		t.Fatalf("flushed steps = %v (len %d), want %v (len %d)", got, len(got), tc.wantFlushes, len(tc.wantFlushes))
-	}
-	for i, want := range tc.wantFlushes {
-		if !strings.Contains(got[i], want) {
-			t.Errorf("flush[%d] = %q, want substring %q", i, got[i], want)
-		}
-	}
-}
-
-func TestWorkerPool_SetupDispatchTurn_ActiveStepLifecycle(t *testing.T) {
-	t.Parallel()
-
-	tests := []setupDispatchActiveStepCase{
-		{
-			name:            "live step forwarding and turn cleanup clearing",
-			source:          "vanadis",
-			chunkID:         "build-lifecycle-chunk-1",
-			prompt:          "Build ID: build-lifecycle\nChunk ID: build-lifecycle-chunk-1",
-			dispatchStatus:  db.StatusPending,
-			emitToolCommand: "git commit -m tweak",
-			expectUpdater:   true,
-			wantFlushes:     []string{"Executing `git`", ""},
-		},
-		{
-			name:            "resumed dispatch turn extracts chunk info and forwards steps",
-			source:          "vanadis",
-			chunkID:         "",
-			targetID:        "build-resumed-99-chunk-1",
-			prompt:          "[VANADIS BUILD CHUNK EXECUTION]\nBuild ID: build-resumed-99\nChunk ID: build-resumed-99-chunk-1\nResume turn",
-			dispatchStatus:  db.StatusProcessing,
-			emitToolCommand: "go test -v ./...",
-			expectUpdater:   true,
-			wantFlushes:     []string{"Executing `go`", ""},
-		},
-		{
-			name:             "http error on live step logs and marks dirty for retry",
-			source:           "vanadis",
-			chunkID:          "build-retry-chunk-err",
-			prompt:           "Build ID: build-retry\nChunk ID: build-retry-chunk-err",
-			dispatchStatus:   db.StatusPending,
-			serverStatus:     http.StatusInternalServerError,
-			emitToolCommand:  "verify.sh",
-			expectUpdater:    true,
-			expectDirtyAfter: true,
-			wantFlushes:      []string{"Executing `verify.sh`", ""},
-		},
-		{
-			name:           "heartbeat dispatch without chunk info skips status updater",
-			source:         "heartbeat",
-			chunkID:        "",
-			prompt:         "regular heartbeat check",
-			dispatchStatus: db.StatusPending,
-			expectUpdater:  false,
-			wantFlushes:    nil,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			runSetupDispatchActiveStepCase(t, tc)
 		})
 	}
 }
