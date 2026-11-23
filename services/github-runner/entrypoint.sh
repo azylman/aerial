@@ -130,10 +130,10 @@ RUNNER_LABELS="${RUNNER_LABELS:-self-hosted,roborev}"
 echo "${PATH}" > /actions-runner/.path
 
 if [ -d "/cache" ]; then
-  mkdir -p /data /cache/go-build /cache/go/pkg/mod /cache/pip /cache/golangci-lint /cache/cargo-target /cache/npm /cache/buildx-config
+  mkdir -p /data /cache/go-build /cache/go/pkg/mod /cache/pip /cache/golangci-lint /cache/cargo-target /cache/npm /cache/buildx-config /cache/bazel-repo-contents /cache/bazel-repo-cache
   chmod 0755 /data 2>/dev/null || true
   ln -sfn /cache /data/cache
-  chown -h 1000:1000 /data/cache /cache /cache/go-build /cache/go /cache/go/pkg /cache/go/pkg/mod /cache/pip /cache/golangci-lint /cache/cargo-target /cache/npm /cache/buildx-config 2>/dev/null || true
+  chown -h 1000:1000 /data/cache /cache /cache/go-build /cache/go /cache/go/pkg /cache/go/pkg/mod /cache/pip /cache/golangci-lint /cache/cargo-target /cache/npm /cache/buildx-config /cache/bazel-repo-contents /cache/bazel-repo-cache 2>/dev/null || true
   if [ -z "$(find /cache -maxdepth 1 -name .last-trim -mmin -360 2>/dev/null)" ]; then
     touch /cache/.last-trim 2>/dev/null || true
     chown -h 1000:1000 /cache/.last-trim 2>/dev/null || true
@@ -149,6 +149,7 @@ if [ -d "/cache" ]; then
   export CARGO_HOME="/usr/local/cargo"
   export CARGO_TARGET_DIR="/cache/cargo-target"
   export NPM_CONFIG_CACHE="/cache/npm"
+  export BAZELISK_HOME="/opt/bazel-cache"
 
   cat >> /actions-runner/.env <<EOF
 GOCACHE=/data/cache/go-build
@@ -161,6 +162,7 @@ RUSTUP_HOME=/usr/local/rustup
 CARGO_HOME=/usr/local/cargo
 CARGO_TARGET_DIR=/cache/cargo-target
 NPM_CONFIG_CACHE=/cache/npm
+BAZELISK_HOME=/opt/bazel-cache
 EOF
 fi
 

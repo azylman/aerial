@@ -4,6 +4,9 @@ FROM golang:1.27.4-bookworm AS roborev-builder
 RUN mkdir -p /out/bin && \
     GOBIN=/out/bin CGO_ENABLED=0 go install golang.org/x/tools/cmd/deadcode@v0.52.0 && \
     GOBIN=/out/bin CGO_ENABLED=0 go install github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen@v2.4.1 && \
+    git clone --depth 1 --branch v0.54.0 https://github.com/bazelbuild/bazel-gazelle.git /tmp/gazelle && \
+    (cd /tmp/gazelle && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/bin/gazelle ./cmd/gazelle) && \
+    rm -rf /tmp/gazelle && \
     git clone https://github.com/azylman/roborev.git /tmp/roborev && \
     (cd /tmp/roborev && git checkout dd816f9c3f87489334c45a165ac569842594f9ba && GOBIN=/out/bin CGO_ENABLED=0 go install ./cmd/roborev) && \
     mv /out/bin/roborev /out/bin/roborev.real && \
@@ -48,6 +51,12 @@ ARG MUSE_VERSION=1.4.23-R8977.1
 ARG MUSE_SHA256=7ca9e16659f759eab3ae6c4b61c6f1e70f5f3fea1ca961ebd49044a1146956f4
 ARG RUNNER_VERSION=2.338.2
 ARG RUNNER_SHA256=baebf204307bac6193480852732f0aba2ae97b6c5597c244f4d5558390147c40
+ARG BAZELISK_VERSION=v1.30.0
+ARG BAZELISK_SHA256=a248ae2b2b62b5baebb748f6fba7203bff1a27e5d01b55399a8406744cb539e8
+ARG BUILDIFIER_VERSION=v10.2.0
+ARG BUILDIFIER_SHA256=470844069d710d0b7740e55007071c63e4d00be89a833dce5d1a91790e84dc28
+ARG CRANE_VERSION=v0.22.1
+ARG CRANE_SHA256=0ab7a1d6932a213aed964ce97666c3077fe691c8606413674a8b3e0b9ec4cda0
 
 RUN mkdir -p /out/usr/local/bin /out/actions-runner && \
     curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 "https://lookaside.facebook.com/lookaside/muse/download/?channel=muse&version=${MUSE_VERSION}&file=muse-x86-linux" -o /out/usr/local/bin/muse && \
@@ -56,7 +65,19 @@ RUN mkdir -p /out/usr/local/bin /out/actions-runner && \
     curl -fsSL "https://github.com/actions/runner/releases/download/v${RUNNER_VERSION}/actions-runner-linux-x64-${RUNNER_VERSION}.tar.gz" -o /tmp/runner.tar.gz && \
     echo "${RUNNER_SHA256}  /tmp/runner.tar.gz" | sha256sum -c - && \
     tar -xzf /tmp/runner.tar.gz -C /out/actions-runner && \
-    rm -f /tmp/runner.tar.gz
+    rm -f /tmp/runner.tar.gz && \
+    curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 "https://github.com/bazelbuild/bazelisk/releases/download/${BAZELISK_VERSION}/bazelisk-linux-amd64" -o /out/usr/local/bin/bazelisk && \
+    echo "${BAZELISK_SHA256}  /out/usr/local/bin/bazelisk" | sha256sum -c - && \
+    chmod 0755 /out/usr/local/bin/bazelisk && \
+    ln -s bazelisk /out/usr/local/bin/bazel && \
+    curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 "https://github.com/bazelbuild/buildtools/releases/download/${BUILDIFIER_VERSION}/buildifier-linux-amd64" -o /out/usr/local/bin/buildifier && \
+    echo "${BUILDIFIER_SHA256}  /out/usr/local/bin/buildifier" | sha256sum -c - && \
+    chmod 0755 /out/usr/local/bin/buildifier && \
+    curl -fsSL --retry 5 --retry-all-errors --retry-delay 5 "https://github.com/google/go-containerregistry/releases/download/${CRANE_VERSION}/go-containerregistry_Linux_x86_64.tar.gz" -o /tmp/crane.tar.gz && \
+    echo "${CRANE_SHA256}  /tmp/crane.tar.gz" | sha256sum -c - && \
+    tar -xzf /tmp/crane.tar.gz -C /out/usr/local/bin crane && \
+    chmod 0755 /out/usr/local/bin/crane && \
+    rm -f /tmp/crane.tar.gz
 
 FROM ubuntu:24.04
 
@@ -141,12 +162,18 @@ RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm && \
 COPY --link --from=npm-tools /opt/npm-global /opt/npm-global
 COPY --link --from=docker:27-cli /usr/local/bin/docker /usr/local/bin/docker
 COPY --link --from=docker:27-cli /usr/local/libexec/docker/cli-plugins/ /usr/local/libexec/docker/cli-plugins/
-COPY --link --from=cli-tools /out/usr/local/bin/muse /usr/local/bin/muse
+COPY --link --from=cli-tools /out/usr/local/bin/ /usr/local/bin/
 COPY --link --chown=1000:1000 --from=cli-tools /out/actions-runner /actions-runner
 
-ENV RUSTUP_HOME="/usr/local/rustup" \
+ENV BAZELISK_HOME=/opt/bazel-cache \
+    RUSTUP_HOME="/usr/local/rustup" \
     CARGO_HOME="/usr/local/cargo" \
     PATH="/opt/npm-global/bin:/usr/local/cargo/bin:/usr/local/go/bin:/data/cache/go/bin:/home/ubuntu/go/bin:/root/go/bin:${PATH}"
+
+RUN BAZELISK_HOME=/opt/bazel-cache USE_BAZEL_VERSION=9.3.3 /usr/local/bin/bazelisk version && \
+    chmod -R a+rX /opt/bazel-cache && \
+    echo 'common --config=cluster' > /etc/bazel.bazelrc && \
+    chmod 0644 /etc/bazel.bazelrc
 
 RUN (useradd -m -u 1000 runner 2>/dev/null || true) && \
     mkdir -p /data && \
