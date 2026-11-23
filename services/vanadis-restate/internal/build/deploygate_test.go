@@ -86,7 +86,7 @@ func TestDeploygateRetryDelegation(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	gateRuntime := func() objectRuntime {
-		rt := &deploymentGateFakeRuntime{fakeObjectRuntime: newFakeObjectRuntime("b"), now: now}
+		rt := &fakeObjectRuntime{key: "b", now: now}
 		rt.attempts = map[string]deploygate.Attempt{"c": {ChunkID: "c", PRNumber: 1, Revision: "sha", Generation: 1, Deadline: now.Add(-time.Minute), Delivered: true}}
 		return rt
 	}
@@ -98,8 +98,8 @@ func TestDeploygateRetryDelegation(t *testing.T) {
 		wantBuild, wantStatus string
 	}{
 		{name: "deployment runtime", rt: gateRuntime(), wantBuild: "b", wantStatus: statusRunning},
-		{name: "runtime without deployment surface", rt: newFakeObjectRuntime("b"), wantErr: "deployment runtime unavailable"},
-		{name: "durable snapshot failure surfaces", rt: &deploymentGateFakeRuntime{fakeObjectRuntime: newFakeObjectRuntime("b"), now: now}, storeErr: errors.New("snapshot unavailable"), wantErr: "snapshot unavailable"},
+		{name: "runtime without deployment surface", rt: struct{ objectRuntime }{newFakeObjectRuntime("b")}, wantErr: "deployment runtime unavailable"},
+		{name: "durable snapshot failure surfaces", rt: &fakeObjectRuntime{key: "b", now: now}, storeErr: errors.New("snapshot unavailable"), wantErr: "snapshot unavailable"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -123,7 +123,7 @@ func TestDeploygateRetryDelegation(t *testing.T) {
 func TestDeploygateWrapperRuntimeGuards(t *testing.T) {
 	t.Parallel()
 	bo := &BuildObject{}
-	plain := newFakeObjectRuntime("b")
+	plain := struct{ objectRuntime }{newFakeObjectRuntime("b")}
 	require.Error(t, bo.expireDeploymentDeadline(plain, deploygate.DeploymentDeadlineRequest{ChunkID: "c", Revision: "sha", Generation: 1}))
 	require.Error(t, bo.armDeploymentStart(plain, "b", pubsub.PRLifecycleEvent{}))
 	require.NoError(t, bo.syncDeploymentDeadlines(plain, nil, nil, nil))
@@ -134,7 +134,7 @@ func TestDeploygateWrapperRuntimeGuards(t *testing.T) {
 func TestDeploygateDelegationErrorPaths(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	rt := &deploymentGateFakeRuntime{fakeObjectRuntime: newFakeObjectRuntime("b"), now: now}
+	rt := &fakeObjectRuntime{key: "b", now: now}
 	rt.attempts = map[string]deploygate.Attempt{"c": {ChunkID: "c", PRNumber: 1, Revision: "sha", Generation: 1, Deadline: now.Add(-time.Minute)}}
 	st := &fakeStore{builds: []model.VanadisBuild{{ID: "b", Status: statusRunning, ThreadID: "th-1"}}, chunks: []model.VanadisChunk{{ID: "c", BuildID: "b", PRNumber: 1, MergeSHA: "sha", Status: statusDeploying}}}
 	bo := NewBuildObject("", nil).WithAuthority(st, nil)

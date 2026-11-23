@@ -123,6 +123,10 @@ func TestApplyRawChunkCIChecks(t *testing.T) {
 		{name: "invalid json", raw: "{oops"},
 		{name: "full", raw: `{"_head_sha":"h","_merge_sha":"m","_remediated_sha":"r","lint":"passed"}`, wantHead: "h", wantMerge: "m", wantRemed: "r", wantChecks: map[string]string{"lint": "passed"}},
 		{name: "internal only", raw: `{"_head_sha":"h"}`, wantHead: "h"},
+		{name: "merge queue preserved", raw: `{"_head_sha":"h","_merge_queue":"2/3","lint":"passed"}`, wantHead: "h", wantChecks: map[string]string{"lint": "passed", "_merge_queue": "2/3"}},
+		{name: "merge queue trimmed and preserved", raw: `{"_head_sha":"h","_merge_queue":" 1/2 ","_remediated_sha":"r"}`, wantHead: "h", wantRemed: "r", wantChecks: map[string]string{"_merge_queue": "1/2"}},
+		{name: "empty merge queue stripped", raw: `{"_head_sha":"h","_merge_queue":"   "}`, wantHead: "h"},
+		{name: "merge queue only", raw: `{"_merge_queue":"1/2"}`, wantChecks: map[string]string{"_merge_queue": "1/2"}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

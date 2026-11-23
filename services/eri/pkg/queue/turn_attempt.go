@@ -9,6 +9,7 @@ import (
 	"time"
 
 	restate "github.com/restatedev/sdk-go"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/azylman/aerial/services/eri/pkg/db"
 	"github.com/azylman/aerial/services/eri/pkg/metrics"
@@ -210,6 +211,31 @@ func attemptInterruptedError(turnID string) error {
 	return restate.ToTerminalError(fmt.Errorf("queue: turn %s attempt interrupted", turnID), restate.WithErrorCode(CodeQueueConflict))
 }
 
+// attemptRequeueTime returns when a resumed row re-entered the queue (zero on a first attempt).
+func attemptRequeueTime(restartCount int, updatedAt time.Time) time.Time {
+	if restartCount > 0 {
+		return updatedAt
+	}
+	return time.Time{}
+}
+
+// attemptSpanStatus maps an attempt result kind to the status recorded on the attempt root span.
+func attemptSpanStatus(kind string, teStatus string) string {
+	switch kind {
+	case AttemptKindSuccess, AttemptKindResume:
+		return outcomeSuccess
+	case AttemptKindTimeout:
+		return string(OutcomeTimeout)
+	case AttemptKindAborted:
+		return string(OutcomeCancelled)
+	default:
+		if teStatus != "" {
+			return teStatus
+		}
+		return outcomeFailed
+	}
+}
+
 // attemptSubject is what differs between a burst attempt and a dispatch attempt.
 type attemptSubject interface {
 	// load re-reads the rows onto te; it returns the IDs still PROCESSING, or the recorded
@@ -222,6 +248,7 @@ type attemptSubject interface {
 	// ensureCompleted writes COMPLETED for rows a successful delivery left active.
 	ensureCompleted(ctx context.Context, s db.Store, te *turnExecution, ids []string) error
 	startIndicators(te *turnExecution) func()
+	traceItems(te *turnExecution) []queuedTurnItem
 }
 
 // RunBurstAttempt executes one lease attempt of a burst turn (one run-<n> step).
@@ -333,14 +360,30 @@ type attemptRun struct {
 }
 
 //nolint:contextcheck,nolintlint // the reused legacy turn helpers own their contexts; store calls take ctx.
-func (p *WorkerPool) executeAttempt(ctx context.Context, s db.Store, te *turnExecution, subj attemptSubject, in AttemptInput, ids []string) (AttemptResult, error) {
+func (p *WorkerPool) executeAttempt(ctx context.Context, s db.Store, te *turnExecution, subj attemptSubject, in AttemptInput, ids []string) (res AttemptResult, err error) {
 	maxAttempts := p.maxAttempts()
 	cfg := te.resolveAttemptConfig(ctx, in.Ordinal)
 	model := cfg.model
+	te.turnModel = model
 	te.turnPrompt = in.Prep.Prompt
 	te.injectedHookContext = in.Prep.InjectedContext
 	te.turnAttempted = true
 	te.hookMetadata = hookMetadataAny(in.Prep.HookMetadata)
+
+	_, span := startTurnSpan(ctx, p.tracer(), turnSpanSpec{
+		items:          subj.traceItems(te),
+		conversationID: te.threadID,
+		agentName:      p.cfg.AgentName,
+		triggerType:    te.triggerType,
+		pickup:         te.execStart,
+	})
+	te.turnSpan = span
+	defer func() {
+		if p.cfg.TraceContent {
+			span.SetAttributes(runner.ContentAttributes(te.sentPrompt, te.turnResponseText)...)
+		}
+		finishTurnSpan(span, te.turnModel, te.turnTokenUsage, attemptSpanStatus(res.Kind, te.turnStatus))
+	}()
 
 	if te.checkGlobalQuotaLockout(cfg.apiKey, model) {
 		return AttemptResult{Kind: AttemptKindTerminal, Reason: "global quota pause active", AutoResumes: in.AutoResumes}, nil
@@ -425,7 +468,11 @@ func (te *turnExecution) runOneLease(cfg attemptConfig, in AttemptInput) attempt
 		prompt = YieldTrapResumePrompt
 	}
 	prompt = te.prepareAttemptPrompt(in.Ordinal, prompt, in.LastError, in.LastError)
-	runCtx, runCancel := context.WithTimeout(te.turnCtxValue(), attemptRunTimeout(cfg.timeoutMinutes))
+	baseCtx := te.turnCtxValue()
+	if te.turnSpan != nil {
+		baseCtx = trace.ContextWithSpan(baseCtx, te.turnSpan)
+	}
+	runCtx, runCancel := context.WithTimeout(baseCtx, attemptRunTimeout(cfg.timeoutMinutes))
 	defer runCancel()
 	outcome, turnRes, stderr, execErr := te.executeLeaseAttemptCtx(runCtx, cfg.model, prompt)
 	return attemptRun{
@@ -494,6 +541,7 @@ func isYieldTrapCircuitBroken(st attemptOutcomeState, autoResumes int) bool {
 // resumeAttempt reports a yield trap under the auto-resume cap; the next run uses the resume prompt.
 func (te *turnExecution) resumeAttempt(st attemptOutcomeState, base AttemptResult, model string) AttemptResult {
 	addUsage(&base.Telemetry.Usage, st.resp.Usage)
+	te.turnTokenUsage = base.Telemetry.Usage
 	base.Kind = AttemptKindResume
 	base.AutoResumes++
 	base.SessionID = te.currentSessionID
@@ -542,7 +590,8 @@ func (p *WorkerPool) failAttempt(ctx context.Context, s db.Store, te *turnExecut
 		return base, nil
 	case classQuotaPause, classCapacityExhausted:
 		// Today's quota side effects: notice, global lockout (and haro retry for quota pauses), rows FAILED.
-		te.handleQuotaPause(f.errDetail, f.stderr, f.model, "", f.ordinal, f.maxAttempts)
+		effort, _ := te.turnEffortAndModel()
+		te.handleQuotaPause(f.errDetail, f.stderr, f.model, effort, f.ordinal, f.maxAttempts)
 		base.Kind = AttemptKindTerminal
 		return base, nil
 	case classTimeout, classTerminal, classExhausted, classSuccess, classResume, classAborted:
@@ -683,6 +732,20 @@ func (burstSubject) startIndicators(te *turnExecution) func() {
 	return te.stopIndicators
 }
 
+func (burstSubject) traceItems(te *turnExecution) []queuedTurnItem {
+	items := make([]queuedTurnItem, 0, len(te.burst))
+	for _, m := range te.burst {
+		items = append(items, queuedTurnItem{
+			traceparent:  m.Traceparent,
+			createdAt:    m.CreatedAt,
+			requeuedAt:   attemptRequeueTime(m.RestartCount, m.UpdatedAt),
+			restartCount: m.RestartCount,
+			retryCount:   m.RetryCount,
+		})
+	}
+	return items
+}
+
 // dispatchSubject runs attempts over one dispatch row.
 type dispatchSubject struct {
 	pool *WorkerPool
@@ -777,4 +840,18 @@ func (d dispatchSubject) startIndicators(te *turnExecution) func() {
 		te.statusUpdater.Stop()
 		logInterruptWarning("clear chunk active step", d.pool.FlushChunkActiveStepToRestate(widgetCtx, buildID, chunkID, ""))
 	}
+}
+
+func (dispatchSubject) traceItems(te *turnExecution) []queuedTurnItem {
+	if te.dispatch == nil {
+		return nil
+	}
+	d := te.dispatch
+	return []queuedTurnItem{{
+		traceparent:  d.Traceparent,
+		createdAt:    d.CreatedAt,
+		requeuedAt:   attemptRequeueTime(d.RestartCount, d.UpdatedAt),
+		restartCount: d.RestartCount,
+		retryCount:   d.RetryCount,
+	}}
 }

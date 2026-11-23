@@ -480,7 +480,7 @@ func (s *Store) ResetPRCheckState(ctx context.Context, chunkID, headSHA, mergeSH
 		const mergeQ = `UPDATE vanadis_chunks
 SET ci_checks = CASE
         WHEN COALESCE(ci_checks->>'_merge_sha', '') = $3
-            THEN jsonb_strip_nulls(COALESCE(ci_checks, '{}'::jsonb) || jsonb_build_object('_head_sha', COALESCE(NULLIF($2::text, ''), NULLIF(ci_checks->>'_head_sha', '')), '_merge_sha', NULLIF($3::text, '')))
+            THEN jsonb_strip_nulls((COALESCE(ci_checks, '{}'::jsonb) - '_merge_queue') || jsonb_build_object('_head_sha', COALESCE(NULLIF($2::text, ''), NULLIF(ci_checks->>'_head_sha', '')), '_merge_sha', NULLIF($3::text, '')))
         ELSE jsonb_strip_nulls(jsonb_build_object('_head_sha', COALESCE(NULLIF($2::text, ''), NULLIF(ci_checks->>'_head_sha', '')), '_merge_sha', NULLIF($3::text, '')))
     END,
     banner = '',
@@ -498,7 +498,7 @@ WHERE id = $1 AND status NOT IN ('completed', 'cancelled') AND (status != 'faile
 	const syncQ = `UPDATE vanadis_chunks AS c
 SET ci_checks = CASE
         WHEN $2 != '' AND LOWER(COALESCE(c.ci_checks->>'_head_sha', '')) = LOWER($2) THEN c.ci_checks - '_merge_sha'
-        WHEN $2 != '' THEN jsonb_build_object('_head_sha', $2::text)
+        WHEN $2 != '' THEN jsonb_strip_nulls(jsonb_build_object('_head_sha', $2::text, '_merge_queue', NULLIF(c.ci_checks->>'_merge_queue', '')))
         ELSE '{}'::jsonb
     END,
     banner = '',

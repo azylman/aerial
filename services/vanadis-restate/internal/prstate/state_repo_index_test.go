@@ -456,3 +456,77 @@ func TestRepoState_UpdatedForMain(t *testing.T) {
 		})
 	}
 }
+
+type queuePositionCase struct {
+	name         string
+	nilState     bool
+	seedPR       int
+	seedHead     string
+	seedPos      string
+	recordPR     int
+	recordHead   string
+	recordPos    string
+	clearPR      int
+	idxEvent     *PRIndexEvent
+	checkPR      int
+	wantRecorded bool
+	wantHas      bool
+	wantMapIsNil bool
+}
+
+func seedQueuePositionRepo(nilState bool, seedPR int, seedHead, seedPos string) *RepoState {
+	if nilState {
+		return nil
+	}
+	st := NewRepoState("azylman/aerial")
+	if seedPR > 0 {
+		st.RecordPRQueuePosition(seedPR, seedHead, seedPos)
+	}
+	return st
+}
+
+func applyQueuePositionStep(st *RepoState, tc queuePositionCase) bool {
+	var recorded bool
+	if tc.recordPR != 0 {
+		recorded = st.RecordPRQueuePosition(tc.recordPR, tc.recordHead, tc.recordPos)
+	}
+	if tc.clearPR != 0 {
+		st.ClearPRQueuePosition(tc.clearPR)
+	}
+	if tc.idxEvent != nil {
+		st.ApplyPRIndex(*tc.idxEvent)
+	}
+	return recorded
+}
+
+func TestRepoState_QueuePositions(t *testing.T) {
+	t.Parallel()
+	tests := []queuePositionCase{
+		{name: "nil state operations are safe", nilState: true, recordPR: 1, recordHead: "h1", recordPos: "1/2", checkPR: 1, wantRecorded: false, wantHas: false, wantMapIsNil: true},
+		{name: "zero or negative pr number is no-op", recordPR: 0, recordHead: "h1", recordPos: "1/2", checkPR: 0, wantRecorded: false, wantHas: false, wantMapIsNil: true},
+		{name: "recording queue position records head and pos", recordPR: 101, recordHead: "h1", recordPos: "1/2", checkPR: 101, wantRecorded: true, wantHas: true, wantMapIsNil: false},
+		{name: "recording identical queue position returns false", seedPR: 101, seedHead: "h1", seedPos: "1/2", recordPR: 101, recordHead: "h1", recordPos: "1/2", checkPR: 101, wantRecorded: false, wantHas: true, wantMapIsNil: false},
+		{name: "recording changed pos returns true", seedPR: 101, seedHead: "h1", seedPos: "1/2", recordPR: 101, recordHead: "h1", recordPos: "2/3", checkPR: 101, wantRecorded: true, wantHas: true, wantMapIsNil: false},
+		{name: "recording changed head returns true", seedPR: 101, seedHead: "h1", seedPos: "1/2", recordPR: 101, recordHead: "h2", recordPos: "1/2", checkPR: 101, wantRecorded: true, wantHas: true, wantMapIsNil: false},
+		{name: "different pr is not reported as having position", seedPR: 101, seedHead: "h1", seedPos: "1/2", checkPR: 102, wantHas: false, wantMapIsNil: false},
+		{name: "clearing only pr resets map to nil", seedPR: 101, seedHead: "h1", seedPos: "1/2", clearPR: 101, checkPR: 101, wantHas: false, wantMapIsNil: true},
+		{name: "merged index lifecycle clears queue position", seedPR: 101, seedHead: "h1", seedPos: "1/2", idxEvent: &PRIndexEvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "h1", MergeSHA: "m1", Lifecycle: IndexMerged}, checkPR: 101, wantHas: false, wantMapIsNil: true},
+		{name: "closed index lifecycle clears queue position", seedPR: 101, seedHead: "h1", seedPos: "1/2", idxEvent: &PRIndexEvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "h1", Lifecycle: IndexClosed}, checkPR: 101, wantHas: false, wantMapIsNil: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			st := seedQueuePositionRepo(tc.nilState, tc.seedPR, tc.seedHead, tc.seedPos)
+			gotRecorded := applyQueuePositionStep(st, tc)
+			if tc.recordPR != 0 && gotRecorded != tc.wantRecorded {
+				t.Fatalf("RecordPRQueuePosition(%d, %q, %q) = %v, want %v", tc.recordPR, tc.recordHead, tc.recordPos, gotRecorded, tc.wantRecorded)
+			}
+			if gotHas := st.HasPRQueuePosition(tc.checkPR); gotHas != tc.wantHas {
+				t.Fatalf("HasPRQueuePosition(%d) = %v, want %v", tc.checkPR, gotHas, tc.wantHas)
+			}
+			if st != nil && (st.QueuePositions == nil) != tc.wantMapIsNil {
+				t.Fatalf("st.QueuePositions == nil is %v, want %v", st.QueuePositions == nil, tc.wantMapIsNil)
+			}
+		})
+	}
+}
