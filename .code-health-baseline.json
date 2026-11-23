@@ -1,86 +1,5 @@
 {
   "files": {
-    "mcp/docket-mcp/internal/config/config_test.go": {
-      "blank_assigns": 1
-    },
-    "mcp/docket-mcp/internal/server/server_test.go": {
-      "blank_assigns": 11
-    },
-    "mcp/docket-mcp/internal/store/vikunja_test.go": {
-      "blank_assigns": 3
-    },
-    "mcp/docket-mcp/main_test.go": {
-      "blank_assigns": 1
-    },
-    "mcp/kernel-mcp/internal/server/cdp_test.go": {
-      "blank_assigns": 3
-    },
-    "pkg/githubapitest/githubapitest_test.go": {
-      "blank_assigns": 1
-    },
-    "pkg/githubauth/transport_test.go": {
-      "blank_assigns": 7
-    },
-    "pkg/httpkit/httpkit_test.go": {
-      "blank_assigns": 7
-    },
-    "pkg/httpkit/reload_test.go": {
-      "blank_assigns": 1
-    },
-    "pkg/k8sauth/auth_test.go": {
-      "blank_assigns": 2
-    },
-    "pkg/mcpkit/client_test.go": {
-      "blank_assigns": 1
-    },
-    "pkg/ollama/ollama_test.go": {
-      "blank_assigns": 1
-    },
-    "pkg/pubsub/jetstream_message_test.go": {
-      "blank_assigns": 1
-    },
-    "pkg/restateingresstest/restateingresstest_test.go": {
-      "blank_assigns": 1
-    },
-    "pkg/sanitizer/sanitizer_test.go": {
-      "blank_assigns": 8
-    },
-    "pkg/tracing/tracing_test.go": {
-      "blank_assigns": 2
-    },
-    "scripts/affected/affected_test.go": {
-      "blank_assigns": 1
-    },
-    "services/coven/internal/config/config_test.go": {
-      "blank_assigns": 1
-    },
-    "services/coven/internal/server/app_test.go": {
-      "blank_assigns": 4
-    },
-    "services/coven/internal/server/consolidation_test.go": {
-      "blank_assigns": 2
-    },
-    "services/coven/internal/server/extractor_test.go": {
-      "blank_assigns": 4
-    },
-    "services/coven/internal/server/goleak_test.go": {
-      "blank_assigns": 1
-    },
-    "services/coven/internal/server/server_test.go": {
-      "blank_assigns": 1
-    },
-    "services/coven/internal/server/skills_publisher_test.go": {
-      "blank_assigns": 2
-    },
-    "services/coven/internal/store/goleak_test.go": {
-      "blank_assigns": 1
-    },
-    "services/coven/internal/store/indexer_client_test.go": {
-      "blank_assigns": 2
-    },
-    "services/coven/internal/store/sqlstore_test.go": {
-      "blank_assigns": 1
-    },
     "services/eri/cmd/hook-guard/trace_test.go": {
       "blank_assigns": 1
     },
@@ -94,10 +13,10 @@
       "blank_assigns": 3
     },
     "services/eri/internal/server/funnel_test.go": {
-      "blank_assigns": 23
+      "blank_assigns": 22
     },
     "services/eri/internal/server/handlers_test.go": {
-      "blank_assigns": 15
+      "blank_assigns": 12
     },
     "services/eri/internal/server/handlers_voice_internal_test.go": {
       "blank_assigns": 2
@@ -115,16 +34,13 @@
       "blank_assigns": 8
     },
     "services/eri/pkg/config/config_test.go": {
-      "blank_assigns": 8
+      "blank_assigns": 6
     },
     "services/eri/pkg/db/db_test.go": {
-      "blank_assigns": 31
+      "blank_assigns": 23
     },
     "services/eri/pkg/db/dbtest/fakestore_test.go": {
-      "blank_assigns": 60
-    },
-    "services/eri/pkg/db/sql_store_test.go": {
-      "blank_assigns": 4
+      "blank_assigns": 49
     },
     "services/eri/pkg/db/store_test.go": {
       "blank_assigns": 1
@@ -184,19 +100,19 @@
       "blank_assigns": 4
     },
     "services/eri/pkg/queue/queue_hooks_test.go": {
-      "blank_assigns": 40
+      "blank_assigns": 30
     },
     "services/eri/pkg/queue/queue_sessions_test.go": {
-      "blank_assigns": 11
+      "blank_assigns": 9
     },
     "services/eri/pkg/queue/queue_test.go": {
-      "blank_assigns": 26
+      "blank_assigns": 22
     },
     "services/eri/pkg/queue/restate_actors_voice_test.go": {
       "blank_assigns": 1
     },
     "services/eri/pkg/queue/test_helpers_test.go": {
-      "blank_assigns": 41
+      "blank_assigns": 40
     },
     "services/eri/pkg/queue/test_leased_pool_test.go": {
       "blank_assigns": 3
@@ -208,7 +124,7 @@
       "blank_assigns": 2
     },
     "services/eri/pkg/queue/turn_outcome_test.go": {
-      "blank_assigns": 29
+      "blank_assigns": 23
     },
     "services/eri/pkg/queue/turn_prompt_test.go": {
       "blank_assigns": 28
@@ -222,20 +138,17 @@
     "services/eri/pkg/queue/turn_steps_test.go": {
       "blank_assigns": 7
     },
-    "services/eri/pkg/queue/turn_trace_test.go": {
-      "blank_assigns": 7
-    },
     "services/eri/pkg/queue/vanadis_test.go": {
-      "blank_assigns": 2
+      "blank_assigns": 1
     },
     "services/eri/pkg/queue/voice_test.go": {
-      "blank_assigns": 47
+      "blank_assigns": 46
     },
     "services/eri/pkg/queue/worker_test.go": {
-      "blank_assigns": 43
+      "blank_assigns": 41
     },
     "services/eri/pkg/queue/worker_turn_test.go": {
-      "blank_assigns": 23
+      "blank_assigns": 14
     },
     "services/eri/pkg/runner/active_turn_owner_test.go": {
       "blank_assigns": 2
@@ -306,39 +219,6 @@
     "services/eri/pkg/transcript/worker_test.go": {
       "blank_assigns": 4
     },
-    "services/haro/goleak_test.go": {
-      "blank_assigns": 1
-    },
-    "services/haro/internal/config/config_test.go": {
-      "blank_assigns": 13
-    },
-    "services/haro/internal/dispatch/dispatch_test.go": {
-      "blank_assigns": 1
-    },
-    "services/haro/internal/server/server_test.go": {
-      "blank_assigns": 7
-    },
-    "services/haro/internal/server/server_triggers_test.go": {
-      "blank_assigns": 8
-    },
-    "services/haro/internal/store/events_test.go": {
-      "blank_assigns": 6
-    },
-    "services/haro/internal/ticker/ticker_restate_test.go": {
-      "blank_assigns": 24
-    },
-    "services/haro/internal/ticker/ticker_test.go": {
-      "blank_assigns": 2
-    },
-    "services/haro/internal/tools/events_test.go": {
-      "blank_assigns": 1
-    },
-    "services/haro/internal/tools/tools_test.go": {
-      "blank_assigns": 3
-    },
-    "services/haro/main_test.go": {
-      "blank_assigns": 4
-    },
     "services/prospera/internal/config/config_test.go": {
       "blank_assigns": 3
     },
@@ -355,7 +235,7 @@
       "blank_assigns": 5
     },
     "services/prospera/internal/mediastream/session_test.go": {
-      "blank_assigns": 30
+      "blank_assigns": 28
     },
     "services/prospera/internal/mediastream/tools_bridge_test.go": {
       "blank_assigns": 1
@@ -380,93 +260,6 @@
     },
     "services/prospera/main_test.go": {
       "blank_assigns": 1
-    },
-    "services/synapse/internal/discord/catchup_test.go": {
-      "blank_assigns": 4
-    },
-    "services/synapse/internal/discord/gateway_test.go": {
-      "blank_assigns": 1
-    },
-    "services/synapse/internal/kube/client_test.go": {
-      "blank_assigns": 2
-    },
-    "services/synapse/internal/kube/stopped_workload_test.go": {
-      "blank_assigns": 2
-    },
-    "services/synapse/internal/restateclient/client_registry_test.go": {
-      "blank_assigns": 1
-    },
-    "services/synapse/internal/router/github_events_test.go": {
-      "blank_assigns": 2
-    },
-    "services/synapse/internal/router/restate_edge_test.go": {
-      "blank_assigns": 2
-    },
-    "services/synapse/internal/router/workers_jetstream_test.go": {
-      "blank_assigns": 1
-    },
-    "services/vanadis-restate/internal/build/action_retry_test.go": {
-      "blank_assigns": 3
-    },
-    "services/vanadis-restate/internal/build/failure_isolation_test.go": {
-      "blank_assigns": 4
-    },
-    "services/vanadis-restate/internal/build/main_journal_test.go": {
-      "blank_assigns": 2
-    },
-    "services/vanadis-restate/internal/build/main_test.go": {
-      "blank_assigns": 6
-    },
-    "services/vanadis-restate/internal/build/pr_attachment_test.go": {
-      "blank_assigns": 1
-    },
-    "services/vanadis-restate/internal/build/pr_lifecycle_test.go": {
-      "blank_assigns": 17
-    },
-    "services/vanadis-restate/internal/build/reconcile_lifecycle_test.go": {
-      "blank_assigns": 14
-    },
-    "services/vanadis-restate/internal/build/reconcile_test.go": {
-      "blank_assigns": 19
-    },
-    "services/vanadis-restate/internal/build/runner_test.go": {
-      "blank_assigns": 2
-    },
-    "services/vanadis-restate/internal/prstate/effects_facts_test.go": {
-      "blank_assigns": 1
-    },
-    "services/vanadis-restate/internal/prstate/github_client_test.go": {
-      "blank_assigns": 3
-    },
-    "services/vanadis-restate/internal/prstate/handlers_repo_test.go": {
-      "blank_assigns": 1
-    },
-    "services/vanadis-restate/internal/prstate/kube_client_test.go": {
-      "blank_assigns": 2
-    },
-    "services/vanadis-restate/internal/prstate/rollouts_test.go": {
-      "blank_assigns": 4
-    },
-    "services/vanadis-restate/internal/prstate/service_registry_test.go": {
-      "blank_assigns": 1
-    },
-    "services/vanadis-restate/internal/prstate/state_repo_index_test.go": {
-      "blank_assigns": 3
-    },
-    "services/vanadis-restate/internal/router/router_test.go": {
-      "blank_assigns": 2
-    },
-    "services/vanadis-restate/internal/store/pr_attachment_test.go": {
-      "blank_assigns": 1
-    },
-    "services/vanadis-restate/internal/store/pr_lookup_test.go": {
-      "blank_assigns": 4
-    },
-    "services/vanadis-restate/internal/store/store_pr_recovery_test.go": {
-      "blank_assigns": 1
-    },
-    "services/vanadis-restate/internal/widget/discord_sender_test.go": {
-      "blank_assigns": 2
     }
   }
 }
