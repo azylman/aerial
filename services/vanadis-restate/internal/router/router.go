@@ -105,40 +105,40 @@ func isLookupNotFound(err error) bool {
 	return errors.Is(err, build.ErrChunkNotFound) || errors.Is(err, store.ErrBuildNotFound)
 }
 
-func (s *BuildRouterService) resolvePRBuildID(rc restate.RunContext, repo string, ev pubsub.PRLifecycleEvent) (store.BuildRoute, error) {
+func (s *BuildRouterService) resolvePRBuildRoutes(rc restate.RunContext, repo string, ev pubsub.PRLifecycleEvent) ([]store.BuildRoute, error) {
 	if s.store == nil {
-		return store.BuildRoute{}, nil
+		return nil, nil
 	}
-	route, _, err := s.store.LookupPRChunk(rc, repo, ev.PRNumber)
-	if err == nil && route.BuildID != "" {
-		return route, nil
+	routes, err := s.store.LookupPRBuildRoutes(rc, repo, ev.PRNumber)
+	if err == nil && len(routes) > 0 {
+		return routes, nil
 	}
 	if err != nil && !isLookupNotFound(err) {
-		return store.BuildRoute{}, err
+		return nil, err
 	}
 
 	if chunkID := build.ExtractChunkIDFromBranch(repo, ev.Branch); chunkID != "" {
 		route, err := s.store.LookupChunkBuildID(rc, chunkID)
 		if err == nil && route.BuildID != "" {
-			return route, nil
+			return []store.BuildRoute{route}, nil
 		}
 		if err != nil && !isLookupNotFound(err) {
-			return store.BuildRoute{}, err
+			return nil, err
 		}
-		return store.BuildRoute{}, nil
+		return nil, nil
 	}
 
 	if build.CanFallbackThreadRepoLookup(ev) {
 		route, _, err := s.store.LookupUnattachedChunkByThreadAndRepo(rc, ev.TargetID, repo)
 		if err == nil && route.BuildID != "" {
-			return route, nil
+			return []store.BuildRoute{route}, nil
 		}
 		if err != nil && !isLookupNotFound(err) {
-			return store.BuildRoute{}, err
+			return nil, err
 		}
 	}
 
-	return store.BuildRoute{}, nil
+	return nil, nil
 }
 
 // RoutePREvent routes inbound PR lifecycle events to the owning Build Virtual Object.
@@ -151,14 +151,14 @@ func (s *BuildRouterService) RoutePREvent(ctx restate.Context, ev pubsub.PRLifec
 	}
 	ev.TargetID = strutil.FirstNonEmpty(strings.TrimSpace(ev.TargetID), model.ExtractTargetIDFromBranch(repo, ev.Branch))
 
-	route, err := build.RunJournaled(ctx, build.LabelRoutePREvent, "lookup-pr-chunk", func(rc restate.RunContext) (store.BuildRoute, error) {
-		return s.resolvePRBuildID(rc, repo, ev)
+	routes, err := build.RunJournaled(ctx, build.LabelRoutePREvent, "lookup-pr-chunk", func(rc restate.RunContext) ([]store.BuildRoute, error) {
+		return s.resolvePRBuildRoutes(rc, repo, ev)
 	})
 	if err != nil {
 		return err
 	}
 
-	if s.store != nil && route.BuildID == "" && strings.EqualFold(strings.TrimSpace(ev.Event), "opened") && build.CanFallbackThreadRepoLookup(ev) && model.ExtractChunkIDFromBranch(repo, ev.Branch) == "" {
+	if s.store != nil && len(routes) == 0 && strings.EqualFold(strings.TrimSpace(ev.Event), "opened") && build.CanFallbackThreadRepoLookup(ev) && model.ExtractChunkIDFromBranch(repo, ev.Branch) == "" {
 		attached, aErr := s.RouteAttachPR(ctx, store.AttachChunkPRRequest{
 			PRNumber: ev.PRNumber,
 			Repo:     repo,
@@ -170,15 +170,25 @@ func (s *BuildRouterService) RoutePREvent(ctx restate.Context, ev pubsub.PRLifec
 		if aErr != nil {
 			return aErr
 		}
-		route.BuildID = attached.BuildID
+		if attached.BuildID != "" {
+			routes = []store.BuildRoute{{BuildID: attached.BuildID}}
+		}
 	}
 
-	if route.BuildID == "" {
+	if len(routes) == 0 {
 		return nil
 	}
 
 	inv := s.getInvoker(ctx)
-	return inv.RoutePREvent(ctx, route.BuildID, ev)
+	for _, route := range routes {
+		if route.BuildID == "" {
+			continue
+		}
+		if err := inv.RoutePREvent(ctx, route.BuildID, ev); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // RouteDispatchOutcome routes dispatch outcomes to the target Build Virtual Object.

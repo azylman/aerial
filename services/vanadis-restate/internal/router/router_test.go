@@ -114,6 +114,7 @@ func TestBuildRouterService_InvokerWiring(t *testing.T) {
 
 type mockInvoker struct {
 	lastPRBuildID        string
+	prBuildIDs           []string
 	lastDispatchBuildID  string
 	lastAttachBuildID    string
 	lastFailBuildID      string
@@ -124,6 +125,7 @@ type mockInvoker struct {
 
 func (m *mockInvoker) RoutePREvent(_ context.Context, buildID string, _ pubsub.PRLifecycleEvent) error {
 	m.lastPRBuildID = buildID
+	m.prBuildIDs = append(m.prBuildIDs, buildID)
 	return nil
 }
 
@@ -178,6 +180,7 @@ func TestBuildRouterService_RoutePREvent(t *testing.T) {
 		ev              pubsub.PRLifecycleEvent
 		db              *dbFixture
 		wantBuildID     string
+		wantBuildIDs    []string
 		wantBuildPrefix string
 		wantErr         bool
 		wantMetric      float64
@@ -193,6 +196,21 @@ func TestBuildRouterService_RoutePREvent(t *testing.T) {
 				chunks: []model.VanadisChunk{{BuildID: "b-matched", ID: "c1", PRNumber: 101}},
 			},
 			wantBuildID: "b-matched",
+		},
+		{
+			name: "multi-build fanout in deterministic order",
+			ev:   pubsub.PRLifecycleEvent{Repo: "aerial", PRNumber: 110, Event: "synchronize"},
+			db: &dbFixture{
+				builds: []model.VanadisBuild{
+					{ID: "b-beta", Status: "running"},
+					{ID: "b-alpha", Status: "running"},
+				},
+				chunks: []model.VanadisChunk{
+					{BuildID: "b-beta", ID: "c-beta", PRNumber: 110},
+					{BuildID: "b-alpha", ID: "c-alpha", PRNumber: 110},
+				},
+			},
+			wantBuildIDs: []string{"b-alpha", "b-beta"},
 		},
 		{
 			name: "primary lookup error records metric", ev: pubsub.PRLifecycleEvent{Repo: "aerial", PRNumber: 101, Event: "synchronize"},
@@ -247,9 +265,12 @@ func TestBuildRouterService_RoutePREvent(t *testing.T) {
 			before := restatetest.MetricValue(t, "vanadis_restate_reconcile_errors_total", "RoutePREvent")
 			err := router.RoutePREvent(makeRouterMockContext(t), tc.ev)
 			assert.Equal(t, tc.wantErr, err != nil, "err = %v", err)
-			if tc.wantBuildPrefix != "" {
+			switch {
+			case tc.wantBuildPrefix != "":
 				assert.True(t, strings.HasPrefix(inv.lastPRBuildID, tc.wantBuildPrefix))
-			} else {
+			case len(tc.wantBuildIDs) > 0:
+				assert.Equal(t, tc.wantBuildIDs, inv.prBuildIDs)
+			default:
 				assert.Equal(t, tc.wantBuildID, inv.lastPRBuildID)
 			}
 			assert.Equal(t, before+tc.wantMetric, restatetest.MetricValue(t, "vanadis_restate_reconcile_errors_total", "RoutePREvent"))

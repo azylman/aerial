@@ -5,9 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strconv"
 	"strings"
 
+	"github.com/azylman/aerial/pkg/buildplan"
 	"github.com/azylman/aerial/pkg/eriwire"
 	"github.com/azylman/aerial/pkg/prwire"
 	"github.com/azylman/aerial/pkg/pubsub"
@@ -31,6 +33,8 @@ const (
 	statusSynced       = "synced"
 	statusDeploying    = "deploying"
 	statusDeployed     = "deployed"
+	statusCompleted    = "completed"
+	statusCancelled    = "cancelled"
 
 	chunkModeAction = "action"
 	effortMedium    = "medium"
@@ -468,7 +472,7 @@ func (f *Flow) HandleConflictEvent(ctx context.Context, buildID, chunkID string,
 		return ErrPRTransitionSkipped
 	}
 	switch strings.TrimSpace(chunk.Status) {
-	case statusMerged, statusSynced, statusDeploying, statusDeployed, statusDeployFailed, "completed", "cancelled":
+	case statusMerged, statusSynced, statusDeploying, statusDeployed, statusDeployFailed, statusCompleted, statusCancelled:
 		return ErrPRTransitionSkipped
 	}
 	if head := strings.TrimSpace(ev.HeadSHA); head != "" && chunk.HeadSHA != "" && !strings.EqualFold(chunk.HeadSHA, head) {
@@ -513,7 +517,7 @@ func validateChunkRemediationEligibility(chunk model.VanadisChunk, headSHA strin
 		return ErrPRTransitionSkipped
 	}
 	switch strings.TrimSpace(chunk.Status) {
-	case statusMerged, statusSynced, statusDeploying, statusDeployed, statusDeployFailed, "completed", statusFailed, "cancelled":
+	case statusMerged, statusSynced, statusDeploying, statusDeployed, statusDeployFailed, statusCompleted, statusFailed, statusCancelled:
 		return ErrPRTransitionSkipped
 	}
 	if head := strings.TrimSpace(headSHA); head != "" && chunk.HeadSHA != "" && !strings.EqualFold(chunk.HeadSHA, head) {
@@ -728,6 +732,12 @@ func (f *Flow) isActionChunk(ctx context.Context, buildID, chunkID string) bool 
 // LocateOrAttachPRChunk resolves the event to its chunk, attaching an
 // unattached chunk when the branch or thread match is unambiguous.
 func (f *Flow) LocateOrAttachPRChunk(ctx context.Context, buildID string, ev pubsub.PRLifecycleEvent) (string, error) {
+	if f == nil || f.Store == nil {
+		return "", nil
+	}
+	if chunkID := f.locateBuildOwnedPRChunk(ctx, buildID, ev); chunkID != "" {
+		return chunkID, nil
+	}
 	lookup, err := f.Store.GetChunkByPR(ctx, ev.Repo, ev.PRNumber)
 	if err != nil {
 		return "", err
@@ -741,6 +751,43 @@ func (f *Flow) LocateOrAttachPRChunk(ctx context.Context, buildID string, ev pub
 		return lookup.ChunkID, nil
 	}
 	return f.ResolveOrAttachPRChunk(ctx, buildID, ev)
+}
+
+func (f *Flow) locateBuildOwnedPRChunk(ctx context.Context, buildID string, ev pubsub.PRLifecycleEvent) string {
+	trimmedBuildID := strings.TrimSpace(buildID)
+	if trimmedBuildID == "" || ev.PRNumber <= 0 {
+		return ""
+	}
+	_, chunks, err := f.Store.GetBuild(ctx, trimmedBuildID)
+	if err != nil {
+		return ""
+	}
+	owner := ""
+	if f.Exec != nil {
+		owner = f.Exec.GitHubOwner()
+	} else if parts := strings.Split(buildplan.TrimRepo(ev.Repo), "/"); len(parts) == 2 && parts[0] != "" {
+		owner = parts[0]
+	}
+	candidates := store.RepoMatchCandidates(owner, ev.Repo)
+	for _, c := range chunks {
+		if c.Status != statusCancelled && c.PRNumber == ev.PRNumber && chunkRepoMatches(owner, c.Repo, ev.Repo, candidates) {
+			return c.ID
+		}
+	}
+	return ""
+}
+
+func chunkRepoMatches(owner, chunkRepo, eventRepo string, candidates []string) bool {
+	if chunkRepo == eventRepo {
+		return true
+	}
+	if len(candidates) > 0 {
+		trimmed := buildplan.TrimRepo(chunkRepo)
+		if slices.Contains(candidates, trimmed) || slices.Contains(candidates, chunkRepo) {
+			return true
+		}
+	}
+	return slices.Contains(store.RepoMatchCandidates(owner, chunkRepo), buildplan.TrimRepo(eventRepo))
 }
 
 func isEligibleBranchChunk(owner string, build *model.VanadisBuild, c *model.VanadisChunk, ev pubsub.PRLifecycleEvent) bool {

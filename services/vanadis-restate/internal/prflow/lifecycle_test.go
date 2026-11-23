@@ -248,24 +248,80 @@ func TestFlow_HandlePRCheckEvent(t *testing.T) {
 func TestFlow_LocateOrAttachPRChunk(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name      string
-		lookup    *store.VanadisChunkPRLookup
-		lookupErr error
-		wantChunk string
-		wantErr   string
+		name        string
+		buildID     string
+		chunks      []model.VanadisChunk
+		storeNil    bool
+		getBuildErr error
+		withExec    bool
+		lookup      *store.VanadisChunkPRLookup
+		lookupErr   error
+		ev          pubsub.PRLifecycleEvent
+		wantChunk   string
+		wantErr     string
 	}{
-		{name: "matched lookup returns chunk", wantChunk: "c1"},
-		{name: "own build chunk", lookup: &store.VanadisChunkPRLookup{ChunkID: "c1", BuildID: "b1", Matched: true}, wantChunk: "c1"},
-		{name: "blank owner keeps chunk", lookup: &store.VanadisChunkPRLookup{ChunkID: "c1", Matched: true}, wantChunk: "c1"},
-		{name: "foreign build chunk is never acted on", lookup: &store.VanadisChunkPRLookup{ChunkID: "c9", BuildID: "b2", Matched: true}},
-		{name: "unmatched lookup without executor resolves nothing", lookup: &store.VanadisChunkPRLookup{Matched: false}},
-		{name: "lookup error propagates", lookupErr: errLifecycleRead, wantErr: "read unavailable"},
+		{name: "matched lookup returns chunk", ev: pubsub.PRLifecycleEvent{Repo: "owner/repo", PRNumber: 12}, wantChunk: "c1"},
+		{name: "own build chunk", lookup: &store.VanadisChunkPRLookup{ChunkID: "c1", BuildID: "b1", Matched: true}, ev: pubsub.PRLifecycleEvent{Repo: "owner/repo", PRNumber: 12}, wantChunk: "c1"},
+		{name: "blank owner keeps chunk", lookup: &store.VanadisChunkPRLookup{ChunkID: "c1", Matched: true}, ev: pubsub.PRLifecycleEvent{Repo: "owner/repo", PRNumber: 12}, wantChunk: "c1"},
+		{name: "foreign build chunk is never acted on", lookup: &store.VanadisChunkPRLookup{ChunkID: "c9", BuildID: "b2", Matched: true}, ev: pubsub.PRLifecycleEvent{Repo: "owner/repo", PRNumber: 12}},
+		{name: "unmatched lookup without executor resolves nothing", lookup: &store.VanadisChunkPRLookup{Matched: false}, ev: pubsub.PRLifecycleEvent{Repo: "owner/repo", PRNumber: 12}},
+		{name: "lookup error propagates", lookupErr: errLifecycleRead, ev: pubsub.PRLifecycleEvent{Repo: "owner/repo", PRNumber: 12}, wantErr: "read unavailable"},
+		{name: "nil store returns empty", storeNil: true, ev: pubsub.PRLifecycleEvent{Repo: "owner/repo", PRNumber: 12}},
+		{
+			name:      "own build attached chunk preferred over foreign pr lookup",
+			chunks:    []model.VanadisChunk{{ID: "c-own", BuildID: "b1", Repo: "repo", PRNumber: 12, Status: "running"}},
+			lookup:    &store.VanadisChunkPRLookup{ChunkID: "c-other", BuildID: "b2", Matched: true},
+			ev:        pubsub.PRLifecycleEvent{Repo: "owner/repo", PRNumber: 12},
+			wantChunk: "c-own",
+		},
+		{
+			name:      "own build attached chunk preferred over foreign pr lookup with executor",
+			chunks:    []model.VanadisChunk{{ID: "c-own-exec", BuildID: "b1", Repo: "example-owner/repo", PRNumber: 12, Status: "running"}},
+			lookup:    &store.VanadisChunkPRLookup{ChunkID: "c-other", BuildID: "b2", Matched: true},
+			ev:        pubsub.PRLifecycleEvent{Repo: "repo", PRNumber: 12},
+			withExec:  true,
+			wantChunk: "c-own-exec",
+		},
+		{
+			name:        "store get build error falls back to lookup",
+			getBuildErr: errors.New("get build error"),
+			lookup:      &store.VanadisChunkPRLookup{ChunkID: "c-fallback", BuildID: "b1", Matched: true},
+			ev:          pubsub.PRLifecycleEvent{Repo: "owner/repo", PRNumber: 12},
+			wantChunk:   "c-fallback",
+		},
+		{
+			name:      "blank build id skips build scan",
+			buildID:   "  ",
+			chunks:    []model.VanadisChunk{{ID: "c-scanned", BuildID: "b1", Repo: "owner/repo", PRNumber: 12, Status: "running"}},
+			lookup:    &store.VanadisChunkPRLookup{ChunkID: "c-lookup", Matched: true},
+			ev:        pubsub.PRLifecycleEvent{Repo: "owner/repo", PRNumber: 12},
+			wantChunk: "c-lookup",
+		},
+		{
+			name:      "own build cancelled chunk ignored",
+			chunks:    []model.VanadisChunk{{ID: "c-canc", BuildID: "b1", Repo: "repo", PRNumber: 12, Status: "cancelled"}},
+			lookup:    &store.VanadisChunkPRLookup{ChunkID: "c-active", BuildID: "b1", Matched: true},
+			ev:        pubsub.PRLifecycleEvent{Repo: "owner/repo", PRNumber: 12},
+			wantChunk: "c-active",
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			f := NewFlow(&checkStatusSpyStore{lookup: tc.lookup, lookupErr: tc.lookupErr}, nil)
-			got, err := f.LocateOrAttachPRChunk(context.Background(), "b1", pubsub.PRLifecycleEvent{Repo: "owner/repo", PRNumber: 12})
+			var st store.VanadisStore
+			if !tc.storeNil {
+				st = &checkStatusSpyStore{chunks: tc.chunks, lookup: tc.lookup, lookupErr: tc.lookupErr, getBuildErr: tc.getBuildErr}
+			}
+			var exec *executor.Executor
+			if tc.withExec {
+				exec = newLifecycleExecutor(t, &eritest.Client{}, nil, 0, "")
+			}
+			f := NewFlow(st, exec)
+			bID := "b1"
+			if tc.buildID != "" {
+				bID = tc.buildID
+			}
+			got, err := f.LocateOrAttachPRChunk(context.Background(), bID, tc.ev)
 			assertLifecycleErr(t, tc.wantErr, err)
 			assert.Equal(t, tc.wantChunk, got)
 		})
