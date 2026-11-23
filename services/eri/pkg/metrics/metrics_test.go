@@ -10,10 +10,10 @@ import (
 	"testing"
 	"time"
 
+	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	dto "github.com/prometheus/client_model/go"
-	_ "modernc.org/sqlite"
 )
 
 func TestMetricsRegistryAndHandler(t *testing.T) {
@@ -49,8 +49,8 @@ func TestMetricsRegistryAndHandler(t *testing.T) {
 	MemorySearchDurationSeconds.Observe(0.015)
 	ConfigReloadsTotal.WithLabelValues("SIGHUP", "success").Inc()
 
-	// Register DB stats with in-memory sqlite
-	db, err := sql.Open("sqlite", ":memory:")
+	// Register DB stats on a lazily opened pgx handle (no connection is made)
+	db, err := sql.Open("pgx", "postgres://127.0.0.1:1/aerial")
 	if err == nil {
 		defer db.Close()
 		RegisterDBStats(db)
