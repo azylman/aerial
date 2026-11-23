@@ -10,6 +10,8 @@ hermetic_go() {
     env -i \
         ${PATH:+PATH="$PATH"} \
         ${HOME:+HOME="$HOME"} \
+        ${BAZELISK_HOME:+BAZELISK_HOME="$BAZELISK_HOME"} \
+        ${USE_BAZEL_VERSION:+USE_BAZEL_VERSION="$USE_BAZEL_VERSION"} \
         ${GOROOT:+GOROOT="$GOROOT"} \
         ${GOTOOLCHAIN:+GOTOOLCHAIN="$GOTOOLCHAIN"} \
         ${GOPATH:+GOPATH="$GOPATH"} \
@@ -66,4 +68,130 @@ discover_go_services() {
         done
     ) | sort -u | tr '\n' ' ' | sed 's/[[:space:]]*$//'
 }
+
+ensure_bazel_build_files() {
+    local root="${1:-${REPO_ROOT:-}}"
+    if [ -z "$root" ]; then
+        if command -v git >/dev/null 2>&1; then
+            root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+        else
+            root="$(pwd)"
+        fi
+    fi
+
+    if [ ! -f "$root/MODULE.bazel" ] || ! command -v bazel >/dev/null 2>&1; then
+        return 0
+    fi
+
+    if [ ! -f "$root/MODULE.bazel.lock" ] || [ "$root/go.mod" -nt "$root/MODULE.bazel.lock" ]; then
+        (cd "$root" && bazel mod tidy) || return $?
+    fi
+
+    if command -v gazelle >/dev/null 2>&1; then
+        (cd "$root" && gazelle) || return $?
+    else
+        (cd "$root" && bazel run //:gazelle) || return $?
+    fi
+
+    # services/eri/pkg/db/BUILD.bazel: schema.sql and migrations/**
+    if [ -d "$root/services/eri/pkg/db" ]; then
+        local db_build="$root/services/eri/pkg/db/BUILD.bazel"
+        if [ ! -f "$db_build" ] || ! grep -q 'name = "schema"' "$db_build" 2>/dev/null; then
+            cat >> "$db_build" <<'EOF'
+
+exports_files(
+    ["schema.sql"],
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "schema",
+    srcs = ["schema.sql"],
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "migrations",
+    srcs = glob(["migrations/**"]),
+    visibility = ["//visibility:public"],
+)
+EOF
+        fi
+    fi
+
+    # services/console/BUILD.bazel: static/**
+    if [ -d "$root/services/console" ]; then
+        local console_build="$root/services/console/BUILD.bazel"
+        if [ ! -f "$console_build" ] || ! grep -q 'name = "static"' "$console_build" 2>/dev/null; then
+            cat >> "$console_build" <<'EOF'
+
+filegroup(
+    name = "static",
+    srcs = glob(["static/**"]),
+    visibility = ["//visibility:public"],
+)
+EOF
+        fi
+    fi
+
+    # services/synapse/BUILD.bazel: testdata/**
+    if [ -d "$root/services/synapse" ]; then
+        local synapse_build="$root/services/synapse/BUILD.bazel"
+        if [ ! -f "$synapse_build" ] || ! grep -q 'name = "testdata"' "$synapse_build" 2>/dev/null; then
+            cat >> "$synapse_build" <<'EOF'
+
+filegroup(
+    name = "testdata",
+    srcs = glob(["testdata/**"]),
+    visibility = ["//visibility:public"],
+)
+EOF
+        fi
+    fi
+
+    return 0
+}
+
+# Merge multiple Go coverage profile files into a single output file.
+# Usage: merge_coverage_profiles <output_file> <profile1> [profile2...]
+merge_coverage_profiles() {
+    local out_file="$1"
+    shift
+    [ $# -gt 0 ] || { rm -f "$out_file"; return 1; }
+    local tmp_out="${out_file}.tmp.$$"
+    if ! awk '
+        /^mode:/ {
+            if (mode_line != "" && mode_line != $0) {
+                print "merge_coverage_profiles: conflicting coverage modes: " mode_line " vs " $0 > "/dev/stderr"
+                conflict = 1
+                exit 1
+            }
+            mode_line = $0
+            next
+        }
+        NF >= 3 {
+            block = $1 " " $(NF-1)
+            if (!(block in stmts)) {
+                blocks[++n] = block
+                stmts[block] = $(NF-1) + 0
+            }
+            count[block] += $NF + 0
+        }
+        END {
+            if (conflict) {
+                exit 1
+            }
+            print (mode_line ? mode_line : "mode: set")
+            for (i = 1; i <= n; i++) {
+                b = blocks[i]
+                print b " " count[b]
+            }
+        }
+    ' "$@" > "$tmp_out"; then
+        rm -f "$tmp_out" "$out_file"
+        return 1
+    fi
+    mv "$tmp_out" "$out_file"
+}
+
 

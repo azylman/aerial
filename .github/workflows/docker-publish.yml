@@ -201,6 +201,7 @@ jobs:
         run: |
           set -euo pipefail
           . scripts/lib/hermetic-go-env.sh
+          ensure_bazel_build_files "$GITHUB_WORKSPACE"
           GO_MODULES=$(discover_go_services)
           CHANGED_FILES=$(git diff --name-only HEAD^1 HEAD 2>/dev/null || true)
           # Same import-graph selection as the test gate; .golangci.yml selects every module.

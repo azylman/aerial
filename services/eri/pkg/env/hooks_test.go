@@ -13,7 +13,17 @@ import (
 // same guards.
 func TestDefaultCanonicalHooksJSON(t *testing.T) {
 	t.Parallel()
-	repoHooks, err := os.ReadFile(filepath.Join("..", "..", "..", "..", "scripts", "hooks", "hooks.json"))
+	var hooksPath string
+	if srcdir := os.Getenv("TEST_SRCDIR"); srcdir != "" {
+		workspace := os.Getenv("TEST_WORKSPACE")
+		if workspace == "" {
+			workspace = "_main"
+		}
+		hooksPath = filepath.Join(srcdir, workspace, "scripts", "hooks", "hooks.json")
+	} else {
+		hooksPath = filepath.Join("..", "..", "..", "..", "scripts", "hooks", "hooks.json")
+	}
+	repoHooks, err := os.ReadFile(hooksPath)
 	if err != nil {
 		t.Fatalf("read scripts/hooks/hooks.json: %v", err)
 	}
