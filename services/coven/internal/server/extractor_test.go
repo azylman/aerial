@@ -31,7 +31,10 @@ func testHTTPBrainLLMClientCase(ctx context.Context, t *testing.T, tc brainLLMCl
 				return
 			}
 			var req brainLLMRequest
-			_ = json.NewDecoder(r.Body).Decode(&req)
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
 			w.WriteHeader(tc.statusCode)
 			_, _ = w.Write([]byte(tc.body))
 		}))
@@ -45,8 +48,14 @@ func testHTTPBrainLLMClientCase(ctx context.Context, t *testing.T, tc brainLLMCl
 	callCtx := ctx
 	const parentTraceID = "4bf92f3577b34da6a3ce929d0e0e4736"
 	if tc.parent {
-		traceID, _ := trace.TraceIDFromHex(parentTraceID)
-		spanID, _ := trace.SpanIDFromHex("00f067aa0ba902b7")
+		traceID, err := trace.TraceIDFromHex(parentTraceID)
+		if err != nil {
+			t.Fatalf("TraceIDFromHex: %v", err)
+		}
+		spanID, err := trace.SpanIDFromHex("00f067aa0ba902b7")
+		if err != nil {
+			t.Fatalf("SpanIDFromHex: %v", err)
+		}
 		callCtx = trace.ContextWithSpanContext(ctx, trace.NewSpanContext(trace.SpanContextConfig{
 			TraceID: traceID, SpanID: spanID, TraceFlags: trace.FlagsSampled,
 		}))
@@ -183,7 +192,10 @@ func runBatchingAndHalvingCase(t *testing.T, tc extractBatchingTestCase) {
 	llm := func(ctx context.Context, prompt string) (string, error) {
 		callIdx++
 		// Count only the new turns; prior turns are context, not batch members.
-		_, newTurns, _ := strings.Cut(prompt, "NEW UNEXTRACTED TURNS:\n")
+		_, newTurns, found := strings.Cut(prompt, "NEW UNEXTRACTED TURNS:\n")
+		if !found {
+			t.Errorf("prompt missing marker: %s", prompt)
+		}
 		capturedBatchSizes = append(capturedBatchSizes, strings.Count(newTurns, "User message turn"))
 
 		if tc.timeoutAlways || (tc.timeoutOnCall > 0 && callIdx == tc.timeoutOnCall) {
