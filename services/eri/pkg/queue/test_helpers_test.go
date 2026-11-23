@@ -983,23 +983,6 @@ func (*errQueueStore) RotateSessionID(context.Context, string, string) error {
 	return errors.New("errQueueStore: rotate session id error")
 }
 
-type mockDrainErrStore struct {
-	db.Store
-
-	messages []db.Message
-}
-
-func (m *mockDrainErrStore) GetPendingOrProcessingMessages(context.Context, int) ([]db.Message, error) {
-	if len(m.messages) > 0 {
-		return m.messages, nil
-	}
-	return []db.Message{{ID: "msg-proc-1", Status: db.StatusProcessing}}, nil
-}
-
-func (*mockDrainErrStore) UpdateMessageStatus(context.Context, string, string, string, ...db.TurnTelemetry) error {
-	return errors.New("mock drain update error")
-}
-
 type mockClaimStore struct {
 	db.Store
 

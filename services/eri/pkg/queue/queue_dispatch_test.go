@@ -193,10 +193,10 @@ func TestCancelBurstOnShutdown_Dispatch(t *testing.T) {
 				t.Fatalf("failed to fetch dispatch: %v", err)
 			}
 			if refreshed.Status != db.StatusProcessing {
-				t.Fatalf("expected interrupted dispatch to remain %s in DB for startup recovery, got %+v", db.StatusProcessing, refreshed)
+				t.Fatalf("expected interrupted dispatch to remain %s in DB, got %+v", db.StatusProcessing, refreshed)
 			}
 			if refreshed.RestartCount != 0 {
-				t.Fatalf("expected restart count to remain 0 until RecoverInterrupted runs, got %d", refreshed.RestartCount)
+				t.Fatalf("expected restart count to remain 0, got %d", refreshed.RestartCount)
 			}
 		})
 	}
