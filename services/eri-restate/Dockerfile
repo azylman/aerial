@@ -192,7 +192,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     xfonts-scalable \
     && rm -rf /var/lib/apt/lists/*
 
-# Postgres 18 server + pgvector for hermetic Go store tests (pkg/pgtest finds /usr/lib/postgresql/18/bin).
+# Postgres 19 server + pgvector for hermetic Go store tests (pkg/pgtest finds /usr/lib/postgresql/19/bin).
 # createcluster.d stops the Debian postinst from creating a main cluster, so the image ships no data dir or service.
 # The hold keeps the existing postgresql-client metapackage on the distro client instead of PGDG's newest major.
 RUN apt-mark hold postgresql-client && \
@@ -201,10 +201,10 @@ RUN apt-mark hold postgresql-client && \
     curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc -o /etc/apt/keyrings/pgdg.asc && \
     chmod go+r /etc/apt/keyrings/pgdg.asc && \
     echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/pgdg.asc] https://apt.postgresql.org/pub/repos/apt noble-pgdg main" > /etc/apt/sources.list.d/pgdg.list && \
-    apt-get update && apt-get install -y --no-install-recommends postgresql-18 postgresql-18-pgvector && \
+    apt-get update && apt-get install -y --no-install-recommends postgresql-19 postgresql-19-pgvector && \
     apt-mark unhold postgresql-client && \
-    rm -rf /var/lib/apt/lists/* /var/lib/postgresql/18 /etc/postgresql/18 && \
-    /usr/lib/postgresql/18/bin/initdb --version && \
+    rm -rf /var/lib/apt/lists/* /var/lib/postgresql/19 /etc/postgresql/19 && \
+    /usr/lib/postgresql/19/bin/initdb --version && \
     psql --version
 
 # Configure default SSH client to include the config copied to /data/ssh by the ssh-bootstrap initContainer

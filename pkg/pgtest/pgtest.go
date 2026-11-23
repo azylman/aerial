@@ -25,15 +25,17 @@ import (
 )
 
 const (
-	// defaultBinDir is where the Debian/Ubuntu postgresql-18 package installs
+	// defaultBinDir is where the Debian/Ubuntu postgresql-19 package installs
 	// its server binaries (the CI runner images use it).
-	defaultBinDir = "/usr/lib/postgresql/18/bin"
+	defaultBinDir = "/usr/lib/postgresql/19/bin"
+	// fallbackBinDir allows seamless fallback during migration from postgresql-18.
+	fallbackBinDir = "/usr/lib/postgresql/18/bin"
 	// schemaRelPath is the single declarative production schema.
 	schemaRelPath = "services/eri/pkg/db/schema.sql"
 	// templateDB holds the loaded schema every test database is cloned from.
 	templateDB = "pgtest_template"
 	// runnerHint names where the CI image installs the server.
-	runnerHint = "install postgresql-18 and postgresql-18-pgvector as in services/github-runner/Dockerfile"
+	runnerHint = "install postgresql-19 and postgresql-19-pgvector as in services/github-runner/Dockerfile"
 )
 
 // active is the server Main started for this test binary.
@@ -83,7 +85,7 @@ func newSetup(uid int, wd string, wdErr error, pgConfig []byte, pgConfigErr erro
 	if pgConfigErr == nil {
 		pgConfigDir = strings.TrimSpace(string(pgConfig))
 	}
-	return setup{uid: uid, binDirs: []string{defaultBinDir, pgConfigDir}, workDir: wd}
+	return setup{uid: uid, binDirs: []string{defaultBinDir, fallbackBinDir, pgConfigDir}, workDir: wd}
 }
 
 // run is Main's core: it validates env, starts a server published through
@@ -139,7 +141,7 @@ func resolveBinDir(candidates []string) (string, error) {
 			return dir, nil
 		}
 	}
-	return "", fmt.Errorf("PostgreSQL 18 server binaries (initdb, pg_ctl) not found in %v; %s", candidates, runnerHint)
+	return "", fmt.Errorf("PostgreSQL 19 server binaries (initdb, pg_ctl) not found in %v; %s", candidates, runnerHint)
 }
 
 func isExecutable(path string) bool {

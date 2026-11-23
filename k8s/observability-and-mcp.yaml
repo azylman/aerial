@@ -3024,7 +3024,7 @@ spec:
                 secretKeyRef:
                   key: password
                   name: postgres-aerial-role
-          image: ghcr.io/cloudnative-pg/postgresql:18
+          image: ghcr.io/cloudnative-pg/postgresql:19-system-trixie@sha256:789b58fff514c28a42844962951c0556cedecaa8d3f35678bc86162fddad9f18
           name: init-docket-schema
           resources:
             limits:

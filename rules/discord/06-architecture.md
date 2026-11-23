@@ -13,7 +13,7 @@ Aerial runs on a 3-node NixOS 26.05 k3s Kubernetes cluster supervised by Flux CD
   - **`vanadis`**: Multi-chunk build queue orchestrator providing HTTP/MCP APIs (`:4025`), JIT symbol line-slice resolution, and NATS JetStream consumers paired with **`vanadis-restate`** (`RestateDeployment` on `:9080` Restate SDK and `:4026` health/metrics) executing durable Restate `Build` Virtual Object and `BuildRouter` DAG workflows.
   - **`nats`**: NATS 2 JetStream broker (`StatefulSet` on `:4222`, HTTP monitoring `:8222`) backing durable cluster streams (`AERIAL_EVENTS`, `AERIAL_JOBS`, `AERIAL_COALESCED`, `VISION_JOBS`) reconciled programmatically on startup via `pkg/pubsub`.
   - **`restate`**: Official Kubernetes Restate Operator (`restate-operator`) managing `RestateCluster` instances (`:8080` ingress / `:9070` admin with RocksDB state/journal storage in the restate namespace).
-  - **`postgres`**: CloudNativePG 2-instance PostgreSQL 18 + `pgvector` cluster with native `:9187` Prometheus metrics for production persistence (messages, sessions, atomic CAS task queues, schedules, event triggers, vector embeddings, PR registry, and Grafana), also hosting the logical `docket` database for `docket-store` (Vikunja) and `docket-mcp`.
+  - **`postgres`**: CloudNativePG 2-instance PostgreSQL 19 + `pgvector` cluster with native `:9187` Prometheus metrics for production persistence (messages, sessions, atomic CAS task queues, schedules, event triggers, vector embeddings, PR registry, and Grafana), also hosting the logical `docket` database for `docket-store` (Vikunja) and `docket-mcp`.
   - **`flux-system` / `git-sync`**: Flux CD (`flux-system`) reconciling `./k8s` Kustomizations and Kubernetes `git-sync` sidecar initContainers mounting `/share/aerial:ro` and `/share/aerial-config:ro` into `eri`.
   - **`coredns`**: Kubernetes CoreDNS daemon rewriting internal DNS records (`restate.aerial` -> `restate.restate.svc.cluster.local`, `*.aerial`, `*.lan` -> `*.default.svc.cluster.local`).
   - **`infisical`**: Centralized secret management and automated rotation backed by Valkey 9, synced via External Secrets Operator into scoped per-service Kubernetes Secrets and the `shared-secrets` redaction bundle.
@@ -21,7 +21,7 @@ Aerial runs on a 3-node NixOS 26.05 k3s Kubernetes cluster supervised by Flux CD
 - **Outbound Model Context Protocol (MCP) Microservices**:
   - **`kubernetes-mcp`**: Native Streamable HTTP MCP server for Kubernetes cluster orchestration, resource lifecycles, and pod diagnostics.
   - **`discord-mcp`**: Outbound Discord API operations (channels, threads, history).
-  - **`docket-mcp`**: Native Streamable HTTP MCP server for issue tracking, task graph management, and semantic task search backed by Vikunja and PostgreSQL 18.
+  - **`docket-mcp`**: Native Streamable HTTP MCP server for issue tracking, task graph management, and semantic task search backed by Vikunja and PostgreSQL 19.
   - **`github-mcp`**: Native Streamable HTTP MCP server for GitHub repository, PR, and issue operations.
   - **`infisical-mcp`**: Native Streamable HTTP MCP server for Infisical secret management and rotation.
   - **`victoriametrics-mcp`**: Streamable HTTP MCP server for TSDB metric querying and alert rule inspection.
@@ -54,7 +54,7 @@ Aerial runs on a 3-node NixOS 26.05 k3s Kubernetes cluster supervised by Flux CD
   - **`prospera`**: Autonomous PSTN voice call and SMS interaction service.
 
 - **Heterogeneous 3-Node Cluster Topology**:
-  - **`quiet-zero`** (Storage & Standard Agent Node): NixOS 26.05 k3s agent (`compute-tier=standard`, `storage-tier=nvme`) hosting persistent storage workloads, CloudNativePG PostgreSQL 18 + pgvector, `docket-store` (Vikunja), `nats` (NATS 2 JetStream StatefulSet), `restate` (RestateCluster), and standard microservices.
+  - **`quiet-zero`** (Storage & Standard Agent Node): NixOS 26.05 k3s agent (`compute-tier=standard`, `storage-tier=nvme`) hosting persistent storage workloads, CloudNativePG PostgreSQL 19 + pgvector, `docket-store` (Vikunja), `nats` (NATS 2 JetStream StatefulSet), `restate` (RestateCluster), and standard microservices.
   - **`calibarn`** (k3s Control-Plane Server & AI / GPU Compute Node): NixOS 26.05 k3s server with NVIDIA GPU acceleration hosting `eri`, `vanadis`, `vanadis-restate` (RestateDeployment), `coven`, `haro`, `synapse`, `agentsview`, `senses`, `pjev`, `vision`, `prospera`, `kernel-browser`, and 8 scale-to-zero Actions Runner Controller (ARC) AutoscalingRunnerSet HelmReleases for GitHub Actions CI & RoboRev.
   - **`cockpit`** (Touch Kiosk Node): NixOS 26.05 k3s kiosk agent (`role=kiosk:NoSchedule`) hosting `kiosk-display` (Wayland cage + Chromium + PipeWire), microphone capture (`kiosk-ear`), wake-word detection, remote display control (`kiosk-remote`), Cast watcher (`kiosk-cast-watcher`), WebRTC media streaming (`kiosk-go2rtc`), and display power CronJobs.
 

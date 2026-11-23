@@ -3,7 +3,7 @@
 `./scripts/atlas-diff.sh <name> [target_dir]` generates and validates a migration;
 it never applies migrations to application databases. An explicit `ATLAS_DEV_URL`
 is caller-owned: it is neither created nor dropped by these scripts. Without a
-runtime configuration, the existing Docker fallback uses `pgvector/pgvector:pg18`.
+runtime configuration, the existing Docker fallback uses `pgvector/pgvector:pg19`.
 `DATABASE_URL` and `POSTGRES_URL` are not provisioning credentials.
 
 ## Runtime contract
@@ -28,7 +28,7 @@ Secrets Operator → a scoped Kubernetes Secret → password environment variabl
 The helper exports `PGPASSWORD` for psql and Atlas; generated URLs contain no
 password. Never enable shell tracing in credential-bearing jobs.
 
-An administrator must prepare a PostgreSQL 18 template with pgvector already
+An administrator must prepare a PostgreSQL 19 template with pgvector already
 installed. The dedicated migration role needs LOGIN and CREATEDB, permission to
 clone that template, and access to the maintenance database. It must have no
 superuser, CREATEROLE, replication, or application-role memberships. CREATEDB

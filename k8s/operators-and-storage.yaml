@@ -118,6 +118,130 @@ spec:
     storageClass: local-path
   switchoverDelay: 3600
 ---
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: postgres-19
+  namespace: default
+spec:
+  affinity:
+    podAntiAffinityType: required
+  bootstrap:
+    initdb:
+      database: app
+      encoding: UTF8
+      localeCType: en_US.utf8
+      localeCollate: en_US.utf8
+      owner: app
+  enablePDB: true
+  enableSuperuserAccess: false
+  failoverDelay: 0
+  imageName: ghcr.io/cloudnative-pg/postgresql:19-system-trixie@sha256:789b58fff514c28a42844962951c0556cedecaa8d3f35678bc86162fddad9f18
+  instances: 2
+  logLevel: info
+  managed:
+    roles:
+      - connectionLimit: -1
+        ensure: present
+        inherit: true
+        login: true
+        name: aerial
+        passwordSecret:
+          name: postgres-aerial-role
+        replication: true
+        superuser: true
+      - connectionLimit: -1
+        ensure: present
+        inherit: true
+        login: true
+        name: eri
+        passwordSecret:
+          name: postgres-eri-role
+      - connectionLimit: -1
+        ensure: present
+        inherit: true
+        login: false
+        name: memory_writer
+      - connectionLimit: -1
+        ensure: present
+        inherit: true
+        inRoles:
+          - memory_writer
+        login: true
+        name: coven_aerial
+        passwordSecret:
+          name: postgres-coven-aerial-role
+  maxSyncReplicas: 0
+  minSyncReplicas: 0
+  monitoring:
+    customQueriesConfigMap:
+      - key: queries
+        name: cnpg-default-monitoring
+    disableDefaultQueries: false
+    enablePodMonitor: false
+  postgresGID: 26
+  postgresUID: 26
+  postgresql:
+    parameters:
+      archive_mode: "on"
+      archive_timeout: 5min
+      dynamic_shared_memory_type: posix
+      full_page_writes: "on"
+      log_destination: csvlog
+      log_directory: /controller/log
+      log_filename: postgres
+      log_rotation_age: "0"
+      log_rotation_size: "0"
+      log_truncate_on_rotation: "false"
+      logging_collector: "on"
+      max_logical_replication_workers: "24"
+      max_parallel_workers: "32"
+      max_replication_slots: "32"
+      max_sync_workers_per_subscription: "2"
+      max_wal_senders: "32"
+      max_worker_processes: "32"
+      shared_memory_type: mmap
+      shared_preload_libraries: ""
+      ssl_max_protocol_version: TLSv1.3
+      ssl_min_protocol_version: TLSv1.3
+      wal_keep_size: 512MB
+      wal_level: logical
+      wal_log_hints: "on"
+      wal_receiver_timeout: 5s
+      wal_sender_timeout: 5s
+    syncReplicaElectionConstraint:
+      enabled: false
+  primaryUpdateMethod: restart
+  primaryUpdateStrategy: unsupervised
+  probes:
+    liveness:
+      isolationCheck:
+        connectionTimeout: 1000
+        enabled: true
+        requestTimeout: 1000
+  replicationSlots:
+    highAvailability:
+      enabled: true
+      slotPrefix: _cnpg_
+    synchronizeReplicas:
+      enabled: true
+    updateInterval: 30
+  resources:
+    limits:
+      cpu: "2"
+      memory: 2Gi
+    requests:
+      cpu: 500m
+      memory: 512Mi
+  smartShutdownTimeout: 180
+  startDelay: 3600
+  stopDelay: 1800
+  storage:
+    resizeInUseVolumes: true
+    size: 20Gi
+    storageClass: local-path
+  switchoverDelay: 3600
+---
 apiVersion: v1
 kind: Service
 metadata:
