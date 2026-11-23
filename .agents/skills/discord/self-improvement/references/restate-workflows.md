@@ -92,14 +92,15 @@ Restate classifies errors into two categories:
 ### 3.1 Retriable (Transient) Errors
 By default, any standard Go `error` returned by a handler or inside a `restate.Run` step is treated as **retriable**. Restate suspends the invocation and automatically retries the failed step with exponential backoff.
 - Transient errors include PostgreSQL connection pool exhaustions, network blips, 502/503/504 HTTP responses, and external rate limits.
-- Preserve these errors as standard Go errors so Restate guarantees eventual completion.
+- Preserve these errors as standard Go errors. Every service retries under the server's `default-retry-policy` (500ms initial, factor 2.0, 1m max interval, 70 attempts including the first): roughly an hour of retries, after which the invocation is **paused**, not failed. A paused invocation keeps its journal and needs a manual resume (admin API / `restate` CLI). The cluster sets no override; only test harnesses shorten it via `RESTATE_DEFAULT_RETRY_POLICY__*` env (`services/eri/pkg/restatetest/harness.go`).
+- **No retry overrides**: never add `WithMaxRetryAttempts`, `WithMaxRetryDuration` or `WithInitialRetryInterval` on `restate.Run` steps, per-service or per-handler retry policies, deadline-to-terminal shortcuts, or custom idempotency retention. A capped step turns exhaustion into a `TerminalError`, converting a transient outage into a permanent failure. If retry-then-pause causes harm, change the cluster-wide default instead.
 
 ### 3.2 Terminal (Non-Retriable) Errors
 Failures that will never succeed on retry must be wrapped in `restate.ToTerminalError`:
 - Client validation failures (400 Bad Request, invalid JSON, missing required fields).
 - Resource not found (404 Not Found).
-- Unrecoverable state conflicts or stale generation fencing (409 Conflict).
-- Precondition violations.
+- Unrecoverable state conflicts, stale-generation fencing, stale-state and precondition violations (412 Precondition Failed).
+- **409 is reserved for Restate's own cancellation** (sdk-go surfaces a cancelled call/await as terminal 409). Never emit 409 yourself. A handler that awaits a call or `RunAsync` treats terminal 409 as "cancelled" (eri `isRestateCancel`); when re-wrapping a downstream terminal error that carries 409, remap it to 412 (eri `coordinatorError`). Constants: `CodeRestateCancelled` / `CodeQueueConflict` in `services/eri/pkg/queue/turn_contract.go`.
 
 ```go
 func ToTerminalErr(err error) error {
@@ -112,7 +113,7 @@ func ToTerminalErr(err error) error {
     case errors.Is(err, store.ErrBuildNotFound), errors.Is(err, ErrChunkNotFound):
         return restate.ToTerminalError(err, restate.WithErrorCode(404))
     case errors.Is(err, store.ErrBuildConflict):
-        return restate.ToTerminalError(err, restate.WithErrorCode(409))
+        return restate.ToTerminalError(err, restate.WithErrorCode(412))
     default:
         return err // retried automatically by Restate
     }
@@ -131,7 +132,20 @@ out, err := restate.Run(ctx, func(rc restate.RunContext) (MyData, error) {
 }, restate.WithName("fetch-data"))
 ```
 
-### 3.4 Separate Metrics for Client vs Reconcile Errors
+### 3.4 Postgres Errors Inside `restate.Run`
+Classify store errors explicitly; never let every DB error retry forever or fail at once.
+- **Terminal at once (deterministic)**: SQLSTATE classes `22` (data exception / invalid input), `23` (integrity: unique, FK, check, not-null), `42` (syntax, undefined object, permission), `0A`, `2B`, `2D`, `25`.
+- **Retryable (everything else)**: `08` connection, `40` serialization failure / deadlock (`40001`, `40P01`), `53` resources, `57` (query cancelled, admin shutdown), pool and context timeouts.
+- Bound each store call with a short deadline (eri: `turnStepStoreTimeout = 5s`) so a hang becomes a retryable error instead of a stuck step.
+- Reference: `classifyStoreError` in `services/eri/pkg/queue/turn_contract.go` (unexported; copy the pattern, there is no shared package). To map a specific owned unique constraint (`23505`) to a domain conflict, match the constraint name as vanadis-restate's `knownCreationConflict` does (`internal/store/build_create_get.go`).
+- An idempotent insert uses `INSERT ... ON CONFLICT DO NOTHING` rather than surfacing `23505`.
+
+### 3.5 Killed `RunAsync` Work
+- Restate cancellation does **not** cancel a `RunAsync` closure's `RunContext`; only the await sees terminal 409. A stream drop does cancel it.
+- A closure interrupted after the handler has moved past its await must return a **terminal non-409 error (412)**, never a retryable one. In sdk-go v1.2.0 a late retryable result aborts the current attempt, forcing a replay in which an unjournaled follow-up step (e.g. `stop-turn`) can run twice (observed in `services/eri/pkg/restatetest/cancel_spike_test.go`, see `errKilled`).
+- Pattern: eri `attemptInterruptedError` (`turn_attempt.go`) and llmcall `stepError` (`ctx.Err() != nil` -> 412, `services/eri/pkg/llmcall/llmcall.go`).
+
+### 3.6 Separate Metrics for Client vs Reconcile Errors
 Always track 4xx terminal client errors separately from 5xx retriable system errors in Prometheus:
 ```go
 func RecordError(handler string, err error) {
@@ -207,9 +221,9 @@ Two Virtual Objects calling each other synchronously (`restate.Object[T](ctx, ..
 
 ### 5.1 Two-Phase Side Effects Pattern
 When modifying external systems (e.g. creating GitHub PRs, dispatching agent processes, or triggering deployments):
-1. **Phase 1: State Transition & Intent Recording**: Commit the state transition and intent in PostgreSQL and Restate K/V state first inside `restate.Run`.
-2. **Phase 2: Idempotent External Dispatch**: Execute the external action using an idempotency key.
-3. If Phase 2 fails, the persistent intent recorded in Phase 1 ensures a subsequent reconcile pass recovers the exact same action without duplicating work.
+1. **Phase 1: State Transition**: Record the transition in Restate K/V state (the source of truth) and the journal. Postgres rows are records written by journaled steps for list/get tools and cross-entity queries, not the workflow's state.
+2. **Phase 2: Idempotent External Dispatch**: Execute the external action in a journaled step using a deterministic idempotency key.
+3. If Phase 2 fails, Restate retries the step from the journal; the idempotency key keeps the retried action from duplicating work.
 
 ### 5.2 Read-Only Verdict + Idempotent Publish-Ack
 - First compute the next state transition as a pure function of current state and event inputs.
@@ -318,7 +332,51 @@ Modifying the sequence, count, or type of `restate.Run`, `restate.Get`, `restate
 - If adding new steps, gate them behind a monotonic schema version or feature flag.
 - For breaking state machine changes, register a new versioned service (e.g. `BuildV2`) or ensure active instances have completed before deploying.
 
+#### Deployment Set Stability (`DeploymentInUse`)
+- Normal rollouts are safe: the operator drains the old ReplicaSet (`drainDelaySeconds`, default 300s), in-flight invocations stay pinned to their old deployment until done, then it force-deletes the old Restate deployment.
+- **Operator chart 2.8.2 (pinned in `k8s/operators/operators.yaml`)**: the `RestateDeployment` finalizer refuses deletion (`CleanupFailed` / `DeploymentInUse`) while that deployment is still the latest registration for any of its services. Deleting a whole `RestateDeployment`, or dropping a whole service from the new revision, leaves the object stuck terminating (2026-11-20 incident blocked Flux for every PR).
+- Rules: keep the service set stable across revisions. To retire a service or `RestateDeployment`: confirm zero non-completed invocations via the admin `/query` on `sys_invocation`, get the admin user's explicit OK, then `DELETE /deployments/<id>?force=true` for its registrations before removing the manifest.
+- restate-operator v3.0.0 changed this: only unfinished invocations hold a deletion. Re-check the deployed chart version before applying the 2.8.2 rule.
+
 ### 7.4 Hermetic Testing Patterns
 - **Unit Testing Handlers with Mock Runtimes**: Factor state access behind an interface (e.g. `objectRuntime`) so state transitions, validation logic, and error mapping can be tested hermetically with table-driven tests without requiring a live Restate daemon.
 - **Restate SDK Mock Context**: Use `restate.WithMockContext` for testing handler logic with simulated journal state.
 - **Disabling Invoker Inactivity Timeouts in Tests**: When running tests against an embedded or local Restate testcontainer, pass `RESTATE_WORKER__INVOKER__INACTIVITY_TIMEOUT=0m` to prevent spurious timeouts during test debugging.
+
+---
+
+## 8. Anti-Patterns: What Not to Build When Restate Is Available
+
+Each was hand-rolled in this repo and replaced; do not reintroduce them.
+
+- **Status-flag claim queues in Postgres** (`UPDATE ... SET status='processing'` loops).
+  - Why: a crash mid-claim strands rows (prospera call reports stuck in `processing`).
+  - Instead: a Virtual Object per key queues invocations for you.
+  - Example: eri's DB-claim queue -> `ThreadSession` / `DispatchSession` coordinators (legacy queries deleted in PR #2613); prospera -> `ProsperaReport` object (PR #2516).
+- **Advisory locks / mutexes for per-key serialization**.
+  - Why: busy-lock retries storm (Nak loops), and in-process mutexes do not span pods.
+  - Instead: key a Virtual Object; its exclusive handler is the lock.
+  - Example: coven advisory locks + `extractionMutex` -> `CovenThread` object (PR #2514).
+- **Polling tickers and sweeps**.
+  - Why: latency floor, wasted queries, races between pods.
+  - Instead: delayed self-sends (`ObjectSend` + `WithDelay`, section 4.2).
+  - Example: haro's ticker -> `HaroSchedule` / `HaroEventWatch` (PR #2515); coven's 30s dreaming ticker -> `CovenDreamer` (PR #2514).
+- **Delete-before-send / advance-before-send**.
+  - Why: a crash between the DB write and the send loses the run (haro deleted one-shots / triggers before the eri send).
+  - Instead: send in a journaled step with a deterministic `Idempotency-Key`, then delete or advance in a later step.
+  - Example: `HaroSchedule.Fire` (`dispatch-turn` -> `finalize-schedule`), `HaroEventWatch.Fire` (`dispatch-event` -> `consume-trigger`) (PR #2515).
+- **In-memory state assuming one pod**.
+  - Why: lost on restart, diverges across replicas.
+  - Instead: object K/V state.
+  - Example: Vanadis package-global `chunkActiveSteps` map -> per-chunk state on the `Build` object (PR #2535).
+- **Cross-object row writes**.
+  - Why: one object's step mutating another's rows bypasses its lock and contends on row locks.
+  - Instead: `ObjectSend` to each owning object.
+  - Example: Vanadis cross-build deploy sweep -> `Mutate` sends to each foreign `Build` object (PR #2534).
+- **Replying "busy" and making the caller retry**.
+  - Why: lease/backoff loops and memoized `skipped_active` responses (section 5.4).
+  - Instead: enqueue into the Virtual Object and let it run when free.
+  - Example: Vanadis dispatch deferral lease/backoff loop deleted; dispatches queue on `DispatchSession` (PR #2551).
+- **Postgres as source of truth for workflow state**.
+  - Why: two stores drift; replay cannot see Postgres.
+  - Instead: Restate state and journal own the workflow; Postgres holds records written by journaled steps (section 5.1).
