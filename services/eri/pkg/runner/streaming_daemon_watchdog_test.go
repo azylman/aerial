@@ -89,7 +89,7 @@ func TestStreamingDaemon_WatchdogRescue(t *testing.T) {
 	}
 }
 
-func TestStreamingDaemon_RescuerEdgeCases(t *testing.T) {
+func TestStreamingDaemon_RescueContextFallbacks(t *testing.T) {
 	d := &StreamingDaemon{sessionID: "sess-res"}
 	if got := d.rescueTranscript(nil); got != "" {
 		t.Errorf("expected empty string for nil turn, got %q", got)
@@ -124,7 +124,7 @@ func TestStreamingDaemon_RescuerEdgeCases(t *testing.T) {
 	}
 }
 
-func TestStreamingDaemon_CheckWatchdogBranches(t *testing.T) {
+func TestStreamingDaemon_WatchdogConditions(t *testing.T) {
 	d := &StreamingDaemon{sessionID: "sess-branches"}
 	d.closed.Store(true)
 	d.checkWatchdog(time.Millisecond)

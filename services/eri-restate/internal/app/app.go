@@ -223,7 +223,6 @@ func startUsagePoller(ctx context.Context, cur *config.ConfigData, ephemeralHome
 }
 
 var (
-	openDefaultDB      = db.New
 	onServerReady      func(restateAddr, healthAddr string)
 	startUsagePollerFn = metrics.StartUsagePoller
 )
@@ -381,7 +380,7 @@ func RunApp(ctx context.Context, cfg Config, opts ...AppOption) error {
 	store := appOpts.store
 	txStore := appOpts.txStore
 	if store == nil {
-		s, tx, cleanupStores, err := bootstrap.InitDefaultStores(openDefaultDB, appCfg, cur, cfg.AgentName)
+		s, tx, cleanupStores, err := bootstrap.InitDefaultStores(db.New, appCfg, cur, cfg.AgentName)
 		if err != nil {
 			return err
 		}

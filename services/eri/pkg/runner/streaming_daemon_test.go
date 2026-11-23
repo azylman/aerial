@@ -13,12 +13,6 @@ import (
 	"time"
 )
 
-func (d *StreamingDaemon) StepCount() int {
-	d.mu.RLock()
-	defer d.mu.RUnlock()
-	return d.stepCount
-}
-
 type mockCompletedTool struct {
 	ToolName, MCPServer, Status string
 	Duration                    time.Duration
@@ -243,8 +237,8 @@ func TestStreamingDaemon_HandshakeSuccessAndDefaults(t *testing.T) {
 	cfg := DaemonConfig{SessionID: "00000000-0000-0000-0000-000000000001", Timeout: 2 * time.Second}
 	h := startTestStreamingDaemon(t, cfg, "", false)
 	d := h.daemon
-	if d.State() != StateReady || d.SessionID() != cfg.SessionID || d.TurnCount() != 0 || d.StepCount() != 0 || time.Since(d.LastUsed()) > 5*time.Second {
-		t.Errorf("unexpected initial state: state=%s, session=%s, turns=%d, steps=%d", d.State(), d.SessionID(), d.TurnCount(), d.StepCount())
+	if d.State() != StateReady || d.SessionID() != cfg.SessionID || d.TurnCount() != 0 || time.Since(d.LastUsed()) > 5*time.Second {
+		t.Errorf("unexpected initial state: state=%s, session=%s, turns=%d", d.State(), d.SessionID(), d.TurnCount())
 	}
 	if DefaultHandshakeTimeout != 30*time.Second {
 		t.Fatalf("expected DefaultHandshakeTimeout 30s, got %v", DefaultHandshakeTimeout)
@@ -330,7 +324,7 @@ func TestStreamingDaemon_DispatchEvents(t *testing.T) {
 	sink.mu.Unlock()
 
 	if thinking != 1 || len(deltas) != 2 || deltas[0] != "chunk1" || deltas[1] != "chunk2" || len(toolCalls) != 1 || toolCalls[0] != "bash:ls -la" ||
-		h.daemon.StepCount() != 4 || h.daemon.TurnCount() != 1 || h.daemon.State() != StateReady {
+		h.daemon.TurnCount() != 1 || h.daemon.State() != StateReady {
 		t.Errorf("unexpected events: thinking=%d, deltas=%v, tools=%v", thinking, deltas, toolCalls)
 	}
 }
@@ -513,7 +507,7 @@ func TestStreamingDaemon_SendConcurrency(t *testing.T) {
 	}
 }
 
-func TestStreamingDaemon_DispatchEdgeCasesAndNestedDeltas(t *testing.T) {
+func TestStreamingDaemon_DispatchLines(t *testing.T) {
 	h := startTestStreamingDaemon(t, cfgForSession("00000000-0000-0000-0000-000000000001"), "", false)
 	daemon := h.daemon
 	for _, line := range []string{"", "   \n", `{"event":"step_update","delta":"orphan"}`} {

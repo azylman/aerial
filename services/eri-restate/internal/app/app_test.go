@@ -3,7 +3,6 @@ package app
 import (
 	"bytes"
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -22,6 +21,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/azylman/aerial/pkg/pgtest"
 	"github.com/azylman/aerial/services/eri/pkg/bootstrap"
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
@@ -430,7 +430,7 @@ func TestRunApp_CanceledContext(t *testing.T) {
 
 	tmpDir := t.TempDir()
 	appCfg := config.NewFromData(&config.ConfigData{
-		DatabaseURL:   "sqlite://" + tmpDir + "/test.db",
+		DatabaseURL:   pgtest.NewDSN(t),
 		GeminiHomeDir: tmpDir + "/home",
 		DataDir:       tmpDir + "/data",
 		Port:          "4028",
@@ -464,7 +464,7 @@ func TestRunApp_CanceledContext(t *testing.T) {
 
 	// Test config DiscordToken and NATSURL in RunApp
 	appCfgWithTokens := config.NewFromData(&config.ConfigData{
-		DatabaseURL:   "sqlite://" + tmpDir + "/test.db",
+		DatabaseURL:   pgtest.NewDSN(t),
 		GeminiHomeDir: tmpDir + "/home",
 		DataDir:       tmpDir + "/data",
 		Port:          "4028",
@@ -485,7 +485,7 @@ func TestRunApp_CanceledContext(t *testing.T) {
 
 	// Test provisioner sync error branch in RunApp
 	appCfgBadSync := config.NewFromData(&config.ConfigData{
-		DatabaseURL:   "sqlite://" + tmpDir + "/test.db",
+		DatabaseURL:   pgtest.NewDSN(t),
 		GeminiHomeDir: tmpDir + "/home",
 		DataDir:       "/proc/nonexistent-sync-dir/data",
 		Port:          "4028",
@@ -546,8 +546,9 @@ func TestRunApp_CanceledContext(t *testing.T) {
 		HealthPort:  "14028",
 		AgentName:   "aerial-test",
 	}
+	appCfgBadDB := config.NewFromData(&config.ConfigData{DatabaseURL: ""})
 	err = RunApp(ctx, cfgBadDB,
-		WithAppConfig(appCfg),
+		WithAppConfig(appCfgBadDB),
 		WithDaemonSpawner(&dummySpawner{}),
 	)
 	assert.Error(t, err)
@@ -683,7 +684,7 @@ func TestRunApp_ListenFailures(t *testing.T) {
 
 	tmpDir := t.TempDir()
 	appCfg := config.NewFromData(&config.ConfigData{
-		DatabaseURL:   "sqlite://" + tmpDir + "/test.db",
+		DatabaseURL:   pgtest.NewDSN(t),
 		GeminiHomeDir: tmpDir + "/home",
 		DataDir:       tmpDir + "/data",
 		Port:          "4028",
@@ -738,17 +739,11 @@ func TestRunApp_DefaultDatabaseInitializationAndShutdown(t *testing.T) {
 	})
 
 	t.Run("GracefulShutdownWithDefaultStore", func(t *testing.T) {
-		oldOpen := openDefaultDB
-		openDefaultDB = func(*config.Config) (*sql.DB, error) {
-			return sql.Open("pgx", "postgres://localhost/test")
-		}
-		defer func() { openDefaultDB = oldOpen }()
-
 		ctx, cancel := context.WithCancel(t.Context())
 
 		tmpDir := t.TempDir()
 		appCfg := config.NewFromData(&config.ConfigData{
-			DatabaseURL:   "postgres://localhost/test",
+			DatabaseURL:   pgtest.NewDSN(t),
 			GeminiHomeDir: tmpDir + "/home",
 			DataDir:       tmpDir + "/data",
 			Port:          "4028",

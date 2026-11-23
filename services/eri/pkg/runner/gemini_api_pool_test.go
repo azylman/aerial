@@ -17,9 +17,7 @@ import (
 	"time"
 )
 
-func (s *GeminiAPISession) TargetKey() string { return s.targetKey }
-
-func (s *GeminiAPISession) History() []geminiContent {
+func getGeminiSessionHistory(s *GeminiAPISession) []geminiContent {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return append([]geminiContent(nil), s.history...)
@@ -218,7 +216,7 @@ func assertSendSuiteSuccess(t *testing.T, tc sendTestCase, sess AgentSession, se
 		t.Fatalf("unexpected Send error: %v", sendErr)
 	}
 	if tc.expectEmptyHist {
-		if hist := requireType[*GeminiAPISession](t, sess).History(); len(hist) != 0 {
+		if hist := getGeminiSessionHistory(requireType[*GeminiAPISession](t, sess)); len(hist) != 0 {
 			t.Errorf("expected empty history, got %d", len(hist))
 		}
 		return
@@ -241,7 +239,7 @@ func runSendSuiteSequential(t *testing.T, tc sendTestCase, sess AgentSession) {
 			t.Fatalf("turn %d failed: %v", i, err)
 		}
 	}
-	hist := requireType[*GeminiAPISession](t, sess).History()
+	hist := getGeminiSessionHistory(requireType[*GeminiAPISession](t, sess))
 	if len(hist) != tc.expectMaxHistory || (tc.expectHistFirst != "" && hist[0].Parts[0].Text != tc.expectHistFirst) || (tc.expectHistLast != "" && hist[len(hist)-1].Parts[0].Text != tc.expectHistLast) {
 		t.Errorf("history mismatch: len=%d, first=%q, last=%q", len(hist), hist[0].Parts[0].Text, hist[len(hist)-1].Parts[0].Text)
 	}
@@ -348,7 +346,7 @@ func TestGeminiAPIPool_AccessorsAndNilPool(t *testing.T) {
 		t.Errorf("expected non-nil HTTPClient")
 	}
 	sess, err := pool.GetOrCreateSession(context.Background(), "target-123", "custom-uuid")
-	if err != nil || requireType[*GeminiAPISession](t, sess).TargetKey() != "target-123" || sess.SessionID() != "custom-uuid" {
+	if err != nil || requireType[*GeminiAPISession](t, sess).targetKey != "target-123" || sess.SessionID() != "custom-uuid" {
 		t.Errorf("unexpected session: %v, %v", sess, err)
 	}
 	targets := pool.PrewarmedTargets()
@@ -583,7 +581,7 @@ func TestGeminiAPISession_PersistenceAndHydrationCycle(t *testing.T) {
 
 	freshSession := &GeminiAPISession{targetKey: "persisted-session", sessionID: "persisted-session", pool: pool, dataDir: tmpDir}
 	freshSession.hydrateHistory()
-	if hist := freshSession.History(); len(hist) != 2 || hist[0].Parts[0].Text != "First prompt" || hist[1].Parts[0].Text != "Persisted response" {
+	if hist := getGeminiSessionHistory(freshSession); len(hist) != 2 || hist[0].Parts[0].Text != "First prompt" || hist[1].Parts[0].Text != "Persisted response" {
 		t.Errorf("unexpected hydrated history: %+v", hist)
 	}
 	// Additional transcript edge branches
@@ -633,7 +631,7 @@ func TestGeminiAPISession_TranscriptPersistence_Suite(t *testing.T) {
 			}
 			sess := &GeminiAPISession{targetKey: "sess-" + tc.name, sessionID: "sess-" + tc.name, pool: NewGeminiAPIPool(GeminiAPIPoolConfig{DataDir: tmpDir}), dataDir: tmpDir}
 			sess.hydrateHistory()
-			hist := sess.History()
+			hist := getGeminiSessionHistory(sess)
 			if len(hist) != tc.expectedLen || (tc.firstText != "" && hist[0].Parts[0].Text != tc.firstText) {
 				t.Errorf("%s: unexpected hist: len=%d, first=%+v", tc.name, len(hist), hist)
 			}
@@ -1076,7 +1074,7 @@ func runGeminiAPISessionRetrieverCase(t *testing.T, tc retrieverTestCase) {
 	if strings.Count(wireText, tc.expectedWireTag) != 1 || !strings.Contains(wireText, tc.expectedContent) {
 		t.Errorf("wireText mismatch for %s: %s", tc.expectedWireTag, wireText)
 	}
-	hist := requireType[*GeminiAPISession](t, sess).History()
+	hist := getGeminiSessionHistory(requireType[*GeminiAPISession](t, sess))
 	if len(hist) != 2 || hist[0].Role != "user" || !strings.Contains(hist[0].Parts[0].Text, tc.expectedHistoryClean) || hist[1].Parts[0].Text != tc.modelResponse {
 		t.Errorf("history mismatch: %+v", hist)
 	}

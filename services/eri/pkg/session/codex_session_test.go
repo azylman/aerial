@@ -45,7 +45,7 @@ func TestCodexInternal_ErrorLineExtraction(t *testing.T) {
 	}
 }
 
-func TestCodexInternal_ResponseEdgeCases(t *testing.T) {
+func TestCodexInternal_ScanLinesForResponse(t *testing.T) {
 	t.Parallel()
 	responseEdgeTests := []struct {
 		name     string

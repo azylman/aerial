@@ -1087,7 +1087,7 @@ func TestTurnExecution_DeliverDiscordSuccess_Retries(t *testing.T) {
 		name         string
 		failAttempts int
 		cancelCtx    bool
-		errType      string
+		failErr      error
 		wantAttempts int
 	}{
 		{
@@ -1114,31 +1114,31 @@ func TestTurnExecution_DeliverDiscordSuccess_Retries(t *testing.T) {
 		{
 			name:         "partial send error does not retry to avoid duplicates",
 			failAttempts: 3,
-			errType:      "partial_chunk",
+			failErr:      errors.New("failed to send message chunk 1: network timeout"),
 			wantAttempts: 1,
 		},
 		{
 			name:         "permanent client 403 error does not retry",
 			failAttempts: 3,
-			errType:      "forbidden",
+			failErr:      &discordgo.RESTError{Response: &http.Response{StatusCode: http.StatusForbidden}},
 			wantAttempts: 1,
 		},
 		{
 			name:         "nil discord session does not retry",
 			failAttempts: 2,
-			errType:      "nil_session",
+			failErr:      errors.New("discord session is nil"),
 			wantAttempts: 1,
 		},
 		{
 			name:         "transient 429 rate limit retries and succeeds",
 			failAttempts: 1,
-			errType:      "rate_limit",
+			failErr:      &discordgo.RESTError{Response: &http.Response{StatusCode: http.StatusTooManyRequests}},
 			wantAttempts: 2,
 		},
 		{
 			name:         "transient 502 gateway error retries and succeeds",
 			failAttempts: 1,
-			errType:      "server_error",
+			failErr:      &discordgo.RESTError{Response: &http.Response{StatusCode: http.StatusBadGateway}},
 			wantAttempts: 2,
 		},
 	}
@@ -1159,20 +1159,10 @@ func TestTurnExecution_DeliverDiscordSuccess_Retries(t *testing.T) {
 				DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
 					att := int(attempts.Add(1))
 					if att <= tc.failAttempts {
-						switch tc.errType {
-						case "partial_chunk":
-							return errors.New("failed to send message chunk 1: network timeout")
-						case "forbidden":
-							return &discordgo.RESTError{Response: &http.Response{StatusCode: http.StatusForbidden}}
-						case "nil_session":
-							return errors.New("discord session is nil")
-						case "rate_limit":
-							return &discordgo.RESTError{Response: &http.Response{StatusCode: http.StatusTooManyRequests}}
-						case "server_error":
-							return &discordgo.RESTError{Response: &http.Response{StatusCode: http.StatusBadGateway}}
-						default:
-							return errors.New("simulated discord delivery error")
+						if tc.failErr != nil {
+							return tc.failErr
 						}
+						return errors.New("simulated discord delivery error")
 					}
 					return nil
 				},

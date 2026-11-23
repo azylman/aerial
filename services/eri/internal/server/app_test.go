@@ -152,66 +152,44 @@ func runBrainAppUntilReady(t *testing.T, cfg *config.Config, opts ...BrainAppOpt
 
 func TestRunBrainApp_ValidationAndErrors(t *testing.T) {
 	tmpDir := t.TempDir()
-
-	tests := []struct {
-		name       string
-		mode       string
-		wantErrStr string
-		wantNil    bool
-	}{
-		{"nil config", "nil_cfg", "config cannot be nil", false},
-		{"canceled context", "canceled", "", true},
-		{"canceled context with init error", "canceled_init_err", "", true},
-		{"missing database URL without store", "missing_db", "database URL or path is required", false},
-		{"missing gemini home dir", "missing_home", "gemini home directory is required", false},
-		{"missing data dir", "missing_data", "data directory is required", false},
-		{"missing port", "missing_port", "port is required", false},
-		{"unsupported database scheme", "unsupported_db", "failed to initialize database", false},
-		{"invalid listen port", "invalid_port", "listen", false},
-	}
-
 	mkCfg := func(home, data, port, dbURL string) *config.Config {
 		return newTestConfig(func(d *config.ConfigData) {
 			d.GeminiHomeDir, d.DataDir, d.Port, d.DatabaseURL = home, data, port, dbURL
 			d.AgyBin, d.Model, d.SystemPrompt = "/bin/true", "gemini-2.5-flash", "test"
 		})
 	}
+	blockDir := filepath.Join(t.TempDir(), "block")
+	_ = os.WriteFile(blockDir, []byte("file"), 0o644)
+	storeOpt := []BrainAppOption{WithStore(newTestStore(t))}
+
+	tests := []struct {
+		name       string
+		cfg        *config.Config
+		opts       []BrainAppOption
+		cancel     bool
+		wantErrStr string
+		wantNil    bool
+	}{
+		{"nil config", nil, nil, false, "config cannot be nil", false},
+		{"canceled context", mkCfg(tmpDir, filepath.Join(tmpDir, "data"), "0", unopenedDSN), nil, true, "", true},
+		{"canceled context with init error", mkCfg(blockDir, filepath.Join(tmpDir, "data"), "0", unopenedDSN), nil, true, "", true},
+		{"missing database URL without store", mkCfg(tmpDir, filepath.Join(tmpDir, "data"), "0", ""), nil, false, "database URL or path is required", false},
+		{"missing gemini home dir", mkCfg("", filepath.Join(tmpDir, "data"), "0", unopenedDSN), nil, false, "gemini home directory is required", false},
+		{"missing data dir", mkCfg(tmpDir, "", "0", unopenedDSN), nil, false, "data directory is required", false},
+		{"missing port", mkCfg(tmpDir, filepath.Join(tmpDir, "data"), "", unopenedDSN), nil, false, "port is required", false},
+		{"unsupported database scheme", mkCfg(tmpDir, filepath.Join(tmpDir, "data"), "0", "mysql://user:pass@localhost/db"), nil, false, "failed to initialize database", false},
+		{"invalid listen port", mkCfg(tmpDir, filepath.Join(tmpDir, "data"), "-1", unopenedDSN), storeOpt, false, "listen", false},
+	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
-
-			var cfg *config.Config
-			var opts []BrainAppOption
-
-			switch tt.mode {
-			case "nil_cfg":
-				cfg = nil
-			case "canceled":
-				cfg = mkCfg(tmpDir, filepath.Join(tmpDir, "data"), "0", unopenedDSN)
+			if tt.cancel {
 				cancel()
-			case "canceled_init_err":
-				blockDir := filepath.Join(t.TempDir(), "block")
-				_ = os.WriteFile(blockDir, []byte("file"), 0o644)
-				cfg = mkCfg(blockDir, filepath.Join(tmpDir, "data"), "0", unopenedDSN)
-				cancel()
-			case "missing_db":
-				cfg = mkCfg(tmpDir, filepath.Join(tmpDir, "data"), "0", "")
-			case "missing_home":
-				cfg = mkCfg("", filepath.Join(tmpDir, "data"), "0", unopenedDSN)
-			case "missing_data":
-				cfg = mkCfg(tmpDir, "", "0", unopenedDSN)
-			case "missing_port":
-				cfg = mkCfg(tmpDir, filepath.Join(tmpDir, "data"), "", unopenedDSN)
-			case "unsupported_db":
-				cfg = mkCfg(tmpDir, filepath.Join(tmpDir, "data"), "0", "mysql://user:pass@localhost/db")
-			case "invalid_port":
-				cfg = mkCfg(tmpDir, filepath.Join(tmpDir, "data"), "-1", unopenedDSN)
-				opts = []BrainAppOption{WithStore(newTestStore(t))}
 			}
 
-			err := RunBrainApp(ctx, cfg, opts...)
+			err := RunBrainApp(ctx, tt.cfg, tt.opts...)
 			if tt.wantNil {
 				if err != nil {
 					t.Errorf("expected nil error, got: %v", err)
