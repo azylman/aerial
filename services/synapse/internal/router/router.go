@@ -41,6 +41,7 @@ var (
 	_ flux.RolloutSink         = (*RouterServer)(nil)
 	_ buildmeta.GitHubGetter   = (*RouterServer)(nil)
 	_ model.OutboundDispatcher = (*DefaultOutboundDispatcher)(nil)
+	_ flux.KubeClient          = (*DefaultOutboundDispatcher)(nil)
 )
 
 type BotConfig = config.BotConfig

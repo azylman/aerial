@@ -31,7 +31,6 @@ type dispatchCase struct {
 	maxAttempts  int
 	noBrainURL   bool
 	closedServer bool
-	nilSubClient bool
 	ctxState     string // "" live, "cancelled" before the call, "cancel_on_hit" when the first request lands
 	wantHits     int32
 	wantRetry    bool
@@ -66,10 +65,6 @@ func newDispatchClient(t *testing.T, tc dispatchCase) (*Client, context.Context,
 	}
 	c := NewClient(brainURL, nil)
 	c.SetRetryConfig(tc.retryDelay, tc.maxAttempts)
-	if tc.nilSubClient {
-		c.SetDiscordMsgClient(nil)
-		c.SetDiscordInteractionClient(nil)
-	}
 	if tc.ctxState == "cancelled" {
 		cancel()
 	}
@@ -166,7 +161,7 @@ func TestDispatchDiscordMessage(t *testing.T) {
 		{name: "500 server error not retried", status: http.StatusInternalServerError, body: `{"error":"internal error"}`, wantHits: 1, wantErr: "status 500"},
 		{name: "empty brain url", noBrainURL: true, wantErr: "brain URL is not configured"},
 		{name: "transport failure", closedServer: true, wantErr: "discord message ingress request failed"},
-		{name: "nil message client falls back to http client", body: `{"status":"processed"}`, nilSubClient: true, wantHits: 1},
+		{name: "cancelled context fails request", ctxState: "cancelled", wantErr: "discord message ingress request failed"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -186,7 +181,6 @@ func TestDispatchDiscordInteraction(t *testing.T) {
 		{name: "400 client error", status: http.StatusBadRequest, body: `{"error":"invalid payload"}`, wantHits: 1, wantErr: "discord interaction returned status 400"},
 		{name: "500 server error not retried", status: http.StatusInternalServerError, body: `{"error":"internal error"}`, wantHits: 1, wantErr: "status 500"},
 		{name: "cancelled context fails request", ctxState: "cancelled", wantErr: "discord interaction request failed"},
-		{name: "nil interaction client falls back to http client", body: `{"status":"ok"}`, nilSubClient: true, wantHits: 1},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

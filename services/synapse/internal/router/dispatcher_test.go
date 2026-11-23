@@ -4,8 +4,6 @@ import (
 	"cmp"
 	"context"
 	"errors"
-	"io"
-	"maps"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -13,6 +11,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/bwmarrin/discordgo"
 )
@@ -49,6 +48,40 @@ func TestDefaultOutboundDispatcher_ResolveEriURL(t *testing.T) {
 			t.Parallel()
 			if got := tc.disp.resolveEriURL(tc.agent); got != tc.want {
 				t.Errorf("resolveEriURL(%q) = %q, want %q", tc.agent, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestDefaultOutboundDispatcher_KubeConfig pins the promoted kube accessors
+// the Flux watcher reads: it silently does nothing if APIServer() is empty.
+func TestDefaultOutboundDispatcher_KubeConfig(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name           string
+		apiServer      string
+		retryDelay     time.Duration
+		wantAPIServer  string
+		wantRetryDelay time.Duration
+	}{
+		{name: "unconfigured keeps defaults", wantRetryDelay: 1500 * time.Millisecond},
+		{name: "configured server and retry delay", apiServer: "https://kube.test:6443/", retryDelay: 20 * time.Millisecond, wantAPIServer: "https://kube.test:6443", wantRetryDelay: 20 * time.Millisecond},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			d := NewDefaultOutboundDispatcher("http://eri.test", nil)
+			if tc.apiServer != "" {
+				d.SetKubeConfig(tc.apiServer, "tok")
+			}
+			if tc.retryDelay != 0 {
+				d.kubeClient.SetRetryConfig(tc.retryDelay, 3)
+			}
+			if got := d.APIServer(); got != tc.wantAPIServer {
+				t.Errorf("APIServer() = %q, want %q", got, tc.wantAPIServer)
+			}
+			if got := d.RetryDelay(); got != tc.wantRetryDelay {
+				t.Errorf("RetryDelay() = %v, want %v", got, tc.wantRetryDelay)
 			}
 		})
 	}
@@ -334,13 +367,12 @@ type kubeFixture struct {
 	mu       sync.Mutex
 	routes   map[string]kubeRoute
 	requests []string
-	bodies   map[string]string
 	queries  map[string]string
 }
 
 func newKubeFixture(t *testing.T, routes map[string]kubeRoute) (*kubeFixture, *httptest.Server) {
 	t.Helper()
-	f := &kubeFixture{routes: routes, bodies: map[string]string{}, queries: map[string]string{}}
+	f := &kubeFixture{routes: routes, queries: map[string]string{}}
 	ts := httptest.NewServer(f)
 	t.Cleanup(ts.Close)
 	return f, ts
@@ -348,10 +380,8 @@ func newKubeFixture(t *testing.T, routes map[string]kubeRoute) (*kubeFixture, *h
 
 func (f *kubeFixture) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	key := r.Method + " " + r.URL.Path
-	body, _ := io.ReadAll(r.Body)
 	f.mu.Lock()
 	f.requests = append(f.requests, key)
-	f.bodies[key] = string(body)
 	f.queries[key] = r.URL.RawQuery
 	route, ok := f.routes[key]
 	f.mu.Unlock()
@@ -373,37 +403,4 @@ func (f *kubeFixture) Query(key string) string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.queries[key]
-}
-
-func (f *kubeFixture) Body(key string) string {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.bodies[key]
-}
-
-const (
-	kubeDeploymentsPath        = "GET /apis/apps/v1/deployments"
-	kubeStatefulSetsPath       = "GET /apis/apps/v1/statefulsets"
-	kubeDaemonSetsPath         = "GET /apis/apps/v1/daemonsets"
-	kubeJobsPath               = "GET /apis/batch/v1/jobs"
-	kubeCronJobsPath           = "GET /apis/batch/v1/cronjobs"
-	kubeRestateDeploymentsPath = "GET /apis/restate.dev/v1beta1/restatedeployments"
-	kubeRestateClustersPath    = "GET /apis/restate.dev/v1/restateclusters"
-	kubeKustomizations         = "GET /apis/kustomize.toolkit.fluxcd.io/v1/namespaces/flux-system/kustomizations"
-	emptyKubeList              = `{"items":[]}`
-)
-
-// kubeWorkloadRoutes returns every workload list route empty, overlaid with overrides.
-func kubeWorkloadRoutes(overrides map[string]kubeRoute) map[string]kubeRoute {
-	routes := map[string]kubeRoute{
-		kubeDeploymentsPath:        {body: emptyKubeList},
-		kubeStatefulSetsPath:       {body: emptyKubeList},
-		kubeDaemonSetsPath:         {body: emptyKubeList},
-		kubeJobsPath:               {body: emptyKubeList},
-		kubeCronJobsPath:           {body: emptyKubeList},
-		kubeRestateDeploymentsPath: {body: emptyKubeList},
-		kubeRestateClustersPath:    {body: emptyKubeList},
-	}
-	maps.Copy(routes, overrides)
-	return routes
 }

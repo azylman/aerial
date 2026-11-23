@@ -653,7 +653,7 @@ func runTraceparentDispatchCase(t *testing.T, target string, withParent bool, fa
 		client = nil
 	}
 	d := NewDefaultOutboundDispatcher(srv.URL, client)
-	d.SetRetryConfig(time.Millisecond, 6)
+	d.eriClient.SetRetryConfig(time.Millisecond, 6)
 	switch target {
 	case "brain":
 		if err := d.DispatchBackground(ctx, DispatchRequest{Source: "webhook"}); err != nil {
