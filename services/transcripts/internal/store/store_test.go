@@ -781,3 +781,83 @@ func TestStoreClosedDBErrors(t *testing.T) {
 		t.Errorf("expected SaveSummary error on closed db")
 	}
 }
+
+type recordSummaryRejectionCase struct {
+	name           string
+	stack          string
+	presetAttempts int
+	session        string
+	lastIndexed    int
+	closeDB        bool
+	wantAttempts   int
+	wantStored     int
+	wantDue        bool
+	wantErr        bool
+}
+
+// seedRejectionStore seeds sess-1 with steps 0..4 and presetAttempts rejected
+// answers, returning the writer store and a store bound to stack.
+func seedRejectionStore(t *testing.T, stack string, presetAttempts int) (*Store, *Store) {
+	t.Helper()
+	seeded := newTestStore(t, "aerial")
+	if _, err := seeded.ApplyBatch(context.Background(), testBatch("sess-1", rejectionEpoch, 0, 4, true, false)); err != nil {
+		t.Fatalf("seed batch: %v", err)
+	}
+	if _, err := seeded.db.ExecContext(context.Background(), `UPDATE session_summaries SET summary_attempts = $1 WHERE session_id = 'sess-1'`, presetAttempts); err != nil {
+		t.Fatalf("preset attempts: %v", err)
+	}
+	return seeded, NewStore(seeded.db, stack)
+}
+
+var rejectionEpoch = time.Date(2026, 11, 22, 9, 0, 0, 0, time.UTC)
+
+func runRecordSummaryRejectionCase(t *testing.T, tc recordSummaryRejectionCase) {
+	t.Helper()
+	ctx := context.Background()
+	seeded, st := seedRejectionStore(t, tc.stack, tc.presetAttempts)
+	if tc.closeDB {
+		_ = seeded.db.Close()
+	}
+	got, recErr := st.RecordSummaryRejection(ctx, "aerial", tc.session, tc.lastIndexed)
+	if (recErr != nil) != tc.wantErr {
+		t.Fatalf("RecordSummaryRejection() err = %v, wantErr %v", recErr, tc.wantErr)
+	}
+	if tc.closeDB {
+		return
+	}
+	if got != tc.wantAttempts {
+		t.Errorf("RecordSummaryRejection() = %d, want %d", got, tc.wantAttempts)
+	}
+	var stored int
+	if err := seeded.db.QueryRowContext(ctx, `SELECT summary_attempts FROM session_summaries WHERE session_id = 'sess-1'`).Scan(&stored); err != nil {
+		t.Fatalf("read attempts: %v", err)
+	}
+	if stored != tc.wantStored {
+		t.Errorf("stored attempts = %d, want %d", stored, tc.wantStored)
+	}
+	due, dueErr := seeded.ListDueSessions(ctx, 10*time.Minute, 1, 10, rejectionEpoch.Add(time.Hour))
+	if dueErr != nil {
+		t.Fatalf("ListDueSessions() err = %v", dueErr)
+	}
+	if (len(due) == 1) != tc.wantDue {
+		t.Errorf("ListDueSessions() returned %d candidates, wantDue %v", len(due), tc.wantDue)
+	}
+}
+
+func TestRecordSummaryRejection(t *testing.T) {
+	t.Parallel()
+	tests := []recordSummaryRejectionCase{
+		{name: "first rejection counts one", stack: "aerial", session: "sess-1", lastIndexed: 4, wantAttempts: 1, wantStored: 1, wantDue: true},
+		{name: "third rejection hides session", stack: "aerial", presetAttempts: 2, session: "sess-1", lastIndexed: 4, wantAttempts: 3, wantStored: 3},
+		{name: "newer steps indexed records nothing", stack: "aerial", presetAttempts: 1, session: "sess-1", lastIndexed: 3, wantAttempts: 0, wantStored: 1, wantDue: true},
+		{name: "unknown session records nothing", stack: "aerial", session: "sess-missing", lastIndexed: 4, wantAttempts: 0, wantStored: 0, wantDue: true},
+		{name: "read-only store rejects write", stack: "", session: "sess-1", lastIndexed: 4, wantErr: true, wantStored: 0, wantDue: true},
+		{name: "closed db fails", stack: "aerial", session: "sess-1", lastIndexed: 4, closeDB: true, wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			runRecordSummaryRejectionCase(t, tc)
+		})
+	}
+}

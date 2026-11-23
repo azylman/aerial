@@ -155,11 +155,13 @@ func (c *RestateIngressClient) CompleteLLM(ctx context.Context, req llmcall.Requ
 	return out.Response, nil
 }
 
-// NewRestateLLMFunc returns a runner.LLMFunc that runs each call unkeyed through
-// the Restate LLM service. The caller ctx bounds only the HTTP wait.
+// NewRestateLLMFunc returns a runner.LLMFunc that runs each call through the
+// Restate LLM service, keyed by the caller key the call site put on ctx with
+// runner.WithLLMCallerKey (unkeyed when none was set). The caller ctx bounds
+// only the HTTP wait.
 func NewRestateLLMFunc(client *RestateIngressClient) runner.LLMFunc {
 	return func(ctx context.Context, model, prompt string) (string, error) {
-		return client.CompleteLLM(ctx, llmcall.Request{Prompt: prompt, Model: model})
+		return client.CompleteLLM(ctx, llmcall.Request{Prompt: prompt, Model: model, CallerKey: runner.LLMCallerKey(ctx)})
 	}
 }
 

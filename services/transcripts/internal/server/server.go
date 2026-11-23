@@ -11,6 +11,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+
 	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/pkg/k8sauth"
 	"github.com/azylman/aerial/pkg/pgutil"
@@ -185,6 +187,7 @@ func NewServer(st *store.Store, auth ...*k8sauth.Authenticator) *Server {
 	s.mux.HandleFunc("/health", s.handleHealth)
 	s.mux.HandleFunc("/healthz", s.handleHealth)
 	s.mux.HandleFunc("/debug/coverage/flush", httpkit.HandleCoverageFlush("transcripts"))
+	s.mux.Handle("/metrics", promhttp.Handler())
 
 	s.mux.HandleFunc("/watermark", s.handleWatermarks)
 	s.mux.HandleFunc("/watermarks", s.handleWatermarks)

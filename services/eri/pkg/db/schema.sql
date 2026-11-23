@@ -215,6 +215,7 @@ CREATE TABLE IF NOT EXISTS session_summaries (
     last_indexed_step INT NOT NULL DEFAULT -1,
     last_mtime TIMESTAMPTZ,
     summary_step_watermark INT NOT NULL DEFAULT -1,
+    summary_attempts INT NOT NULL DEFAULT 0,
     is_settled BOOLEAN NOT NULL DEFAULT FALSE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,

@@ -374,6 +374,16 @@ func normalizeThreadSummaryOutput(result string) (string, error) {
 	return summary, nil
 }
 
+// ThreadSummaryCallerKey names the thread-summary refresh of threadID up to the
+// watermark message: "summary:<thread ID>:<watermark message ID>". Blank when
+// either ID is unknown.
+func ThreadSummaryCallerKey(threadID, watermark string) string {
+	if threadID == "" || watermark == "" {
+		return ""
+	}
+	return "summary:" + threadID + ":" + watermark
+}
+
 // SummarizeThreadHistoryWithGroup coordinates concurrent summarization requests for the same thread via singleflight.
 func SummarizeThreadHistoryWithGroup(ctx context.Context, sfg *singleflight.Group, llm LLMFunc, model, threadID string, msgs []HistoryMessage, opts ...ThreadSummaryOption) (string, error) {
 	if len(msgs) == 0 {
