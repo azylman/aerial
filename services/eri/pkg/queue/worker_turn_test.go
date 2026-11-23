@@ -621,78 +621,6 @@ func runStatefulEvictionCase(t *testing.T, tc statefulEvictionTestCase) {
 	assertStatefulEvictionResults(ctx, t, tc, store, disp.ID, sessUUID, pool, seen)
 }
 
-// runStatefulEvictionCaseLegacyQueue drives the dispatch through the legacy EnqueueDispatch path.
-func runStatefulEvictionCaseLegacyQueue(t *testing.T, tc statefulEvictionTestCase) {
-	t.Helper()
-	store := dbtest.NewFakeStore()
-	ctx := context.Background()
-	tmpHome := t.TempDir()
-	tempData := t.TempDir()
-	sessMgr := session.New(tmpHome, tempData)
-
-	sessUUID := "33333333-3333-3333-3333-333333333333"
-	if tc.hasExistingTranscript {
-		sessDir, _ := ensureTestSessionDir(sessMgr, sessUUID)
-		_ = os.MkdirAll(filepath.Join(sessDir, ".system_generated", "logs"), 0o755)
-		_ = os.WriteFile(filepath.Join(sessDir, ".system_generated", "logs", "transcript.jsonl"), []byte(`{"step_index":0}
-`), 0o644)
-		_ = store.SaveSessionID(ctx, tc.sessionID, sessUUID)
-	}
-
-	var mu sync.Mutex
-	var promptsSeen []string
-	var invCount atomic.Int32
-	doneCh := make(chan struct{})
-
-	origPrompt := "[VANADIS BUILD CHUNK EXECUTION] Chunk execution test"
-
-	pool := NewWorkerPool(WorkerPoolConfig{
-		Store:          store,
-		SessionManager: sessMgr,
-		RunnerWithOptionsFunc: func(ctx context.Context, agyBin, prompt, sID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
-			mu.Lock()
-			promptsSeen = append(promptsSeen, prompt)
-			mu.Unlock()
-
-			inv := invCount.Add(1)
-			if tc.yieldTrap && inv == 1 {
-				return `{"conversation_id":"` + sessUUID + `","status":"SUCCESS","response":"Waiting for task to complete"}`, "terminating 1 background task(s)", 0, nil
-			}
-			defer close(doneCh)
-			return `{"conversation_id":"` + sessUUID + `","status":"SUCCESS","response":"chunk executed successfully"}`, "", 0, nil
-		},
-	})
-	defer pool.Stop()
-
-	disp := db.Dispatch{
-		ID:           uuid.New().String(),
-		Source:       "vanadis",
-		SessionID:    tc.sessionID,
-		Prompt:       origPrompt,
-		RestartCount: tc.restartCount,
-		Status:       db.StatusPending,
-		CreatedAt:    time.Now().UTC(),
-		UpdatedAt:    time.Now().UTC(),
-	}
-	_, _ = store.InsertDispatch(ctx, disp)
-	pool.EnqueueDispatch(disp)
-
-	select {
-	case <-doneCh:
-	case <-time.After(5 * time.Second):
-		t.Fatalf("timeout waiting for dispatch execution")
-	}
-
-	waitPoolIdle(t, pool, 3*time.Second)
-	pool.Stop()
-
-	mu.Lock()
-	seen := append([]string(nil), promptsSeen...)
-	mu.Unlock()
-
-	assertStatefulEvictionResults(ctx, t, tc, store, disp.ID, sessUUID, pool, seen)
-}
-
 var statefulEvictionCases = []statefulEvictionTestCase{
 	{
 		name:                   "stateful dispatch evicts active pool session while preserving conversation in store",
@@ -726,18 +654,6 @@ func TestWorker_ProcessDispatch_StatefulEvictionAndRestartContinuation(t *testin
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			runStatefulEvictionCase(t, tc)
-		})
-	}
-}
-
-// TestWorker_ProcessDispatch_StatefulEviction_LegacyQueue runs statefulEvictionCases through the
-// legacy EnqueueDispatch path; it exists only while that path does (c06b deletes both).
-func TestWorker_ProcessDispatch_StatefulEviction_LegacyQueue(t *testing.T) {
-	t.Parallel()
-	for _, tc := range statefulEvictionCases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			runStatefulEvictionCaseLegacyQueue(t, tc)
 		})
 	}
 }

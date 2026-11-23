@@ -1,8 +1,7 @@
 package prstate
 
 // Deploy verdicts, dedup slots and the deploy-failure deadline. PRObject is
-// the single ordered authority for per-PR deploy state; Postgres pr_registry
-// is a projection fed by a journaled send after the state commit.
+// the single ordered authority for per-PR deploy state.
 //
 // The deploy_success verdict uses BOTH-key deploy dedup: a deploy counts as fully dispatched only when a PR-keyed or
 // job-plus-SHA slot hit coincides with every applicable recorded effect

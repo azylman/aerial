@@ -1,7 +1,11 @@
 package prstate
 
 import (
+	"context"
 	"errors"
+	"log/slog"
+	"reflect"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -100,6 +104,71 @@ func newStateMock[T any](t *testing.T, existing T) (*mocks.MockContext, *stateCa
 	return mc, rec
 }
 
+// stubRunContext is the hermetic restate.RunContext for executing Run
+// closures in mocks.
+type stubRunContext struct {
+	context.Context
+}
+
+func (stubRunContext) Log() *slog.Logger         { return slog.Default() }
+func (stubRunContext) Request() *restate.Request { return nil }
+
+// runCapture records whether a journaled restate.Run executed.
+type runCapture struct {
+	ran bool
+}
+
+// stubRun executes every restate.Run closure once, whatever run options the
+// step passes (the mock flattens them into arguments, arity 2-6). A closure
+// error stands in for exhausted retries and returns terminal; keepTerminal
+// keeps a terminal closure error's code, matching Restate, which never
+// retries a terminal error.
+func stubRun(mc *mocks.MockContext, keepTerminal bool) *runCapture {
+	rec := &runCapture{}
+	run := func(fn func(restate.RunContext) (any, error), output any, _ ...restate.RunOption) restate.TerminalError {
+		rec.ran = true
+		res, err := fn(stubRunContext{Context: context.Background()})
+		switch {
+		case err != nil && keepTerminal && restate.IsTerminalError(err):
+			return restate.AsTerminalError(err)
+		case err != nil && keepTerminal:
+			return restate.TerminalErrorf("retries exhausted: %v", err)
+		case err != nil:
+			return restate.TerminalErrorf("%v", err)
+		}
+		if out := reflect.ValueOf(output); res != nil && out.Kind() == reflect.Pointer && !out.IsNil() {
+			out.Elem().Set(reflect.ValueOf(res))
+		}
+		return nil
+	}
+	for arity := 2; arity <= 6; arity++ {
+		mc.On("Run", slices.Repeat([]any{mock.Anything}, arity)...).Return(run).Maybe()
+	}
+	return rec
+}
+
+// TestAfterCommitSkipsInvalidState pins that an unkeyed state never sends.
+func TestAfterCommitSkipsInvalidState(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		state *PRState
+	}{
+		{name: "nil state", state: nil},
+		{name: "zero pr number", state: &PRState{Repo: "azylman/aerial"}},
+		{name: "empty repo", state: &PRState{PRNumber: 101}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			mc := mocks.NewMockContext(t)
+			sends := captureSends(t, mc)
+			NewPRObjectService().afterCommit(restate.WithMockContext(mc), tc.state)
+			require.Empty(t, sends.snapshot())
+		})
+	}
+}
+
 // errKVUnavailable is the hermetic Restate K/V failure for error-path rows.
 var errKVUnavailable = errors.New("kv unavailable")
 
@@ -159,7 +228,7 @@ func TestRegisterPRStateServices(t *testing.T) {
 	require.NotNil(t, gotRepo)
 	assert.Equal(t, "PRObject", gotPR.ServiceName())
 	assert.Equal(t, "RepoObject", gotRepo.ServiceName())
-	assert.Equal(t, "DropUntracked,GetBuildLifecycle,GetDeployView,HandleBranchConflict,HandleBuildMetadata,HandleCIRecovered,HandleCheckFailed,HandleCheckPassed,HandleCheckRerunRequested,HandleCheckStatus,HandleClosed,HandleCollaboratorAlert,HandleConflict,HandleConflictCheck,HandleConflictResolved,HandleDeployAttemptFailed,HandleDeployFailed,HandleDeployFailureDeadline,HandleDeployObserved,HandleDeploySuccess,HandleHeadRefMissing,HandleKustomizationRequested,HandleMainAdvanced,HandleMerged,HandleOpened,HandleReadinessRetry,HandleReconcileLost,HandleReopened,HandleRolloutProgress,HandleSelfRegistered,HandleSynchronized,Project,Register,RetryEriEffect,RetryFactEffect,RetryFluxReconcile,RetryReadiness", sortedHandlerNames(restate.Reflect(gotPR)))
+	assert.Equal(t, "DropUntracked,GetBuildLifecycle,GetDeployView,HandleBranchConflict,HandleBuildMetadata,HandleCIRecovered,HandleCheckFailed,HandleCheckPassed,HandleCheckRerunRequested,HandleCheckStatus,HandleClosed,HandleCollaboratorAlert,HandleConflict,HandleConflictCheck,HandleConflictResolved,HandleDeployAttemptFailed,HandleDeployFailed,HandleDeployFailureDeadline,HandleDeployObserved,HandleDeploySuccess,HandleHeadRefMissing,HandleKustomizationRequested,HandleMainAdvanced,HandleMerged,HandleOpened,HandleReadinessRetry,HandleReconcileLost,HandleReopened,HandleRolloutProgress,HandleSelfRegistered,HandleSynchronized,Register,RetryEriEffect,RetryFactEffect,RetryFluxReconcile,RetryReadiness", sortedHandlerNames(restate.Reflect(gotPR)))
 	assert.Equal(t, "HandleAutoUpdate,HandleCheckRunBySHA,HandleFanout,HandleGitPush,HandleHeldExpiry,HandleHeldReplay,HandleImagePromotion,HandleImageReadyBySHA,HandleKustomizationStatus,HandleMainPush,HandlePRIndex,HandlePushBySHA,HandleRolloutIndex,HandleWorkflowRerun,HandleWorkflowRunBySHA,ListRollouts,ResolvePRBySHA", sortedHandlerNames(restate.Reflect(gotRepo)))
 }
 
@@ -611,10 +680,9 @@ func TestPRObjectService_HandleOpened(t *testing.T) {
 		existing  *PRState
 		agent     string
 		wantAgent string
-		wantBotID string
 	}{
-		{name: "opened claims the body owner", agent: "bot-b", wantAgent: "bot-b", wantBotID: "bot-b"},
-		{name: "body owner overrides a hinted owner", existing: &PRState{Repo: "azylman/aerial", PRNumber: 101, Agent: "bot-a"}, agent: "bot-b", wantAgent: "bot-b", wantBotID: "bot-b"},
+		{name: "opened claims the body owner", agent: "bot-b", wantAgent: "bot-b"},
+		{name: "body owner overrides a hinted owner", existing: &PRState{Repo: "azylman/aerial", PRNumber: 101, Agent: "bot-a"}, agent: "bot-b", wantAgent: "bot-b"},
 		{name: "no body owner keeps the stored owner", existing: &PRState{Repo: "azylman/aerial", PRNumber: 101, Agent: "bot-a"}, wantAgent: "bot-a"},
 	}
 	for _, tc := range tests {
@@ -625,7 +693,7 @@ func TestPRObjectService_HandleOpened(t *testing.T) {
 			require.NoError(t, err)
 			require.NotNil(t, rec.saved)
 			require.Equal(t, tc.wantAgent, rec.saved.Agent)
-			require.Equal(t, tc.wantBotID, rec.saved.BotID)
+			require.False(t, rec.saved.Untracked(), "an opened PR stays tracked")
 		})
 	}
 }

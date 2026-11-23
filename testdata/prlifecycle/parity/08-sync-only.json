@@ -141,8 +141,7 @@
       "status": "merged",
       "title": "Sync PR",
       "metadata": {
-        "agent": "aerial",
-        "bot_id": "aerial"
+        "agent": "aerial"
       }
     }
   ]

@@ -9,7 +9,8 @@ modules:
   `restate` stream and performs no effect itself.
 - `services/vanadis-restate/internal/prstate/parity_test.go` replays
   `restate` through the real PRObject/RepoObject handlers on an in-memory
-  Restate and asserts the `effects` multiset and the final `rows`.
+  Restate and asserts the `effects` multiset and that each tracked PR's
+  committed PRObject state matches its final `rows` entry.
 
 Synapse has no registry and no legacy pipeline; the `effects`, `rows` and
 `fact_rollout_states` fields are hand-derived from the lifecycle the legacy
@@ -26,8 +27,8 @@ pipeline used to run, so prstate is still proven against it.
   it from committed PRObject state (`BuildPRRolloutState`) when the fact
   carries none. Build VO stores a chunk's rollout state only from these
   facts. `../rollout_state/render.json` pins the render per row.
-- `rows`: the final pr_registry rows, written out by hand. Metadata leaves
-  out empty values because prstate projects them as absent keys.
+- `rows`: the final registry state of every tracked PR (one with a target
+  thread), written out by hand. Metadata leaves out empty values.
 - `restate`: the wire contract synapse sends. Every lifecycle fact rides the event that owns it, so PRObject
   decides whether the fact fires.
 - `github_routes`: canned GitHub API bodies (kept for reference; no test

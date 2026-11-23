@@ -48,8 +48,7 @@
       "status": "open",
       "title": "Register PR",
       "metadata": {
-        "agent": "aerial",
-        "bot_id": "aerial"
+        "agent": "aerial"
       }
     }
   ]

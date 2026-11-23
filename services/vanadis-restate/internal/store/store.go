@@ -60,16 +60,6 @@ func New(db PgxQueryExecer, gitHubOwner string) *Store {
 	return &Store{db: db, gitHubOwner: gitHubOwner}
 }
 
-// DB returns the underlying query surface so sibling packages (the prstate
-// pr_registry projection) share the one pool instead of opening another.
-// A nil Store returns nil.
-func (s *Store) DB() PgxQueryExecer {
-	if s == nil {
-		return nil
-	}
-	return s.db
-}
-
 type VanadisChunkSummary struct {
 	ID          string    `json:"id"`
 	ChunkIndex  int       `json:"chunk_index"`
