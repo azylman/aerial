@@ -27,14 +27,6 @@ func readyCond(status, reason, message string) []fluxCondition {
 	return []fluxCondition{{Type: "Reconciling", Status: "False"}, {Type: "Ready", Status: status, Reason: reason, Message: message}}
 }
 
-func (m *mockOutboundDispatcher) ReconcileKustomization(ctx context.Context, ref fluxKustomizationRef, requestedAt string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.reconcileCalls = append(m.reconcileCalls, ref)
-	m.reconcileRequestedAts = append(m.reconcileRequestedAts, requestedAt)
-	return m.reconcileErrs[ref.Name]
-}
-
 func (m *mockOutboundDispatcher) ListKustomizationWorkloads(ctx context.Context, ref fluxKustomizationRef) ([]workloadRollout, error) {
 	return m.workloads, m.workloadsErr
 }

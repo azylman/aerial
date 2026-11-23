@@ -212,7 +212,8 @@ var (
 	}
 	bindRepoObjectHandlers = []string{
 		"HandleAutoUpdate", "HandleCheckRunBySHA", "HandleFanout", "HandleGitPush", "HandleHeldExpiry", "HandleHeldReplay", "HandleImagePromotion",
-		"HandleImageReadyBySHA", "HandleKustomizationStatus", "HandleMainPush", "HandlePRIndex", "HandlePushBySHA", "HandleRolloutIndex", "HandleWorkflowRerun",
+		"HandleImageReadyBySHA", "HandleKustomizationStatus", "HandleMainPush", "HandlePRIndex", "HandlePushBySHA", "HandleRolloutIndex", "HandleUntrackedReconcile",
+		"HandleWorkflowRerun",
 		"HandleWorkflowRunBySHA", "ListRollouts", "ResolvePRBySHA",
 	}
 )

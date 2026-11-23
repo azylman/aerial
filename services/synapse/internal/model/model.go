@@ -289,10 +289,10 @@ type DirectMessageRequest struct {
 	Content   string `json:"content"`
 }
 
-// OutboundDispatcher delivers outbound events, prompts, and cluster updates.
+// OutboundDispatcher delivers outbound events and prompts and reads cluster
+// state; it never writes to Kubernetes.
 type OutboundDispatcher interface {
 	DiscoverImageKustomizations(ctx context.Context, imageNames []string) ([]FluxKustomizationRef, error)
-	ReconcileKustomization(ctx context.Context, ref FluxKustomizationRef, requestedAt string) error
 	ListKustomizationWorkloads(ctx context.Context, ref FluxKustomizationRef) ([]WorkloadRollout, error)
 	ListKustomizationConfigMaps(ctx context.Context, ref FluxKustomizationRef) ([]ConfigMapChange, error)
 	ResolveFluxSourceRepo(ctx context.Context, obj FluxInvolvedObject) (string, error)

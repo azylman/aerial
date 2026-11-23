@@ -74,6 +74,7 @@ var repoHandlers = map[string]bool{
 	prwire.RepoHandlerWorkflowRerun:       true,
 	prwire.RepoHandlerGitPush:             true,
 	prwire.RepoHandlerImagePromotion:      true,
+	prwire.RepoHandlerUntrackedReconcile:  true,
 }
 
 // SHA-only RepoObject handlers: each wraps the PRObject event it would
