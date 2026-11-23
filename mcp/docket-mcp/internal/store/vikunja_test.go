@@ -287,18 +287,27 @@ func (s pagedTasksServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(vikunjaErrBody))
 		return
 	}
-	perPage, err := strconv.Atoi(r.URL.Query().Get("per_page"))
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
+	perPage := s.maxPerPage
+	if raw := r.URL.Query().Get("per_page"); raw != "" {
+		var err error
+		perPage, err = strconv.Atoi(raw)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 	}
 	perPage = min(perPage, s.maxPerPage)
-	page, err := strconv.Atoi(r.URL.Query().Get("page"))
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
+
+	page := 1
+	if raw := r.URL.Query().Get("page"); raw != "" {
+		var err error
+		page, err = strconv.Atoi(raw)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 	}
-	if s.ignorePage {
+	if s.ignorePage || page < 1 {
 		page = 1
 	}
 	tasks := []config.VikunjaTask{}
