@@ -25,7 +25,6 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/bootstrap"
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
-	"github.com/azylman/aerial/services/eri/pkg/db/dbtest"
 	"github.com/azylman/aerial/services/eri/pkg/env"
 	"github.com/azylman/aerial/services/eri/pkg/metrics"
 	"github.com/azylman/aerial/services/eri/pkg/queue"
@@ -445,7 +444,7 @@ func TestRunApp_CanceledContext(t *testing.T) {
 		},
 	})
 
-	fakeStore := dbtest.NewFakeStore()
+	fakeStore := newTestStore(t)
 
 	cfg := Config{
 		RestatePort: "19080",
@@ -672,7 +671,7 @@ func TestRunApp_ConfigLoadError(t *testing.T) {
 		AgentName:   "aerial-test",
 	}
 
-	err := RunApp(t.Context(), cfg, WithStore(dbtest.NewFakeStore(), nil))
+	err := RunApp(t.Context(), cfg, WithStore(newTestStore(t), nil))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "failed to load configuration")
 }
@@ -695,7 +694,7 @@ func TestRunApp_ListenFailures(t *testing.T) {
 		},
 	})
 
-	fakeStore := dbtest.NewFakeStore()
+	fakeStore := newTestStore(t)
 
 	// Invalid RestatePort
 	cfgInvalidRestate := Config{
