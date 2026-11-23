@@ -5,13 +5,16 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	restate "github.com/restatedev/sdk-go"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
@@ -347,6 +350,9 @@ type ExtractJobRequest struct {
 }
 
 // CovenThread is a Restate Virtual Object executing fact extraction serially per thread.
+// Restate's per-key lock is the only serialization extraction needs; each batch runs as
+// journaled steps (load, LLM, one step per fact write, watermark) so a retry resumes at the
+// failed step instead of re-running the batch.
 type CovenThread struct {
 	worker *Worker
 }
@@ -356,7 +362,39 @@ func NewCovenThread(worker *Worker) *CovenThread {
 	return &CovenThread{worker: worker}
 }
 
-// Extract extracts thread facts inside a durable Restate step.
+const (
+	// extractAttemptStateKey holds the rejected-answer attempt ordinal for the current batch.
+	extractAttemptStateKey = "extract_attempt"
+	// maxExtractAttempts is the house agent-retry cap for one batch's LLM answer.
+	maxExtractAttempts = 3
+)
+
+// extractAttemptState counts rejected LLM answers for the batch that starts after Watermark.
+type extractAttemptState struct {
+	Watermark int64 `json:"watermark"`
+	Attempt   int   `json:"attempt"`
+}
+
+// classifyExtractError marks deterministic failures terminal (runbook 3.4): Postgres SQLSTATE
+// classes 22/23/42/0A/2B/2D/25 -> 400 and a missing fact -> 404. Connection, timeout,
+// serialization and deadlock errors stay retryable.
+func classifyExtractError(err error) error {
+	if err == nil || restate.IsTerminalError(err) {
+		return err
+	}
+	if errors.Is(err, store.ErrFactNotFound) {
+		return restate.ToTerminalError(err, restate.WithErrorCode(http.StatusNotFound))
+	}
+	if pgErr, ok := errors.AsType[*pgconn.PgError](err); ok && len(pgErr.Code) >= 2 {
+		switch strings.ToUpper(pgErr.Code[:2]) {
+		case "22", "23", "42", "0A", "2B", "2D", "25":
+			return restate.ToTerminalError(err, restate.WithErrorCode(http.StatusBadRequest))
+		}
+	}
+	return err
+}
+
+// Extract extracts the thread's unextracted turns batch by batch.
 func (c *CovenThread) Extract(ctx restate.ObjectContext, req ExtractJobRequest) error {
 	key := restate.Key(ctx)
 	agent, threadID := config.ParseScopedThreadKey(key)
@@ -366,23 +404,192 @@ func (c *CovenThread) Extract(ctx restate.ObjectContext, req ExtractJobRequest) 
 	if req.Agent != "" {
 		agent = req.Agent
 	}
+	threadID = strings.TrimSpace(threadID)
+	agent = strings.TrimSpace(agent)
 	if threadID == "" {
 		return nil
 	}
 
-	_, err := restate.Run(ctx, func(rc restate.RunContext) (struct{}, error) {
-		if c.worker == nil {
-			return struct{}{}, restate.ToTerminalError(errors.New("coven worker is nil"))
+	batchSize := config.DefaultExtractMaxSteps
+	for {
+		batch, err := restate.Run(ctx, func(rc restate.RunContext) (extractBatch, error) {
+			if c.worker == nil || c.worker.store == nil {
+				return extractBatch{}, restate.ToTerminalError(errors.New("coven worker is nil"), restate.WithErrorCode(http.StatusBadRequest))
+			}
+			b, err := loadExtractBatch(rc, c.worker.store, threadID, agent, batchSize)
+			return b, classifyExtractError(err)
+		}, restate.WithName("load-extract-batch"))
+		if err != nil {
+			return err
 		}
-		if err := c.worker.ExtractThread(rc, threadID, agent); err != nil {
-			return struct{}{}, err
+		switch {
+		case batch.Halve > 0:
+			batchSize = batch.Halve
+			continue
+		case batch.Skipped:
+			batchSize = config.DefaultExtractMaxSteps
+			continue
+		case !batch.Ready:
+			restate.Clear(ctx, extractAttemptStateKey)
+			return nil
 		}
-		return struct{}{}, nil
-	}, restate.WithName("extract-thread-facts"))
-	if err != nil {
-		return err
+		next, procErr := c.processBatch(ctx, threadID, agent, batch)
+		if procErr != nil {
+			return procErr
+		}
+		batchSize = next
 	}
+}
+
+// processBatch runs one loaded batch through the LLM and applies the answer, returning the
+// next batch size. A rejected answer is retried under a fresh LLM key (CallerKey + ":a<N>")
+// up to maxExtractAttempts; then the batch is recorded as failed and the watermark moves past it.
+func (c *CovenThread) processBatch(ctx restate.ObjectContext, threadID, agent string, batch extractBatch) (int, error) {
+	state, err := restate.Get[extractAttemptState](ctx, extractAttemptStateKey)
+	if err != nil {
+		return 0, err
+	}
+	attempt := 0
+	if state.Watermark == batch.Watermark {
+		attempt = state.Attempt
+	}
+
+	llmKey := extractLLMKey(agent, threadID, batch.Watermark, attempt)
+	ans, err := restate.Run(ctx, func(rc restate.RunContext) (extractAnswer, error) {
+		return c.worker.callExtractStep(rc, llmKey, agent, batch)
+	}, restate.WithName("extract-llm"))
+	if err != nil {
+		return 0, err
+	}
+	if ans.TimedOut {
+		return max(1, batch.Turns/2), nil
+	}
+
+	if ans.Rejected != "" {
+		attempt++
+		if attempt < maxExtractAttempts {
+			restate.Set(ctx, extractAttemptStateKey, extractAttemptState{Watermark: batch.Watermark, Attempt: attempt})
+			return config.DefaultExtractMaxSteps, nil
+		}
+		if _, err := restate.Run(ctx, func(rc restate.RunContext) (struct{}, error) {
+			return struct{}{}, classifyExtractError(skipRejectedBatch(rc, c.worker.store, threadID, agent, batch, ans.Rejected))
+		}, restate.WithName("skip-rejected-batch")); err != nil {
+			return 0, err
+		}
+		restate.Clear(ctx, extractAttemptStateKey)
+		return config.DefaultExtractMaxSteps, nil
+	}
+
+	if err := c.applyBatch(ctx, threadID, agent, batch.MaxRowID, ans.Payload); err != nil {
+		return 0, err
+	}
+	restate.Clear(ctx, extractAttemptStateKey)
+	return config.DefaultExtractMaxSteps, nil
+}
+
+// callExtractStep is the body of the extract-llm step: one keyed LLM call bounded by the
+// extraction timeout. A timeout on a multi-turn batch asks the handler to halve the batch.
+func (w *Worker) callExtractStep(ctx context.Context, llmKey, agent string, batch extractBatch) (extractAnswer, error) {
+	if w.llmClient == nil {
+		return extractAnswer{}, restate.ToTerminalError(errors.New("coven LLM client is nil"), restate.WithErrorCode(http.StatusBadRequest))
+	}
+	spanCtx, span := startExtractSpan(ctx, agent)
+	defer span.End()
+	span.SetAttributes(attribute.Int("aerial.coven.batch_size", batch.Turns))
+	callCtx, cancel := context.WithTimeout(spanCtx, w.extractTimeout)
+	defer cancel()
+
+	ans, err := callExtractLLM(withLLMKey(callCtx, llmKey), w.llmClient, batch.Prompt)
+	if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil && batch.Turns > 1 {
+		slog.WarnContext(ctx, "[Memory] extraction timed out, halving batch size", "llm_key", llmKey, "new_batch_size", max(1, batch.Turns/2))
+		return extractAnswer{TimedOut: true}, nil
+	}
+	if err != nil {
+		span.SetStatus(codes.Error, "extraction LLM call failed")
+		return extractAnswer{}, err
+	}
+	if ans.Rejected != "" {
+		slog.WarnContext(ctx, "[Memory] extraction LLM answer rejected", "llm_key", llmKey, "reason", ans.Rejected)
+	}
+	return ans, nil
+}
+
+// skipRejectedBatch advances the watermark past a batch whose every LLM answer was rejected,
+// so the thread keeps extracting later turns, and records the skip in logs and metrics.
+func skipRejectedBatch(ctx context.Context, s store.Store, threadID, agent string, batch extractBatch, reason string) error {
+	if err := s.UpdateConversationFactWatermark(ctx, threadID, batch.MaxRowID, agent); err != nil {
+		return fmt.Errorf("failed to skip rejected extraction batch: %w", err)
+	}
+	slog.ErrorContext(ctx, "[Memory] extraction batch failed: LLM answer rejected on every attempt; skipping batch",
+		"agent", agent, "thread_id", threadID, "from_row_id", batch.Watermark, "to_row_id", batch.MaxRowID,
+		"attempts", maxExtractAttempts, "reason", reason)
+	ExtractBatchesRejectedTotal.Inc()
+	RecordOperation("extract", "error", 0)
 	return nil
+}
+
+// applyBatch writes one validated answer, one side effect per step: each reinforcement, each
+// candidate's plan (embedding + tier-3 LLM) then its write, each procedural candidate, and
+// finally the watermark.
+func (c *CovenThread) applyBatch(ctx restate.ObjectContext, threadID, agent string, maxRowID int64, payload ExtractedFactsPayload) error {
+	s := c.worker.store
+	for _, id := range uniquePositiveIDs(payload.ReinforcedIDs) {
+		if _, err := restate.Run(ctx, func(rc restate.RunContext) (struct{}, error) {
+			return struct{}{}, classifyExtractError(reinforceExtractedFactIDs(rc, s, []int64{id}))
+		}, restate.WithName("reinforce-fact")); err != nil {
+			return err
+		}
+	}
+	for _, item := range firstFactCandidates(payload.Facts) {
+		plan, err := restate.Run(ctx, func(rc restate.RunContext) (reconcilePlan, error) {
+			p, err := planCandidateReconcile(rc, s, c.worker.ollama, c.worker.llmClient, item, agent)
+			return p, classifyExtractError(err)
+		}, restate.WithName("plan-fact"))
+		if err != nil {
+			return err
+		}
+		if !plan.Admit {
+			continue
+		}
+		if _, err := restate.Run(ctx, func(rc restate.RunContext) (struct{}, error) {
+			return struct{}{}, classifyExtractError(writeCandidateReconcile(rc, s, item, plan, agent))
+		}, restate.WithName("write-fact")); err != nil {
+			return err
+		}
+	}
+	procedural := payload.ProceduralCandidates
+	if len(procedural) > 3 {
+		procedural = procedural[:3]
+	}
+	for _, item := range procedural {
+		if _, err := restate.Run(ctx, func(rc restate.RunContext) (struct{}, error) {
+			err := stageProceduralCandidates(rc, s, c.worker.ollama, threadID, []ExtractedProceduralItem{item}, agent)
+			return struct{}{}, classifyExtractError(err)
+		}, restate.WithName("stage-procedural")); err != nil {
+			return err
+		}
+	}
+	_, err := restate.Run(ctx, func(rc restate.RunContext) (struct{}, error) {
+		if err := s.UpdateConversationFactWatermark(rc, threadID, maxRowID, agent); err != nil {
+			return struct{}{}, classifyExtractError(fmt.Errorf("failed to update conversation fact watermark: %w", err))
+		}
+		RecordOperation("extract", statusSuccess, 0)
+		return struct{}{}, nil
+	}, restate.WithName("advance-watermark"))
+	return err
+}
+
+// uniquePositiveIDs returns ids without duplicates or non-positive values, in input order.
+func uniquePositiveIDs(ids []int64) []int64 {
+	seen := make(map[int64]bool, len(ids))
+	var out []int64
+	for _, id := range ids {
+		if id > 0 && !seen[id] {
+			seen[id] = true
+			out = append(out, id)
+		}
+	}
+	return out
 }
 
 // CovenDreamer is a Restate Virtual Object executing daily fact & skill consolidation.
