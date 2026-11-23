@@ -510,6 +510,7 @@ func TestDestroyConn(t *testing.T) {
 		closeBefore bool
 	}{
 		{name: "already closed", holdLock: false, closeBefore: true},
+		{name: "live without advisory lock", holdLock: false, closeBefore: false},
 		{name: "live holding advisory lock", holdLock: true, closeBefore: false},
 	}
 	for _, tc := range tests {
