@@ -203,7 +203,7 @@ run_golangci_lint() {
         fi
         if has_cmd golangci-lint; then
             # shellcheck disable=SC2086
-            (cd "$svc" && GOTOOLCHAIN="${GOTOOLCHAIN:-go1.27.4}" golangci-lint run --concurrency "${AERIAL_LINT_CONCURRENCY:-4}" --allow-parallel-runners --path-prefix="$svc/" --config "$REPO_ROOT/.golangci.yml" $targets)
+            (cd "$svc" && GOTOOLCHAIN="${GOTOOLCHAIN:-go1.27.3}" golangci-lint run --concurrency "${AERIAL_LINT_CONCURRENCY:-4}" --allow-parallel-runners --path-prefix="$svc/" --config "$REPO_ROOT/.golangci.yml" $targets)
         elif has_docker; then
             # shellcheck disable=SC2086
             docker run --rm \
