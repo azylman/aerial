@@ -15,3 +15,32 @@ go_deps.gazelle_override(
     path = "github.com/restatedev/sdk-go",
 )
 use_repo(go_deps, "com_github_bwmarrin_discordgo", "com_github_google_jsonschema_go", "com_github_google_uuid", "com_github_gorilla_websocket", "com_github_itchyny_gojq", "com_github_jackc_pgx_v5", "com_github_modelcontextprotocol_go_sdk", "com_github_nats_io_nats_go", "com_github_nats_io_nats_server_v2", "com_github_pgvector_pgvector_go", "com_github_prometheus_client_golang", "com_github_prometheus_client_model", "com_github_restatedev_sdk_go", "com_github_restatedev_sdk_go_x_mocks", "com_github_robfig_cron_v3", "com_github_stretchr_testify", "in_gopkg_yaml_v3", "io_opentelemetry_go_otel", "io_opentelemetry_go_otel_exporters_otlp_otlptrace_otlptracehttp", "io_opentelemetry_go_otel_sdk", "io_opentelemetry_go_otel_trace", "org_golang_x_sync", "org_uber_go_goleak")
+
+oci = use_extension("@rules_oci//oci:extensions.bzl", "oci")
+oci.pull(
+    name = "distroless_static",
+    digest = "sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab",
+    image = "gcr.io/distroless/static-debian12",
+    platforms = ["linux/amd64"],
+)
+oci.pull(
+    name = "nginx_base",
+    digest = "sha256:8c950211a641ec5b23f265450517001f6bcca533666120ebe36cb4cff3d00a55",
+    image = "index.docker.io/library/nginx",
+    platforms = ["linux/amd64"],
+)
+oci.pull(
+    name = "atlas_base",
+    digest = "sha256:3cd6883d5ec2703741f750fd5f9efed3a61f8e164b9dcea93ab7a7be429a1b5b",
+    image = "index.docker.io/arigaio/atlas",
+    platforms = ["linux/amd64"],
+)
+use_repo(
+    oci,
+    "atlas_base",
+    "atlas_base_linux_amd64",
+    "distroless_static",
+    "distroless_static_linux_amd64",
+    "nginx_base",
+    "nginx_base_linux_amd64",
+)

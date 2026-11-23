@@ -1,37 +1,13 @@
 # syntax=docker/dockerfile:1
-# --- Build stage --------------------------------------------------------
+# --- Go SDK and gazelle builder stage -----------------------------------
 FROM golang:1.27.3-bookworm AS builder
-
-WORKDIR /src
 
 # Prune Go SDK test, doc, and api directories before source copy to keep /usr/local/go layer static
 RUN rm -rf /usr/local/go/test /usr/local/go/doc /usr/local/go/api
 
-COPY go.mod go.sum ./
-RUN --mount=type=cache,target=/go/pkg/mod go mod download
-
-WORKDIR /src/services/eri-restate
-COPY pkg/ /src/pkg/
-COPY services/eri/ /src/services/eri/
-COPY services/eri-restate/ ./
-
-# Exclude CLI helpers (transcript-search, hook-guard) from -cover: every hook invocation is a
-# short-lived process that would write its own counter file (a flood of tiny files per turn).
-RUN --mount=type=cache,target=/root/.cache/go-build \
-    --mount=type=cache,target=/go/pkg/mod \
-    CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /hook-guard /src/services/eri/cmd/hook-guard && \
-    CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /transcript-search /src/services/eri/cmd/transcript-search && \
-    git clone --depth 1 --branch v0.54.0 https://github.com/bazelbuild/bazel-gazelle.git /tmp/gazelle && \
+RUN git clone --depth 1 --branch v0.54.0 https://github.com/bazelbuild/bazel-gazelle.git /tmp/gazelle && \
     (cd /tmp/gazelle && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/bin/gazelle ./cmd/gazelle) && \
     rm -rf /tmp/gazelle
-
-# -coverpkg instruments the eri and shared pkg packages linked into eri-restate too, so eri code
-# that only runs here reports prod coverage (service eri-restate) instead of looking dead.
-RUN --mount=type=cache,target=/root/.cache/go-build \
-    --mount=type=cache,target=/go/pkg/mod \
-    CGO_ENABLED=0 go build -cover -covermode=atomic \
-    -coverpkg=github.com/azylman/aerial/services/eri-restate/...,github.com/azylman/aerial/services/eri/...,github.com/azylman/aerial/pkg/... \
-    -trimpath -ldflags="-s -w" -o /app/eri-restate ./cmd/eri-restate
 
 # --- Superpowers stage ---------------------------------------------------
 FROM alpine:3.24 AS superpowers
@@ -280,9 +256,9 @@ COPY --link scripts/ /usr/local/bin/
 RUN chmod +x /usr/local/bin/*.sh 2>/dev/null || true
 COPY --link rules /app/rules
 COPY --link .agents /app/.agents
-COPY --link --from=builder /hook-guard /usr/local/bin/hook-guard
-COPY --link --from=builder /transcript-search /usr/local/bin/transcript-search
-COPY --link --from=builder /app/eri-restate /app/eri-restate
+COPY --link .bazel-stage/hook-guard /usr/local/bin/hook-guard
+COPY --link .bazel-stage/transcript-search /usr/local/bin/transcript-search
+COPY --link .bazel-stage/eri-restate /app/eri-restate
 
 ENV GIT_TERMINAL_PROMPT=0
 

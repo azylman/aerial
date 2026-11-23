@@ -69,6 +69,84 @@ discover_go_services() {
     ) | sort -u | tr '\n' ' ' | sed 's/[[:space:]]*$//'
 }
 
+# Discover which Go services/modules are affected by a set of changed files.
+# Usage: discover_affected_services "$changed_files"
+# Output: list of service names (one per line, e.g. "eri", "haro", "console"), or "ALL"
+discover_affected_services() {
+    local changed_files="$1"
+    local test_all=0
+    local targets=""
+    local direct_services=""
+
+    local old_ifs="$IFS"
+    IFS="
+"
+    for file in $changed_files; do
+        IFS="$old_ifs"
+        [ -n "$file" ] || continue
+        case "$file" in
+            docs/*|k8s/*|rules/*|*.md|.gitignore|.dockerignore|.git*|channels/*|custom-skills/*)
+                # Documentation, k8s manifests, markdown docs, rules, and git metadata do not require Go unit tests
+                ;;
+            pkg/*|build/*|scripts/*|.github/*|go.mod|go.sum|MODULE.bazel*|BUILD.bazel)
+                test_all=1
+                ;;
+            web/theme/*)
+                direct_services="$direct_services console docs"
+                ;;
+            services/*|mcp/*)
+                dir=$(dirname "$file")
+                svc_name=$(echo "$file" | cut -d/ -f2)
+                direct_services="$direct_services $svc_name"
+                cur_dir="$dir"
+                while [ -n "$cur_dir" ] && [ "$cur_dir" != "." ] && [ "$cur_dir" != "/" ]; do
+                    if [ -f "$cur_dir/BUILD.bazel" ]; then
+                        targets="$targets //$cur_dir:all"
+                        break
+                    fi
+                    cur_dir=$(dirname "$cur_dir")
+                done
+                ;;
+            *)
+                test_all=1
+                ;;
+        esac
+    done
+    IFS="$old_ifs"
+
+    if [ "$test_all" -eq 1 ]; then
+        echo "ALL"
+        return 0
+    fi
+    if [ -z "$direct_services" ]; then
+        return 0
+    fi
+
+    local query_services=""
+    if [ -n "$targets" ]; then
+        if ! command -v bazel >/dev/null 2>&1; then
+            echo "::warning::Bazel is not available for rdeps change detection; testing all services" >&2
+            echo "ALL"
+            return 0
+        fi
+        local query_out
+        query_out=$(mktemp /tmp/aerial-affected-query.XXXXXX)
+        local repo_dir="${REPO_ROOT:-}"
+        [ -n "$repo_dir" ] || repo_dir="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+        if (cd "$repo_dir" && bazel query "rdeps(//..., set($targets))" >"$query_out" 2>/dev/null); then
+            query_services=$(grep -E "^//(services|mcp)/" "$query_out" | sed -E "s#^//(services|mcp)/([^/:]+).*#\2#" || true)
+            rm -f "$query_out"
+        else
+            rm -f "$query_out"
+            echo "::warning::Bazel rdeps query failed in discover_affected_services; falling back to ALL" >&2
+            echo "ALL"
+            return 0
+        fi
+    fi
+
+    printf "%s\n%s\n" "$direct_services" "$query_services" | tr " " "\n" | grep -v "^[[:space:]]*$" | sort -u
+}
+
 ensure_bazel_build_files() {
     local root="${1:-${REPO_ROOT:-}}"
     if [ -z "$root" ]; then
@@ -79,7 +157,11 @@ ensure_bazel_build_files() {
         fi
     fi
 
-    if [ ! -f "$root/MODULE.bazel" ] || ! command -v bazel >/dev/null 2>&1; then
+    if [ -f "$root/MODULE.bazel" ] && ! command -v bazel >/dev/null 2>&1; then
+        echo "🚨 [Aerial] Error: bazel is required when MODULE.bazel is present" >&2
+        return 1
+    fi
+    if [ ! -f "$root/MODULE.bazel" ]; then
         return 0
     fi
 
@@ -119,7 +201,7 @@ EOF
         fi
     fi
 
-    # services/console/BUILD.bazel: static/**
+    # services/console/BUILD.bazel: static/** and ui/**
     if [ -d "$root/services/console" ]; then
         local console_build="$root/services/console/BUILD.bazel"
         if [ ! -f "$console_build" ] || ! grep -q 'name = "static"' "$console_build" 2>/dev/null; then
@@ -128,6 +210,18 @@ EOF
 filegroup(
     name = "static",
     srcs = glob(["static/**"]),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "ui_srcs",
+    srcs = glob(
+        ["ui/**"],
+        exclude = [
+            "ui/node_modules/**",
+            "ui/dist/**",
+        ],
+    ),
     visibility = ["//visibility:public"],
 )
 EOF

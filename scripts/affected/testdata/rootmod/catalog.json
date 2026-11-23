@@ -1,3 +1,0 @@
-[
-  { "service": "root", "select": { "go_roots": ["."], "inputs": ["Dockerfile"] } }
-]

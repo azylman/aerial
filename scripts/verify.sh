@@ -264,49 +264,22 @@ run_pkg_deadcode() {
     fi
     ensure_deadcode
 
-    tmp_gowork=$(mktemp -d)
-    if [ -f "$REPO_ROOT/go.mod" ]; then
-        work_dirs="$REPO_ROOT"
-        pkg_targets="./..."
-    else
-        work_dirs="$REPO_ROOT/pkg"
-        pkg_targets="./pkg/..."
-        for s in $GO_SERVICES; do
-            if [ "$s" != "pkg" ] && [ -f "$REPO_ROOT/$s/go.mod" ]; then
-                work_dirs="$work_dirs $REPO_ROOT/$s"
-                pkg_targets="$pkg_targets ./$s/..."
-            fi
-        done
-    fi
-
-    # shellcheck disable=SC2086
-    (cd "$tmp_gowork" && go work init $work_dirs >/dev/null) || {
-        echo "🚨 [Aerial Verify] Error: failed to initialize go.work for pkg deadcode analysis" >&2
-        rm -rf "$tmp_gowork"
-        exit 1
-    }
-
-    # Collect main package import paths and all package import paths
-    # shellcheck disable=SC2086
-    main_pkgs=$(cd "$REPO_ROOT" && GOWORK="$tmp_gowork/go.work" go list -f '{{if eq .Name "main"}}{{.ImportPath}}{{end}}' $pkg_targets) || {
+    local pkg_targets="./..."
+    main_pkgs=$(cd "$REPO_ROOT" && go list -f '{{if eq .Name "main"}}{{.ImportPath}}{{end}}' $pkg_targets) || {
         echo "🚨 [Aerial Verify] Error: failed to list main packages in workspace" >&2
-        rm -rf "$tmp_gowork"
         exit 1
     }
-    # shellcheck disable=SC2086
-    all_pkgs=$(cd "$REPO_ROOT" && GOWORK="$tmp_gowork/go.work" go list $pkg_targets) || {
+    all_pkgs=$(cd "$REPO_ROOT" && go list $pkg_targets) || {
         echo "🚨 [Aerial Verify] Error: failed to list all packages in workspace" >&2
-        rm -rf "$tmp_gowork"
         exit 1
     }
 
     # Pass 1: Production Call Graph on non-*test pkg/* packages
     if [ -n "$main_pkgs" ]; then
         # shellcheck disable=SC2086
-        dead_prod=$(cd "$REPO_ROOT" && GOWORK="$tmp_gowork/go.work" "$DEADCODE_BIN" -filter='^github\.com/azylman/aerial/pkg/' $main_pkgs 2>&1) || {
+        dead_prod=$(cd "$REPO_ROOT" && "$DEADCODE_BIN" -filter='^github\.com/azylman/aerial/pkg/' $main_pkgs 2>&1) || {
             echo "🚨 [Aerial Verify] Error: deadcode (pkg production) execution failed:" >&2
             echo "$dead_prod" >&2
-            rm -rf "$tmp_gowork"
             exit 1
         }
         filtered_prod=""
@@ -316,7 +289,6 @@ run_pkg_deadcode() {
         if [ -n "$filtered_prod" ]; then
             echo "🚨 [Aerial Verify] Unreachable production code detected in pkg/ packages:" >&2
             echo "$filtered_prod" | sed 's/^/   • /' >&2
-            rm -rf "$tmp_gowork"
             exit 1
         fi
     fi
@@ -324,21 +296,17 @@ run_pkg_deadcode() {
     # Pass 2: Workspace Test Call Graph across all pkg/* and pkg/*test packages
     if [ -n "$all_pkgs" ]; then
         # shellcheck disable=SC2086
-        dead_test=$(cd "$REPO_ROOT" && GOWORK="$tmp_gowork/go.work" "$DEADCODE_BIN" -test -filter='^github\.com/azylman/aerial/pkg/' $all_pkgs 2>&1) || {
+        dead_test=$(cd "$REPO_ROOT" && "$DEADCODE_BIN" -test -filter='^github\.com/azylman/aerial/pkg/' $all_pkgs 2>&1) || {
             echo "🚨 [Aerial Verify] Error: deadcode (pkg test) execution failed:" >&2
             echo "$dead_test" >&2
-            rm -rf "$tmp_gowork"
             exit 1
         }
         if [ -n "$dead_test" ]; then
             echo "🚨 [Aerial Verify] [FAIL] deadcode -test found unreachable functions in pkg/ packages:" >&2
             echo "$dead_test" | sed 's/^/   • /' >&2
-            rm -rf "$tmp_gowork"
             exit 1
         fi
     fi
-
-    rm -rf "$tmp_gowork"
 }
 
 run_deadcode() {
@@ -425,37 +393,33 @@ run_go_pkg_coverage() {
             fi
         fi
         rel_svc="${rel_svc#/}"
-        if [ -n "${REPO_ROOT:-}" ] && [ -f "${REPO_ROOT}/MODULE.bazel" ] && command -v bazel >/dev/null 2>&1 && [ -d "${REPO_ROOT}/${rel_svc}" ]; then
-            rel_pkg="${rel_svc}"
-            if [ "$targetPkg" != "." ]; then
-                rel_pkg="${rel_svc}/${targetPkg#./}"
-            fi
-            rel_pkg="${rel_pkg%/}"
-            bazel_log=$(mktemp /tmp/aerial-bazel-cov.XXXXXX)
-            if bazel coverage "//${rel_pkg}:all" >"$bazel_log" 2>&1; then
-                cov_files=$(find "${REPO_ROOT}/bazel-testlogs/${rel_pkg}" -maxdepth 5 -name "coverage.dat" 2>/dev/null || true)
-                if [ -n "$cov_files" ]; then
-                    # shellcheck disable=SC2086
-                    if ! merge_coverage_profiles "$prof_file" $cov_files || [ ! -s "$prof_file" ]; then
-                        echo "🚨 [Aerial Verify] merge_coverage_profiles failed or produced empty profile for //${rel_pkg}:all" >&2
-                        rm -f "$prof_file" "$bazel_log"
-                        exit 1
-                    fi
+        if ! command -v bazel >/dev/null 2>&1; then
+            echo "🚨 [Aerial Verify] Error: bazel is required for coverage verification" >&2
+            rm -f "$prof_file"
+            exit 1
+        fi
+        rel_pkg="${rel_svc}"
+        if [ "$targetPkg" != "." ]; then
+            rel_pkg="${rel_svc}/${targetPkg#./}"
+        fi
+        rel_pkg="${rel_pkg%/}"
+        bazel_log=$(mktemp /tmp/aerial-bazel-cov.XXXXXX)
+        if bazel coverage "//${rel_pkg}:all" >"$bazel_log" 2>&1; then
+            cov_files=$(find "${REPO_ROOT}/bazel-testlogs/${rel_pkg}" -maxdepth 5 -name "coverage.dat" 2>/dev/null || true)
+            if [ -n "$cov_files" ]; then
+                # shellcheck disable=SC2086
+                if ! merge_coverage_profiles "$prof_file" $cov_files || [ ! -s "$prof_file" ]; then
+                    echo "🚨 [Aerial Verify] merge_coverage_profiles failed or produced empty profile for //${rel_pkg}:all" >&2
+                    rm -f "$prof_file" "$bazel_log"
+                    exit 1
                 fi
-                rm -f "$bazel_log"
-            else
-                echo "🚨 [Aerial Verify] Bazel coverage failed on //${rel_pkg}:all:" >&2
-                cat "$bazel_log" >&2
-                rm -f "$prof_file" "$bazel_log"
-                exit 1
             fi
+            rm -f "$bazel_log"
         else
-            if ! (cd "$svc" && hermetic_go \
-                CGO_ENABLED="$cgo_val" \
-                go test ${race_flag:+"$race_flag"} -trimpath -timeout "${AERIAL_TEST_TIMEOUT:-180s}" -coverprofile="$prof_file" "$targetPkg"); then
-                rm -f "$prof_file"
-                exit 1
-            fi
+            echo "🚨 [Aerial Verify] Bazel coverage failed on //${rel_pkg}:all:" >&2
+            cat "$bazel_log" >&2
+            rm -f "$prof_file" "$bazel_log"
+            exit 1
         fi
         if [ -f "$prof_file" ]; then
             counts=$(awk '

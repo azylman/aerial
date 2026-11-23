@@ -24,10 +24,6 @@ def go_test(name, data = [], **kwargs):
     if pkg.startswith("services/synapse") and pkg != "services/synapse":
         extra_data.append("//services/synapse:testdata")
 
-    # Scripts/affected testdata (excluded from root gazelle walk)
-    if pkg == "scripts/affected":
-        extra_data.extend(native.glob(["testdata/**"], allow_empty = True))
-
     # Schema.sql only for packages running database tests with pgtest
     if (
         pkg.startswith("services/eri") or
