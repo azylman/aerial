@@ -1477,3 +1477,15 @@ func TestTicker_Start_Error(t *testing.T) {
 		t.Fatal("expected Start to return error on invalid restate port, got nil")
 	}
 }
+
+// fireHeartbeatAt runs one HaroSchedule.Fire for a heartbeat due at dueAt with the clock at now.
+func fireHeartbeatAt(t *testing.T, s *HaroSchedule, scheduleID string, dueAt, now time.Time) {
+	t.Helper()
+	mc, client := setupObjectMockContext(t, scheduleID, 1)
+	s.nowFn = func() time.Time { return now }
+	if _, err := s.Fire(restate.WithMockContext(mc), FireRequest{Generation: 1, ScheduleType: model.ScheduleTypeHeartbeat, DueAt: dueAt}); err != nil {
+		t.Fatalf("Fire(%s) error = %v", dueAt.Format(time.RFC3339), err)
+	}
+	// Every heartbeat tick, dispatched or skipped, re-arms the next Fire.
+	client.AssertCalled(t, "Send", mock.Anything, mock.Anything)
+}
