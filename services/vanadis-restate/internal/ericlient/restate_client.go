@@ -2,11 +2,9 @@ package ericlient
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
-	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -19,12 +17,12 @@ import (
 
 // ThreadSessionServiceName returns the Restate service name for ThreadSession Virtual Objects.
 func ThreadSessionServiceName(name string) string {
-	return agent.ScopedServiceName("ThreadSession", name)
+	return eriwire.ThreadSessionServiceName(name)
 }
 
 // DispatchSessionServiceName returns the Restate service name for DispatchSession Virtual Objects.
 func DispatchSessionServiceName(name string) string {
-	return agent.ScopedServiceName("DispatchSession", name)
+	return eriwire.DispatchSessionServiceName(name)
 }
 
 // StatusWidgetDeliverer abstracts status widget delivery to decouple from concrete discord sender.
@@ -102,24 +100,6 @@ func (c *RestateEriClient) postRestateJSON(ctx context.Context, endpoint, idempo
 	return respBody, nil
 }
 
-type restateDispatchResult struct {
-	Status     string `json:"status"`
-	DispatchID string `json:"dispatch_id"`
-	MessageID  string `json:"message_id"`
-	SessionID  string `json:"session_id"`
-}
-
-func parseDispatchResponse(respBytes []byte) (restateDispatchResult, error) {
-	var result restateDispatchResult
-	if len(respBytes) == 0 {
-		return result, nil
-	}
-	if err := json.Unmarshal(respBytes, &result); err != nil {
-		return result, fmt.Errorf("decode restate dispatch response: %w", err)
-	}
-	return result, nil
-}
-
 // effectiveAgent resolves the first non-empty explicit value, else AgentFromContext(ctx), else c.agentName, else defaultAgentName.
 func (c *RestateEriClient) effectiveAgent(ctx context.Context, explicit ...string) string {
 	for _, exp := range explicit {
@@ -139,25 +119,29 @@ func (c *RestateEriClient) effectiveAgent(ctx context.Context, explicit ...strin
 	return agent.Default
 }
 
-func (c *RestateEriClient) executeRestateDispatch(ctx context.Context, req eriwire.BrainDispatchRequest) (restateDispatchResult, error) {
+func (c *RestateEriClient) executeRestateDispatch(ctx context.Context, req eriwire.BrainDispatchRequest) (eriwire.RestateEnqueueEnvelope, error) {
 	if c == nil {
-		return restateDispatchResult{}, errors.New("restate eri client is nil")
+		return eriwire.RestateEnqueueEnvelope{}, errors.New("restate eri client is nil")
 	}
 	if c.restateURL == "" {
-		return restateDispatchResult{}, errors.New("restate url not configured")
+		return eriwire.RestateEnqueueEnvelope{}, errors.New("restate url not configured")
 	}
 	dispatchAgent := c.effectiveAgent(ctx, req.Agent)
 	req.Agent = dispatchAgent
 	dispatchID := strings.TrimSpace(req.ID)
 	sessionKey := eriwire.ResolveDispatchSessionKey(req)
 	svc := DispatchSessionServiceName(dispatchAgent)
-	endpoint := fmt.Sprintf("%s/%s/%s/Enqueue", c.restateURL, svc, url.PathEscape(sessionKey))
+	endpoint := eriwire.RestateMethodEndpoint(c.restateURL, svc, sessionKey, "Enqueue")
 
 	respBytes, err := c.postRestateJSON(ctx, endpoint, dispatchID, "dispatch", req)
 	if err != nil {
-		return restateDispatchResult{}, err
+		return eriwire.RestateEnqueueEnvelope{}, err
 	}
-	return parseDispatchResponse(respBytes)
+	res, err := eriwire.ParseRestateEnqueueEnvelope(respBytes)
+	if err != nil {
+		return eriwire.RestateEnqueueEnvelope{}, fmt.Errorf("decode restate dispatch response: %w", err)
+	}
+	return res, nil
 }
 
 func (c *RestateEriClient) Dispatch(ctx context.Context, req eriwire.BrainDispatchRequest) error {
@@ -198,10 +182,7 @@ func (c *RestateEriClient) DispatchAccepted(ctx context.Context, req eriwire.Bra
 	if res.Status == eriwire.StatusSkippedActive {
 		return eriwire.ErrDispatchActive
 	}
-	effectiveID := res.DispatchID
-	if effectiveID == "" {
-		effectiveID = res.MessageID
-	}
+	effectiveID := res.EffectiveID()
 	if req.ID != "" && effectiveID == req.ID {
 		if res.Status == eriwire.StatusAccepted || res.Status == eriwire.StatusAlreadyExists || res.Status == statusOK {
 			return nil
@@ -222,7 +203,8 @@ func (c *RestateEriClient) CancelDispatch(ctx context.Context, chunkID string) e
 		return errors.New("restate url not configured")
 	}
 	key := "vanadis-" + targetChunk
-	actionURL := fmt.Sprintf("%s/%s/%s/Cancel", c.restateURL, DispatchSessionServiceName(c.effectiveAgent(ctx)), url.PathEscape(key))
+	svc := DispatchSessionServiceName(c.effectiveAgent(ctx))
+	actionURL := eriwire.RestateMethodEndpoint(c.restateURL, svc, key, "Cancel")
 	_, err := c.postRestateJSON(ctx, actionURL, "", "cancel dispatch", map[string]string{"chunk_id": targetChunk})
 	return err
 }
@@ -246,7 +228,8 @@ func (c *RestateEriClient) Prompt(ctx context.Context, threadID, prompt string) 
 // enqueueThreadPrompt enqueues one prompt turn on agent's ThreadSession
 // Virtual Object keyed by the thread.
 func (c *RestateEriClient) enqueueThreadPrompt(ctx context.Context, agentName, threadID, prompt, msgID, idempotencyKey string) error {
-	endpoint := fmt.Sprintf("%s/%s/%s/Enqueue", c.restateURL, ThreadSessionServiceName(agentName), url.PathEscape(threadID))
+	svc := ThreadSessionServiceName(agentName)
+	endpoint := eriwire.RestateMethodEndpoint(c.restateURL, svc, threadID, "Enqueue")
 	reqBody := struct {
 		ChannelID string `json:"channel_id"`
 		Prompt    string `json:"prompt"`
