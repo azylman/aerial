@@ -485,7 +485,9 @@ func (b *JetStreamBus) PublishWithHeader(ctx context.Context, subject string, ms
 
 	mergedHeader := nats.Header{}
 	for k, vv := range header {
-		mergedHeader[k] = slices.Clone(vv)
+		for _, v := range vv {
+			mergedHeader.Add(k, v)
+		}
 	}
 	if msgID != "" {
 		mergedHeader.Set(HeaderMsgID, msgID)
@@ -559,31 +561,18 @@ func (*JetStreamBus) dispatchCore(subCtx context.Context, m *nats.Msg, handler H
 		failSpan(span, err)
 		span.End()
 	}()
-	if handler != nil {
-		err = handler(ctx, msg)
-	}
+	err = handler(ctx, msg)
 }
 
 type coreMessage struct {
 	raw *nats.Msg
 }
 
-func (m *coreMessage) Data() []byte {
-	if m.raw != nil {
-		return m.raw.Data
-	}
-	return nil
-}
-
-func (m *coreMessage) Subject() string {
-	if m.raw != nil {
-		return m.raw.Subject
-	}
-	return ""
-}
+func (m *coreMessage) Data() []byte    { return m.raw.Data }
+func (m *coreMessage) Subject() string { return m.raw.Subject }
 
 func (m *coreMessage) Header() nats.Header {
-	if m.raw != nil && m.raw.Header != nil {
+	if m.raw.Header != nil {
 		return m.raw.Header
 	}
 	return nats.Header{}

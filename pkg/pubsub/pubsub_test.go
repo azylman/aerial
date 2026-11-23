@@ -492,13 +492,6 @@ func TestMessage_SettledSettlementIsNoop(t *testing.T) {
 			wantData:      "vdata-2",
 			wantDelivered: 1,
 		},
-		{
-			name:          "core message nil raw",
-			msg:           &coreMessage{raw: nil},
-			wantSubject:   "",
-			wantData:      "",
-			wantDelivered: 1,
-		},
 	}
 
 	for _, tc := range tests {
@@ -1129,25 +1122,6 @@ type coreVoiceObservation struct {
 	traceID   string
 }
 
-func assertCoreMessageSettlements(t *testing.T, msg Message) {
-	t.Helper()
-	if ackErr := msg.Ack(); ackErr != nil {
-		t.Errorf("msg.Ack = %v, want nil", ackErr)
-	}
-	if nakErr := msg.NakWithDelay(0); nakErr != nil {
-		t.Errorf("msg.NakWithDelay = %v, want nil", nakErr)
-	}
-	if termErr := msg.Term(); termErr != nil {
-		t.Errorf("msg.Term = %v, want nil", termErr)
-	}
-	if snoozeErr := msg.Snooze(0); snoozeErr != nil {
-		t.Errorf("msg.Snooze = %v, want nil", snoozeErr)
-	}
-	if inProgErr := msg.InProgress(); inProgErr != nil {
-		t.Errorf("msg.InProgress = %v, want nil", inProgErr)
-	}
-}
-
 func assertCoreVoiceDelivery(t *testing.T, got coreVoiceObservation, wantSub, wantData, wantCustom, wantMsgID, wantTraceID string) {
 	t.Helper()
 	if got.subject != wantSub {
@@ -1206,7 +1180,6 @@ func runCoreVoiceTest(t *testing.T, tc coreVoiceTestCase) {
 			delivered: msg.NumDelivered(),
 			traceID:   trace.SpanContextFromContext(ctx).TraceID().String(),
 		}
-		assertCoreMessageSettlements(t, msg)
 		return tc.handlerErr
 	})
 	if err != nil {
@@ -1293,11 +1266,10 @@ func TestJetStreamBus_DispatchCore_Direct(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name       string
-		subject    string
-		msg        *nats.Msg
-		nilHandler bool
-		wantSpan   spanShape
+		name     string
+		subject  string
+		msg      *nats.Msg
+		wantSpan spanShape
 	}{
 		{
 			name:     "dispatch with nil header starts root process span",
@@ -1305,26 +1277,15 @@ func TestJetStreamBus_DispatchCore_Direct(t *testing.T) {
 			msg:      &nats.Msg{Subject: "voice.stream.direct.root", Data: []byte("d")},
 			wantSpan: procSpan("proc", "", "voice.stream.direct.root", "", "", 1),
 		},
-		{
-			name:       "dispatch with nil handler does not panic",
-			subject:    "voice.stream.direct.nilhandler",
-			msg:        &nats.Msg{Subject: "voice.stream.direct.nilhandler"},
-			nilHandler: true,
-			wantSpan:   procSpan("proc", "", "voice.stream.direct.nilhandler", "", "", 1),
-		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			bus := &JetStreamBus{}
-			var handler Handler
-			if !tc.nilHandler {
-				handler = func(ctx context.Context, msg Message) error {
-					return nil
-				}
-			}
-			bus.dispatchCore(context.Background(), tc.msg, handler)
+			bus.dispatchCore(context.Background(), tc.msg, func(ctx context.Context, msg Message) error {
+				return nil
+			})
 			assertSpanShapes(t, testSpans.await(tc.subject, 1), []spanShape{tc.wantSpan})
 		})
 	}
