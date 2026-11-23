@@ -73,7 +73,6 @@ type DispatchStore interface {
 type SessionStore interface {
 	GetSessionID(ctx context.Context, threadID string) (string, error)
 	GetPreviousSessionID(ctx context.Context, threadID string) (string, error)
-	ResolveThreadForSession(ctx context.Context, sessionID string) (string, error)
 	SaveSessionID(ctx context.Context, threadID, sessionID string) error
 	IncrementSessionTurnCount(ctx context.Context, sessionKey string) (int, error)
 	GetSessionTurnCount(ctx context.Context, sessionKey string) (int, error)
@@ -123,24 +122,9 @@ type TranscriptStep struct {
 	RankScore  float64   `json:"rank_score,omitempty"`
 }
 
-// TranscriptStore handles persistence, reconciliation, and search for session summaries and transcript steps
-// in a transcript index shared across stacks. Writes (sync states, upserts, inserts, backfills) are scoped to
-// the store's own stack; reads take a stack filter where empty matches every stack.
+// TranscriptStore handles persistence and reconciliation of known turn sessions in the transcript index.
 type TranscriptStore interface {
-	GetSessionSyncStates(ctx context.Context) (map[string]SessionSyncState, error)
 	GetKnownTurnSessionIDs(ctx context.Context) (map[string]bool, error)
-	UpsertSessionSummary(ctx context.Context, summary SessionSummary) error
-	BatchInsertTranscriptSteps(ctx context.Context, steps []TranscriptStep) error
-	BackfillToolKinds(ctx context.Context, mapper func(toolName string) string) (int64, error)
-	BackfillSessionEngines(ctx context.Context, infer func(toolNames []string) string) (int64, error)
-	// PurgeMigratedLocalTranscripts deletes this stack's transcript rows left in its own primary DB
-	// after the index moved to another database, but only sessions already present in that index.
-	// It returns the number of local sessions deleted and is a no-op when the index is the primary DB.
-	PurgeMigratedLocalTranscripts(ctx context.Context) (int64, error)
-	SearchSessionSummaries(ctx context.Context, stack string, embedding []float32, queryText string, limit int, minScore float64) ([]SessionSummary, error)
-	SearchTranscriptSteps(ctx context.Context, stack, queryText, sessionFilter, toolFilter string, limit int, since ...time.Time) ([]TranscriptStep, error)
-	GetTranscriptStepRange(ctx context.Context, stack, sessionID string, startStep, endStep int) ([]TranscriptStep, error)
-	GetTranscriptStats(ctx context.Context, stack string) ([]TranscriptStackStats, error)
 }
 
 // TranscriptStackStats counts one stack's indexed sessions and steps in the shared transcript index.

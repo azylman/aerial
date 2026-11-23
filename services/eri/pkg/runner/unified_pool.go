@@ -192,19 +192,6 @@ func (p *UnifiedProcessPool) SetTranscriptRescuer(rescuer func(ctx context.Conte
 	}
 }
 
-// SetTerminalTurnRescuer updates the terminal turn rescuer callback on the pool and its active daemons.
-func (p *UnifiedProcessPool) SetTerminalTurnRescuer(rescuer func(ctx context.Context, convID string, since time.Time) string) {
-	if p == nil {
-		return
-	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.cfg.TerminalTurnRescuer = rescuer
-	for _, d := range p.daemons {
-		d.SetTerminalTurnRescuer(rescuer)
-	}
-}
-
 // SetSessionManager updates the session manager for rotation guardrail checks.
 func (p *UnifiedProcessPool) SetSessionManager(sm *session.Manager) {
 	if p == nil {

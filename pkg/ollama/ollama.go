@@ -75,10 +75,6 @@ func (c *Client) config() Config {
 	}
 }
 
-func (c *Client) BaseURL() string {
-	return c.config().BaseURL
-}
-
 type embeddingRequest struct {
 	Model   string         `json:"model"`
 	Prompt  string         `json:"prompt"`

@@ -11,7 +11,6 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"reflect"
-	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -28,7 +27,6 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/delivery"
 	"github.com/azylman/aerial/services/eri/pkg/llmcall"
 	"github.com/azylman/aerial/services/eri/pkg/queue"
-	"github.com/azylman/aerial/services/eri/pkg/transcript"
 )
 
 func runHTTP(h http.HandlerFunc, method, target string, body io.Reader, headers ...string) *httptest.ResponseRecorder {
@@ -404,7 +402,7 @@ func runDirectMessageMuxCases(t *testing.T) {
 	pool := queue.New(nil, queue.WorkerPoolConfig{
 		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error { return nil },
 	})
-	mux := SetupBrainMuxWithEmbedder(dbtest.NewFakeStore(), dbtest.NewFakeStore(), pool, nil)
+	mux := SetupBrainMux(dbtest.NewFakeStore(), pool)
 	w := httptest.NewRecorder()
 	mux.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/discord/message", strings.NewReader(`{"channel_id":"1542423172400291873","content":"test"}`)))
 	if w.Code != http.StatusOK {
@@ -489,177 +487,6 @@ func TestHandleDirectMessage(t *testing.T) {
 	t.Run("mux route mounting for /discord/message", func(t *testing.T) {
 		runDirectMessageMuxCases(t)
 	})
-}
-
-func runTranscriptSearchSuccessCases(t *testing.T, fake *dbtest.FakeStore, embedder func(context.Context, string) ([]float32, error), embedderCalled *bool) {
-	t.Helper()
-	t.Run("search success and embedder", func(t *testing.T) {
-		w := runHTTP(handleTranscriptSearch(fake, embedder), http.MethodGet, "/api/transcripts/search?q=container&mode=auto&limit=5&tool=run_command&session=sess-mux-1", nil)
-		if w.Code != http.StatusOK {
-			t.Fatalf("expected 200 OK, got %d: %s", w.Code, w.Body.String())
-		}
-		if !*embedderCalled {
-			t.Error("expected embedder to be invoked")
-		}
-		var res transcript.SearchResult
-		if err := json.Unmarshal(w.Body.Bytes(), &res); err != nil || len(res.Sessions) != 1 || res.Sessions[0].SessionID != "sess-mux-1" {
-			t.Fatalf("unexpected search result: %+v, err: %v", res, err)
-		}
-	})
-
-	t.Run("search with since and empty query steps mode", func(t *testing.T) {
-		sinceTime := time.Now().Add(-10 * time.Minute).Format(time.RFC3339)
-		w := runHTTP(handleTranscriptSearch(fake, nil), http.MethodGet, "/api/transcripts/search?mode=steps&session=sess-mux-1&since="+url.QueryEscape(sinceTime), nil)
-		if w.Code != http.StatusOK {
-			t.Fatalf("expected 200 OK, got %d: %s", w.Code, w.Body.String())
-		}
-	})
-
-	t.Run("search tool kind matches native name", func(t *testing.T) {
-		w := runHTTP(handleTranscriptSearch(fake, nil), http.MethodGet, "/api/transcripts/search?mode=steps&session=sess-mux-1&tool=shell", nil)
-		var resTool transcript.SearchResult
-		if err := json.Unmarshal(w.Body.Bytes(), &resTool); err != nil || len(resTool.Steps) != 1 || resTool.Steps[0].ToolName != "Bash" || resTool.Steps[0].ToolKind != "shell" || resTool.Steps[0].Stack != "fake" {
-			t.Fatalf("unexpected steps: %d %+v err=%v", w.Code, resTool, err)
-		}
-	})
-
-	t.Run("search filtered to other stack", func(t *testing.T) {
-		w := runHTTP(handleTranscriptSearch(fake, nil), http.MethodGet, "/api/transcripts/search?q=container&stack=elsewhere", nil)
-		var resOther transcript.SearchResult
-		if err := json.Unmarshal(w.Body.Bytes(), &resOther); err != nil || w.Code != http.StatusOK || resOther.Total != 0 {
-			t.Fatalf("expected empty 200 result, got %d %+v err=%v", w.Code, resOther, err)
-		}
-	})
-}
-
-func runTranscriptStatsAndStepsCases(t *testing.T, fake *dbtest.FakeStore) {
-	t.Helper()
-	for _, tc := range []struct {
-		name   string
-		target string
-		want   string
-	}{
-		{"stats all stacks", "/api/transcripts/stats", `{"stacks":[{"stack":"fake","sessions":1,"steps":1}],"status":"ok","total_sessions":1,"total_steps":1}`},
-		{"stats filtered to other stack", "/api/transcripts/stats?stack=elsewhere", `{"stacks":[],"status":"ok","total_sessions":0,"total_steps":0}`},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			w := runHTTP(handleTranscriptStats(fake), http.MethodGet, tc.target, nil)
-			if w.Code != http.StatusOK {
-				t.Fatalf("expected 200 OK, got %d: %s", w.Code, w.Body.String())
-			}
-			if got := strings.TrimSpace(w.Body.String()); got != tc.want {
-				t.Fatalf("stats body = %s, want %s", got, tc.want)
-			}
-		})
-	}
-
-	for _, tc := range []struct {
-		name       string
-		target     string
-		wantStacks []string
-	}{
-		{"steps all stacks", "/api/transcripts/steps?session=sess-mux-1&step=0", []string{"fake"}},
-		{"steps own stack", "/api/transcripts/steps?session=sess-mux-1&step=0&stack=fake", []string{"fake"}},
-		{"steps other stack is empty", "/api/transcripts/steps?session=sess-mux-1&step=0&stack=elsewhere", nil},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			w := runHTTP(handleTranscriptSteps(fake), http.MethodGet, tc.target, nil)
-			var res transcript.StepWindowResult
-			if err := json.Unmarshal(w.Body.Bytes(), &res); err != nil || w.Code != http.StatusOK {
-				t.Fatalf("got %d %s err=%v", w.Code, w.Body.String(), err)
-			}
-			gotStacks := make([]string, 0, len(res.Steps))
-			for _, st := range res.Steps {
-				gotStacks = append(gotStacks, st.Stack)
-			}
-			if !slices.Equal(gotStacks, tc.wantStacks) {
-				t.Errorf("step stacks = %v, want %v", gotStacks, tc.wantStacks)
-			}
-		})
-	}
-}
-
-func TestHandleTranscriptSearchAndStats(t *testing.T) {
-	fake := dbtest.NewFakeStore()
-	_ = fake.UpsertSessionSummary(context.Background(), db.SessionSummary{
-		SessionID: "sess-mux-1",
-		Summary:   "Triaged container restart in aerial",
-	})
-	_ = fake.BatchInsertTranscriptSteps(context.Background(), []db.TranscriptStep{
-		{SessionID: "sess-mux-1", StepIndex: 0, StepType: "tool_call", ToolName: "Bash", ToolKind: "shell", Content: "kubectl rollout restart"},
-	})
-	errStore := &errTranscriptStore{FakeStore: dbtest.NewFakeStore()}
-	embedderCalled := false
-	embedder := func(ctx context.Context, text string) ([]float32, error) {
-		embedderCalled = true
-		return make([]float32, 384), nil
-	}
-
-	for _, tc := range []struct {
-		name       string
-		handler    http.HandlerFunc
-		method     string
-		target     string
-		wantStatus int
-	}{
-		{"search method not allowed", handleTranscriptSearch(fake, nil), http.MethodPost, "/api/transcripts/search", http.StatusMethodNotAllowed},
-		{"search nil store", handleTranscriptSearch(nil, nil), http.MethodGet, "/api/transcripts/search?q=test", http.StatusInternalServerError},
-		{"search store error", handleTranscriptSearch(errStore, nil), http.MethodGet, "/api/transcripts/search?q=test&mode=semantic", http.StatusInternalServerError},
-		{"stats method not allowed", handleTranscriptStats(fake), http.MethodPost, "/api/transcripts/stats", http.StatusMethodNotAllowed},
-		{"stats nil store", handleTranscriptStats(nil), http.MethodGet, "/api/transcripts/stats", http.StatusInternalServerError},
-		{"stats store error", handleTranscriptStats(errStore), http.MethodGet, "/api/transcripts/stats", http.StatusInternalServerError},
-		{"search query param alias", handleTranscriptSearch(fake, nil), http.MethodGet, "/api/transcripts/search?query=fallback-query&limit=abc", http.StatusOK},
-		{"steps method not allowed", handleTranscriptSteps(fake), http.MethodPost, "/api/transcripts/steps?session=sess-1&step=0", http.StatusMethodNotAllowed},
-		{"steps nil store", handleTranscriptSteps(nil), http.MethodGet, "/api/transcripts/steps?session=sess-1&step=0", http.StatusInternalServerError},
-		{"steps missing session", handleTranscriptSteps(fake), http.MethodGet, "/api/transcripts/steps?step=0", http.StatusBadRequest},
-		{"steps empty session", handleTranscriptSteps(fake), http.MethodGet, "/api/transcripts/steps?session=%20%20&step=0", http.StatusBadRequest},
-		{"steps missing step", handleTranscriptSteps(fake), http.MethodGet, "/api/transcripts/steps?session=sess-1", http.StatusBadRequest},
-		{"steps invalid step non-integer", handleTranscriptSteps(fake), http.MethodGet, "/api/transcripts/steps?session=sess-1&step=xyz", http.StatusBadRequest},
-		{"steps invalid step negative", handleTranscriptSteps(fake), http.MethodGet, "/api/transcripts/steps?session=sess-1&step=-1", http.StatusBadRequest},
-		{"steps invalid context non-integer", handleTranscriptSteps(fake), http.MethodGet, "/api/transcripts/steps?session=sess-1&step=0&context=abc", http.StatusBadRequest},
-		{"steps store error", handleTranscriptSteps(errStore), http.MethodGet, "/api/transcripts/steps?session=sess-1&step=0", http.StatusInternalServerError},
-		{"steps success default context", handleTranscriptSteps(fake), http.MethodGet, "/api/transcripts/steps?session=sess-mux-1&step=0", http.StatusOK},
-		{"steps success custom context", handleTranscriptSteps(fake), http.MethodGet, "/api/transcripts/steps?session=sess-mux-1&step=0&context=5", http.StatusOK},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			if w := runHTTP(tc.handler, tc.method, tc.target, nil); w.Code != tc.wantStatus {
-				t.Fatalf("got status=%d, want %d (body: %s)", w.Code, tc.wantStatus, w.Body.String())
-			}
-		})
-	}
-
-	runTranscriptSearchSuccessCases(t, fake, embedder, &embedderCalled)
-
-	runTranscriptStatsAndStepsCases(t, fake)
-
-	t.Run("mux endpoints", func(t *testing.T) {
-		mux := SetupBrainMuxWithEmbedder(fake, fake, nil, nil)
-		for _, path := range []string{"/api/transcripts/search?q=test", "/api/transcripts/stats", "/api/transcripts/steps?session=sess-mux-1&step=0"} {
-			if w := runHTTP(mux.ServeHTTP, http.MethodGet, path, nil); w.Code != http.StatusOK {
-				t.Errorf("expected 200 for %s, got %d", path, w.Code)
-			}
-		}
-	})
-}
-
-type errTranscriptStore struct {
-	*dbtest.FakeStore
-}
-
-func (*errTranscriptStore) GetTranscriptStats(ctx context.Context, stack string) ([]db.TranscriptStackStats, error) {
-	return nil, errors.New("simulated transcript stats error")
-}
-
-func (*errTranscriptStore) SearchTranscriptSteps(ctx context.Context, stack, query, sessionFilter, toolFilter string, limit int, since ...time.Time) ([]db.TranscriptStep, error) {
-	return nil, errors.New("simulated search transcript steps error")
-}
-
-func (*errTranscriptStore) SearchSessionSummaries(ctx context.Context, stack string, queryEmbedding []float32, textQuery string, limit int, threshold float64) ([]db.SessionSummary, error) {
-	return nil, errors.New("simulated search session summaries error")
-}
-
-func (*errTranscriptStore) GetTranscriptStepRange(ctx context.Context, stack, sessionID string, startStep, endStep int) ([]db.TranscriptStep, error) {
-	return nil, errors.New("simulated get transcript step range error")
 }
 
 func runHandleTasksFilterCases(t *testing.T, handler http.HandlerFunc, now time.Time) {
@@ -1057,8 +884,7 @@ func TestSetupBrainMux_And_Endpoints(t *testing.T) {
 	installRestateCapture(t, http.StatusOK, `{"status":"accepted"}`)
 	store := dbtest.NewFakeStore()
 	pool := newTestWorkerPool(store)
-	tmpHome := t.TempDir()
-	mux := SetupBrainMuxWithEmbedder(store, store, pool, nil, tmpHome)
+	mux := SetupBrainMux(store, pool)
 
 	if w := runHTTP(mux.ServeHTTP, http.MethodGet, "/health", nil); w.Code != http.StatusOK {
 		t.Errorf("Expected 200 from /health, got %d", w.Code)
