@@ -293,12 +293,12 @@ func isLoopbackAPIURL(raw string) bool {
 	return h == "127.0.0.1" || h == "localhost" || h == "::1"
 }
 
-func (e *Executor) enablePRAutoMerge(ctx context.Context, nodeID string) {
+func (e *Executor) enablePRAutoMerge(ctx context.Context, nodeID string) error {
 	if nodeID == "" {
-		return
+		return nil
 	}
 	if e.gitHubToken == "" && !isLoopbackAPIURL(e.GitHubAPIURL) {
-		return
+		return nil
 	}
 	graphqlURL := strings.TrimRight(e.GitHubAPIURL, "/") + "/graphql"
 	mutationPayload, mErr := json.Marshal(map[string]any{
@@ -320,11 +320,11 @@ func (e *Executor) enablePRAutoMerge(ctx context.Context, nodeID string) {
 		},
 	})
 	if mErr != nil {
-		return
+		return mErr
 	}
 	gReq, gErr := http.NewRequestWithContext(ctx, http.MethodPost, graphqlURL, bytes.NewReader(mutationPayload))
 	if gErr != nil {
-		return
+		return gErr
 	}
 	gReq.Header.Set("Content-Type", "application/json")
 	gReq.Header.Set("Accept", "application/vnd.github+json")
@@ -334,7 +334,7 @@ func (e *Executor) enablePRAutoMerge(ctx context.Context, nodeID string) {
 	gResp, gDoErr := e.HTTPClient.Do(gReq)
 	if gDoErr != nil {
 		slog.WarnContext(ctx, "[vanadis-restate] enable pull request auto-merge failed", "error", gDoErr)
-		return
+		return gDoErr
 	}
 	defer func() {
 		if cErr := gResp.Body.Close(); cErr != nil {
@@ -342,8 +342,9 @@ func (e *Executor) enablePRAutoMerge(ctx context.Context, nodeID string) {
 		}
 	}()
 	if gResp.StatusCode >= 400 {
+		err := fmt.Errorf("enable auto-merge returned HTTP status %d", gResp.StatusCode)
 		slog.WarnContext(ctx, "[vanadis-restate] enable pull request auto-merge HTTP error", "status", gResp.StatusCode)
-		return
+		return err
 	}
 	var res struct {
 		Errors []struct {
@@ -351,8 +352,11 @@ func (e *Executor) enablePRAutoMerge(ctx context.Context, nodeID string) {
 		} `json:"errors"`
 	}
 	if err := json.NewDecoder(io.LimitReader(gResp.Body, 64<<10)).Decode(&res); err == nil && len(res.Errors) > 0 {
+		err := fmt.Errorf("enable auto-merge GraphQL error: %s", res.Errors[0].Message)
 		slog.WarnContext(ctx, "[vanadis-restate] enable pull request auto-merge GraphQL error", "error", res.Errors[0].Message)
+		return err
 	}
+	return nil
 }
 
 // EnsurePRAutoMergeAndContext enriches multi-chunk PR descriptions with Vanadis build context
@@ -374,7 +378,9 @@ func (e *Executor) EnsurePRAutoMergeAndContext(ctx context.Context, build model.
 	if err := e.enrichPRContext(ctx, build, chunks, chunk, pr, fullRepo, prNumber); err != nil {
 		return err
 	}
-	e.enablePRAutoMerge(ctx, pr.NodeID)
+	if aErr := e.enablePRAutoMerge(ctx, pr.NodeID); aErr != nil {
+		slog.WarnContext(ctx, "[vanadis-restate] enable pull request auto-merge warning", "error", aErr)
+	}
 	return nil
 }
 

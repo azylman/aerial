@@ -626,6 +626,8 @@ func (b *BuildObject) handleNoPRTurnOutcome(ctx restate.ObjectContext, ev pubsub
 			return noPRActionNone, nil
 		}
 		if chunk.Mode != chunkModeAction && chunk.PRNumber == 0 {
+			// TryAttachOpenPRForChunk runs inside this RunJournaled step via rc (restate.RunContext),
+			// memoizing discovery and attachment so replay never re-invokes external GitHub APIs.
 			attached, aErr := b.flow().TryAttachOpenPRForChunk(rc, bld, chunks, chunk)
 			if aErr != nil {
 				slog.WarnContext(rc, "[vanadis-restate] try attach open pr warning", "error", aErr)

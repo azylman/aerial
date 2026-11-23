@@ -605,6 +605,7 @@ func TestEnablePRAutoMerge(t *testing.T) {
 		transportErr bool
 		wantRequests int
 		wantAuth     string
+		wantErr      bool
 	}{
 		{
 			name:         "remote url without token returns early",
@@ -646,6 +647,7 @@ func TestEnablePRAutoMerge(t *testing.T) {
 			respBody:     `{"errors":[{"message":"auto-merge is not allowed"}]}`,
 			wantRequests: 1,
 			wantAuth:     "Bearer secret-token",
+			wantErr:      true,
 		},
 		{
 			name:         "non-200 status code handled",
@@ -656,6 +658,7 @@ func TestEnablePRAutoMerge(t *testing.T) {
 			respBody:     `{}`,
 			wantRequests: 1,
 			wantAuth:     "Bearer secret-token",
+			wantErr:      true,
 		},
 		{
 			name:         "network transport error handled",
@@ -665,6 +668,7 @@ func TestEnablePRAutoMerge(t *testing.T) {
 			transportErr: true,
 			wantRequests: 1,
 			wantAuth:     "Bearer secret-token",
+			wantErr:      true,
 		},
 	}
 	for _, tc := range tests {
@@ -695,7 +699,8 @@ func TestEnablePRAutoMerge(t *testing.T) {
 			}
 			exec := NewExecutor("", nil, nil, tc.token, "example-owner", client)
 			exec.GitHubAPIURL = tc.apiURL
-			exec.enablePRAutoMerge(context.Background(), tc.nodeID)
+			err := exec.enablePRAutoMerge(context.Background(), tc.nodeID)
+			assert.Equal(t, tc.wantErr, err != nil)
 			assert.Equal(t, tc.wantRequests, reqCount)
 			if tc.wantRequests > 0 {
 				assert.Equal(t, "/graphql", capturedPath)
