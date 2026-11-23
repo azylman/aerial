@@ -195,7 +195,11 @@ func startTestStreamingDaemon(t *testing.T, cfg DaemonConfig, initLine string, d
 	}
 	go func() { _, _ = outW.Write([]byte(initLine)) }()
 	if discardStdin {
-		go func() { _, _ = io.Copy(io.Discard, inR) }()
+		go func() {
+			if _, err := io.Copy(io.Discard, inR); err != nil {
+				return
+			}
+		}()
 	}
 	daemon, err := StartStreamingDaemon(context.Background(), context.Background(), cfg, mock)
 	if err != nil {
@@ -656,7 +660,11 @@ func TestStreamingDaemon_Send_ContextRetrievers(t *testing.T) {
 		readDone := make(chan []byte, 1)
 		go func() {
 			buf := make([]byte, 2048)
-			n, _ := h.inR.Read(buf)
+			n, err := h.inR.Read(buf)
+			if err != nil && !errors.Is(err, io.EOF) {
+				t.Errorf("%s: inR.Read: %v", tc.name, err)
+				return
+			}
 			readDone <- buf[:n]
 		}()
 		if err := h.daemon.Send(tc.prompt, &TurnContext{TurnID: "turn-" + tc.name, Prompt: tc.prompt, Sink: newMockTurnSink(), CreatedAt: time.Now()}); err != nil {

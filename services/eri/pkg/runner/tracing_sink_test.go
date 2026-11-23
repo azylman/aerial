@@ -412,12 +412,19 @@ func TestTracingTurnSink_ClaimToolSpan(t *testing.T) {
 			}
 			got := make([]trace.SpanContext, len(tc.claims))
 			for i, c := range tc.claims[:len(tc.claims)-1] {
-				got[i], _ = sink.ClaimToolSpan(context.Background(), c.server, c.tool, c.callID)
+				sc, ok := sink.ClaimToolSpan(context.Background(), c.server, c.tool, c.callID)
+				if ok != (c.want != "") {
+					t.Fatalf("ClaimToolSpan(%s, %s, %s) ok = %v, want %v", c.server, c.tool, c.callID, ok, c.want != "")
+				}
+				got[i] = sc
 			}
 			last := tc.claims[len(tc.claims)-1]
 			done := make(chan trace.SpanContext, 1)
 			go func() {
-				sc, _ := sink.ClaimToolSpan(context.Background(), last.server, last.tool, last.callID)
+				sc, ok := sink.ClaimToolSpan(context.Background(), last.server, last.tool, last.callID)
+				if ok != (last.want != "") {
+					t.Errorf("ClaimToolSpan(%s, %s, %s) ok = %v, want %v", last.server, last.tool, last.callID, ok, last.want != "")
+				}
 				done <- sc
 			}()
 			if tc.openLater != nil {
