@@ -251,37 +251,6 @@ func (s *SQLStore) UpdateMessageCompleted(ctx context.Context, id, responseText,
 		StatusCompleted, responseText, t.DurationMs, t.InputTokens, t.OutputTokens, t.ThinkingTokens, t.CacheReadTokens, t.TotalTokens, now, agent, id)
 }
 
-func (s *SQLStore) IncrementMessageRetry(ctx context.Context, id, errorMsg string) error {
-	agent := s.effectiveAgent()
-	return s.execMessageUpdate(ctx, id, `UPDATE messages SET retry_count = retry_count + 1, error_message = $1, updated_at = $2 WHERE agent = $3 AND id = $4`, errorMsg, time.Now().UTC(), agent, id)
-}
-
-func (s *SQLStore) ResetMessageToPendingWithRestart(ctx context.Context, id, reason string) error {
-	agent := s.effectiveAgent()
-	return s.execMessageUpdate(ctx, id, `UPDATE messages SET restart_count = restart_count + 1, status = 'PENDING', error_message = $1, updated_at = $2 WHERE agent = $3 AND id = $4 AND status = 'PROCESSING'`, reason, time.Now().UTC(), agent, id)
-}
-
-func (s *SQLStore) GetPendingOrProcessingMessages(ctx context.Context, limit int) (results []Message, err error) {
-	defer recordTranscriptQuery("get_pending_messages", time.Now(), &err)
-	if checkDBErr := s.checkDB(); checkDBErr != nil {
-		return nil, checkDBErr
-	}
-	queryCtx, cancel := withTimeout(ctx, 10*time.Second)
-	defer cancel()
-	rows, queryErr := s.db.QueryContext(queryCtx, fmt.Sprintf("SELECT %s FROM messages WHERE agent = $1 AND status IN ('PENDING', 'PROCESSING') ORDER BY created_at ASC", messageSelectCols), s.effectiveAgent())
-	if queryErr != nil {
-		return nil, queryErr
-	}
-	results, err = scanMessages(rows, true)
-	if err != nil {
-		return nil, err
-	}
-	if limit > 0 && len(results) > limit {
-		results = results[:limit]
-	}
-	return results, nil
-}
-
 func (s *SQLStore) GetMessage(ctx context.Context, id string) (*Message, error) {
 	if err := s.checkDB(); err != nil || id == "" {
 		return nil, err
@@ -327,24 +296,6 @@ func (s *SQLStore) ClaimPendingMessage(ctx context.Context, id string) (claimed 
 	return true, nil
 }
 
-func (s *SQLStore) GetActiveRecentThreadIDs(ctx context.Context, since time.Duration) ([]string, error) {
-	if err := s.checkDB(); err != nil {
-		return nil, err
-	}
-	if since <= 0 {
-		since = 24 * time.Hour
-	}
-	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
-	defer cancel()
-	cutoff := time.Now().UTC().Add(-since)
-	agent := s.effectiveAgent()
-	rows, err := s.db.QueryContext(queryCtx, `SELECT thread_id FROM (SELECT thread_id, MAX(max_updated_at) AS max_updated_at FROM (SELECT thread_id, updated_at AS max_updated_at FROM messages WHERE agent = $1 AND thread_id != '' AND updated_at >= $2 UNION ALL SELECT SUBSTR(session_id, 9) AS thread_id, updated_at AS max_updated_at FROM sessions WHERE agent = $3 AND session_id LIKE 'discord-%' AND updated_at >= $4) sub GROUP BY thread_id) combined ORDER BY max_updated_at DESC LIMIT 50`, agent, cutoff, agent, cutoff)
-	if err != nil {
-		return nil, err
-	}
-	return scanNonEmptyStrings(rows)
-}
-
 func (s *SQLStore) GetRecentThreadMessages(ctx context.Context, threadID string, limit int) (msgs []Message, err error) {
 	defer recordTranscriptQuery("get_recent_thread_messages", time.Now(), &err)
 	if err = s.checkDB(); err != nil || threadID == "" {
@@ -364,25 +315,4 @@ func (s *SQLStore) GetRecentThreadMessages(ctx context.Context, threadID string,
 		return nil, fmt.Errorf("failed to scan recent message: %w", err)
 	}
 	return msgs, nil
-}
-
-func (s *SQLStore) HasActiveThreadTurn(ctx context.Context, threadID string) (bool, error) {
-	if err := s.checkDB(); err != nil {
-		return false, err
-	}
-	threadID = strings.TrimSpace(threadID)
-	if threadID == "" {
-		return false, nil
-	}
-	queryCtx, cancel := withTimeout(ctx, 5*time.Second)
-	defer cancel()
-	var dummy int
-	err := s.db.QueryRowContext(queryCtx, `SELECT 1 FROM messages WHERE agent = $1 AND thread_id = $2 AND status IN ('PENDING', 'PROCESSING') LIMIT 1`, s.effectiveAgent(), threadID).Scan(&dummy)
-	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
-	}
-	if err != nil {
-		return false, fmt.Errorf("failed to check active thread turn for %s: %w", threadID, err)
-	}
-	return true, nil
 }

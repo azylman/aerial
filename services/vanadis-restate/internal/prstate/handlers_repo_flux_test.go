@@ -138,6 +138,79 @@ func TestRepoHandlersHandleGitPush(t *testing.T) {
 	}
 }
 
+// untrackedReconcile is an untracked PR #9 commit u1 rolling out core and
+// apps (the promotion fixture requests).
+func untrackedReconcile() RepoEvent {
+	return RepoEvent{Repo: "azylman/aerial", PRNumber: 9, HeadSHA: "u1", KustomizationRequests: promotionRequests}
+}
+
+func TestRepoHandlersHandleUntrackedReconcile(t *testing.T) {
+	t.Parallel()
+	key := EffectKey{Repo: "azylman/aerial", PRNumber: 9, HeadSHA: "u1", Kind: prwire.EffectFluxReconcile}
+	keyStr := "azylman/aerial#9@u1:gen0:flux_reconcile"
+	bothCalls := []string{"reconcile flux-system/apps@t1", "reconcile flux-system/core@t1"}
+	tests := []struct {
+		name        string
+		ev          RepoEvent
+		seed        *RepoState
+		kube        *fakeKube
+		noKube      bool
+		wantErr     error
+		wantOutcome RepoEffectOutcome
+		wantCalls   []string
+		wantEffects []string
+	}{
+		{
+			name: "patches every request in name order", ev: untrackedReconcile(), kube: &fakeKube{},
+			wantOutcome: RepoEffectOutcome{Key: key, Executed: true}, wantCalls: bothCalls, wantEffects: []string{keyStr},
+		},
+		{
+			name: "repeated commit dedupes", ev: untrackedReconcile(), kube: &fakeKube{},
+			seed:        &RepoState{Repo: "azylman/aerial", RepoEffects: []string{keyStr}},
+			wantOutcome: RepoEffectOutcome{Key: key, Deduped: true}, wantEffects: []string{keyStr},
+		},
+		{
+			name: "retryable failure leaves the key open", ev: untrackedReconcile(), kube: &fakeKube{reconcileErr: map[string]*KubeError{"apps": errKubeDown}},
+			wantOutcome: RepoEffectOutcome{Key: key, Retry: true, Kube: errKubeDown}, wantCalls: bothCalls, wantEffects: []string{},
+		},
+		{
+			name: "terminal failure commits", ev: untrackedReconcile(), kube: &fakeKube{reconcileErr: map[string]*KubeError{"core": errKubeForbidden}},
+			wantOutcome: RepoEffectOutcome{Key: key, Kube: errKubeForbidden}, wantCalls: bothCalls, wantEffects: []string{keyStr},
+		},
+		{
+			name: "missing kube client retries", ev: untrackedReconcile(), noKube: true,
+			wantOutcome: RepoEffectOutcome{Key: key, Retry: true, Kube: errKubeUnconfigured}, wantEffects: []string{},
+		},
+		{name: "missing pr is invalid", ev: RepoEvent{Repo: "azylman/aerial", HeadSHA: "u1", KustomizationRequests: promotionRequests}, kube: &fakeKube{}, wantErr: ErrInvalidRepoEvent, wantEffects: []string{}},
+		{name: "missing head sha is invalid", ev: RepoEvent{Repo: "azylman/aerial", PRNumber: 9, KustomizationRequests: promotionRequests}, kube: &fakeKube{}, wantErr: ErrInvalidRepoEvent, wantEffects: []string{}},
+		{name: "zero head sha is invalid", ev: RepoEvent{Repo: "azylman/aerial", PRNumber: 9, HeadSHA: "0000000000000000000000000000000000000000", KustomizationRequests: promotionRequests}, kube: &fakeKube{}, wantErr: ErrInvalidRepoEvent, wantEffects: []string{}},
+		{name: "missing requests are invalid", ev: RepoEvent{Repo: "azylman/aerial", PRNumber: 9, HeadSHA: "u1"}, kube: &fakeKube{}, wantErr: ErrInvalidRepoEvent, wantEffects: []string{}},
+		{name: "blank request names are invalid", ev: RepoEvent{Repo: "azylman/aerial", PRNumber: 9, HeadSHA: "u1", KustomizationRequests: map[string]KustomizationRequest{" ": {Namespace: "flux-system"}}}, kube: &fakeKube{}, wantErr: ErrInvalidRepoEvent, wantEffects: []string{}},
+		{name: "missing repo is invalid", ev: RepoEvent{PRNumber: 9, HeadSHA: "u1", KustomizationRequests: promotionRequests}, kube: &fakeKube{}, wantErr: ErrInvalidRepoEvent, wantEffects: []string{}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			store := NewMemRepoStore()
+			store.SaveRepo(&RepoState{Repo: "azylman/aerial", RepoEffects: []string{}})
+			if tc.seed != nil {
+				store.SaveRepo(tc.seed)
+			}
+			h := testRepoHandlers(t, store, &fakePRSender{}, nil)
+			if !tc.noKube {
+				h = h.WithKube(tc.kube)
+			}
+			out, err := h.HandleUntrackedReconcile(context.Background(), tc.ev)
+			require.ErrorIs(t, err, tc.wantErr)
+			require.Equal(t, tc.wantOutcome, out)
+			if tc.kube != nil {
+				require.Equal(t, tc.wantCalls, tc.kube.Calls())
+			}
+			require.Equal(t, tc.wantEffects, storedRepoEffects(t, store))
+		})
+	}
+}
+
 // Image promotion fixtures: core and apps requested at t1, the PR rollout's
 // deploy_started fact, and the deploy_failed fact a failure fills in.
 var (

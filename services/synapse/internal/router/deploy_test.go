@@ -164,8 +164,26 @@ func processDeployEventOwnedCases() []processDeployEventOwnedCase {
 			bodies: map[string]string{"ResolvePRBySHA": `nope`}, ghBody: "[]", wantEffects: 3,
 		},
 		{
-			name: "untracked pr patches its kustomizations once without tracking", evt: DeployEvent{Event: eventDeploySuccess, SourceKind: kindKustomization, JobName: "aerial-config", Repo: cfgRepo, PRNumber: 42, CommitSHA: ownedMerge},
-			bodies: map[string]string{"GetDeployView": `{"found":false}`}, repoRefs: cfgRefs, wantEffects: 1,
+			name: "untracked pr hands its kustomization reconcile to RepoObject", evt: DeployEvent{Event: eventDeploySuccess, SourceKind: kindKustomization, JobName: "aerial-config", Repo: cfgRepo, PRNumber: 42, CommitSHA: ownedMerge},
+			bodies: map[string]string{"GetDeployView": `{"found":false}`}, repoRefs: cfgRefs,
+			wantPaths:  []string{cfgRepoKey + "HandleUntrackedReconcile/send"},
+			wantBodies: []string{`"pr_number":42,"head_sha":"` + ownedMerge + `"`},
+		},
+		{
+			name: "untracked pr reconcile carries the aerial-config request", evt: DeployEvent{Event: eventDeployStarted, SourceKind: kindKustomization, JobName: "aerial-config", Repo: cfgRepo, PRNumber: 42, CommitSHA: ownedMerge},
+			bodies: map[string]string{"GetDeployView": `{"found":false}`}, repoRefs: cfgRefs,
+			wantPaths:  []string{cfgRepoKey + "HandleUntrackedReconcile/send"},
+			wantBodies: []string{`"kustomization_requests":{"aerial-config":{"namespace":"flux-system"`},
+		},
+		{
+			name: "untracked pr sync hands its kustomization reconcile to RepoObject", wantBusEvent: "flux:sync_success", evt: DeployEvent{Event: eventSyncSuccess, Repo: cfgRepo, PRNumber: 42, CommitSHA: ownedMerge},
+			bodies: map[string]string{"GetDeployView": `{"found":false}`}, repoRefs: cfgRefs,
+			wantPaths:  []string{cfgRepoKey + "HandleUntrackedReconcile/send"},
+			wantBodies: []string{`"head_sha":"` + ownedMerge + `","kustomization_requests":{"aerial-config":{"namespace":"flux-system"`},
+		},
+		{
+			name: "untracked pr without a commit sha skips the reconcile", wantBusEvent: "flux:sync_success", evt: DeployEvent{Event: eventSyncSuccess, Repo: cfgRepo, PRNumber: 42},
+			bodies: map[string]string{"GetDeployView": `{"found":false}`}, repoRefs: cfgRefs,
 		},
 		{
 			name: "pr-less sync failure keeps the stateless system alert", wantBusEvent: "flux:sync_failed", evt: DeployEvent{Event: eventSyncFailed, Repo: cfgRepo, Details: "fetch failed"},

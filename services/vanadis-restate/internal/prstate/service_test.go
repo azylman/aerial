@@ -229,7 +229,7 @@ func TestRegisterPRStateServices(t *testing.T) {
 	assert.Equal(t, "PRObject", gotPR.ServiceName())
 	assert.Equal(t, "RepoObject", gotRepo.ServiceName())
 	assert.Equal(t, "DropUntracked,GetBuildLifecycle,GetDeployView,HandleBranchConflict,HandleBuildMetadata,HandleCIRecovered,HandleCheckFailed,HandleCheckPassed,HandleCheckRerunRequested,HandleCheckStatus,HandleClosed,HandleCollaboratorAlert,HandleConflict,HandleConflictCheck,HandleConflictResolved,HandleDeployAttemptFailed,HandleDeployFailed,HandleDeployFailureDeadline,HandleDeployObserved,HandleDeploySuccess,HandleHeadRefMissing,HandleKustomizationRequested,HandleMainAdvanced,HandleMerged,HandleOpened,HandleReadinessRetry,HandleReconcileLost,HandleReopened,HandleRolloutProgress,HandleSelfRegistered,HandleSynchronized,Register,RetryEriEffect,RetryFactEffect,RetryFluxReconcile,RetryReadiness", sortedHandlerNames(restate.Reflect(gotPR)))
-	assert.Equal(t, "HandleAutoUpdate,HandleCheckRunBySHA,HandleFanout,HandleGitPush,HandleHeldExpiry,HandleHeldReplay,HandleImagePromotion,HandleImageReadyBySHA,HandleKustomizationStatus,HandleMainPush,HandlePRIndex,HandlePushBySHA,HandleRolloutIndex,HandleWorkflowRerun,HandleWorkflowRunBySHA,ListRollouts,ResolvePRBySHA", sortedHandlerNames(restate.Reflect(gotRepo)))
+	assert.Equal(t, "HandleAutoUpdate,HandleCheckRunBySHA,HandleFanout,HandleGitPush,HandleHeldExpiry,HandleHeldReplay,HandleImagePromotion,HandleImageReadyBySHA,HandleKustomizationStatus,HandleMainPush,HandlePRIndex,HandlePushBySHA,HandleRolloutIndex,HandleUntrackedReconcile,HandleWorkflowRerun,HandleWorkflowRunBySHA,ListRollouts,ResolvePRBySHA", sortedHandlerNames(restate.Reflect(gotRepo)))
 }
 
 // TestPRObjectService_DarkHandlers proves the forwarding and first-touch
