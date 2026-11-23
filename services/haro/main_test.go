@@ -276,7 +276,7 @@ func TestHaro_EventsConsumerIntegration_RestateIngress(t *testing.T) {
 
 	awaitBusHandled(t, wrapped.Handled, "event delivery")
 
-	wantPath := "/HaroEventWatch/trig-restate-1/Fire"
+	wantPath := "/HaroEventWatch/trig-restate-1/Fire/send"
 	if capturedPath != wantPath {
 		t.Errorf("capturedPath = %q, want %q", capturedPath, wantPath)
 	}

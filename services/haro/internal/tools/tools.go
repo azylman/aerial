@@ -147,6 +147,26 @@ func (h *ToolHandler) armSchedule(ctx context.Context, scheduleType, id string) 
 	}
 }
 
+// ArmScheduleTick asks HaroSchedule to arm id for one due tick and returns the
+// ingress error so the caller can retry. The idempotency key names the
+// operation (schedule type + ID + due tick), matching startup backfill, so
+// repeated arms of the same tick collapse into one Arm invocation.
+func (h *ToolHandler) ArmScheduleTick(ctx context.Context, scheduleType, id string, dueAt time.Time) error {
+	ingressURL := h.RestateIngressURL()
+	id = strings.TrimSpace(id)
+	if ingressURL == "" || id == "" {
+		return nil
+	}
+	idempotencyKey := fmt.Sprintf("haro:arm:%s:%s:%s", scheduleType, id, dueAt.UTC().Format(time.RFC3339Nano))
+	endpoint := fmt.Sprintf("%s/HaroSchedule/%s/Arm/send", ingressURL, url.PathEscape(id))
+	client := http.DefaultClient
+	if h.httpClient != nil {
+		client = h.httpClient
+	}
+	_, err := restateingress.Post(ctx, client, endpoint, idempotencyKey, map[string]any{model.FieldScheduleType: scheduleType}, 0)
+	return err
+}
+
 func (h *ToolHandler) cancelSchedule(ctx context.Context, id string) {
 	ingressURL := h.RestateIngressURL()
 	id = strings.TrimSpace(id)
