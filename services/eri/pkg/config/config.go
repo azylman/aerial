@@ -837,7 +837,7 @@ func DefaultConfigData() *ConfigData {
 		GeminiHomeDir:      "",
 		Ollama: OllamaConfig{
 			BaseURL:     "",
-			Model:       "all-minilm",
+			Model:       "bge-small-en-v1.5",
 			QueryPrefix: "Represent this sentence for searching relevant passages: ",
 			NumCtx:      512,
 		},

@@ -982,8 +982,8 @@ func TestNewOllamaClient(t *testing.T) {
 		},
 		{
 			name:      "CustomFieldsTrimSlash",
-			cfg:       &config.OllamaConfig{BaseURL: "http://ollama:11434/", Model: "bge", NumCtx: 256},
-			wantURL:   "http://ollama:11434",
+			cfg:       &config.OllamaConfig{BaseURL: "http://senses.aerial:8080/", Model: "bge", NumCtx: 256},
+			wantURL:   "http://senses.aerial:8080",
 			wantModel: "bge",
 			wantCtx:   256,
 		},

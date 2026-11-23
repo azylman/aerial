@@ -19,8 +19,8 @@ rules_dir: '/custom/rules'
 config_repo_owner: 'example-owner'
 config_repo_name: 'example-config'
 ollama:
-  base_url: 'http://ollama:11434'
-  model: 'all-minilm'
+  base_url: 'http://senses.aerial:8080'
+  model: 'bge-small-en-v1.5'
   num_ctx: 512
 `
 
@@ -32,8 +32,8 @@ eri_llm_url: 'http://eri.aerial/internal/llm'
 role: 'extractor'
 stack: 'agent-alpha'
 ollama:
-  base_url: 'http://ollama:11434'
-  model: 'all-minilm'
+  base_url: 'http://senses.aerial:8080'
+  model: 'bge-small-en-v1.5'
   num_ctx: 512
 `
 
@@ -417,12 +417,12 @@ var covenLoadConfigCases = []struct {
 	},
 	{
 		name:    "missing ollama base_url returns error",
-		yaml:    covenConfigSwap(covenDarkBaseConfig, "base_url: 'http://ollama:11434'", "base_url: ''"),
+		yaml:    covenConfigSwap(covenDarkBaseConfig, "base_url: 'http://senses.aerial:8080'", "base_url: ''"),
 		wantErr: "config: ollama.base_url is required in ",
 	},
 	{
 		name:    "missing ollama model returns error",
-		yaml:    covenConfigSwap(covenDarkBaseConfig, "model: 'all-minilm'", "model: ''"),
+		yaml:    covenConfigSwap(covenDarkBaseConfig, "model: 'bge-small-en-v1.5'", "model: ''"),
 		wantErr: "config: ollama.model is required in ",
 	},
 	{
