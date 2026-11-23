@@ -6,10 +6,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"log"
+	"net"
 	"net/http"
 	"strings"
+	"time"
 )
 
 // HTTPError is a non-2xx response from the Restate ingress.
@@ -89,4 +93,89 @@ func Post(ctx context.Context, client *http.Client, endpoint, idempotencyKey str
 		return nil, ParseHTTPError(resp.StatusCode, respBody)
 	}
 	return respBody, nil
+}
+
+// RegisterDeployment registers advertiseURL with the Restate admin deployments endpoint.
+func RegisterDeployment(ctx context.Context, client *http.Client, adminURL, advertiseURL string) error {
+	cleanAdmin := strings.TrimRight(strings.TrimSpace(adminURL), "/")
+	cleanAdv := strings.TrimSpace(advertiseURL)
+	if cleanAdmin == "" || cleanAdv == "" {
+		return nil
+	}
+	endpoint := cleanAdmin + "/deployments"
+	payload := map[string]any{
+		"uri":   cleanAdv,
+		"force": true,
+	}
+	_, err := Post(ctx, client, endpoint, "", payload, 1024)
+	if err == nil {
+		return nil
+	}
+	if httpErr, ok := errors.AsType[*HTTPError](err); ok {
+		detail := httpErr.Message
+		if detail == "" {
+			detail = httpErr.Body
+		}
+		if detail != "" {
+			detail = ": " + detail
+		}
+		return fmt.Errorf("restate admin /deployments returned %d%s", httpErr.Status, detail)
+	}
+	return fmt.Errorf("register restate deployment: %w", err)
+}
+
+// StartServer initializes and starts an unencrypted HTTP/2 (h2c) listener for Restate services.
+// It sets up graceful shutdown on ctx cancellation and serves requests in the background.
+func StartServer(ctx context.Context, addr string, handler http.Handler) (net.Listener, *http.Server, <-chan error, error) {
+	cleanAddr := strings.TrimSpace(addr)
+	if cleanAddr == "" {
+		cleanAddr = ":9080"
+	}
+	if !strings.Contains(cleanAddr, ":") {
+		cleanAddr = ":" + cleanAddr
+	}
+
+	var protocols http.Protocols
+	protocols.SetHTTP1(true)
+	protocols.SetUnencryptedHTTP2(true)
+
+	srv := &http.Server{
+		Addr:              cleanAddr,
+		Handler:           handler,
+		Protocols:         &protocols,
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+
+	var lc net.ListenConfig
+	ln, err := lc.Listen(ctx, "tcp", cleanAddr)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("listen on %s: %w", cleanAddr, err)
+	}
+
+	errChan := make(chan error, 1)
+	serveDone := make(chan struct{})
+
+	if ctx.Done() != nil {
+		go func() {
+			select {
+			case <-ctx.Done():
+				shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+				defer cancel()
+				if shutErr := srv.Shutdown(shutdownCtx); shutErr != nil && !errors.Is(shutErr, http.ErrServerClosed) {
+					log.Printf("[restateingress] server shutdown notice: %v", shutErr)
+				}
+			case <-serveDone:
+			}
+		}()
+	}
+
+	go func() {
+		defer close(serveDone)
+		if sErr := srv.Serve(ln); sErr != nil && !errors.Is(sErr, http.ErrServerClosed) {
+			errChan <- sErr
+		}
+		close(errChan)
+	}()
+
+	return ln, srv, errChan, nil
 }

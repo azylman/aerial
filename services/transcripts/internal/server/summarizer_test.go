@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/azylman/aerial/pkg/eriwire"
 	"github.com/azylman/aerial/pkg/transcriptwire"
 	"github.com/azylman/aerial/services/transcripts/internal/config"
 	"github.com/azylman/aerial/services/transcripts/internal/store"
@@ -34,7 +35,7 @@ type fakeSummaryLLM struct {
 func (f *fakeSummaryLLM) Complete(ctx context.Context, prompt string) (string, error) {
 	f.calls++
 	f.lastPrompt = prompt
-	f.lastKey = llmKeyFrom(ctx)
+	f.lastKey = eriwire.LLMKeyFrom(ctx)
 	if f.err != nil {
 		return "", f.err
 	}
@@ -423,7 +424,7 @@ func TestLLMClientComplete(t *testing.T) {
 				srv.Close()
 			} else if tc.serve {
 				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					var req internalLLMRequest
+					var req eriwire.InternalLLMRequest
 					if err := decodeJSONBody(r, &req); err == nil {
 						gotEffort = req.Effort
 					}
@@ -436,7 +437,7 @@ func TestLLMClientComplete(t *testing.T) {
 			var client LLMClient
 			client = NewLLMClient(url, nil)
 			if tc.nilClient {
-				client = (*httpLLMClient)(nil)
+				client = (*eriwire.InternalLLMClient)(nil)
 			}
 			got, err := client.Complete(context.Background(), tc.prompt)
 			if (err != nil) != tc.wantErr {
@@ -448,8 +449,8 @@ func TestLLMClientComplete(t *testing.T) {
 			if !strings.Contains(got, tc.wantFrag) {
 				t.Errorf("Complete() = %q, want fragment %q", got, tc.wantFrag)
 			}
-			if gotEffort != llmEffortLow {
-				t.Errorf("effort = %q, want %q", gotEffort, llmEffortLow)
+			if gotEffort != eriwire.EffortLow {
+				t.Errorf("effort = %q, want %q", gotEffort, eriwire.EffortLow)
 			}
 		})
 	}

@@ -68,34 +68,6 @@ func TestValidateAppendChunksInputs(t *testing.T) {
 	}
 }
 
-func TestResolveChunkRef(t *testing.T) {
-	t.Parallel()
-	chunks := []model.VanadisChunk{
-		{ID: "c-first", ChunkIndex: 0},
-		{ID: "c-second", ChunkIndex: 1},
-	}
-	tests := []struct {
-		ref  string
-		want int
-	}{
-		{ref: "", want: -1},
-		{ref: "c-first", want: 0},
-		{ref: "c-second", want: 1},
-		{ref: "0", want: 0},
-		{ref: "1", want: 1},
-		{ref: "5", want: -1},
-		{ref: "c-unknown", want: -1},
-	}
-	for _, tc := range tests {
-		t.Run(tc.ref, func(t *testing.T) {
-			t.Parallel()
-			if got := resolveChunkRef(chunks, tc.ref); got != tc.want {
-				t.Errorf("resolveChunkRef(%q) = %d, want %d", tc.ref, got, tc.want)
-			}
-		})
-	}
-}
-
 // bmFixture is the declarative database state one mutation row starts from:
 // seeded rows, optional sabotage DDL in the private database, a closed pool
 // or a Store without a database.

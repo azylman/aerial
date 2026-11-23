@@ -197,20 +197,10 @@ type MCPCompleteChunkOutput struct {
 }
 
 // completeChunkPayload mirrors the Restate CompleteChunk ingress body.
-type completeChunkPayload struct {
-	BuildID    string `json:"build_id"`
-	ChunkID    string `json:"chunk_id"`
-	DispatchID string `json:"dispatch_id"`
-	Summary    string `json:"summary"`
-}
+type completeChunkPayload = buildplan.CompleteChunkRequest
 
 // completeChunkResponse mirrors the Restate CompleteChunk ingress response.
-type completeChunkResponse struct {
-	Status    string `json:"status"`
-	BuildID   string `json:"build_id"`
-	ChunkID   string `json:"chunk_id"`
-	Completed bool   `json:"completed"`
-}
+type completeChunkResponse = buildplan.CompleteChunkResponse
 
 // updateBuildPayload mirrors the Restate UpdateBuild ingress body.
 type updateBuildPayload struct {
@@ -220,17 +210,7 @@ type updateBuildPayload struct {
 }
 
 // updateChunkPayload mirrors the Restate UpdateChunk ingress body.
-type updateChunkPayload struct {
-	ChunkRef      string    `json:"chunk_ref,omitempty"`
-	Mode          *string   `json:"mode,omitempty"`
-	Repo          string    `json:"repo,omitempty"`
-	Title         string    `json:"title,omitempty"`
-	Instructions  string    `json:"instructions,omitempty"`
-	TargetFiles   []string  `json:"target_files,omitempty"`
-	TargetSymbols []string  `json:"target_symbols,omitempty"`
-	Effort        string    `json:"effort,omitempty"`
-	DependsOn     *[]string `json:"depends_on,omitempty"`
-}
+type updateChunkPayload = buildplan.UpdateChunkRequest
 
 // appendChunksPayload mirrors the Restate AppendChunks ingress body.
 type appendChunksPayload struct {
@@ -243,21 +223,10 @@ type removeChunkPayload struct {
 }
 
 // failChunkPayload mirrors the Restate RouteFailChunk ingress body.
-type failChunkPayload struct {
-	DispatchID string `json:"dispatch_id,omitempty"`
-	BuildID    string `json:"build_id,omitempty"`
-	ChunkID    string `json:"chunk_id"`
-	Reason     string `json:"reason"`
-}
+type failChunkPayload = buildplan.FailChunkRequest
 
 // failChunkResponse mirrors the Restate RouteFailChunk ingress response.
-type failChunkResponse struct {
-	Failed      bool   `json:"failed"`
-	BuildID     string `json:"build_id"`
-	ChunkID     string `json:"chunk_id"`
-	BuildStatus string `json:"build_status"`
-	ChunkStatus string `json:"chunk_status"`
-}
+type failChunkResponse = buildplan.FailChunkResponse
 
 // ToMCPChunkBriefs projects full chunks into concise MCP listing briefs.
 func ToMCPChunkBriefs(chunks []model.VanadisChunk) []MCPChunkBrief {

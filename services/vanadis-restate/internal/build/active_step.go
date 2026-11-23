@@ -12,19 +12,14 @@ import (
 
 	restate "github.com/restatedev/sdk-go"
 
+	"github.com/azylman/aerial/pkg/buildplan"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/executor"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
 )
 
 // UpdateActiveStepRequest carries the target chunk and active step description.
-type UpdateActiveStepRequest struct {
-	ChunkID     string            `json:"chunk_id,omitempty"`
-	ActiveStep  string            `json:"active_step,omitempty"`
-	Step        string            `json:"step,omitempty"`
-	ClearAll    bool              `json:"clear_all,omitempty"`
-	ActiveSteps map[string]string `json:"active_steps,omitempty"`
-}
+type UpdateActiveStepRequest = buildplan.UpdateActiveStepRequest
 
 // AckResponse represents an acknowledgement response from a Restate handler.
 type AckResponse struct {

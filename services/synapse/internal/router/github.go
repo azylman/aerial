@@ -583,7 +583,7 @@ func (s *RouterServer) resolveCollaboratorAlertTarget(ctx context.Context, repo 
 	if expectedSHA != "" && pr.Head.SHA != "" && !strings.EqualFold(pr.Head.SHA, expectedSHA) {
 		return pr, "", "", false, nil
 	}
-	if ResolveAerialPRMetadata(repo, pr.Head.Ref, pr.GetBody()).OK() || ExtractChunkIDFromBranch(repo, pr.Head.Ref) != "" {
+	if ResolveAerialPRMetadata(repo, pr.Head.Ref, pr.Body).OK() || ExtractChunkIDFromBranch(repo, pr.Head.Ref) != "" {
 		return pr, "", "", false, nil
 	}
 	channelID, mention, ok := s.lookupCollaboratorCIAlert(repo, pr.User.Login)

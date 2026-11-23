@@ -55,29 +55,13 @@ type consumerStatsQuerier = metrics.ConsumerStatsQuerier
 type CancelBuildRequest struct{}
 
 // FailChunkRequest carries the chunk and reason for failing a chunk.
-type FailChunkRequest struct {
-	DispatchID string `json:"dispatch_id,omitempty"`
-	BuildID    string `json:"build_id,omitempty"`
-	ChunkID    string `json:"chunk_id"`
-	Reason     string `json:"reason"`
-}
+type FailChunkRequest = buildplan.FailChunkRequest
 
 // FailChunkResponse represents the result of failing a chunk.
-type FailChunkResponse struct {
-	Failed      bool   `json:"failed"`
-	BuildID     string `json:"build_id"`
-	ChunkID     string `json:"chunk_id"`
-	BuildStatus string `json:"build_status"`
-	ChunkStatus string `json:"chunk_status"`
-}
+type FailChunkResponse = buildplan.FailChunkResponse
 
 // AttachChunkPRResponse represents the result of attaching a PR to a chunk or standalone build.
-type AttachChunkPRResponse struct {
-	Status   string `json:"status"`
-	BuildID  string `json:"build_id"`
-	ChunkID  string `json:"chunk_id"`
-	ThreadID string `json:"thread_id"`
-}
+type AttachChunkPRResponse = buildplan.AttachChunkPRResponse
 
 func (s *VanadisServer) restateClient() *Client {
 	if s == nil {

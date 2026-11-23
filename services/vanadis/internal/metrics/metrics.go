@@ -4,11 +4,11 @@ package metrics
 
 import (
 	"context"
-	"errors"
 	"log/slog"
 
 	"github.com/prometheus/client_golang/prometheus"
 
+	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/vanadis/internal/model"
 )
@@ -67,11 +67,7 @@ var (
 
 // RegisterCollector registers a Prometheus collector, tolerating duplicate registration.
 func RegisterCollector(c prometheus.Collector) {
-	if err := prometheus.Register(c); err != nil {
-		if _, ok := errors.AsType[prometheus.AlreadyRegisteredError](err); !ok {
-			panic(err)
-		}
-	}
+	httpkit.RegisterCollector(c)
 }
 
 func init() {

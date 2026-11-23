@@ -1,12 +1,12 @@
 package server
 
 import (
-	"errors"
 	"net/http"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
+	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/services/coven/internal/store"
 )
 
@@ -68,21 +68,13 @@ var (
 	knownFactActions = []string{"inserted", "updated", "reinforced", "deleted"}
 )
 
-func registerCovenCollector(c prometheus.Collector) {
-	if err := prometheus.Register(c); err != nil {
-		if _, ok := errors.AsType[prometheus.AlreadyRegisteredError](err); !ok {
-			panic(err)
-		}
-	}
-}
-
 func init() {
-	registerCovenCollector(FactsTotal)
-	registerCovenCollector(OperationsTotal)
-	registerCovenCollector(OperationDurationSeconds)
-	registerCovenCollector(FactsStoredTotal)
-	registerCovenCollector(RestateRegistered)
-	registerCovenCollector(ExtractBatchesRejectedTotal)
+	httpkit.RegisterCollector(FactsTotal)
+	httpkit.RegisterCollector(OperationsTotal)
+	httpkit.RegisterCollector(OperationDurationSeconds)
+	httpkit.RegisterCollector(FactsStoredTotal)
+	httpkit.RegisterCollector(RestateRegistered)
+	httpkit.RegisterCollector(ExtractBatchesRejectedTotal)
 
 	FactsTotal.Set(0)
 	RestateRegistered.Set(0)

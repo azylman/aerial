@@ -147,3 +147,93 @@ func TestParseHTTPError(t *testing.T) {
 		})
 	}
 }
+
+const ingressURL = "<ingress>"
+
+func TestRegisterDeployment(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name         string
+		client       *http.Client
+		adminURL     string
+		advertiseURL string
+		status       int
+		respBody     string
+		wantErr      string
+	}{
+		{name: "empty admin url no-op", adminURL: "", advertiseURL: "http://svc:9080"},
+		{name: "empty advertise url no-op", adminURL: ingressURL, advertiseURL: ""},
+		{name: "success", adminURL: ingressURL, advertiseURL: "http://svc:9080", status: 200, respBody: `{"id":"dep-1"}`},
+		{name: "admin error returns HTTP status and detail", adminURL: ingressURL, advertiseURL: "http://svc:9080", status: 409, respBody: `{"message":"already exists"}`, wantErr: "restate admin /deployments returned 409: already exists"},
+		{name: "admin error fallback to raw body", adminURL: ingressURL, advertiseURL: "http://svc:9080", status: 502, respBody: "bad gateway", wantErr: "restate admin /deployments returned 502: bad gateway"},
+		{name: "admin error with empty body", adminURL: ingressURL, advertiseURL: "http://svc:9080", status: 500, respBody: "", wantErr: "restate admin /deployments returned 500"},
+		{name: "transport failure wraps error", client: failDoClient, adminURL: "http://restate.invalid", advertiseURL: "http://svc:9080", wantErr: "register restate deployment: Post \"http://restate.invalid/deployments\": connection refused"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ingress := restateingresstest.New(t)
+			ingress.Routes = map[string]restateingresstest.Response{"/deployments": {Status: tc.status, Body: tc.respBody}}
+			adminURL := tc.adminURL
+			if adminURL == ingressURL {
+				adminURL = ingress.URL()
+			}
+			client := tc.client
+			if client == nil {
+				client = ingress.Client()
+			}
+			err := RegisterDeployment(context.Background(), client, adminURL, tc.advertiseURL)
+			if tc.wantErr != "" {
+				if err == nil || err.Error() != tc.wantErr {
+					t.Fatalf("RegisterDeployment() err = %v, want %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("RegisterDeployment() unexpected err = %v", err)
+			}
+		})
+	}
+}
+
+func TestStartServer(t *testing.T) {
+	t.Parallel()
+	type row struct {
+		name    string
+		addr    string
+		wantErr bool
+	}
+	tc := func(name, addr string, wantErr bool) row {
+		return row{name: name, addr: addr, wantErr: wantErr}
+	}
+	tests := []row{
+		tc("valid with port only without colon", "0", false),
+		tc("listen failure on invalid address", "127.0.0.1:99999999", true),
+	}
+	handler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			ln, srv, errChan, err := StartServer(ctx, tt.addr, handler)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("StartServer() expected error, got nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("StartServer() err = %v", err)
+			}
+			defer ln.Close()
+			if srv == nil {
+				t.Fatal("StartServer() srv is nil")
+			}
+			cancel()
+			<-errChan
+		})
+	}
+}

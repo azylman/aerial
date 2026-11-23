@@ -1,14 +1,12 @@
 package server
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"log/slog"
 	"net/http"
@@ -23,6 +21,7 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/azylman/aerial/pkg/eriwire"
 	"github.com/azylman/aerial/pkg/tracing"
 	"github.com/azylman/aerial/services/coven/internal/config"
 	"github.com/azylman/aerial/services/coven/internal/store"
@@ -39,19 +38,9 @@ const (
 // LLMClientFunc defines the interface function for sending prompts to an LLM.
 type LLMClientFunc func(ctx context.Context, prompt string) (string, error)
 
-type llmKeyCtx struct{}
-
 // withLLMKey attaches an Idempotency-Key identity to ctx for the next LLM call.
 func withLLMKey(ctx context.Context, key string) context.Context {
-	return context.WithValue(ctx, llmKeyCtx{}, key)
-}
-
-func llmKeyFrom(ctx context.Context) string {
-	key, ok := ctx.Value(llmKeyCtx{}).(string)
-	if !ok {
-		return ""
-	}
-	return strings.TrimSpace(key)
+	return eriwire.WithLLMKey(ctx, key)
 }
 
 // hash16 returns the first 16 hex chars of sha256(s) for bounded key parts.
@@ -84,58 +73,9 @@ type ExtractedFactsPayload struct {
 	ProceduralCandidates []ExtractedProceduralItem `json:"procedural_candidates,omitempty"`
 }
 
-type brainLLMRequest struct {
-	Prompt string `json:"prompt"`
-}
-
-type brainLLMResponse struct {
-	Response string `json:"response"`
-}
-
 // HTTPBrainLLMClient returns an LLMClientFunc communicating with brain's internal LLM proxy.
 func HTTPBrainLLMClient(brainLLMURL string, httpClient *http.Client) LLMClientFunc {
-	if httpClient == nil {
-		httpClient = &http.Client{Timeout: 120 * time.Second}
-	}
-	// eri's /internal/llm is internal, so traceparent is propagated and its span joins ours.
-	httpClient = tracing.Client(httpClient)
-	cleanURL := strings.TrimSpace(brainLLMURL)
-	return func(ctx context.Context, prompt string) (string, error) {
-		if cleanURL == "" {
-			return "", errors.New("brain LLM URL is not configured")
-		}
-		reqBody, err := json.Marshal(brainLLMRequest{Prompt: prompt})
-		if err != nil {
-			return "", fmt.Errorf("failed to marshal brain LLM request: %w", err)
-		}
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, cleanURL, bytes.NewReader(reqBody))
-		if err != nil {
-			return "", fmt.Errorf("failed to create brain LLM request: %w", err)
-		}
-		req.Header.Set("Content-Type", "application/json")
-		if key := llmKeyFrom(ctx); key != "" {
-			req.Header.Set("Idempotency-Key", key)
-		}
-
-		resp, err := httpClient.Do(req)
-		if err != nil {
-			return "", fmt.Errorf("brain LLM request failed: %w", err)
-		}
-		defer resp.Body.Close()
-
-		respBytes, err := io.ReadAll(resp.Body)
-		if err != nil {
-			return "", fmt.Errorf("failed to read brain LLM response body: %w", err)
-		}
-		if resp.StatusCode != http.StatusOK {
-			return "", fmt.Errorf("brain LLM returned status %d: %s", resp.StatusCode, string(respBytes))
-		}
-		var llmResp brainLLMResponse
-		if err := json.Unmarshal(respBytes, &llmResp); err != nil {
-			return "", fmt.Errorf("failed to decode brain LLM response: %w", err)
-		}
-		return llmResp.Response, nil
-	}
+	return eriwire.HTTPInternalLLMClient(brainLLMURL, httpClient)
 }
 
 // FactExtractionPrompt is the base prompt template instructing the LLM to extract durable facts.

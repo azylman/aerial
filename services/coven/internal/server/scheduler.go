@@ -123,34 +123,6 @@ func (w *Worker) HTTPClient() *http.Client {
 	return http.DefaultClient
 }
 
-func registerRestateDeployment(ctx context.Context, client *http.Client, adminURL, advertiseURL string) error {
-	admin := strings.TrimRight(strings.TrimSpace(adminURL), "/")
-	advertise := strings.TrimSpace(advertiseURL)
-	if admin == "" || advertise == "" {
-		return nil
-	}
-	endpoint := admin + "/deployments"
-	payload := map[string]any{
-		"uri":   advertise,
-		"force": true,
-	}
-	_, err := restateingress.Post(ctx, client, endpoint, "", payload, 1024)
-	if err == nil {
-		return nil
-	}
-	if httpErr, ok := errors.AsType[*restateingress.HTTPError](err); ok {
-		detail := httpErr.Message
-		if detail == "" {
-			detail = httpErr.Body
-		}
-		if detail != "" {
-			detail = ": " + detail
-		}
-		return fmt.Errorf("restate admin /deployments returned %d%s", httpErr.Status, detail)
-	}
-	return fmt.Errorf("register coven restate deployment: %w", err)
-}
-
 func (w *Worker) armDreamer(ctx context.Context) error {
 	endpoint := fmt.Sprintf("%s/CovenDreamer/%s/Arm", w.restateIngressURL, url.PathEscape(w.Stack()))
 	idempotencyKey := "coven:dreamer:arm:" + w.Stack()
@@ -163,7 +135,7 @@ func (w *Worker) armDreamer(ctx context.Context) error {
 		maxBackoff = 4 * w.armRetryInterval
 	}
 	for {
-		if err := registerRestateDeployment(ctx, w.httpClient, w.restateAdminURL, w.restateAdvertiseURL); err != nil {
+		if err := restateingress.RegisterDeployment(ctx, w.httpClient, w.restateAdminURL, w.restateAdvertiseURL); err != nil {
 			log.Printf("[coven-dreamer] warning registering restate deployment: %v; will retry in %s", err, backoff)
 			timer := time.NewTimer(backoff)
 			select {

@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -272,34 +273,7 @@ func startRestateServer(ctx context.Context, cfg *config.Config, thread *CovenTh
 	if restatePort == "" {
 		restatePort = config.DefaultRestatePort
 	}
-
-	var restateProtocols http.Protocols
-	restateProtocols.SetHTTP1(true)
-	restateProtocols.SetUnencryptedHTTP2(true)
-
-	restateHTTPServer := &http.Server{
-		Addr:              ":" + restatePort,
-		Handler:           restateHandler,
-		Protocols:         &restateProtocols,
-		ReadHeaderTimeout: 10 * time.Second,
-	}
-
-	var lc net.ListenConfig
-	restateLn, err := lc.Listen(ctx, "tcp", ":"+restatePort)
-	if err != nil {
-		return nil, nil, nil, fmt.Errorf("listen on restate port %s: %w", restatePort, err)
-	}
-
-	restateErrChan := make(chan error, 1)
-	go func() {
-		log.Printf("Coven Restate Server listening on %s", restateLn.Addr().String())
-		if sErr := restateHTTPServer.Serve(restateLn); sErr != nil && sErr != http.ErrServerClosed {
-			restateErrChan <- sErr
-		}
-		close(restateErrChan)
-	}()
-
-	return restateLn, restateHTTPServer, restateErrChan, nil
+	return restateingress.StartServer(ctx, ":"+restatePort, restateHandler)
 }
 
 const (
@@ -418,25 +392,7 @@ func newExtractFn(cfg *config.Config, worker *Worker) func(context.Context, stri
 	}
 }
 
-// RunApp bootstraps the coven MCP HTTP server with graceful shutdown.
-func RunApp(ctx context.Context, cfg *config.Config) error {
-	if cfg == nil {
-		return fmt.Errorf("app: config cannot be nil")
-	}
-	if err := validateRestateIngress(cfg.RestateIngressURL); err != nil {
-		return err
-	}
-	port := strings.TrimSpace(cfg.Port)
-	if port == "" {
-		port = config.DefaultPort
-	}
-
-	database, err := store.OpenDB(ctx, cfg)
-	if err != nil {
-		return err
-	}
-	defer httpkit.CloseWarn(database, "database on shutdown")
-
+func setupCovenDependencies(cfg *config.Config, database *sql.DB) (*Worker, *Server) {
 	sqlStore := store.NewSQLStore(database)
 	sqlStore.SetStack(cfg.EffectiveStack())
 	if cfg.TranscriptsURL != "" {
@@ -468,11 +424,65 @@ func RunApp(ctx context.Context, cfg *config.Config) error {
 		RestateAdminURL:     cfg.RestateAdminURL,
 		RestateAdvertiseURL: cfg.RestateAdvertiseURL,
 	})
-	workerCtx, workerCancel := context.WithCancel(ctx)
-	defer workerCancel()
 
 	extractFn := newExtractFn(cfg, worker)
 	mcpServer := NewServer(toolHandler, extractFn)
+	return worker, mcpServer
+}
+
+func waitForCovenExit(ctx context.Context, errChan, restateErrChan <-chan error) error {
+	select {
+	case <-ctx.Done():
+		return nil
+	case err, ok := <-errChan:
+		if ok {
+			return err
+		}
+		return nil
+	case err, ok := <-restateErrChan:
+		if ok {
+			return err
+		}
+		return nil
+	}
+}
+
+func shutdownCovenServers(ctx context.Context, httpServer, restateHTTPServer *http.Server) {
+	log.Println("Shutting down Coven MCP and Restate servers gracefully...")
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer shutdownCancel()
+
+	if err := httpServer.Shutdown(shutdownCtx); err != nil {
+		log.Printf("HTTP server shutdown error: %v", err)
+	}
+	if err := restateHTTPServer.Shutdown(shutdownCtx); err != nil {
+		log.Printf("Restate server shutdown error: %v", err)
+	}
+	log.Println("Coven MCP server stopped cleanly")
+}
+
+// RunApp bootstraps the coven MCP HTTP server with graceful shutdown.
+func RunApp(ctx context.Context, cfg *config.Config) error {
+	if cfg == nil {
+		return fmt.Errorf("app: config cannot be nil")
+	}
+	if err := validateRestateIngress(cfg.RestateIngressURL); err != nil {
+		return err
+	}
+	port := strings.TrimSpace(cfg.Port)
+	if port == "" {
+		port = config.DefaultPort
+	}
+
+	database, err := store.OpenDB(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	defer httpkit.CloseWarn(database, "database on shutdown")
+
+	worker, mcpServer := setupCovenDependencies(cfg, database)
+	workerCtx, workerCancel := context.WithCancel(ctx)
+	defer workerCancel()
 
 	thread := NewCovenThread(worker)
 	dreamer := NewCovenDreamer(worker)
@@ -517,24 +527,7 @@ func RunApp(ctx context.Context, cfg *config.Config) error {
 		close(errChan)
 	}()
 
-	select {
-	case <-ctx.Done():
-	case err := <-errChan:
-		return err
-	case err := <-restateErrChan:
-		return err
-	}
-
-	log.Println("Shutting down Coven MCP and Restate servers gracefully...")
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-	defer shutdownCancel()
-
-	if err := httpServer.Shutdown(shutdownCtx); err != nil {
-		log.Printf("HTTP server shutdown error: %v", err)
-	}
-	if err := restateHTTPServer.Shutdown(shutdownCtx); err != nil {
-		log.Printf("Restate server shutdown error: %v", err)
-	}
-	log.Println("Coven MCP server stopped cleanly")
-	return nil
+	runErr := waitForCovenExit(ctx, errChan, restateErrChan)
+	shutdownCovenServers(ctx, httpServer, restateHTTPServer)
+	return runErr
 }

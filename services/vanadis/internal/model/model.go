@@ -112,18 +112,7 @@ func SummarizeBuildEntry(build VanadisBuild, chunks []VanadisChunk) VanadisBuild
 }
 
 // CreateChunkInput defines a single chunk in a CreateBuildRequest.
-type CreateChunkInput struct {
-	ID                 string   `json:"id"`
-	Mode               string   `json:"mode,omitempty"`
-	Repo               string   `json:"repo,omitempty"`
-	Title              string   `json:"title"`
-	Instructions       string   `json:"instructions"`
-	TargetFiles        []string `json:"target_files"`
-	TargetSymbols      []string `json:"target_symbols"`
-	Effort             string   `json:"effort,omitempty"`
-	AcceptanceCriteria []string `json:"acceptance_criteria"`
-	DependsOn          []string `json:"depends_on"`
-}
+type CreateChunkInput = buildplan.CreateChunkInput
 
 // CreateBuildRequest defines the JSON request body for POST /builds.
 type CreateBuildRequest struct {
@@ -139,13 +128,7 @@ type CreateBuildRequest struct {
 }
 
 // UpdateActiveStepRequest carries the target chunk and active step description.
-type UpdateActiveStepRequest struct {
-	ChunkID     string            `json:"chunk_id,omitempty"`
-	ActiveStep  string            `json:"active_step,omitempty"`
-	Step        string            `json:"step,omitempty"`
-	ClearAll    bool              `json:"clear_all,omitempty"`
-	ActiveSteps map[string]string `json:"active_steps,omitempty"`
-}
+type UpdateActiveStepRequest = buildplan.UpdateActiveStepRequest
 
 // ParseCreateBuildChunks validates raw chunk inputs and normalizes the build DAG.
 func ParseCreateBuildChunks(buildID string, now time.Time, rawChunks []CreateChunkInput) ([]VanadisChunk, error) {

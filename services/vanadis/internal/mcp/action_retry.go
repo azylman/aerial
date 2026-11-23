@@ -11,6 +11,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/azylman/aerial/pkg/buildplan"
 	"github.com/azylman/aerial/services/vanadis/internal/model"
 )
 
@@ -18,22 +19,10 @@ const chunkModeAction = "action"
 
 // RetryActionChunkRequest carries the identity and optional correction for a
 // durable action-chunk retry.
-type RetryActionChunkRequest struct {
-	BuildID                 string  `json:"build_id"`
-	ChunkID                 string  `json:"chunk_id"`
-	ExpectedDispatchID      string  `json:"expected_dispatch_id"`
-	Reason                  string  `json:"reason"`
-	ExpectedInstructions    *string `json:"expected_instructions,omitempty"    jsonschema:"Exact stored instructions required for correction; supply with replacement_instructions"`
-	ReplacementInstructions *string `json:"replacement_instructions,omitempty" jsonschema:"Corrected nonblank worker instructions atomically saved before retry; supply with expected_instructions"`
-}
+type RetryActionChunkRequest = buildplan.RetryActionChunkRequest
 
 // RetryActionChunkResult reports the accepted durable retry dispatch.
-type RetryActionChunkResult struct {
-	BuildID    string `json:"build_id"`
-	ChunkID    string `json:"chunk_id"`
-	DispatchID string `json:"dispatch_id"`
-	Accepted   bool   `json:"accepted"`
-}
+type RetryActionChunkResult = buildplan.RetryActionChunkResult
 
 // ErrRetryIngressUnavailable reports that durable Restate ingress is required
 // for action retry.

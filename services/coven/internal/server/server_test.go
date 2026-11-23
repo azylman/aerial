@@ -309,7 +309,7 @@ func TestServer_Metrics_Table(t *testing.T) {
 	server := NewServer(handler)
 	nilStoreServer := &Server{handler: &ToolHandler{}}
 
-	registerCovenCollector(FactsTotal)
+	httpkit.RegisterCollector(FactsTotal)
 
 	RecordOperation("search", "success", 0.01)
 	RecordOperation("search", "error", 0.02)

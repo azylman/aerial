@@ -7,6 +7,9 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/azylman/aerial/pkg/discordutil"
+	"github.com/azylman/aerial/pkg/prwire"
 )
 
 var (
@@ -26,11 +29,7 @@ func RandomNonce() string {
 // CleanRepoName strips any owner prefix ("owner/name" -> "name") for
 // concise Discord notifications.
 func CleanRepoName(repo string) string {
-	repo = strings.TrimSpace(repo)
-	if idx := strings.LastIndex(repo, "/"); idx >= 0 {
-		return repo[idx+1:]
-	}
-	return repo
+	return prwire.CleanRepoName(repo)
 }
 
 func DedupeTrimmedStrings(items []string) []string {
@@ -50,24 +49,13 @@ func DedupeTrimmedStrings(items []string) []string {
 // NormalizeDiscordTargetID strips Model 2 session prefixes ("discord-" and optional
 // colon-delimited pool scopes like "stateful_medium:discord-") from a target identifier.
 func NormalizeDiscordTargetID(id string) string {
-	clean := strings.TrimSpace(id)
-	if idx := strings.LastIndex(clean, ":"); idx >= 0 {
-		clean = strings.TrimSpace(clean[idx+1:])
-	}
-	return strings.TrimSpace(strings.TrimPrefix(clean, "discord-"))
+	return discordutil.NormalizeThreadID(id)
 }
 
 // IsHeadlessSessionKey returns true if id is a Model 2 headless dispatch, heartbeat,
 // or pooled worker session key.
 func IsHeadlessSessionKey(id string) bool {
-	clean := strings.TrimSpace(id)
-	if idx := strings.LastIndex(clean, ":"); idx >= 0 {
-		clean = strings.TrimSpace(clean[idx+1:])
-	}
-	return strings.HasPrefix(clean, "dispatch-") ||
-		strings.HasPrefix(clean, "heartbeat-") ||
-		strings.HasPrefix(clean, "worker-") ||
-		strings.Contains(clean, "-worker-")
+	return discordutil.IsHeadlessSessionKey(id)
 }
 
 func IsValidDiscordSnowflake(id string) bool {

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/azylman/aerial/pkg/agent"
+	"github.com/azylman/aerial/pkg/buildplan"
 	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/pkg/k8sauth"
 	"github.com/azylman/aerial/pkg/strutil"
@@ -32,19 +33,7 @@ const (
 )
 
 // AttachChunkPRRequest represents the payload for POST /chunks/attach-pr.
-type AttachChunkPRRequest struct {
-	ChunkID  string `json:"chunk_id,omitempty"`
-	PRNumber int    `json:"pr_number"`
-	Repo     string `json:"repo"`
-	Branch   string `json:"branch,omitempty"`
-	Title    string `json:"title,omitempty"`
-	TargetID string `json:"target_id,omitempty"`
-	Quiet    bool   `json:"quiet,omitempty"`
-	// Agent is the caller agent that owns a new standalone build. Agent
-	// callers are always resolved from their ServiceAccount token; the body
-	// value is honored only for service principals and unauthenticated mode.
-	Agent string `json:"agent,omitempty"`
-}
+type AttachChunkPRRequest = buildplan.AttachChunkPRRequest
 
 func (s *VanadisServer) authorizeBuildUpdate(ctx context.Context, buildAgent string) error {
 	if !s.authEnabled() {

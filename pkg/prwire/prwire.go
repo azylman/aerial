@@ -10,9 +10,11 @@
 package prwire
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/azylman/aerial/pkg/pubsub"
+	"github.com/azylman/aerial/pkg/strutil"
 )
 
 // Frozen Restate service names. Every agent's PRs live in these single
@@ -489,4 +491,42 @@ type RetryReadinessResponse struct {
 	Status    int                             `json:"status"`
 	Requests  map[string]KustomizationRequest `json:"kustomization_requests,omitempty"`
 	EffectKey string                          `json:"effect_key,omitempty"`
+}
+
+// CleanRepoName strips any owner prefix ("owner/name" -> "name").
+func CleanRepoName(repo string) string {
+	clean := strings.TrimSpace(repo)
+	if _, after, found := strings.CutLast(clean, "/"); found {
+		return strings.TrimSpace(after)
+	}
+	return clean
+}
+
+// DefaultMaxPromptRunes is the default character budget for prompt error blocks.
+const DefaultMaxPromptRunes = 6000
+
+// TruncatePromptDetails sanitizes details for prompt embedding by replacing triple backticks
+// and truncating to maxRunes (default DefaultMaxPromptRunes if <= 0).
+func TruncatePromptDetails(s string, maxRunes ...int) string {
+	limit := DefaultMaxPromptRunes
+	if len(maxRunes) > 0 && maxRunes[0] > 0 {
+		limit = maxRunes[0]
+	}
+	return strutil.TruncateRunes(strings.ReplaceAll(s, "```", "'''"), limit)
+}
+
+// FormatErrorDetailsBlock formats an error details block with header, fenced details,
+// optional extra line and footer.
+func FormatErrorDetailsBlock(header, details, extraLine, footer string) string {
+	lines := []string{header}
+	if clean := strings.TrimSpace(details); clean != "" {
+		lines = append(lines, fmt.Sprintf("Error details:\n```\n%s\n```", TruncatePromptDetails(clean)))
+	}
+	if cleanExtra := strings.TrimSpace(extraLine); cleanExtra != "" {
+		lines = append(lines, cleanExtra)
+	}
+	if footer != "" {
+		lines = append(lines, footer)
+	}
+	return strings.Join(lines, "\n")
 }

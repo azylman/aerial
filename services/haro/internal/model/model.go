@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/azylman/aerial/pkg/agent"
+	"github.com/azylman/aerial/pkg/eriwire"
 )
 
 // Schedule types shared by the schedule tables, metrics labels and run records.
@@ -35,9 +36,9 @@ const (
 
 // Reasoning effort levels accepted for scheduled turns.
 const (
-	EffortLow    = "low"
-	EffortMedium = "medium"
-	EffortHigh   = "high"
+	EffortLow    = eriwire.EffortLow
+	EffortMedium = eriwire.EffortMedium
+	EffortHigh   = eriwire.EffortHigh
 )
 
 // Event-watch sources emitted by vanadis.
@@ -231,14 +232,14 @@ EOF
 
 // NormalizeEffort validates effort tiers, defaulting empty to "low".
 func NormalizeEffort(effort string) (string, error) {
-	switch eff := strings.ToLower(strings.TrimSpace(effort)); eff {
-	case "":
+	if strings.TrimSpace(effort) == "" {
 		return EffortLow, nil
-	case EffortLow, EffortMedium, EffortHigh:
-		return eff, nil
-	default:
+	}
+	norm := eriwire.ParseEffort(effort, "")
+	if norm == "" {
 		return "", fmt.Errorf("invalid effort tier %q: expected 'low', 'medium', or 'high'", effort)
 	}
+	return norm, nil
 }
 
 var (

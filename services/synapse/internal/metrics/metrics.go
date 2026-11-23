@@ -2,7 +2,6 @@ package metrics
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log"
 	"slices"
@@ -10,6 +9,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 
+	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/services/synapse/internal/model"
 )
@@ -199,11 +199,7 @@ var (
 )
 
 func registerCollector(c prometheus.Collector) {
-	if err := prometheus.Register(c); err != nil {
-		if _, ok := errors.AsType[prometheus.AlreadyRegisteredError](err); !ok {
-			panic(err)
-		}
-	}
+	httpkit.RegisterCollector(c)
 }
 
 func init() {

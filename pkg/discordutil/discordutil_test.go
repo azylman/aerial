@@ -54,3 +54,33 @@ func TestNormalizeThreadID(t *testing.T) {
 		})
 	}
 }
+
+func TestIsHeadlessSessionKey(t *testing.T) {
+	t.Parallel()
+	type testCase struct {
+		name      string
+		sessionID string
+		expected  bool
+	}
+	tc := func(name, sessionID string, expected bool) testCase {
+		return testCase{name: name, sessionID: sessionID, expected: expected}
+	}
+	tests := []testCase{
+		tc("empty", "", false),
+		tc("bare dispatch", "dispatch-123", true),
+		tc("scoped dispatch", "pool:dispatch-123", true),
+		tc("heartbeat", "heartbeat-abc", true),
+		tc("worker prefix", "worker-xyz", true),
+		tc("worker infix", "sub-worker-task", true),
+		tc("regular snowflake", "123456789012345678", false),
+		tc("regular channel", "general", false),
+	}
+	for _, c := range tests {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			if got := IsHeadlessSessionKey(c.sessionID); got != c.expected {
+				t.Errorf("IsHeadlessSessionKey(%q) = %v, want %v", c.sessionID, got, c.expected)
+			}
+		})
+	}
+}
