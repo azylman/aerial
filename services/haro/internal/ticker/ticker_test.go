@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -379,15 +380,19 @@ func TestTicker_Start(t *testing.T) {
 				cancel()
 			}
 			doneCh := make(chan struct{})
+			var startErr error
 			go func() {
 				defer close(doneCh)
-				_ = ticker.Start(ctx)
+				startErr = ticker.Start(ctx)
 			}()
 
 			select {
 			case <-doneCh:
 			case <-time.After(5 * time.Second):
 				t.Fatal("timed out waiting for ticker.Start() to stop")
+			}
+			if startErr != nil && !errors.Is(startErr, context.Canceled) {
+				t.Fatalf("unexpected start error: %v", startErr)
 			}
 
 			if got := len(mock.dispatched) + len(mock.dispatchedRequests); got != tc.wantDispatched {
@@ -450,7 +455,9 @@ func assertHeartbeatScheduleRuns(t *testing.T, db *sql.DB, tc evaluateDueHeartbe
 	t.Helper()
 	var runCount int
 	var runStatus, runPrompt, runType string
-	_ = db.QueryRow("SELECT COUNT(*), COALESCE(MAX(status), ''), COALESCE(MAX(prompt), ''), COALESCE(MAX(schedule_type), '') FROM schedule_runs WHERE schedule_id = $1", tc.hbID).Scan(&runCount, &runStatus, &runPrompt, &runType)
+	if err := db.QueryRow("SELECT COUNT(*), COALESCE(MAX(status), ''), COALESCE(MAX(prompt), ''), COALESCE(MAX(schedule_type), '') FROM schedule_runs WHERE schedule_id = $1", tc.hbID).Scan(&runCount, &runStatus, &runPrompt, &runType); err != nil {
+		t.Fatalf("query schedule_runs: %v", err)
+	}
 
 	if tc.seedRunningRun {
 		if runCount != 1 || runStatus != "running" {
@@ -462,10 +469,7 @@ func assertHeartbeatScheduleRuns(t *testing.T, db *sql.DB, tc evaluateDueHeartbe
 	if tc.wantSkippedRun && runCount != 0 {
 		t.Errorf("expected 0 runs for skipped active heartbeat %s, got count=%d", tc.hbID, runCount)
 	}
-	if tc.wantStaleRun && (runCount == 0 || runStatus != model.StatusFailed) {
-		t.Errorf("expected stale failed run for %s, got count=%d, status=%s", tc.hbID, runCount, runStatus)
-	}
-	if tc.wantFailedRun && (runCount == 0 || runStatus != model.StatusFailed) {
+	if (tc.wantStaleRun || tc.wantFailedRun) && (runCount == 0 || runStatus != model.StatusFailed) {
 		t.Errorf("expected failed run for %s, got count=%d, status=%s", tc.hbID, runCount, runStatus)
 	}
 	if tc.wantDispatched && tc.dispatcherErr == nil && !tc.wantSkippedRun && (runCount == 0 || runStatus != "running") {
