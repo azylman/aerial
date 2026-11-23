@@ -650,9 +650,9 @@ func runCustomSessionTargetCase(t *testing.T, tc customSessionTargetCase) {
 		CacheReadTokens: 1,
 		TotalTokens:     17,
 	}
-	ok, deliverErr := te.deliverSuccessAndFinalize(resp, accumulated, "test-model", 1, 1)
-	if !ok || deliverErr != "" {
-		t.Fatalf("deliverSuccessAndFinalize returned false or error: ok=%v, err=%q", ok, deliverErr)
+	ok, failReason := te.deliverSuccessAndFinalize(resp, accumulated, "test-model", 1, 1)
+	if !ok || failReason != "" {
+		t.Fatalf("deliverSuccessAndFinalize = (%v, %q), want (true, empty)", ok, failReason)
 	}
 	if tc.wantDelivered && deliveredTo != tc.wantTargetChan {
 		t.Fatalf("deliveredTo = %q, want %q", deliveredTo, tc.wantTargetChan)

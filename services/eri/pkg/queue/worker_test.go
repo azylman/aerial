@@ -67,7 +67,7 @@ func TestWorker_PassesSessionIDToAgentPool(t *testing.T) {
 				if sessID == "" {
 					sessID = "c1111111-2222-3333-4444-555555555555"
 				}
-				_, _ = fmt.Fprintf(outW, `{"event":"init","conversation_id":%q}`+"\n", sessID)
+				_, _ = outW.Write(fmt.Appendf(nil, `{"event":"init","conversation_id":%q}`+"\n", sessID))
 				scanner := bufio.NewScanner(inR)
 				for scanner.Scan() {
 					_, _ = outW.Write([]byte(`{"event":"result","result":{"status":"SUCCESS","response":"ok","usage":{"total_tokens":5}}}` + "\n"))
@@ -89,12 +89,16 @@ func TestWorker_PassesSessionIDToAgentPool(t *testing.T) {
 
 	ctx := context.Background()
 	expectedSessID := "a1111111-2222-3333-4444-555555555555"
-	_ = store.SaveSessionID(ctx, "thread-with-sess", expectedSessID)
+	if err := store.SaveSessionID(ctx, "thread-with-sess", expectedSessID); err != nil {
+		t.Fatalf("SaveSessionID: %v", err)
+	}
 	for _, m := range []db.Message{
 		{ID: "msg-with-sess", ThreadID: "thread-with-sess", Content: "Resume turn", Status: db.StatusPending, CreatedAt: time.Now()},
 		{ID: "msg-fresh", ThreadID: "thread-fresh", Content: "First turn", Status: db.StatusPending, CreatedAt: time.Now()},
 	} {
-		_ = store.InsertMessage(ctx, m)
+		if err := store.InsertMessage(ctx, m); err != nil {
+			t.Fatalf("InsertMessage: %v", err)
+		}
 		if lt := runLiveBurst(ctx, pool, m.ThreadID, "turn-"+m.ID, m.ID); lt.err != nil || lt.outcome != OutcomeCompleted {
 			t.Fatalf("turn %s = (%s, %v), want completed", m.ID, lt.outcome, lt.err)
 		}
@@ -129,7 +133,9 @@ func TestWorker_PersistentDaemonExecutionErrors(t *testing.T) {
 			binPath := tc.agyBin
 			if tc.script != "" {
 				binPath = filepath.Join(t.TempDir(), "mock_err.sh")
-				_ = os.WriteFile(binPath, []byte(tc.script), 0o755)
+				if err := os.WriteFile(binPath, []byte(tc.script), 0o755); err != nil {
+					t.Fatalf("WriteFile: %v", err)
+				}
 			}
 			cfg := newTestConfig(func(d *config.ConfigData) { d.AgyBin, d.DataDir = binPath, tempData })
 			pool := New(cfg, WorkerPoolConfig{
@@ -139,12 +145,17 @@ func TestWorker_PersistentDaemonExecutionErrors(t *testing.T) {
 			defer pool.Stop()
 
 			ctx := context.Background()
-			_ = store.SaveSessionID(ctx, tc.threadID, tc.sessID)
+			if err := store.SaveSessionID(ctx, tc.threadID, tc.sessID); err != nil {
+				t.Fatalf("SaveSessionID: %v", err)
+			}
 			msg := db.Message{ID: "msg-" + tc.threadID, ThreadID: tc.threadID, Content: "fail", Status: db.StatusPending, CreatedAt: time.Now()}
-			_ = store.InsertMessage(ctx, msg)
+			if err := store.InsertMessage(ctx, msg); err != nil {
+				t.Fatalf("InsertMessage: %v", err)
+			}
 			lt := runLiveBurst(ctx, pool, tc.threadID, "turn-1", msg.ID)
-			if row, _ := store.GetMessage(ctx, msg.ID); lt.err != nil || row == nil || row.Status != db.StatusFailed {
-				t.Fatalf("turn = (%s, %v), row = %+v; want the row FAILED", lt.outcome, lt.err, row)
+			row, getErr := store.GetMessage(ctx, msg.ID)
+			if lt.err != nil || getErr != nil || row == nil || row.Status != db.StatusFailed {
+				t.Fatalf("turn = (%s, %v), row = %+v, getErr = %v; want the row FAILED", lt.outcome, lt.err, row, getErr)
 			}
 		})
 	}
@@ -167,9 +178,9 @@ type persistentDaemonTurnCase struct {
 func assertPersistentQuotaChecks(t *testing.T, tc persistentDaemonTurnCase, store db.Store, msgID string, getOneShots func(string) []oneShotScheduleRequest) {
 	t.Helper()
 	if tc.checkQuotaDbError {
-		dbMsg, _ := store.GetMessage(context.Background(), msgID)
-		if dbMsg == nil || !strings.Contains(dbMsg.ErrorMessage, "[QUOTA_PAUSED") {
-			t.Errorf("expected [QUOTA_PAUSED]")
+		dbMsg, err := store.GetMessage(context.Background(), msgID)
+		if err != nil || dbMsg == nil || !strings.Contains(dbMsg.ErrorMessage, "[QUOTA_PAUSED") {
+			t.Errorf("expected [QUOTA_PAUSED], got msg=%v, err=%v", dbMsg, err)
 		}
 	}
 	if tc.checkQuotaSchedule {
@@ -212,14 +223,14 @@ func assertPersistentDaemonTurnChecks(t *testing.T, tc persistentDaemonTurnCase,
 		t.Errorf("delivered text = %q, want substr %q", deliveredText, tc.wantDeliveredSubstr)
 	}
 	if tc.wantSavedSession != "" {
-		s, _ := store.GetSessionID(context.Background(), tc.threadID)
-		if s != tc.wantSavedSession {
-			t.Errorf("saved session = %q, want %q", s, tc.wantSavedSession)
+		s, err := store.GetSessionID(context.Background(), tc.threadID)
+		if err != nil || s != tc.wantSavedSession {
+			t.Errorf("saved session = %q (err=%v), want %q", s, err, tc.wantSavedSession)
 		}
 	}
 	if tc.expectSessionReject != "" {
-		s, _ := store.GetSessionID(context.Background(), tc.threadID)
-		if s == tc.expectSessionReject {
+		s, err := store.GetSessionID(context.Background(), tc.threadID)
+		if err == nil && s == tc.expectSessionReject {
 			t.Fatalf("security violation: latched foreign session %q", tc.expectSessionReject)
 		}
 	}
@@ -235,21 +246,31 @@ func runPersistentDaemonTurnCase(t *testing.T, tc persistentDaemonTurnCase) {
 
 	cfg := newTestConfig(func(d *config.ConfigData) { d.DataDir = tempData })
 	if tc.presetSessionInDB != "" {
-		_ = store.SaveSessionID(context.Background(), tc.threadID, tc.presetSessionInDB)
+		if err := store.SaveSessionID(context.Background(), tc.threadID, tc.presetSessionInDB); err != nil {
+			t.Fatalf("SaveSessionID: %v", err)
+		}
 	}
 	if tc.transcriptContent != "" {
 		sessDir := filepath.Join(tempData, "brain", tc.daemonUUID, ".system_generated", "logs")
-		_ = os.MkdirAll(sessDir, 0o755)
+		if err := os.MkdirAll(sessDir, 0o755); err != nil {
+			t.Fatalf("MkdirAll: %v", err)
+		}
 		// Stamp transcript steps when the file is written, not when the table literal is built:
 		// parallel subtests can wait well past the worker's 10s transcript cutoff for a slot.
 		content := strings.ReplaceAll(tc.transcriptContent, transcriptWrittenAtToken, time.Now().UTC().Format(time.RFC3339Nano))
-		_ = os.WriteFile(filepath.Join(sessDir, "transcript.jsonl"), []byte(content), 0o644)
+		if err := os.WriteFile(filepath.Join(sessDir, "transcript.jsonl"), []byte(content), 0o644); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
 	}
 	if tc.foreignDiskUUID != "" {
 		brainDir := filepath.Join(tempData, "brain", tc.foreignDiskUUID)
-		_ = os.MkdirAll(brainDir, 0o755)
+		if err := os.MkdirAll(brainDir, 0o755); err != nil {
+			t.Fatalf("MkdirAll: %v", err)
+		}
 		ft := time.Now().Add(5 * time.Second)
-		_ = os.Chtimes(brainDir, ft, ft)
+		if err := os.Chtimes(brainDir, ft, ft); err != nil {
+			t.Fatalf("Chtimes: %v", err)
+		}
 	}
 
 	var deliveryMu sync.Mutex
@@ -270,10 +291,13 @@ func runPersistentDaemonTurnCase(t *testing.T, tc persistentDaemonTurnCase) {
 	ctx := context.Background()
 	msgID := "msg-" + tc.threadID
 	msg := db.Message{ID: msgID, ThreadID: tc.threadID, Content: "run turn", Status: db.StatusPending, CreatedAt: time.Now()}
-	_ = store.InsertMessage(ctx, msg)
+	if err := store.InsertMessage(ctx, msg); err != nil {
+		t.Fatalf("InsertMessage: %v", err)
+	}
 	lt := runLiveBurst(ctx, pool, tc.threadID, "turn-1", msgID)
-	if row, _ := store.GetMessage(ctx, msgID); lt.err != nil || row == nil || row.Status != tc.expectedFinalStatus {
-		t.Fatalf("turn = (%s, %v), row = %+v; want status %s", lt.outcome, lt.err, row, tc.expectedFinalStatus)
+	row, getErr := store.GetMessage(ctx, msgID)
+	if lt.err != nil || getErr != nil || row == nil || row.Status != tc.expectedFinalStatus {
+		t.Fatalf("turn = (%s, %v), row = %+v, getErr = %v; want status %s", lt.outcome, lt.err, row, getErr, tc.expectedFinalStatus)
 	}
 
 	deliveryMu.Lock()
@@ -342,15 +366,21 @@ func TestWorkerPool_TransientRetry_RotatesBloatedSession(t *testing.T) {
 	tmpHome, tempData := t.TempDir(), t.TempDir()
 	validUUID := "c4444444-5555-6666-7777-888888888888"
 	sessDir := filepath.Join(tempData, "brain", validUUID, ".system_generated", "logs")
-	_ = os.MkdirAll(sessDir, 0o755)
+	if err := os.MkdirAll(sessDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
 	transcriptFile := filepath.Join(sessDir, "transcript.jsonl")
-	_ = os.WriteFile(transcriptFile, []byte(fmt.Sprintf(`{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","content":"hello"}
+	if err := os.WriteFile(transcriptFile, []byte(fmt.Sprintf(`{"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","content":"hello"}
 {"step_index":100,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","content":"working...","created_at":%q}
-`, time.Now().UTC().Format(time.RFC3339))), 0o644)
+`, time.Now().UTC().Format(time.RFC3339))), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
 
 	cfg := newTestConfig(func(d *config.ConfigData) { d.DataDir = tempData })
 	threadID := "thread-transient-bloat-rotation"
-	_ = store.SaveSessionID(context.Background(), threadID, validUUID)
+	if err := store.SaveSessionID(context.Background(), threadID, validUUID); err != nil {
+		t.Fatalf("SaveSessionID: %v", err)
+	}
 
 	var sessionsSeen []string
 	var mu sync.Mutex
@@ -364,10 +394,12 @@ func TestWorkerPool_TransientRetry_RotatesBloatedSession(t *testing.T) {
 			mu.Unlock()
 			if att == 1 {
 				bloatedContent := fmt.Sprintf(`{"step_index":%d,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","content":"tool runaway","created_at":%q}`+"\n", session.DefaultMaxSessionSteps+5, time.Now().UTC().Format(time.RFC3339))
-				if f, _ := os.OpenFile(transcriptFile, os.O_APPEND|os.O_WRONLY, 0o644); f != nil {
-					_, _ = f.WriteString(bloatedContent)
-					_ = f.Close()
+				f, openErr := os.OpenFile(transcriptFile, os.O_APPEND|os.O_WRONLY, 0o644)
+				if openErr != nil {
+					return "", "", 1, openErr
 				}
+				_, _ = f.WriteString(bloatedContent)
+				_ = f.Close()
 				return "", fmt.Sprintf("Starting conversation update stream for %s\nError 503: high demand service unavailable", validUUID), 1, fmt.Errorf("exit status 1")
 			}
 			return mockJSONResponse(uuid.New().String(), "Recovered successfully"), "", 0, nil
@@ -377,7 +409,9 @@ func TestWorkerPool_TransientRetry_RotatesBloatedSession(t *testing.T) {
 	defer pool.Stop()
 
 	msg := db.Message{ID: "msg-transient-bloated", ThreadID: threadID, Content: "run transient test", Status: db.StatusPending, CreatedAt: time.Now()}
-	_ = store.InsertMessage(context.Background(), msg)
+	if err := store.InsertMessage(context.Background(), msg); err != nil {
+		t.Fatalf("InsertMessage: %v", err)
+	}
 	if lt := runLiveBurst(context.Background(), pool, threadID, "turn-1", msg.ID); lt.err != nil || lt.outcome != OutcomeCompleted {
 		t.Fatalf("turn = (%s, %v), want completed", lt.outcome, lt.err)
 	}
@@ -387,8 +421,8 @@ func TestWorkerPool_TransientRetry_RotatesBloatedSession(t *testing.T) {
 	if len(sessionsSeen) != 2 || sessionsSeen[0] != validUUID || sessionsSeen[1] != validUUID {
 		t.Errorf("expected attempts to preserve session ID %q across retry, got: %v", validUUID, sessionsSeen)
 	}
-	if prevSess, _ := store.GetPreviousSessionID(context.Background(), threadID); prevSess != "" {
-		t.Errorf("expected previous session ID empty, got %q", prevSess)
+	if prevSess, err := store.GetPreviousSessionID(context.Background(), threadID); err != nil || prevSess != "" {
+		t.Errorf("expected previous session ID empty, got %q (err=%v)", prevSess, err)
 	}
 }
 
@@ -450,7 +484,9 @@ func TestWorker_DualPoolRouting(t *testing.T) {
 			ctx := context.Background()
 			threadID := "thread-" + strings.ToLower(tt.name)
 			msg := db.Message{ID: "msg-" + strings.ToLower(tt.name), ThreadID: threadID, Content: "run task", Effort: tt.effort, Status: db.StatusPending, CreatedAt: time.Now()}
-			_ = store.InsertMessage(ctx, msg)
+			if err := store.InsertMessage(ctx, msg); err != nil {
+				t.Fatalf("InsertMessage: %v", err)
+			}
 			if lt := runLiveBurst(ctx, pool, threadID, "turn-1", msg.ID); lt.err != nil || lt.outcome != OutcomeCompleted {
 				t.Fatalf("turn = (%s, %v), want completed", lt.outcome, lt.err)
 			}
@@ -490,7 +526,7 @@ func TestWorker_EphemeralLowEffortPool_SkipsColdStartContextAndRotates(t *testin
 			defer errW.Close()
 			go func() {
 				defer outW.Close()
-				_, _ = fmt.Fprintf(outW, "{\"event\":\"init\",\"conversation_id\":%q}\n", sessUUID)
+				_, _ = outW.Write(fmt.Appendf(nil, "{\"event\":\"init\",\"conversation_id\":%q}\n", sessUUID))
 				buf := make([]byte, 16384)
 				for {
 					n, rErr := inR.Read(buf)
@@ -501,7 +537,7 @@ func TestWorker_EphemeralLowEffortPool_SkipsColdStartContextAndRotates(t *testin
 						mu.Lock()
 						capturedPrompts = append(capturedPrompts, string(buf[:n]))
 						mu.Unlock()
-						_, _ = fmt.Fprintf(outW, "{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"ephemeral ok\",\"conversation_id\":%q,\"usage\":{\"total_tokens\":5}}}\n", sessUUID)
+						_, _ = outW.Write(fmt.Appendf(nil, "{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"ephemeral ok\",\"conversation_id\":%q,\"usage\":{\"total_tokens\":5}}}\n", sessUUID))
 					}
 				}
 			}()
@@ -529,15 +565,23 @@ func TestWorker_EphemeralLowEffortPool_SkipsColdStartContextAndRotates(t *testin
 
 	threadID := "1560318118792790111"
 	ctx := context.Background()
-	_ = store.SaveSessionID(ctx, threadID, prevSessUUID)
-	_ = store.RotateSessionID(ctx, threadID, primarySessUUID)
-	_ = store.SaveThreadSummary(ctx, threadID, "Cached summary that must not be injected", "hist-1")
+	if err := store.SaveSessionID(ctx, threadID, prevSessUUID); err != nil {
+		t.Fatalf("SaveSessionID: %v", err)
+	}
+	if err := store.RotateSessionID(ctx, threadID, primarySessUUID); err != nil {
+		t.Fatalf("RotateSessionID: %v", err)
+	}
+	if err := store.SaveThreadSummary(ctx, threadID, "Cached summary that must not be injected", "hist-1"); err != nil {
+		t.Fatalf("SaveThreadSummary: %v", err)
+	}
 
 	for _, d := range []db.Dispatch{
 		{ID: "msg-ephem-1", Source: "vanadis", Prompt: "execute vanadis chunk 1", Effort: "low", Status: db.StatusPending, CreatedAt: time.Now(), UpdatedAt: time.Now()},
 		{ID: "msg-ephem-2", Source: "vanadis", Prompt: "execute vanadis chunk 2", Effort: "low", Status: db.StatusPending, CreatedAt: time.Now(), UpdatedAt: time.Now()},
 	} {
-		_, _ = store.InsertDispatch(ctx, d)
+		if _, err := store.InsertDispatch(ctx, d); err != nil {
+			t.Fatalf("InsertDispatch: %v", err)
+		}
 		if lt := runLiveDispatch(ctx, pool, "dispatch-"+d.ID, "turn-"+d.ID, d.ID); lt.err != nil || lt.outcome != OutcomeCompleted {
 			t.Fatalf("dispatch %s = (%s, %v), want completed", d.ID, lt.outcome, lt.err)
 		}
@@ -613,16 +657,21 @@ func TestWorker_EphemeralHighEffort_FailsBurst(t *testing.T) {
 
 	threadID := "1560318118792790999"
 	ctx := context.Background()
-	_ = store.SaveSessionID(ctx, threadID, primarySessUUID)
+	if err := store.SaveSessionID(ctx, threadID, primarySessUUID); err != nil {
+		t.Fatalf("SaveSessionID: %v", err)
+	}
 
 	msg := db.Message{
 		ID: "msg-ephem-high-fail", ThreadID: threadID, Content: "execute turn with failing lease",
 		Effort: "high", Status: db.StatusPending, CreatedAt: time.Now(),
 	}
-	_ = store.InsertMessage(ctx, msg)
+	if err := store.InsertMessage(ctx, msg); err != nil {
+		t.Fatalf("InsertMessage: %v", err)
+	}
 	lt := runLiveBurst(ctx, pool, threadID, "turn-1", msg.ID)
-	if row, _ := store.GetMessage(ctx, msg.ID); lt.err != nil || row == nil || row.Status != db.StatusFailed {
-		t.Fatalf("turn = (%s, %v), row = %+v; want status %s", lt.outcome, lt.err, row, db.StatusFailed)
+	row, getErr := store.GetMessage(ctx, msg.ID)
+	if lt.err != nil || getErr != nil || row == nil || row.Status != db.StatusFailed {
+		t.Fatalf("turn = (%s, %v), row = %+v, getErr = %v; want status %s", lt.outcome, lt.err, row, getErr, db.StatusFailed)
 	}
 
 	if got := spawned.Load(); got != 0 {
@@ -662,8 +711,7 @@ func runStatefulResumeCase(t *testing.T, tc statefulResumeCase) {
 			defer errW.Close()
 			go func() {
 				defer outW.Close()
-				_, _ = fmt.Fprintf(outW, `{"event":"init","conversation_id":%q}
-`, rotatedSessUUID)
+				_, _ = outW.Write(fmt.Appendf(nil, "{\"event\":\"init\",\"conversation_id\":%q}\n", rotatedSessUUID))
 				buf := make([]byte, 16384)
 				for {
 					n, rErr := inR.Read(buf)
@@ -671,8 +719,7 @@ func runStatefulResumeCase(t *testing.T, tc statefulResumeCase) {
 						return
 					}
 					if n > 0 {
-						_, _ = fmt.Fprintf(outW, `{"event":"result","result":{"status":"SUCCESS","response":"ok","conversation_id":%q,"usage":{"total_tokens":5}}}
-`, rotatedSessUUID)
+						_, _ = outW.Write(fmt.Appendf(nil, "{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"ok\",\"conversation_id\":%q,\"usage\":{\"total_tokens\":5}}}\n", rotatedSessUUID))
 					}
 				}
 			}()
@@ -720,13 +767,17 @@ func runStatefulResumeCase(t *testing.T, tc statefulResumeCase) {
 
 	threadID := "1560318118792790888-" + tc.effort
 	ctx := context.Background()
-	_ = store.SaveSessionID(ctx, threadID, existingSessUUID)
+	if err := store.SaveSessionID(ctx, threadID, existingSessUUID); err != nil {
+		t.Fatalf("SaveSessionID: %v", err)
+	}
 
 	msg := db.Message{
 		ID: "msg-stateful-" + tc.effort, ThreadID: threadID, Content: "execute persistent " + tc.effort,
 		Effort: tc.effort, Status: db.StatusPending, CreatedAt: time.Now(),
 	}
-	_ = store.InsertMessage(ctx, msg)
+	if err := store.InsertMessage(ctx, msg); err != nil {
+		t.Fatalf("InsertMessage: %v", err)
+	}
 	if lt := runLiveBurst(ctx, pool, threadID, "turn-1", msg.ID); lt.err != nil || lt.outcome != OutcomeCompleted {
 		t.Fatalf("stateful %s turn = (%s, %v), want completed", tc.effort, lt.outcome, lt.err)
 	}
@@ -907,7 +958,9 @@ func TestWorker_ResolveTurnPolicy_ParentChannelFallback_TableDriven(t *testing.T
 					},
 				},
 			}
-			_ = te.resolveTurnPolicy()
+			if !te.resolveTurnPolicy() {
+				t.Fatal("expected resolveTurnPolicy to return true")
+			}
 			if te.effectiveName != tc.wantEffectiveName {
 				t.Errorf("te.effectiveName = %q, want %q", te.effectiveName, tc.wantEffectiveName)
 			}
@@ -984,7 +1037,9 @@ func TestWorker_EvaluateAmbientWake_HTTPAndSilent_TableDriven(t *testing.T) {
 				burst:    burst,
 			}
 
-			_ = te.evaluateAmbientWake()
+			if gotExit := te.evaluateAmbientWake(); gotExit != !tc.wantSkipClass {
+				t.Errorf("evaluateAmbientWake() = %v, want %v", gotExit, !tc.wantSkipClass)
+			}
 			defer te.stopIndicators()
 			if tc.wantSkipClass {
 				if te.wakeInfos != nil {
@@ -1200,7 +1255,9 @@ func TestWorkerPool_ProcessInteractiveTurn_PublishesTurnCompleted(t *testing.T) 
 		Status:    db.StatusPending,
 		CreatedAt: time.Now().UTC(),
 	}
-	_ = insertMessage(store, msg)
+	if err := insertMessage(store, msg); err != nil {
+		t.Fatalf("insertMessage: %v", err)
+	}
 
 	if lt := runLiveBurst(context.Background(), pool, threadID, "turn-1", msg.ID); lt.err != nil || lt.outcome != OutcomeCompleted {
 		t.Fatalf("turn = (%s, %v), want completed", lt.outcome, lt.err)
@@ -1241,7 +1298,9 @@ func TestTurnExecution_CreateOneShotSchedule_JetStream(t *testing.T) {
 	var gotSubject string
 	_, err := memBus.Subscribe(ctx, "aerial.jobs.>", "test-oneshot-sub", func(_ context.Context, msg pubsub.Message) error {
 		gotSubject = msg.Subject()
-		_ = json.Unmarshal(msg.Data(), &gotArgs)
+		if err := json.Unmarshal(msg.Data(), &gotArgs); err != nil {
+			return err
+		}
 		select {
 		case done <- struct{}{}:
 		default:
