@@ -58,11 +58,15 @@ func TestThrowawayTurnSink(t *testing.T) {
 	for range 50 {
 		resCh := make(chan string, 1)
 		resCh <- "ready"
-		_, _ = selectContext(ctxCancel, resCh, nil, "")
+		if _, err := selectContext(ctxCancel, resCh, nil, ""); err == nil {
+			t.Fatal("expected error on canceled context")
+		}
 
 		errCh := make(chan error, 1)
 		errCh <- errors.New("ready")
-		_, _ = selectContext(ctxCancel, nil, errCh, "")
+		if _, err := selectContext(ctxCancel, nil, errCh, ""); err == nil {
+			t.Fatal("expected error on canceled context")
+		}
 	}
 }
 

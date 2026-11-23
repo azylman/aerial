@@ -147,7 +147,9 @@ func assertDefaultDaemonSpawnerEngine(t *testing.T, engine, customBin, defaultBi
 	}
 	closeQuietlyAll(inC, outC, errC)
 	if hC != nil {
-		_ = hC.Kill()
+		if err := hC.Kill(); err != nil {
+			t.Errorf("hC.Kill: %v", err)
+		}
 	}
 
 	inCDef, outCDef, errCDef, hCDef, errCDefSpawn := customSpawner.Spawn(context.Background(), DaemonConfig{
@@ -158,7 +160,9 @@ func assertDefaultDaemonSpawnerEngine(t *testing.T, engine, customBin, defaultBi
 	}
 	closeQuietlyAll(inCDef, outCDef, errCDef)
 	if hCDef != nil {
-		_ = hCDef.Kill()
+		if err := hCDef.Kill(); err != nil {
+			t.Errorf("hCDef.Kill: %v", err)
+		}
 	}
 }
 
@@ -298,8 +302,12 @@ func TestDefaultDaemonSpawner_RetryAndTransientError(t *testing.T) {
 				t.Fatalf("expected success with valid pipes and handle, got err: %v", err)
 			}
 			closeQuietlyAll(stdin, stdout, stderr)
-			_ = handle.Kill()
-			_ = handle.Wait()
+			if err := handle.Kill(); err != nil {
+				t.Fatalf("handle.Kill: %v", err)
+			}
+			if err := handle.Wait(); err != nil {
+				t.Fatalf("handle.Wait: %v", err)
+			}
 		})
 	}
 }
@@ -384,7 +392,9 @@ func TestTransientBinarySpawnHelperFunctions(t *testing.T) {
 	if err == nil {
 		closeQuietlyAll(in, out, errR)
 		if ph != nil {
-			_ = ph.Kill()
+			if err := ph.Kill(); err != nil {
+				t.Errorf("ph.Kill: %v", err)
+			}
 		}
 		t.Errorf("expected spawn error with default spawner delays")
 	}
