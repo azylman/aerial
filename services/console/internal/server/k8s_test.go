@@ -245,7 +245,9 @@ func TestFetchK8sClusterState(t *testing.T) {
 
 	tempDir := t.TempDir()
 	tokenFile := filepath.Join(tempDir, "token")
-	_ = os.WriteFile(tokenFile, []byte("mock-k8s-bearer-token"), 0o600)
+	if err := os.WriteFile(tokenFile, []byte("mock-k8s-bearer-token"), 0o600); err != nil {
+		t.Fatalf("failed to write token file: %v", err)
+	}
 
 	caFile := writeTestCA(t, mockTLSServer)
 
