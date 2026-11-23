@@ -129,7 +129,10 @@ func testLifecycleUpdateStateAndTurns(ctx context.Context, t *testing.T, st *sto
 	if err := st.UpdateCallState(ctx, "call-123", "in-progress", "", "human"); err != nil {
 		t.Fatalf("UpdateCallState(in-progress) error = %v", err)
 	}
-	updatedCall, _ := st.GetCall(ctx, "call-123")
+	updatedCall, getErr := st.GetCall(ctx, "call-123")
+	if getErr != nil {
+		t.Fatalf("GetCall(call-123) error = %v", getErr)
+	}
 	if updatedCall.State != "in-progress" || updatedCall.AnsweredBy != "human" || updatedCall.AnsweredAt == nil {
 		t.Errorf("expected in-progress call with answered_by=human, got: %+v", updatedCall)
 	}
@@ -146,7 +149,10 @@ func testLifecycleUpdateStateAndTurns(ctx context.Context, t *testing.T, st *sto
 		t.Errorf("AppendTranscriptTurn(non-existent) err = %v, want ErrCallNotFound", err)
 	}
 
-	withTurns, _ := st.GetCall(ctx, "call-123")
+	withTurns, getErr := st.GetCall(ctx, "call-123")
+	if getErr != nil {
+		t.Fatalf("GetCall(call-123) error = %v", getErr)
+	}
 	if len(withTurns.Transcript) < 2 {
 		t.Errorf("unexpected transcript turns: %+v", withTurns.Transcript)
 	}
@@ -189,7 +195,10 @@ func testLifecycleInstructionsAndCompletion(ctx context.Context, t *testing.T, s
 		t.Errorf("UpdateCallState(non-existent) err = %v, want ErrCallNotFound", err)
 	}
 
-	endedCall, _ := st.GetCall(ctx, "call-123")
+	endedCall, getErr := st.GetCall(ctx, "call-123")
+	if getErr != nil {
+		t.Fatalf("GetCall(call-123) error = %v", getErr)
+	}
 	if endedCall.State != "completed" || endedCall.EndedAt == nil || endedCall.VoicemailRecordingURL != "https://api.twilio.com/recordings/RE123" {
 		t.Errorf("unexpected ended call: %+v", endedCall)
 	}
@@ -332,8 +341,12 @@ func TestPGStore_FindRecentOutboundCall(t *testing.T) {
 		UpdatedAt:  now.Add(-240 * time.Hour),
 	}
 
-	_ = st.CreateInboundCall(ctx, c1)
-	_ = st.CreateInboundCall(ctx, c2)
+	if err := st.CreateInboundCall(ctx, c1); err != nil {
+		t.Fatalf("CreateInboundCall(c1) error = %v", err)
+	}
+	if err := st.CreateInboundCall(ctx, c2); err != nil {
+		t.Fatalf("CreateInboundCall(c2) error = %v", err)
+	}
 
 	found, err := st.FindRecentOutboundCall(ctx, "+15105550111", 168*time.Hour)
 	if err != nil {
@@ -375,11 +388,13 @@ func TestPGStore_TransitionReportStatus(t *testing.T) {
 		StartedAt:    time.Now().UTC(),
 		UpdatedAt:    time.Now().UTC(),
 	}
-	_ = st.CreateInboundCall(ctx, call)
+	if err := st.CreateInboundCall(ctx, call); err != nil {
+		t.Fatalf("CreateInboundCall(call) error = %v", err)
+	}
 
-	ok, err := st.TransitionReportStatus(ctx, "call-status-test", []string{"pending"}, "processing", "")
-	if err != nil || !ok {
-		t.Fatalf("TransitionReportStatus(pending -> processing) ok=%v, err=%v", ok, err)
+	ok, transErr := st.TransitionReportStatus(ctx, "call-status-test", []string{"pending"}, "processing", "")
+	if transErr != nil || !ok {
+		t.Fatalf("TransitionReportStatus(pending -> processing) ok=%v, err=%v", ok, transErr)
 	}
 
 	callVM := model.VoiceCall{
@@ -392,18 +407,23 @@ func TestPGStore_TransitionReportStatus(t *testing.T) {
 		StartedAt:    time.Now().UTC(),
 		UpdatedAt:    time.Now().UTC(),
 	}
-	_ = st.CreateInboundCall(ctx, callVM)
-
-	blocked, err := st.TransitionReportStatus(ctx, "call-vm-test", []string{"pending"}, "processing", "")
-	if err != nil || blocked {
-		t.Fatalf("expected blocked transition when awaiting_recording, got ok=%v, err=%v", blocked, err)
+	if err := st.CreateInboundCall(ctx, callVM); err != nil {
+		t.Fatalf("CreateInboundCall(callVM) error = %v", err)
 	}
 
-	uncondOk, err := st.TransitionReportStatus(ctx, "call-vm-test", nil, "delivered", "voicemail received")
-	if err != nil || !uncondOk {
-		t.Fatalf("unconditional transition failed: ok=%v, err=%v", uncondOk, err)
+	blocked, transErr := st.TransitionReportStatus(ctx, "call-vm-test", []string{"pending"}, "processing", "")
+	if transErr != nil || blocked {
+		t.Fatalf("expected blocked transition when awaiting_recording, got ok=%v, err=%v", blocked, transErr)
 	}
-	vmCall, _ := st.GetCall(ctx, "call-vm-test")
+
+	uncondOk, transErr := st.TransitionReportStatus(ctx, "call-vm-test", nil, "delivered", "voicemail received")
+	if transErr != nil || !uncondOk {
+		t.Fatalf("unconditional transition failed: ok=%v, err=%v", uncondOk, transErr)
+	}
+	vmCall, getErr := st.GetCall(ctx, "call-vm-test")
+	if getErr != nil {
+		t.Fatalf("GetCall(call-vm-test) error = %v", getErr)
+	}
 	if vmCall.ReportStatus != "delivered" || vmCall.ReportSummary != "voicemail received" {
 		t.Errorf("unexpected call after unconditional transition: %+v", vmCall)
 	}
@@ -417,9 +437,9 @@ func TestPGStore_ListUnfinishedReportCalls(t *testing.T) {
 	now := time.Now().UTC()
 
 	// Initial empty check
-	calls, err := st.ListUnfinishedReportCalls(ctx, 0)
-	if err != nil {
-		t.Fatalf("ListUnfinishedReportCalls() initial error = %v", err)
+	calls, listErr := st.ListUnfinishedReportCalls(ctx, 0)
+	if listErr != nil {
+		t.Fatalf("ListUnfinishedReportCalls() initial error = %v", listErr)
 	}
 	if len(calls) != 0 {
 		t.Fatalf("expected 0 calls, got %d", len(calls))
@@ -470,14 +490,15 @@ func TestPGStore_ListUnfinishedReportCalls(t *testing.T) {
 		UpdatedAt:    now,
 	}
 
-	_ = st.CreateInboundCall(ctx, cPending)
-	_ = st.CreateInboundCall(ctx, cProcessing)
-	_ = st.CreateInboundCall(ctx, cDelivered)
-	_ = st.CreateInboundCall(ctx, cActive)
+	for _, c := range []model.VoiceCall{cPending, cProcessing, cDelivered, cActive} {
+		if err := st.CreateInboundCall(ctx, c); err != nil {
+			t.Fatalf("CreateInboundCall(%s) error = %v", c.CallID, err)
+		}
+	}
 
-	calls, err = st.ListUnfinishedReportCalls(ctx, 10)
-	if err != nil {
-		t.Fatalf("ListUnfinishedReportCalls() error = %v", err)
+	calls, listErr = st.ListUnfinishedReportCalls(ctx, 10)
+	if listErr != nil {
+		t.Fatalf("ListUnfinishedReportCalls() error = %v", listErr)
 	}
 	if len(calls) != 2 {
 		t.Fatalf("expected 2 unfinished calls, got %d", len(calls))
@@ -487,9 +508,9 @@ func TestPGStore_ListUnfinishedReportCalls(t *testing.T) {
 	}
 
 	// Limit test
-	limited, err := st.ListUnfinishedReportCalls(ctx, 1)
-	if err != nil || len(limited) != 1 {
-		t.Fatalf("ListUnfinishedReportCalls(limit=1) len=%d, err=%v", len(limited), err)
+	limited, limitErr := st.ListUnfinishedReportCalls(ctx, 1)
+	if limitErr != nil || len(limited) != 1 {
+		t.Fatalf("ListUnfinishedReportCalls(limit=1) len=%d, err=%v", len(limited), limitErr)
 	}
 }
 
@@ -552,11 +573,11 @@ func TestPGStore_ReconcileOrphanedCalls(t *testing.T) {
 		UpdatedAt:       now,
 	}
 
-	_ = st.CreateInboundCall(ctx, c1)
-	_ = st.CreateInboundCall(ctx, c2)
-	_ = st.CreateInboundCall(ctx, c3)
-	_ = st.CreateInboundCall(ctx, cErr)
-	_ = st.CreateInboundCall(ctx, c4)
+	for _, c := range []model.VoiceCall{c1, c2, c3, cErr, c4} {
+		if err := st.CreateInboundCall(ctx, c); err != nil {
+			t.Fatalf("CreateInboundCall(%s) error = %v", c.CallID, err)
+		}
+	}
 
 	checkActive := func(_ context.Context, providerSID string) (bool, error) {
 		if providerSID == "CA_err" {
@@ -576,17 +597,26 @@ func TestPGStore_ReconcileOrphanedCalls(t *testing.T) {
 		t.Errorf("reconciled = %d, want 2", reconciled)
 	}
 
-	rec1, _ := st.GetCall(ctx, "orphan-no-sid")
+	rec1, err := st.GetCall(ctx, "orphan-no-sid")
+	if err != nil {
+		t.Fatalf("GetCall(orphan-no-sid) error = %v", err)
+	}
 	if rec1.State != "failed" || rec1.EndReason != "orphan_no_provider_sid" || rec1.EndedAt == nil {
 		t.Errorf("unexpected reconciled c1: %+v", rec1)
 	}
 
-	rec3, _ := st.GetCall(ctx, "inactive-call")
+	rec3, err := st.GetCall(ctx, "inactive-call")
+	if err != nil {
+		t.Fatalf("GetCall(inactive-call) error = %v", err)
+	}
 	if rec3.State != "completed" || rec3.EndReason != "reconciled_orphan" || rec3.EndedAt == nil {
 		t.Errorf("unexpected reconciled c3: %+v", rec3)
 	}
 
-	act2, _ := st.GetCall(ctx, "active-call")
+	act2, err := st.GetCall(ctx, "active-call")
+	if err != nil {
+		t.Fatalf("GetCall(active-call) error = %v", err)
+	}
 	if act2.EndedAt != nil {
 		t.Errorf("active call c2 should not be ended: %+v", act2)
 	}
@@ -630,9 +660,9 @@ func TestPGStore_VoiceMessages(t *testing.T) {
 		t.Fatalf("SaveVoiceMessage(msgZero) error = %v", err)
 	}
 
-	msgs, err := st.ListVoiceMessages(ctx, 0)
-	if err != nil {
-		t.Fatalf("ListVoiceMessages() error = %v", err)
+	msgs, listErr := st.ListVoiceMessages(ctx, 0)
+	if listErr != nil {
+		t.Fatalf("ListVoiceMessages() error = %v", listErr)
 	}
 	if len(msgs) != 2 {
 		t.Errorf("len(msgs) = %d, want 2", len(msgs))
@@ -645,7 +675,10 @@ func TestPGStore_VoiceMessages(t *testing.T) {
 		t.Errorf("MarkVoiceMessageDelivered(non-existent) err = %v, want ErrMessageNotFound", err)
 	}
 
-	msgsAfter, _ := st.ListVoiceMessages(ctx, 10)
+	msgsAfter, afterErr := st.ListVoiceMessages(ctx, 10)
+	if afterErr != nil {
+		t.Fatalf("ListVoiceMessages error = %v", afterErr)
+	}
 	var foundSM bool
 	for _, m := range msgsAfter {
 		if m.MessageSID == "SM123456" && m.DiscordDelivered {
