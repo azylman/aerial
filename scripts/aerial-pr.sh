@@ -619,7 +619,7 @@ register_pr_in_brain() {
         if [ -n "$reg_resp" ] && echo "$reg_resp" | jq -e '.status == "registered"' >/dev/null 2>&1; then
             local resolved_target
             resolved_target=$(echo "$reg_resp" | jq -r '.target_id // empty' 2>/dev/null || true)
-            echo "🗄️ [aerial-pr] Registered PR #${pr_num} in PostgreSQL pr_registry (target: ${resolved_target:-${target_id:-headless}})." >&2
+            echo "🗄️ [aerial-pr] Registered PR #${pr_num} with the PR lifecycle (target: ${resolved_target:-${target_id:-headless}})." >&2
             return 0
         fi
         if [ "$attempt" -lt "$max_attempts" ]; then
@@ -632,7 +632,7 @@ register_pr_in_brain() {
         attempt=$((attempt + 1))
     done
 
-    echo "❌ [aerial-pr] ERROR: Failed to register PR #${pr_num} in brain pr_registry (${brain_reg_url}) after ${max_attempts} attempts: ${reg_resp:-unreachable}" >&2
+    echo "❌ [aerial-pr] ERROR: Failed to register PR #${pr_num} with the PR lifecycle (${brain_reg_url}) after ${max_attempts} attempts: ${reg_resp:-unreachable}" >&2
     return 1
 }
 
@@ -1240,7 +1240,7 @@ submit_scratch() {
         exit 1
     fi
 
-    # Register PR in PostgreSQL pr_registry via internal endpoint
+    # Register PR with the PR lifecycle via internal endpoint
     local brain_reg_url
     brain_reg_url=$(resolve_pr_register_url 2>/dev/null || true)
 
@@ -1278,7 +1278,7 @@ submit_scratch() {
 
     if [ -n "$brain_reg_url" ]; then
         if ! register_pr_in_brain "$brain_reg_url" "$reg_payload" "$pr_num" "$target_id"; then
-            echo "ERROR: Failed to register PR #${pr_num} in PostgreSQL pr_registry (${brain_reg_url})." >&2
+            echo "ERROR: Failed to register PR #${pr_num} with the PR lifecycle (${brain_reg_url})." >&2
             exit 1
         fi
     else

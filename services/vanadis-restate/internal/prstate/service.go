@@ -5,10 +5,8 @@ package prstate
 // PRObject (key repo#prNumber) is the single ordered authority for per-PR
 // state; RepoObject (key repo) holds only repo-level state: the bounded
 // main-push index, dispatched-SHA tombstones, the SHA->PR routing index with
-// open and deploying sets, and SHA-only events held until indexed. Postgres
-// pr_registry (row, typed columns and child tables) stays a
-// read-only projection synced by one journaled transactional send after
-// the state commit and is never consulted to decide a transition.
+// open and deploying sets, and SHA-only events held until indexed. Restate
+// K/V is the only copy of this state.
 //
 // The services bind beside BuildRouter so the Restate deployment discovers
 // PRObject and RepoObject; synapse sends every lifecycle event here and
@@ -39,6 +37,7 @@ package prstate
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 	"time"
@@ -61,9 +60,7 @@ const (
 // PRObjectService is the dark PRObject Virtual Object. Handlers persist
 // first-touch and applied state to Restate K/V and fire nothing.
 type PRObjectService struct {
-	stateKey   string
-	projection ProjectionStore
-	retryDelay time.Duration
+	stateKey string
 
 	eri           EriEffector
 	eriRetryDelay time.Duration
@@ -78,11 +75,10 @@ type PRObjectService struct {
 	reconcileRetryDelay time.Duration
 }
 
-// NewPRObjectService builds the single PRObject service. Without
-// WithProjection it writes no pr_registry rows.
+// NewPRObjectService builds the single PRObject service.
 func NewPRObjectService() *PRObjectService {
 	return &PRObjectService{
-		stateKey: prObjectStateKey, retryDelay: DefaultProjectionRetry,
+		stateKey:      prObjectStateKey,
 		eriRetryDelay: DefaultEriEffectRetryDelay, factRetryDelay: DefaultFactRetryDelay, deployFailureDeadline: DefaultDeployFailureDeadline,
 		reconcileRetryDelay: DefaultRepoEffectRetryDelay,
 	}
@@ -126,6 +122,25 @@ var untrackedEventsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
 
 func init() {
 	registerCollector(untrackedEventsTotal)
+}
+
+// registerCollector registers c on the default registry, tolerating a
+// duplicate registration and panicking on any other conflict.
+func registerCollector(c prometheus.Collector) {
+	if err := prometheus.Register(c); err != nil {
+		if _, ok := errors.AsType[prometheus.AlreadyRegisteredError](err); !ok {
+			panic(fmt.Sprintf("prstate: register metric: %v", err))
+		}
+	}
+}
+
+// afterCommit runs after a PRObject handler persisted st. It never fails:
+// it syncs the rollout index for a keyed PR.
+func (s *PRObjectService) afterCommit(ctx restate.ObjectContext, st *PRState) {
+	if st == nil || st.Repo == "" || st.PRNumber <= 0 {
+		return
+	}
+	s.syncRolloutIndex(ctx, st)
 }
 
 // dropUntrackedRollout drops one rollout event for an untracked PR: it
@@ -460,7 +475,7 @@ func (s *PRObjectService) HandleConflict(ctx restate.ObjectContext, ev PREvent) 
 // runVerdict is the decide-commit-execute core of the merged verdict
 // handlers: it loads the PR, resolves the verdict, and when fires reports
 // the verdict applies, commits it, then runs the carried facts and syncs the
-// projection. Malformed events resolve the zero verdict.
+// rollout index. Malformed events resolve the zero verdict.
 func runVerdict[D any](s *PRObjectService, ctx restate.ObjectContext, ev PREvent, resolve func(*PRState, PREvent) (D, error), fires func(D) bool, commit func(*PRState) error) (D, error) {
 	var zero D
 	if strings.TrimSpace(ev.Repo) == "" || ev.PRNumber <= 0 {
@@ -660,7 +675,6 @@ func (s *PRObjectService) HandleOpened(ctx restate.ObjectContext, ev PREvent) er
 	return s.mutatePREvent(ctx, ev, func(st *PRState) {
 		if agent := strings.TrimSpace(ev.Agent); agent != "" {
 			st.ClaimOwner(agent)
-			st.BotID = agent
 		}
 	})
 }

@@ -1,5 +1,5 @@
 {
- "description": "Rollout state renders for one pr_registry row: synapse buildPRRolloutState over the row metadata (build_metadata kept only when build_metadata_fenced, i.e. LoadPRBuildMetadata returns it) and prstate BuildPRRolloutState over the hydrated PRState must both equal rollout_state. Hand-derived.",
+ "description": "Rollout state renders for one registry row: synapse buildPRRolloutState over the row metadata (build_metadata kept only when build_metadata_fenced, i.e. LoadPRBuildMetadata returns it) and prstate BuildPRRolloutState over the hydrated PRState must both equal rollout_state. Hand-derived.",
  "cases": [
   {
    "name": "no_jobs",

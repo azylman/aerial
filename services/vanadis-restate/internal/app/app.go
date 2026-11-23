@@ -146,14 +146,13 @@ func LoadConfig(getenv func(string) string) Config {
 // whichever deployment registered last.
 //
 // The default-agent runner requires every prstate boundary and fails to
-// start when one is nil: projection is the pr_registry writer PRObject
-// uses, eri the boundary for eri wakes and DMs, facts the aerial.pr.>
+// start when one is nil: eri is the boundary for eri wakes and DMs, facts the aerial.pr.>
 // lifecycle fact publisher, gh the GitHub client for GitHub effects
 // (auto-update, update-branch, conflict checks, workflow reruns), and kube
 // the Kubernetes/Flux client for Flux and image effects (git-push dispatch,
 // image promotion, reconcile requests). A sibling runner binds no prstate
 // services and ignores them.
-func bindRestateServices(agentName string, restateObj *build.BuildObject, routerSvc *router.BuildRouterService, projection *prstate.PgProjectionStore, eri prstate.EriEffector, facts prstate.FactPublisher, gh *prstate.GitHubClient, kube *prstate.KubeClient) (*server.Restate, error) {
+func bindRestateServices(agentName string, restateObj *build.BuildObject, routerSvc *router.BuildRouterService, eri prstate.EriEffector, facts prstate.FactPublisher, gh *prstate.GitHubClient, kube *prstate.KubeClient) (*server.Restate, error) {
 	srv := server.NewRestate().
 		Bind(restate.Reflect(restateObj,
 			restate.WithInactivityTimeout(45*time.Second),
@@ -164,7 +163,7 @@ func bindRestateServices(agentName string, restateObj *build.BuildObject, router
 			restate.WithAbortTimeout(15*time.Second),
 		))
 	if ownsPRState(agentName) {
-		pr, repo, err := newPRStateServices(projection, eri, facts, gh, kube)
+		pr, repo, err := newPRStateServices(eri, facts, gh, kube)
 		if err != nil {
 			return nil, err
 		}
@@ -179,10 +178,8 @@ var errMissingPRStateDependency = errors.New("vanadis-restate: prstate dependenc
 
 // newPRStateServices wires the PRObject and RepoObject services with every
 // boundary passed explicitly; a nil boundary is a wiring error.
-func newPRStateServices(projection *prstate.PgProjectionStore, eri prstate.EriEffector, facts prstate.FactPublisher, gh *prstate.GitHubClient, kube *prstate.KubeClient) (*prstate.PRObjectService, *prstate.RepoObjectService, error) {
+func newPRStateServices(eri prstate.EriEffector, facts prstate.FactPublisher, gh *prstate.GitHubClient, kube *prstate.KubeClient) (*prstate.PRObjectService, *prstate.RepoObjectService, error) {
 	switch {
-	case projection == nil:
-		return nil, nil, fmt.Errorf("%w: projection store", errMissingPRStateDependency)
 	case eri == nil:
 		return nil, nil, fmt.Errorf("%w: eri effector", errMissingPRStateDependency)
 	case facts == nil:
@@ -192,7 +189,7 @@ func newPRStateServices(projection *prstate.PgProjectionStore, eri prstate.EriEf
 	case kube == nil:
 		return nil, nil, fmt.Errorf("%w: Kubernetes client", errMissingPRStateDependency)
 	}
-	pr := prstate.NewPRObjectService().WithProjection(projection).WithEriEffector(eri).WithFactPublisher(facts).WithGitHub(gh).WithKube(kube)
+	pr := prstate.NewPRObjectService().WithEriEffector(eri).WithFactPublisher(facts).WithGitHub(gh).WithKube(kube)
 	repo := prstate.NewRepoObjectService().WithGitHub(gh).WithKube(kube)
 	return pr, repo, nil
 }
@@ -296,7 +293,7 @@ func RunApp(ctx context.Context, cfg Config) error {
 
 	restateObj := build.NewBuildObjectWithAgent(cfg.VanadisURL, cfg.AgentName, tracing.Client(&http.Client{Timeout: 30 * time.Second})).WithAuthority(pgStore, exec)
 	routerSvc := router.NewBuildRouterServiceWithAgent(pgStore, cfg.AgentName)
-	restateServer, bindErr := bindRestateServices(cfg.AgentName, restateObj, routerSvc, prstate.NewPgProjectionStore(pgStore.DB()), prstate.NewSessionEriEffector(eriClient), prstate.NewBusFactPublisher(bus),
+	restateServer, bindErr := bindRestateServices(cfg.AgentName, restateObj, routerSvc, prstate.NewSessionEriEffector(eriClient), prstate.NewBusFactPublisher(bus),
 		prstate.NewGitHubClient(newGitHubHTTPClient(ghSource, nil, 30*time.Second), "", ""),
 		prstate.NewKubeClient(tracing.ExternalClient(&http.Client{Timeout: 15 * time.Second}), cfg.KubeAPIServer, prstate.DefaultKubeTokenPath, prstate.DefaultKubeCAPath, cfg.FluxReceiverURL))
 	if bindErr != nil {

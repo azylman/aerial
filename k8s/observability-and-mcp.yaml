@@ -729,14 +729,6 @@ spec:
             severity: warning
           annotations:
             summary: prstate {{ $labels.kind }} effects are failing ({{ $labels.result }})
-        - alert: PrstateProjectionWriteErrors
-          expr: |
-            sum(increase(prstate_projection_writes_total{result="error"}[15m])) > 0
-          for: 5m
-          labels:
-            severity: warning
-          annotations:
-            summary: PRObject pr_registry projection writes are failing
     - name: nats_health
       interval: 1m
       rules:

@@ -29,8 +29,6 @@ import (
 //   - Index misses are held (bounded count, expiring after
 //     HeldSHAEventMaxAge via a delayed self-send) and replayed by a delayed
 //     self-send once PRObject indexes the SHA.
-//   - pr_registry is a read-only projection synced AFTER the state commit;
-//     projection failure never discards or gates the transition.
 //
 // The Restate binding in service.go builds these handlers per invocation
 // over Restate K/V and Restate sends; tests use MemRepoStore and fakes.

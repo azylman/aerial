@@ -1,7 +1,6 @@
 package prstate
 
-// Conflict and CI-recovery verdict tests: the Restate PRObject — never the
-// Postgres projection — decides whether synapse publishes a conflict
+// Conflict and CI-recovery verdict tests: the Restate PRObject decides whether synapse publishes a conflict
 // republish or recovers from CI failure. The conflict verdict records
 // nothing, so a publish failure leaves the next invocation returning
 // should_publish again (at-least-once); only the publish-recorded ack marks

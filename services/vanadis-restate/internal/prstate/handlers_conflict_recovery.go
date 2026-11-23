@@ -1,8 +1,7 @@
 package prstate
 
 // Conflict-republish and CI-recovery verdicts. PRObject is the single
-// ordered authority for per-PR conflict and failure state; the Postgres
-// pr_registry stays a read-only projection and is never consulted to decide
+// ordered authority for per-PR conflict and failure state and alone decides
 // whether a conflict republish or a CI recovery fires.
 //
 // HandleConflict and HandleCIRecovered resolve the verdict without
