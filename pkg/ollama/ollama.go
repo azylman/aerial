@@ -13,7 +13,7 @@ import (
 )
 
 const (
-	DefaultModel  = "all-minilm"
+	DefaultModel  = "bge-small-en-v1.5"
 	DefaultNumCtx = 512
 )
 

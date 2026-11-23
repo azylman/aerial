@@ -491,7 +491,7 @@ func cfgWith(layers ...Config) *Config {
 		Port:            "8080",
 		VikunjaUsername: "aerial",
 		VikunjaPassword: "aerial-password",
-		Ollama:          ollama.Config{Model: "all-minilm", NumCtx: 512},
+		Ollama:          ollama.Config{Model: ollama.DefaultModel, NumCtx: ollama.DefaultNumCtx},
 	}
 	for _, l := range layers {
 		cfg.Port = cmp.Or(l.Port, cfg.Port)
