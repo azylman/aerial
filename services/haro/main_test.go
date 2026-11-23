@@ -338,6 +338,7 @@ func TestHaro_MemoryBusIntegration(t *testing.T) {
 
 	run := model.ScheduleRun{
 		ID:           "run-bus-1",
+		MessageID:    "heartbeat:hb-bus-1:2026-11-22T10:00:00Z",
 		ScheduleID:   "hb-bus-1",
 		ScheduleType: "heartbeat",
 		TargetID:     "1234567890",
@@ -367,7 +368,7 @@ func TestHaro_MemoryBusIntegration(t *testing.T) {
 	}
 
 	ev := pubsub.DispatchOutcomeEvent{
-		DispatchID:  "run-bus-1",
+		DispatchID:  "heartbeat:hb-bus-1:2026-11-22T10:00:00Z",
 		Status:      "completed",
 		StartedAt:   now,
 		CompletedAt: now.Add(3 * time.Second),
@@ -379,9 +380,9 @@ func TestHaro_MemoryBusIntegration(t *testing.T) {
 
 	awaitBusHandled(t, wrapped.Handled, "message delivery")
 
-	updatedRun, err := store.GetScheduleRun(ctx, db, "run-bus-1")
+	updatedRun, err := store.GetScheduleRunByDispatchID(ctx, db, "heartbeat:hb-bus-1:2026-11-22T10:00:00Z")
 	if err != nil {
-		t.Fatalf("GetScheduleRun failed: %v", err)
+		t.Fatalf("GetScheduleRunByDispatchID failed: %v", err)
 	}
 	if updatedRun.Status != "completed" {
 		t.Errorf("updatedRun.Status = %q, want completed", updatedRun.Status)
