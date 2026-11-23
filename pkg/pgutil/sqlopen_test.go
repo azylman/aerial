@@ -52,25 +52,52 @@ func immediateAfter(time.Duration) <-chan time.Time {
 
 func neverAfter(time.Duration) <-chan time.Time { return nil }
 
+func makeAfterTracker(neverFire bool, recorded *time.Duration) func(time.Duration) <-chan time.Time {
+	if neverFire {
+		return neverAfter
+	}
+	return func(d time.Duration) <-chan time.Time {
+		if *recorded == 0 {
+			*recorded = d
+		}
+		return immediateAfter(d)
+	}
+}
+
+func assertConnectorOpenErr(t *testing.T, db *sql.DB, err error, wantErr string, wantCanceled bool) {
+	t.Helper()
+	if err == nil || !strings.Contains(err.Error(), wantErr) {
+		t.Fatalf("open() err = %v, want substring %q", err, wantErr)
+	}
+	if got := errors.Is(err, context.Canceled); got != wantCanceled {
+		t.Fatalf("errors.Is(err, context.Canceled) = %v, want %v", got, wantCanceled)
+	}
+	if db != nil {
+		t.Fatalf("open() db = %v, want nil on error", db)
+	}
+}
+
 func TestConnectorOpen(t *testing.T) {
 	t.Parallel()
 	cancelled, cancel := context.WithCancel(context.Background())
 	cancel()
 	tests := []struct {
-		name         string
-		driver       string
-		ctx          context.Context
-		neverFire    bool
-		dsn          string
-		opts         SQLOptions
-		wantErr      string
-		wantMaxOpen  int
-		wantCanceled bool
+		name             string
+		driver           string
+		ctx              context.Context
+		neverFire        bool
+		dsn              string
+		opts             SQLOptions
+		wantErr          string
+		wantMaxOpen      int
+		wantCanceled     bool
+		wantFirstBackoff time.Duration
 	}{
 		{name: "empty", driver: "pgutil-fake", ctx: context.Background(), dsn: "  ", wantErr: "connection string cannot be empty"},
 		{name: "bad scheme redacts dsn", driver: "pgutil-fake", ctx: context.Background(), dsn: "mysql://u:hunter2@db/app?password=x", wantErr: `unsupported database scheme in "mysql://u:xxxxx@db/app": only postgres:// or postgresql:// supported`},
 		{name: "first attempt succeeds with defaults", driver: "pgutil-fake", ctx: context.Background(), dsn: " postgresql://ok@db/app ", wantMaxOpen: 0},
 		{name: "retry then success applies options", driver: "pgutil-fake", ctx: context.Background(), dsn: "postgres://retry@db/app", opts: SQLOptions{MaxOpenConns: 10, MaxIdleConns: 5, ConnMaxLifetime: 30 * time.Minute, ConnMaxIdleTime: 5 * time.Minute}, wantMaxOpen: 10},
+		{name: "custom retry base overrides default", driver: "pgutil-fake", ctx: context.Background(), dsn: "postgres://retry@db/app", opts: SQLOptions{RetryBase: 25 * time.Millisecond}, wantFirstBackoff: 25 * time.Millisecond},
 		{name: "exhausted retries", driver: "pgutil-fake", ctx: context.Background(), dsn: "postgres://exhausted@db/app", wantErr: "failed to connect to PostgreSQL after 3 attempts: fake: connection refused"},
 		{name: "unknown driver exhausts retries", driver: "pgutil-missing", ctx: context.Background(), dsn: "postgres://ok@db/app", wantErr: `failed to connect to PostgreSQL after 3 attempts: sql: unknown driver "pgutil-missing"`},
 		{name: "ctx cancel stops retrying", driver: "pgutil-fake", ctx: cancelled, neverFire: true, dsn: "postgres://cancel@db/app", wantErr: "gave up waiting for PostgreSQL after 1 attempts", wantCanceled: true},
@@ -78,22 +105,12 @@ func TestConnectorOpen(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			after := immediateAfter
-			if tc.neverFire {
-				after = neverAfter
-			}
+			var gotFirstBackoff time.Duration
+			after := makeAfterTracker(tc.neverFire, &gotFirstBackoff)
 			c := connector{driver: tc.driver, maxAttempts: 3, retryBase: time.Millisecond, pingTimeout: time.Second, after: after}
 			db, err := c.open(tc.ctx, tc.dsn, tc.opts)
 			if tc.wantErr != "" {
-				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
-					t.Fatalf("open() err = %v, want substring %q", err, tc.wantErr)
-				}
-				if got := errors.Is(err, context.Canceled); got != tc.wantCanceled {
-					t.Fatalf("errors.Is(err, context.Canceled) = %v, want %v", got, tc.wantCanceled)
-				}
-				if db != nil {
-					t.Fatalf("open() db = %v, want nil on error", db)
-				}
+				assertConnectorOpenErr(t, db, err, tc.wantErr, tc.wantCanceled)
 				return
 			}
 			if err != nil {
@@ -102,6 +119,9 @@ func TestConnectorOpen(t *testing.T) {
 			defer func() { _ = db.Close() }()
 			if got := db.Stats().MaxOpenConnections; got != tc.wantMaxOpen {
 				t.Fatalf("MaxOpenConnections = %d, want %d", got, tc.wantMaxOpen)
+			}
+			if tc.wantFirstBackoff != 0 && gotFirstBackoff != tc.wantFirstBackoff {
+				t.Fatalf("firstBackoff = %v, want %v", gotFirstBackoff, tc.wantFirstBackoff)
 			}
 		})
 	}
@@ -167,6 +187,35 @@ func TestRedactDSN(t *testing.T) {
 			t.Parallel()
 			if got := RedactDSN(tc.dsn); got != tc.want {
 				t.Errorf("RedactDSN(%q) = %q, want %q", tc.dsn, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestWithSearchPath(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		connStr string
+		sp      string
+		want    string
+	}{
+		{name: "empty connStr", connStr: "", sp: "myschema", want: ""},
+		{name: "whitespace connStr", connStr: "   ", sp: "myschema", want: "   "},
+		{name: "empty defaultSearchPath", connStr: "postgres://u:p@db/app", sp: "", want: "postgres://u:p@db/app"},
+		{name: "whitespace defaultSearchPath", connStr: "postgres://u:p@db/app", sp: "  ", want: "postgres://u:p@db/app"},
+		{name: "URL without search_path", connStr: "postgres://u:p@db/app?sslmode=disable", sp: "tenant1", want: "postgres://u:p@db/app?search_path=tenant1&sslmode=disable"},
+		{name: "postgresql scheme without search_path", connStr: "postgresql://u:p@db/app", sp: "tenant1", want: "postgresql://u:p@db/app?search_path=tenant1"},
+		{name: "URL with existing search_path", connStr: "postgres://u:p@db/app?search_path=custom", sp: "tenant1", want: "postgres://u:p@db/app?search_path=custom"},
+		{name: "malformed URL", connStr: "postgres://%gh&invalid", sp: "tenant1", want: "postgres://%gh&invalid"},
+		{name: "key value without search_path", connStr: "host=localhost dbname=test", sp: "tenant1", want: "host=localhost dbname=test search_path=tenant1"},
+		{name: "key value with search_path", connStr: "host=localhost dbname=test search_path=custom", sp: "tenant1", want: "host=localhost dbname=test search_path=custom"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := WithSearchPath(tc.connStr, tc.sp); got != tc.want {
+				t.Fatalf("WithSearchPath(%q, %q) = %q, want %q", tc.connStr, tc.sp, got, tc.want)
 			}
 		})
 	}
