@@ -4,8 +4,7 @@ package prstate
 // the single ordered authority for per-PR deploy state; Postgres pr_registry
 // is a projection fed by a journaled send after the state commit.
 //
-// The deploy_success verdict preserves the BOTH-key deploy dedup legacy
-// synapse used: a deploy counts as fully dispatched only when a PR-keyed or
+// The deploy_success verdict uses BOTH-key deploy dedup: a deploy counts as fully dispatched only when a PR-keyed or
 // job-plus-SHA slot hit coincides with every applicable recorded effect
 // key. Readiness retry never mints a generation and never clears effect
 // keys.
@@ -24,11 +23,10 @@ import (
 	"github.com/azylman/aerial/pkg/pubsub"
 )
 
-// DeployDispatchDecision is the synapse deploy_success publish verdict. The
-// PRObject computes it from the deploy_dispatch effect key plus both
-// WasDispatched slots; it never records anything, so a publish failure
-// leaves the next invocation returning ShouldPublish again (at-least-once)
-// and only the publish-recorded ack completes the dispatch.
+// DeployDispatchDecision is the deploy_success publish verdict
+// HandleDeploySuccess returns. PRObject computes it from the deploy_dispatch
+// effect key plus both WasDispatched slots before recording anything; only
+// a ShouldPublish verdict commits (RecordDeployPublished) and publishes.
 type DeployDispatchDecision struct {
 	Disposition   EventDisposition `json:"disposition"`
 	ShouldPublish bool             `json:"should_publish"`
@@ -36,9 +34,9 @@ type DeployDispatchDecision struct {
 	EffectKey     string           `json:"effect_key"`
 }
 
-// DeployPublishedOutcome is the result of one publish-recorded ack. The ack
-// marks the dispatch key and both dedup slots, so it is idempotent: a
-// redelivered ack replays as already recorded.
+// DeployPublishedOutcome is the result of one deploy_success record. The
+// record marks the dispatch key and both dedup slots, so it is idempotent:
+// a repeated record reports Deduped.
 type DeployPublishedOutcome struct {
 	Disposition EventDisposition `json:"disposition"`
 	EffectKey   string           `json:"effect_key"`
@@ -76,9 +74,8 @@ func ResolveDeployDispatchDecision(s *PRState, ev PREvent) (DeployDispatchDecisi
 
 // DeploySuccessDue reports whether a deploy_success for jobName may publish.
 // A PR without recorded Kustomization requests (direct alert, sync) always
-// may. A watcher-tracked rollout publishes once per PR, like the legacy
-// MarkKustomizationsDeployed transition: only while deploy_success_pending
-// is set (the last Kustomization already flipped the row) or when jobName is
+// may. A watcher-tracked rollout publishes once per PR: only while
+// deploy_success_pending is set (the last Kustomization already flipped the row) or when jobName is
 // the last outstanding request of a deploying rollout.
 func (s *PRState) DeploySuccessDue(jobName string) bool {
 	if s == nil || len(s.KustomizationRequests) == 0 || s.DeploySuccessPending {
@@ -287,8 +284,8 @@ func (s *PRObjectService) HandleDeployFailureDeadline(ctx restate.ObjectContext,
 	if p == nil {
 		return nil
 	}
-	// Like legacy AtomicTransitionDeployFailed, exhaustion writes no banner;
-	// the failure detail rides the deploy_failed fact.
+	// Exhaustion writes no banner; the failure detail rides the
+	// deploy_failed fact.
 	if !current || !st.ApplyRegistryDeployFailed("") {
 		restate.Set(ctx, s.stateKey, st)
 		return nil
@@ -328,8 +325,8 @@ func (s *PRState) RetryReadinessGate(mergeSHA string) (map[string]KustomizationR
 
 // ReadinessReconcileKey keys the reconcile one accepted readiness retry
 // requests: the merge SHA plus the retry ordinal, in the current
-// generation. The returned match key drops the ordinal, matching the
-// [synapse-effect] line synapse logs for its legacy readiness reconcile.
+// generation. The returned match key drops the ordinal, so every retry of
+// one merge SHA shares it.
 func ReadinessReconcileKey(s *PRState, mergeSHA string) (EffectKey, string) {
 	if s == nil {
 		return EffectKey{}, ""

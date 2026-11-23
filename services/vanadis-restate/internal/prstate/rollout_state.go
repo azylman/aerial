@@ -10,11 +10,9 @@ import (
 //
 // Build VO stores a chunk's rollout_state only from the facts that carry one
 // (CompletePRDeployment on deploy_success, RecordPRRolloutState otherwise),
-// and the build widget and cross-build sweep read it from there. Legacy
-// synapse rendered it per fact from the pr_registry row (synapse
-// buildPRRolloutState over LoadRawPRMetadata plus the fenced
-// LoadPRBuildMetadata). PRObject holds that same row, so it renders the
-// same state from committed PRState when it publishes a restate-owned fact.
+// and the build widget and cross-build sweep read it from there. PRObject
+// renders it from committed PRState when it publishes a fact that carries
+// none.
 
 // Image card states for a selected service, matching synapse
 // structuredServiceState.
@@ -38,9 +36,8 @@ const (
 // started and deployed jobs come from the row, and job_states keys are
 // lower-cased with selected services filled from their build results
 // without overriding a deployment-reported state. Kustomization statuses
-// stay empty: legacy read metadata.kustomization_statuses, which no writer
-// ever set and PRState does not hold. It returns nil when nothing renders,
-// like legacy.
+// stay empty: PRState does not hold them. It returns nil when nothing
+// renders.
 func BuildPRRolloutState(st *PRState) *pubsub.PRRolloutState {
 	if st == nil {
 		return nil

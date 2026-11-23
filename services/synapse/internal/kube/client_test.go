@@ -147,6 +147,8 @@ const (
 	kubeBadJSONErr = "invalid character 'i' looking for beginning of object key string"
 	kubeKustPath   = "GET /apis/kustomize.toolkit.fluxcd.io/v1/namespaces/flux-system/kustomizations"
 	kubeGitRepo    = "GET /apis/source.toolkit.fluxcd.io/v1/namespaces/flux-system/gitrepositories/aerial"
+	// kubeCoreSelector is the label selector query for the flux-system/core Kustomization.
+	kubeCoreSelector = "labelSelector=kustomize.toolkit.fluxcd.io%2Fname%3Dcore%2Ckustomize.toolkit.fluxcd.io%2Fnamespace%3Dflux-system"
 )
 
 var (
@@ -349,15 +351,15 @@ func TestClient_ListKustomizationConfigMaps(t *testing.T) {
 	t.Parallel()
 	ref := model.FluxKustomizationRef{Namespace: "flux-system", Name: "core"}
 	changed := time.Date(2026, 11, 18, 12, 0, 0, 0, time.UTC)
-	routes := map[string]kubeRoute{"GET /api/v1/configmaps": {body: `{"items":[{"metadata":{"name":"cfg1","namespace":"flux-system","managedFields":[` +
-		`{"time":"2026-11-18T11:00:00Z"},{"time":"2026-11-18T12:00:00Z"},{"time":"2026-11-18T13:00:00Z","subresource":"status"}]}}]}`}}
+	routes := map[string]kubeRoute{"GET /api/v1/configmaps": {wantQuery: kubeCoreSelector, body: `{"items":[{"metadata":{"name":"cfg1","namespace":"flux-system","managedFields":[` +
+		`{"time":"2026-11-18T11:00:00Z"},{"time":"2026-11-18T12:00:00Z"},{"time":"2026-11-18T13:00:00Z","subresource":"status"}]}},{"metadata":{"name":"bare","namespace":"apps"}}]}`}}
 	tests := []struct {
 		name    string
 		routes  map[string]kubeRoute
 		want    []model.ConfigMapChange
 		wantErr string
 	}{
-		{name: "latest managed field wins", routes: routes, want: []model.ConfigMapChange{{Namespace: "flux-system", Name: "cfg1", ChangedAt: changed}}},
+		{name: "latest managed field wins", routes: routes, want: []model.ConfigMapChange{{Namespace: "flux-system", Name: "cfg1", ChangedAt: changed}, {Namespace: "apps", Name: "bare"}}},
 		{name: "unconfigured", wantErr: "list core configmaps: kube api server not configured"},
 		{name: "server error", routes: kubeAll500, wantErr: "list core configmaps: kube GET /api/v1/configmaps?"},
 		{name: "malformed", routes: kubeAllBad, wantErr: "decode core configmaps: " + kubeBadJSONErr},
@@ -380,10 +382,16 @@ func TestClient_ListKustomizationWorkloads(t *testing.T) {
 	tests := []struct {
 		name    string
 		routes  map[string]kubeRoute
-		wantLen int
+		want    []string
 		wantErr string
 	}{
-		{name: "missing kinds skipped", routes: map[string]kubeRoute{"GET /apis/apps/v1/deployments": {body: `{"items":[{"metadata":{"name":"a"}}]}`}}, wantLen: 1},
+		{name: "missing kinds skipped", routes: map[string]kubeRoute{"GET /apis/apps/v1/deployments": {wantQuery: kubeCoreSelector, body: `{"items":[{"metadata":{"name":"a","namespace":"default"}}]}`}}, want: []string{"Deployment default/a"}},
+		{name: "every workload kind listed in order", routes: map[string]kubeRoute{
+			"GET /apis/apps/v1/deployments":                    {body: `{"items":[{"metadata":{"name":"synapse","namespace":"default"}}]}`},
+			"GET /apis/apps/v1/daemonsets":                     {body: `{"items":[{"metadata":{"name":"agent","namespace":"kube-system"}}]}`},
+			"GET /apis/restate.dev/v1beta1/restatedeployments": {body: `{"items":[{"metadata":{"name":"worker","namespace":"default"}}]}`},
+			"GET /apis/restate.dev/v1/restateclusters":         {body: `{"items":[{"metadata":{"name":"restate","namespace":"default"}}]}`},
+		}, want: []string{"Deployment default/synapse", "DaemonSet kube-system/agent", "RestateDeployment default/worker", "RestateCluster default/restate"}},
 		{name: "unconfigured", wantErr: "list core workloads: kube api server not configured"},
 		{name: "server error", routes: kubeAll500, wantErr: "list core workloads: kube GET /apis/apps/v1/deployments?"},
 		{name: "malformed", routes: kubeAllBad, wantErr: "decode /apis/apps/v1/deployments: " + kubeBadJSONErr},
@@ -393,8 +401,12 @@ func TestClient_ListKustomizationWorkloads(t *testing.T) {
 			t.Parallel()
 			got, err := newKubeRouteClient(t, tc.routes, false).ListKustomizationWorkloads(context.Background(), ref)
 			checkKubeErr(t, err, tc.wantErr)
-			if len(got) != tc.wantLen {
-				t.Errorf("ListKustomizationWorkloads() = %+v, want %d workloads", got, tc.wantLen)
+			names := make([]string, 0, len(got))
+			for _, w := range got {
+				names = append(names, w.Kind+" "+w.Namespace+"/"+w.Name)
+			}
+			if !slices.Equal(names, tc.want) {
+				t.Errorf("ListKustomizationWorkloads() = %v, want %v", names, tc.want)
 			}
 		})
 	}
@@ -454,6 +466,15 @@ func TestClient_DiscoverImageKustomizations(t *testing.T) {
 	t.Parallel()
 	deployments := map[string]kubeRoute{"GET /apis/apps/v1/deployments": {body: `{"items":[{"metadata":{"labels":{"kustomize.toolkit.fluxcd.io/name":"aerial-core","kustomize.toolkit.fluxcd.io/namespace":"flux-system"}},"spec":{"template":{"spec":{"containers":[{"image":"ghcr.io/example/aerial-synapse:abc"}]}}}}]}`}}
 	fallback := map[string]kubeRoute{kubeKustPath: {body: `{"items":[{"metadata":{"name":"alpha","namespace":"flux-system"},"spec":{"postBuild":{"substituteFrom":[{"kind":"Secret","name":"x"},{"kind":"ConfigMap","name":"aerial-image-tags"}]}}}]}`}}
+	owners := map[string]kubeRoute{
+		"GET /apis/batch/v1/cronjobs":              {body: `{"items":[{"metadata":{"labels":{"kustomize.toolkit.fluxcd.io/name":"gamma-core"}},"spec":{"jobTemplate":{"spec":{"template":{"spec":{"initContainers":[{"image":"ghcr.io/example/aerial-synapse@sha256:beef"}]}}}}}}]}`},
+		"GET /apis/restate.dev/v1/restateclusters": {body: `{"items":[{"metadata":{"labels":{"kustomize.toolkit.fluxcd.io/name":"restate-system","kustomize.toolkit.fluxcd.io/namespace":"flux-system"}},"spec":{"compute":{"image":"ghcr.io/example/aerial-synapse:abc"}}}]}`},
+	}
+	fallbackMany := map[string]kubeRoute{kubeKustPath: {body: `{"items":[` +
+		`{"metadata":{"name":"zeta","namespace":"flux-system"},"spec":{"postBuild":{"substituteFrom":[{"kind":"ConfigMap","name":"aerial-image-tags"}]}}},` +
+		`{"metadata":{"name":"plain","namespace":"flux-system"},"spec":{}},` +
+		`{"metadata":{"name":"secret-only","namespace":"flux-system"},"spec":{"postBuild":{"substituteFrom":[{"kind":"Secret","name":"aerial-image-tags"}]}}},` +
+		`{"metadata":{"name":"alpha","namespace":"flux-system"},"spec":{"postBuild":{"substituteFrom":[{"kind":"ConfigMap","name":"other"},{"kind":"ConfigMap","name":"aerial-image-tags"}]}}}]}`}}
 	tests := []struct {
 		name    string
 		images  []string
@@ -465,6 +486,8 @@ func TestClient_DiscoverImageKustomizations(t *testing.T) {
 		{name: "no kube configured skips kube", images: []string{"aerial-synapse"}},
 		{name: "workload label discovered", images: []string{"aerial-synapse"}, routes: deployments, want: []model.FluxKustomizationRef{{Namespace: "flux-system", Name: "aerial-core"}}},
 		{name: "fallback to configmap substitute", images: []string{"aerial-haro"}, routes: fallback, want: []model.FluxKustomizationRef{{Namespace: "flux-system", Name: "alpha"}}},
+		{name: "cronjob init container and restate cluster owners sorted", images: []string{"aerial-synapse"}, routes: owners, want: []model.FluxKustomizationRef{{Namespace: "flux-system", Name: "gamma-core"}, {Namespace: "flux-system", Name: "restate-system"}}},
+		{name: "fallback keeps only image tag configmap substitutes sorted", images: []string{"aerial-haro"}, routes: fallbackMany, want: []model.FluxKustomizationRef{{Namespace: "flux-system", Name: "alpha"}, {Namespace: "flux-system", Name: "zeta"}}},
 		{name: "workload list error", images: []string{"aerial-synapse"}, routes: kubeAll500, wantErr: "list workloads: kube GET /apis/apps/v1/deployments returned status 500"},
 		{name: "fallback list error", images: []string{"aerial-haro"}, routes: map[string]kubeRoute{kubeKustPath: {status: 500}}, wantErr: "list kustomizations: kube GET /apis/kustomize.toolkit.fluxcd.io/v1/namespaces/flux-system/kustomizations returned status 500"},
 		{name: "fallback malformed", images: []string{"aerial-haro"}, routes: map[string]kubeRoute{kubeKustPath: {body: kubeBadJSON}}, wantErr: "decode kustomizations: " + kubeBadJSONErr},
@@ -489,7 +512,7 @@ func TestClient_ReconcileKustomization(t *testing.T) {
 		routes  map[string]kubeRoute
 		wantErr string
 	}{
-		{name: "patched", routes: map[string]kubeRoute{"PATCH /apis/kustomize.toolkit.fluxcd.io/v1/namespaces/flux-system/kustomizations/core": {body: `{}`}}},
+		{name: "patched", routes: map[string]kubeRoute{"PATCH /apis/kustomize.toolkit.fluxcd.io/v1/namespaces/flux-system/kustomizations/core": {body: `{}`, wantBody: `{"metadata":{"annotations":{"reconcile.fluxcd.io/requestedAt":"2026-11-18T00:00:00Z"}}}`}}},
 		{name: "unconfigured", wantErr: "reconcile kustomization flux-system/core: kube api server not configured"},
 		{name: "server error", routes: kubeAll500, wantErr: "reconcile kustomization flux-system/core: kube PATCH /apis/kustomize.toolkit.fluxcd.io/v1/namespaces/flux-system/kustomizations/core returned status 500"},
 	}
@@ -627,8 +650,13 @@ func TestClient_ResolveFluxSourceRepo(t *testing.T) {
 
 func TestClient_DiscoverRepoKustomizations(t *testing.T) {
 	t.Parallel()
-	kusts := kubeRoute{body: `{"items":[{"metadata":{"name":"core"},"spec":{"sourceRef":{"kind":"GitRepository","name":"aerial"}}},{"metadata":{"name":"also"},"spec":{"sourceRef":{"kind":"GitRepository","name":"aerial"}}},{"metadata":{"name":"suspended"},"spec":{"suspend":true,"sourceRef":{"kind":"GitRepository","name":"aerial"}}}]}`}
-	routes := map[string]kubeRoute{kubeKustPath: kusts, kubeGitRepo: {body: `{"spec":{"url":"ssh://git@github.com/example/aerial"}}`}}
+	kusts := kubeRoute{body: `{"items":[{"metadata":{"name":"core"},"spec":{"sourceRef":{"kind":"GitRepository","name":"aerial"}}},{"metadata":{"name":"also"},"spec":{"sourceRef":{"kind":"GitRepository","name":"aerial"}}},{"metadata":{"name":"suspended"},"spec":{"suspend":true,"sourceRef":{"kind":"GitRepository","name":"aerial"}}},` +
+		`{"metadata":{"name":"stack"},"spec":{"sourceRef":{"kind":"GitRepository","name":"stack","namespace":"apps"}}},{"metadata":{"name":"charts"},"spec":{"sourceRef":{"kind":"OCIRepository","name":"charts"}}}]}`}
+	routes := map[string]kubeRoute{
+		kubeKustPath: kusts,
+		kubeGitRepo:  {body: `{"spec":{"url":"ssh://git@github.com/example/aerial"}}`},
+		"GET /apis/source.toolkit.fluxcd.io/v1/namespaces/apps/gitrepositories/stack": {body: `{"spec":{"url":"git@github.com:acme/stack.git"}}`},
+	}
 	tests := []struct {
 		name    string
 		repo    string
@@ -637,6 +665,8 @@ func TestClient_DiscoverRepoKustomizations(t *testing.T) {
 		wantErr string
 	}{
 		{name: "matching sources sorted, suspended skipped", repo: " EXAMPLE/aerial ", routes: routes, want: []model.FluxKustomizationRef{{Namespace: "flux-system", Name: "also"}, {Namespace: "flux-system", Name: "core"}}},
+		{name: "cross-namespace source resolves in its own namespace", repo: "acme/stack", routes: routes, want: []model.FluxKustomizationRef{{Namespace: "flux-system", Name: "stack"}}},
+		{name: "bare repo name matches no owner-qualified source", repo: "aerial", routes: routes},
 		{name: "empty repo", repo: " ", routes: routes},
 		{name: "unconfigured", repo: "example/aerial"},
 		{name: "list error", repo: "example/aerial", routes: kubeAll500, wantErr: "list kustomizations: kube GET"},

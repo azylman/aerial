@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path"
-	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -364,84 +363,6 @@ func TestStartKustomizationWatcher(t *testing.T) {
 	}
 }
 
-func TestDefaultOutboundDispatcher_ListKustomizationWorkloads(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-	deploymentList := `{"items":[{"metadata":{"name":"synapse","namespace":"default","generation":2},"spec":{"replicas":1,"template":{"spec":{"containers":[{"image":"ghcr.io/azylman/aerial-synapse:abc"}]}}},"status":{"observedGeneration":2,"replicas":1,"updatedReplicas":1,"availableReplicas":1}}]}`
-	daemonSetList := `{"items":[{"metadata":{"name":"agent","namespace":"kube-system","generation":1},"spec":{"template":{"spec":{"containers":[{"image":"agent:abc"}]}}},"status":{"observedGeneration":1,"desiredNumberScheduled":2,"updatedNumberScheduled":1,"numberAvailable":2}}]}`
-	restateDeploymentList := `{"items":[{"metadata":{"name":"restate-worker","namespace":"default","generation":1},"spec":{"replicas":1,"template":{"spec":{"containers":[{"image":"ghcr.io/azylman/aerial-restate-worker:abc"}]}}},"status":{"observedGeneration":1,"replicas":1,"readyReplicas":1,"availableReplicas":1,"deploymentId":"dp_123","conditions":[{"type":"Ready","status":"True"}]}}]}`
-	restateClusterList := `{"items":[{"metadata":{"name":"restate","namespace":"default","generation":1},"spec":{"compute":{"image":"docker.io/restatedev/restate:1.6"}},"status":{"observedGeneration":1,"conditions":[{"type":"Ready","status":"True"}]}}]}`
-
-	tests := []struct {
-		name         string
-		noKube       bool
-		routes       map[string]kubeRoute
-		want         []string
-		wantErr      string
-		wantRequests int
-	}{
-		{
-			name:         "lists deployments statefulsets daemonsets and restate resources of the kustomization",
-			routes:       kubeWorkloadRoutes(map[string]kubeRoute{kubeDeploymentsPath: {body: deploymentList}, kubeDaemonSetsPath: {body: daemonSetList}, kubeRestateDeploymentsPath: {body: restateDeploymentList}, kubeRestateClustersPath: {body: restateClusterList}}),
-			want:         []string{"Deployment default/synapse", "DaemonSet kube-system/agent", "RestateDeployment default/restate-worker", "RestateCluster default/restate"},
-			wantRequests: 5,
-		},
-		{
-			name:         "missing crd 404 is treated as empty workload list during rollout listing",
-			routes:       kubeWorkloadRoutes(map[string]kubeRoute{kubeDeploymentsPath: {body: deploymentList}, kubeRestateDeploymentsPath: {status: http.StatusNotFound, body: `{"reason":"NotFound"}`}, kubeRestateClustersPath: {status: http.StatusNotFound, body: `{"reason":"NotFound"}`}}),
-			want:         []string{"Deployment default/synapse"},
-			wantRequests: 5,
-		},
-		{
-			name:         "list failure returns error",
-			routes:       kubeWorkloadRoutes(map[string]kubeRoute{kubeStatefulSetsPath: {status: http.StatusForbidden, body: `forbidden`}}),
-			wantErr:      "list aerial-core workloads",
-			wantRequests: 2,
-		},
-		{
-			name:         "malformed list returns error",
-			routes:       kubeWorkloadRoutes(map[string]kubeRoute{kubeDeploymentsPath: {body: `{"items":`}}),
-			wantErr:      "decode /apis/apps/v1/deployments",
-			wantRequests: 1,
-		},
-		{name: "unconfigured kube API returns error", noKube: true, wantErr: "kube api server not configured"},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			fixture, ts := newKubeFixture(t, tc.routes)
-			disp := NewDefaultOutboundDispatcher("", ts.Client())
-			if !tc.noKube {
-				disp.SetKubeConfig(ts.URL, "test-token")
-			}
-			workloads, err := disp.ListKustomizationWorkloads(ctx, fluxKustomizationRef{Namespace: "flux-system", Name: "aerial-core"})
-			if tc.wantErr != "" {
-				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
-					t.Fatalf("err = %v, want substring %q", err, tc.wantErr)
-				}
-			} else if err != nil {
-				t.Fatalf("unexpected err: %v", err)
-			}
-			got := make([]string, 0, len(workloads))
-			for _, w := range workloads {
-				got = append(got, flux.WorkloadString(w))
-			}
-			if !slices.Equal(got, tc.want) {
-				t.Errorf("workloads = %v, want %v", got, tc.want)
-			}
-			if n := len(fixture.Requests()); n != tc.wantRequests {
-				t.Errorf("kube requests = %d (%v), want %d", n, fixture.Requests(), tc.wantRequests)
-			}
-			if tc.wantRequests > 0 {
-				if q := fixture.Query(kubeDeploymentsPath); q != "labelSelector=kustomize.toolkit.fluxcd.io%2Fname%3Daerial-core%2Ckustomize.toolkit.fluxcd.io%2Fnamespace%3Dflux-system" {
-					t.Errorf("deployments query = %q", q)
-				}
-			}
-		})
-	}
-}
-
 func TestHandleFluxWebhookSourceRepo(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -543,53 +464,6 @@ func TestCommitTime(t *testing.T) {
 			}
 			if n := len(fixture.Requests()); n != tc.wantRequests {
 				t.Errorf("github requests = %d (%v), want %d", n, fixture.Requests(), tc.wantRequests)
-			}
-		})
-	}
-}
-
-func TestDefaultOutboundDispatcher_ListKustomizationConfigMaps(t *testing.T) {
-	t.Parallel()
-	const configMapsPath = "GET /api/v1/configmaps"
-	tests := []struct {
-		name    string
-		noKube  bool
-		routes  map[string]kubeRoute
-		want    []configMapChange
-		wantErr string
-	}{
-		{
-			name:   "decodes the last non-subresource write of each configmap",
-			routes: map[string]kubeRoute{configMapsPath: {body: `{"items":[{"metadata":{"name":"eri-config","namespace":"default","managedFields":[{"manager":"kustomize-controller","operation":"Apply","time":"2026-11-08T10:01:00Z"},{"manager":"other","operation":"Update","subresource":"status","time":"2026-11-08T10:05:00Z"}]}},{"metadata":{"name":"bare","namespace":"apps"}}]}`}},
-			want:   []configMapChange{{Namespace: "default", Name: "eri-config", ChangedAt: rolloutClock(10, 1, 0)}, {Namespace: "apps", Name: "bare"}},
-		},
-		{name: "list failure returns error", routes: map[string]kubeRoute{configMapsPath: {status: http.StatusForbidden, body: `forbidden`}}, wantErr: "list aerial-core configmaps"},
-		{name: "malformed list returns error", routes: map[string]kubeRoute{configMapsPath: {body: `{"items":`}}, wantErr: "decode aerial-core configmaps"},
-		{name: "unconfigured kube API returns error", noKube: true, wantErr: "kube api server not configured"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			fixture, ts := newKubeFixture(t, tc.routes)
-			disp := NewDefaultOutboundDispatcher("", ts.Client())
-			if !tc.noKube {
-				disp.SetKubeConfig(ts.URL, "test-token")
-			}
-			got, err := disp.ListKustomizationConfigMaps(context.Background(), fluxKustomizationRef{Namespace: "flux-system", Name: "aerial-core"})
-			if tc.wantErr != "" {
-				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
-					t.Fatalf("err = %v, want substring %q", err, tc.wantErr)
-				}
-			} else if err != nil {
-				t.Fatalf("unexpected err: %v", err)
-			}
-			if !reflect.DeepEqual(got, tc.want) {
-				t.Errorf("configmaps = %+v, want %+v", got, tc.want)
-			}
-			if !tc.noKube {
-				if q := fixture.Query(configMapsPath); q != "labelSelector=kustomize.toolkit.fluxcd.io%2Fname%3Daerial-core%2Ckustomize.toolkit.fluxcd.io%2Fnamespace%3Dflux-system" {
-					t.Errorf("configmaps query = %q", q)
-				}
 			}
 		})
 	}

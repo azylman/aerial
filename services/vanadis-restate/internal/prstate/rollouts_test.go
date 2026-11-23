@@ -232,7 +232,7 @@ func TestResolvePromotionPR(t *testing.T) {
 		wantFactPR int
 	}{
 		{name: "restate sha-only promotion takes the indexed pr", ev: RepoEvent{HeadSHA: "m42", Facts: []pubsub.PRLifecycleEvent{fact}, DeployFailedFacts: []pubsub.PRLifecycleEvent{fact}}, wantPR: 42, wantBranch: "feat/y", wantFactPR: 42},
-		{name: "unstamped sha-only promotion takes the indexed pr", ev: RepoEvent{HeadSHA: "m42", Facts: []pubsub.PRLifecycleEvent{fact}, DeployFailedFacts: []pubsub.PRLifecycleEvent{fact}}, wantPR: 42, wantBranch: "feat/y", wantFactPR: 42},
+		{name: "sha-only promotion takes the indexed pr", ev: RepoEvent{HeadSHA: "m42", Facts: []pubsub.PRLifecycleEvent{fact}, DeployFailedFacts: []pubsub.PRLifecycleEvent{fact}}, wantPR: 42, wantBranch: "feat/y", wantFactPR: 42},
 		{name: "unindexed sha stays untracked", ev: RepoEvent{HeadSHA: "m9", Facts: []pubsub.PRLifecycleEvent{fact}}},
 		{name: "known pr is kept", ev: RepoEvent{HeadSHA: "m42", PRNumber: 7, Branch: "b", Facts: []pubsub.PRLifecycleEvent{fact}}, wantPR: 7, wantBranch: "b"},
 	}
@@ -285,6 +285,7 @@ func TestPRObjectServiceHandleDeployObserved(t *testing.T) {
 		{name: "started job publishes deploy_started", seed: svcRow("h1", "m1", RegistryStatusMerged, TerminalMerged), ev: PREvent{Repo: "azylman/aerial", PRNumber: 101, MergeSHA: "m1", JobName: "eri", Facts: []pubsub.PRLifecycleEvent{started}}, wantEvents: []string{"deploy_started"}, wantStatus: RegistryStatusDeploying},
 		{name: "already deployed job suppresses deploy_started", seed: deployed, ev: PREvent{Repo: "azylman/aerial", PRNumber: 101, MergeSHA: "m1", JobName: "eri", Facts: []pubsub.PRLifecycleEvent{started}}, wantStatus: RegistryStatusDeployed},
 		{name: "other facts always publish", seed: svcRow("h1", "m1", RegistryStatusMerged, TerminalMerged), ev: PREvent{Repo: "azylman/aerial", PRNumber: 101, MergeSHA: "m1", ExpectedJobs: []string{"eri"}, Facts: []pubsub.PRLifecycleEvent{synced}}, wantEvents: []string{"sync_success"}, wantStatus: RegistryStatusMerged},
+		{name: "untracked pr drops without persisting or publishing", ev: PREvent{Repo: "azylman/aerial", PRNumber: 101, MergeSHA: "m1", JobName: "eri", Facts: []pubsub.PRLifecycleEvent{started}}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -294,7 +295,11 @@ func TestPRObjectServiceHandleDeployObserved(t *testing.T) {
 			pub := &fakeFactPublisher{}
 			require.NoError(t, NewPRObjectService().WithFactPublisher(pub).HandleDeployObserved(restate.WithMockContext(mc), tc.ev))
 			require.Equal(t, tc.wantEvents, factEvents(pub.Calls()))
-			require.Equal(t, tc.wantStatus, rec.saved.Status)
+			var status string
+			if rec.saved != nil {
+				status = rec.saved.Status
+			}
+			require.Equal(t, tc.wantStatus, status)
 		})
 	}
 }

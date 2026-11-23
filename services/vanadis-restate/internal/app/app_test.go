@@ -199,13 +199,13 @@ type discoveryManifest struct {
 }
 
 // bindPRObjectHandlers and bindRepoObjectHandlers are the complete sorted
-// handler sets the default-agent runner registers (42 and 17).
+// handler sets the default-agent runner registers (37 and 17).
 var (
 	bindPRObjectHandlers = []string{
-		"DropUntracked", "GetBuildLifecycle", "GetDeployView", "HandleBranchConflict", "HandleBuildMetadata", "HandleCIRecovered", "HandleCIRecovery",
+		"DropUntracked", "GetBuildLifecycle", "GetDeployView", "HandleBranchConflict", "HandleBuildMetadata", "HandleCIRecovered",
 		"HandleCheckFailed", "HandleCheckPassed", "HandleCheckRerunRequested", "HandleCheckStatus", "HandleClosed", "HandleCollaboratorAlert", "HandleConflict",
-		"HandleConflictCheck", "HandleConflictDetected", "HandleConflictPublished", "HandleConflictResolved", "HandleDeployAttemptFailed", "HandleDeployDispatched",
-		"HandleDeployFailed", "HandleDeployFailureDeadline", "HandleDeployObserved", "HandleDeploySuccess", "HandleDeploySuccessPublished", "HandleHeadRefMissing",
+		"HandleConflictCheck", "HandleConflictResolved", "HandleDeployAttemptFailed",
+		"HandleDeployFailed", "HandleDeployFailureDeadline", "HandleDeployObserved", "HandleDeploySuccess", "HandleHeadRefMissing",
 		"HandleKustomizationRequested", "HandleMainAdvanced", "HandleMerged", "HandleOpened", "HandleReadinessRetry", "HandleReconcileLost", "HandleReopened",
 		"HandleRolloutProgress", "HandleSelfRegistered", "HandleSynchronized", "Project", "Register", "RetryEriEffect", "RetryFactEffect", "RetryFluxReconcile",
 		"RetryReadiness",

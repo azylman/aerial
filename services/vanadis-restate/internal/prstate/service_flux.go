@@ -148,8 +148,7 @@ func (s *PRObjectService) WithKube(k KubeEffector) *PRObjectService {
 // carried fact publishes on any applied request.
 //
 // An untracked PR (PRState.Untracked: an upstream Flux source commit
-// resolved to a PR nobody registered) drops the request entirely, like the
-// legacy registry, which has no row to transition or record into.
+// resolved to a PR nobody registered) drops the request entirely.
 func (s *PRObjectService) HandleKustomizationRequested(ctx restate.ObjectContext, ev PREvent) error {
 	started, rest := SplitDeployStartedFacts(ev.Facts)
 	ev.Facts = nil

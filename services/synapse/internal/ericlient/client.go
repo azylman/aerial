@@ -53,16 +53,6 @@ func (c *Client) SetRetryConfig(delay time.Duration, maxAttempts int) {
 	c.maxAttempts = maxAttempts
 }
 
-// SetDiscordMsgClient overrides the HTTP client for Discord message ingress calls.
-func (c *Client) SetDiscordMsgClient(client *http.Client) {
-	c.discordMsgClient = client
-}
-
-// SetDiscordInteractionClient overrides the HTTP client for Discord interaction calls.
-func (c *Client) SetDiscordInteractionClient(client *http.Client) {
-	c.discordInteractionClient = client
-}
-
 // ValidateBrainChannel checks whether the channel identifier is valid for the target endpoint.
 func ValidateBrainChannel(channelID, endpointPath string) error {
 	if channelID != "" || endpointPath != "/dispatch" {
@@ -184,11 +174,7 @@ func (c *Client) PostDiscordInternalJSONToURL(ctx context.Context, eriBaseURL st
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 
-	httpClient := client
-	if httpClient == nil {
-		httpClient = c.httpClient
-	}
-	resp, err := httpClient.Do(httpReq)
+	resp, err := client.Do(httpReq)
 	if err != nil {
 		return fmt.Errorf("%s request failed: %w", reqLabel, err)
 	}

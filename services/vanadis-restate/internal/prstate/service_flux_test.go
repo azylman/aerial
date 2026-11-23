@@ -153,7 +153,7 @@ func TestRepoObjectServiceHandleImagePromotion(t *testing.T) {
 		wantSends []sentCall
 	}{
 		{
-			name: "unstamped untracked promotion promotes and reconciles", ev: RepoEvent{Repo: "azylman/aerial", HeadSHA: "s2", Images: []string{"eri"}, KustomizationRequests: requests}, kube: &fakeKube{},
+			name: "untracked promotion promotes and reconciles", ev: RepoEvent{Repo: "azylman/aerial", HeadSHA: "s2", Images: []string{"eri"}, KustomizationRequests: requests}, kube: &fakeKube{},
 			wantSet: true, wantRun: true, wantCalls: []string{"promote eri@s2", "reconcile flux-system/core@t1"},
 		},
 		{
@@ -258,7 +258,7 @@ func TestPRObjectServiceRetryReadiness(t *testing.T) {
 		{name: "unknown pr has no gate", req: RetryReadinessRequest{MergeSHA: "m1"}, kube: &fakeKube{}, want: RetryReadinessResponse{Status: 409}},
 		{name: "mismatched merge sha has no gate", seed: deployedRollout(), req: RetryReadinessRequest{MergeSHA: "m9"}, kube: &fakeKube{}, want: RetryReadinessResponse{Status: 409}},
 		{
-			name: "unstamped retry re-requests the original reconcile", seed: deployedRollout(), req: RetryReadinessRequest{MergeSHA: "m1"}, kube: &fakeKube{},
+			name: "retry re-requests the original reconcile", seed: deployedRollout(), req: RetryReadinessRequest{MergeSHA: "m1"}, kube: &fakeKube{},
 			want:    RetryReadinessResponse{Status: 202, Requests: coreRequests, EffectKey: readinessKey},
 			wantSet: true, wantStatus: RegistryStatusDeploying, wantCalls: []string{"reconcile flux-system/core@t1"}, wantDispatched: true, wantSends: []sentCall{indexSend, rolloutIndexSend(1, true)},
 		},

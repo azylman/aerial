@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -17,10 +18,14 @@ const (
 	testStoppedRSJSON     = `{"metadata":{"name":"worker-old","namespace":"work","uid":"child","generation":2,"ownerReferences":[{"apiVersion":"restate.dev/v1beta1","kind":"RestateDeployment","name":"worker","uid":"parent","controller":true}]},"spec":{"replicas":0},"status":{"observedGeneration":2}}`
 )
 
-// kubeRoute is one scripted kube API response; status 0 means 200.
+// kubeRoute is one scripted kube API response; status 0 means 200. A set
+// wantQuery or wantBody must match the request exactly, otherwise the route
+// answers 400 so the caller's error names the mismatch.
 type kubeRoute struct {
-	status int
-	body   string
+	status    int
+	body      string
+	wantQuery string
+	wantBody  string
 }
 
 // newMockKubeServer serves routes keyed by "METHOD /path" (query ignored). The "*" route answers every unlisted
@@ -33,6 +38,12 @@ func newMockKubeServer(routes map[string]kubeRoute) *httptest.Server {
 		}
 		if !ok {
 			resp = kubeRoute{status: http.StatusNotFound, body: `{"kind":"Status","reason":"NotFound"}`}
+		}
+		reqBody, _ := io.ReadAll(r.Body)
+		if resp.wantQuery != "" && r.URL.RawQuery != resp.wantQuery {
+			resp = kubeRoute{status: http.StatusBadRequest, body: "unexpected query " + r.URL.RawQuery}
+		} else if resp.wantBody != "" && string(reqBody) != resp.wantBody {
+			resp = kubeRoute{status: http.StatusBadRequest, body: "unexpected body " + string(reqBody)}
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(cmp.Or(resp.status, http.StatusOK))
