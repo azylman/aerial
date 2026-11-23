@@ -23,7 +23,7 @@ Hard rules for inventory agents:
 - Use bullet lines in the inventory, never tables.
 
 ### 2a. Dead code signals
-- **Production coverage** (`production_code_coverage`, populated by `services/coverage-ingest`; query dormant rows via `scripts/coverage-query.sh [service] [days_dormant]`). It is sticky: once a function executes it keeps `last_executed_at`, so `NULL` means it never ran since `first_seen_at`.
+- **Production coverage** (`production_code_coverage`, populated by `services/coverage-ingest`; query dormant rows via `scripts/coverage-query.sh [service] [days_dormant]` or `psql -c "SELECT ..."` which connect automatically via the local `/var/run/postgresql` proxy without needing `POSTGRES_URL` or `/secrets/POSTGRES_PASSWORD`). It is sticky: once a function executes it keeps `last_executed_at`, so `NULL` means it never ran since `first_seen_at`.
   - A few days of data covers everything except failure recovery. There are no weekly jobs unless the user says otherwise.
   - A partial % means some branches never ran. Data is per function, so dead branches inside live functions still need a static read.
   - **"Stopped running" is a second signal.** Group functions by `last_executed_at`. A big cluster that last ran on one date usually marks a feature switch-over (e.g. the day a new UI shell became the default). That cluster is legacy code.
