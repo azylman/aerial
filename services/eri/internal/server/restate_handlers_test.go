@@ -265,7 +265,7 @@ func TestHandleVoiceAskSSE_RestateCutover(t *testing.T) {
 	assert.Contains(t, body, "event: done")
 }
 
-func TestSetupBrainMuxWithEmbedder_RestateLLM(t *testing.T) {
+func TestSetupBrainMux_RestateLLM(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, "/LLM/Complete", r.URL.Path)
 		w.WriteHeader(http.StatusOK)
@@ -277,7 +277,7 @@ func TestSetupBrainMuxWithEmbedder_RestateLLM(t *testing.T) {
 	orig := restateclient.SwapActiveRestateIngressClient(client)
 	defer restateclient.StoreActiveRestateIngressClient(orig)
 
-	mux := SetupBrainMuxWithEmbedder(nil, nil, nil, nil)
+	mux := SetupBrainMux(nil, nil)
 	req := httptest.NewRequest(http.MethodPost, "/internal/llm", strings.NewReader(`{"prompt":"summarize"}`))
 	rec := httptest.NewRecorder()
 	mux.ServeHTTP(rec, req)

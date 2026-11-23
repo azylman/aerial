@@ -197,64 +197,6 @@ func (p *Publisher) BuildSessionBatches(params SessionBatchParams) ([]transcript
 	return batches, nil
 }
 
-// PublishSessions locates and scans sessions, builds batches, enqueues them on p, and drains.
-func (p *Publisher) PublishSessions(ctx context.Context, brainDir string, watermarks map[string]int, sessionIDs ...string) error {
-	if p == nil {
-		return fmt.Errorf("transcript publisher: publisher is nil")
-	}
-	if len(sessionIDs) == 0 && brainDir != "" {
-		if entries, err := os.ReadDir(brainDir); err == nil {
-			discovered := discoverSessions(brainDir, entries, "")
-			for sid := range discovered {
-				sessionIDs = append(sessionIDs, sid)
-			}
-		}
-	}
-	for _, sid := range sessionIDs {
-		sid = strings.TrimSpace(sid)
-		if sid == "" {
-			continue
-		}
-		wm := -1
-		if watermarks != nil {
-			if w, ok := watermarks[sid]; ok {
-				wm = w
-			}
-		}
-		batches, err := p.BuildSessionBatches(SessionBatchParams{
-			SessionID: sid,
-			BrainDir:  brainDir,
-			Watermark: wm,
-		})
-		if err != nil {
-			return err
-		}
-		p.Enqueue(batches...)
-	}
-	return p.Drain(ctx)
-}
-
-// PublishSession builds batches for a single session, enqueues them on p, and drains.
-func (p *Publisher) PublishSession(ctx context.Context, params SessionBatchParams) error {
-	if p == nil {
-		return fmt.Errorf("transcript publisher: publisher is nil")
-	}
-	batches, err := p.BuildSessionBatches(params)
-	if err != nil {
-		return err
-	}
-	p.Enqueue(batches...)
-	return p.Drain(ctx)
-}
-
-// EnqueueSteps splits steps with the shared wire splitter and enqueues the
-// resulting batches. It returns the number of batches enqueued.
-func (p *Publisher) EnqueueSteps(base transcriptwire.TranscriptStepBatch, steps []transcriptwire.TranscriptStep) int {
-	batches := transcriptwire.SplitStepBatches(base, steps)
-	p.Enqueue(batches...)
-	return len(batches)
-}
-
 // removeSessionLocked drops a session's queue and its order entry together,
 // keeping the order/queue membership invariant so a concurrent Enqueue can
 // never append a duplicate order entry. The caller must hold p.mu.
@@ -270,26 +212,6 @@ func (p *Publisher) removeSessionLocked(session string) {
 		p.order[i] = ""
 	}
 	p.order = kept
-}
-
-// PendingSessions returns session IDs with queued batches in first-seen order.
-func (p *Publisher) PendingSessions() []string {
-	if p == nil {
-		return nil
-	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return append([]string(nil), p.order...)
-}
-
-// PendingCount returns the queued batch count for one session.
-func (p *Publisher) PendingCount(sessionID string) int {
-	if p == nil {
-		return 0
-	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return len(p.queues[strings.TrimSpace(sessionID)])
 }
 
 // Drain publishes every queued batch strictly in order within each session.

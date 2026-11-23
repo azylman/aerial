@@ -292,13 +292,6 @@ func (p *InterchangeablePool) Model() string {
 	return p.underlying.Model()
 }
 
-func (p *InterchangeablePool) Underlying() *UnifiedProcessPool {
-	if p == nil {
-		return nil
-	}
-	return p.underlying
-}
-
 func (p *InterchangeablePool) SetTranscriptRescuer(r func(context.Context, string, time.Time) string) {
 	if p != nil && p.underlying != nil {
 		p.underlying.SetTranscriptRescuer(r)
@@ -308,12 +301,6 @@ func (p *InterchangeablePool) SetTranscriptRescuer(r func(context.Context, strin
 func (p *InterchangeablePool) SetSessionManager(sm *session.Manager) {
 	if p != nil && p.underlying != nil {
 		p.underlying.SetSessionManager(sm)
-	}
-}
-
-func (p *InterchangeablePool) SetSessionCallbacks(getRec func(ctx context.Context, targetKey string) (SessionRecord, error), onRot func(ctx context.Context, targetKey, oldSessionID, newSessionID string) error) {
-	if p != nil && p.underlying != nil {
-		p.underlying.SetSessionCallbacks(getRec, onRot)
 	}
 }
 
@@ -333,13 +320,6 @@ func (p *InterchangeablePool) MarkDirty() {
 	if p != nil && p.underlying != nil {
 		p.underlying.MarkDirty()
 	}
-}
-
-func (p *InterchangeablePool) Get(targetKey string) (*StreamingDaemon, bool) {
-	if p == nil || p.underlying == nil {
-		return nil, false
-	}
-	return p.underlying.Get(targetKey)
 }
 
 func (p *InterchangeablePool) returnWorker(workerKey string) {

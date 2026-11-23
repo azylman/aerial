@@ -13,9 +13,6 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/db"
 )
 
-// testTranscriptStack is the transcript stack every test transcript store uses.
-const testTranscriptStack = "eri"
-
 // newTestDB opens a private cloned database through the production
 // constructor (db.Open: pool sizing, ping, metrics.RegisterDBStats).
 func newTestDB(t testing.TB) *sql.DB {
@@ -36,11 +33,4 @@ func newTestDB(t testing.TB) *sql.DB {
 func newTestStore(t testing.TB) *db.SQLStore {
 	t.Helper()
 	return db.NewSQLStore(newTestDB(t))
-}
-
-// newTestTranscriptStore returns a production SQLTranscriptStore over a
-// private cloned database.
-func newTestTranscriptStore(t testing.TB) *db.SQLTranscriptStore {
-	t.Helper()
-	return db.NewSQLTranscriptStore(newTestDB(t), testTranscriptStack)
 }

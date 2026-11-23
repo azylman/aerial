@@ -131,7 +131,7 @@ type voiceTurnTestCase struct {
 	runnerCode, resultExitCode                                                                                          int
 	runnerErr, spawnerErr, wantErrIs, hookErr                                                                           error
 	poolNil, poolStopped, poolDeadCtx, cancelCaller, nilProcessPool, useVoiceHook, useVoiceStreamHook                   bool
-	closePipeImmediately, cancelCallerOnScan, clearPreSpawnedSessionID                                                  bool
+	closePipeImmediately, cancelCallerOnScan                                                                            bool
 	resultStatus, resultError, resultResponse                                                                           string
 	// wantTurnStatus is the aerial.turn.status of the invoke_agent span parented to the caller's
 	// span; "" leaves the turn's trace unchecked. wantChatSpan expects a chat child under it, and
@@ -354,14 +354,6 @@ func runVoiceTurnCase(t *testing.T, tt voiceTurnTestCase) {
 	}
 
 	targetSess := tt.sessionID
-	if tt.clearPreSpawnedSessionID && procPool != nil {
-		targetSess = "fallback-conv-id"
-		d, err := procPool.GetOrCreate(context.Background(), targetSess, "")
-		if err != nil {
-			t.Fatalf("failed pre-spawning: %v", err)
-		}
-		d.SetSessionID("")
-	}
 
 	reply, convID, err := pool.ExecuteVoiceTurn(ctx, tt.prompt, targetSess, func(s string) { statusReceived = s }, func(s string) { sentenceReceived = s })
 	caller.End()
@@ -461,7 +453,7 @@ func TestWorkerPool_ExecuteVoiceTurn_TableDriven(t *testing.T) {
 		{name: "DaemonTurnTraced", prompt: "test", sessionID: "sess-daemon-ok", resultStatus: "SUCCESS", resultResponse: "lights on", wantReply: "lights on", wantTurnStatus: "success", wantChatSpan: true, wantRegistered: true},
 		{name: "SendFailureBrokenPipe", prompt: "test", sessionID: "sess-pipe-err", closePipeImmediately: true, wantErrSub: "failed sending turn to voice daemon"},
 		{name: "ContextCanceledWaitingForResult", prompt: "test", sessionID: "sess-ctx-cancel", cancelCallerOnScan: true, wantErrSub: "context canceled", wantTurnStatus: "cancelled", wantRegistered: true},
-		{name: "ExitCodeNonZeroAndEmptySessionFallback", prompt: "test", sessionID: "sess-exit-fallback", clearPreSpawnedSessionID: true, resultStatus: "SUCCESS", resultExitCode: 1, wantErrSub: "empty response", wantRegistered: true},
+		{name: "ExitCodeNonZeroAndEmptySessionFallback", prompt: "test", sessionID: "sess-exit-fallback", resultStatus: "SUCCESS", resultExitCode: 1, wantErrSub: "empty response", wantRegistered: true},
 		{name: "VoiceModelSet", prompt: "test", sessionID: "sess-voice-model", appVoiceModel: "haiku", appLowModel: "opus-low", resultStatus: "SUCCESS", resultResponse: "lights on", wantReply: "lights on", wantTurnStatus: "success", wantChatSpan: true, wantRegistered: true, wantModel: "haiku", wantProvider: "anthropic"},
 		{name: "VoiceModelEmptyFallbackLow", prompt: "test", sessionID: "sess-voice-empty", appVoiceModel: "", appLowModel: "opus-low", resultStatus: "SUCCESS", resultResponse: "lights on", wantReply: "lights on", wantTurnStatus: "success", wantChatSpan: true, wantRegistered: true, wantModel: "opus-low", wantProvider: "anthropic"},
 		{name: "GeminiAPIPoolVoiceModel", prompt: "test", sessionID: "sess-gemini-voice", useGeminiAPIPool: true, wantReply: "gemini voice reply", wantTurnStatus: "success", wantChatSpan: true, wantModel: "gemini-2.5-flash", wantProvider: "gcp.gemini"},
@@ -1027,14 +1019,12 @@ func TestStatusUpdater_GuardrailsAndRESTTransport(t *testing.T) {
 
 	var nilSu *StatusUpdater
 	nilSu.MarkTurnStarted()
-	nilSu.SetCapacityBackoff(5 * time.Second)
 	nilSu.Stop()
 	nilSu.DeleteStatusMessage()
 	nilSu.HandleStep(&runner.StepUpdateEvent{StepType: "thinking"})
 
 	uDis := NewStatusUpdater(nil, "thread-dis", false)
 	uDis.Start()
-	uDis.SetCapacityBackoff(5 * time.Second)
 	uDis.triggerFlush()
 	uEn := NewStatusUpdater(nil, "thread-en", true, WithStatusInterval(50*time.Millisecond))
 	uEn.Start()
@@ -1044,16 +1034,8 @@ func TestStatusUpdater_GuardrailsAndRESTTransport(t *testing.T) {
 	uStep.Stop()
 	uStep.disabled = true
 	uStep.HandleStep(&runner.StepUpdateEvent{StepType: "thinking"})
-	uStep.SetCapacityBackoff(5 * time.Second)
 	uStep.disabled = false
-	uStep.SetCapacityBackoff(15 * time.Second)
-	if got := uStep.currentStatusText(); !strings.Contains(got, "Waiting on model capacity") {
-		t.Errorf("expected capacity backoff text, got %q", got)
-	}
 	uStep.MarkTurnStarted()
-	if uStep.phase != "" {
-		t.Errorf("expected MarkTurnStarted to reset backoff phase, got %q", uStep.phase)
-	}
 	uStep.HandleStep(&runner.StepUpdateEvent{StepType: "thinking"})
 	uStep.HandleStep(&runner.StepUpdateEvent{StepType: "tool_call", ToolName: "view_file", State: "ACTIVE", ToolInfo: &runner.StepToolInfo{Parameters: runner.StepToolParameters{CommandLine: "ls"}}})
 	uStep.HandleStep(&runner.StepUpdateEvent{StepType: "tool_call", ToolName: "other_tool", State: "DONE"})
