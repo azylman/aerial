@@ -33,6 +33,7 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/llmcall"
 	"github.com/azylman/aerial/services/eri/pkg/mcp"
 	"github.com/azylman/aerial/services/eri/pkg/metrics"
+	"github.com/azylman/aerial/services/eri/pkg/pgproxy"
 	"github.com/azylman/aerial/services/eri/pkg/queue"
 	"github.com/azylman/aerial/services/eri/pkg/runner"
 	"github.com/azylman/aerial/services/eri/pkg/session"
@@ -40,10 +41,11 @@ import (
 
 // Config holds runtime configuration for the eri-restate worker service.
 type Config struct {
-	RestatePort string
-	HealthPort  string
-	PostgresURL string
-	AgentName   string
+	RestatePort        string
+	HealthPort         string
+	PostgresURL        string
+	PostgresSocketPath string
+	AgentName          string
 }
 
 // LoadConfigFromEnv loads configuration from environment variables with defaults.
@@ -62,13 +64,15 @@ func LoadConfigFromEnv() Config {
 	}
 
 	pgURL := strings.TrimSpace(strutil.FirstNonEmpty(os.Getenv("DATABASE_URL"), os.Getenv("POSTGRES_URL"), httpkit.BuildPostgresDSN(os.Getenv, "aerial")))
+	pgSocketPath := strings.TrimSpace(strutil.FirstNonEmpty(os.Getenv("POSTGRES_SOCKET_PATH"), pgproxy.DefaultSocketPath))
 	agentName := strings.TrimSpace(strutil.FirstNonEmpty(os.Getenv("AGENT_NAME"), "aerial"))
 
 	return Config{
-		RestatePort: restatePort,
-		HealthPort:  healthPort,
-		PostgresURL: pgURL,
-		AgentName:   agentName,
+		RestatePort:        restatePort,
+		HealthPort:         healthPort,
+		PostgresURL:        pgURL,
+		PostgresSocketPath: pgSocketPath,
+		AgentName:          agentName,
 	}
 }
 
@@ -363,6 +367,18 @@ func RunApp(ctx context.Context, cfg Config, opts ...AppOption) error {
 
 	cur := appCfg.Current()
 	config.RegisterConfigTokens(appCfg)
+
+	if socketPath := strings.TrimSpace(cfg.PostgresSocketPath); socketPath != "" {
+		stopPGProxy, proxyErr := pgproxy.Start(ctx, pgproxy.Options{
+			SocketPath: socketPath,
+			DSNFunc:    func() string { return strutil.FirstNonEmpty(appCfg.Current().DatabaseURL, cfg.PostgresURL) },
+		})
+		if proxyErr != nil {
+			log.Printf("[eri-restate] Warning starting postgres socket proxy on %s: %v", socketPath, proxyErr)
+		} else {
+			defer stopPGProxy()
+		}
+	}
 
 	log.Printf("[eri-restate] turn_queue=coordinator source=builtin")
 

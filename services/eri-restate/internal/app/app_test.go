@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -193,11 +194,12 @@ func TestDiscoveryManifestTimeoutsAndH2C(t *testing.T) {
 }
 
 type configEnvCase struct {
-	name            string
-	env             map[string]string
-	wantRestatePort string
-	wantHealthPort  string
-	wantAgentName   string
+	name                   string
+	env                    map[string]string
+	wantRestatePort        string
+	wantHealthPort         string
+	wantPostgresSocketPath string
+	wantAgentName          string
 }
 
 func runConfigEnvCase(t *testing.T, tc configEnvCase) {
@@ -208,31 +210,35 @@ func runConfigEnvCase(t *testing.T, tc configEnvCase) {
 	cfg := LoadConfigFromEnv()
 	assert.Equal(t, tc.wantRestatePort, cfg.RestatePort)
 	assert.Equal(t, tc.wantHealthPort, cfg.HealthPort)
+	assert.Equal(t, tc.wantPostgresSocketPath, cfg.PostgresSocketPath)
 	assert.Equal(t, tc.wantAgentName, cfg.AgentName)
 }
 
 func TestLoadConfigFromEnv(t *testing.T) {
 	tests := []configEnvCase{
 		{
-			name:            "default values",
-			env:             map[string]string{"RESTATE_PORT": "", "PORT": "", "HEALTH_PORT": "", "AGENT_NAME": ""},
-			wantRestatePort: "9080",
-			wantHealthPort:  "4028",
-			wantAgentName:   "aerial",
+			name:                   "default values",
+			env:                    map[string]string{"RESTATE_PORT": "", "PORT": "", "HEALTH_PORT": "", "POSTGRES_SOCKET_PATH": "", "AGENT_NAME": ""},
+			wantRestatePort:        "9080",
+			wantHealthPort:         "4028",
+			wantPostgresSocketPath: "/var/run/postgresql/.s.PGSQL.5432",
+			wantAgentName:          "aerial",
 		},
 		{
-			name:            "PORT fallback for restate port",
-			env:             map[string]string{"RESTATE_PORT": "", "PORT": "9081", "HEALTH_PORT": "4029", "AGENT_NAME": "agent-alpha"},
-			wantRestatePort: "9081",
-			wantHealthPort:  "4029",
-			wantAgentName:   "agent-alpha",
+			name:                   "PORT fallback for restate port",
+			env:                    map[string]string{"RESTATE_PORT": "", "PORT": "9081", "HEALTH_PORT": "4029", "POSTGRES_SOCKET_PATH": "", "AGENT_NAME": "agent-alpha"},
+			wantRestatePort:        "9081",
+			wantHealthPort:         "4029",
+			wantPostgresSocketPath: "/var/run/postgresql/.s.PGSQL.5432",
+			wantAgentName:          "agent-alpha",
 		},
 		{
-			name:            "explicit environment overrides",
-			env:             map[string]string{"RESTATE_PORT": "9090", "HEALTH_PORT": "4030", "AGENT_NAME": "agent-beta"},
-			wantRestatePort: "9090",
-			wantHealthPort:  "4030",
-			wantAgentName:   "agent-beta",
+			name:                   "explicit environment overrides",
+			env:                    map[string]string{"RESTATE_PORT": "9090", "HEALTH_PORT": "4030", "POSTGRES_SOCKET_PATH": "/tmp/custom/.s.PGSQL.5432", "AGENT_NAME": "agent-beta"},
+			wantRestatePort:        "9090",
+			wantHealthPort:         "4030",
+			wantPostgresSocketPath: "/tmp/custom/.s.PGSQL.5432",
+			wantAgentName:          "agent-beta",
 		},
 	}
 
@@ -494,10 +500,31 @@ func TestRunApp_CanceledContext(t *testing.T) {
 	)
 	assert.NoError(t, err)
 
-	// Test nil Current() config fallback
-	err = RunApp(ctx, cfg,
+	// Test nil Current() config fallback and PostgresSocketPath startup + error warning branches
+	sockTmp, sErr := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, sErr)
+	cfgWithSocket := Config{
+		RestatePort:        "19080",
+		HealthPort:         "14028",
+		PostgresSocketPath: filepath.Join(sockTmp, ".s.PGSQL.5432"),
+		AgentName:          "aerial-test",
+	}
+	err = RunApp(ctx, cfgWithSocket,
 		WithStore(fakeStore, nil),
 		WithAppConfig(config.NewFromData(nil)),
+		WithDaemonSpawner(&dummySpawner{}),
+	)
+	assert.NoError(t, err)
+
+	cfgWithBadSocket := Config{
+		RestatePort:        "19080",
+		HealthPort:         "14028",
+		PostgresSocketPath: "/proc/nonexistent-pgproxy-dir/.s.PGSQL.5432",
+		AgentName:          "aerial-test",
+	}
+	err = RunApp(ctx, cfgWithBadSocket,
+		WithStore(fakeStore, nil),
+		WithAppConfig(appCfg),
 		WithDaemonSpawner(&dummySpawner{}),
 	)
 	assert.NoError(t, err)
@@ -722,10 +749,12 @@ func TestRunApp_DefaultDatabaseInitializationAndShutdown(t *testing.T) {
 			},
 		})
 
+		sockPath := filepath.Join(tmpDir, ".s.PGSQL.5432")
 		cfg := Config{
-			RestatePort: "0",
-			HealthPort:  "0",
-			AgentName:   "aerial-test",
+			RestatePort:        "0",
+			HealthPort:         "0",
+			PostgresSocketPath: sockPath,
+			AgentName:          "aerial-test",
 		}
 
 		ready := make(chan struct{})
@@ -737,6 +766,16 @@ func TestRunApp_DefaultDatabaseInitializationAndShutdown(t *testing.T) {
 
 		go func() {
 			<-ready
+			if c, dErr := (&net.Dialer{}).DialContext(ctx, "unix", sockPath); dErr == nil {
+				if _, wErr := c.Write([]byte{0, 0, 0, 16, 0x04, 0xd2, 0x16, 0x2e, 0, 0, 0, 1, 0, 0, 0, 2}); wErr == nil {
+					if _, rErr := io.ReadAll(c); rErr != nil {
+						return
+					}
+				}
+				if cErr := c.Close(); cErr != nil {
+					return
+				}
+			}
 			cancel()
 		}()
 
