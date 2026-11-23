@@ -33,7 +33,9 @@ type mockWidgetSender struct {
 
 	lastSendChannelID string
 	lastSendData      *discordgo.MessageSend
+	lastSendContext   context.Context
 	lastEditData      *discordgo.MessageEdit
+	lastEditContext   context.Context
 	lastDeleteID      string
 	lastDeleteChannel string
 }
@@ -53,9 +55,24 @@ func extractTestComponentsText(components []discordgo.MessageComponent) string {
 	return strings.Join(lines, "\n")
 }
 
-func (m *mockWidgetSender) ChannelMessageSendComplex(channelID string, data *discordgo.MessageSend, _ ...discordgo.RequestOption) (*discordgo.Message, error) {
+func (m *mockWidgetSender) ChannelMessageSendComplex(channelID string, data *discordgo.MessageSend, opts ...discordgo.RequestOption) (*discordgo.Message, error) {
 	m.lastSendChannelID = channelID
 	m.lastSendData = data
+	if len(opts) > 0 {
+		req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "/", http.NoBody)
+		if err != nil {
+			panic(err)
+		}
+		cfg := &discordgo.RequestConfig{Request: req}
+		for _, opt := range opts {
+			if opt != nil {
+				opt(cfg)
+			}
+		}
+		if cfg.Request != nil {
+			m.lastSendContext = cfg.Request.Context()
+		}
+	}
 	if m.sendErr != nil {
 		return nil, m.sendErr
 	}
@@ -68,8 +85,23 @@ func (m *mockWidgetSender) ChannelMessageSendComplex(channelID string, data *dis
 	return &discordgo.Message{ID: "msg-default-new", ChannelID: channelID}, nil
 }
 
-func (m *mockWidgetSender) ChannelMessageEditComplex(edit *discordgo.MessageEdit, _ ...discordgo.RequestOption) (*discordgo.Message, error) {
+func (m *mockWidgetSender) ChannelMessageEditComplex(edit *discordgo.MessageEdit, opts ...discordgo.RequestOption) (*discordgo.Message, error) {
 	m.lastEditData = edit
+	if len(opts) > 0 {
+		req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "/", http.NoBody)
+		if err != nil {
+			panic(err)
+		}
+		cfg := &discordgo.RequestConfig{Request: req}
+		for _, opt := range opts {
+			if opt != nil {
+				opt(cfg)
+			}
+		}
+		if cfg.Request != nil {
+			m.lastEditContext = cfg.Request.Context()
+		}
+	}
 	if m.editErr != nil {
 		return nil, m.editErr
 	}
@@ -203,6 +235,92 @@ func TestShouldSinkWidget(t *testing.T) {
 	}
 }
 
+func TestWidgetMessageHasHeader(t *testing.T) {
+	t.Parallel()
+	cv2 := discordgo.MessageFlagsIsComponentsV2
+	containerWithHeader := func(header string) []discordgo.MessageComponent {
+		return []discordgo.MessageComponent{
+			&discordgo.Container{
+				Components: []discordgo.MessageComponent{
+					&discordgo.TextDisplay{
+						Content: header,
+					},
+				},
+			},
+		}
+	}
+	sectionWithHeader := func(header string) []discordgo.MessageComponent {
+		return []discordgo.MessageComponent{
+			&discordgo.Section{
+				Components: []discordgo.MessageComponent{
+					&discordgo.TextDisplay{
+						Content: header,
+					},
+				},
+			},
+		}
+	}
+
+	tests := []struct {
+		name       string
+		msg        *discordgo.Message
+		wantHeader string
+		want       bool
+	}{
+		{name: "nil message returns false", wantHeader: "### Header", want: false},
+		{
+			name:       "message without Components V2 flag returns false",
+			msg:        &discordgo.Message{Components: containerWithHeader("### Header")},
+			wantHeader: "### Header",
+			want:       false,
+		},
+		{
+			name:       "empty wantHeader returns false",
+			msg:        &discordgo.Message{Flags: cv2, Components: containerWithHeader("### Header")},
+			wantHeader: "",
+			want:       false,
+		},
+		{
+			name:       "message with matching header in container returns true",
+			msg:        &discordgo.Message{Flags: cv2, Components: containerWithHeader("### 🛠️ Build 1")},
+			wantHeader: "### 🛠️ Build 1",
+			want:       true,
+		},
+		{
+			name:       "header comparison trims whitespace",
+			msg:        &discordgo.Message{Flags: cv2, Components: containerWithHeader("  ### 🛠️ Build 1 \n")},
+			wantHeader: "### 🛠️ Build 1",
+			want:       true,
+		},
+		{
+			name:       "message with matching header in section returns true",
+			msg:        &discordgo.Message{Flags: cv2, Components: sectionWithHeader("### 🛠️ Build 1")},
+			wantHeader: "### 🛠️ Build 1",
+			want:       true,
+		},
+		{
+			name:       "message with different header returns false",
+			msg:        &discordgo.Message{Flags: cv2, Components: containerWithHeader("### 🛠️ Other Build")},
+			wantHeader: "### 🛠️ Build 1",
+			want:       false,
+		},
+		{
+			name:       "message with empty components returns false",
+			msg:        &discordgo.Message{Flags: cv2, Components: nil},
+			wantHeader: "### 🛠️ Build 1",
+			want:       false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := widgetMessageHasHeader(tc.msg, tc.wantHeader)
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}
+
 func TestDeliverStatusWidget(t *testing.T) {
 	t.Parallel()
 	notFoundErr := &discordgo.RESTError{Response: &http.Response{StatusCode: http.StatusNotFound}}
@@ -213,6 +331,23 @@ func TestDeliverStatusWidget(t *testing.T) {
 	missingAccessErr := &discordgo.RESTError{Response: forbidden, Message: &discordgo.APIErrorMessage{Code: 50001, Message: "Missing Access"}}
 	buried := msgs(1, 20*time.Minute, 0)
 	errBoom := errors.New("boom")
+	orphanCard := func(id, title string) *discordgo.Message {
+		return &discordgo.Message{
+			ID:    id,
+			Flags: discordgo.MessageFlagsIsComponentsV2,
+			Components: []discordgo.MessageComponent{
+				&discordgo.Container{
+					Components: []discordgo.MessageComponent{
+						&discordgo.TextDisplay{
+							Content: buildWidgetHeaderText(ericlient.StatusWidgetRequest{ChannelID: "chan-1", Title: title}),
+						},
+					},
+				},
+			},
+		}
+	}
+	orphanBuild1 := []*discordgo.Message{orphanCard("msg-orphan-1", "Build 1")}
+	orphanOtherBuild := []*discordgo.Message{orphanCard("msg-orphan-other", "Different Build")}
 
 	type dwCase struct {
 		name         string
@@ -250,6 +385,11 @@ func TestDeliverStatusWidget(t *testing.T) {
 		row("buried message sinks by creating new and deleting old", &mockWidgetSender{msgs: buried, sendMsg: &discordgo.Message{ID: "msg-sunk-new"}}, "chan-1", "msg-buried-1", "msg-sunk-new", "", true, "msg-buried-1", false),
 		row("buried message sink delete failure still succeeds", &mockWidgetSender{msgs: buried, sendMsg: &discordgo.Message{ID: "msg-sunk-new-2"}, deleteErr: errors.New("delete failed")}, "chan-1", "msg-buried-del-fail", "msg-sunk-new-2", "", true, "msg-buried-del-fail", false),
 		row("buried message sink send failure falls back to edit in place", &mockWidgetSender{msgs: buried, sendErr: errors.New("sink failed"), editMsg: &discordgo.Message{ID: "msg-sink-fail"}}, "chan-1", "msg-sink-fail", "msg-sink-fail", "", true, "", false),
+		row("buried message sink context deadline exceeded fails without fallback to edit", &mockWidgetSender{msgs: buried, sendErr: context.DeadlineExceeded, editMsg: &discordgo.Message{ID: "msg-sink-fail"}}, "chan-1", "msg-sink-fail", "", "failed to sink status widget message msg-sink-fail: context deadline exceeded", true, "", false),
+		row("buried message sink context canceled fails without fallback to edit", &mockWidgetSender{msgs: buried, sendErr: context.Canceled, editMsg: &discordgo.Message{ID: "msg-sink-fail"}}, "chan-1", "msg-sink-fail", "", "failed to sink status widget message msg-sink-fail: context canceled", true, "", false),
+		row("orphan card adoption edits newer matching card in place and deletes old", &mockWidgetSender{msgs: orphanBuild1, editMsg: &discordgo.Message{ID: "msg-orphan-1"}}, "chan-1", "msg-old-1", "msg-orphan-1", "", false, "msg-old-1", false),
+		row("orphan card non-context edit failure falls back to editing old in place", &mockWidgetSender{msgs: orphanBuild1, editErr: errors.New("edit failed")}, "chan-1", "msg-old-fallback", "", "failed to edit status widget message msg-old-fallback", false, "", false),
+		row("orphan card with different header does not adopt and edits old in place", &mockWidgetSender{msgs: orphanOtherBuild, editMsg: &discordgo.Message{ID: "msg-old-2"}}, "chan-1", "msg-old-2", "msg-old-2", "", false, "", false),
 		row("buried message with skip_sink edits in place", &mockWidgetSender{msgs: buried, editMsg: &discordgo.Message{ID: "msg-buried-2"}}, "chan-1", "msg-buried-2", "msg-buried-2", "", false, "", true),
 	}
 
@@ -285,6 +425,7 @@ func TestDelivererDeliverStatusWidget(t *testing.T) {
 		name     string
 		d        *DiscordWidgetDeliverer
 		req      ericlient.StatusWidgetRequest
+		ctx      context.Context
 		wantID   string
 		wantErr  string
 		wantText []string
@@ -301,12 +442,23 @@ func TestDelivererDeliverStatusWidget(t *testing.T) {
 			req:  ericlient.StatusWidgetRequest{ChannelID: "chan-1", Title: "Build Clock @everyone"}, wantID: "m-clock",
 			wantText: []string{"<t:1795089600:R>", "@everyone"},
 		},
+		{
+			name:   "post-lock widget timeout derives bounded context",
+			d:      newSenderDeliverer(&mockWidgetSender{sendMsg: &discordgo.Message{ID: "m-timeout"}}, ""),
+			req:    ericlient.StatusWidgetRequest{ChannelID: "chan-1", Title: "Build Timeout"},
+			ctx:    ericlient.WithWidgetTimeout(context.Background(), 10*time.Second),
+			wantID: "m-timeout",
+		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			id, err := tc.d.DeliverStatusWidget(context.Background(), tc.req)
+			ctx := tc.ctx
+			if ctx == nil {
+				ctx = context.Background()
+			}
+			id, err := tc.d.DeliverStatusWidget(ctx, tc.req)
 			if tc.wantErr != "" {
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), tc.wantErr)
@@ -315,6 +467,12 @@ func TestDelivererDeliverStatusWidget(t *testing.T) {
 			}
 			assert.Equal(t, tc.wantID, id)
 			mock := senderMock(tc.d, tc.req.Agent)
+			if tc.ctx != nil && mock != nil && mock.lastSendContext != nil {
+				deadline, ok := mock.lastSendContext.Deadline()
+				assert.True(t, ok)
+				assert.LessOrEqual(t, time.Until(deadline), 10*time.Second)
+				assert.Positive(t, time.Until(deadline))
+			}
 			if mock == nil || mock.lastSendData == nil {
 				assert.Empty(t, tc.wantText)
 				return

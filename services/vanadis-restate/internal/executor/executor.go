@@ -412,7 +412,15 @@ func (e *Executor) SyncBuildWidget(ctx context.Context, st store.VanadisStore, b
 	if notice != "" {
 		widgetReq.Banner = notice
 	}
-	msgID, err := e.EriClient.Widget(ctx, widgetReq)
+	widgetCtx := ctx
+	casCtx := ctx
+	if baseCtx, timeout := ericlient.WidgetTimeoutFromContext(ctx); timeout > 0 {
+		var cancel context.CancelFunc
+		widgetCtx, cancel = context.WithTimeout(ericlient.WithWidgetTimeout(baseCtx, timeout), timeout)
+		defer cancel()
+		casCtx = baseCtx
+	}
+	msgID, err := e.EriClient.Widget(widgetCtx, widgetReq)
 	if err != nil {
 		return "", fmt.Errorf("sync widget to eri: %w", err)
 	}
@@ -421,18 +429,19 @@ func (e *Executor) SyncBuildWidget(ctx context.Context, st store.VanadisStore, b
 	}
 	// Concurrent syncs of one build can each re-post the card from the same
 	// stale StatusMessageID; only the first to swap keeps its message.
-	swapped, cErr := st.CompareAndSwapBuildStatusMessageID(ctx, build.ID, build.StatusMessageID, msgID)
+	swapped, cErr := st.CompareAndSwapBuildStatusMessageID(casCtx, build.ID, build.StatusMessageID, msgID)
 	if cErr != nil {
-		slog.WarnContext(ctx, "[vanadis-restate] update status message id failed", "build_id", build.ID, "error", cErr)
+		slog.WarnContext(casCtx, "[vanadis-restate] update status message id failed", "build_id", build.ID, "error", cErr)
+		e.recordMessageIDAdvance(build.ID, build.StatusMessageID, msgID)
 		return msgID, nil
 	}
 	if swapped {
 		e.recordMessageIDAdvance(build.ID, build.StatusMessageID, msgID)
 		return msgID, nil
 	}
-	slog.InfoContext(ctx, "[vanadis-restate] status widget lost the message id race; deleting duplicate card", "build_id", build.ID, "message_id", msgID)
-	if dErr := e.EriClient.DeleteWidget(ctx, widgetReq.Agent, widgetReq.ChannelID, msgID); dErr != nil {
-		slog.WarnContext(ctx, "[vanadis-restate] delete duplicate status widget failed", "build_id", build.ID, "message_id", msgID, "error", dErr)
+	slog.InfoContext(casCtx, "[vanadis-restate] status widget lost the message id race; deleting duplicate card", "build_id", build.ID, "message_id", msgID)
+	if dErr := e.EriClient.DeleteWidget(casCtx, widgetReq.Agent, widgetReq.ChannelID, msgID); dErr != nil {
+		slog.WarnContext(casCtx, "[vanadis-restate] delete duplicate status widget failed", "build_id", build.ID, "message_id", msgID, "error", dErr)
 	}
 	return "", nil
 }
