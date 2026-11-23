@@ -51,6 +51,7 @@ type MessageStore interface {
 	GetMessagesByID(ctx context.Context, ids []string) ([]Message, error)
 	FailMessagesIfActive(ctx context.Context, ids []string, reason string) ([]string, error)
 	FailMessagesIfPending(ctx context.Context, ids []string, reason string) ([]string, error)
+	SkipMessagesIfActive(ctx context.Context, ids []string, reason string) ([]string, error)
 	RequeueProcessingMessages(ctx context.Context, ids []string, reason string) ([]string, error)
 	BeginMessageAttempt(ctx context.Context, id string, ordinal int) (AttemptStart, error)
 }
@@ -65,6 +66,7 @@ type DispatchStore interface {
 	GetRecentSessionDispatches(ctx context.Context, sessionID string, limit int) ([]Dispatch, error)
 	FailDispatchesIfActive(ctx context.Context, ids []string, reason string) ([]string, error)
 	FailDispatchesIfPending(ctx context.Context, ids []string, reason string) ([]string, error)
+	SkipDispatchesIfActive(ctx context.Context, ids []string, reason string) ([]string, error)
 	BeginDispatchAttempt(ctx context.Context, id string, ordinal int) (AttemptStart, error)
 	ListActiveDispatchSessionKeys(ctx context.Context, dispatchID, buildID string) ([]string, error)
 }

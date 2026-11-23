@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -24,6 +25,7 @@ import (
 	"github.com/azylman/aerial/pkg/k8sauth"
 	"github.com/azylman/aerial/pkg/restateingress"
 	"github.com/azylman/aerial/pkg/sanitizer"
+	"github.com/azylman/aerial/pkg/strutil"
 	"github.com/azylman/aerial/services/eri/internal/restateclient"
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
@@ -42,6 +44,29 @@ type PromptRequest struct {
 	Model        string `json:"model,omitempty"`
 	Effort       string `json:"effort,omitempty"`
 	SkipIfActive bool   `json:"skip_if_active,omitempty"`
+	// AuthorID and Timestamp only feed the derived idempotency key of a request sent without
+	// message_id, so distinct sends of the same text stay distinct.
+	AuthorID  string `json:"author_id,omitempty"`
+	Timestamp string `json:"timestamp,omitempty"`
+}
+
+// requestContentID derives a stable UUID-shaped key (sha256 over parts) for a request that
+// arrived without its own ID, so a caller's retry of the same request keeps the same Restate
+// idempotency key instead of minting a new one. It is never used as a row ID: dedupe stays
+// bounded by Restate's idempotency retention, so a later identical send is still delivered.
+func requestContentID(namespace string, parts ...string) string {
+	data := []byte(namespace + "\x00" + strings.Join(parts, "\x00"))
+	return uuid.NewHash(sha256.New(), uuid.NameSpaceURL, data, 8).String()
+}
+
+// promptRequestID is the derived message ID for a /prompt request without message_id.
+func promptRequestID(channelID string, req PromptRequest) string {
+	return requestContentID("aerial:prompt", channelID, strings.TrimSpace(req.AuthorID), strings.TrimSpace(req.Title), req.Prompt, strings.TrimSpace(req.Timestamp))
+}
+
+// dispatchRequestID is the derived dispatch ID for a /dispatch request without id.
+func dispatchRequestID(req DispatchRequest) string {
+	return requestContentID("aerial:dispatch", strings.ToLower(strings.TrimSpace(req.Source)), strings.TrimSpace(req.SessionID), strings.TrimSpace(req.TargetID), strings.TrimSpace(req.VanadisChunkID), req.Prompt)
 }
 
 func writeErr(w http.ResponseWriter, status int, msg string) {
@@ -74,54 +99,31 @@ func resolvePromptChannelID(channelID string, pool *queue.WorkerPool) string {
 	return channelID
 }
 
-func handleDuplicatePrompt(ctx context.Context, w http.ResponseWriter, store db.Store, rawID, channelID string) bool {
-	msgID := strings.TrimSpace(rawID)
-	if msgID == "" || store == nil {
-		return false
-	}
-	exists, err := store.MessageExists(ctx, msgID)
-	if err != nil {
-		log.Printf("[HTTP] Failed to check existing prompt message %s: %v", msgID, err)
-		writeErr(w, http.StatusInternalServerError, "Failed to check existing prompt message")
-		return true
-	}
-	if exists {
-		httpkit.WriteJSON(w, http.StatusOK, map[string]string{
-			jsonKeyStatus:    eriwire.StatusAlreadyExists,
-			jsonKeyChannelID: channelID,
-			jsonKeySessionID: channelID,
-			jsonKeyMessageID: msgID,
-		})
-		return true
-	}
-	return false
-}
-
-func handleRestatePrompt(ctx context.Context, w http.ResponseWriter, client *restateclient.RestateIngressClient, req PromptRequest, channelID string) {
-	msgID := strings.TrimSpace(req.MessageID)
-	if msgID == "" {
-		msgID = uuid.New().String()
-	}
-	status, err := handlePromptViaRestate(ctx, client, req, channelID, msgID)
+func handleRestatePrompt(ctx context.Context, w http.ResponseWriter, client *restateclient.RestateIngressClient, req PromptRequest, channelID, recordID, keyID string) {
+	resp, err := handlePromptViaRestate(ctx, client, req, channelID, recordID, keyID)
 	if err != nil {
 		log.Printf("[HTTP] Failed to enqueue prompt via restate: %v", err)
 		writeErr(w, http.StatusInternalServerError, "Failed to enqueue prompt: "+err.Error())
 		return
 	}
 	httpCode := http.StatusAccepted
-	if status == eriwire.StatusSkippedActive || status == eriwire.StatusAlreadyExists {
+	if resp.Status == eriwire.StatusSkippedActive || resp.Status == eriwire.StatusAlreadyExists {
 		httpCode = http.StatusOK
 	}
+	threadID := strings.TrimSpace(resp.ThreadID)
+	if threadID == "" {
+		threadID = channelID
+	}
 	httpkit.WriteJSON(w, httpCode, map[string]string{
-		jsonKeyStatus:    status,
-		jsonKeyChannelID: channelID,
-		jsonKeySessionID: channelID,
-		jsonKeyMessageID: msgID,
+		jsonKeyStatus:    resp.Status,
+		jsonKeyChannelID: threadID,
+		jsonKeySessionID: threadID,
+		jsonKeyMessageID: strutil.FirstNonEmpty(resp.MessageID, recordID, keyID),
 		"message":        "Prompt execution enqueued in background",
 	})
 }
 
-func handlePrompt(store db.Store, pool *queue.WorkerPool) http.HandlerFunc {
+func handlePrompt(pool *queue.WorkerPool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, `{"error":"Method not allowed"}`, http.StatusMethodNotAllowed)
@@ -142,10 +144,6 @@ func handlePrompt(store db.Store, pool *queue.WorkerPool) http.HandlerFunc {
 			return
 		}
 
-		if pool != nil {
-			channelID = pool.RedirectBuildPrompt(channelID, req.Prompt)
-		}
-
 		if err := validatePromptEffort(req.Effort); err != nil {
 			writeErr(w, http.StatusBadRequest, err.Error())
 			return
@@ -156,15 +154,16 @@ func handlePrompt(store db.Store, pool *queue.WorkerPool) http.HandlerFunc {
 		req.Model = model
 		req.Effort = effort
 
-		if pool != nil {
-			channelID = pool.ResolveTargetThread(channelID, strings.TrimSpace(req.Title), req.Prompt, time.Now().UTC())
+		// Duplicate detection, build-notice redirect and thread creation all happen inside
+		// ThreadSession.Enqueue as journaled steps keyed on the caller's channel + message ID,
+		// so a retried request never creates a second Discord thread.
+		recordID := strings.TrimSpace(req.MessageID)
+		keyID := recordID
+		if keyID == "" {
+			keyID = promptRequestID(channelID, req)
 		}
 
-		if handleDuplicatePrompt(r.Context(), w, store, req.MessageID, channelID) {
-			return
-		}
-
-		handleRestatePrompt(r.Context(), w, restateclient.ResolveRestateClient(), req, channelID)
+		handleRestatePrompt(r.Context(), w, restateclient.ResolveRestateClient(), req, channelID, recordID, keyID)
 	}
 }
 
@@ -198,8 +197,10 @@ func checkDuplicateDispatch(ctx context.Context, store db.Store, dispatchID stri
 	return existing != nil, nil
 }
 
-func handleDuplicateDispatch(ctx context.Context, w http.ResponseWriter, store db.Store, rawID, dispatchID, sessionID string) bool {
-	if strings.TrimSpace(rawID) == "" || store == nil {
+// handleDuplicateDispatch answers already_exists for a caller-supplied dispatch ID that is already
+// recorded; derived keys never reach it.
+func handleDuplicateDispatch(ctx context.Context, w http.ResponseWriter, store db.Store, dispatchID, sessionID string) bool {
+	if dispatchID == "" || store == nil {
 		return false
 	}
 	exists, err := checkDuplicateDispatch(ctx, store, dispatchID)
@@ -218,27 +219,28 @@ func handleDuplicateDispatch(ctx context.Context, w http.ResponseWriter, store d
 	return false
 }
 
-func handleRestateDispatch(ctx context.Context, w http.ResponseWriter, client *restateclient.RestateIngressClient, req DispatchRequest, sessionID, dispatchID string) {
+func handleRestateDispatch(ctx context.Context, w http.ResponseWriter, client *restateclient.RestateIngressClient, req DispatchRequest, sessionID, recordID, keyID string) {
 	sessionKey := sessionID
 	if sessionKey == "" {
 		sessionKey = eriwire.ResolveDispatchSessionKey(eriwire.BrainDispatchRequest{
 			SessionID:      req.SessionID,
 			VanadisChunkID: req.VanadisChunkID,
-			ID:             dispatchID,
+			ID:             keyID,
 		})
 	}
-	status, err := handleDispatchViaRestate(ctx, client, req, sessionKey, dispatchID)
+	resp, err := handleDispatchViaRestate(ctx, client, req, sessionKey, recordID, keyID)
 	if err != nil {
 		log.Printf("[HTTP] Failed to enqueue dispatch via restate: %v", err)
 		writeErr(w, http.StatusInternalServerError, "Failed to enqueue dispatch: "+err.Error())
 		return
 	}
 	httpCode := http.StatusAccepted
-	if status == eriwire.StatusSkippedActive || status == eriwire.StatusAlreadyExists {
+	if resp.Status == eriwire.StatusSkippedActive || resp.Status == eriwire.StatusAlreadyExists {
 		httpCode = http.StatusOK
 	}
+	dispatchID := strutil.FirstNonEmpty(resp.DispatchID, recordID, keyID)
 	httpkit.WriteJSON(w, httpCode, map[string]string{
-		jsonKeyStatus:     status,
+		jsonKeyStatus:     resp.Status,
 		jsonKeyDispatchID: dispatchID,
 		jsonKeyMessageID:  dispatchID,
 		jsonKeySessionID:  sessionKey,
@@ -263,16 +265,17 @@ func handleDispatch(store db.Store) http.HandlerFunc {
 		}
 
 		sessionID := strings.TrimSpace(req.SessionID)
-		dispatchID := strings.TrimSpace(req.ID)
-		if dispatchID == "" {
-			dispatchID = uuid.New().String()
+		recordID := strings.TrimSpace(req.ID)
+		keyID := recordID
+		if keyID == "" {
+			keyID = dispatchRequestID(req)
 		}
 
-		if handleDuplicateDispatch(r.Context(), w, store, req.ID, dispatchID, sessionID) {
+		if handleDuplicateDispatch(r.Context(), w, store, recordID, sessionID) {
 			return
 		}
 
-		handleRestateDispatch(r.Context(), w, restateclient.ResolveRestateClient(), req, sessionID, dispatchID)
+		handleRestateDispatch(r.Context(), w, restateclient.ResolveRestateClient(), req, sessionID, recordID, keyID)
 	}
 }
 
@@ -893,7 +896,7 @@ func metricsMiddleware(next http.Handler) http.Handler {
 func SetupBrainMux(store db.Store, pool *queue.WorkerPool) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", metrics.Handler())
-	mux.HandleFunc("/prompt", handlePrompt(store, pool))
+	mux.HandleFunc("/prompt", handlePrompt(pool))
 	mux.HandleFunc("/dispatch", handleDispatch(store))
 	mux.HandleFunc("/dispatch/cancel", handleCancelDispatch())
 	mux.HandleFunc("/discord/message", handleDirectMessage(pool))

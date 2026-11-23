@@ -65,7 +65,8 @@ func (r dispatchRecords) failIfPending(ctx context.Context, ids []string, reason
 }
 
 func (r dispatchRecords) markSkipped(ctx context.Context, id string) error {
-	return r.store.UpdateDispatchStatus(ctx, id, db.StatusCompleted, skippedActiveTurnReason)
+	_, err := r.store.SkipDispatchesIfActive(ctx, []string{id}, skippedActiveTurnReason)
+	return err
 }
 
 // buildEnqueuedDispatch builds the PENDING dispatch row for req under sessionKey.

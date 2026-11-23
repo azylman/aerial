@@ -25,11 +25,14 @@ const (
 // coordinatorStore is the narrow store surface the coordinators and the dispatch cancel router use.
 type coordinatorStore interface {
 	InsertMessage(ctx context.Context, msg db.Message) error
+	GetMessage(ctx context.Context, id string) (*db.Message, error)
 	InsertDispatch(ctx context.Context, d db.Dispatch) (bool, error)
 	FailMessagesIfActive(ctx context.Context, ids []string, reason string) ([]string, error)
 	FailMessagesIfPending(ctx context.Context, ids []string, reason string) ([]string, error)
 	FailDispatchesIfActive(ctx context.Context, ids []string, reason string) ([]string, error)
 	FailDispatchesIfPending(ctx context.Context, ids []string, reason string) ([]string, error)
+	SkipMessagesIfActive(ctx context.Context, ids []string, reason string) ([]string, error)
+	SkipDispatchesIfActive(ctx context.Context, ids []string, reason string) ([]string, error)
 	UpdateMessageStatus(ctx context.Context, id, status, errorMsg string, telemetry ...db.TurnTelemetry) error
 	UpdateDispatchStatus(ctx context.Context, id, status, errorMsg string, telemetry ...db.TurnTelemetry) error
 }
