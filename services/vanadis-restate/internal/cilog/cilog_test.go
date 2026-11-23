@@ -477,6 +477,109 @@ func TestHasRoboRevOverrideChecked(t *testing.T) {
 	}
 }
 
+func TestHasActiveOrRecoveredChecksChecked(t *testing.T) {
+	t.Parallel()
+	const checkRunsPath = "GET /repos/acme/aerial/commits/abc123/check-runs?filter=latest&per_page=100"
+	runs := func(body string) ciLogEnv {
+		return ciLogEnv{routes: map[string][]githubapitest.Response{checkRunsPath: ciResp(http.StatusOK, body)}}
+	}
+	tests := []struct {
+		name      string
+		env       ciLogEnv
+		repo      string
+		sha       string
+		want      bool
+		wantErr   string
+		wantPaths []string
+	}{
+		{name: "nil client", env: ciLogEnv{nilClient: true}, repo: "aerial", sha: "abc123"},
+		{name: "nil http client", env: ciLogEnv{noHTTPClient: true}, repo: "aerial", sha: "abc123"},
+		{name: "empty repo", repo: "", sha: "abc123"},
+		{name: "empty sha", repo: "aerial", sha: "   "},
+		{name: "malformed api url", env: ciLogEnv{apiURL: "://bad-url"}, repo: "aerial", sha: "abc123", wantErr: "missing protocol scheme"},
+		{name: "transport error", env: ciLogEnv{serverDown: true}, repo: "aerial", sha: "abc123", wantErr: "connection refused"},
+		{
+			name:      "retryable 500 error",
+			env:       ciLogEnv{routes: map[string][]githubapitest.Response{checkRunsPath: ciResp(http.StatusInternalServerError, "")}},
+			repo:      "aerial",
+			sha:       "abc123",
+			wantErr:   "github api error (500): Internal Server Error",
+			wantPaths: []string{checkRunsPath},
+		},
+		{
+			name:      "non-200 status is false",
+			env:       ciLogEnv{routes: map[string][]githubapitest.Response{checkRunsPath: ciResp(http.StatusNotFound, `{"message":"Not Found"}`)}},
+			repo:      "aerial",
+			sha:       "abc123",
+			wantPaths: []string{checkRunsPath},
+		},
+		{
+			name:      "malformed json is false",
+			env:       ciLogEnv{routes: map[string][]githubapitest.Response{checkRunsPath: ciResp(http.StatusOK, `not-json`)}},
+			repo:      "aerial",
+			sha:       "abc123",
+			wantPaths: []string{checkRunsPath},
+		},
+		{
+			name:      "empty check runs is false",
+			env:       runs(`{"check_runs":[]}`),
+			repo:      "aerial",
+			sha:       "abc123",
+			wantPaths: []string{checkRunsPath},
+		},
+		{
+			name:      "gate-only check runs is false",
+			env:       runs(`{"check_runs":[{"name":"CI Gate","status":"completed","conclusion":"success"}]}`),
+			repo:      "aerial",
+			sha:       "abc123",
+			wantPaths: []string{checkRunsPath},
+		},
+		{
+			name:      "active queued check run is true",
+			env:       runs(`{"check_runs":[{"name":"unit-tests","status":"queued","conclusion":""}]}`),
+			repo:      "aerial",
+			sha:       "abc123",
+			want:      true,
+			wantPaths: []string{checkRunsPath},
+		},
+		{
+			name:      "active in_progress check run is true",
+			env:       runs(`{"check_runs":[{"name":"unit-tests","status":"in_progress","conclusion":""}]}`),
+			repo:      "aerial",
+			sha:       "abc123",
+			want:      true,
+			wantPaths: []string{checkRunsPath},
+		},
+		{
+			name:      "all completed and passing is true",
+			env:       runs(`{"check_runs":[{"name":"unit-tests","status":"completed","conclusion":"success"},{"name":"lint","status":"completed","conclusion":"neutral"}]}`),
+			repo:      "aerial",
+			sha:       "abc123",
+			want:      true,
+			wantPaths: []string{checkRunsPath},
+		},
+		{
+			name:      "completed with a failing check run is false",
+			env:       runs(`{"check_runs":[{"name":"unit-tests","status":"completed","conclusion":"failure"},{"name":"lint","status":"completed","conclusion":"success"}]}`),
+			repo:      "aerial",
+			sha:       "abc123",
+			wantPaths: []string{checkRunsPath},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			c, srv := newCILogClient(t, tc.env)
+			got, err := c.HasActiveOrRecoveredChecksChecked(context.Background(), tc.repo, tc.sha)
+			assertCILogErr(t, err, tc.wantErr)
+			assert.Equal(t, tc.want, got)
+			if !tc.env.serverDown {
+				assertCILogRequests(t, srv, tc.env, tc.wantPaths)
+			}
+		})
+	}
+}
+
 func TestIsWorkflowRunFailure(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

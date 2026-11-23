@@ -158,6 +158,10 @@ type gitHubRunJobs struct {
 	Jobs []gitHubRunJob `json:"jobs"`
 }
 
+type gitHubCheckRuns struct {
+	CheckRuns []gitHubRunJob `json:"check_runs"`
+}
+
 // fetchRunFailureLogsChecked lists a workflow run's latest jobs and joins the
 // extracted logs of up to maxRunFailedJobLogs failed or timed-out jobs, skipping
 // gate aggregators. It returns "" when no failed job yields a log.
@@ -302,6 +306,64 @@ func (c *Client) HasRoboRevOverrideChecked(ctx context.Context, repo string, prN
 		}
 	}
 	return false, nil
+}
+
+// HasActiveOrRecoveredChecksChecked reports whether the PR's head commit has
+// active (queued/in_progress) or passing (completed and non-failing) CI checks,
+// ignoring gate aggregators.
+func (c *Client) HasActiveOrRecoveredChecksChecked(ctx context.Context, repo, headSHA string) (bool, error) {
+	if c == nil || c.HTTPClient == nil {
+		return false, nil
+	}
+	repoPath := githubapi.QualifyRepo(c.gitHubOwner, repo)
+	cleanSHA := strings.TrimSpace(headSHA)
+	if repoPath == "" || cleanSHA == "" {
+		return false, nil
+	}
+	timeoutCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	path := fmt.Sprintf("/repos/%s/commits/%s/check-runs?filter=latest&per_page=100", repoPath, cleanSHA)
+	req, err := githubapi.NewRequest(timeoutCtx, c.GitHubAPIURL, c.GitHubToken, http.MethodGet, path, nil)
+	if err != nil {
+		return false, err
+	}
+	resp, err := c.HTTPClient.Do(req)
+	if err != nil {
+		return false, err
+	}
+	defer resp.Body.Close()
+
+	if githubapi.IsRetryable(resp) {
+		return false, fmt.Errorf("github api error (%d): %s", resp.StatusCode, http.StatusText(resp.StatusCode))
+	}
+	if resp.StatusCode != http.StatusOK {
+		return false, nil
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
+	if err != nil {
+		return false, err
+	}
+	var listing gitHubCheckRuns
+	if json.Unmarshal(body, &listing) != nil {
+		return false, nil
+	}
+
+	nonGateCount := 0
+	hasFailed := false
+	for _, cr := range listing.CheckRuns {
+		if isGateAggregatorJob(cr.Name) {
+			continue
+		}
+		nonGateCount++
+		if strings.TrimSpace(cr.Status) != "" && !strings.EqualFold(strings.TrimSpace(cr.Status), "completed") {
+			return true, nil
+		}
+		if isFailedJobConclusion(cr.Conclusion) {
+			hasFailed = true
+		}
+	}
+	return nonGateCount > 0 && !hasFailed, nil
 }
 
 func (c *Client) fetchLatestRoboRevCommentChecked(ctx context.Context, repo string, prNumber int, headSHA string) (string, error) {
