@@ -157,7 +157,9 @@ channels:
 	}
 
 	// Default funcs verification
-	_ = discordSessionOpener(&discordgo.Session{})
+	if err := discordSessionOpener(&discordgo.Session{}); err != nil {
+		t.Errorf("unexpected error opening unconfigured discord session: %v", err)
+	}
 	memberSess := newMockDiscordSession(t, func(req *http.Request) (*http.Response, error) {
 		if strings.HasSuffix(req.URL.Path, "/guilds/g1/members/u1") {
 			return jsonHTTPResponse(http.StatusOK, `{"user":{"id":"u1"},"roles":["r-1"]}`), nil

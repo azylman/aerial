@@ -805,7 +805,6 @@ func TestTurnExecution_StoreDelegates(t *testing.T) {
 			threadID := "t-" + tc.name
 			tc.te.updateMessageStatus("m1", "failed", "err")
 			tc.te.updateMessageCompleted("m1", "resp")
-			tc.te.incrementMessageRetry("m1", "retry-err")
 			tc.te.saveSessionID(t.Context(), threadID, "s1")
 			tc.te.rotateSessionID(threadID, "s2")
 			cnt, err := tc.te.incrementSessionTurnCount(threadID)
@@ -875,7 +874,7 @@ func TestSummarizeAndHistoryHelpers(t *testing.T) {
 	teNil := &turnExecution{pool: &WorkerPool{}}
 	_, _ = teNil.resolveWebhookDispatcher()
 	_ = teNil.resolveTurnPolicy()
-	if _, _, _, err := teNil.executeLeaseAttempt("test-model", "prompt", 1); err == nil {
+	if _, _, _, err := teNil.executeLeaseAttemptCtx(t.Context(), "test-model", "prompt"); err == nil {
 		t.Fatal("expected error")
 	}
 	teSumClassifier := &turnExecution{
