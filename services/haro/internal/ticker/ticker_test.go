@@ -1,6 +1,7 @@
 package ticker
 
 import (
+	"cmp"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -46,6 +47,7 @@ type fakeDispatcher struct {
 	dispatchedRequests []eriwire.BrainDispatchRequest
 	dispatchResponse   eriwire.DispatchEnqueueResponse
 	dispatchErr        error
+	echoDispatchID     bool
 	onDispatch         func()
 }
 
@@ -61,6 +63,11 @@ func (m *fakeDispatcher) Dispatch(_ context.Context, req eriwire.BrainDispatchRe
 	m.dispatchedRequests = append(m.dispatchedRequests, req)
 	if m.onDispatch != nil {
 		m.onDispatch()
+	}
+	if m.echoDispatchID {
+		resp := m.dispatchResponse
+		resp.DispatchID = req.ID
+		return resp, m.dispatchErr
 	}
 	return m.dispatchResponse, m.dispatchErr
 }
@@ -594,6 +601,7 @@ type dispatchOutcomeTestCase struct {
 	seedScheduleType    string
 	seedScheduleID      string
 	seedRunID           string
+	seedDispatchID      string
 	seedRunStatus       string
 	seedRunStartedAt    time.Time
 	orphanRun           bool
@@ -627,7 +635,7 @@ func seedOutcomeHeartbeat(ctx context.Context, t *testing.T, db *sql.DB, schedul
 	}
 }
 
-func seedOutcomeRun(ctx context.Context, t *testing.T, db *sql.DB, runID, scheduleType, scheduleID, status string, startedAt time.Time) {
+func seedOutcomeRun(ctx context.Context, t *testing.T, db *sql.DB, runID, dispatchID, scheduleType, scheduleID, status string, startedAt time.Time) {
 	t.Helper()
 	if runID == "" {
 		return
@@ -636,7 +644,7 @@ func seedOutcomeRun(ctx context.Context, t *testing.T, db *sql.DB, runID, schedu
 		status = "running"
 	}
 	run := model.ScheduleRun{
-		ID: runID, ScheduleID: scheduleID, ScheduleType: scheduleType,
+		ID: runID, ScheduleID: scheduleID, ScheduleType: scheduleType, MessageID: cmp.Or(dispatchID, runID),
 		TargetID: "1234567890", ThreadID: "thread-" + scheduleID,
 		Title: "Run Title", Prompt: "Run Prompt", Status: status, StartedAt: startedAt,
 	}
@@ -673,7 +681,7 @@ func runDispatchOutcomeCase(t *testing.T, tc dispatchOutcomeTestCase, now time.T
 		if !tc.seedRunStartedAt.IsZero() {
 			startedAt = tc.seedRunStartedAt
 		}
-		seedOutcomeRun(ctx, t, db, tc.seedRunID, tc.seedScheduleType, tc.seedScheduleID, tc.seedRunStatus, startedAt)
+		seedOutcomeRun(ctx, t, db, tc.seedRunID, tc.seedDispatchID, tc.seedScheduleType, tc.seedScheduleID, tc.seedRunStatus, startedAt)
 		if tc.sabotageSQL != "" {
 			if _, err := db.ExecContext(ctx, tc.sabotageSQL); err != nil {
 				t.Fatalf("sabotage SQL failed: %v", err)
@@ -716,9 +724,9 @@ func assertOutcomeRun(ctx context.Context, t *testing.T, db *sql.DB, tc dispatch
 	if tc.seedRunID == "" || tc.wantRunStatus == "" {
 		return
 	}
-	run, err := store.GetScheduleRun(ctx, db, tc.seedRunID)
+	run, err := store.GetScheduleRunByDispatchID(ctx, db, cmp.Or(tc.seedDispatchID, tc.seedRunID))
 	if err != nil {
-		t.Fatalf("GetScheduleRun failed: %v", err)
+		t.Fatalf("GetScheduleRunByDispatchID failed: %v", err)
 	}
 	if run.Status != tc.wantRunStatus {
 		t.Errorf("run.Status = %q, want %q", run.Status, tc.wantRunStatus)
@@ -815,6 +823,18 @@ func TestHandleDispatchOutcome(t *testing.T) {
 			event:         &pubsub.DispatchOutcomeEvent{DispatchID: "run-hb-term", Status: "failed", Error: "late failure"},
 			wantRunStatus: "completed", wantDurationMs: -1,
 		},
+		{
+			name:             "uuid-keyed heartbeat run resolves via stored dispatch id",
+			seedScheduleType: "heartbeat", seedScheduleID: "hb-uuid", seedRunID: "6f1c2a52-0d2b-5b8e-9a51-3f1f6b7f9c10", seedDispatchID: "heartbeat:hb-uuid:2026-11-14T01:00:00Z",
+			event:         &pubsub.DispatchOutcomeEvent{DispatchID: "heartbeat:hb-uuid:2026-11-14T01:00:00Z", Source: "heartbeat", Status: "completed", StartedAt: now, CompletedAt: now.Add(3 * time.Second), DurationMs: 3000},
+			wantRunStatus: "completed", wantDurationMs: 3000, wantWatermarkTime: &now,
+		},
+		{
+			name:             "dispatch id equal only to run row id is not resolved and naks",
+			seedScheduleType: "heartbeat", seedScheduleID: "hb-id-only", seedRunID: "run-hb-id-only", seedDispatchID: "heartbeat:hb-id-only:2026-11-14T01:00:00Z",
+			event:         &pubsub.DispatchOutcomeEvent{DispatchID: "run-hb-id-only", Source: "heartbeat", Status: "completed", StartedAt: now},
+			wantRunStatus: "running", wantNaked: true, wantDurationMs: -1,
+		},
 		{name: "nil database returns error", nilDatabase: true, wantErr: true, wantDurationMs: -1},
 		{name: "nil message returns error", nilMessage: true, wantErr: true, wantDurationMs: -1},
 		{
@@ -843,6 +863,126 @@ func TestHandleDispatchOutcome(t *testing.T) {
 			t.Parallel()
 			runDispatchOutcomeCase(t, tc, now)
 		})
+	}
+}
+
+func TestHeartbeatRunLifecycle(t *testing.T) {
+	t.Parallel()
+	due1 := time.Date(2026, 11, 22, 10, 0, 0, 0, time.UTC)
+	fired1 := time.Date(2026, 11, 22, 10, 1, 0, 0, time.UTC)
+	due2 := time.Date(2026, 11, 22, 10, 5, 0, 0, time.UTC)
+	fired2 := time.Date(2026, 11, 22, 10, 5, 30, 0, time.UTC)
+	priorWatermark := time.Date(2026, 11, 21, 8, 0, 0, 0, time.UTC)
+
+	tests := []struct {
+		name               string
+		scheduleID         string
+		seedWatermark      *time.Time
+		outcomeStatus      string
+		wantDispatchID     string
+		wantFirstMark      string
+		wantRunStatus      string
+		wantSecondDispatch bool
+		wantSecondMark     string
+	}{
+		{
+			name: "completed outcome finalizes run and next tick uses its watermark", scheduleID: "hb-life-ok", outcomeStatus: "completed",
+			wantDispatchID: "heartbeat:hb-life-ok:2026-11-22T10:00:00Z", wantFirstMark: "none (initial run)", wantRunStatus: "completed",
+			wantSecondDispatch: true, wantSecondMark: "2026-11-22T10:01:00Z",
+		},
+		{
+			name: "failed outcome finalizes run but keeps initial watermark", scheduleID: "hb-life-fail", outcomeStatus: "failed",
+			wantDispatchID: "heartbeat:hb-life-fail:2026-11-22T10:00:00Z", wantFirstMark: "none (initial run)", wantRunStatus: "failed",
+			wantSecondDispatch: true, wantSecondMark: "none (initial run)",
+		},
+		{
+			name: "existing watermark is sent on the first fire", scheduleID: "hb-life-prior", seedWatermark: &priorWatermark, outcomeStatus: "completed",
+			wantDispatchID: "heartbeat:hb-life-prior:2026-11-22T10:00:00Z", wantFirstMark: "2026-11-21T08:00:00Z", wantRunStatus: "completed",
+			wantSecondDispatch: true, wantSecondMark: "2026-11-22T10:01:00Z",
+		},
+		{
+			name: "no outcome leaves run running and next tick skips", scheduleID: "hb-life-none",
+			wantDispatchID: "heartbeat:hb-life-none:2026-11-22T10:00:00Z", wantFirstMark: "none (initial run)", wantRunStatus: "running",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			db := openTickerTestDB(t)
+			seedLifecycleHeartbeat(ctx, t, db, tc.scheduleID, due1, tc.seedWatermark)
+			disp := &fakeDispatcher{dispatchResponse: eriwire.DispatchEnqueueResponse{Status: eriwire.StatusAccepted}, echoDispatchID: true}
+			s := NewHaroSchedule(db, disp)
+
+			fireHeartbeatAt(t, s, tc.scheduleID, due1, fired1)
+			if len(disp.dispatchedRequests) != 1 {
+				t.Fatalf("first fire dispatched %d requests, want 1", len(disp.dispatchedRequests))
+			}
+			if got := disp.dispatchedRequests[0].ID; got != tc.wantDispatchID {
+				t.Errorf("dispatch ID = %q, want %q", got, tc.wantDispatchID)
+			}
+			assertWatermark(t, disp.dispatchedRequests[0].Prompt, tc.wantFirstMark)
+
+			deliverLifecycleOutcome(ctx, t, db, tc.wantDispatchID, tc.outcomeStatus, fired1)
+			run, err := store.GetScheduleRunByDispatchID(ctx, db, tc.wantDispatchID)
+			if err != nil {
+				t.Fatalf("GetScheduleRunByDispatchID: %v", err)
+			}
+			if run.Status != tc.wantRunStatus {
+				t.Errorf("run status = %q, want %q", run.Status, tc.wantRunStatus)
+			}
+
+			fireHeartbeatAt(t, s, tc.scheduleID, due2, fired2)
+			gotSecond := len(disp.dispatchedRequests) == 2
+			if gotSecond != tc.wantSecondDispatch {
+				t.Fatalf("second fire dispatched = %v, want %v", gotSecond, tc.wantSecondDispatch)
+			}
+			if gotSecond {
+				assertWatermark(t, disp.dispatchedRequests[1].Prompt, tc.wantSecondMark)
+			}
+		})
+	}
+}
+
+func seedLifecycleHeartbeat(ctx context.Context, t *testing.T, db *sql.DB, scheduleID string, due time.Time, watermark *time.Time) {
+	t.Helper()
+	if err := store.InsertHeartbeatSchedule(ctx, db, model.HeartbeatSchedule{
+		ID: scheduleID, TargetID: "100000000000000003", CronExpr: "*/5 * * * *",
+		Prompt: "Prompt heartbeat", Timezone: "UTC", NextRunAt: due, Enabled: true,
+	}); err != nil {
+		t.Fatalf("InsertHeartbeatSchedule: %v", err)
+	}
+	if watermark == nil {
+		return
+	}
+	if err := store.AdvanceHeartbeatLastCompletedAt(ctx, db, scheduleID, *watermark); err != nil {
+		t.Fatalf("AdvanceHeartbeatLastCompletedAt: %v", err)
+	}
+}
+
+// deliverLifecycleOutcome feeds eri's dispatch outcome for dispatchID through HandleDispatchOutcome; empty status delivers nothing.
+func deliverLifecycleOutcome(ctx context.Context, t *testing.T, db *sql.DB, dispatchID, status string, startedAt time.Time) {
+	t.Helper()
+	if status == "" {
+		return
+	}
+	payload, err := json.Marshal(pubsub.DispatchOutcomeEvent{DispatchID: dispatchID, Source: "heartbeat", Status: status, StartedAt: startedAt, CompletedAt: startedAt.Add(30 * time.Second), DurationMs: 30000})
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	msg := &pubsubtest.Message{Payload: payload, Subj: "aerial.dispatch." + status, Delivered: 1}
+	if err := HandleDispatchOutcome(ctx, db, msg); err != nil {
+		t.Fatalf("HandleDispatchOutcome: %v", err)
+	}
+	if _, naked := msg.NakDelay(); naked {
+		t.Fatal("outcome was nakked, want resolved")
+	}
+}
+
+func assertWatermark(t *testing.T, prompt, wantMark string) {
+	t.Helper()
+	if !strings.Contains(prompt, "Last Successful Check Started At: "+wantMark) {
+		t.Errorf("prompt watermark missing %q", wantMark)
 	}
 }
 
