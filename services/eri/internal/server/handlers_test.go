@@ -64,7 +64,11 @@ func installRestateCapture(t *testing.T, status int, resp string) *restateCaptur
 	t.Helper()
 	capture := &restateCapture{}
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, _ := io.ReadAll(r.Body)
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 		capture.mu.Lock()
 		capture.last = body
 		capture.mu.Unlock()
@@ -127,7 +131,10 @@ func TestHandlePromptValidation(t *testing.T) {
 	pool.Start()
 	defer pool.Stop()
 
-	mockSess, _ := discordgo.New("Bot fake-token")
+	mockSess, err := discordgo.New("Bot fake-token")
+	if err != nil {
+		t.Fatalf("failed to create discord session: %v", err)
+	}
 	mockSess.State = discordgo.NewState()
 	mockSess.State.GuildAdd(&discordgo.Guild{
 		ID: "guild-1",
@@ -310,7 +317,9 @@ func runDirectMessageDeliveryCases(t *testing.T) {
 		t.Fatalf("unexpected delivery: code=%d, ch=%q, txt=%q", w.Code, capturedChannelID, capturedText)
 	}
 	var resp map[string]any
-	_ = json.Unmarshal(w.Body.Bytes(), &resp)
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
 	if resp["status"] != "sent" || resp["channel_id"] != "1542423172400291873" {
 		t.Fatalf("unexpected response body: %+v", resp)
 	}
@@ -357,7 +366,10 @@ func runDirectMessageMuxCases(t *testing.T) {
 }
 
 func TestHandleDirectMessage(t *testing.T) {
-	mockSess, _ := discordgo.New("Bot fake-token")
+	mockSess, err := discordgo.New("Bot fake-token")
+	if err != nil {
+		t.Fatalf("failed to create discord session: %v", err)
+	}
 	mockSess.State = discordgo.NewState()
 	mockSess.State.GuildAdd(&discordgo.Guild{
 		ID: "guild-1",
@@ -517,12 +529,14 @@ func TestHandleTasks(t *testing.T) {
 	store := newTestStore(t)
 	now := time.Now().UTC()
 	longPrompt := strings.Repeat("A", 600) + " plain-internal-detail"
-	_ = store.InsertMessage(context.Background(), db.Message{
+	if err := store.InsertMessage(context.Background(), db.Message{
 		ID: "msg-test-task", ThreadID: "thread-1", AuthorID: "user-1",
 		AuthorName: "Tester",
 		Content:    "Internal prompt " + longPrompt,
 		Status:     db.StatusProcessing, CreatedAt: now, UpdatedAt: now,
-	})
+	}); err != nil {
+		t.Fatalf("failed to insert message: %v", err)
+	}
 
 	handler := handleTasks(store)
 	rr := runHTTP(handler, http.MethodGet, "/tasks", nil)
@@ -535,7 +549,9 @@ func TestHandleTasks(t *testing.T) {
 		Total  int             `json:"total"`
 		Tasks  []db.ActiveTask `json:"tasks"`
 	}
-	_ = json.NewDecoder(rr.Body).Decode(&resp)
+	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
 	if resp.Status != "ok" || resp.Total != 1 || len(resp.Tasks) != 1 {
 		t.Fatalf("unexpected response payload: %+v", resp)
 	}
@@ -548,17 +564,21 @@ func TestHandleTasks(t *testing.T) {
 		t.Errorf("prompt unexpectedly truncated: len=%d, text=%s", len(task.Prompt), task.Prompt)
 	}
 
-	_ = store.InsertMessage(context.Background(), db.Message{
+	if err := store.InsertMessage(context.Background(), db.Message{
 		ID: "msg-test-task-2", ThreadID: "thread-2", AuthorID: "user-2", AuthorName: "Tester 2",
 		Content: "Second prompt", Status: db.StatusPending, CreatedAt: now.Add(time.Second), UpdatedAt: now.Add(time.Second),
-	})
+	}); err != nil {
+		t.Fatalf("failed to insert message: %v", err)
+	}
 	rrCached := runHTTP(handler, http.MethodGet, "/tasks", nil)
 	var cachedResp struct {
 		Status string          `json:"status"`
 		Total  int             `json:"total"`
 		Tasks  []db.ActiveTask `json:"tasks"`
 	}
-	_ = json.NewDecoder(rrCached.Body).Decode(&cachedResp)
+	if err := json.NewDecoder(rrCached.Body).Decode(&cachedResp); err != nil {
+		t.Fatalf("failed to decode cached response: %v", err)
+	}
 	if cachedResp.Total != 1 || len(cachedResp.Tasks) != 1 {
 		t.Errorf("expected 1 cached task within 1s TTL, got %d", cachedResp.Total)
 	}
@@ -711,7 +731,10 @@ func newLLMIngressStub(t *testing.T, status int, body string) (*httptest.Server,
 		c := llmIngressCapture{path: r.URL.Path}
 		c.idemKey = r.Header.Get("Idempotency-Key")
 		_, c.hasKey = r.Header["Idempotency-Key"]
-		_ = json.NewDecoder(r.Body).Decode(&c.req)
+		if err := json.NewDecoder(r.Body).Decode(&c.req); err != nil && err != io.EOF {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 		seen <- c
 		w.WriteHeader(status)
 		_, _ = w.Write([]byte(body))

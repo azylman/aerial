@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/bwmarrin/discordgo"
+	"github.com/stretchr/testify/require"
 
 	"github.com/azylman/aerial/services/eri/internal/restateclient"
 	"github.com/azylman/aerial/services/eri/pkg/classifier"
@@ -89,6 +90,19 @@ func (f roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 	return f(req)
 }
 
+func addMockStateChannel(t *testing.T, s *discordgo.Session, ch *discordgo.Channel) {
+	t.Helper()
+	if ch == nil {
+		return
+	}
+	if ch.GuildID != "" {
+		if g, err := s.State.Guild(ch.GuildID); err != nil || g == nil {
+			require.NoError(t, s.State.GuildAdd(&discordgo.Guild{ID: ch.GuildID}))
+		}
+	}
+	require.NoError(t, s.State.ChannelAdd(ch))
+}
+
 func newMockDiscordSession(t *testing.T, rt roundTripperFunc, stateChannels ...*discordgo.Channel) *discordgo.Session {
 	t.Helper()
 	s, err := discordgo.New("Bot test-token")
@@ -99,9 +113,7 @@ func newMockDiscordSession(t *testing.T, rt roundTripperFunc, stateChannels ...*
 	s.State = discordgo.NewState()
 	s.State.User = &discordgo.User{ID: "bot-123", Username: "Aerial"}
 	for _, ch := range stateChannels {
-		if ch != nil {
-			_ = s.State.ChannelAdd(ch)
-		}
+		addMockStateChannel(t, s, ch)
 	}
 	if rt != nil {
 		s.Client = &http.Client{Transport: rt}
@@ -118,6 +130,32 @@ func jsonHTTPResponse(status int, body string) *http.Response {
 		StatusCode: status,
 		Header:     http.Header{"Content-Type": []string{"application/json"}},
 		Body:       io.NopCloser(strings.NewReader(body)),
+	}
+}
+
+func assertResolveGuildID(t *testing.T, s *discordgo.Session) {
+	t.Helper()
+	if id := resolveGuildID(nil, nil); id != "" {
+		t.Errorf("Expected empty string for nil, got %q", id)
+	}
+	if id := resolveGuildID(nil, &discordgo.Message{GuildID: "direct-guild"}); id != "direct-guild" {
+		t.Errorf("Expected direct-guild, got %q", id)
+	}
+
+	queue.InvalidateChannelCache("cached-chan-99")
+	defer queue.InvalidateChannelCache("cached-chan-99")
+	queue.CacheDiscordChannel(&discordgo.Channel{ID: "cached-chan-99", GuildID: "cached-guild-99"})
+	if id := resolveGuildID(nil, &discordgo.Message{ChannelID: "cached-chan-99"}); id != "cached-guild-99" {
+		t.Errorf("Expected cached-guild-99, got %q", id)
+	}
+
+	require.NoError(t, s.State.GuildAdd(&discordgo.Guild{ID: "session-guild-77"}))
+	require.NoError(t, s.State.ChannelAdd(&discordgo.Channel{ID: "session-chan-77", GuildID: "session-guild-77"}))
+	if id := resolveGuildID(s, &discordgo.Message{ChannelID: "session-chan-77"}); id != "session-guild-77" {
+		t.Errorf("Expected session-guild-77, got %q", id)
+	}
+	if id := resolveGuildID(s, &discordgo.Message{ChannelID: "unknown-chan"}); id != "" {
+		t.Errorf("Expected empty string for unknown channel, got %q", id)
 	}
 }
 
@@ -169,29 +207,7 @@ channels:
 		t.Errorf("default member fetcher = %+v, %v; want user u1 with role r-1", member, err)
 	}
 
-	// ResolveGuildID extended edge cases
-	if id := resolveGuildID(nil, nil); id != "" {
-		t.Errorf("Expected empty string for nil, got %q", id)
-	}
-	if id := resolveGuildID(nil, &discordgo.Message{GuildID: "direct-guild"}); id != "direct-guild" {
-		t.Errorf("Expected direct-guild, got %q", id)
-	}
-
-	queue.InvalidateChannelCache("cached-chan-99")
-	defer queue.InvalidateChannelCache("cached-chan-99")
-	queue.CacheDiscordChannel(&discordgo.Channel{ID: "cached-chan-99", GuildID: "cached-guild-99"})
-	if id := resolveGuildID(nil, &discordgo.Message{ChannelID: "cached-chan-99"}); id != "cached-guild-99" {
-		t.Errorf("Expected cached-guild-99, got %q", id)
-	}
-
-	_ = s.State.GuildAdd(&discordgo.Guild{ID: "session-guild-77"})
-	_ = s.State.ChannelAdd(&discordgo.Channel{ID: "session-chan-77", GuildID: "session-guild-77"})
-	if id := resolveGuildID(s, &discordgo.Message{ChannelID: "session-chan-77"}); id != "session-guild-77" {
-		t.Errorf("Expected session-guild-77, got %q", id)
-	}
-	if id := resolveGuildID(s, &discordgo.Message{ChannelID: "unknown-chan"}); id != "" {
-		t.Errorf("Expected empty string for unknown channel, got %q", id)
-	}
+	assertResolveGuildID(t, s)
 
 	seedSessionStateForIngress(nil, "", nil)
 	seedSessionStateForIngress(s, "", nil)
@@ -199,7 +215,9 @@ channels:
 		t.Errorf("expected isSelfOrNilMessage to return true for nil message")
 	}
 	seedSessionStateForIngress(s, "bot-exists", nil) // m == nil
-	_ = s.State.GuildAdd(&discordgo.Guild{ID: "guild-already-present"})
+	if err := s.State.GuildAdd(&discordgo.Guild{ID: "guild-already-present"}); err != nil {
+		t.Fatalf("failed to add guild: %v", err)
+	}
 	seedSessionStateForIngress(s, "bot-exists", &discordgo.Message{GuildID: "guild-already-present"})
 	seedSessionStateForIngress(s, "bot-exists", &discordgo.Message{GuildID: "guild-new-to-add"})
 
@@ -239,7 +257,9 @@ channels:
 
 	s := newMockDiscordSession(t, nil)
 	s.State.User = &discordgo.User{ID: "bot-self-id", Username: "AerialBot"}
-	_ = s.State.GuildAdd(&discordgo.Guild{ID: "guild-1"})
+	if err := s.State.GuildAdd(&discordgo.Guild{ID: "guild-1"}); err != nil {
+		t.Fatalf("failed to add guild: %v", err)
+	}
 
 	channels := []*discordgo.Channel{
 		{ID: "chan-general", GuildID: "guild-1", Name: "general", Type: discordgo.ChannelTypeGuildText},
@@ -255,7 +275,9 @@ channels:
 		{ID: "thread-sub-1", GuildID: "guild-1", ParentID: "chan-threads", Name: "sub-discussion", Type: discordgo.ChannelTypeGuildPublicThread},
 	}
 	for _, ch := range channels {
-		_ = s.State.ChannelAdd(ch)
+		if err := s.State.ChannelAdd(ch); err != nil {
+			t.Fatalf("failed to add channel: %v", err)
+		}
 	}
 
 	user := func(id, username string, bot bool) *discordgo.User {
@@ -368,7 +390,10 @@ func TestGetDiscordChannel(t *testing.T) {
 
 	sWithREST := newMockDiscordSession(t, roundTripperFunc(func(req *http.Request) (*http.Response, error) {
 		if strings.Contains(req.URL.Path, "/channels/123456789012345678") {
-			body, _ := json.Marshal(&discordgo.Channel{ID: "123456789012345678", Name: "rest-chan"})
+			body, err := json.Marshal(&discordgo.Channel{ID: "123456789012345678", Name: "rest-chan"})
+			if err != nil {
+				return nil, err
+			}
 			return jsonHTTPResponse(http.StatusOK, string(body)), nil
 		}
 		return jsonHTTPResponse(http.StatusNotFound, "{}"), nil
@@ -380,25 +405,8 @@ func TestGetDiscordChannel(t *testing.T) {
 	}
 }
 
-func TestGetOrCreateThreadID_ModesAndCaching(t *testing.T) {
-	setupTestConfig(t, `
-model: "gemini-2.5-flash"
-admin_users:
-  - "admin-123"
-channels:
-  default:
-    mode: "threads"
-  general:
-    mode: "channel"
-  "111222333":
-    mode: "channel"
-`)
-
-	s := newMockDiscordSession(t, nil)
-	_ = s.State.GuildAdd(&discordgo.Guild{ID: "guild-1"})
-	_ = s.State.ChannelAdd(&discordgo.Channel{ID: "111222333", GuildID: "guild-1", Name: "general", Type: discordgo.ChannelTypeGuildText})
-	_ = s.State.ChannelAdd(&discordgo.Channel{ID: "thread-444", GuildID: "guild-1", ParentID: "111222333", Name: "discussion-thread", Type: discordgo.ChannelTypeGuildPublicThread})
-
+func assertThreadIDResolutionCases(t *testing.T, s *discordgo.Session) {
+	t.Helper()
 	if thID, isTh := getOrCreateThreadID(t.Context(), s, nil); thID != "" || isTh {
 		t.Errorf("Expected empty string and false for nil message, got %s, %t", thID, isTh)
 	}
@@ -417,6 +425,53 @@ channels:
 	if thID, isTh := getOrCreateThreadID(t.Context(), s, msgInThread); thID != "thread-444" || !isTh {
 		t.Errorf("Expected existing thread to return thread-444 and true, got %s, %t", thID, isTh)
 	}
+}
+
+func assertThreadSummarizeFailureAndSaturation(t *testing.T, sNoToken *discordgo.Session, msgDev *discordgo.Message) {
+	t.Helper()
+	clsErr := classifier.New(currentFunnelConfig())
+	clsErr.LLMFunc = func(ctx context.Context, model, prompt string) (string, error) {
+		return "", errors.New("summarizer forced failure")
+	}
+	pool := queue.New(currentFunnelConfig(), queue.WorkerPoolConfig{Classifier: clsErr, Store: newTestStore(t)})
+	SetFunnelPool(pool)
+	defer SetFunnelPool(nil)
+
+	if thIDFail, isTh := getOrCreateThreadID(t.Context(), sNoToken, msgDev, true); thIDFail != "chan-threads-555" || isTh {
+		t.Errorf("expected chan-threads-555 and false on summarizer failure, got %s, %t", thIDFail, isTh)
+	}
+
+	titleSummarizeSem <- struct{}{}
+	titleSummarizeSem <- struct{}{}
+	defer func() {
+		<-titleSummarizeSem
+		<-titleSummarizeSem
+	}()
+	if thID2, isTh := getOrCreateThreadID(t.Context(), sNoToken, msgDev, true); thID2 != "chan-threads-555" || isTh {
+		t.Errorf("expected chan-threads-555 and false when semaphore saturated, got %s, %t", thID2, isTh)
+	}
+}
+
+func TestGetOrCreateThreadID_ModesAndCaching(t *testing.T) {
+	setupTestConfig(t, `
+model: "gemini-2.5-flash"
+admin_users:
+  - "admin-123"
+channels:
+  default:
+    mode: "threads"
+  general:
+    mode: "channel"
+  "111222333":
+    mode: "channel"
+`)
+
+	s := newMockDiscordSession(t, nil)
+	require.NoError(t, s.State.GuildAdd(&discordgo.Guild{ID: "guild-1"}))
+	require.NoError(t, s.State.ChannelAdd(&discordgo.Channel{ID: "111222333", GuildID: "guild-1", Name: "general", Type: discordgo.ChannelTypeGuildText}))
+	require.NoError(t, s.State.ChannelAdd(&discordgo.Channel{ID: "thread-444", GuildID: "guild-1", ParentID: "111222333", Name: "discussion-thread", Type: discordgo.ChannelTypeGuildPublicThread}))
+
+	assertThreadIDResolutionCases(t, s)
 
 	threadID1 := "th-cached-101"
 	queue.InvalidateChannelCache(threadID1)
@@ -427,42 +482,90 @@ channels:
 	}
 
 	threadID2 := "th-state-102"
-	_ = s.State.ChannelAdd(&discordgo.Channel{ID: threadID2, GuildID: "guild-1", ParentID: "chan-threads-555", Type: discordgo.ChannelTypeGuildPublicThread})
+	require.NoError(t, s.State.ChannelAdd(&discordgo.Channel{ID: threadID2, GuildID: "guild-1", ParentID: "chan-threads-555", Type: discordgo.ChannelTypeGuildPublicThread}))
 	if thID, isTh := getOrCreateThreadID(t.Context(), s, &discordgo.Message{ID: threadID2, ChannelID: "chan-threads-555", GuildID: "guild-1"}); thID != threadID2 || !isTh {
 		t.Errorf("Expected session state hit (%s, true), got (%s, %t)", threadID2, thID, isTh)
 	}
 
 	sNoToken := &discordgo.Session{State: discordgo.NewState()}
-	_ = sNoToken.State.GuildAdd(&discordgo.Guild{ID: "guild-1"})
-	_ = sNoToken.State.ChannelAdd(&discordgo.Channel{ID: "chan-threads-555", GuildID: "guild-1", Name: "dev-chat", Type: discordgo.ChannelTypeGuildText})
+	require.NoError(t, sNoToken.State.GuildAdd(&discordgo.Guild{ID: "guild-1"}))
+	require.NoError(t, sNoToken.State.ChannelAdd(&discordgo.Channel{ID: "chan-threads-555", GuildID: "guild-1", Name: "dev-chat", Type: discordgo.ChannelTypeGuildText}))
 	msgDev := &discordgo.Message{ID: "msg-dev-1", ChannelID: "chan-threads-555", GuildID: "guild-1", Content: "Start a new thread please", Author: &discordgo.User{ID: "user-1", Username: "alice"}}
 	if thID, isTh := getOrCreateThreadID(t.Context(), sNoToken, msgDev); thID != "chan-threads-555" || isTh {
 		t.Errorf("Expected threads mode without active REST to return chan-threads-555 and false, got %s, %t", thID, isTh)
 	}
-	if thID, _ := getOrCreateThreadID(t.Context(), sNoToken, msgDev, false); thID != "chan-threads-555" {
-		t.Errorf("expected chan-threads-555 with allowSummarize=false")
+	if thID, isTh := getOrCreateThreadID(t.Context(), sNoToken, msgDev, false); thID != "chan-threads-555" || isTh {
+		t.Errorf("expected chan-threads-555 and false with allowSummarize=false, got %s, %t", thID, isTh)
 	}
 
-	clsErr := classifier.New(currentFunnelConfig())
-	clsErr.LLMFunc = func(ctx context.Context, model, prompt string) (string, error) {
-		return "", errors.New("summarizer forced failure")
-	}
-	pool := queue.New(currentFunnelConfig(), queue.WorkerPoolConfig{Classifier: clsErr, Store: newTestStore(t)})
-	SetFunnelPool(pool)
-	defer SetFunnelPool(nil)
+	assertThreadSummarizeFailureAndSaturation(t, sNoToken, msgDev)
+}
 
-	if thIDFail, _ := getOrCreateThreadID(t.Context(), sNoToken, msgDev, true); thIDFail != "chan-threads-555" {
-		t.Errorf("expected chan-threads-555 on summarizer failure")
+type restRecoveryCase struct {
+	name         string
+	messageID    string
+	content      string
+	threadsCode  int
+	threadsBody  string
+	chCode       int
+	chBody       string
+	wantThreadID string
+	wantIsThread bool
+	checkCache   bool
+	wantParentID string
+}
+
+func runRESTRecoveryCase(t *testing.T, guildID, parentChanID string, tt restRecoveryCase) {
+	t.Helper()
+	queue.InvalidateChannelCache(tt.messageID)
+	defer queue.InvalidateChannelCache(tt.messageID)
+	if tt.wantThreadID != parentChanID {
+		queue.InvalidateChannelCache(tt.wantThreadID)
+		defer queue.InvalidateChannelCache(tt.wantThreadID)
 	}
 
-	titleSummarizeSem <- struct{}{}
-	titleSummarizeSem <- struct{}{}
-	defer func() {
-		<-titleSummarizeSem
-		<-titleSummarizeSem
-	}()
-	if thID2, _ := getOrCreateThreadID(t.Context(), sNoToken, msgDev, true); thID2 != "chan-threads-555" {
-		t.Errorf("expected chan-threads-555 when semaphore saturated")
+	mockRT := func(threadsCode int, threadsBody string, chCode int, chBody string) roundTripperFunc {
+		return func(req *http.Request) (*http.Response, error) {
+			if strings.Contains(req.URL.Path, "/threads") {
+				return jsonHTTPResponse(threadsCode, threadsBody), nil
+			}
+			if chCode != 0 && strings.Contains(req.URL.Path, "/channels/") {
+				return jsonHTTPResponse(chCode, chBody), nil
+			}
+			return jsonHTTPResponse(http.StatusNotFound, "{}"), nil
+		}
+	}
+
+	s := newMockDiscordSession(t, mockRT(tt.threadsCode, tt.threadsBody, tt.chCode, tt.chBody))
+	require.NoError(t, s.State.GuildAdd(&discordgo.Guild{ID: guildID}))
+	require.NoError(t, s.State.ChannelAdd(&discordgo.Channel{
+		ID:      parentChanID,
+		GuildID: guildID,
+		Name:    "feature-requests",
+		Type:    discordgo.ChannelTypeGuildText,
+	}))
+
+	m := &discordgo.Message{
+		ID:        tt.messageID,
+		ChannelID: parentChanID,
+		GuildID:   guildID,
+		Content:   tt.content,
+		Author:    &discordgo.User{ID: "user-42", Username: "test-user"},
+	}
+
+	targetID, isThread := getOrCreateThreadID(t.Context(), s, m)
+	if targetID != tt.wantThreadID || isThread != tt.wantIsThread {
+		t.Fatalf("getOrCreateThreadID() = (%q, %t); want (%q, %t)", targetID, isThread, tt.wantThreadID, tt.wantIsThread)
+	}
+
+	if tt.checkCache {
+		snap, ok := queue.GetCachedChannel(tt.wantThreadID)
+		if !ok {
+			t.Fatalf("Expected thread %q to be in queue cache", tt.wantThreadID)
+		}
+		if !snap.IsThread || snap.ParentID != tt.wantParentID {
+			t.Errorf("Unexpected cached thread metadata: %+v", snap)
+		}
 	}
 }
 
@@ -477,31 +580,7 @@ channels:
 	guildID := "g-rest-1"
 	parentChanID := "ch-rest-parent"
 
-	mockRT := func(threadsCode int, threadsBody string, chCode int, chBody string) roundTripperFunc {
-		return func(req *http.Request) (*http.Response, error) {
-			if strings.Contains(req.URL.Path, "/threads") {
-				return jsonHTTPResponse(threadsCode, threadsBody), nil
-			}
-			if chCode != 0 && strings.Contains(req.URL.Path, "/channels/") {
-				return jsonHTTPResponse(chCode, chBody), nil
-			}
-			return jsonHTTPResponse(http.StatusNotFound, "{}"), nil
-		}
-	}
-
-	tests := []struct {
-		name         string
-		messageID    string
-		content      string
-		threadsCode  int
-		threadsBody  string
-		chCode       int
-		chBody       string
-		wantThreadID string
-		wantIsThread bool
-		checkCache   bool
-		wantParentID string
-	}{
+	tests := []restRecoveryCase{
 		{"200 thread created successfully", "msg-200-ok", "deploy service", 200, `{"id":"th-created-200","guild_id":"g-rest-1","parent_id":"ch-rest-parent","name":"deploy-service","type":11}`, 0, "", "th-created-200", true, true, parentChanID},
 		{"200 thread created with missing parent and guild", "msg-200-empty-parent", "start missing parent thread", 200, `{"id":"th-created-empty-parent","type":11}`, 0, "", "th-created-empty-parent", true, true, parentChanID},
 		{"200 thread in guild missing from session state", "msg-200-other-guild", "start other guild thread", 200, `{"id":"th-created-other-guild","guild_id":"g-not-in-state","parent_id":"ch-rest-parent","type":11}`, 0, "", "th-created-other-guild", true, true, parentChanID},
@@ -513,44 +592,7 @@ channels:
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			queue.InvalidateChannelCache(tt.messageID)
-			defer queue.InvalidateChannelCache(tt.messageID)
-			if tt.wantThreadID != parentChanID {
-				queue.InvalidateChannelCache(tt.wantThreadID)
-				defer queue.InvalidateChannelCache(tt.wantThreadID)
-			}
-
-			s := newMockDiscordSession(t, mockRT(tt.threadsCode, tt.threadsBody, tt.chCode, tt.chBody))
-			_ = s.State.GuildAdd(&discordgo.Guild{ID: guildID})
-			_ = s.State.ChannelAdd(&discordgo.Channel{
-				ID:      parentChanID,
-				GuildID: guildID,
-				Name:    "feature-requests",
-				Type:    discordgo.ChannelTypeGuildText,
-			})
-
-			m := &discordgo.Message{
-				ID:        tt.messageID,
-				ChannelID: parentChanID,
-				GuildID:   guildID,
-				Content:   tt.content,
-				Author:    &discordgo.User{ID: "user-42", Username: "test-user"},
-			}
-
-			targetID, isThread := getOrCreateThreadID(t.Context(), s, m)
-			if targetID != tt.wantThreadID || isThread != tt.wantIsThread {
-				t.Fatalf("getOrCreateThreadID() = (%q, %t); want (%q, %t)", targetID, isThread, tt.wantThreadID, tt.wantIsThread)
-			}
-
-			if tt.checkCache {
-				snap, ok := queue.GetCachedChannel(tt.wantThreadID)
-				if !ok {
-					t.Fatalf("Expected thread %q to be in queue cache", tt.wantThreadID)
-				}
-				if !snap.IsThread || snap.ParentID != tt.wantParentID {
-					t.Errorf("Unexpected cached thread metadata: %+v", snap)
-				}
-			}
+			runRESTRecoveryCase(t, guildID, parentChanID, tt)
 		})
 	}
 }
@@ -858,7 +900,9 @@ func TestSyncBotMemberRoles(t *testing.T) {
 
 	s := newMockDiscordSession(t, nil)
 	s.State.User = &discordgo.User{ID: "bot-1"}
-	_ = s.State.GuildAdd(&discordgo.Guild{ID: "guild-1"})
+	if err := s.State.GuildAdd(&discordgo.Guild{ID: "guild-1"}); err != nil {
+		t.Fatalf("failed to add guild: %v", err)
+	}
 
 	syncBotMemberRoles(context.Background(), nil, "guild-1", "bot-1")
 	syncBotMemberRoles(context.Background(), s, "", "bot-1")
@@ -961,10 +1005,12 @@ func assertPopulateDiscordMessageCase(t *testing.T, tc populateDiscordMessageCas
 func TestPopulateDiscordMessageFields(t *testing.T) {
 	t.Parallel()
 	s := newMockDiscordSession(t, nil)
-	_ = s.State.GuildAdd(&discordgo.Guild{
+	if err := s.State.GuildAdd(&discordgo.Guild{
 		ID:    "guild-1",
 		Roles: []*discordgo.Role{{ID: "role-mod", Name: "Moderator"}},
-	})
+	}); err != nil {
+		t.Fatalf("failed to add guild: %v", err)
+	}
 
 	tests := []populateDiscordMessageCase{
 		{
@@ -1046,11 +1092,15 @@ func TestPopulateDiscordMessageFields(t *testing.T) {
 func TestResolveMessageContent(t *testing.T) {
 	t.Parallel()
 	s := newMockDiscordSession(t, nil)
-	_ = s.State.GuildAdd(&discordgo.Guild{
+	if err := s.State.GuildAdd(&discordgo.Guild{
 		ID:    "guild-1",
 		Roles: []*discordgo.Role{{ID: "role-1", Name: "Admins", Mentionable: false}},
-	})
-	_ = s.State.ChannelAdd(&discordgo.Channel{ID: "chan-1", GuildID: "guild-1"})
+	}); err != nil {
+		t.Fatalf("failed to add guild: %v", err)
+	}
+	if err := s.State.ChannelAdd(&discordgo.Channel{ID: "chan-1", GuildID: "guild-1"}); err != nil {
+		t.Fatalf("failed to add channel: %v", err)
+	}
 
 	sStateErr := &discordgo.Session{StateEnabled: true, State: discordgo.NewState()}
 
