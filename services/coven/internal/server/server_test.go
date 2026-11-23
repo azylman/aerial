@@ -46,7 +46,7 @@ func newServerFixture(t *testing.T, sabotage string) *Server {
 	}
 	execSQL(t, db, sabotage)
 	handler := NewToolHandler(&config.Config{}, s, &MockOllamaClient{embedding: testEmbedding(1.0)})
-	server := NewServer(handler, func(_ context.Context, threadID string) error {
+	server := NewServer(handler, func(_ context.Context, threadID, _ string) error {
 		if threadID == "th-err" {
 			return errors.New("extract error")
 		}
@@ -122,7 +122,7 @@ func TestServer_AdminExtractDefaultHandler(t *testing.T) {
 
 func TestServer_Routes_ExtractorRole(t *testing.T) {
 	handler := NewToolHandler(&config.Config{Role: "extractor"}, newTestStore(t), &MockOllamaClient{embedding: testEmbedding(1.0)})
-	server := NewServer(handler, func(_ context.Context, _ string) error {
+	server := NewServer(handler, func(_ context.Context, _, _ string) error {
 		return nil
 	})
 	routes := server.Routes()
@@ -419,7 +419,7 @@ func newServerFixtureWithAuth(t *testing.T, authCfg k8sauth.Config) *Server {
 		t.Fatalf("seed: %v", err)
 	}
 	handler := NewToolHandler(&config.Config{Stack: config.DefaultStack, Auth: authCfg}, s, &MockOllamaClient{embedding: testEmbedding(1.0)})
-	server := NewServer(handler, func(_ context.Context, threadID string) error {
+	server := NewServer(handler, func(_ context.Context, threadID, _ string) error {
 		if threadID == "th-err" {
 			return errors.New("extract failed")
 		}

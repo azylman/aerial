@@ -42,9 +42,6 @@ func dispatchCovenExtract(ctx context.Context, worker *Worker, targetAgent, thre
 	if worker == nil {
 		return nil
 	}
-	if worker.RestateIngressURL() == "" {
-		return worker.ExtractThread(ctx, threadID, targetAgent)
-	}
 
 	scopedKey := config.ScopedThreadKey(targetAgent, threadID)
 	endpoint := fmt.Sprintf("%s/CovenThread/%s/Extract/send", worker.RestateIngressURL(), url.PathEscape(scopedKey))
@@ -373,30 +370,51 @@ func runWorkerAfterRegistration(ctx context.Context, client *http.Client, adminU
 	return worker.Start(ctx)
 }
 
-func newExtractFn(cfg *config.Config, worker *Worker, toolHandler *ToolHandler) func(context.Context, string) error {
-	return func(extractCtx context.Context, threadID string) error {
-		if cfg.RestateIngressURL != "" {
-			var targetAgent, cleanThread string
-			if strings.Contains(threadID, "/") {
-				targetAgent, cleanThread = config.ParseScopedThreadKey(threadID)
-			} else {
-				targetAgent = cfg.EffectiveStack()
-				cleanThread = strings.TrimSpace(threadID)
-			}
-			scopedKey := config.ScopedThreadKey(targetAgent, cleanThread)
-			endpoint := fmt.Sprintf("%s/CovenThread/%s/Extract/send", strings.TrimRight(cfg.RestateIngressURL, "/"), url.PathEscape(scopedKey))
-			req := ExtractJobRequest{
-				ThreadID: cleanThread,
-				Agent:    targetAgent,
-			}
-			var client *http.Client
-			if worker != nil {
-				client = worker.HTTPClient()
-			}
-			_, postErr := restateingress.Post(extractCtx, client, endpoint, "", req, 0)
-			return postErr
+// errRestateIngressRequired is returned at startup when no Restate ingress URL is configured:
+// extraction and dreaming only run as Restate Virtual Objects.
+var errRestateIngressRequired = errors.New("config: restate_ingress_url is required (coven runs extraction and dreaming only through Restate)")
+
+// validateRestateIngress fails startup when the Restate ingress URL is empty.
+func validateRestateIngress(ingressURL string) error {
+	if strings.TrimSpace(ingressURL) == "" {
+		return errRestateIngressRequired
+	}
+	return nil
+}
+
+// adminExtractIdempotencyKey names an admin-triggered extraction by the caller's request ID
+// (admin:extract:<stack>:<request id>). Without a request ID the key is empty and the
+// Idempotency-Key header is omitted, so distinct admin calls are never collapsed.
+func adminExtractIdempotencyKey(stack, requestID string) string {
+	requestID = strings.TrimSpace(requestID)
+	if requestID == "" {
+		return ""
+	}
+	return fmt.Sprintf("admin:extract:%s:%s", config.NormalizeStack(stack), requestID)
+}
+
+// newExtractFn returns the admin extract hook: it sends the thread to its CovenThread object.
+func newExtractFn(cfg *config.Config, worker *Worker) func(context.Context, string, string) error {
+	return func(extractCtx context.Context, threadID, requestID string) error {
+		var targetAgent, cleanThread string
+		if strings.Contains(threadID, "/") {
+			targetAgent, cleanThread = config.ParseScopedThreadKey(threadID)
+		} else {
+			targetAgent = cfg.EffectiveStack()
+			cleanThread = strings.TrimSpace(threadID)
 		}
-		return toolHandler.Extract(extractCtx, threadID)
+		scopedKey := config.ScopedThreadKey(targetAgent, cleanThread)
+		endpoint := fmt.Sprintf("%s/CovenThread/%s/Extract/send", strings.TrimRight(cfg.RestateIngressURL, "/"), url.PathEscape(scopedKey))
+		req := ExtractJobRequest{
+			ThreadID: cleanThread,
+			Agent:    targetAgent,
+		}
+		var client *http.Client
+		if worker != nil {
+			client = worker.HTTPClient()
+		}
+		_, postErr := restateingress.Post(extractCtx, client, endpoint, adminExtractIdempotencyKey(targetAgent, requestID), req, 0)
+		return postErr
 	}
 }
 
@@ -404,6 +422,9 @@ func newExtractFn(cfg *config.Config, worker *Worker, toolHandler *ToolHandler) 
 func RunApp(ctx context.Context, cfg *config.Config) error {
 	if cfg == nil {
 		return fmt.Errorf("app: config cannot be nil")
+	}
+	if err := validateRestateIngress(cfg.RestateIngressURL); err != nil {
+		return err
 	}
 	port := strings.TrimSpace(cfg.Port)
 	if port == "" {
@@ -440,8 +461,6 @@ func RunApp(ctx context.Context, cfg *config.Config) error {
 		LLMClient:           HTTPBrainLLMClient(cfg.EriLLMURL, nil),
 		Publisher:           publisher,
 		CustomSkillsDir:     cfg.CustomSkillsDir,
-		InitialDelay:        DefaultWorkerInitialDelay,
-		TickInterval:        DefaultWorkerTickInterval,
 		Role:                cfg.Role,
 		Stack:               cfg.EffectiveStack(),
 		ExtractTimeout:      cfg.ExtractTimeout(),
@@ -452,7 +471,7 @@ func RunApp(ctx context.Context, cfg *config.Config) error {
 	workerCtx, workerCancel := context.WithCancel(ctx)
 	defer workerCancel()
 
-	extractFn := newExtractFn(cfg, worker, toolHandler)
+	extractFn := newExtractFn(cfg, worker)
 	mcpServer := NewServer(toolHandler, extractFn)
 
 	thread := NewCovenThread(worker)

@@ -27,7 +27,7 @@ type Server struct {
 	role          string
 	stack         string
 	auth          *k8sauth.Authenticator
-	extractFn     func(ctx context.Context, threadID string) error
+	extractFn     func(ctx context.Context, threadID, requestID string) error
 }
 
 // serverInstructions is sent on initialize so clients that defer tool schemas
@@ -37,7 +37,7 @@ memory_store already dedupes: text at >= 0.85 cosine similarity to an existing f
 Never store secrets, tokens or credentials, including in supersedes_id updates (they skip the admission gate).`
 
 // NewServer creates and initializes the Server.
-func NewServer(handler *ToolHandler, extractFn ...func(ctx context.Context, threadID string) error) *Server {
+func NewServer(handler *ToolHandler, extractFn ...func(ctx context.Context, threadID, requestID string) error) *Server {
 	if handler == nil {
 		panic("server: handler cannot be nil")
 	}
@@ -52,7 +52,7 @@ func NewServer(handler *ToolHandler, extractFn ...func(ctx context.Context, thre
 		Version: "1.0.0",
 	}, &mcp.ServerOptions{Instructions: serverInstructions})
 
-	fn := handler.Extract
+	fn := func(ctx context.Context, threadID, _ string) error { return handler.Extract(ctx, threadID) }
 	if len(extractFn) > 0 {
 		fn = extractFn[0]
 	}
@@ -285,12 +285,17 @@ func (s *Server) handleAdminExtract(w http.ResponseWriter, r *http.Request) {
 	}
 
 	threadID := strings.TrimSpace(r.URL.Query().Get("thread_id"))
+	requestID := strings.TrimSpace(r.Header.Get("X-Request-ID"))
 	if threadID == "" && r.Body != nil {
 		var body struct {
-			ThreadID string `json:"thread_id"`
+			ThreadID  string `json:"thread_id"`
+			RequestID string `json:"request_id"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&body); err == nil {
 			threadID = strings.TrimSpace(body.ThreadID)
+			if requestID == "" {
+				requestID = strings.TrimSpace(body.RequestID)
+			}
 		}
 	}
 
@@ -299,7 +304,7 @@ func (s *Server) handleAdminExtract(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.extractFn(r.Context(), threadID); err != nil {
+	if err := s.extractFn(r.Context(), threadID, requestID); err != nil {
 		log.Printf("[coven] admin extract error: %v", err)
 		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
 		return

@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"maps"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -127,65 +126,57 @@ func TestCoven_RetrySubscribeCovenTurns(t *testing.T) {
 }
 
 type handleCovenExtractJobTestCase struct {
-	name           string
-	msgData        string
-	delivered      uint64
-	role           string
-	sabotage       string
-	ingressURL     string
-	wantErr        bool
-	wantErrIs      error
-	wantTerm       bool
-	wantMinNak     time.Duration
-	wantExactNak   time.Duration
-	wantWatermarks map[string]int64
-	wantFacts      []toolFactRow
+	name         string
+	msgData      string
+	delivered    uint64
+	role         string
+	wantErr      bool
+	wantTerm     bool
+	wantMinNak   time.Duration
+	wantExactNak time.Duration
+	wantSends    []string
 }
 
-// extractJobLLM extracts one admissible fact from every turn batch.
-func extractJobLLM(context.Context, string) (string, error) {
-	return `{"facts":[{"fact_text":"User always drinks oolong tea"}]}`, nil
+// ingressRecorder is a Restate ingress stub recording "<path> key=<Idempotency-Key>" per request;
+// bodies naming th-ext-fail get a 500.
+type ingressRecorder struct {
+	mu    sync.Mutex
+	sends []string
 }
 
-// extractJobWatermarks reads extraction watermarks for thread th-ext-1 keyed by agent.
-func extractJobWatermarks(t *testing.T, db store.DBTX) map[string]int64 {
-	t.Helper()
-	rows, err := db.QueryContext(context.Background(), `SELECT agent, last_extracted_rowid FROM extraction_watermarks WHERE thread_id = 'th-ext-1'`)
+func (rec *ingressRecorder) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	body, err := io.ReadAll(r.Body)
 	if err != nil {
-		t.Fatalf("query watermarks: %v", err)
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
 	}
-	defer rows.Close()
-	got := map[string]int64{}
-	for rows.Next() {
-		var agent string
-		var rowID int64
-		if err := rows.Scan(&agent, &rowID); err != nil {
-			t.Fatalf("scan watermark: %v", err)
-		}
-		got[agent] = rowID
+	rec.mu.Lock()
+	rec.sends = append(rec.sends, r.URL.Path+" key="+r.Header.Get("Idempotency-Key"))
+	rec.mu.Unlock()
+	if strings.Contains(string(body), "th-ext-fail") {
+		http.Error(w, `{"error":"restate invoke error"}`, http.StatusInternalServerError)
+		return
 	}
-	if err := rows.Err(); err != nil {
-		t.Fatalf("read watermarks: %v", err)
-	}
-	return got
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write([]byte(`{}`))
+}
+
+func (rec *ingressRecorder) snapshot() []string {
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	return slices.Clone(rec.sends)
 }
 
 func runHandleCovenExtractJobCase(t *testing.T, tc handleCovenExtractJobTestCase) {
 	t.Helper()
 	ctx := context.Background()
-	db := newTestDB(t)
-	// One extractable admin turn per agent: aerial row 35, agent-alpha row 36.
-	seedTurns(t, db,
-		adminTurn("th-ext-1", 35, "test message", "resp"),
-		testTurn{agent: "agent-alpha", thread: "th-ext-1", rowID: 36, content: "alpha message", response: "alpha resp", admin: true},
-	)
-	execSQL(t, db, tc.sabotage)
+	rec := &ingressRecorder{}
+	srv := httptest.NewServer(rec)
+	defer srv.Close()
 	worker := NewWorker(WorkerConfig{
 		Role:              tc.role,
-		Store:             store.NewSQLStore(db),
-		Ollama:            &MockOllamaClient{embedding: testEmbedding(1.0)},
-		LLMClient:         extractJobLLM,
-		RestateIngressURL: tc.ingressURL,
+		RestateIngressURL: srv.URL,
+		HTTPClient:        srv.Client(),
 	})
 	msg := &pubsubtest.Message{
 		Payload:   []byte(tc.msgData),
@@ -196,9 +187,6 @@ func runHandleCovenExtractJobCase(t *testing.T, tc handleCovenExtractJobTestCase
 	err := handleCovenExtractJob(ctx, msg, worker)
 	if (err != nil) != tc.wantErr {
 		t.Fatalf("handleCovenExtractJob() err = %v, wantErr = %v", err, tc.wantErr)
-	}
-	if tc.wantErrIs != nil && !errors.Is(err, tc.wantErrIs) {
-		t.Errorf("err = %v, want %v", err, tc.wantErrIs)
 	}
 	if msg.Termed() != tc.wantTerm {
 		t.Errorf("termed = %v, want %v", msg.Termed(), tc.wantTerm)
@@ -213,46 +201,26 @@ func runHandleCovenExtractJobCase(t *testing.T, tc handleCovenExtractJobTestCase
 	if tc.wantExactNak > 0 && nakDelay != tc.wantExactNak {
 		t.Errorf("nakDelay = %v, want %v", nakDelay, tc.wantExactNak)
 	}
-	if got := extractJobWatermarks(t, db); !maps.Equal(got, tc.wantWatermarks) {
-		t.Errorf("watermarks = %v, want %v", got, tc.wantWatermarks)
-	}
-	if got := toolFactRows(t, db); !slices.Equal(got, tc.wantFacts) {
-		t.Errorf("facts = %+v, want %+v", got, tc.wantFacts)
+	if got := rec.snapshot(); !slices.Equal(got, tc.wantSends) {
+		t.Errorf("ingress sends = %q, want %q", got, tc.wantSends)
 	}
 }
 
 func TestHandleCovenExtractJob_Scenarios(t *testing.T) {
 	t.Parallel()
-	none := map[string]int64{}
-	aerialFact := []toolFactRow{{id: 1, text: "User always drinks oolong tea", reinforceCount: 1, sourceAgent: "aerial"}}
-
-	restateSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, err := io.ReadAll(r.Body)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		if strings.Contains(string(body), "th-ext-fail") {
-			http.Error(w, `{"error":"restate invoke error"}`, http.StatusInternalServerError)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{}`))
-	}))
-	t.Cleanup(restateSrv.Close)
+	aerialSend := []string{"/CovenThread/aerial/th-ext-1/Extract/send key=coven:extract:aerial/th-ext-1:msg-test-1"}
+	failSend := []string{"/CovenThread/aerial/th-ext-fail/Extract/send key=coven:extract:aerial/th-ext-fail:msg-test-1"}
 
 	tests := []handleCovenExtractJobTestCase{
-		{name: "UnmarshalErrorTermsMessageAndReturnsNil", msgData: "bad-json", delivered: 1, wantTerm: true, wantWatermarks: none},
-		{name: "EmptyThreadIDTermsMessageAndReturnsNil", msgData: `{"thread_id":"   "}`, delivered: 1, wantTerm: true, wantWatermarks: none},
-		{name: "MismatchedAgentSkipsExtraction", msgData: `{"thread_id":"th-ext-1","agent":"agent-alpha"}`, delivered: 1, wantWatermarks: none},
-		{name: "RoleAllAcceptsAnyValidAgent", msgData: `{"thread_id":"th-ext-1","agent":"agent-alpha"}`, delivered: 1, role: "all", wantWatermarks: map[string]int64{"agent-alpha": 36}, wantFacts: []toolFactRow{{id: 1, text: "User always drinks oolong tea", reinforceCount: 1, sourceAgent: "agent-alpha"}}},
-		{name: "WorkerSuccessAdvancesWatermark", msgData: `{"thread_id":"th-ext-1"}`, delivered: 1, wantWatermarks: map[string]int64{"aerial": 35}, wantFacts: aerialFact},
-		{name: "WorkerErrorAttempt1NaksWithBackoff", msgData: `{"thread_id":"th-ext-1"}`, delivered: 1, sabotage: sabotageTurnReads, wantErr: true, wantMinNak: 1 * time.Second, wantWatermarks: none},
-		{name: "WorkerErrorAttempt4NaksWithBackoff", msgData: `{"thread_id":"th-ext-1"}`, delivered: 4, sabotage: sabotageTurnReads, wantErr: true, wantMinNak: 8 * time.Second, wantWatermarks: none},
-		{name: "WorkerErrorAttempt5NaksWithBackoff", msgData: `{"thread_id":"th-ext-1"}`, delivered: 5, sabotage: sabotageTurnReads, wantErr: true, wantMinNak: 16 * time.Second, wantWatermarks: none},
-		{name: "RestateIngressSuccess", msgData: `{"thread_id":"th-ext-1"}`, delivered: 1, ingressURL: restateSrv.URL, wantWatermarks: none},
-		{name: "RestateIngressErrorNaksWithBackoff", msgData: `{"thread_id":"th-ext-fail"}`, delivered: 2, ingressURL: restateSrv.URL, wantErr: true, wantMinNak: 2 * time.Second, wantWatermarks: none},
+		{name: "UnmarshalErrorTermsMessageAndReturnsNil", msgData: "bad-json", delivered: 1, wantTerm: true},
+		{name: "EmptyThreadIDTermsMessageAndReturnsNil", msgData: `{"thread_id":"   "}`, delivered: 1, wantTerm: true},
+		{name: "InvalidAgentSlugTermsMessage", msgData: `{"thread_id":"th-ext-1","agent":"Bad Agent!"}`, delivered: 1, wantTerm: true},
+		{name: "MismatchedAgentSkipsExtraction", msgData: `{"thread_id":"th-ext-1","agent":"agent-alpha"}`, delivered: 1},
+		{name: "RoleAllAcceptsAnyValidAgent", msgData: `{"thread_id":"th-ext-1","agent":"agent-alpha"}`, delivered: 1, role: "all", wantSends: []string{"/CovenThread/agent-alpha/th-ext-1/Extract/send key=coven:extract:agent-alpha/th-ext-1:msg-test-1"}},
+		{name: "SendsKeyedByMessageID", msgData: `{"thread_id":"th-ext-1"}`, delivered: 1, wantSends: aerialSend},
+		{name: "IngressErrorAttempt1NaksWithBackoff", msgData: `{"thread_id":"th-ext-fail"}`, delivered: 1, wantErr: true, wantMinNak: 1 * time.Second, wantSends: failSend},
+		{name: "IngressErrorAttempt4NaksWithBackoff", msgData: `{"thread_id":"th-ext-fail"}`, delivered: 4, wantErr: true, wantMinNak: 8 * time.Second, wantSends: failSend},
+		{name: "IngressErrorAttempt5NaksWithBackoff", msgData: `{"thread_id":"th-ext-fail"}`, delivered: 5, wantErr: true, wantMinNak: 16 * time.Second, wantSends: failSend},
 	}
 
 	for _, tc := range tests {
@@ -266,20 +234,10 @@ func TestHandleCovenExtractJob_Scenarios(t *testing.T) {
 func TestCoven_TranscriptsIndexedToCoalescedExtractIntegration(t *testing.T) {
 	ctx := context.Background()
 
-	db := newTestDB(t)
-	seedTurns(t, db, adminTurn("th-e2e-1", 88, "I prefer matcha", "Noted"))
-	s := store.NewSQLStore(db)
-
-	client := &MockOllamaClient{embedding: testEmbedding(1.0)}
-	llm := func(ctx context.Context, prompt string) (string, error) {
-		return `{"facts":[]}`, nil
-	}
-
-	worker := NewWorker(WorkerConfig{
-		Store:     s,
-		Ollama:    client,
-		LLMClient: llm,
-	})
+	rec := &ingressRecorder{}
+	srv := httptest.NewServer(rec)
+	defer srv.Close()
+	worker := NewWorker(WorkerConfig{RestateIngressURL: srv.URL, HTTPClient: srv.Client()})
 
 	memBus := pubsub.NewMemoryBus()
 	defer memBus.Close()
@@ -298,6 +256,9 @@ func TestCoven_TranscriptsIndexedToCoalescedExtractIntegration(t *testing.T) {
 		Stack:        "aerial",
 		SessionID:    "sess-e2e-1",
 		ThreadID:     "th-e2e-1",
+		FirstStep:    1,
+		LastStep:     2,
+		FileMtime:    time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
 		StepsIndexed: 2,
 		Final:        true,
 		IndexedAt:    time.Now().UTC(),
@@ -312,12 +273,9 @@ func TestCoven_TranscriptsIndexedToCoalescedExtractIntegration(t *testing.T) {
 		}
 	}
 
-	wm, _, err := s.GetConversationFactWatermark(ctx, "th-e2e-1")
-	if err != nil {
-		t.Fatalf("GetConversationFactWatermark: %v", err)
-	}
-	if wm != 88 {
-		t.Errorf("watermark = %d, want 88", wm)
+	want := []string{"/CovenThread/aerial/th-e2e-1/Extract/send key=coven:extract:aerial/th-e2e-1:coven:extract:aerial:th-e2e-1:sess-e2e-1:1-2:1767225600000"}
+	if got := rec.snapshot(); !slices.Equal(got, want) {
+		t.Errorf("ingress sends = %q, want %q", got, want)
 	}
 }
 
@@ -426,11 +384,13 @@ func TestCovenDurableNamesAndFilters(t *testing.T) {
 
 func TestRunApp_Lifecycle(t *testing.T) {
 	validDSN := pgtest.NewDSN(t)
+	const ingress = "http://127.0.0.1:1"
 
 	tests := []struct {
-		name    string
-		cfg     *config.Config
-		wantErr bool
+		name      string
+		cfg       *config.Config
+		wantErr   bool
+		wantErrIs error
 	}{
 		{
 			name:    "NilConfigFails",
@@ -438,18 +398,24 @@ func TestRunApp_Lifecycle(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name:      "EmptyRestateIngressURLFails",
+			cfg:       &config.Config{Port: "0", RestatePort: "0", DatabaseURL: validDSN},
+			wantErr:   true,
+			wantErrIs: errRestateIngressRequired,
+		},
+		{
 			name:    "InvalidDBFails",
-			cfg:     &config.Config{DatabaseURL: "mysql://x"},
+			cfg:     &config.Config{DatabaseURL: "mysql://x", RestateIngressURL: ingress},
 			wantErr: true,
 		},
 		{
 			name:    "CleanLifecycleWithPostgres",
-			cfg:     &config.Config{Port: "0", RestatePort: "0", DatabaseURL: validDSN},
+			cfg:     &config.Config{Port: "0", RestatePort: "0", DatabaseURL: validDSN, RestateIngressURL: ingress},
 			wantErr: false,
 		},
 		{
 			name:    "CleanLifecycleExtractorWithTranscriptsURL",
-			cfg:     &config.Config{Port: "0", RestatePort: "0", DatabaseURL: validDSN, TranscriptsURL: "http://mock-transcripts", Role: "extractor"},
+			cfg:     &config.Config{Port: "0", RestatePort: "0", DatabaseURL: validDSN, TranscriptsURL: "http://mock-transcripts", Role: "extractor", RestateIngressURL: ingress},
 			wantErr: false,
 		},
 	}
@@ -461,6 +427,9 @@ func TestRunApp_Lifecycle(t *testing.T) {
 			err := RunApp(ctx, tc.cfg)
 			if tc.wantErr && err == nil {
 				t.Fatal("expected error, got nil")
+			}
+			if tc.wantErrIs != nil && !errors.Is(err, tc.wantErrIs) {
+				t.Fatalf("RunApp() err = %v, want %v", err, tc.wantErrIs)
 			}
 			if !tc.wantErr && err != nil && !errors.Is(err, http.ErrServerClosed) {
 				t.Fatalf("RunApp() unexpected err = %v", err)
@@ -642,18 +611,30 @@ func TestNewRestateServer(t *testing.T) {
 }
 
 type covenDreamerArmTestCase struct {
-	name         string
-	key          string
-	alreadyArmed bool
-	failGet      bool
-	nilWorker    bool
-	nilStore     bool
-	failRun      error
-	lastRunAt    *time.Time
-	wantErrSub   string
-	wantDelayed  bool
-	wantStack    string
-	wantSend     bool
+	name        string
+	key         string
+	nilWorker   bool
+	nilStore    bool
+	failRun     error
+	lastRunAt   *time.Time
+	wantErrSub  string
+	wantDelayed bool
+	wantStack   string
+	wantSend    bool
+}
+
+// stubDreamDueState backs dreamDueStateKey with *due: Get reads it, Set writes it.
+func stubDreamDueState(mc *mocks.MockContext, due *int64) {
+	mc.On("Get", dreamDueStateKey, mock.Anything).Run(func(args mock.Arguments) {
+		if p, ok := args.Get(1).(*int64); ok && p != nil {
+			*p = *due
+		}
+	}).Return(*due != 0, nil).Maybe()
+	mc.On("Set", dreamDueStateKey, mock.Anything).Run(func(args mock.Arguments) {
+		if v, ok := args.Get(1).(int64); ok {
+			*due = v
+		}
+	}).Return().Maybe()
 }
 
 func runCovenDreamerArmCase(t *testing.T, tc covenDreamerArmTestCase) {
@@ -673,20 +654,11 @@ func runCovenDreamerArmCase(t *testing.T, tc covenDreamerArmTestCase) {
 
 	mc := mocks.NewMockContext(t)
 	mc.On("Key").Return(tc.key).Maybe()
+	mc.On("Clear", legacyArmedStateKey).Return().Maybe()
+	mc.On("Clear", legacyFailuresStateKey).Return().Maybe()
+	var due int64
+	stubDreamDueState(mc, &due)
 	sends := captureCovenSends(t, mc)
-	switch {
-	case tc.failGet:
-		mc.On("Get", "armed", mock.Anything).Return(false, restate.ToTerminalError(errors.New("state load error")))
-	case tc.alreadyArmed:
-		mc.On("Get", "armed", mock.Anything).Run(func(args mock.Arguments) {
-			if pp, ok := args.Get(1).(*bool); ok && pp != nil {
-				*pp = true
-			}
-		}).Return(true, nil)
-	default:
-		mc.On("Get", "armed", mock.Anything).Return(false, nil).Maybe()
-		mc.On("Set", "armed", true).Maybe()
-	}
 	if tc.failRun != nil {
 		mc.On("Run", mock.Anything, mock.Anything, mock.Anything).Return(restate.TerminalErrorf("%v", tc.failRun))
 	} else {
@@ -698,20 +670,19 @@ func runCovenDreamerArmCase(t *testing.T, tc covenDreamerArmTestCase) {
 	if tc.wantErrSub != "" {
 		require.Error(t, err)
 		require.Contains(t, err.Error(), tc.wantErrSub)
+		require.Empty(t, sends.snapshot())
 		return
 	}
 	require.NoError(t, err)
 
 	calls := sends.snapshot()
-	if !tc.wantSend {
-		require.Empty(t, calls)
-		return
-	}
 	require.Len(t, calls, 1)
 	require.Equal(t, "CovenDreamer", calls[0].service)
 	require.Equal(t, tc.wantStack, calls[0].key)
 	require.Equal(t, "Dream", calls[0].method)
 	require.Equal(t, tc.wantDelayed, calls[0].delayed)
+	require.NotZero(t, due, "Arm must store the due token")
+	require.Equal(t, DreamRequest{Due: due}, calls[0].input, "the sent Dream must carry the stored due token")
 }
 
 func TestCovenDreamer_Arm(t *testing.T) {
@@ -722,64 +693,12 @@ func TestCovenDreamer_Arm(t *testing.T) {
 	stale := now.Add(-25 * time.Hour)
 
 	tests := []covenDreamerArmTestCase{
-		{
-			name:         "already armed does nothing and sends no invocation",
-			key:          "aerial",
-			alreadyArmed: true,
-			wantSend:     false,
-		},
-		{
-			name:       "get armed error propagates error",
-			key:        "aerial",
-			failGet:    true,
-			wantErrSub: "state load error",
-		},
-		{
-			name:        "nil worker defaults delay to min interval",
-			key:         "",
-			nilWorker:   true,
-			wantDelayed: true,
-			wantStack:   config.DefaultStack,
-			wantSend:    true,
-		},
-		{
-			name:        "nil store defaults delay to min interval",
-			key:         "agent-beta",
-			nilStore:    true,
-			wantDelayed: true,
-			wantStack:   "agent-beta",
-			wantSend:    true,
-		},
-		{
-			name:        "zero watermark runs immediately without delay",
-			key:         "aerial",
-			lastRunAt:   nil,
-			wantDelayed: false,
-			wantStack:   "aerial",
-			wantSend:    true,
-		},
-		{
-			name:        "recent watermark arms with remaining delay",
-			key:         "aerial",
-			lastRunAt:   &recent,
-			wantDelayed: true,
-			wantStack:   "aerial",
-			wantSend:    true,
-		},
-		{
-			name:        "stale watermark runs immediately without delay",
-			key:         "aerial",
-			lastRunAt:   &stale,
-			wantDelayed: false,
-			wantStack:   "aerial",
-			wantSend:    true,
-		},
-		{
-			name:       "compute delay error propagates error",
-			key:        "aerial",
-			failRun:    errors.New("db compute error"),
-			wantErrSub: "db compute error",
-		},
+		{name: "nil worker defaults delay to min interval", key: "", nilWorker: true, wantDelayed: true, wantStack: config.DefaultStack, wantSend: true},
+		{name: "nil store defaults delay to min interval", key: "agent-beta", nilStore: true, wantDelayed: true, wantStack: "agent-beta", wantSend: true},
+		{name: "zero watermark runs immediately without delay", key: "aerial", wantStack: "aerial", wantSend: true},
+		{name: "recent watermark arms with remaining delay", key: "aerial", lastRunAt: &recent, wantDelayed: true, wantStack: "aerial", wantSend: true},
+		{name: "stale watermark runs immediately without delay", key: "aerial", lastRunAt: &stale, wantStack: "aerial", wantSend: true},
+		{name: "compute delay error propagates error", key: "aerial", failRun: errors.New("db compute error"), wantErrSub: "db compute error"},
 	}
 
 	for _, tc := range tests {
@@ -790,64 +709,52 @@ func TestCovenDreamer_Arm(t *testing.T) {
 	}
 }
 
+func TestDreamDelay(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 1, 2, 12, 0, 0, 0, time.UTC)
+	at := func(ago time.Duration) *time.Time { v := now.Add(-ago); return &v }
+	tests := []struct {
+		name      string
+		lastRunAt *time.Time
+		want      time.Duration
+	}{
+		{name: "never ran", lastRunAt: nil, want: 0},
+		{name: "zero time", lastRunAt: &time.Time{}, want: 0},
+		{name: "ran 2h ago waits the rest of the day", lastRunAt: at(2 * time.Hour), want: DefaultDreamingMinInterval - 2*time.Hour},
+		{name: "ran exactly one interval ago", lastRunAt: at(DefaultDreamingMinInterval), want: 0},
+		{name: "ran 25h ago", lastRunAt: at(25 * time.Hour), want: 0},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, tc.want, dreamDelay(tc.lastRunAt, now))
+		})
+	}
+}
+
 func TestCovenDreamer_Dream(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name            string
-		key             string
-		nilWorker       bool
-		nilDreamer      bool
-		failOp          string
-		initialFailures int
-		wantStack       string
-		wantDelay       time.Duration
-		wantErr         bool
+		name       string
+		key        string
+		nilWorker  bool
+		nilDreamer bool
+		failOp     string
+		storedDue  int64
+		reqDue     int64
+		wantStack  string
+		wantSend   bool
+		wantErr    bool
 	}{
-		{
-			name:       "nil dreamer returns error",
-			nilDreamer: true,
-			wantErr:    true,
-		},
-		{
-			name:      "nil worker runs safely and schedules next cycle",
-			key:       "",
-			nilWorker: true,
-			wantStack: config.DefaultStack,
-			wantDelay: DefaultDreamingMinInterval,
-		},
-		{
-			name:      "worker with components runs consolidation and schedules next cycle",
-			key:       "stack-alpha",
-			nilWorker: false,
-			wantStack: "stack-alpha",
-			wantDelay: DefaultDreamingMinInterval,
-		},
-		{
-			name:      "consolidate facts error logs failure and schedules retry",
-			key:       "stack-err",
-			failOp:    "GetAllFactsWithEmbeddings",
-			wantStack: "stack-err",
-			wantDelay: DefaultDreamingRetryInterval,
-			wantErr:   false,
-		},
-		{
-			name:            "consolidate facts consecutive errors applies exponential backoff",
-			key:             "stack-err-backoff",
-			failOp:          "GetAllFactsWithEmbeddings",
-			initialFailures: 2,
-			wantStack:       "stack-err-backoff",
-			wantDelay:       4 * DefaultDreamingRetryInterval,
-			wantErr:         false,
-		},
-		{
-			name:      "consolidate skills error logs failure and schedules retry",
-			key:       "stack-err-skills",
-			failOp:    "GetPendingProceduralCandidates",
-			wantStack: "stack-err-skills",
-			wantDelay: DefaultDreamingRetryInterval,
-			wantErr:   false,
-		},
+		{name: "nil dreamer returns error", nilDreamer: true, wantErr: true},
+		{name: "nil worker runs safely and schedules next cycle", nilWorker: true, wantStack: config.DefaultStack, wantSend: true},
+		{name: "matching token runs consolidation and schedules next cycle", key: "stack-alpha", storedDue: 1700, reqDue: 1700, wantStack: "stack-alpha", wantSend: true},
+		{name: "legacy empty payload with no stored token runs", key: "stack-legacy", wantStack: "stack-legacy", wantSend: true},
+		{name: "superseded token does nothing", key: "stack-alpha", storedDue: 1800, reqDue: 1700},
+		{name: "legacy payload after re-arm does nothing", key: "stack-alpha", storedDue: 1800},
+		{name: "consolidate facts error still schedules normal interval", key: "stack-err", failOp: "facts", wantStack: "stack-err", wantSend: true},
+		{name: "consolidate skills error still schedules normal interval", key: "stack-err-skills", failOp: "skills", wantStack: "stack-err-skills", wantSend: true},
 	}
 
 	for _, tc := range tests {
@@ -856,23 +763,10 @@ func TestCovenDreamer_Dream(t *testing.T) {
 
 			mc := mocks.NewMockContext(t)
 			mc.On("Key").Return(tc.key).Maybe()
-			mc.On("Set", "armed", true).Maybe()
-			failureCount := tc.initialFailures
-			mc.On("Get", "failures", mock.Anything).Run(func(args mock.Arguments) {
-				if outPtr, ok := args.Get(1).(*int); ok && outPtr != nil {
-					*outPtr = failureCount
-				}
-			}).Return(true, nil).Maybe()
-			mc.On("Set", "failures", mock.Anything).Run(func(args mock.Arguments) {
-				if val, ok := args.Get(1).(int); ok {
-					failureCount = val
-				}
-			}).Return().Maybe()
-			mc.On("Clear", "failures").Run(func(args mock.Arguments) {
-				failureCount = 0
-			}).Return().Maybe()
+			due := tc.storedDue
+			stubDreamDueState(mc, &due)
 			sends := captureCovenSends(t, mc)
-			stubCovenRun(mc, true)
+			runs := stubCovenRun(mc, true)
 
 			var dreamer *CovenDreamer
 			if !tc.nilDreamer {
@@ -880,9 +774,9 @@ func TestCovenDreamer_Dream(t *testing.T) {
 				if !tc.nilWorker {
 					db := newTestDB(t)
 					switch tc.failOp {
-					case "GetAllFactsWithEmbeddings":
+					case "facts":
 						execSQL(t, db, sabotageFacts)
-					case "GetPendingProceduralCandidates":
+					case "skills":
 						execSQL(t, db, sabotageProcedural)
 					}
 					worker = NewWorker(WorkerConfig{
@@ -897,29 +791,29 @@ func TestCovenDreamer_Dream(t *testing.T) {
 				dreamer = NewCovenDreamer(worker)
 			}
 
-			err := dreamer.Dream(restate.WithMockContext(mc), struct{}{})
+			err := dreamer.Dream(restate.WithMockContext(mc), DreamRequest{Due: tc.reqDue})
 			if tc.wantErr {
 				require.Error(t, err)
-				if !tc.nilDreamer {
-					calls := sends.snapshot()
-					require.Len(t, calls, 1)
-					require.Equal(t, "CovenDreamer", calls[0].service)
-					require.Equal(t, tc.wantStack, calls[0].key)
-					require.Equal(t, "Dream", calls[0].method)
-					require.True(t, calls[0].delayed)
-					require.Equal(t, restate.WithDelay(tc.wantDelay), calls[0].option)
-				}
+				require.True(t, restate.IsTerminalError(err))
 				return
 			}
 			require.NoError(t, err)
+			require.False(t, runs.hasRetryCap, "CovenDreamer.Dream must not cap retry attempts")
 
 			calls := sends.snapshot()
+			if !tc.wantSend {
+				require.Empty(t, calls)
+				require.Equal(t, tc.storedDue, due, "a superseded Dream must not touch the live token")
+				return
+			}
 			require.Len(t, calls, 1)
 			require.Equal(t, "CovenDreamer", calls[0].service)
 			require.Equal(t, tc.wantStack, calls[0].key)
 			require.Equal(t, "Dream", calls[0].method)
 			require.True(t, calls[0].delayed)
-			require.Equal(t, restate.WithDelay(tc.wantDelay), calls[0].option)
+			require.Equal(t, restate.WithDelay(DefaultDreamingMinInterval), calls[0].option)
+			require.NotEqual(t, tc.storedDue, due, "Dream must store a fresh due token")
+			require.Equal(t, DreamRequest{Due: due}, calls[0].input)
 		})
 	}
 }
@@ -1135,7 +1029,7 @@ func TestWorker_StartDreamerArm_Retry(t *testing.T) {
 	require.GreaterOrEqual(t, armRetryAttempts.Load(), int32(2))
 }
 
-func TestWorker_StartDreamerArm_ErrorAndFallbacks(t *testing.T) {
+func TestWorker_StartDreamerArm_ErrorAndExtractor(t *testing.T) {
 	t.Parallel()
 
 	errHandled := make(chan struct{})
@@ -1177,64 +1071,85 @@ func TestWorker_StartDreamerArm_ErrorAndFallbacks(t *testing.T) {
 	ctxExt, cancelExt := context.WithCancel(context.Background())
 	cancelExt()
 	require.ErrorIs(t, wExtractor.Start(ctxExt), context.Canceled)
-
-	// Worker with empty RestateIngressURL falls back to in-process ticker loop and exits on ctx cancellation
-	wNoIngress := NewWorker(WorkerConfig{
-		Stack:             "aerial",
-		RestateIngressURL: "",
-		TickInterval:      5 * time.Millisecond,
-	})
-	ctxNoIngress, cancelNoIngress := context.WithCancel(context.Background())
-	time.AfterFunc(20*time.Millisecond, cancelNoIngress)
-	require.ErrorIs(t, wNoIngress.Start(ctxNoIngress), context.Canceled)
-
-	// When fallbackMu is held, runDaily skips immediately without overlapping
-	wNoIngress.fallbackMu.Lock()
-	wNoIngress.runDaily(context.Background())
-	wNoIngress.fallbackMu.Unlock()
 }
 
 func TestAdminExtract_RestateIngressExtractFn(t *testing.T) {
 	t.Parallel()
 
-	var gotEndpoint string
-	var gotIdempotency string
-	mockRestate := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotEndpoint = r.URL.Path
-		gotIdempotency = r.Header.Get("Idempotency-Key")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{}`))
-	}))
-	defer mockRestate.Close()
-
-	cfg := &config.Config{
-		Stack:             "custom-stack",
-		RestateIngressURL: mockRestate.URL,
+	tests := []struct {
+		name      string
+		path      string
+		header    string
+		body      string
+		wantSends []string
+	}{
+		{name: "UnscopedThreadDefaultsToConfigStackWithoutKey", path: "/admin/extract?thread_id=th-test-admin", wantSends: []string{"/CovenThread/custom-stack/th-test-admin/Extract/send key="}},
+		{name: "ScopedDefaultStackIsPreserved", path: "/admin/extract?thread_id=aerial/th-default", wantSends: []string{"/CovenThread/aerial/th-default/Extract/send key="}},
+		{name: "RequestIDHeaderKeysOperation", path: "/admin/extract?thread_id=th-1", header: "req-42", wantSends: []string{"/CovenThread/custom-stack/th-1/Extract/send key=admin:extract:custom-stack:req-42"}},
+		{name: "RequestIDBodyKeysOperation", path: "/admin/extract", body: `{"thread_id":"aerial/th-2","request_id":" req-7 "}`, wantSends: []string{"/CovenThread/aerial/th-2/Extract/send key=admin:extract:aerial:req-7"}},
+		{name: "HeaderWinsOverBodyRequestID", path: "/admin/extract", header: "req-h", body: `{"thread_id":"th-3","request_id":"req-b"}`, wantSends: []string{"/CovenThread/custom-stack/th-3/Extract/send key=admin:extract:custom-stack:req-h"}},
 	}
 
-	th := NewToolHandler(cfg, store.NewSQLStore(newTestDB(t)), nil)
-	worker := NewWorker(WorkerConfig{
-		Stack:             "custom-stack",
-		RestateIngressURL: mockRestate.URL,
-		HTTPClient:        mockRestate.Client(),
-	})
-	extractFn := newExtractFn(cfg, worker, th)
-	server := NewServer(th, extractFn)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			rec := &ingressRecorder{}
+			srv := httptest.NewServer(rec)
+			defer srv.Close()
+			cfg := &config.Config{Stack: "custom-stack", RestateIngressURL: srv.URL}
+			worker := NewWorker(WorkerConfig{Stack: "custom-stack", RestateIngressURL: srv.URL, HTTPClient: srv.Client()})
+			server := NewServer(NewToolHandler(cfg, nil, nil), newExtractFn(cfg, worker))
 
-	// Unscoped thread ID defaults to cfg.EffectiveStack() ("custom-stack")
-	req := httptest.NewRequest(http.MethodPost, "/admin/extract?thread_id=th-test-admin", http.NoBody)
-	rr := httptest.NewRecorder()
-	server.Routes().ServeHTTP(rr, req)
-	require.Equal(t, http.StatusOK, rr.Code)
-	require.Contains(t, gotEndpoint, "/CovenThread/custom-stack/th-test-admin/Extract/send")
-	require.Empty(t, gotIdempotency)
+			req := httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(tc.body))
+			if tc.header != "" {
+				req.Header.Set("X-Request-ID", tc.header)
+			}
+			rr := httptest.NewRecorder()
+			server.Routes().ServeHTTP(rr, req)
+			require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+			require.Equal(t, tc.wantSends, rec.snapshot())
+		})
+	}
+}
 
-	// Explicitly scoped with DefaultStack ("aerial/th-default") preserves "aerial", does not rewrite to custom-stack
-	reqAerial := httptest.NewRequest(http.MethodPost, "/admin/extract?thread_id=aerial/th-default", http.NoBody)
-	rrAerial := httptest.NewRecorder()
-	server.Routes().ServeHTTP(rrAerial, reqAerial)
-	require.Equal(t, http.StatusOK, rrAerial.Code)
-	require.Contains(t, gotEndpoint, "/CovenThread/aerial/th-default/Extract/send")
+func TestAdminExtractIdempotencyKey(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		stack     string
+		requestID string
+		want      string
+	}{
+		{name: "request id names the operation", stack: "agent-alpha", requestID: "r-1", want: "admin:extract:agent-alpha:r-1"},
+		{name: "empty stack normalizes to default", stack: "", requestID: "r-2", want: "admin:extract:aerial:r-2"},
+		{name: "whitespace request id is trimmed", stack: "aerial", requestID: "  r-3  ", want: "admin:extract:aerial:r-3"},
+		{name: "no request id omits the key", stack: "aerial", requestID: "  ", want: ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, tc.want, adminExtractIdempotencyKey(tc.stack, tc.requestID))
+		})
+	}
+}
+
+func TestValidateRestateIngress(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		url     string
+		wantErr error
+	}{
+		{name: "configured url passes", url: "http://restate.aerial:8080"},
+		{name: "empty url is a config error", url: "", wantErr: errRestateIngressRequired},
+		{name: "whitespace url is a config error", url: "   ", wantErr: errRestateIngressRequired},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			require.ErrorIs(t, validateRestateIngress(tc.url), tc.wantErr)
+		})
+	}
 }
 
 func TestDispatchCovenExtract(t *testing.T) {
@@ -1252,24 +1167,11 @@ func TestDispatchCovenExtract(t *testing.T) {
 	}))
 	defer mockRestate.Close()
 
-	// Direct extraction without ingress URL
-	directStore := store.NewSQLStore(newTestDB(t))
-	wDirect := NewWorker(WorkerConfig{
-		Stack:  "aerial",
-		Store:  directStore,
-		Ollama: &MockOllamaClient{embedding: testEmbedding(1.0)},
-		LLMClient: func(context.Context, string) (string, error) {
-			return `{"facts":[]}`, nil
-		},
-	})
-	require.NoError(t, dispatchCovenExtract(context.Background(), wDirect, "aerial", "th-direct"))
-
 	// Ingress with explicit message ID sets Idempotency-Key header and routes to /send
 	wIngress := NewWorker(WorkerConfig{
 		Stack:             "aerial",
 		RestateIngressURL: mockRestate.URL,
 		HTTPClient:        mockRestate.Client(),
-		Store:             directStore,
 	})
 	require.NoError(t, dispatchCovenExtract(context.Background(), wIngress, "aerial", "th-msg", "custom-msg-id-123"))
 	require.Equal(t, "coven:extract:aerial/th-msg:custom-msg-id-123", gotIdempotency)
