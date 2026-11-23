@@ -356,6 +356,7 @@ func TestGitHubClientHeadChecksBlocked(t *testing.T) {
 		{name: "all passed", sha: "h1", routes: map[string][]apiResponse{checksRoute: {{Status: 200, Body: `{"check_runs":[{"id":1,"name":"lint","status":"completed","conclusion":"success"}]}`}}}},
 		{name: "pending run blocks", sha: "h1", routes: map[string][]apiResponse{checksRoute: {{Status: 200, Body: `{"check_runs":[{"id":1,"name":"lint","status":"in_progress"}]}`}}}, want: true},
 		{name: "failed run blocks", sha: "h1", routes: map[string][]apiResponse{checksRoute: {{Status: 200, Body: `{"check_runs":[{"id":1,"name":"test","status":"completed","conclusion":"failure"}]}`}}}, want: true},
+		{name: "cancelled run does not block", sha: "h1", routes: map[string][]apiResponse{checksRoute: {{Status: 200, Body: `{"check_runs":[{"id":1,"name":"test","status":"completed","conclusion":"cancelled"}]}`}}}},
 		{name: "failed gate aggregator alone does not block", sha: "h1", routes: map[string][]apiResponse{checksRoute: {{Status: 200, Body: `{"check_runs":[{"id":1,"name":"CI Gate","status":"completed","conclusion":"failure"}]}`}}}},
 		{
 			name: "newest rerun of a check wins", sha: "h1",

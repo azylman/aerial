@@ -47,7 +47,10 @@ func fixtureSHA(objType, data string) string {
 func treeOf(entries ...string) string {
 	var b strings.Builder
 	for i := 0; i+2 < len(entries); i += 3 {
-		raw, _ := hex.DecodeString(entries[i+2])
+		raw, err := hex.DecodeString(entries[i+2])
+		if err != nil {
+			panic(err)
+		}
 		b.WriteString(entries[i] + " " + entries[i+1] + "\x00" + string(raw))
 	}
 	return b.String()
@@ -110,7 +113,10 @@ func packOf(objs ...fixtureObj) []byte {
 		case o.baseIdx >= 0:
 			buf.Write(ofsBytes(offsets[i] - offsets[o.baseIdx]))
 		case o.baseSHA != "":
-			raw, _ := hex.DecodeString(o.baseSHA)
+			raw, err := hex.DecodeString(o.baseSHA)
+			if err != nil {
+				panic(err)
+			}
 			buf.Write(raw)
 		}
 		if o.rawZ != nil {
@@ -177,12 +183,18 @@ func sharedTreePush(content, dirA, dirB string) []fixtureObj {
 	sub := treeOf("100644", "hosts.yaml", blobSHA)
 	subSHA := fixtureSHA("tree", sub)
 	objs := []fixtureObj{lit(packBlob, content), lit(packTree, sub)}
-	parentA, nameA, _ := strings.Cut(dirA, "/")
-	parentB, nameB, _ := strings.Cut(dirB, "/")
+	parentA, nameA, okA := strings.Cut(dirA, "/")
+	parentB, nameB, okB := strings.Cut(dirB, "/")
+	if okA != okB {
+		panic("sharedTreePush: mismatched dir depths")
+	}
 	var root string
 	if nameA == "" {
 		root = treeOf("40000", parentA, subSHA, "40000", parentB, subSHA)
 	} else {
+		if !okA || !okB {
+			panic("sharedTreePush: expected okA and okB")
+		}
 		mid := treeOf("40000", nameA, subSHA, "40000", nameB, subSHA)
 		objs = append(objs, lit(packTree, mid))
 		root = treeOf("40000", parentA, fixtureSHA("tree", mid))

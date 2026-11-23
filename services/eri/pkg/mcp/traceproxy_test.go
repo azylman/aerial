@@ -83,7 +83,10 @@ func newUpstream(t *testing.T) (*httptest.Server, <-chan seenRequest) {
 	seen := make(chan seenRequest, 16)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var buf bytes.Buffer
-		_, _ = buf.ReadFrom(r.Body)
+		if _, err := buf.ReadFrom(r.Body); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 		seen <- seenRequest{
 			traceparent: r.Header.Get("Traceparent"), daemonHeader: r.Header.Get("X-Eri-Daemon"),
 			auth: r.Header.Get("Authorization"), path: r.URL.RequestURI(), body: buf.String(),
@@ -298,7 +301,10 @@ func runTraceProxyCase(t *testing.T, tc traceProxyCase) {
 	defer srv.Close()
 
 	for _, a := range tc.announcements {
-		body, _ := json.Marshal(a)
+		body, err := json.Marshal(a)
+		if err != nil {
+			t.Fatalf("marshal announcement: %v", err)
+		}
 		resp, err := srv.Client().Post(srv.URL+"/internal/mcp-proxy/announce", "application/json", bytes.NewReader(body))
 		if err != nil {
 			t.Fatalf("announce: %v", err)
@@ -314,7 +320,10 @@ func runTraceProxyCase(t *testing.T, tc traceProxyCase) {
 
 func assertTraceProxyCall(t *testing.T, srv *httptest.Server, rec endedSpans, seen <-chan seenRequest, i int, call proxyCall) {
 	t.Helper()
-	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/internal/mcp-proxy/discord/docket", strings.NewReader(call.body))
+	req, err := http.NewRequest(http.MethodPost, srv.URL+"/internal/mcp-proxy/discord/docket", strings.NewReader(call.body))
+	if err != nil {
+		t.Fatalf("call %d: NewRequest: %v", i, err)
+	}
 	req.Header.Set("Authorization", "Bearer upstream-token")
 	if call.daemonHeader != "" {
 		req.Header.Set("X-Eri-Daemon", call.daemonHeader)

@@ -291,7 +291,9 @@ func TestExtractResponseFromMuseTranscriptFile(t *testing.T) {
 	}
 
 	pEmpty := filepath.Join(tmp, "empty.jsonl")
-	_ = os.WriteFile(pEmpty, []byte(""), 0o644)
+	if err := os.WriteFile(pEmpty, []byte(""), 0o644); err != nil {
+		t.Fatalf("WriteFile(empty): %v", err)
+	}
 	if res := extractResponseFromMuseTranscriptFile(context.Background(), pEmpty, time.Time{}); res != "" {
 		t.Fatalf("expected empty for empty file, got %q", res)
 	}
@@ -301,7 +303,9 @@ func TestExtractResponseFromMuseTranscriptFile(t *testing.T) {
 		`{"payload_type":"runtime.session","recorded_at":1762510000000000,"payload":{"kind":"run","event":{"kind":"started","prompt":"Task"}}}`,
 		`{"payload_type":"runtime.session","recorded_at":1762510001000000,"payload":{"kind":"run","event":{"kind":"assistant_message_committed","text":"Here is the result."}}}`,
 	}, "\n") + "\n"
-	_ = os.WriteFile(pValid, []byte(content), 0o644)
+	if err := os.WriteFile(pValid, []byte(content), 0o644); err != nil {
+		t.Fatalf("WriteFile(valid): %v", err)
+	}
 
 	res := extractResponseFromMuseTranscriptFile(context.Background(), pValid, time.Unix(1762509999, 0))
 	if res != "Here is the result." {

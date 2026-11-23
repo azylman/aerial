@@ -225,7 +225,11 @@ func runFlushActiveStepCase(t *testing.T, tc flushActiveStepTestCase) {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			capturedMu.Lock()
 			capturedURI = r.URL.RequestURI()
-			_ = json.NewDecoder(r.Body).Decode(&capturedReq)
+			if err := json.NewDecoder(r.Body).Decode(&capturedReq); err != nil {
+				capturedMu.Unlock()
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
 			capturedMu.Unlock()
 
 			w.WriteHeader(tc.serverStatus)
