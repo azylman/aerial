@@ -71,46 +71,6 @@ func setupTestStoreWithBuild() *memoryVanadisStore {
 	return s
 }
 
-func TestValidateUpdateChunkInput_Validation(t *testing.T) {
-	t.Parallel()
-
-	strPtr := func(s string) *string { return &s }
-
-	// validateUpdateChunkInput tests
-	_, err := validateUpdateChunkInput("", "c1", UpdateChunkRequest{})
-	if err == nil || !strings.Contains(err.Error(), "build id and chunk ref are required") {
-		t.Fatalf("expected error on empty buildID, got %v", err)
-	}
-	_, err = validateUpdateChunkInput("b1", "", UpdateChunkRequest{})
-	if err == nil || !strings.Contains(err.Error(), "build id and chunk ref are required") {
-		t.Fatalf("expected error on empty chunkRef, got %v", err)
-	}
-	_, err = validateUpdateChunkInput("b1", "c1", UpdateChunkRequest{})
-	if err == nil || !strings.Contains(err.Error(), "at least one updated field are required") {
-		t.Fatalf("expected error on empty fields, got %v", err)
-	}
-	_, err = validateUpdateChunkInput("b1", "c1", UpdateChunkRequest{Mode: strPtr("  ")})
-	if err == nil || !strings.Contains(err.Error(), "mode cannot be empty string") {
-		t.Fatalf("expected error on empty mode string, got %v", err)
-	}
-	_, err = validateUpdateChunkInput("b1", "c1", UpdateChunkRequest{Mode: strPtr("invalid-mode")})
-	if err == nil {
-		t.Fatal("expected error on invalid mode")
-	}
-	_, err = validateUpdateChunkInput("b1", "c1", UpdateChunkRequest{Effort: "huge"})
-	if err == nil {
-		t.Fatal("expected error on invalid effort")
-	}
-	effort, err := validateUpdateChunkInput("b1", "c1", UpdateChunkRequest{Effort: "high"})
-	if err != nil || effort != "medium" {
-		t.Fatalf("expected medium effort, got %q (err: %v)", effort, err)
-	}
-	effort, err = validateUpdateChunkInput("b1", "c1", UpdateChunkRequest{Title: "New Title"})
-	if err != nil || effort != "" {
-		t.Fatalf("expected empty effort, got %q (err: %v)", effort, err)
-	}
-}
-
 // serveChunkRequest routes one request through srv's SetupMux. errBody swaps the
 // request body for a reader that always fails.
 func serveChunkRequest(srv *VanadisServer, method, path, body string, errBody bool) *httptest.ResponseRecorder {

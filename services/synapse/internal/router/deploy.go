@@ -276,9 +276,7 @@ func (s *RouterServer) processOwnedDeployEvent(ctx context.Context, evt DeployEv
 	s.evaluateFluxEventTriggers(ctx, evt)
 
 	if evt.PRNumber <= 0 {
-		// PR-less alerts have no PRObject key: the stateless system-alert
-		// path publishes and prompts without touching Restate.
-		return s.publishUnownedDeployEvent(ctx, evt)
+		return &evt, nil
 	}
 	waiting := evt.SourceKind == kindKustomization && s.ownedWaitingForImageBuild(ctx, evt.Repo, evt.PRNumber, view)
 	if handled, err := s.ownedDeferDeployEventToWatcher(ctx, evt, view, waiting); handled || err != nil {

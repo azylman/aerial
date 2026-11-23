@@ -35,11 +35,6 @@ type StatusWidgetDeliverer interface {
 	DeleteStatusWidget(ctx context.Context, agentName, channelID, messageID string) error
 }
 
-// DirectMessageDeliverer abstracts direct message delivery to decouple from concrete discord sender.
-type DirectMessageDeliverer interface {
-	DeliverDirectMessage(ctx context.Context, channelID, content string) error
-}
-
 // RestateEriClient implements EriClient against Restate Virtual Objects.
 type RestateEriClient struct {
 	restateURL string
@@ -404,9 +399,6 @@ func (c *RestateEriClient) Message(ctx context.Context, channelID, content strin
 
 	if mda, ok := deliverer.(agentMessageDeliverer); ok && mda != nil {
 		return mda.DeliverDirectMessageWithAgent(ctx, c.effectiveAgent(ctx), cleanChannelID, cleanContent)
-	}
-	if md, ok := deliverer.(DirectMessageDeliverer); ok && md != nil {
-		return md.DeliverDirectMessage(ctx, cleanChannelID, cleanContent)
 	}
 
 	return errors.New("direct message delivery is unconfigured")

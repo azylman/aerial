@@ -76,15 +76,10 @@ const BADGES_ALL = { Tasks: '5', Schedules: '40', Memory: '150', Builds: '10' };
 const BADGES_NO_STATUS = { ...BADGES_ALL, Tasks: '0' };
 
 const BRAND = ['Aerial Console'];
-/** status.json quick_launch_links (all six have a name and url). */
-const DOCK = ['🛰️ Console', '📈 Grafana', '📚 Docs', '🔭 Agentsview', '🏠 Homepage', '🏡 Home Assistant'];
 
 const SHELL_COUNTS: readonly CountExpectation[] = [
   { selector: '.view-tab-btn', count: 6 },
   { selector: '.tab-badge', count: 4 },
-  { selector: '.dock-chip', count: 6 },
-  { selector: '.dock-chip.active', count: 1 },
-  { selector: '.ping-dot.custom', count: 1 },
 ];
 
 /** status.json services: 15 healthy, aerial-vision and aerial-prospera degraded, aerial-kernel-mcp down. */
@@ -444,19 +439,19 @@ export const CONSOLE_ROWS: readonly ConsoleRow[] = [
     name: 'shell: bare URL lands on telemetry',
     start: '',
     steps: [],
-    expect: { hash: '#telemetry', activeTab: 'Overview', badges: BADGES_ALL, texts: [...BRAND, PERMET_STABLE, ...DOCK], counts: SHELL_COUNTS },
+    expect: { hash: '#telemetry', activeTab: 'Overview', badges: BADGES_ALL, texts: [...BRAND, PERMET_STABLE], counts: SHELL_COUNTS },
   },
   {
     name: 'shell: clicking a tab switches and updates the hash',
     start: '#telemetry',
     steps: [{ kind: 'clickTab', tab: 'Builds' }],
-    expect: { hash: '#builds', activeTab: 'Builds', badges: BADGES_ALL, texts: [...BRAND, PERMET_STABLE, ...DOCK], counts: SHELL_COUNTS },
+    expect: { hash: '#builds', activeTab: 'Builds', badges: BADGES_ALL, texts: [...BRAND, PERMET_STABLE], counts: SHELL_COUNTS },
   },
   {
     name: 'shell: keyboard activation of a tab',
     start: '#tasks',
     steps: [{ kind: 'keyTab', tab: 'Memory', key: 'Enter' }],
-    expect: { hash: '#memory', activeTab: 'Memory', badges: BADGES_ALL, texts: [...BRAND, PERMET_STABLE, ...DOCK], counts: SHELL_COUNTS },
+    expect: { hash: '#memory', activeTab: 'Memory', badges: BADGES_ALL, texts: [...BRAND, PERMET_STABLE], counts: SHELL_COUNTS },
   },
   {
     name: 'shell: schedules deep link never polls status',
@@ -469,7 +464,6 @@ export const CONSOLE_ROWS: readonly ConsoleRow[] = [
       texts: [...BRAND, PERMET_STATIC],
       counts: [
         { selector: '.view-tab-btn', count: 6 },
-        { selector: '.dock-chip', count: 0 },
       ],
     },
   },

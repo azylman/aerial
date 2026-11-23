@@ -229,7 +229,7 @@ func TestPostgresStoreUpsertService(t *testing.T) {
 
 func TestPostgresStorePruneServices(t *testing.T) {
 	t.Parallel()
-	keep := []string{"eri", "eri-restate"}
+	keep := []string{"eri"}
 	pruneExec := []recordedExec{{kind: "prune", args: []any{keep}}}
 	twoServices := []prunedRow{{service: "dashboard", count: 12}, {service: "hangar", count: 3}}
 	tests := []struct {

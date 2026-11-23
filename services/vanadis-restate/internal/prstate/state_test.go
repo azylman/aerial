@@ -114,42 +114,6 @@ func TestPRStateFailedCheckRunDetailed(t *testing.T) {
 	}
 }
 
-func TestPRStateRollbackFailedCheckRun(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name        string
-		check       string
-		recordSHA   string
-		rollbackSHA string
-		wasActive   bool
-		hadPrior    bool
-		wantActive  bool
-		wantEver    bool
-	}{
-		{name: "rollback fresh lint clears active and ever", check: "lint", recordSHA: "abc123", rollbackSHA: "abc123", wasActive: false, hadPrior: false, wantActive: false, wantEver: false},
-		{name: "rollback keeps prior ever failed", check: "lint", recordSHA: "abc123", rollbackSHA: "abc123", wasActive: false, hadPrior: true, wantActive: false, wantEver: true},
-		{name: "rollback skips when was active", check: "lint", recordSHA: "abc123", rollbackSHA: "abc123", wasActive: true, hadPrior: false, wantActive: true, wantEver: true},
-		{name: "rollback fresh roborev clears", check: "roborev", recordSHA: "abc123", rollbackSHA: "abc123", wasActive: false, hadPrior: false, wantActive: false, wantEver: false},
-		{name: "rollback roborev keeps prior ever", check: "roborev", recordSHA: "abc123", rollbackSHA: "abc123", wasActive: false, hadPrior: true, wantActive: false, wantEver: true},
-		{name: "stale sha rollback noop", check: "lint", recordSHA: "abc123", rollbackSHA: "def456", wasActive: false, hadPrior: false, wantActive: true, wantEver: true},
-		{name: "empty check rollback noop", check: "", recordSHA: "abc123", rollbackSHA: "abc123", wasActive: false, hadPrior: false, wantActive: false, wantEver: false},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			s := NewPRState("azylman/aerial", 101)
-			s.RecordFailedCheckRunDetailed(tc.recordSHA, tc.check)
-			s.RollbackFailedCheckRun(tc.rollbackSHA, tc.check, tc.wasActive, tc.hadPrior)
-			if got := s.HasActiveCheckRun(tc.recordSHA, tc.check); got != tc.wantActive {
-				t.Fatalf("HasActiveCheckRun = %v, want %v", got, tc.wantActive)
-			}
-			if got := s.HasEverFailedCheckRun(tc.recordSHA, tc.check); got != tc.wantEver {
-				t.Fatalf("HasEverFailedCheckRun = %v, want %v", got, tc.wantEver)
-			}
-		})
-	}
-}
-
 // TestPRStateClearFailedCISHA pins the ClearFailedCISHA fan-out: the failed
 // CI SHA, every per-check failure and the conflict-published SHA clear.
 func TestPRStateClearFailedCISHA(t *testing.T) {
@@ -246,14 +210,12 @@ func TestPRStateGenerationGating(t *testing.T) {
 	tests := []struct {
 		name       string
 		kind       string
-		retries    int
 		mints      int
 		wantGen    uint64
 		wantOldKey bool
 	}{
 		{name: "discord alert keyed to generation", kind: prwire.EffectDiscordAlert, mints: 1, wantGen: 2, wantOldKey: false},
 		{name: "deploy dispatch keyed to generation", kind: prwire.EffectDeployDispatch, mints: 1, wantGen: 2, wantOldKey: false},
-		{name: "retry preserves generation and keys", kind: prwire.EffectDiscordAlert, retries: 1, wantGen: 1, wantOldKey: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -266,9 +228,6 @@ func TestPRStateGenerationGating(t *testing.T) {
 			s.MarkEffectDispatched(k1)
 			if !s.WasEffectDispatched(k1) {
 				t.Fatalf("effect key should be dispatched in generation 1")
-			}
-			for range tc.retries {
-				s.RetryPRReadiness()
 			}
 			for range tc.mints {
 				s.RecordKustomizationRequests()
@@ -457,8 +416,8 @@ func TestRepoStateTouchPRKey(t *testing.T) {
 				}
 				s = restored
 			}
-			if got := s.PRKeys(); len(got) != tc.wantN {
-				t.Fatalf("PRKeys length = %d, want %d", len(got), tc.wantN)
+			if got := s.TouchedPRKeys; len(got) != tc.wantN {
+				t.Fatalf("TouchedPRKeys length = %d, want %d", len(got), tc.wantN)
 			}
 		})
 	}
@@ -484,8 +443,8 @@ func TestRepoStateTombstones(t *testing.T) {
 			s := NewRepoState("azylman/aerial")
 			s.RecordTombstone(tc.sha, tc.gen)
 			s.EvictTombstonesBelowGeneration(tc.minGen)
-			if got := s.HasTombstone(tc.query); got != tc.want {
-				t.Fatalf("HasTombstone(%q) = %v, want %v", tc.query, got, tc.want)
+			if got := (s.Tombstones != nil && s.Tombstones[tc.query] != 0); got != tc.want {
+				t.Fatalf("Tombstone(%q) = %v, want %v", tc.query, got, tc.want)
 			}
 		})
 	}
@@ -502,13 +461,11 @@ func TestPRStateNilReceiver(t *testing.T) {
 	t.Parallel()
 	alert := prwire.EffectDiscordAlert
 	var nilState *PRState
-	nilState.RollbackFailedCheckRun("abc123", "lint", false, false)
 	nilState.MarkConflictPublished("abc123")
 	nilState.ClearFailedCISHA()
 	nilState.ClearConflictPublished()
 	nilState.MarkTerminal(TerminalMerged)
 	nilState.Reopen()
-	nilState.RetryPRReadiness()
 	nilState.MarkEffectDispatched(nilState.EffectKeyFor(alert, "abc123", "", ""))
 	zero := &PRState{}
 	zero.MarkEffectDispatched(zero.EffectKeyFor(alert, "abc123", "", ""))
@@ -564,11 +521,7 @@ func TestRepoStateNilReceiver(t *testing.T) {
 		got  any
 		want any
 	}{
-		{name: "nil PRKeys", got: nilRepo.PRKeys(), want: []string(nil)},
-		{name: "nil HasTombstone", got: nilRepo.HasTombstone("abc123"), want: false},
 		{name: "nil RecordMainPushSHA", got: nilRepo.RecordMainPushSHA("abc123"), want: false},
-		{name: "zero value PRKeys", got: zeroRepo.PRKeys(), want: []string{"azylman/aerial#101"}},
-		{name: "zero value HasTombstone", got: zeroRepo.HasTombstone("abc123"), want: true},
 		{name: "empty repo RecordMainPushSHA", got: NewRepoState("").RecordMainPushSHA("abc123"), want: false},
 	}
 	for _, tc := range tests {

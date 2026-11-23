@@ -63,8 +63,6 @@ type (
 	DiscordIngressArgs           = model.DiscordIngressArgs
 	DiscordInteractionArgs       = model.DiscordInteractionArgs
 	DiscordMessageIngressRequest = model.DiscordMessageIngressRequest
-	PromptRequest                = model.PromptRequest
-	DispatchRequest              = model.DispatchRequest
 	DirectMessageRequest         = model.DirectMessageRequest
 	PRBuildLifecycle             = model.PRBuildLifecycle
 	DeployingPR                  = model.DeployingPR
@@ -80,29 +78,26 @@ type (
 )
 
 const (
-	deployedKustomizationsKey = "deployed_kustomizations"
-	kustomizationRequestsKey  = "kustomization_requests"
-	fluxSystemNamespace       = "flux-system"
-	eventDeploySuccess        = "deploy_success"
-	eventDeployFailed         = "deploy_failed"
-	eventDeployStarted        = "deploy_started"
-	eventDeployRollback       = "deploy_rollback"
-	eventSyncSuccess          = "sync_success"
-	eventSyncFailed           = "sync_failed"
-	kindKustomization         = "Kustomization"
-	kindHelmRelease           = "HelmRelease"
-	statusAccepted            = "accepted"
-	prConflict                = "conflict"
-	prSynced                  = "synced"
-	fieldStatus               = "status"
-	fieldError                = "error"
-	fieldEvent                = "event"
-	fieldJobName              = "job_name"
-	fieldPRNumber             = "pr_number"
-	errMsgInvalidJSONPayload  = "invalid json payload"
-	jobGitSync                = "git-sync"
-	jobGitMerge               = "git-merge"
-	maxRoboRevCommentRunes    = model.MaxRoboRevCommentRunes
+	fluxSystemNamespace      = "flux-system"
+	eventDeploySuccess       = "deploy_success"
+	eventDeployFailed        = "deploy_failed"
+	eventDeployStarted       = "deploy_started"
+	eventDeployRollback      = "deploy_rollback"
+	eventSyncSuccess         = "sync_success"
+	eventSyncFailed          = "sync_failed"
+	kindKustomization        = "Kustomization"
+	kindHelmRelease          = "HelmRelease"
+	statusAccepted           = "accepted"
+	prConflict               = "conflict"
+	prSynced                 = "synced"
+	fieldStatus              = "status"
+	fieldError               = "error"
+	fieldEvent               = "event"
+	fieldJobName             = "job_name"
+	fieldPRNumber            = "pr_number"
+	errMsgInvalidJSONPayload = "invalid json payload"
+	jobGitSync               = "git-sync"
+	jobGitMerge              = "git-merge"
 )
 
 const (
@@ -459,127 +454,12 @@ func (s *RouterServer) isValidAlertTarget(targetID string) bool {
 	return sys != "" && clean == sys && model.IsValidDiscordChannel(clean)
 }
 
-type alertPromptOpts struct {
-	silent       bool
-	skipIfActive bool
-	effort       string
-	dispatchID   string
-}
-
-func (s *RouterServer) dispatchAlertWithPrompt(ctx context.Context, targetID, label, dmMsg, prompt string, aOpts ...alertPromptOpts) error {
-	if s.dispatcher == nil {
-		return nil
-	}
-	var opt alertPromptOpts
-	if len(aOpts) > 0 {
-		opt = aOpts[0]
-	}
-	if dmMsg != "" && s.isValidAlertTarget(targetID) {
-		if err := s.dispatcher.DispatchDirectMessage(ctx, DirectMessageRequest{ChannelID: targetID, Content: dmMsg}); err != nil {
-			slog.WarnContext(ctx, "[synapse] [dispatcher] error dispatching direct message", "label", label, "error", err)
-		}
-	}
-	if opt.silent {
-		req := DispatchRequest{
-			ID:           opt.dispatchID,
-			Source:       "synapse",
-			TargetID:     targetID,
-			Prompt:       prompt,
-			Effort:       opt.effort,
-			SkipIfActive: opt.skipIfActive,
-		}
-		if err := s.dispatcher.DispatchBackground(ctx, req); err != nil {
-			slog.ErrorContext(ctx, "[synapse] [dispatcher] error dispatching background prompt", "label", label, "error", err)
-			return fmt.Errorf("dispatch background %s prompt: %w", label, err)
-		}
-		return nil
-	}
-	if !s.isValidAlertTarget(targetID) {
-		return nil
-	}
-	req := PromptRequest{ChannelID: targetID, Prompt: prompt}
-	if err := s.dispatcher.DispatchPrompt(ctx, req); err != nil {
-		slog.ErrorContext(ctx, "[synapse] [dispatcher] error dispatching prompt", "label", label, "error", err)
-		return fmt.Errorf("dispatch %s prompt: %w", label, err)
-	}
-	return nil
-}
-
-// publishUnownedDeployEvent handles a deploy alert that resolved to no PR.
-// No PRObject key exists for it, so synapse publishes the PR-less lifecycle
-// fact and prompts the system channel itself; Restate is never involved.
-func (s *RouterServer) publishUnownedDeployEvent(ctx context.Context, evt DeployEvent) (*DeployEvent, error) {
-	if !s.isValidAlertTarget(evt.TargetID) || s.dispatcher == nil {
-		return &evt, nil
-	}
-	prefix := model.FormatDirectMessagePrefix(evt.PRNumber, evt.Repo)
-	switch evt.Event {
-	case eventDeployStarted:
-		return &evt, s.publishPRLifecycleEvent(ctx, ownedDeployFact(evt, eventDeployStarted, statusDeploying, ""))
-	case eventDeploySuccess:
-		if err := s.publishPRLifecycleEvent(ctx, ownedDeployFact(evt, eventDeploySuccess, statusDeployed, "")); err != nil {
-			return &evt, err
-		}
-		return &evt, s.dispatchDeploymentSuccessPrompt(ctx, evt)
-	case eventDeployRollback, eventDeployFailed:
-		return &evt, s.handleDeployFailedOrRollback(ctx, evt, prefix)
-	case eventSyncFailed:
-		return &evt, s.handleDeploySyncFailed(ctx, evt, prefix)
-	}
-	return &evt, nil
-}
-
-func (s *RouterServer) handleDeployFailedOrRollback(ctx context.Context, evt DeployEvent, prefix string) error {
-	if err := s.publishPRLifecycleEvent(ctx, ownedDeployFact(evt, eventDeployFailed, eventDeployFailed, "")); err != nil {
-		return fmt.Errorf("publish deploy lifecycle event: %w", err)
-	}
-	targetID := strutil.FirstNonEmpty(evt.TargetID, s.currentConfig().SystemChannelID)
-	actionDesc, fixDesc := "Deployment failed", "deployment failure"
-	if evt.Event == eventDeployRollback {
-		actionDesc, fixDesc = "Deployment failed and rolled back", "deployment rollback failure"
-	}
-	dmMsg := fmt.Sprintf("💥 %s%s for %s. Following up...", prefix, actionDesc, evt.JobName)
-	prompt := model.FormatErrorDetailsBlock(
-		fmt.Sprintf("%s for job %s on %s (PR #%d, commit: %s).", actionDesc, evt.JobName, evt.Repo, evt.PRNumber, evt.CommitSHA),
-		evt.Details, "", fmt.Sprintf("Please investigate and fix the %s.", fixDesc),
-	)
-	return s.dispatchAlertWithPrompt(ctx, targetID, evt.Event, dmMsg, prompt)
-}
-
-func (s *RouterServer) handleDeploySyncFailed(ctx context.Context, evt DeployEvent, prefix string) error {
-	if err := s.publishPRLifecycleEvent(ctx, ownedDeployFact(evt, eventSyncFailed, eventDeployFailed, "")); err != nil {
-		return fmt.Errorf("publish deploy lifecycle event: %w", err)
-	}
-	header := fmt.Sprintf("Git sync failed for repo %s (commit: %s).", evt.Repo, evt.CommitSHA)
-	dmMsg := fmt.Sprintf("⚠️ %sGit file sync failed. Following up...", prefix)
-	prompt := model.FormatErrorDetailsBlock(header, evt.Details, "", "Please investigate and fix the git sync failure.")
-	return s.dispatchAlertWithPrompt(ctx, evt.TargetID, "sync_failed", dmMsg, prompt)
-}
-
 // ProcessDeployEvent normalizes one deploy alert and sends it to Restate.
 func (s *RouterServer) ProcessDeployEvent(ctx context.Context, evt DeployEvent) (*DeployEvent, error) {
+	if s.onProcessed != nil {
+		defer s.onProcessed(evt.Event, evt.JobName)
+	}
 	return s.processOwnedDeployEvent(ctx, evt)
-}
-
-func (s *RouterServer) dispatchDeploymentSuccessPrompt(ctx context.Context, evt DeployEvent) error {
-	if s.dispatcher == nil || !s.isValidAlertTarget(evt.TargetID) {
-		return nil
-	}
-	repoPart := ""
-	if evt.Repo != "" {
-		repoPart = " on " + evt.Repo
-	}
-	refPart := ""
-	if evt.DeploymentID != "" {
-		refPart = ", ref: " + evt.DeploymentID
-	}
-	header := fmt.Sprintf("Continuous Delivery deployment completed for job %s%s (PR #%d, commit: %s%s).", evt.JobName, repoPart, evt.PRNumber, evt.CommitSHA, refPart)
-	lines := []string{
-		header,
-		"",
-		"Directive: Confirm the deployment and suggest logical next steps, follow-up verification, or related tasks concisely.",
-	}
-	return s.dispatchAlertWithPrompt(ctx, evt.TargetID, "deploy_success", "", strings.Join(lines, "\n"))
 }
 
 func (s *RouterServer) handleFluxWebhook(w http.ResponseWriter, r *http.Request) {

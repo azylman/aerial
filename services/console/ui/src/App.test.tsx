@@ -45,7 +45,6 @@ const BODIES: Readonly<Record<string, unknown>> = {
     system_time: '2026-11-08T12:00:00Z',
     active_tasks: [{ id: 't1' }],
     services: [{ name: 'eri', status: 'healthy' }],
-    quick_launch_links: [],
   },
   '/console/api/schedules': { status: 'ok', summary: { total_active: 3 }, crons: [], one_shots: [] },
   '/console/api/facts': { facts: [], total: 9, limit: 0, offset: 0 },

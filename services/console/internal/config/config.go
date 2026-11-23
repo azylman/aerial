@@ -27,35 +27,16 @@ func ResolveConfigPath(fallbackPath string) string {
 	return httpkit.ResolveConfigPathWithLocal("CONFIG_PATH", localConfigPath, DefaultConfigPath, "console.yaml", "config.yaml")
 }
 
-type QuickLaunchLink struct {
-	Name        string `json:"name"                  yaml:"name"`
-	URL         string `json:"url"                   yaml:"url"`
-	Icon        string `json:"icon,omitempty"        yaml:"icon,omitempty"`
-	Description string `json:"description,omitempty" yaml:"description,omitempty"`
-	Target      string `json:"target,omitempty"      yaml:"target,omitempty"`
-	IsCore      bool   `json:"is_core,omitempty"     yaml:"is_core,omitempty"`
-	IsCustom    bool   `json:"is_custom,omitempty"   yaml:"is_custom,omitempty"`
-}
-
-// DefaultQuickLaunchLinks returns the core default gateway launch targets.
-func DefaultQuickLaunchLinks() []QuickLaunchLink {
-	return []QuickLaunchLink{}
-}
-
 type rawUserConfig struct {
 	Console struct {
-		QuickLinks       []QuickLaunchLink `yaml:"quick_links"`
-		QuickLaunchLinks []QuickLaunchLink `yaml:"quick_launch_links"`
-		GitHubRepos      []string          `yaml:"github_repos"`
-		Repos            []string          `yaml:"repos"`
-		VanadisURL       string            `yaml:"vanadis_url"`
-		HaroURL          string            `yaml:"haro_url"`
+		GitHubRepos []string `yaml:"github_repos"`
+		Repos       []string `yaml:"repos"`
+		VanadisURL  string   `yaml:"vanadis_url"`
+		HaroURL     string   `yaml:"haro_url"`
 	} `yaml:"console"`
-	QuickLinks       []QuickLaunchLink `yaml:"quick_links"`
-	QuickLaunchLinks []QuickLaunchLink `yaml:"quick_launch_links"`
-	GitHubRepos      []string          `yaml:"github_repos"`
-	VanadisURL       string            `yaml:"vanadis_url"`
-	HaroURL          string            `yaml:"haro_url"`
+	GitHubRepos []string `yaml:"github_repos"`
+	VanadisURL  string   `yaml:"vanadis_url"`
+	HaroURL     string   `yaml:"haro_url"`
 }
 
 // loadRawUserConfig parses and unmarshals rawUserConfig from the given path.
@@ -106,40 +87,6 @@ func LoadConsoleRepos(configPath string) []string {
 	}
 
 	return repos
-}
-
-// LoadQuickLaunchLinks merges default core links with custom links defined in config.yaml.
-func LoadQuickLaunchLinks(configPath string) []QuickLaunchLink {
-	links := DefaultQuickLaunchLinks()
-
-	cfg, ok := loadRawUserConfig(configPath)
-	if !ok {
-		return links
-	}
-
-	custom := cfg.Console.QuickLinks
-	if len(custom) == 0 {
-		custom = cfg.Console.QuickLaunchLinks
-	}
-	if len(custom) == 0 {
-		custom = cfg.QuickLaunchLinks
-	}
-	if len(custom) == 0 {
-		custom = cfg.QuickLinks
-	}
-
-	for _, l := range custom {
-		if l.Name == "" || l.URL == "" {
-			continue
-		}
-		if l.Target == "" {
-			l.Target = "_blank"
-		}
-		l.IsCustom = true
-		links = append(links, l)
-	}
-
-	return links
 }
 
 // ConsoleConfig holds configuration settings for the console web server.

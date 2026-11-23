@@ -1,8 +1,7 @@
 import { memo, useEffect, useMemo, useState } from 'react';
-import type { QuickLaunchLink } from '../api/types';
 import { getAgentPaletteIndex } from '../lib/formatters';
 import { applyTheme, initTheme, nextTheme, subscribeTheme, type ThemeMode } from '../lib/theme';
-import { dockLinks, isDockLinkActive, type PermetTone, permetScore } from '../store/selectors';
+import { type PermetTone, permetScore } from '../store/selectors';
 import { useConsoleStore } from '../store/store';
 import { Icon } from './Icon';
 import { TabBar } from './TabBar';
@@ -28,39 +27,7 @@ const PermetGauge = memo(function PermetGauge() {
   );
 });
 
-function DockChip({ link, pathname }: { readonly link: QuickLaunchLink; readonly pathname: string }) {
-  const blank = link.target !== '_self';
-  return (
-    <a
-      href={link.url}
-      className={isDockLinkActive(link.url, pathname) ? 'dock-chip active' : 'dock-chip'}
-      target={blank ? '_blank' : '_self'}
-      rel={blank ? 'noopener noreferrer' : undefined}
-      title={link.description || undefined}
-    >
-      <span className={link.is_custom === true ? 'ping-dot custom' : 'ping-dot'} />
-      <span>
-        {link.icon ? `${link.icon} ` : ''}
-        {link.name}
-      </span>
-    </a>
-  );
-}
 
-/** Quick-launch dock: hidden entirely until the status poll returns links. */
-const QuickLaunchDock = memo(function QuickLaunchDock() {
-  const raw = useConsoleStore((s) => s.status.cluster.data?.quick_launch_links ?? null);
-  const links = useMemo(() => dockLinks(raw), [raw]);
-  if (links.length === 0) return null;
-  const pathname = window.location.pathname;
-  return (
-    <nav className="quick-launch-dock" aria-label="Tactical Gateway Launcher">
-      {links.map((link) => (
-        <DockChip key={`${link.name}\u0000${link.url}`} link={link} pathname={pathname} />
-      ))}
-    </nav>
-  );
-});
 
 const ThemeToggle = memo(function ThemeToggle() {
   const [theme, setTheme] = useState<ThemeMode>(() => initTheme());
@@ -145,7 +112,6 @@ export const Header = memo(function Header() {
       </div>
       <div className="cmd-right">
         <AgentSelector />
-        <QuickLaunchDock />
         <PermetGauge />
         <ThemeToggle />
       </div>

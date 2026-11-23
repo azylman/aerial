@@ -7,13 +7,6 @@ import (
 	"regexp"
 	"strings"
 	"time"
-
-	"github.com/azylman/aerial/pkg/strutil"
-)
-
-const (
-	MaxPromptRunes         = 1500
-	MaxRoboRevCommentRunes = 4000
 )
 
 var (
@@ -38,21 +31,6 @@ func CleanRepoName(repo string) string {
 		return repo[idx+1:]
 	}
 	return repo
-}
-
-// FormatDirectMessagePrefix formats the bold PR and repo prefix for direct Discord messages.
-func FormatDirectMessagePrefix(prNumber int, repo string) string {
-	repoName := CleanRepoName(repo)
-	switch {
-	case prNumber > 0 && repoName != "":
-		return fmt.Sprintf("**(PR: #%d, repo: %s)** ", prNumber, repoName)
-	case repoName != "":
-		return fmt.Sprintf("**(repo: %s)** ", repoName)
-	case prNumber > 0:
-		return fmt.Sprintf("**(PR: #%d)** ", prNumber)
-	default:
-		return ""
-	}
 }
 
 func DedupeTrimmedStrings(items []string) []string {
@@ -108,22 +86,4 @@ func Is4xxClientError(err error) bool {
 	}
 	msg := err.Error()
 	return re4xx.MatchString(msg) || strings.Contains(msg, "invalid discord snowflake")
-}
-
-func FormatErrorDetailsBlock(header, details, extraLine, footer string) string {
-	lines := []string{header}
-	if clean := strings.TrimSpace(details); clean != "" {
-		lines = append(lines, fmt.Sprintf("Error details:\n```\n%s\n```", TruncatePromptDetails(clean)))
-	}
-	if cleanExtra := strings.TrimSpace(extraLine); cleanExtra != "" {
-		lines = append(lines, cleanExtra)
-	}
-	if footer != "" {
-		lines = append(lines, footer)
-	}
-	return strings.Join(lines, "\n")
-}
-
-func TruncatePromptDetails(s string) string {
-	return strutil.TruncateRunes(strings.ReplaceAll(s, "```", "'''"), MaxPromptRunes)
 }

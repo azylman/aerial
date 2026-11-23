@@ -632,16 +632,15 @@ func TestPruneRetired(t *testing.T) {
 		pruneErr     error
 		wantServices []string
 	}{
-		{name: "drops services outside the config", cfg: config.Config{Targets: []config.Target{{Service: "eri", URL: "http://eri"}}, PushServices: []string{"photos-sync"}}, wantServices: []string{"eri", "eri-restate", "photos-sync"}},
-		{name: "eri-restate survives without a target", cfg: config.Config{Targets: []config.Target{{Service: "eri", URL: "http://eri"}}}, wantServices: []string{"eri", "eri-restate"}},
-		{name: "empty keep set refuses", cfg: config.Config{}, wantServices: []string{"dashboard", "eri", "eri-restate", "hangar", "photos-sync"}},
-		{name: "store failure keeps rows", cfg: config.Config{Targets: []config.Target{{Service: "eri", URL: "http://eri"}}}, pruneErr: errors.New("conn refused"), wantServices: []string{"dashboard", "eri", "eri-restate", "hangar", "photos-sync"}},
+		{name: "drops services outside the config", cfg: config.Config{Targets: []config.Target{{Service: "eri", URL: "http://eri"}}, PushServices: []string{"photos-sync"}}, wantServices: []string{"eri", "photos-sync"}},
+		{name: "empty keep set refuses", cfg: config.Config{}, wantServices: []string{"dashboard", "eri", "hangar", "photos-sync"}},
+		{name: "store failure keeps rows", cfg: config.Config{Targets: []config.Target{{Service: "eri", URL: "http://eri"}}}, pruneErr: errors.New("conn refused"), wantServices: []string{"dashboard", "eri", "hangar", "photos-sync"}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			row := []config.CoverageRow{{File: "a.go", Function: "F", Percent: 50}}
-			store := &fakeStore{pruneErr: tc.pruneErr, upserts: map[string][]config.CoverageRow{"dashboard": row, "eri": row, "eri-restate": row, "hangar": row, "photos-sync": row}}
+			store := &fakeStore{pruneErr: tc.pruneErr, upserts: map[string][]config.CoverageRow{"dashboard": row, "eri": row, "hangar": row, "photos-sync": row}}
 			NewServer(tc.cfg, nil, &fakeRunner{}, store).pruneRetired(context.Background())
 			if got := store.services(); !reflect.DeepEqual(got, tc.wantServices) {
 				t.Fatalf("services = %v, want %v", got, tc.wantServices)

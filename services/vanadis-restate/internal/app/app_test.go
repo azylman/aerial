@@ -202,7 +202,7 @@ type discoveryManifest struct {
 // handler sets the default-agent runner registers (37 and 17).
 var (
 	bindPRObjectHandlers = []string{
-		"DropUntracked", "GetBuildLifecycle", "GetDeployView", "HandleBranchConflict", "HandleBuildMetadata", "HandleCIRecovered",
+		"GetBuildLifecycle", "GetDeployView", "HandleBranchConflict", "HandleBuildMetadata", "HandleCIRecovered",
 		"HandleCheckFailed", "HandleCheckPassed", "HandleCheckRerunRequested", "HandleCheckStatus", "HandleClosed", "HandleCollaboratorAlert", "HandleConflict",
 		"HandleConflictCheck", "HandleConflictResolved", "HandleDeployAttemptFailed",
 		"HandleDeployFailed", "HandleDeployFailureDeadline", "HandleDeployObserved", "HandleDeploySuccess", "HandleHeadRefMissing",

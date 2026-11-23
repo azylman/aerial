@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/azylman/aerial/pkg/agent"
-	"github.com/azylman/aerial/pkg/buildplan"
 	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/pkg/k8sauth"
 	"github.com/azylman/aerial/pkg/strutil"
@@ -26,59 +25,11 @@ const (
 	fieldBuildID             = "build_id"
 	fieldChunks              = "chunks"
 	fieldChunk               = "chunk"
-	statusUpdated            = "updated"
-	statusCIFailed           = "ci_failed"
-	statusFailed             = "failed"
-	statusDeployed           = "deployed"
-	statusDeploying          = "deploying"
-	statusSynced             = "synced"
-	statusConflict           = "conflict"
-	statusMerged             = "merged"
-	statusOpen               = "open"
 	statusRunning            = "running"
-	statusPending            = "pending"
 	statusCompleted          = "completed"
 	statusCancelled          = "cancelled"
 	statusQueued             = "queued"
-	statusCoding             = "coding"
-	statusPROpened           = "pr_opened"
-	statusDeployFailed       = "deploy_failed"
-	statusPassed             = "passed"
-	statusNotFound           = "not_found"
 )
-
-// VanadisChunkSummary captures a lightweight view of a chunk for advancement outputs.
-type VanadisChunkSummary struct {
-	ID          string    `json:"id"`
-	ChunkIndex  int       `json:"chunk_index"`
-	Mode        string    `json:"mode"`
-	Repo        string    `json:"repo,omitempty"`
-	Title       string    `json:"title"`
-	Status      string    `json:"status"`
-	PRNumber    int       `json:"pr_number,omitempty"`
-	StartedAt   time.Time `json:"started_at,omitempty"`
-	CompletedAt time.Time `json:"completed_at,omitempty"`
-	UpdatedAt   time.Time `json:"updated_at,omitempty"`
-}
-
-// VanadisAdvancementResult represents the outcome of advancing a chunk via PR merge.
-type VanadisAdvancementResult struct {
-	Matched          bool                  `json:"matched"`
-	Advanced         bool                  `json:"advanced"`
-	BuildID          string                `json:"build_id"`
-	ThreadID         string                `json:"thread_id"`
-	Tier             int                   `json:"tier"`
-	Title            string                `json:"title"`
-	Objective        string                `json:"objective"`
-	BuildStatus      string                `json:"build_status"`
-	StatusMessageID  string                `json:"status_message_id,omitempty"`
-	MergedChunkIndex int                   `json:"merged_chunk_index"`
-	MergedChunkTitle string                `json:"merged_chunk_title"`
-	ChunkMode        string                `json:"chunk_mode,omitempty"`
-	NextChunkIndex   int                   `json:"next_chunk_index"`
-	BuildCompleted   bool                  `json:"build_completed"`
-	Chunks           []VanadisChunkSummary `json:"chunks,omitempty"`
-}
 
 // AttachChunkPRRequest represents the payload for POST /chunks/attach-pr.
 type AttachChunkPRRequest struct {
@@ -93,48 +44,6 @@ type AttachChunkPRRequest struct {
 	// callers are always resolved from their ServiceAccount token; the body
 	// value is honored only for service principals and unauthenticated mode.
 	Agent string `json:"agent,omitempty"`
-}
-
-// ChunkPRRequest represents generic repo + pr_number request payloads.
-type ChunkPRRequest struct {
-	Repo     string `json:"repo"`
-	PRNumber int    `json:"pr_number"`
-}
-
-// SyncChunkPRWidgetRequest represents the payload for POST /chunks/sync-pr-widget.
-type SyncChunkPRWidgetRequest struct {
-	BuildID    string `json:"build_id,omitempty"`
-	Repo       string `json:"repo"`
-	PRNumber   int    `json:"pr_number"`
-	PRStatus   string `json:"pr_status"`
-	PRBanner   string `json:"pr_banner"`
-	ActiveStep string `json:"active_step,omitempty"`
-	PRFound    bool   `json:"pr_found"`
-}
-
-// UpdateBuildRequest defines the request payload for updating build metadata.
-type UpdateBuildRequest struct {
-	Title         string `json:"title,omitempty"`
-	Objective     string `json:"objective,omitempty"`
-	SharedContext string `json:"shared_context,omitempty"`
-}
-
-// UpdateChunkRequest defines the request payload for updating chunk fields before launch.
-type UpdateChunkRequest struct {
-	ChunkRef      string    `json:"chunk_ref,omitempty"`
-	Mode          *string   `json:"mode,omitempty"`
-	Repo          string    `json:"repo,omitempty"`
-	Title         string    `json:"title,omitempty"`
-	Instructions  string    `json:"instructions,omitempty"`
-	TargetFiles   []string  `json:"target_files,omitempty"`
-	TargetSymbols []string  `json:"target_symbols,omitempty"`
-	Effort        string    `json:"effort,omitempty"`
-	DependsOn     *[]string `json:"depends_on,omitempty"`
-}
-
-// AppendChunksRequest defines the request payload for appending chunks to a running build.
-type AppendChunksRequest struct {
-	Chunks []CreateChunkInput `json:"chunks"`
 }
 
 func (s *VanadisServer) authorizeBuildUpdate(ctx context.Context, buildAgent string) error {
@@ -564,36 +473,6 @@ func (s *VanadisServer) resolveAttachCallerAgent(ctx context.Context, requested 
 	return strutil.FirstNonEmpty(requested, agent.Default), nil
 }
 
-func validateUpdateChunkInput(buildID, chunkRef string, req UpdateChunkRequest) (string, error) {
-	if strings.TrimSpace(buildID) == "" || strings.TrimSpace(chunkRef) == "" {
-		return "", fmt.Errorf("%w: build id and chunk ref are required", ErrInvalidBuildInput)
-	}
-	repo := strings.TrimSpace(req.Repo)
-	title := strings.TrimSpace(req.Title)
-	instructions := strings.TrimSpace(req.Instructions)
-	effortStr := strings.TrimSpace(req.Effort)
-	hasField := req.Mode != nil || repo != "" || title != "" || instructions != "" || effortStr != "" || req.TargetFiles != nil || req.TargetSymbols != nil || req.DependsOn != nil
-	if !hasField {
-		return "", fmt.Errorf("%w: build id, chunk ref, and at least one updated field are required", ErrInvalidBuildInput)
-	}
-	if req.Mode != nil {
-		if strings.TrimSpace(*req.Mode) == "" {
-			return "", fmt.Errorf("%w: mode cannot be empty string (must be 'pr' or 'action')", ErrInvalidBuildInput)
-		}
-		if _, err := buildplan.NormalizeChunkMode(*req.Mode); err != nil {
-			return "", fmt.Errorf("%w: %w", ErrInvalidBuildInput, err)
-		}
-	}
-	if effortStr != "" {
-		normEffort, effErr := buildplan.NormalizeChunkEffort(effortStr)
-		if effErr != nil {
-			return "", fmt.Errorf("%w: %w", ErrInvalidBuildInput, effErr)
-		}
-		return normEffort, nil
-	}
-	return "", nil
-}
-
 func (s *VanadisServer) decodeJSONBody(w http.ResponseWriter, r *http.Request, target any) bool {
 	if s.store == nil {
 		writeErr(w, http.StatusInternalServerError, "vanadis store not configured")
@@ -609,122 +488,4 @@ func (s *VanadisServer) decodeJSONBody(w http.ResponseWriter, r *http.Request, t
 		return false
 	}
 	return true
-}
-
-func (s *VanadisServer) handleUpdateBuild(w http.ResponseWriter, r *http.Request, buildID string) {
-	serveBuildMutation(s, w, r, buildID, "UpdateBuild", func(req *UpdateBuildRequest) error {
-		if strings.TrimSpace(req.Title) == "" && strings.TrimSpace(req.Objective) == "" && strings.TrimSpace(req.SharedContext) == "" {
-			return fmt.Errorf("%w: at least one of title, objective, or shared_context must be provided", ErrInvalidBuildInput)
-		}
-		return nil
-	}, func(updated VanadisBuild) map[string]any {
-		return map[string]any{fieldStatus: statusUpdated, fieldBuild: updated}
-	})
-}
-
-// serveBuildMutation decodes and prepares a per-build mutation request,
-// authorizes it against the stored build, and forwards it to the Build object
-// of the runner that executes that build.
-func serveBuildMutation[Req, Out any](s *VanadisServer, w http.ResponseWriter, r *http.Request, buildID, handler string, prepare func(*Req) error, respond func(Out) map[string]any) {
-	var req Req
-	if !s.decodeJSONBody(w, r, &req) {
-		return
-	}
-	if err := prepare(&req); err != nil {
-		writeStoreErr(r.Context(), w, err)
-		return
-	}
-	build, ok := s.authorizeBuildMutation(w, r, buildID)
-	if !ok {
-		return
-	}
-	var out Out
-	if err := s.mutateBuildObject(r.Context(), build, handler, req, &out); err != nil {
-		writeStoreErr(r.Context(), w, err)
-		return
-	}
-	httpkit.WriteJSON(w, http.StatusOK, respond(out))
-}
-
-func (s *VanadisServer) handleGetBuildChunk(w http.ResponseWriter, r *http.Request, buildID, chunkRef string) {
-	if s.store == nil {
-		writeErr(w, http.StatusInternalServerError, "vanadis store not configured")
-		return
-	}
-	if err := s.authorizeBuildRead(r.Context(), "get"); err != nil {
-		k8sauth.WriteError(w, err)
-		return
-	}
-	build, chunks, err := s.store.GetBuild(r.Context(), buildID)
-	if err != nil {
-		writeStoreErr(r.Context(), w, err)
-		return
-	}
-	idx := buildplan.ResolveChunkRef(chunks, chunkRef)
-	if idx < 0 {
-		writeStoreErr(r.Context(), w, ErrChunkNotFound)
-		return
-	}
-	httpkit.WriteJSON(w, http.StatusOK, map[string]any{fieldChunk: chunks[idx], fieldBuild: build})
-}
-
-func (s *VanadisServer) handleUpdateChunk(w http.ResponseWriter, r *http.Request, buildID, chunkRef string) {
-	serveBuildMutation(s, w, r, buildID, "UpdateChunk", func(req *UpdateChunkRequest) error {
-		if _, err := validateUpdateChunkInput(buildID, chunkRef, *req); err != nil {
-			return err
-		}
-		req.ChunkRef = chunkRef
-		return nil
-	}, func(updated VanadisChunk) map[string]any {
-		return map[string]any{fieldStatus: statusUpdated, fieldChunk: updated}
-	})
-}
-
-func (s *VanadisServer) handleAppendChunks(w http.ResponseWriter, r *http.Request, buildID string) {
-	serveBuildMutation(s, w, r, buildID, "AppendChunks", func(req *AppendChunksRequest) error {
-		if len(req.Chunks) == 0 {
-			return fmt.Errorf("%w: chunks cannot be empty", ErrInvalidBuildInput)
-		}
-		return nil
-	}, func(appended []VanadisChunk) map[string]any {
-		return map[string]any{fieldStatus: "appended", fieldBuildID: buildID, fieldChunks: appended}
-	})
-}
-
-func (s *VanadisServer) handleRemoveChunk(w http.ResponseWriter, r *http.Request, buildID, chunkRef string) {
-	if s.store == nil {
-		writeErr(w, http.StatusInternalServerError, "vanadis store not configured")
-		return
-	}
-	build, chs, err := s.store.GetBuild(r.Context(), buildID)
-	if err != nil {
-		writeStoreErr(r.Context(), w, err)
-		return
-	}
-	if err := s.authorizeBuildUpdate(r.Context(), build.Agent); err != nil {
-		k8sauth.WriteError(w, err)
-		return
-	}
-	removedID := chunkRef
-	if idx := buildplan.ResolveChunkRef(chs, chunkRef); idx >= 0 {
-		removedID = chs[idx].ID
-	}
-	req := RemoveChunkRequest{ChunkRef: chunkRef}
-	if err := s.mutateBuildObject(r.Context(), build, "RemoveChunk", req, nil); err != nil {
-		writeStoreErr(r.Context(), w, err)
-		return
-	}
-	var remaining []VanadisChunk
-	if s.store != nil {
-		_, chs, err := s.store.GetBuild(r.Context(), buildID)
-		if err == nil {
-			remaining = chs
-		}
-	}
-	httpkit.WriteJSON(w, http.StatusOK, map[string]any{
-		fieldStatus:        "removed",
-		fieldBuildID:       buildID,
-		"removed_chunk_id": removedID,
-		fieldChunks:        remaining,
-	})
 }

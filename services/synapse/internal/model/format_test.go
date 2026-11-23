@@ -4,37 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
-	"strconv"
-	"strings"
 	"testing"
 )
-
-func TestRepoHelpers(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		in       string
-		clean    string
-		prefixPR int
-		dmPrefix string
-	}{
-		{"aerial", "aerial", 42, "**(PR: #42, repo: aerial)** "},
-		{" acme/aerial ", "aerial", 0, "**(repo: aerial)** "},
-		{"other/repo", "repo", 10, "**(PR: #10, repo: repo)** "},
-		{"", "", 5, "**(PR: #5)** "},
-		{"", "", 0, ""},
-	}
-	for _, tc := range tests {
-		t.Run(tc.in+"_pr"+strconv.Itoa(tc.prefixPR), func(t *testing.T) {
-			t.Parallel()
-			if got := CleanRepoName(tc.in); got != tc.clean {
-				t.Fatalf("CleanRepoName(%q) = %q, want %q", tc.in, got, tc.clean)
-			}
-			if got := FormatDirectMessagePrefix(tc.prefixPR, tc.in); got != tc.dmPrefix {
-				t.Fatalf("FormatDirectMessagePrefix(%d, %q) = %q, want %q", tc.prefixPR, tc.in, got, tc.dmPrefix)
-			}
-		})
-	}
-}
 
 func TestDedupeTrimmedStrings(t *testing.T) {
 	t.Parallel()
@@ -43,6 +14,27 @@ func TestDedupeTrimmedStrings(t *testing.T) {
 	got := DedupeTrimmedStrings(in)
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("DedupeTrimmedStrings(%v) = %v, want %v", in, got, want)
+	}
+}
+
+func TestCleanRepoName(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		in    string
+		clean string
+	}{
+		{"aerial", "aerial"},
+		{" acme/aerial ", "aerial"},
+		{"other/repo", "repo"},
+		{"", ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.in, func(t *testing.T) {
+			t.Parallel()
+			if got := CleanRepoName(tc.in); got != tc.clean {
+				t.Fatalf("CleanRepoName(%q) = %q, want %q", tc.in, got, tc.clean)
+			}
+		})
 	}
 }
 
@@ -113,46 +105,5 @@ func TestRandomNonce(t *testing.T) {
 	n2 := RandomNonce()
 	if n1 == "" || n2 == "" || n1 == n2 {
 		t.Fatalf("RandomNonce() returned non-unique or empty nonces: n1=%q, n2=%q", n1, n2)
-	}
-}
-
-func TestTruncatePromptDetails(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name string
-		in   string
-		want string
-	}{
-		{name: "short text unchanged", in: "short text", want: "short text"},
-		{name: "backtick fences neutralized", in: "code ```block```", want: "code '''block'''"},
-		{name: "long text truncated to the rune cap", in: strings.Repeat("x", 2000), want: strings.Repeat("x", 1500) + "... (truncated)"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			if got := TruncatePromptDetails(tc.in); got != tc.want {
-				t.Errorf("TruncatePromptDetails() = %q, want %q", got, tc.want)
-			}
-		})
-	}
-}
-
-func TestFormatErrorDetailsBlock(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name                               string
-		header, details, extraLine, footer string
-		want                               string
-	}{
-		{name: "all parts", header: "Header:", details: "details", extraLine: "Extra info", footer: "Footer.", want: "Header:\nError details:\n```\ndetails\n```\nExtra info\nFooter."},
-		{name: "header only", header: "Header:", want: "Header:"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			if got := FormatErrorDetailsBlock(tc.header, tc.details, tc.extraLine, tc.footer); got != tc.want {
-				t.Errorf("FormatErrorDetailsBlock() = %q, want %q", got, tc.want)
-			}
-		})
 	}
 }

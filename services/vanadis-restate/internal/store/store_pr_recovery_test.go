@@ -109,7 +109,6 @@ func TestPostgresVanadisStore_RecoverFailedPRFailures(t *testing.T) {
 		name       string
 		closed     bool
 		sabotage   string
-		baseline   bool
 		wantErrSub string
 	}{
 		{name: "begin", closed: true, wantErrSub: "closed pool"},
@@ -118,17 +117,12 @@ func TestPostgresVanadisStore_RecoverFailedPRFailures(t *testing.T) {
 		{name: "chunks", sabotage: `ALTER TABLE vanadis_chunks RENAME COLUMN banner TO banner_x;`, wantErrSub: "banner"},
 		{name: "chunk write", sabotage: failStatement("vanadis_chunks", "UPDATE"), wantErrSub: "sabotaged UPDATE on vanadis_chunks"},
 		{name: "parent write", sabotage: failStatement("vanadis_builds", "UPDATE"), wantErrSub: "sabotaged UPDATE on vanadis_builds"},
-		{name: "baseline write", baseline: true, sabotage: failStatement("vanadis_chunks", "UPDATE"), wantErrSub: "sabotaged UPDATE on vanadis_chunks"},
-		{name: "baseline commit", baseline: true, sabotage: failCommit("vanadis_chunks", "UPDATE"), wantErrSub: "sabotaged UPDATE on vanadis_chunks"},
 		{name: "commit", sabotage: failCommit("vanadis_builds", "UPDATE"), wantErrSub: "sabotaged UPDATE on vanadis_builds"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			chunk := model.VanadisChunk{ID: "c1", BuildID: "b1", Mode: "pr", PRNumber: 12, Status: "failed", HeadSHA: "old"}
-			if tc.baseline {
-				chunk.HeadSHA = ""
-			}
 			st, pool := rcOpen(t, "failed", []model.VanadisChunk{chunk}, tc.sabotage)
 			if tc.closed {
 				pool.Close()
@@ -176,9 +170,8 @@ func TestPostgresVanadisStore_PRRecoveryHeadUpdates(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			chunks := []model.VanadisChunk{{ID: "c1", BuildID: "b1", Mode: "pr", PRNumber: 12, Status: "failed"}, {ID: "c2", BuildID: "b1", ChunkIndex: 1, Mode: "pr", PRNumber: 13, Status: "failed", HeadSHA: "h1"}}
+			chunks := []model.VanadisChunk{{ID: "c1", BuildID: "b1", Mode: "pr", PRNumber: 12, Status: "failed", HeadSHA: "h1"}, {ID: "c2", BuildID: "b1", ChunkIndex: 1, Mode: "pr", PRNumber: 13, Status: "failed", HeadSHA: "h1"}}
 			st, pool := rcOpen(t, "failed", chunks, "")
-			rcAssertLegacyBaseline(t, st, pool)
 			if err := st.recoverFailedPR(rcVerified(true), "c1", "h2"); err != nil {
 				t.Fatal(err)
 			}
@@ -197,19 +190,6 @@ func TestPostgresVanadisStore_PRRecoveryHeadUpdates(t *testing.T) {
 			}
 			rcAssertRunningHead(t, pool, wantHead)
 		})
-	}
-}
-
-// rcAssertLegacyBaseline recovers legacy chunk c1 (no stored head) twice: each
-// call only seeds its baseline head, is skipped and keeps the failure state.
-func rcAssertLegacyBaseline(t *testing.T, st *Store, pool *pgxpool.Pool) {
-	t.Helper()
-	for range 2 {
-		err := st.recoverFailedPR(rcVerified(true), "c1", "h1")
-		c1, c2, parent := loadChunk(t, pool, "c1"), loadChunk(t, pool, "c2"), loadBuild(t, pool, "b1").Status
-		if !errors.Is(err, ErrPRTransitionSkipped) || c1.HeadSHA != "h1" || c1.Status != "failed" || parent != "failed" || c2.HeadSHA != "h1" {
-			t.Fatalf("baseline error=%v parent=%s c1=%+v c2=%+v", err, parent, c1, c2)
-		}
 	}
 }
 

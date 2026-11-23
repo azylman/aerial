@@ -48,7 +48,6 @@ const cluster = (over: Partial<ClusterResponse> = {}): ClusterResponse => ({
   active_tasks: [],
   services: SERVICES,
   deployments: DEPLOYS,
-  quick_launch_links: [],
   ongoing_deploy: '',
   is_deploying: true,
   ...over,

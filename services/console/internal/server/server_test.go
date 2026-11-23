@@ -129,8 +129,8 @@ func statusHandlerPrimaryCases() []statusTestCase {
 		},
 		{name: "ActiveTasks_Degraded", brainPath: "/brain/offline", wantCode: http.StatusOK, wantTasks: 0},
 		{
-			name: "EnrichedFields", yamlContent: "console:\n  quick_launch_links:\n    - name: \"HOME\"\n      url: \"https://home.example.com\"\n",
-			wantCode: http.StatusOK, wantQuickLink: "HOME",
+			name: "EnrichedFields", yamlContent: "console:\n  repos:\n    - \"example/aerial\"\n",
+			wantCode: http.StatusOK,
 		},
 		{name: "DegradedClusterStatus", k8sPath: "/degraded", wantCode: http.StatusOK, wantClusterStatus: "degraded"},
 	}
@@ -186,7 +186,6 @@ type statusTestCase struct {
 	wantDeploys          int
 	wantMinServices      int
 	wantServiceName      string
-	wantQuickLink        string
 	wantConfiguredAgents []string
 	wantTaskID           string
 }
@@ -238,7 +237,7 @@ func runStatusHandlerCase(t *testing.T, tc statusTestCase, mockServerURL, k8sURL
 		}
 		h = SetupConsoleMux(cfg, nil)
 	} else {
-		h = statusHandler(brainURL, cfgFile, "testcommit", kubeAPIServer, haroURL, vanadisURL)
+		h = statusHandler(brainURL, "testcommit", kubeAPIServer, haroURL, vanadisURL)
 	}
 
 	method := tc.method
@@ -356,18 +355,6 @@ func assertStatusServices(t *testing.T, tc statusTestCase, resp ClusterResponse)
 		}
 		if !found {
 			t.Errorf("expected service %q, got services: %+v", tc.wantServiceName, resp.Services)
-		}
-	}
-	if tc.wantQuickLink != "" {
-		found := false
-		for _, l := range resp.QuickLaunchLinks {
-			if l.Name == tc.wantQuickLink {
-				found = true
-				break
-			}
-		}
-		if !found {
-			t.Errorf("expected quick link %q in %+v", tc.wantQuickLink, resp.QuickLaunchLinks)
 		}
 	}
 }
@@ -785,13 +772,6 @@ func TestSetupConsoleMux_StaticRouting(t *testing.T) {
 		wantBodySubstr string
 		wantHeaders    map[string]string
 	}{
-		{name: "legacy_console_next_bare", path: "/console/next", wantCode: http.StatusMovedPermanently, wantLocation: "/console/"},
-		{name: "legacy_console_next_slash", path: "/console/next/", wantCode: http.StatusMovedPermanently, wantLocation: "/console/"},
-		{name: "legacy_console_next_deep_query", path: "/console/next/memory?x=1", wantCode: http.StatusMovedPermanently, wantLocation: "/console/memory?x=1"},
-		{name: "legacy_root_next_bare", path: "/next", wantCode: http.StatusMovedPermanently, wantLocation: "/"},
-		{name: "legacy_root_next_slash_query", path: "/next/?tab=memory", wantCode: http.StatusMovedPermanently, wantLocation: "/?tab=memory"},
-		{name: "legacy_root_next_deep", path: "/next/builds/abc", wantCode: http.StatusMovedPermanently, wantLocation: "/builds/abc"},
-		{name: "legacy_root_next_nested_next", path: "/next/next/x", wantCode: http.StatusMovedPermanently, wantLocation: "/next/x"},
 		{name: "console_shell", path: "/console/", wantCode: http.StatusOK, wantCache: "no-cache, must-revalidate", wantBodySubstr: `<div id="root"></div>`},
 		{name: "root_shell", path: "/", wantCode: http.StatusOK, wantCache: "no-cache, must-revalidate", wantBodySubstr: `<div id="root"></div>`},
 		{name: "console_deep_link_shell", path: "/console/schedules", wantCode: http.StatusOK, wantCache: "no-cache, must-revalidate", wantBodySubstr: `<div id="root"></div>`},

@@ -3,16 +3,12 @@ import type {
   BuildsAPIResponse,
   ClusterResponse,
   FactsAPIResponse,
-  QuickLaunchLink,
   SchedulesAPIResponse,
   ServiceStatus,
 } from '../api/types';
 import {
   buildsBadgeCount,
-  dockLinks,
   filterByAgent,
-  isDockLinkActive,
-  matchAgent,
   memoryBadgeCount,
   PERMET_IDLE,
   permetScore,
@@ -107,7 +103,7 @@ describe('tab badge counts', () => {
   });
 });
 
-describe('filterByAgent & matchAgent', () => {
+describe('filterByAgent', () => {
   interface TestItem {
     readonly id: number;
     readonly agent?: string;
@@ -117,14 +113,7 @@ describe('filterByAgent & matchAgent', () => {
   const itemDefault: TestItem = { id: 3 };
   const items: readonly TestItem[] = [itemAerial, itemAlpha, itemDefault];
 
-  it('matchAgent defaults to aerial when agent is absent', () => {
-    expect(matchAgent(itemAerial, 'aerial')).toBe(true);
-    expect(matchAgent(itemAlpha, 'aerial')).toBe(false);
-    expect(matchAgent(itemDefault, 'aerial')).toBe(true);
-    expect(matchAgent(itemAlpha, 'all')).toBe(true);
-  });
-
-  it('filterByAgent filters by selected agent and returns all when "all"', () => {
+  it('filters by selected agent and returns all when "all"', () => {
     expect(filterByAgent(items, 'all')).toBe(items);
     expect(filterByAgent(items, 'aerial')).toEqual([itemAerial, itemDefault]);
     expect(filterByAgent(items, 'agent-alpha')).toEqual([itemAlpha]);
@@ -155,30 +144,4 @@ describe('permetScore', () => {
   });
 });
 
-const link = (name: string, url: string): QuickLaunchLink => ({ name, url });
-const VALID = [link('Grafana', '/grafana/'), link('Docs', '/docs/')];
 
-describe('dockLinks', () => {
-  it.each([
-    { name: 'null links', links: null, want: [], wantSame: false },
-    { name: 'empty links', links: [], want: [], wantSame: false },
-    { name: 'all valid keeps the reference', links: VALID, want: VALID, wantSame: true },
-    { name: 'drops nameless and url-less entries', links: [...VALID, link('', '/x/'), link('Nope', '')], want: VALID, wantSame: false },
-  ])('$name', ({ links, want, wantSame }) => {
-    const got = dockLinks(links);
-    expect(got).toEqual(want);
-    expect(got === links).toBe(wantSame);
-  });
-});
-
-describe('isDockLinkActive', () => {
-  it.each([
-    { url: '/console/', pathname: '/console/', want: true },
-    { url: '/console/', pathname: '/console/next/', want: true },
-    { url: '/grafana/', pathname: '/console/next/', want: false },
-    { url: '/', pathname: '/console/', want: false },
-    { url: '/', pathname: '/', want: true },
-  ])('$url on $pathname -> $want', ({ url, pathname, want }) => {
-    expect(isDockLinkActive(url, pathname)).toBe(want);
-  });
-});

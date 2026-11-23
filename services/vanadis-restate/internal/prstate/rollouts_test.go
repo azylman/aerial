@@ -8,7 +8,6 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
-	"github.com/azylman/aerial/pkg/prwire"
 	"github.com/azylman/aerial/pkg/pubsub"
 )
 
@@ -455,49 +454,6 @@ func untrackedResidue() *PRState {
 	return s
 }
 
-// untrackedCleaned is untrackedResidue after the cleanup: rollout fields
-// cleared, generation kept, index membership dropped at the next sequence.
-func untrackedCleaned() *PRState {
-	s := NewPRState("kubernetes-sigs/gateway-api", 5433)
-	s.Agent = "aerial"
-	s.GateGeneration, s.RolloutIndexSeq = 1, 2
-	return s
-}
-
-// untrackedCleanupSends are the index closes the cleanup sends.
-var untrackedCleanupSends = []sentCall{
-	{service: prwire.RepoObjectServiceName, key: RolloutIndexKey, method: prwire.RepoHandlerRolloutIndex, input: RolloutIndexEvent{Repo: "kubernetes-sigs/gateway-api", PRNumber: 5433, Seq: 2}},
-	{service: prwire.RepoObjectServiceName, key: "kubernetes-sigs/gateway-api", method: prwire.RepoHandlerPRIndex, input: PRIndexEvent{Repo: "kubernetes-sigs/gateway-api", PRNumber: 5433, Generation: 1, Lifecycle: IndexDeployed}},
-}
-
-func TestPRObjectServiceDropUntracked(t *testing.T) {
-	t.Parallel()
-	tracked := svcRow("h1", "m1", RegistryStatusDeploying, TerminalMerged)
-	tests := []struct {
-		name      string
-		seed      *PRState
-		want      DropUntrackedResponse
-		wantSaved *PRState
-		wantSends []sentCall
-	}{
-		{name: "unknown pr is untouched"},
-		{name: "tracked pr is untouched", seed: tracked},
-		{name: "untracked rollout is cleaned and leaves both indexes", seed: untrackedResidue(), want: DropUntrackedResponse{Untracked: true, Cleaned: true}, wantSaved: untrackedCleaned(), wantSends: untrackedCleanupSends},
-		{name: "cleaned untracked pr is idempotent", seed: untrackedCleaned(), want: DropUntrackedResponse{Untracked: true}},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			mc, rec := newStateMock(t, tc.seed)
-			got, err := NewPRObjectService().DropUntracked(restate.WithMockContext(mc), DropUntrackedRequest{})
-			require.NoError(t, err)
-			require.Equal(t, tc.want, got)
-			require.Equal(t, tc.wantSaved, rec.saved)
-			require.Equal(t, tc.wantSends, rec.sends.snapshot())
-		})
-	}
-}
-
 // TestPRObjectServiceHandleKustomizationRequestedUntracked pins the drop
 // for an untracked PR: a fresh state persists and sends nothing, and a
 // stored pre-guard rollout is cleaned on the next request instead of
@@ -514,7 +470,7 @@ func TestPRObjectServiceHandleKustomizationRequestedUntracked(t *testing.T) {
 		wantSends []sentCall
 	}{
 		{name: "fresh restate request persists nothing"},
-		{name: "stored pre-guard rollout is cleaned", seed: untrackedResidue(), wantSaved: untrackedCleaned(), wantSends: untrackedCleanupSends},
+		{name: "stored pre-guard rollout is dropped", seed: untrackedResidue()},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

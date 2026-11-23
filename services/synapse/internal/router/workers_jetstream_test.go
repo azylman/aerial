@@ -125,10 +125,33 @@ func assertJetstreamJobOutcome(t *testing.T, err error, msg *pubsubtest.Message,
 
 const (
 	jetstreamBadGitHubJob = `{"event":"push","delivery":"d-2","body":"e2JhZA=="}`
-	jetstreamBadDeployJob = `{"idempotency_key":"k-2","event":{"event":"deploy_failed","repo":"acme/aerial","pr_number":0,"target_id":"100000000000000001"}}`
+	jetstreamBadDeployJob = `{"idempotency_key":"k-2","event":{"event":"deploy_failed","repo":"acme/aerial","pr_number":42,"target_id":"100000000000000001"}}`
 )
 
 func TestHandleGitHubJob(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		raw       string
+		delivered uint64
+		wantErr   bool
+		wantTerm  bool
+	}{
+		{name: "malformed json terms", raw: `{bad json`, wantTerm: true},
+		{name: "processing error below the delivery limit naks", raw: jetstreamBadGitHubJob, delivered: 1, wantErr: true},
+		{name: "processing error at the delivery limit terms", raw: jetstreamBadGitHubJob, delivered: 5, wantTerm: true},
+	}
+	r := jetstreamJobRouter(&mockOutboundDispatcher{}, 0)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			m := jetstreamJobMsg(tc.raw, tc.delivered)
+			assertJetstreamJobOutcome(t, r.HandleGitHubJob(context.Background(), m), m, tc.wantErr, tc.wantTerm)
+		})
+	}
+}
+
+func TestHandleDeployJob(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name      string
@@ -138,45 +161,20 @@ func TestHandleGitHubJob(t *testing.T) {
 		wantTerm  bool
 	}{
 		{name: "malformed json terms", payload: `{bad json`, wantTerm: true},
-		{name: "processing error below the delivery limit naks", payload: jetstreamBadGitHubJob, delivered: 1, wantErr: true},
-		{name: "processing error at the delivery limit terms", payload: jetstreamBadGitHubJob, delivered: 5, wantTerm: true},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			msg := jetstreamJobMsg(tc.payload, tc.delivered)
-			err := jetstreamJobRouter(&mockOutboundDispatcher{}, 0).HandleGitHubJob(context.Background(), msg)
-			assertJetstreamJobOutcome(t, err, msg, tc.wantErr, tc.wantTerm)
-		})
-	}
-}
-
-func TestHandleDeployJob(t *testing.T) {
-	t.Parallel()
-	errPrompt, errDispatch := errors.New("prompt dispatch failed"), errors.New("dispatch background failed")
-	tests := []struct {
-		name      string
-		payload   string
-		delivered uint64
-		disp      *mockOutboundDispatcher
-		wantErr   bool
-		wantTerm  bool
-	}{
-		{name: "malformed json terms", payload: `{bad json`, disp: &mockOutboundDispatcher{}, wantTerm: true},
 		{
 			name: "dispatch error below the delivery limit naks", payload: jetstreamBadDeployJob, delivered: 1,
-			disp: &mockOutboundDispatcher{promptErr: errPrompt, dispatchErr: errDispatch}, wantErr: true,
+			wantErr: true,
 		},
 		{
-			name: "dispatch error at the delivery limit terms", payload: jetstreamBadDeployJob, delivered: 5,
-			disp: &mockOutboundDispatcher{promptErr: errPrompt, dispatchErr: errDispatch}, wantTerm: true,
+			name: "dispatch error at the delivery limit terms", payload: jetstreamBadDeployJob, delivered: 45,
+			wantTerm: true,
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			msg := jetstreamJobMsg(tc.payload, tc.delivered)
-			err := jetstreamJobRouter(tc.disp, 0).HandleDeployJob(context.Background(), msg)
+			err := jetstreamJobRouter(&mockOutboundDispatcher{}, 0).HandleDeployJob(context.Background(), msg)
 			assertJetstreamJobOutcome(t, err, msg, tc.wantErr, tc.wantTerm)
 		})
 	}
@@ -265,7 +263,6 @@ type wiringDispatcher struct {
 	mockOutboundDispatcher
 
 	onDirect      func()
-	onBackground  func()
 	onMessage     func()
 	onInteraction func()
 }
@@ -274,14 +271,6 @@ func (w *wiringDispatcher) DispatchDirectMessage(ctx context.Context, req Direct
 	err := w.mockOutboundDispatcher.DispatchDirectMessage(ctx, req)
 	if w.onDirect != nil {
 		w.onDirect()
-	}
-	return err
-}
-
-func (w *wiringDispatcher) DispatchBackground(ctx context.Context, req DispatchRequest) error {
-	err := w.mockOutboundDispatcher.DispatchBackground(ctx, req)
-	if w.onBackground != nil {
-		w.onBackground()
 	}
 	return err
 }
@@ -332,23 +321,22 @@ func TestStartJobConsumersAndPublishWiring(t *testing.T) {
 	}
 
 	ghCh := make(chan struct{}, 1)
-	srv.onProcessed = func(_, delivery string) {
+	deployCh := make(chan struct{}, 1)
+	ingressCh := make(chan struct{}, 1)
+	interactionCh := make(chan struct{}, 1)
+
+	srv.onProcessed = func(event, delivery string) {
 		if delivery == "wire-gh" {
 			select {
 			case ghCh <- struct{}{}:
 			default:
 			}
 		}
-	}
-
-	deployCh := make(chan struct{}, 1)
-	ingressCh := make(chan struct{}, 1)
-	interactionCh := make(chan struct{}, 1)
-
-	disp.onDirect = func() {
-		select {
-		case deployCh <- struct{}{}:
-		default:
+		if event == "deploy_failed" {
+			select {
+			case deployCh <- struct{}{}:
+			default:
+			}
 		}
 	}
 	disp.onMessage = func() {
