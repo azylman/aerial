@@ -17,7 +17,6 @@ import (
 
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
-	"github.com/azylman/aerial/services/eri/pkg/db/dbtest"
 	"github.com/azylman/aerial/services/eri/pkg/metrics"
 	"github.com/azylman/aerial/services/eri/pkg/queue"
 )
@@ -141,10 +140,13 @@ func mockGitOpsUpdater(cfg *config.Config, shouldErr bool) GitOpsChannelUpdater 
 	}
 }
 
-func seedStatusFixtures(store *dbtest.FakeStore, active bool) {
+func seedStatusFixtures(t testing.TB, store *db.SQLStore, active bool) {
+	t.Helper()
 	ctx, now := context.Background(), time.Now().UTC()
 	if active {
-		_ = store.InsertMessage(ctx, db.Message{ID: "task-12345", Status: db.StatusProcessing, CreatedAt: now.Add(-45 * time.Second)})
+		if err := store.InsertMessage(ctx, db.Message{ID: "task-12345", Status: db.StatusProcessing, CreatedAt: now.Add(-45 * time.Second)}); err != nil {
+			t.Fatalf("seed active message: %v", err)
+		}
 	}
 }
 
@@ -435,19 +437,20 @@ func buildStatusHaroFixtures(tc statusTestCase, now time.Time) ([]map[string]any
 	return crons, oneShots
 }
 
-func setupStatusRouter(tc statusTestCase, memSrvURL string, haroSrvURL string) (*Router, *config.Config, *mockTransport, *discordgo.Session) {
+func setupStatusRouter(t *testing.T, tc statusTestCase, memSrvURL string, haroSrvURL string) (*Router, *config.Config, *mockTransport, *discordgo.Session) {
+	t.Helper()
 	router, cfg, transport, session := setupTestRouter("admin-123", tc.httpStatus)
 	if tc.seedFacts {
 		router.deps.MemoryURL = memSrvURL
 	} else if tc.failStore {
 		router.deps.MemoryURL = "http://127.0.0.1:1"
 	}
-	store := dbtest.NewFakeStore()
-	seedStatusFixtures(store, tc.seedActive)
+	store, database := newTestStore(t)
+	seedStatusFixtures(t, store, tc.seedActive)
 
 	if tc.failStore {
 		router.deps.HaroURL = "http://127.0.0.1:1"
-		store.FailNext("GetActiveTasks", errors.New("db error"))
+		_ = database.Close()
 		router.deps.Pool = queue.New(nil, queue.WorkerPoolConfig{})
 	} else {
 		router.deps.HaroURL = haroSrvURL
@@ -486,7 +489,7 @@ func runHandleStatusCase(t *testing.T, tc statusTestCase, memSrvURL string) {
 	}))
 	defer haroSrv.Close()
 
-	router, _, transport, session := setupStatusRouter(tc, memSrvURL, haroSrv.URL)
+	router, _, transport, session := setupStatusRouter(t, tc, memSrvURL, haroSrv.URL)
 	router.Handle(t.Context(), session, mkCmd("int-status", "chan-1", "admin-123", "status"))
 
 	reqs := transport.Requests()
