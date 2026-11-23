@@ -541,10 +541,19 @@ func TestProxyHandleCancelRequest(t *testing.T) {
 
 func TestWriteConnectError(t *testing.T) {
 	t.Parallel()
-	ignoreErr(errors.New("test"))
 	var buf bytes.Buffer
 	writeConnectError(&buf, &pgconn.PgError{Severity: "FATAL", Code: "28P01", Message: "auth failed"})
-	if !bytes.Contains(buf.Bytes(), []byte("28P01")) {
-		t.Fatalf("writeConnectError missing code: %q", buf.String())
+
+	frontend := pgproto3.NewFrontend(bytes.NewReader(buf.Bytes()), io.Discard)
+	msg, err := frontend.Receive()
+	if err != nil {
+		t.Fatalf("frontend.Receive: %v", err)
+	}
+	errResp, ok := msg.(*pgproto3.ErrorResponse)
+	if !ok {
+		t.Fatalf("msg = %T, want *pgproto3.ErrorResponse", msg)
+	}
+	if errResp.Severity != "FATAL" || errResp.Code != "28P01" || !strings.Contains(errResp.Message, "auth failed") {
+		t.Errorf("ErrorResponse = %+v, want Severity=FATAL, Code=28P01, Message containing auth failed", errResp)
 	}
 }

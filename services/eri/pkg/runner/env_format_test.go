@@ -357,13 +357,13 @@ func TestBuildAgyEnv(t *testing.T) {
 		},
 		{
 			AgyEnvInput{BaseEnv: []string{"ATLAS_DEV_PASSWORD=dev-fixture", "POSTGRES_PASSWORD=pg-fixture", "POSTGRES_URL=postgres://leak", "KEEP=1"}},
-			[]string{"ATLAS_DEV_PASSWORD=dev-fixture", "KEEP=1", "PGUSER=aerial", "PGDATABASE=aerial"},
+			[]string{"ATLAS_DEV_PASSWORD=dev-fixture", "KEEP=1", "PGUSER=aerial", "PGDATABASE=aerial", "PGHOST=/var/run/postgresql"},
 			[]string{"POSTGRES_PASSWORD=", "POSTGRES_URL="},
 		},
 		{
-			AgyEnvInput{BaseEnv: []string{"PGUSER=custom_user"}, ExtraEnv: []string{"PGDATABASE=custom_db"}},
-			[]string{"PGUSER=custom_user", "PGDATABASE=custom_db"},
-			[]string{"PGUSER=aerial", "PGDATABASE=aerial"},
+			AgyEnvInput{BaseEnv: []string{"PGUSER=custom_user"}, ExtraEnv: []string{"PGDATABASE=custom_db", "PGHOST=/custom/socket"}},
+			[]string{"PGUSER=custom_user", "PGDATABASE=custom_db", "PGHOST=/custom/socket"},
+			[]string{"PGUSER=aerial", "PGDATABASE=aerial", "PGHOST=/var/run/postgresql"},
 		},
 	} {
 		assertContainsAndOmits(t, strings.Join(BuildAgyEnv(tc.input), "\n"), tc.contains, tc.notContains, tc.input)

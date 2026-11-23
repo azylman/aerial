@@ -11,7 +11,6 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -139,9 +138,6 @@ func DefaultSQLDescriber(getenv func(string) string) SQLDescriber {
 	dsn := strings.TrimSpace(getenv("DATABASE_URL"))
 	if dsn == "" {
 		pgHost := strings.TrimSpace(getenv("PGHOST"))
-		if pgHost == "" && !testing.Testing() {
-			pgHost = "/var/run/postgresql"
-		}
 		if pgHost != "" {
 			if _, err := os.Stat(filepath.Join(pgHost, ".s.PGSQL.5432")); err == nil {
 				user := strutil.FirstNonEmpty(strings.TrimSpace(getenv("PGUSER")), "aerial")

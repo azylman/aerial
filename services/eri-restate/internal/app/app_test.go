@@ -1,15 +1,18 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -516,18 +519,27 @@ func TestRunApp_CanceledContext(t *testing.T) {
 	)
 	assert.NoError(t, err)
 
+	badDir := filepath.Join(t.TempDir(), "not-a-dir")
+	require.NoError(t, os.WriteFile(badDir, []byte("x"), 0o600))
 	cfgWithBadSocket := Config{
 		RestatePort:        "19080",
 		HealthPort:         "14028",
-		PostgresSocketPath: "/proc/nonexistent-pgproxy-dir/.s.PGSQL.5432",
+		PostgresSocketPath: filepath.Join(badDir, "sub", ".s.PGSQL.5432"),
 		AgentName:          "aerial-test",
 	}
+
+	var logBuf bytes.Buffer
+	origLogWriter := log.Writer()
+	log.SetOutput(&logBuf)
+	defer log.SetOutput(origLogWriter)
+
 	err = RunApp(ctx, cfgWithBadSocket,
 		WithStore(fakeStore, nil),
 		WithAppConfig(appCfg),
 		WithDaemonSpawner(&dummySpawner{}),
 	)
 	assert.NoError(t, err)
+	assert.Contains(t, logBuf.String(), "Warning starting postgres socket proxy")
 
 	// Test database error branch when store is not injected
 	cfgBadDB := Config{

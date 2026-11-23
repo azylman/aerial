@@ -259,6 +259,9 @@ func BuildAgyEnv(input AgyEnvInput) []string {
 	if !hasEnvKey(cmdEnv, "PGDATABASE") {
 		cmdEnv = append(cmdEnv, "PGDATABASE=aerial")
 	}
+	if !hasEnvKey(cmdEnv, "PGHOST") {
+		cmdEnv = append(cmdEnv, "PGHOST=/var/run/postgresql")
+	}
 	return cmdEnv
 }
 
