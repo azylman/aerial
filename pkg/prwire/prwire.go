@@ -207,8 +207,8 @@ type PREvent struct {
 	BeforeSHA string `json:"before_sha,omitempty"`
 	// TargetID is the Discord target synapse resolved for the PR.
 	TargetID string `json:"target_id,omitempty"`
-	// CheckState is the ci_checks value HandleCheckStatus records
-	// (passed/pending).
+	// CheckState is the check-run state (passed/pending) synapse reports
+	// with HandleCheckStatus.
 	CheckState string `json:"check_state,omitempty"`
 	// Jobs are the deploy jobs a kustomization request starts.
 	Jobs []string `json:"jobs,omitempty"`
@@ -223,8 +223,6 @@ type PREvent struct {
 	DeployedKustomizations []string `json:"deployed_kustomizations,omitempty"`
 	// Banner is the failure banner a deploy failure records.
 	Banner string `json:"banner,omitempty"`
-	// Acknowledged marks a deploy-failed event as the publish ack.
-	Acknowledged bool `json:"acknowledged,omitempty"`
 	// BuildMetadata is one build-metadata snapshot for the PR revision.
 	BuildMetadata *BuildMetadata `json:"build_metadata,omitempty"`
 	// EriEffects are the rendered eri-bound effects synapse resolved for

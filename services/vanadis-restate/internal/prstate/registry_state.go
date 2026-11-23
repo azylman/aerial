@@ -3,8 +3,8 @@ package prstate
 // Registry state. PRState carries the per-PR registry fields (branch, head,
 // merge, target, title and status plus jobs, started_jobs, deployed_jobs,
 // job_states, kustomization_requests, deployed_kustomizations,
-// deploy_success_pending, build_metadata, banner,
-// ci_checks and agent). The transitions below are pure ports of the
+// deploy_success_pending, build_metadata, banner
+// and agent). The transitions below are pure ports of the
 // synapse registry SQL (services/synapse/internal/registry/registry.go and
 // kustomization.go): each names the statement it mirrors, and none performs
 // I/O, reads clocks, or touches Restate.
@@ -80,11 +80,10 @@ func (s *PRState) RegistryStatus() string {
 	return s.Status
 }
 
-// clearHeadScoped drops the metadata a head change invalidates: banner,
-// ci_checks and build_metadata.
+// clearHeadScoped drops the metadata a head change invalidates: banner
+// and build_metadata.
 func (s *PRState) clearHeadScoped() {
 	s.Banner = ""
-	s.CIChecks = nil
 	s.BuildMetadata = nil
 }
 
@@ -305,32 +304,6 @@ func (s *PRState) ApplyRegistryRecovered(from string) bool {
 		return false
 	}
 	s.Status = RegistryStatusOpen
-	return true
-}
-
-// RecordCheckState mirrors RecordPRCheckStatus: ci_checks[check] = state for
-// an open/ci_failed/conflict PR on its head SHA or a merged/synced PR on its
-// merge SHA. Returns true when the stored value changed.
-func (s *PRState) RecordCheckState(sha, checkName, state string) bool {
-	sha = strings.TrimSpace(sha)
-	checkName = strings.TrimSpace(checkName)
-	state = strings.TrimSpace(state)
-	if s == nil || sha == "" || prwire.IsZeroSHA(sha) || checkName == "" || state == "" {
-		return false
-	}
-	status := s.RegistryStatus()
-	preMerge := statusIn(status, RegistryStatusOpen, RegistryStatusCIFailed, RegistryStatusConflict) && s.HeadSHA == sha
-	postMerge := statusIn(status, RegistryStatusMerged, RegistryStatusSynced) && s.MergeSHA == sha
-	if !preMerge && !postMerge {
-		return false
-	}
-	if s.CIChecks[checkName] == state {
-		return false
-	}
-	if s.CIChecks == nil {
-		s.CIChecks = make(map[string]string)
-	}
-	s.CIChecks[checkName] = state
 	return true
 }
 

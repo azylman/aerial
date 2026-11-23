@@ -21,7 +21,6 @@ type registryRowView struct {
 	StartedJobs            []string
 	DeployedJobs           []string
 	DeployedKustomizations []string
-	CIChecks               map[string]string
 	Banner                 string
 	DeploySuccessPending   bool
 	BuildRun               int64
@@ -34,7 +33,7 @@ func viewRow(s *PRState) registryRowView {
 	v := registryRowView{
 		Status: s.Status, HeadSHA: s.HeadSHA, MergeSHA: s.MergeSHA, Branch: s.Branch, Title: s.Title, TargetID: s.TargetID,
 		Jobs: s.Jobs, StartedJobs: s.StartedJobs, DeployedJobs: s.DeployedJobs, DeployedKustomizations: s.DeployedKustomizations,
-		CIChecks: s.CIChecks, Banner: s.Banner, DeploySuccessPending: s.DeploySuccessPending,
+		Banner: s.Banner, DeploySuccessPending: s.DeploySuccessPending,
 	}
 	if s.BuildMetadata != nil {
 		v.BuildRun = s.BuildMetadata.RunNumber
@@ -73,7 +72,6 @@ func TestPRObjectService_RegistryRow(t *testing.T) {
 	failedCI.RecordFailedCheckRunDetailed("h1", "ci")
 	failedCI.RecordFailedCISHA("h1")
 	synced := svcRow("h1", "", RegistryStatusCIFailed, TerminalNone)
-	synced.CIChecks = map[string]string{"ci": "failed"}
 	synced.Banner = "b"
 	req := KustomizationRequest{Namespace: "flux-system", RequestedAt: "t0"}
 
@@ -117,12 +115,12 @@ func TestPRObjectService_RegistryRow(t *testing.T) {
 			want: registryRowView{Status: RegistryStatusOpen, HeadSHA: "h1"},
 		},
 		{
-			name: "check status records pending", got: svc.HandleCheckStatus(restate.WithMockContext(mc03), PREvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "h1", CheckName: "ci", CheckState: "pending"}), rec: rec03, wantSet: true,
-			want: registryRowView{Status: RegistryStatusOpen, HeadSHA: "h1", CIChecks: map[string]string{"ci": "pending"}},
+			name: "check status applies the event row", got: svc.HandleCheckStatus(restate.WithMockContext(mc03), PREvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "h1", CheckName: "ci", CheckState: "pending"}), rec: rec03, wantSet: true,
+			want: registryRowView{Status: RegistryStatusOpen, HeadSHA: "h1"},
 		},
 		{
-			name: "merged check status records on merge sha", got: svc.HandleCheckStatus(restate.WithMockContext(mc18), PREvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "m1", CheckName: "ci", CheckState: "passed"}), rec: rec18, wantSet: true,
-			want: registryRowView{Status: RegistryStatusMerged, HeadSHA: "h1", MergeSHA: "m1", CIChecks: map[string]string{"ci": "passed"}},
+			name: "merged check status keeps the merged row", got: svc.HandleCheckStatus(restate.WithMockContext(mc18), PREvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "m1", CheckName: "ci", CheckState: "passed"}), rec: rec18, wantSet: true,
+			want: registryRowView{Status: RegistryStatusMerged, HeadSHA: "h1", MergeSHA: "m1"},
 		},
 		{
 			name: "conflict resolved reopens", got: svc.HandleConflictResolved(restate.WithMockContext(mc04), PREvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "h1"}), rec: rec04, wantSet: true,

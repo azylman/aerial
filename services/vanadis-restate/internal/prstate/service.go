@@ -806,15 +806,12 @@ func (s *PRObjectService) HandleBuildMetadata(ctx restate.ObjectContext, ev PREv
 	})
 }
 
-// HandleCheckStatus records one ci_checks value (RecordPRCheckStatus): the
-// check state on an open PR's head SHA or a merged/synced PR's merge SHA.
-// Synapse sends it for pending and passed check runs, never for gate
-// aggregators. Merged PRs
-// apply it; closed PRs absorb it.
+// HandleCheckStatus applies a check-run event row and publishes the
+// check_updated fact it carries; Vanadis records the check state from that
+// fact. Synapse sends it for pending and passed check runs, never for gate
+// aggregators. Merged PRs apply it; closed PRs absorb it.
 func (s *PRObjectService) HandleCheckStatus(ctx restate.ObjectContext, ev PREvent) error {
-	return s.mutateDeployEvent(ctx, ev, func(st *PRState) {
-		st.RecordCheckState(ev.HeadSHA, ev.CheckName, ev.CheckState)
-	})
+	return s.mutateDeployEvent(ctx, ev, nil)
 }
 
 // HandleDeploySuccess is the merged deploy_success verdict: one exclusive
