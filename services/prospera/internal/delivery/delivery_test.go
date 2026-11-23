@@ -396,113 +396,112 @@ func TestDeliverInboundSMS(t *testing.T) {
 	}
 }
 
-func TestDelivery_ErrorBranches(t *testing.T) {
+func TestFlushLiveTranscript_Errors(t *testing.T) {
 	t.Parallel()
 
-	t.Run("flush live transcript error cases", func(t *testing.T) {
-		t.Parallel()
-		nilStoreReporter := NewReporter(fakes.StaticConfig{Cfg: &config.Config{BrainURL: "http://brain"}}, nil, &fakes.FakeTwilio{})
-		if err := nilStoreReporter.FlushLiveTranscript(context.Background(), "call-1"); err == nil {
-			t.Fatal("expected error with nil store")
-		}
+	nilStoreReporter := NewReporter(fakes.StaticConfig{Cfg: &config.Config{BrainURL: "http://brain"}}, nil, &fakes.FakeTwilio{})
+	if err := nilStoreReporter.FlushLiveTranscript(context.Background(), "call-1"); err == nil {
+		t.Fatal("expected error with nil store")
+	}
 
-		store := fakes.NewFakeStore()
-		reporter := NewReporter(fakes.StaticConfig{Cfg: &config.Config{BrainURL: "http://brain"}}, store, &fakes.FakeTwilio{})
-		if err := reporter.FlushLiveTranscript(context.Background(), "call-nonexistent"); err == nil {
-			t.Fatal("expected error with nonexistent call")
-		}
+	store := fakes.NewFakeStore()
+	reporter := NewReporter(fakes.StaticConfig{Cfg: &config.Config{BrainURL: "http://brain"}}, store, &fakes.FakeTwilio{})
+	if err := reporter.FlushLiveTranscript(context.Background(), "call-nonexistent"); err == nil {
+		t.Fatal("expected error with nonexistent call")
+	}
 
-		storeWithOpErr := fakes.NewFakeStore()
-		storeWithOpErr.OpErr = errors.New("db error")
-		opErrReporter := NewReporter(fakes.StaticConfig{Cfg: &config.Config{BrainURL: "http://brain"}}, storeWithOpErr, &fakes.FakeTwilio{})
-		if err := opErrReporter.FlushLiveTranscript(context.Background(), "call-operr"); err == nil {
-			t.Fatal("expected error with store op error")
-		}
+	storeWithOpErr := fakes.NewFakeStore()
+	storeWithOpErr.OpErr = errors.New("db error")
+	opErrReporter := NewReporter(fakes.StaticConfig{Cfg: &config.Config{BrainURL: "http://brain"}}, storeWithOpErr, &fakes.FakeTwilio{})
+	if err := opErrReporter.FlushLiveTranscript(context.Background(), "call-operr"); err == nil {
+		t.Fatal("expected error with store op error")
+	}
 
-		// Empty text turns advance cursor without posting to discord
-		if err := store.CreateOutboundCall(context.Background(), model.VoiceCall{
-			CallID: "call-empty-turn",
-			Transcript: []model.TranscriptTurn{
-				{Role: "user", Text: "   "},
-			},
-		}, 5); err != nil {
-			t.Fatalf("CreateOutboundCall: %v", err)
-		}
-		if err := reporter.FlushLiveTranscript(context.Background(), "call-empty-turn"); err != nil {
-			t.Fatalf("unexpected error with empty text turns: %v", err)
-		}
+	// Empty text turns advance cursor without posting to discord
+	if err := store.CreateOutboundCall(context.Background(), model.VoiceCall{
+		CallID: "call-empty-turn",
+		Transcript: []model.TranscriptTurn{
+			{Role: "user", Text: "   "},
+		},
+	}, 5); err != nil {
+		t.Fatalf("CreateOutboundCall: %v", err)
+	}
+	if err := reporter.FlushLiveTranscript(context.Background(), "call-empty-turn"); err != nil {
+		t.Fatalf("unexpected error with empty text turns: %v", err)
+	}
+}
+
+func TestProcessVoicemailRecording_Errors(t *testing.T) {
+	t.Parallel()
+
+	nilStoreReporter := NewReporter(fakes.StaticConfig{Cfg: &config.Config{BrainURL: "http://brain"}}, nil, &fakes.FakeTwilio{})
+	if err := nilStoreReporter.ProcessVoicemailRecording(context.Background(), "call-1", "https://rec"); err == nil {
+		t.Fatal("expected error with nil store")
+	}
+
+	store := fakes.NewFakeStore()
+	reporter := NewReporter(fakes.StaticConfig{Cfg: &config.Config{BrainURL: "http://brain"}}, store, &fakes.FakeTwilio{})
+	if err := reporter.ProcessVoicemailRecording(context.Background(), "call-nonexistent", "https://rec"); err == nil {
+		t.Fatal("expected error with nonexistent call")
+	}
+
+	// Download recording error
+	if err := store.CreateInboundCall(context.Background(), model.VoiceCall{
+		CallID:       "call-dl-err",
+		ReportStatus: "awaiting_recording",
+	}); err != nil {
+		t.Fatalf("CreateInboundCall: %v", err)
+	}
+	failTwilio := &fakes.FakeTwilio{DownloadErr: errors.New("download timeout")}
+	failReporter := NewReporter(fakes.StaticConfig{Cfg: &config.Config{BrainURL: "http://brain"}}, store, failTwilio)
+	if err := failReporter.ProcessVoicemailRecording(context.Background(), "call-dl-err", "https://rec"); err == nil {
+		t.Fatal("expected error when download fails")
+	}
+
+	// Discord delivery error
+	discordFailSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer discordFailSrv.Close()
+
+	if err := store.CreateInboundCall(context.Background(), model.VoiceCall{
+		CallID:       "call-discord-fail",
+		ReportStatus: "awaiting_recording",
+	}); err != nil {
+		t.Fatalf("CreateInboundCall: %v", err)
+	}
+	discordFailReporter := NewReporter(fakes.StaticConfig{Cfg: &config.Config{
+		BrainURL: discordFailSrv.URL,
+	}}, store, &fakes.FakeTwilio{AudioData: []byte("wav")}, WithReporterHTTPClient(discordFailSrv.Client()))
+	if err := discordFailReporter.ProcessVoicemailRecording(context.Background(), "call-discord-fail", "https://rec"); err == nil {
+		t.Fatal("expected error when discord delivery fails")
+	}
+
+	storeVMTransErr := fakes.NewFakeStore()
+	if err := storeVMTransErr.CreateInboundCall(context.Background(), model.VoiceCall{
+		CallID:       "call-vm-trans-err",
+		ReportStatus: "awaiting_recording",
+	}); err != nil {
+		t.Fatalf("CreateInboundCall: %v", err)
+	}
+	storeVMTransErr.TransErr = errors.New("transition failed")
+	vmTransReporter := NewReporter(fakes.StaticConfig{Cfg: &config.Config{BrainURL: "http://brain"}}, storeVMTransErr, &fakes.FakeTwilio{})
+	if err := vmTransReporter.ProcessVoicemailRecording(context.Background(), "call-vm-trans-err", "https://rec"); err == nil {
+		t.Fatal("expected error on transition failure")
+	}
+}
+
+func TestDeliverInboundSMS_EmptyBrainURL(t *testing.T) {
+	t.Parallel()
+
+	reporter := NewReporter(fakes.StaticConfig{Cfg: &config.Config{BrainURL: ""}}, nil, &fakes.FakeTwilio{})
+	err := reporter.DeliverInboundSMS(context.Background(), model.VoiceMessage{
+		MessageSID: "SM1",
+		Body:       "test",
 	})
-
-	t.Run("process voicemail recording error cases", func(t *testing.T) {
-		t.Parallel()
-		nilStoreReporter := NewReporter(fakes.StaticConfig{Cfg: &config.Config{BrainURL: "http://brain"}}, nil, &fakes.FakeTwilio{})
-		if err := nilStoreReporter.ProcessVoicemailRecording(context.Background(), "call-1", "https://rec"); err == nil {
-			t.Fatal("expected error with nil store")
-		}
-
-		store := fakes.NewFakeStore()
-		reporter := NewReporter(fakes.StaticConfig{Cfg: &config.Config{BrainURL: "http://brain"}}, store, &fakes.FakeTwilio{})
-		if err := reporter.ProcessVoicemailRecording(context.Background(), "call-nonexistent", "https://rec"); err == nil {
-			t.Fatal("expected error with nonexistent call")
-		}
-
-		// Download recording error
-		if err := store.CreateInboundCall(context.Background(), model.VoiceCall{
-			CallID:       "call-dl-err",
-			ReportStatus: "awaiting_recording",
-		}); err != nil {
-			t.Fatalf("CreateInboundCall: %v", err)
-		}
-		failTwilio := &fakes.FakeTwilio{DownloadErr: errors.New("download timeout")}
-		failReporter := NewReporter(fakes.StaticConfig{Cfg: &config.Config{BrainURL: "http://brain"}}, store, failTwilio)
-		if err := failReporter.ProcessVoicemailRecording(context.Background(), "call-dl-err", "https://rec"); err == nil {
-			t.Fatal("expected error when download fails")
-		}
-
-		// Discord delivery error
-		discordFailSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(http.StatusInternalServerError)
-		}))
-		defer discordFailSrv.Close()
-
-		if err := store.CreateInboundCall(context.Background(), model.VoiceCall{
-			CallID:       "call-discord-fail",
-			ReportStatus: "awaiting_recording",
-		}); err != nil {
-			t.Fatalf("CreateInboundCall: %v", err)
-		}
-		discordFailReporter := NewReporter(fakes.StaticConfig{Cfg: &config.Config{
-			BrainURL: discordFailSrv.URL,
-		}}, store, &fakes.FakeTwilio{AudioData: []byte("wav")}, WithReporterHTTPClient(discordFailSrv.Client()))
-		if err := discordFailReporter.ProcessVoicemailRecording(context.Background(), "call-discord-fail", "https://rec"); err == nil {
-			t.Fatal("expected error when discord delivery fails")
-		}
-
-		storeVMTransErr := fakes.NewFakeStore()
-		if err := storeVMTransErr.CreateInboundCall(context.Background(), model.VoiceCall{
-			CallID:       "call-vm-trans-err",
-			ReportStatus: "awaiting_recording",
-		}); err != nil {
-			t.Fatalf("CreateInboundCall: %v", err)
-		}
-		storeVMTransErr.TransErr = errors.New("transition failed")
-		vmTransReporter := NewReporter(fakes.StaticConfig{Cfg: &config.Config{BrainURL: "http://brain"}}, storeVMTransErr, &fakes.FakeTwilio{})
-		if err := vmTransReporter.ProcessVoicemailRecording(context.Background(), "call-vm-trans-err", "https://rec"); err == nil {
-			t.Fatal("expected error on transition failure")
-		}
-	})
-
-	t.Run("deliver inbound sms without brain url", func(t *testing.T) {
-		t.Parallel()
-		reporter := NewReporter(fakes.StaticConfig{Cfg: &config.Config{BrainURL: ""}}, nil, &fakes.FakeTwilio{})
-		err := reporter.DeliverInboundSMS(context.Background(), model.VoiceMessage{
-			MessageSID: "SM1",
-			Body:       "test",
-		})
-		if err == nil {
-			t.Fatal("expected error when brain url is empty")
-		}
-	})
+	if err == nil {
+		t.Fatal("expected error when brain url is empty")
+	}
 }
 
 type transcriptionBranchTestCase struct {
@@ -516,7 +515,7 @@ type transcriptionBranchTestCase struct {
 	wantResult string
 }
 
-func TestDelivery_TranscriptionAndSummaryBranches(t *testing.T) {
+func TestTranscribeAndSummarize(t *testing.T) {
 	t.Parallel()
 	tests := []transcriptionBranchTestCase{
 		{name: "summary http 500", backend: "gemini_summary", code: http.StatusInternalServerError, body: `server error`, wantErr: true},

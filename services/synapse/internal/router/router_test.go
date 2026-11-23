@@ -263,7 +263,7 @@ func TestLookupCollaboratorCIAlert(t *testing.T) {
 	}
 }
 
-func TestServerEndpoints_HealthMetricsAndCoverage(t *testing.T) {
+func TestServerEndpoints_HealthMetricsAndDebug(t *testing.T) {
 	oldCountersFn := httpkit.WriteCountersDirFn
 	oldMetaFn := httpkit.WriteMetaDirFn
 	t.Cleanup(func() {

@@ -438,7 +438,7 @@ func TestProcessActiveStepUpdate_TrailingFlushAndPrune(t *testing.T) {
 	}
 }
 
-func TestProcessActiveStepUpdate_DirtyLoopAndFlushBranches(t *testing.T) {
+func TestProcessActiveStepUpdate_DirtyLoopAndFlush(t *testing.T) {
 	t.Parallel()
 	var forwardCalls atomic.Int32
 	var srv *VanadisServer

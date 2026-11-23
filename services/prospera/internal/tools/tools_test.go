@@ -52,74 +52,33 @@ type toolHandlerInitiateCallTestCase struct {
 	args               InitiateCallArgs
 	twilioErr          string
 	updateStateErr     string
+	storeErr           string
+	bindErr            string
 	wantErr            bool
 	wantErrContains    string
 	wantErrNotContains string
 	wantMode           string
+	wantStatus         string
+}
+
+func initCallCase(name string, args InitiateCallArgs, twilioErr, updateStateErr, storeErr, bindErr string, wantErr bool, wantErrContains, wantErrNotContains, wantMode, wantStatus string) toolHandlerInitiateCallTestCase {
+	return toolHandlerInitiateCallTestCase{name: name, args: args, twilioErr: twilioErr, updateStateErr: updateStateErr, storeErr: storeErr, bindErr: bindErr, wantErr: wantErr, wantErrContains: wantErrContains, wantErrNotContains: wantErrNotContains, wantMode: wantMode, wantStatus: wantStatus}
 }
 
 func TestToolHandler_InitiateCall(t *testing.T) {
 	t.Parallel()
 
 	tests := []toolHandlerInitiateCallTestCase{
-		{
-			name: "valid initiate call",
-			args: InitiateCallArgs{
-				To:      "+15105550199",
-				Message: "Hello, this is an automated confirmation call.",
-			},
-			wantErr:  false,
-			wantMode: "conversation",
-		},
-		{
-			name: "valid initiate call with partial brief",
-			args: InitiateCallArgs{
-				To:      "+15105550199",
-				Message: "Hello, this is an automated confirmation call.",
-				Brief: model.CallBrief{
-					Context: "Context details",
-				},
-			},
-			wantErr:  false,
-			wantMode: "conversation",
-		},
-		{
-			name: "valid initiate call with notify mode",
-			args: InitiateCallArgs{
-				To:      "+15105550199",
-				Message: "Hello, notification only.",
-				Mode:    "notify",
-			},
-			wantErr:  false,
-			wantMode: "notify",
-		},
-		{
-			name: "invalid phone number",
-			args: InitiateCallArgs{
-				To:      "not-a-number",
-				Message: "Hello",
-			},
-			wantErr: true,
-		},
-		{
-			name: "empty message and task",
-			args: InitiateCallArgs{
-				To: "+15105550199",
-			},
-			wantErr: true,
-		},
-		{
-			name: "twilio error with state update failure",
-			args: InitiateCallArgs{
-				To:      "+15105550199",
-				Message: "Hello, this is an automated confirmation call.",
-			},
-			twilioErr:          "twilio network error",
-			updateStateErr:     "db write failed",
-			wantErr:            true,
-			wantErrContains:    "twilio network error",
-			wantErrNotContains: "db write failed",
-		},
+		initCallCase("valid initiate call", InitiateCallArgs{To: "+15105550199", Message: "Hello, this is an automated confirmation call."}, "", "", "", "", false, "", "", "conversation", "initiated"),
+		initCallCase("valid initiate call with partial brief", InitiateCallArgs{To: "+15105550199", Message: "Hello, this is an automated confirmation call.", Brief: model.CallBrief{Context: "Context details"}}, "", "", "", "", false, "", "", "conversation", "initiated"),
+		initCallCase("valid initiate call with notify mode", InitiateCallArgs{To: "+15105550199", Message: "Hello, notification only.", Mode: "notify"}, "", "", "", "", false, "", "", "notify", "initiated"),
+		initCallCase("invalid phone number", InitiateCallArgs{To: "not-a-number", Message: "Hello"}, "", "", "", "", true, "", "", "", ""),
+		initCallCase("empty message and task", InitiateCallArgs{To: "+15105550199"}, "", "", "", "", true, "", "", "", ""),
+		initCallCase("twilio error with state update failure", InitiateCallArgs{To: "+15105550199", Message: "Hello, this is an automated confirmation call."}, "twilio network error", "db write failed", "", "", true, "twilio network error", "db write failed", "", ""),
+		initCallCase("store error on initiate", InitiateCallArgs{To: "+15105550199", Message: "hello"}, "", "", "db error", "", true, "db error", "", "", ""),
+		initCallCase("twilio error alone", InitiateCallArgs{To: "+15105550199", Message: "hello"}, "twilio network error", "", "", "", true, "twilio network error", "", "", ""),
+		initCallCase("twilio dial fail and store op error", InitiateCallArgs{To: "+15105550199", Message: "hello"}, "dial fail", "", "db error", "", true, "db error", "", "", ""),
+		initCallCase("bind provider sid error fallback", InitiateCallArgs{To: "+15105550199", Message: "hello"}, "", "", "", "bind failure", false, "", "", "", "initiated"),
 	}
 
 	for _, tc := range tests {
@@ -139,6 +98,12 @@ func runToolHandlerInitiateCallCase(t *testing.T, tc toolHandlerInitiateCallTest
 	if tc.updateStateErr != "" {
 		env.store.UpdateStateErr = errors.New(tc.updateStateErr)
 	}
+	if tc.storeErr != "" {
+		env.store.OpErr = errors.New(tc.storeErr)
+	}
+	if tc.bindErr != "" {
+		env.store.BindErr = errors.New(tc.bindErr)
+	}
 
 	out, err := env.handler.InitiateCall(context.Background(), tc.args)
 	if (err != nil) != tc.wantErr {
@@ -153,7 +118,12 @@ func runToolHandlerInitiateCallCase(t *testing.T, tc toolHandlerInitiateCallTest
 		}
 		return
 	}
-	assertToolHandlerInitiateCallSuccess(t, tc, out, env.store, env.twilio)
+	if tc.wantStatus != "" && out.Status != tc.wantStatus {
+		t.Fatalf("InitiateCall() out.Status = %q, want %q", out.Status, tc.wantStatus)
+	}
+	if tc.bindErr == "" {
+		assertToolHandlerInitiateCallSuccess(t, tc, out, env.store, env.twilio)
+	}
 }
 
 func assertToolHandlerInitiateCallSuccess(t *testing.T, tc toolHandlerInitiateCallTestCase, out InitiateCallOutput, store *fakes.FakeStore, twilioMock *fakes.FakeTwilio) {
@@ -180,49 +150,28 @@ func assertToolHandlerInitiateCallSuccess(t *testing.T, tc toolHandlerInitiateCa
 }
 
 type toolHandlerSteerCallTestCase struct {
-	name    string
-	callID  string
-	msg     string
-	mode    string
-	wantErr bool
+	name          string
+	callID        string
+	msg           string
+	mode          string
+	nilSessionMgr bool
+	wantErr       bool
+}
+
+func steerCase(name, callID, msg, mode string, nilSessionMgr, wantErr bool) toolHandlerSteerCallTestCase {
+	return toolHandlerSteerCallTestCase{name: name, callID: callID, msg: msg, mode: mode, nilSessionMgr: nilSessionMgr, wantErr: wantErr}
 }
 
 func TestToolHandler_SteerCall(t *testing.T) {
 	t.Parallel()
 
 	tests := []toolHandlerSteerCallTestCase{
-		{
-			name:    "empty call id",
-			callID:  "",
-			msg:     "say this",
-			wantErr: true,
-		},
-		{
-			name:    "empty message",
-			callID:  "call-1",
-			msg:     "",
-			wantErr: true,
-		},
-		{
-			name:    "message too long",
-			callID:  "call-1",
-			msg:     strings.Repeat("a", 501),
-			wantErr: true,
-		},
-		{
-			name:    "call not active returns error",
-			callID:  "call-non-existent",
-			msg:     "Wrap up the call please.",
-			mode:    "guidance",
-			wantErr: true,
-		},
-		{
-			name:    "active call steers successfully",
-			callID:  "call-steer-active",
-			msg:     "Wrap up the call please.",
-			mode:    "guidance",
-			wantErr: false,
-		},
+		steerCase("empty call id", "", "say this", "", false, true),
+		steerCase("empty message", "call-1", "", "", false, true),
+		steerCase("message too long", "call-1", strings.Repeat("a", 501), "", false, true),
+		steerCase("call not active returns error", "call-non-existent", "Wrap up the call please.", "guidance", false, true),
+		steerCase("active call steers successfully", "call-steer-active", "Wrap up the call please.", "guidance", false, false),
+		steerCase("steer call with nil session manager", "c1", "msg", "", true, true),
 	}
 
 	for _, tc := range tests {
@@ -246,7 +195,9 @@ func setupMockGeminiSession(t *testing.T, callID string, handler *ToolHandler) {
 func runToolHandlerSteerCallCase(t *testing.T, tc toolHandlerSteerCallTestCase) {
 	t.Helper()
 	env := setupTestToolEnv()
-	if tc.callID == "call-steer-active" {
+	if tc.nilSessionMgr {
+		env.handler = NewToolHandler(env.handler.cfgSrc, env.store, env.twilio, nil, nil)
+	} else if tc.callID == "call-steer-active" {
 		setupMockGeminiSession(t, tc.callID, env.handler)
 	}
 
@@ -260,259 +211,341 @@ func runToolHandlerSteerCallCase(t *testing.T, tc toolHandlerSteerCallTestCase) 
 	}
 }
 
+type toolHandlerEndCallTestCase struct {
+	name             string
+	callID           string
+	reportStatus     string
+	storeErr         string
+	hangupErr        string
+	updateErr        string
+	hasReporter      bool
+	wantErr          bool
+	wantStatus       string
+	wantReportStatus string
+}
+
+func endCallCase(name, callID, reportStatus, storeErr, hangupErr, updateErr string, hasReporter, wantErr bool, wantStatus, wantReportStatus string) toolHandlerEndCallTestCase {
+	return toolHandlerEndCallTestCase{name: name, callID: callID, reportStatus: reportStatus, storeErr: storeErr, hangupErr: hangupErr, updateErr: updateErr, hasReporter: hasReporter, wantErr: wantErr, wantStatus: wantStatus, wantReportStatus: wantReportStatus}
+}
+
+func runToolHandlerEndCallCase(t *testing.T, tc toolHandlerEndCallTestCase) {
+	t.Helper()
+	env := setupTestToolEnv()
+
+	if strings.HasPrefix(tc.callID, "call-active-") {
+		if err := env.store.CreateOutboundCall(context.Background(), model.VoiceCall{
+			CallID:          tc.callID,
+			ProviderCallSID: "CA999",
+			State:           "in-progress",
+			FromNumber:      "+15105550100",
+			ToNumber:        "+15105550199",
+			ReportStatus:    tc.reportStatus,
+		}, 5); err != nil {
+			t.Fatalf("CreateOutboundCall failed: %v", err)
+		}
+	}
+	if tc.storeErr != "" {
+		env.store.OpErr = errors.New(tc.storeErr)
+	}
+	if tc.hangupErr != "" {
+		env.twilio.HangupErr = errors.New(tc.hangupErr)
+	}
+	if tc.updateErr != "" {
+		env.store.UpdateStateErr = errors.New(tc.updateErr)
+	}
+	if tc.hasReporter {
+		rep := delivery.NewReporter(fakes.StaticConfig{Cfg: &config.Config{BrainURL: ""}}, env.store, env.twilio)
+		env.handler = NewToolHandler(env.handler.cfgSrc, env.store, env.twilio, nil, rep)
+	}
+
+	out, err := env.handler.EndCall(context.Background(), EndCallArgs{CallID: tc.callID})
+	if (err != nil) != tc.wantErr {
+		t.Fatalf("EndCall() err = %v, wantErr = %v", err, tc.wantErr)
+	}
+	if tc.wantStatus != "" && out.Status != tc.wantStatus {
+		t.Fatalf("EndCall() status = %s, want %s", out.Status, tc.wantStatus)
+	}
+	if tc.wantReportStatus != "" {
+		updated, getErr := env.store.GetCall(context.Background(), tc.callID)
+		if getErr != nil || updated == nil {
+			t.Fatalf("GetCall() err = %v, call = %+v", getErr, updated)
+		}
+		if updated.ReportStatus != tc.wantReportStatus {
+			t.Fatalf("ReportStatus = %q, want %q", updated.ReportStatus, tc.wantReportStatus)
+		}
+	}
+}
+
 func TestToolHandler_EndCall(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
-		name             string
-		callID           string
-		reportStatus     string
-		wantReportStatus string
-		wantErr          bool
-	}{
-		{
-			name:    "empty call id",
-			callID:  "",
-			wantErr: true,
-		},
-		{
-			name:    "call not found",
-			callID:  "call-missing",
-			wantErr: true,
-		},
-		{
-			name:    "existing call ends successfully",
-			callID:  "call-active-1",
-			wantErr: false,
-		},
-		{
-			name:             "existing call with pending report leaves delivery to ProsperaReport",
-			callID:           "call-active-1",
-			reportStatus:     "pending",
-			wantReportStatus: "pending",
-			wantErr:          false,
-		},
+	tests := []toolHandlerEndCallTestCase{
+		endCallCase("empty call id", "", "", "", "", "", false, true, "", ""),
+		endCallCase("call not found", "call-missing", "", "", "", "", false, true, "", ""),
+		endCallCase("existing call ends successfully", "call-active-1", "", "", "", "", false, false, "ended", ""),
+		endCallCase("existing call with pending report leaves delivery to ProsperaReport", "call-active-1", "pending", "", "", "", false, false, "ended", "pending"),
+		endCallCase("end call store error", "c1", "", "db error", "", "", false, true, "", ""),
+		endCallCase("end call with twilio hangup error and reporter error fallback", "call-active-1", "", "", "hangup failed", "", true, false, "ended", ""),
+		endCallCase("end call update state error fallback", "call-active-1", "", "", "", "update state failure", false, false, "ended", ""),
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			runToolHandlerEndCallCase(t, tc)
+		})
+	}
+}
+
+type toolHandlerGetCallStatusTestCase struct {
+	name     string
+	callID   string
+	storeErr string
+	wantErr  bool
+}
+
+func getCallCase(name, callID, storeErr string, wantErr bool) toolHandlerGetCallStatusTestCase {
+	return toolHandlerGetCallStatusTestCase{name: name, callID: callID, storeErr: storeErr, wantErr: wantErr}
+}
+
+func TestToolHandler_GetCallStatus(t *testing.T) {
+	t.Parallel()
+
+	tests := []toolHandlerGetCallStatusTestCase{
+		getCallCase("get existing call", "call-test-get", "", false),
+		getCallCase("get empty call id fails", "", "", true),
+		getCallCase("get non-existent call", "call-does-not-exist", "", true),
+		getCallCase("get call status store error", "c1", "db error", true),
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			env := setupTestToolEnv()
-
-			if tc.callID == "call-active-1" {
+			if tc.callID == "call-test-get" {
 				if err := env.store.CreateOutboundCall(context.Background(), model.VoiceCall{
-					CallID:          "call-active-1",
-					ProviderCallSID: "CA999",
-					State:           "in-progress",
-					FromNumber:      "+15105550100",
-					ToNumber:        "+15105550199",
-					ReportStatus:    tc.reportStatus,
+					CallID: "call-test-get", State: "in-progress", FromNumber: "+15105550100", ToNumber: "+15105550199",
 				}, 5); err != nil {
 					t.Fatalf("CreateOutboundCall failed: %v", err)
 				}
 			}
-
-			out, err := env.handler.EndCall(context.Background(), EndCallArgs{CallID: tc.callID})
+			if tc.storeErr != "" {
+				env.store.OpErr = errors.New(tc.storeErr)
+			}
+			out, err := env.handler.GetCallStatus(context.Background(), GetCallStatusArgs{CallID: tc.callID})
 			if (err != nil) != tc.wantErr {
-				t.Fatalf("EndCall() err = %v, wantErr = %v", err, tc.wantErr)
+				t.Fatalf("GetCallStatus() err = %v, wantErr = %v", err, tc.wantErr)
 			}
-			if !tc.wantErr && out.Status != "ended" {
-				t.Fatalf("EndCall() status = %s, want 'ended'", out.Status)
-			}
-			if tc.wantReportStatus != "" {
-				updated, getErr := env.store.GetCall(context.Background(), tc.callID)
-				if getErr != nil || updated == nil {
-					t.Fatalf("GetCall() err = %v, call = %+v", getErr, updated)
-				}
-				if updated.ReportStatus != tc.wantReportStatus {
-					t.Fatalf("ReportStatus = %q, want %q", updated.ReportStatus, tc.wantReportStatus)
-				}
+			if !tc.wantErr && (out.Call == nil || out.Call.CallID != tc.callID) {
+				t.Fatalf("GetCallStatus() unexpected out = %+v", out)
 			}
 		})
 	}
 }
 
-func TestToolHandler_GetAndListCalls(t *testing.T) {
-	t.Parallel()
-
-	env := setupTestToolEnv()
-	if err := env.store.CreateOutboundCall(context.Background(), model.VoiceCall{
-		CallID:     "call-test-get",
-		State:      "in-progress",
-		FromNumber: "+15105550100",
-		ToNumber:   "+15105550199",
-	}, 5); err != nil {
-		t.Fatalf("CreateOutboundCall failed: %v", err)
-	}
-
-	t.Run("get existing call", func(t *testing.T) {
-		t.Parallel()
-		out, err := env.handler.GetCallStatus(context.Background(), GetCallStatusArgs{CallID: "call-test-get"})
-		if err != nil || out.Call == nil || out.Call.CallID != "call-test-get" {
-			t.Fatalf("GetCallStatus() err = %v, out = %+v", err, out)
-		}
-	})
-
-	t.Run("get empty call id fails", func(t *testing.T) {
-		t.Parallel()
-		_, err := env.handler.GetCallStatus(context.Background(), GetCallStatusArgs{CallID: ""})
-		if err == nil {
-			t.Fatal("expected error for empty call id")
-		}
-	})
-
-	t.Run("get non-existent call", func(t *testing.T) {
-		t.Parallel()
-		_, err := env.handler.GetCallStatus(context.Background(), GetCallStatusArgs{CallID: "call-does-not-exist"})
-		if err == nil {
-			t.Fatal("expected error for non-existent call")
-		}
-	})
-
-	t.Run("list calls", func(t *testing.T) {
-		t.Parallel()
-		out, err := env.handler.ListCalls(context.Background(), ListCallsArgs{Limit: 10})
-		if err != nil || len(out.Calls) == 0 {
-			t.Fatalf("ListCalls() err = %v, calls = %d", err, len(out.Calls))
-		}
-	})
+type toolHandlerListCallsTestCase struct {
+	name       string
+	limit      int
+	emptyStore bool
+	storeErr   string
+	wantErr    bool
+	wantCalls  bool
+	wantEmpty  bool
 }
 
-func TestToolHandler_SMSAndPhone(t *testing.T) {
-	t.Parallel()
-
-	env := setupTestToolEnv()
-
-	t.Run("send sms", func(t *testing.T) {
-		t.Parallel()
-		testToolHandlerSendSMS(t, env.handler)
-	})
-	t.Run("list sms and calls", func(t *testing.T) {
-		t.Parallel()
-		testToolHandlerListSMSAndCalls(t, env.handler)
-	})
-	t.Run("ensure phone number", func(t *testing.T) {
-		t.Parallel()
-		testToolHandlerEnsurePhone(t, env.handler)
-	})
+func listCallsCase(name string, limit int, emptyStore bool, storeErr string, wantErr, wantCalls, wantEmpty bool) toolHandlerListCallsTestCase {
+	return toolHandlerListCallsTestCase{name: name, limit: limit, emptyStore: emptyStore, storeErr: storeErr, wantErr: wantErr, wantCalls: wantCalls, wantEmpty: wantEmpty}
 }
 
-func TestToolHandler_SendSMSStoreError(t *testing.T) {
+func TestToolHandler_ListCalls(t *testing.T) {
 	t.Parallel()
-	tests := []struct {
-		name    string
-		saveErr string
-		wantErr bool
-	}{
-		{
-			name:    "save error still sends",
-			saveErr: "db write failed",
-			wantErr: false,
-		},
+
+	tests := []toolHandlerListCallsTestCase{
+		listCallsCase("list calls limit 10", 10, false, "", false, true, false),
+		listCallsCase("empty store returns empty non-nil calls", 0, true, "", false, false, true),
+		listCallsCase("list calls store error", 0, false, "db error", true, false, false),
 	}
+
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			env := setupTestToolEnv()
-			if tc.saveErr != "" {
-				env.store.SaveErr = errors.New(tc.saveErr)
+			if tc.emptyStore {
+				env.store = fakes.NewFakeStore()
+				env.handler = NewToolHandler(env.handler.cfgSrc, env.store, env.twilio, nil, nil)
+			} else {
+				if err := env.store.CreateOutboundCall(context.Background(), model.VoiceCall{
+					CallID: "call-list-1", State: "in-progress", FromNumber: "+15105550100", ToNumber: "+15105550199",
+				}, 5); err != nil {
+					t.Fatalf("CreateOutboundCall: %v", err)
+				}
 			}
-			out, err := env.handler.SendSMS(context.Background(), SendSMSArgs{
-				To:   "+15105550199",
-				Body: "Test SMS message",
-			})
+			if tc.storeErr != "" {
+				env.store.OpErr = errors.New(tc.storeErr)
+			}
+			out, err := env.handler.ListCalls(context.Background(), ListCallsArgs{Limit: tc.limit})
 			if (err != nil) != tc.wantErr {
-				t.Fatalf("SendSMS() err = %v, wantErr = %v", err, tc.wantErr)
+				t.Fatalf("ListCalls() err = %v, wantErr = %v", err, tc.wantErr)
 			}
-			if !tc.wantErr && (out.Status != "sent" || out.MessageSID == "") {
-				t.Fatalf("SendSMS() out = %+v, want sent status", out)
+			if tc.wantCalls && len(out.Calls) == 0 {
+				t.Fatalf("ListCalls() expected calls, got 0")
+			}
+			if tc.wantEmpty && (out.Calls == nil || len(out.Calls) != 0) {
+				t.Fatalf("ListCalls() expected empty non-nil calls slice, got %+v", out.Calls)
 			}
 		})
 	}
 }
 
-func testToolHandlerSendSMS(t *testing.T, handler *ToolHandler) {
-	t.Helper()
-	out, err := handler.SendSMS(context.Background(), SendSMSArgs{
-		To:   "+15105550199",
-		Body: "Test SMS message",
-	})
-	if err != nil || out.Status != "sent" || out.MessageSID == "" {
-		t.Fatalf("SendSMS() err = %v, out = %+v", err, out)
+type toolHandlerSendSMSTestCase struct {
+	name         string
+	to           string
+	from         string
+	body         string
+	noConfigFrom bool
+	twilioErr    string
+	saveErr      string
+	wantErr      bool
+	wantStatus   string
+}
+
+func sendSMSCase(name, to, from, body string, noConfigFrom bool, twilioErr, saveErr string, wantErr bool, wantStatus string) toolHandlerSendSMSTestCase {
+	return toolHandlerSendSMSTestCase{name: name, to: to, from: from, body: body, noConfigFrom: noConfigFrom, twilioErr: twilioErr, saveErr: saveErr, wantErr: wantErr, wantStatus: wantStatus}
+}
+
+func TestToolHandler_SendSMS(t *testing.T) {
+	t.Parallel()
+
+	tests := []toolHandlerSendSMSTestCase{
+		sendSMSCase("valid send", "+15105550199", "", "Test SMS message", false, "", "", false, "sent"),
+		sendSMSCase("custom from number", "+15105550199", "+1 (510) 555-0188", "Test custom from", false, "", "", false, "sent"),
+		sendSMSCase("invalid phone number", "invalid", "", "Test", false, "", "", true, ""),
+		sendSMSCase("invalid source number", "+15105550199", "invalid-source-number", "Test", false, "", "", true, ""),
+		sendSMSCase("empty body", "+15105550199", "", "", false, "", "", true, ""),
+		sendSMSCase("missing from in config", "+15105550199", "", "hi", true, "", "", true, ""),
+		sendSMSCase("twilio sms error", "+15105550199", "", "test", false, "twilio sms fail", "", true, ""),
+		sendSMSCase("store save error fallback", "+15105550199", "", "Test SMS message", false, "", "save failure", false, "sent"),
 	}
 
-	outCustom, errCustom := handler.SendSMS(context.Background(), SendSMSArgs{
-		To:   "+15105550199",
-		From: "+1 (510) 555-0188",
-		Body: "Test custom from",
-	})
-	if errCustom != nil || outCustom.Status != "sent" {
-		t.Fatalf("SendSMS() with custom from err = %v, out = %+v", errCustom, outCustom)
-	}
-
-	if _, err := handler.SendSMS(context.Background(), SendSMSArgs{To: "invalid", Body: "Test"}); err == nil {
-		t.Fatal("expected error for invalid phone number")
-	}
-
-	if _, err := handler.SendSMS(context.Background(), SendSMSArgs{To: "+15105550199", From: "invalid-source-number", Body: "Test"}); err == nil {
-		t.Fatal("expected error for invalid from number")
-	}
-
-	if _, err := handler.SendSMS(context.Background(), SendSMSArgs{To: "+15105550199", Body: ""}); err == nil {
-		t.Fatal("expected error for empty body")
-	}
-
-	handlerNoFrom := NewToolHandler(fakes.StaticConfig{Cfg: &config.Config{}}, nil, nil, nil, nil)
-	if _, err := handlerNoFrom.SendSMS(context.Background(), SendSMSArgs{To: "+15105550199", Body: "hi"}); err == nil {
-		t.Fatal("expected error for missing from")
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			env := setupTestToolEnv()
+			if tc.noConfigFrom {
+				env.handler = NewToolHandler(fakes.StaticConfig{Cfg: &config.Config{}}, nil, nil, nil, nil)
+			}
+			if tc.twilioErr != "" {
+				env.twilio.SendSMSErr = errors.New(tc.twilioErr)
+			}
+			if tc.saveErr != "" {
+				env.store.OpErr = errors.New(tc.saveErr)
+				env.store.SaveErr = errors.New(tc.saveErr)
+			}
+			out, err := env.handler.SendSMS(context.Background(), SendSMSArgs{
+				To:   tc.to,
+				From: tc.from,
+				Body: tc.body,
+			})
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("SendSMS() err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			if tc.wantStatus != "" && (out.Status != tc.wantStatus || out.MessageSID == "") {
+				t.Fatalf("SendSMS() out = %+v, want status %s", out, tc.wantStatus)
+			}
+		})
 	}
 }
 
-func testToolHandlerListSMSAndCalls(t *testing.T, handler *ToolHandler) {
-	t.Helper()
-	if _, err := handler.ListSMS(context.Background(), ListSMSArgs{Limit: 5}); err != nil {
-		t.Fatalf("ListSMS() err = %v", err)
+type toolHandlerListSMSTestCase struct {
+	name       string
+	limit      int
+	emptyStore bool
+	storeErr   string
+	wantErr    bool
+	wantEmpty  bool
+}
+
+func listSMSCase(name string, limit int, emptyStore bool, storeErr string, wantErr, wantEmpty bool) toolHandlerListSMSTestCase {
+	return toolHandlerListSMSTestCase{name: name, limit: limit, emptyStore: emptyStore, storeErr: storeErr, wantErr: wantErr, wantEmpty: wantEmpty}
+}
+
+func TestToolHandler_ListSMS(t *testing.T) {
+	t.Parallel()
+
+	tests := []toolHandlerListSMSTestCase{
+		listSMSCase("list sms limit 5", 5, false, "", false, false),
+		listSMSCase("empty store returns empty non-nil messages", 0, true, "", false, true),
+		listSMSCase("list sms store error", 0, false, "db error", true, false),
 	}
 
-	if _, err := handler.ListSMS(context.Background(), ListSMSArgs{Limit: -1}); err != nil {
-		t.Fatalf("ListSMS(-1): %v", err)
-	}
-	if _, err := handler.ListSMS(context.Background(), ListSMSArgs{Limit: 100}); err != nil {
-		t.Fatalf("ListSMS(100): %v", err)
-	}
-	if _, err := handler.ListCalls(context.Background(), ListCallsArgs{Limit: -1}); err != nil {
-		t.Fatalf("ListCalls(-1): %v", err)
-	}
-	if _, err := handler.ListCalls(context.Background(), ListCallsArgs{Limit: 100}); err != nil {
-		t.Fatalf("ListCalls(100): %v", err)
-	}
-
-	emptyStore := fakes.NewFakeStore()
-	h := NewToolHandler(handler.cfgSrc, emptyStore, &fakes.FakeTwilio{}, nil, nil)
-	outCalls, err := h.ListCalls(context.Background(), ListCallsArgs{})
-	if err != nil || outCalls.Calls == nil {
-		t.Fatal("expected empty non-nil calls slice")
-	}
-	outSMS, err := h.ListSMS(context.Background(), ListSMSArgs{})
-	if err != nil || outSMS.Messages == nil {
-		t.Fatal("expected empty non-nil messages slice")
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			env := setupTestToolEnv()
+			if tc.emptyStore {
+				env.store = fakes.NewFakeStore()
+				env.handler = NewToolHandler(env.handler.cfgSrc, env.store, env.twilio, nil, nil)
+			}
+			if tc.storeErr != "" {
+				env.store.OpErr = errors.New(tc.storeErr)
+			}
+			out, err := env.handler.ListSMS(context.Background(), ListSMSArgs{Limit: tc.limit})
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("ListSMS() err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			if tc.wantEmpty && (out.Messages == nil || len(out.Messages) != 0) {
+				t.Fatalf("ListSMS() expected empty messages, got %+v", out.Messages)
+			}
+		})
 	}
 }
 
-func testToolHandlerEnsurePhone(t *testing.T, handler *ToolHandler) {
-	t.Helper()
-	env := setupTestToolEnv()
-	out, err := env.handler.EnsurePhoneNumber(context.Background(), EnsurePhoneNumberArgs{AreaCode: "510"})
-	if err != nil || out.PhoneNumber == "" || out.Status != "configured" {
-		t.Fatalf("EnsurePhoneNumber() err = %v, out = %+v", err, out)
-	}
-	if env.twilio.LastWebhookBaseURL != "https://webhooks.example.com/api/webhooks" {
-		t.Fatalf("lastWebhookBaseURL = %q, want https://webhooks.example.com/api/webhooks", env.twilio.LastWebhookBaseURL)
+type toolHandlerEnsurePhoneTestCase struct {
+	name      string
+	areaCode  string
+	noTwilio  bool
+	twilioErr string
+	wantErr   bool
+	wantWeb   string
+}
+
+func ensurePhoneCase(name, areaCode string, noTwilio bool, twilioErr string, wantErr bool, wantWeb string) toolHandlerEnsurePhoneTestCase {
+	return toolHandlerEnsurePhoneTestCase{name: name, areaCode: areaCode, noTwilio: noTwilio, twilioErr: twilioErr, wantErr: wantErr, wantWeb: wantWeb}
+}
+
+func TestToolHandler_EnsurePhoneNumber(t *testing.T) {
+	t.Parallel()
+
+	tests := []toolHandlerEnsurePhoneTestCase{
+		ensurePhoneCase("configured area code", "510", false, "", false, "https://webhooks.example.com/api/webhooks"),
+		ensurePhoneCase("default area code", "", false, "", false, ""),
+		ensurePhoneCase("missing twilio client returns error", "", true, "", true, ""),
+		ensurePhoneCase("twilio error returns error", "510", false, "twilio phone fail", true, ""),
 	}
 
-	outDef, errDef := handler.EnsurePhoneNumber(context.Background(), EnsurePhoneNumberArgs{AreaCode: ""})
-	if errDef != nil || outDef.Status != "configured" {
-		t.Fatalf("EnsurePhoneNumber() default err = %v, out = %+v", errDef, outDef)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			env := setupTestToolEnv()
+			if tc.noTwilio {
+				env.handler = NewToolHandler(env.handler.cfgSrc, env.store, nil, nil, nil)
+			}
+			if tc.twilioErr != "" {
+				env.twilio.EnsurePhoneErr = errors.New(tc.twilioErr)
+			}
+			out, err := env.handler.EnsurePhoneNumber(context.Background(), EnsurePhoneNumberArgs{AreaCode: tc.areaCode})
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("EnsurePhoneNumber() err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			if !tc.wantErr {
+				if out.PhoneNumber == "" || out.Status != "configured" {
+					t.Fatalf("EnsurePhoneNumber() out = %+v, want configured", out)
+				}
+				if tc.wantWeb != "" && env.twilio.LastWebhookBaseURL != tc.wantWeb {
+					t.Fatalf("LastWebhookBaseURL = %q, want %q", env.twilio.LastWebhookBaseURL, tc.wantWeb)
+				}
+			}
+		})
 	}
 }
 
@@ -555,66 +588,16 @@ func TestMCPStreamableHTTPHandler(t *testing.T) {
 		wantCode int
 		wantSub  string
 	}{
-		{
-			name:     "initialize",
-			body:     `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test-client","version":"1.0"}}}`,
-			wantCode: http.StatusOK,
-			wantSub:  `"protocolVersion"`,
-		},
-		{
-			name:     "tools list",
-			body:     `{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}`,
-			wantCode: http.StatusOK,
-			wantSub:  `initiate_call`,
-		},
-		{
-			name:     "tools call initiate_call",
-			body:     `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"initiate_call","arguments":{"to":"+15105550199","message":"hello","brief":{"context":"reservation details"}}}}`,
-			wantCode: http.StatusOK,
-			wantSub:  `"call_id"`,
-		},
-		{
-			name:     "tools call steer_call",
-			body:     `{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"steer_call","arguments":{"call_id":"call-nonexistent","message":"steer"}}}`,
-			wantCode: http.StatusOK,
-			wantSub:  `"isError":true`,
-		},
-		{
-			name:     "tools call end_call",
-			body:     `{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"end_call","arguments":{"call_id":"call-mcp-active"}}}`,
-			wantCode: http.StatusOK,
-			wantSub:  `"ended"`,
-		},
-		{
-			name:     "tools call get_call_status",
-			body:     `{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"get_call_status","arguments":{"call_id":"call-mcp-active"}}}`,
-			wantCode: http.StatusOK,
-			wantSub:  `call-mcp-active`,
-		},
-		{
-			name:     "tools call list_calls",
-			body:     `{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"list_calls","arguments":{"limit":5}}}`,
-			wantCode: http.StatusOK,
-			wantSub:  `"calls"`,
-		},
-		{
-			name:     "tools call send_sms",
-			body:     `{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"send_sms","arguments":{"to":"+15105550199","body":"test"}}}`,
-			wantCode: http.StatusOK,
-			wantSub:  `"sent"`,
-		},
-		{
-			name:     "tools call list_sms",
-			body:     `{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"list_sms","arguments":{"limit":5}}}`,
-			wantCode: http.StatusOK,
-			wantSub:  `"messages"`,
-		},
-		{
-			name:     "tools call ensure_phone_number",
-			body:     `{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"ensure_phone_number","arguments":{"area_code":"510"}}}`,
-			wantCode: http.StatusOK,
-			wantSub:  `"configured"`,
-		},
+		{name: "initialize", body: `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test-client","version":"1.0"}}}`, wantCode: http.StatusOK, wantSub: `"protocolVersion"`},
+		{name: "tools list", body: `{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}`, wantCode: http.StatusOK, wantSub: `initiate_call`},
+		{name: "tools call initiate_call", body: `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"initiate_call","arguments":{"to":"+15105550199","message":"hello","brief":{"context":"reservation details"}}}}`, wantCode: http.StatusOK, wantSub: `"call_id"`},
+		{name: "tools call steer_call", body: `{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"steer_call","arguments":{"call_id":"call-nonexistent","message":"steer"}}}`, wantCode: http.StatusOK, wantSub: `"isError":true`},
+		{name: "tools call end_call", body: `{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"end_call","arguments":{"call_id":"call-mcp-active"}}}`, wantCode: http.StatusOK, wantSub: `"ended"`},
+		{name: "tools call get_call_status", body: `{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"get_call_status","arguments":{"call_id":"call-mcp-active"}}}`, wantCode: http.StatusOK, wantSub: `call-mcp-active`},
+		{name: "tools call list_calls", body: `{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"list_calls","arguments":{"limit":5}}}`, wantCode: http.StatusOK, wantSub: `"calls"`},
+		{name: "tools call send_sms", body: `{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"send_sms","arguments":{"to":"+15105550199","body":"test"}}}`, wantCode: http.StatusOK, wantSub: `"sent"`},
+		{name: "tools call list_sms", body: `{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"list_sms","arguments":{"limit":5}}}`, wantCode: http.StatusOK, wantSub: `"messages"`},
+		{name: "tools call ensure_phone_number", body: `{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"ensure_phone_number","arguments":{"area_code":"510"}}}`, wantCode: http.StatusOK, wantSub: `"configured"`},
 	}
 
 	for _, tc := range tests {
@@ -643,296 +626,5 @@ func TestMCPStreamableHTTPHandler(t *testing.T) {
 				t.Fatalf("response %s missing %s", string(respBytes), tc.wantSub)
 			}
 		})
-	}
-}
-
-func TestToolHandler_StoreAndTwilioErrors(t *testing.T) {
-	t.Parallel()
-
-	cfg := &config.Config{
-		TwilioFromNumber:     "+15105550100",
-		PublicWebhookBaseURL: "https://webhooks.example.com",
-		MaxConcurrentCalls:   5,
-	}
-
-	t.Run("initiate call store error", func(t *testing.T) {
-		t.Parallel()
-		store := fakes.NewFakeStore()
-		store.OpErr = errors.New("db error")
-		h := NewToolHandler(fakes.StaticConfig{Cfg: cfg}, store, &fakes.FakeTwilio{}, nil, nil)
-		_, err := h.InitiateCall(context.Background(), InitiateCallArgs{
-			To:      "+15105550199",
-			Message: "hello",
-		})
-		if err == nil {
-			t.Fatal("expected error on store failure")
-		}
-	})
-
-	t.Run("initiate call twilio error", func(t *testing.T) {
-		t.Parallel()
-		store := fakes.NewFakeStore()
-		twilioMock := &fakes.FakeTwilio{CreateCallErr: errors.New("twilio network error")}
-		h := NewToolHandler(fakes.StaticConfig{Cfg: cfg}, store, twilioMock, nil, nil)
-		_, err := h.InitiateCall(context.Background(), InitiateCallArgs{
-			To:      "+15105550199",
-			Message: "hello",
-		})
-		if err == nil {
-			t.Fatal("expected error on twilio failure")
-		}
-	})
-
-	t.Run("end call store error", func(t *testing.T) {
-		t.Parallel()
-		store := fakes.NewFakeStore()
-		store.OpErr = errors.New("db error")
-		h := NewToolHandler(fakes.StaticConfig{Cfg: cfg}, store, &fakes.FakeTwilio{}, nil, nil)
-		_, err := h.EndCall(context.Background(), EndCallArgs{CallID: "c1"})
-		if err == nil {
-			t.Fatal("expected error on store failure")
-		}
-	})
-
-	t.Run("get call status store error", func(t *testing.T) {
-		t.Parallel()
-		store := fakes.NewFakeStore()
-		store.OpErr = errors.New("db error")
-		h := NewToolHandler(fakes.StaticConfig{Cfg: cfg}, store, &fakes.FakeTwilio{}, nil, nil)
-		_, err := h.GetCallStatus(context.Background(), GetCallStatusArgs{CallID: "c1"})
-		if err == nil {
-			t.Fatal("expected error on store failure")
-		}
-	})
-
-	t.Run("list calls store error", func(t *testing.T) {
-		t.Parallel()
-		store := fakes.NewFakeStore()
-		store.OpErr = errors.New("db error")
-		h := NewToolHandler(fakes.StaticConfig{Cfg: cfg}, store, &fakes.FakeTwilio{}, nil, nil)
-		_, err := h.ListCalls(context.Background(), ListCallsArgs{})
-		if err == nil {
-			t.Fatal("expected error on store failure")
-		}
-	})
-
-	t.Run("send sms twilio error", func(t *testing.T) {
-		t.Parallel()
-		store := fakes.NewFakeStore()
-		twilioMock := &fakes.FakeTwilio{SendSMSErr: errors.New("twilio sms fail")}
-		h := NewToolHandler(fakes.StaticConfig{Cfg: cfg}, store, twilioMock, nil, nil)
-		_, err := h.SendSMS(context.Background(), SendSMSArgs{
-			To:   "+15105550199",
-			Body: "test",
-		})
-		if err == nil {
-			t.Fatal("expected error on twilio sms fail")
-		}
-	})
-
-	t.Run("list sms store error", func(t *testing.T) {
-		t.Parallel()
-		store := fakes.NewFakeStore()
-		store.OpErr = errors.New("db error")
-		h := NewToolHandler(fakes.StaticConfig{Cfg: cfg}, store, &fakes.FakeTwilio{}, nil, nil)
-		_, err := h.ListSMS(context.Background(), ListSMSArgs{})
-		if err == nil {
-			t.Fatal("expected error on store failure")
-		}
-	})
-
-	t.Run("ensure phone number twilio error", func(t *testing.T) {
-		t.Parallel()
-		store := fakes.NewFakeStore()
-		twilioMock := &fakes.FakeTwilio{EnsurePhoneErr: errors.New("twilio phone fail")}
-		h := NewToolHandler(fakes.StaticConfig{Cfg: cfg}, store, twilioMock, nil, nil)
-		_, err := h.EnsurePhoneNumber(context.Background(), EnsurePhoneNumberArgs{AreaCode: "510"})
-		if err == nil {
-			t.Fatal("expected error on twilio phone fail")
-		}
-	})
-
-	t.Run("steer call with nil session manager", func(t *testing.T) {
-		t.Parallel()
-		store := fakes.NewFakeStore()
-		h := NewToolHandler(fakes.StaticConfig{Cfg: cfg}, store, &fakes.FakeTwilio{}, nil, nil)
-		_, err := h.SteerCall(context.Background(), SteerCallArgs{
-			CallID:  "c1",
-			Message: "msg",
-		})
-		if err == nil {
-			t.Fatal("expected error on nil session manager")
-		}
-	})
-}
-
-func TestToolHandler_ValidationErrors(t *testing.T) {
-	t.Parallel()
-	cfg := &config.Config{TwilioFromNumber: "+15105550100"}
-	store := fakes.NewFakeStore()
-	h := NewToolHandler(fakes.StaticConfig{Cfg: cfg}, store, &fakes.FakeTwilio{}, nil, nil)
-
-	t.Run("initiate call invalid to", func(t *testing.T) {
-		t.Parallel()
-		_, err := h.InitiateCall(context.Background(), InitiateCallArgs{To: "invalid"})
-		if err == nil {
-			t.Fatal("expected err")
-		}
-	})
-
-	t.Run("steer call validation", func(t *testing.T) {
-		t.Parallel()
-		if _, err := h.SteerCall(context.Background(), SteerCallArgs{CallID: ""}); err == nil {
-			t.Fatal("expected err")
-		}
-		if _, err := h.SteerCall(context.Background(), SteerCallArgs{CallID: "c1", Message: ""}); err == nil {
-			t.Fatal("expected err")
-		}
-		if _, err := h.SteerCall(context.Background(), SteerCallArgs{CallID: "c1", Message: strings.Repeat("x", 501)}); err == nil {
-			t.Fatal("expected err")
-		}
-	})
-
-	t.Run("end call validation", func(t *testing.T) {
-		t.Parallel()
-		if _, err := h.EndCall(context.Background(), EndCallArgs{CallID: ""}); err == nil {
-			t.Fatal("expected err")
-		}
-		if _, err := h.EndCall(context.Background(), EndCallArgs{CallID: "missing"}); err == nil {
-			t.Fatal("expected err")
-		}
-	})
-
-	t.Run("get call status validation", func(t *testing.T) {
-		t.Parallel()
-		if _, err := h.GetCallStatus(context.Background(), GetCallStatusArgs{CallID: ""}); err == nil {
-			t.Fatal("expected err")
-		}
-		if _, err := h.GetCallStatus(context.Background(), GetCallStatusArgs{CallID: "missing"}); err == nil {
-			t.Fatal("expected err")
-		}
-	})
-
-	t.Run("send sms validation", func(t *testing.T) {
-		t.Parallel()
-		if _, err := h.SendSMS(context.Background(), SendSMSArgs{To: "bad"}); err == nil {
-			t.Fatal("expected err")
-		}
-		if _, err := h.SendSMS(context.Background(), SendSMSArgs{To: "+15105550199", Body: ""}); err == nil {
-			t.Fatal("expected err")
-		}
-	})
-
-	t.Run("ensure phone number validation", func(t *testing.T) {
-		t.Parallel()
-		hNoTwilio := NewToolHandler(fakes.StaticConfig{Cfg: cfg}, store, nil, nil, nil)
-		if _, err := hNoTwilio.EnsurePhoneNumber(context.Background(), EnsurePhoneNumberArgs{AreaCode: ""}); err == nil {
-			t.Fatal("expected err")
-		}
-	})
-}
-
-func TestToolHandler_SteerEndAndEnsurePhoneFallbacks(t *testing.T) {
-	t.Parallel()
-	cfg := &config.Config{TwilioFromNumber: "+15105550100"}
-
-	t.Run("list sms zero limit defaults to 20", func(t *testing.T) {
-		t.Parallel()
-		store := fakes.NewFakeStore()
-		h := NewToolHandler(fakes.StaticConfig{Cfg: cfg}, store, &fakes.FakeTwilio{}, nil, nil)
-		out, err := h.ListSMS(context.Background(), ListSMSArgs{Limit: 0})
-		if err != nil {
-			t.Fatalf("unexpected err: %v", err)
-		}
-		if len(out.Messages) != 0 {
-			t.Fatalf("expected empty messages, got %v", out.Messages)
-		}
-	})
-
-	t.Run("end call with twilio hangup error and reporter error", func(t *testing.T) {
-		t.Parallel()
-		store := fakes.NewFakeStore()
-		if err := store.CreateOutboundCall(context.Background(), model.VoiceCall{
-			CallID:          "call-hangup-err",
-			ProviderCallSID: "CA-hangup-err",
-			State:           "in-progress",
-		}, 5); err != nil {
-			t.Fatalf("CreateOutboundCall failed: %v", err)
-		}
-		twilioMock := &fakes.FakeTwilio{HangupErr: errors.New("hangup failed")}
-		rep := delivery.NewReporter(fakes.StaticConfig{Cfg: &config.Config{BrainURL: ""}}, store, twilioMock)
-		h := NewToolHandler(fakes.StaticConfig{Cfg: cfg}, store, twilioMock, nil, rep)
-
-		out, err := h.EndCall(context.Background(), EndCallArgs{CallID: "call-hangup-err"})
-		requireFallbackStatus(t, out.Status, err, "ended")
-	})
-
-	t.Run("initiate call with twilio error and state update error", func(t *testing.T) {
-		t.Parallel()
-		store := fakes.NewFakeStore()
-		twilioMock := &fakes.FakeTwilio{CreateCallErr: errors.New("dial fail")}
-		h := NewToolHandler(fakes.StaticConfig{Cfg: cfg}, store, twilioMock, nil, nil)
-		store.OpErr = errors.New("db error")
-
-		_, err := h.InitiateCall(context.Background(), InitiateCallArgs{
-			To:      "+15105550199",
-			Message: "hello",
-		})
-		if err == nil {
-			t.Fatal("expected initiate call error")
-		}
-	})
-
-	t.Run("initiate call bind provider sid error", func(t *testing.T) {
-		t.Parallel()
-		store := fakes.NewFakeStore()
-		store.BindErr = errors.New("bind failure")
-		h := NewToolHandler(fakes.StaticConfig{Cfg: cfg}, store, &fakes.FakeTwilio{}, nil, nil)
-
-		out, err := h.InitiateCall(context.Background(), InitiateCallArgs{
-			To:      "+15105550199",
-			Message: "hello",
-		})
-		requireFallbackStatus(t, out.Status, err, "initiated")
-	})
-
-	t.Run("end call update state error", func(t *testing.T) {
-		t.Parallel()
-		store := fakes.NewFakeStore()
-		if err := store.CreateOutboundCall(context.Background(), model.VoiceCall{
-			CallID: "call-upd-err",
-			State:  "in-progress",
-		}, 5); err != nil {
-			t.Fatalf("CreateOutboundCall failed: %v", err)
-		}
-		store.UpdateStateErr = errors.New("update state failure")
-		h := NewToolHandler(fakes.StaticConfig{Cfg: cfg}, store, &fakes.FakeTwilio{}, nil, nil)
-
-		out, err := h.EndCall(context.Background(), EndCallArgs{CallID: "call-upd-err"})
-		requireFallbackStatus(t, out.Status, err, "ended")
-	})
-
-	t.Run("send sms save error", func(t *testing.T) {
-		t.Parallel()
-		store := fakes.NewFakeStore()
-		store.OpErr = errors.New("save failure")
-		h := NewToolHandler(fakes.StaticConfig{Cfg: cfg}, store, &fakes.FakeTwilio{}, nil, nil)
-
-		out, err := h.SendSMS(context.Background(), SendSMSArgs{
-			To:   "+15105550199",
-			Body: "test message",
-		})
-		requireFallbackStatus(t, out.Status, err, "sent")
-	})
-}
-
-// requireFallbackStatus fails unless a fallback call succeeded with status want.
-func requireFallbackStatus(t *testing.T, got string, err error, want string) {
-	t.Helper()
-	if err != nil {
-		t.Fatalf("unexpected err: %v", err)
-	}
-	if got != want {
-		t.Fatalf("status = %s, want %s", got, want)
 	}
 }

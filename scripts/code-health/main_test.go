@@ -487,6 +487,25 @@ func testRunTargetCases() []testRunCase {
 			wantErr:  `test struct field "onErr" uses a banned closure func type; use declarative expectation fields instead`,
 		},
 		{
+			name: "arbitrary func field in named test table struct rejected in check mode",
+			files: map[string]string{
+				"pkg/ok.go": "package pkg\n",
+				"pkg/named_test.go": "package pkg\nimport \"testing\"\ntype devCase struct {\n\tname string\n\tprovision func(string) error\n}\nfunc TestNamed(t *testing.T) {\n" +
+					"\ttests := []devCase{{name: \"case1\"}}\n\t_ = tests\n}\n",
+			},
+			wantCode: 1,
+			wantErr:  `test struct field "provision" uses a banned closure func type; use declarative expectation fields instead`,
+		},
+		{
+			name: "camelCase catch-all test suffixes rejected in check mode",
+			files: map[string]string{
+				"pkg/ok.go":            "package pkg\n",
+				"pkg/catchall_test.go": "package pkg\n\nfunc TestRoutes_HealthAndCoverage() {}\n",
+			},
+			wantCode: 1,
+			wantErr:  "test function TestRoutes_HealthAndCoverage uses banned split/catch-all suffix",
+		},
+		{
 			name: "test file hygiene violations reported in check mode",
 			files: map[string]string{
 				"pkg/ok.go": "package pkg\n",

@@ -1136,7 +1136,7 @@ func TestChannelCacheAndMessageEffort(t *testing.T) {
 	}
 }
 
-type burstEdgeCase struct {
+type burstPolicyCase struct {
 	name, runnerOut, runnerErrOut, wantMsgStatus string
 	msg                                          db.Message
 	trailing                                     *db.Message
@@ -1146,10 +1146,10 @@ type burstEdgeCase struct {
 	nilClassifier, unclaimed                     bool
 }
 
-func burstEdgeCases() []burstEdgeCase {
+func burstPolicyCases() []burstPolicyCase {
 	now := time.Now().UTC()
 	f05 := 0.5
-	return []burstEdgeCase{
+	return []burstPolicyCase{
 		{name: "claim_error_aborts_burst", msg: db.Message{ID: "m-err-claim", ThreadID: "t-claim", Status: db.StatusPending, CreatedAt: now}, claimErr: errors.New("db lock error")},
 		{name: "unclaimed_message_skipped", msg: db.Message{ID: "m-unclaimed", ThreadID: "t-unclaimed", Status: db.StatusPending, CreatedAt: now}, unclaimed: true},
 		{name: "ignored_channel_completes_schedule_run", msg: db.Message{ID: "m-ign-extra", ThreadID: "t-ign-extra", AuthorID: "u1", Content: "ignored prompt", Status: db.StatusPending, CreatedAt: now}, policy: &config.ChannelPolicy{Mode: "ignore"}, wantMsgStatus: db.StatusCompleted},
@@ -1159,9 +1159,9 @@ func burstEdgeCases() []burstEdgeCase {
 	}
 }
 
-// setupBurstEdgeCase seeds tc's rows and builds its pool; it returns the store to read back and
+// setupBurstPolicyCase seeds tc's rows and builds its pool; it returns the store to read back and
 // the burst in order.
-func setupBurstEdgeCase(t *testing.T, tc burstEdgeCase) (*WorkerPool, db.Store, []db.Message) {
+func setupBurstPolicyCase(t *testing.T, tc burstPolicyCase) (*WorkerPool, db.Store, []db.Message) {
 	t.Helper()
 	fake := testStore(t)
 	_ = insertMessage(fake, tc.msg)
@@ -1191,7 +1191,7 @@ func setupBurstEdgeCase(t *testing.T, tc burstEdgeCase) (*WorkerPool, db.Store, 
 	return pool, fake, burst
 }
 
-func assertBurstEdgeCase(t *testing.T, tc burstEdgeCase, store db.Store) {
+func assertBurstPolicyCase(t *testing.T, tc burstPolicyCase, store db.Store) {
 	t.Helper()
 	if tc.wantMsgStatus == "" {
 		return
@@ -1201,18 +1201,18 @@ func assertBurstEdgeCase(t *testing.T, tc burstEdgeCase, store db.Store) {
 	}
 }
 
-func TestWorkerPool_ProcessBurstEdgeCases(t *testing.T) {
+func TestWorkerPool_ProcessBurstFailuresAndPolicies(t *testing.T) {
 	t.Parallel()
-	for _, tc := range burstEdgeCases() {
+	for _, tc := range burstPolicyCases() {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			pool, store, burst := setupBurstEdgeCase(t, tc)
+			pool, store, burst := setupBurstPolicyCase(t, tc)
 			ids := make([]string, len(burst))
 			for i, m := range burst {
 				ids[i] = m.ID
 			}
 			_ = runLiveBurst(context.Background(), pool, tc.msg.ThreadID, "turn-1", ids...)
-			assertBurstEdgeCase(t, tc, store)
+			assertBurstPolicyCase(t, tc, store)
 		})
 	}
 }

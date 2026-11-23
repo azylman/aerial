@@ -48,7 +48,7 @@ func mainWaitHandled(t *testing.T, handled chan error) error {
 	}
 }
 
-func TestCoven_InitJetStreamEdgeCases(t *testing.T) {
+func TestCoven_InitJetStreamFaults(t *testing.T) {
 	ctx := t.Context()
 
 	if bus := initCovenJetStream(ctx, nil, ""); bus != nil {
@@ -279,7 +279,7 @@ func TestCoven_TranscriptsIndexedToCoalescedExtractIntegration(t *testing.T) {
 	}
 }
 
-func TestCoven_SubscriptionEdgeCases(t *testing.T) {
+func TestCoven_SubscriptionFaults(t *testing.T) {
 	ctx := t.Context()
 
 	worker := NewWorker(WorkerConfig{})

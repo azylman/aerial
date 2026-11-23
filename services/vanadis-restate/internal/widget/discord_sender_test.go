@@ -214,7 +214,7 @@ func TestDeliverStatusWidget(t *testing.T) {
 	buried := msgs(1, 20*time.Minute, 0)
 	errBoom := errors.New("boom")
 
-	tests := []struct {
+	type dwCase struct {
 		name         string
 		sender       *mockWidgetSender
 		channel      string
@@ -224,96 +224,33 @@ func TestDeliverStatusWidget(t *testing.T) {
 		wantErr      string
 		wantSent     bool
 		wantDeleteID string
-	}{
-		{name: "nil sender returns error", channel: "chan-1", wantErr: "discord widget sender is nil"},
-		{name: "empty channel ID returns error", sender: &mockWidgetSender{}, wantErr: "channel_id is required"},
-		{
-			name: "new message success", sender: &mockWidgetSender{sendMsg: &discordgo.Message{ID: "msg-new-123"}}, channel: "chan-1",
-			wantID: "msg-new-123", wantSent: true,
-		},
-		{
-			name: "new message send failure", sender: &mockWidgetSender{sendErr: errors.New("network failure")}, channel: "chan-1",
-			wantErr: "failed to send status widget message", wantSent: true,
-		},
-		{
-			name: "new message send nil message returns error", sender: &mockWidgetSender{nilSendMsg: true}, channel: "chan-1",
-			wantErr: "received nil message", wantSent: true,
-		},
-		{
-			name: "edit existing message success", sender: &mockWidgetSender{editMsg: &discordgo.Message{ID: "msg-orig-1"}}, channel: "chan-1",
-			msgID: "msg-orig-1", wantID: "msg-orig-1",
-		},
-		{
-			name:   "edit existing message 404 recovers by creating new",
-			sender: &mockWidgetSender{editErr: notFoundErr, sendMsg: &discordgo.Message{ID: "msg-recreated-2"}}, channel: "chan-1",
-			msgID: "msg-deleted-1", wantID: "msg-recreated-2", wantSent: true,
-		},
-		{
-			name:   "edit existing message 404 recreate error fails",
-			sender: &mockWidgetSender{editErr: notFoundErr, sendErr: errors.New("recreate error")}, channel: "chan-1", msgID: "msg-deleted-1",
-			wantErr: "failed to send new status widget message after 404 edit", wantSent: true,
-		},
-		{
-			name: "edit existing message 404 recreate nil message fails", sender: &mockWidgetSender{editErr: notFoundErr, nilSendMsg: true},
-			channel: "chan-1", msgID: "msg-deleted-1", wantErr: "received nil message", wantSent: true,
-		},
-		{
-			name: "edit existing non-404 error fails", sender: &mockWidgetSender{editErr: errors.New("edit permission denied")}, channel: "chan-1",
-			msgID: "msg-err-1", wantErr: "failed to edit status widget message",
-		},
-		{
-			name:   "edit foreign-authored message re-posts and deletes old",
-			sender: &mockWidgetSender{editErr: foreignAuthorErr, sendMsg: &discordgo.Message{ID: "msg-reposted-1"}}, channel: "chan-1",
-			msgID: "msg-foreign-1", wantID: "msg-reposted-1", wantSent: true, wantDeleteID: "msg-foreign-1",
-		},
-		{
-			name:    "edit foreign-authored message delete missing permissions still returns new ID",
-			sender:  &mockWidgetSender{editErr: foreignAuthorErr, sendMsg: &discordgo.Message{ID: "msg-reposted-2"}, deleteErr: missingPermsErr},
-			channel: "chan-1", msgID: "msg-foreign-2", wantID: "msg-reposted-2", wantSent: true, wantDeleteID: "msg-foreign-2",
-		},
-		{
-			name:    "edit foreign-authored message delete 404 still returns new ID",
-			sender:  &mockWidgetSender{editErr: foreignAuthorErr, sendMsg: &discordgo.Message{ID: "msg-reposted-3"}, deleteErr: notFoundErr},
-			channel: "chan-1", msgID: "msg-foreign-3", wantID: "msg-reposted-3", wantSent: true, wantDeleteID: "msg-foreign-3",
-		},
-		{
-			name:    "edit foreign-authored message delete other error still returns new ID",
-			sender:  &mockWidgetSender{editErr: foreignAuthorErr, sendMsg: &discordgo.Message{ID: "msg-reposted-4"}, deleteErr: errBoom},
-			channel: "chan-1", msgID: "msg-foreign-4", wantID: "msg-reposted-4", wantSent: true, wantDeleteID: "msg-foreign-4",
-		},
-		{
-			name:   "edit foreign-authored message re-post error fails",
-			sender: &mockWidgetSender{editErr: foreignAuthorErr, sendErr: errors.New("repost error")}, channel: "chan-1", msgID: "msg-foreign-5",
-			wantErr: "failed to send new status widget message after foreign-author edit", wantSent: true,
-		},
-		{
-			name: "edit foreign-authored message re-post nil message fails", sender: &mockWidgetSender{editErr: foreignAuthorErr, nilSendMsg: true},
-			channel: "chan-1", msgID: "msg-foreign-6", wantErr: "after foreign-author edit: received nil message", wantSent: true,
-		},
-		{
-			name: "edit missing access 403 fails without re-posting", sender: &mockWidgetSender{editErr: missingAccessErr}, channel: "chan-1",
-			msgID: "msg-noaccess-1", wantErr: "failed to edit status widget message msg-noaccess-1",
-		},
-		{
-			name:   "buried message sinks by creating new and deleting old",
-			sender: &mockWidgetSender{msgs: buried, sendMsg: &discordgo.Message{ID: "msg-sunk-new"}}, channel: "chan-1", msgID: "msg-buried-1",
-			wantID: "msg-sunk-new", wantSent: true, wantDeleteID: "msg-buried-1",
-		},
-		{
-			name:    "buried message sink delete failure still succeeds",
-			sender:  &mockWidgetSender{msgs: buried, sendMsg: &discordgo.Message{ID: "msg-sunk-new-2"}, deleteErr: errors.New("delete failed")},
-			channel: "chan-1", msgID: "msg-buried-del-fail", wantID: "msg-sunk-new-2", wantSent: true, wantDeleteID: "msg-buried-del-fail",
-		},
-		{
-			name:    "buried message sink send failure falls back to edit in place",
-			sender:  &mockWidgetSender{msgs: buried, sendErr: errors.New("sink failed"), editMsg: &discordgo.Message{ID: "msg-sink-fail"}},
-			channel: "chan-1", msgID: "msg-sink-fail", wantID: "msg-sink-fail", wantSent: true,
-		},
-		{
-			name:   "buried message with skip_sink edits in place",
-			sender: &mockWidgetSender{msgs: buried, editMsg: &discordgo.Message{ID: "msg-buried-2"}}, channel: "chan-1", msgID: "msg-buried-2",
-			skipSink: true, wantID: "msg-buried-2",
-		},
+	}
+	row := func(name string, sender *mockWidgetSender, ch, msgID, wantID, wantErr string, wantSent bool, wantDel string, skipSink bool) dwCase {
+		return dwCase{name: name, sender: sender, channel: ch, msgID: msgID, wantID: wantID, wantErr: wantErr, wantSent: wantSent, wantDeleteID: wantDel, skipSink: skipSink}
+	}
+
+	tests := []dwCase{
+		row("nil sender returns error", nil, "chan-1", "", "", "discord widget sender is nil", false, "", false),
+		row("empty channel ID returns error", &mockWidgetSender{}, "", "", "", "channel_id is required", false, "", false),
+		row("new message success", &mockWidgetSender{sendMsg: &discordgo.Message{ID: "msg-new-123"}}, "chan-1", "", "msg-new-123", "", true, "", false),
+		row("new message send failure", &mockWidgetSender{sendErr: errors.New("network failure")}, "chan-1", "", "", "failed to send status widget message", true, "", false),
+		row("new message send nil message returns error", &mockWidgetSender{nilSendMsg: true}, "chan-1", "", "", "received nil message", true, "", false),
+		row("edit existing message success", &mockWidgetSender{editMsg: &discordgo.Message{ID: "msg-orig-1"}}, "chan-1", "msg-orig-1", "msg-orig-1", "", false, "", false),
+		row("edit existing message 404 recovers by creating new", &mockWidgetSender{editErr: notFoundErr, sendMsg: &discordgo.Message{ID: "msg-recreated-2"}}, "chan-1", "msg-deleted-1", "msg-recreated-2", "", true, "", false),
+		row("edit existing message 404 recreate error fails", &mockWidgetSender{editErr: notFoundErr, sendErr: errors.New("recreate error")}, "chan-1", "msg-deleted-1", "", "failed to send new status widget message after 404 edit", true, "", false),
+		row("edit existing message 404 recreate nil message fails", &mockWidgetSender{editErr: notFoundErr, nilSendMsg: true}, "chan-1", "msg-deleted-1", "", "received nil message", true, "", false),
+		row("edit existing non-404 error fails", &mockWidgetSender{editErr: errors.New("edit permission denied")}, "chan-1", "msg-err-1", "", "failed to edit status widget message", false, "", false),
+		row("edit foreign-authored message re-posts and deletes old", &mockWidgetSender{editErr: foreignAuthorErr, sendMsg: &discordgo.Message{ID: "msg-reposted-1"}}, "chan-1", "msg-foreign-1", "msg-reposted-1", "", true, "msg-foreign-1", false),
+		row("edit foreign-authored message delete missing permissions still returns new ID", &mockWidgetSender{editErr: foreignAuthorErr, sendMsg: &discordgo.Message{ID: "msg-reposted-2"}, deleteErr: missingPermsErr}, "chan-1", "msg-foreign-2", "msg-reposted-2", "", true, "msg-foreign-2", false),
+		row("edit foreign-authored message delete 404 still returns new ID", &mockWidgetSender{editErr: foreignAuthorErr, sendMsg: &discordgo.Message{ID: "msg-reposted-3"}, deleteErr: notFoundErr}, "chan-1", "msg-foreign-3", "msg-reposted-3", "", true, "msg-foreign-3", false),
+		row("edit foreign-authored message delete other error still returns new ID", &mockWidgetSender{editErr: foreignAuthorErr, sendMsg: &discordgo.Message{ID: "msg-reposted-4"}, deleteErr: errBoom}, "chan-1", "msg-foreign-4", "msg-reposted-4", "", true, "msg-foreign-4", false),
+		row("edit foreign-authored message re-post error fails", &mockWidgetSender{editErr: foreignAuthorErr, sendErr: errors.New("repost error")}, "chan-1", "msg-foreign-5", "", "failed to send new status widget message after foreign-author edit", true, "", false),
+		row("edit foreign-authored message re-post nil message fails", &mockWidgetSender{editErr: foreignAuthorErr, nilSendMsg: true}, "chan-1", "msg-foreign-6", "", "after foreign-author edit: received nil message", true, "", false),
+		row("edit missing access 403 fails without re-posting", &mockWidgetSender{editErr: missingAccessErr}, "chan-1", "msg-noaccess-1", "", "failed to edit status widget message msg-noaccess-1", false, "", false),
+		row("buried message sinks by creating new and deleting old", &mockWidgetSender{msgs: buried, sendMsg: &discordgo.Message{ID: "msg-sunk-new"}}, "chan-1", "msg-buried-1", "msg-sunk-new", "", true, "msg-buried-1", false),
+		row("buried message sink delete failure still succeeds", &mockWidgetSender{msgs: buried, sendMsg: &discordgo.Message{ID: "msg-sunk-new-2"}, deleteErr: errors.New("delete failed")}, "chan-1", "msg-buried-del-fail", "msg-sunk-new-2", "", true, "msg-buried-del-fail", false),
+		row("buried message sink send failure falls back to edit in place", &mockWidgetSender{msgs: buried, sendErr: errors.New("sink failed"), editMsg: &discordgo.Message{ID: "msg-sink-fail"}}, "chan-1", "msg-sink-fail", "msg-sink-fail", "", true, "", false),
+		row("buried message with skip_sink edits in place", &mockWidgetSender{msgs: buried, editMsg: &discordgo.Message{ID: "msg-buried-2"}}, "chan-1", "msg-buried-2", "msg-buried-2", "", false, "", true),
 	}
 
 	for _, tc := range tests {
