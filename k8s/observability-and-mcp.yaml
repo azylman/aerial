@@ -38,7 +38,7 @@ spec:
         fsGroup: 1000
       containers:
         - name: bazel-remote
-          image: buchgr/bazel-remote:v2.6.4
+          image: buchgr/bazel-remote-cache:v2.6.4
           args:
             - --dir=/data
             - --max_size=50
