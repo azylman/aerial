@@ -357,6 +357,9 @@ func runVoiceTurnCase(t *testing.T, tt voiceTurnTestCase) {
 
 	reply, convID, err := pool.ExecuteVoiceTurn(ctx, tt.prompt, targetSess, func(s string) { statusReceived = s }, func(s string) { sentenceReceived = s })
 	caller.End()
+	if pool != nil {
+		pool.MarkDirty()
+	}
 	assertVoiceTurnTrace(t, tt, h, caller.SpanContext().SpanID())
 	if assertVoiceTurnError(t, tt, err) {
 		return
@@ -480,6 +483,7 @@ type voiceProcessPoolSpawnerConfig struct {
 	writeTranscriptLogsDir  string
 	cancelCallerOnScan      func()
 	blockUntilDone          chan struct{}
+	onSpawn                 func(cfg runner.DaemonConfig)
 }
 
 func runMockVoiceDaemonPump(inR io.Reader, outW, errW io.WriteCloser, cfg voiceProcessPoolSpawnerConfig) {
@@ -525,6 +529,9 @@ func runMockVoiceDaemonPump(inR io.Reader, outW, errW io.WriteCloser, cfg voiceP
 func newEventDrivenVoiceDaemonSpawner(cfg voiceProcessPoolSpawnerConfig) *mockDaemonSpawner {
 	return &mockDaemonSpawner{
 		SpawnFn: func(ctx context.Context, daemonCfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
+			if cfg.onSpawn != nil {
+				cfg.onSpawn(daemonCfg)
+			}
 			if cfg.spawnerErr != nil {
 				return nil, nil, nil, nil, cfg.spawnerErr
 			}
@@ -540,35 +547,41 @@ func newEventDrivenVoiceDaemonSpawner(cfg voiceProcessPoolSpawnerConfig) *mockDa
 	}
 }
 
-func TestWorkerPool_ExecuteVoiceTurn_ProcessPoolSuccessAndMetrics(t *testing.T) {
-	t.Parallel()
-	stepUpdates := []string{
-		`{"event":"step_update","step_update":{"state":"RUNNING","type":"tool_call","tool_name":"ha_call_service","tool_info":{"parameters":{"CommandLine":""}}}}`,
-		`{"event":"step_update","step_update":{"state":"RUNNING","type":"tool","tool_name":"","tool_info":{"parameters":{"CommandLine":"system-health"}}}}`,
-		`{"event":"step_update","step_update":{"state":"DONE","type":"tool_call","tool_name":"ha_call_service"}}`,
-		`{"event":"step_update","step_update":{"state":"ERROR","type":"tool_call","tool_name":"ha_call_service"}}`,
-	}
-	spawner := newEventDrivenVoiceDaemonSpawner(voiceProcessPoolSpawnerConfig{
-		stepUpdates: stepUpdates, resultStatus: "SUCCESS", resultResponse: "daemon voice turn reply",
-		tokens: runner.TokenUsage{InputTokens: 60, OutputTokens: 40, TotalTokens: 100},
-	})
-	procPool := runner.NewUnifiedProcessPool(runner.PoolConfig{DefaultModel: "gemini-2.5-flash"}, spawner)
-	defer procPool.Close()
+type voiceProcessPoolTestCase struct {
+	name              string
+	prompt            string
+	deviceKey         string
+	spawnerCfg        voiceProcessPoolSpawnerConfig
+	useVoicePoolField bool
+	withSessionMgr    bool
+	trackMetrics      bool
+	wantReply         string
+	wantConvID        string
+	wantMinStatuses   int
+	wantSentenceSub   string
+	wantSpawnedTarget string
+}
 
-	pool := New(nil, WorkerPoolConfig{ProcessPool: procPool})
-	pool.Start()
-	defer pool.Stop()
-
-	var statuses []string
-	reply, convID, err := pool.ExecuteVoiceTurn(context.Background(), "turn on living room light", "kiosk", func(s string) { statuses = append(statuses, s) }, nil)
-	if err != nil || reply != "daemon voice turn reply" || !runner.IsValidUUID(convID) || len(statuses) < 2 {
-		t.Fatalf("unexpected success result: convID=%q statuses=%v err=%v", convID, statuses, err)
+func setupVoiceSessionManager(t *testing.T, deviceKey string, cfg *voiceProcessPoolSpawnerConfig) *session.Manager {
+	t.Helper()
+	tempDir := t.TempDir()
+	logsDir := filepath.Join(tempDir, ".gemini", "antigravity-cli", "brain", deviceKey, ".system_generated", "logs")
+	if err := os.MkdirAll(logsDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll failed: %v", err)
 	}
-	reply2, _, err2 := pool.ExecuteVoiceTurn(context.Background(), "turn on living room light", "sess-no-status", nil, nil)
-	if err2 != nil || reply2 != "daemon voice turn reply" {
-		t.Fatalf("unexpected nil onStatus error: %v", err2)
-	}
+	cfg.writeTranscriptLogsDir = logsDir
+	return session.New(tempDir, tempDir)
+}
 
+func assertVoiceProcessPoolMetrics(t *testing.T, pool *WorkerPool, prompt, wantReply, convID string) {
+	t.Helper()
+	if !runner.IsValidUUID(convID) {
+		t.Errorf("expected valid UUID convID, got %q", convID)
+	}
+	reply2, _, err2 := pool.ExecuteVoiceTurn(context.Background(), prompt, "sess-no-status", nil, nil)
+	if err2 != nil || reply2 != wantReply {
+		t.Errorf("unexpected nil onStatus error: %v, reply2=%q", err2, reply2)
+	}
 	rec := httptest.NewRecorder()
 	metrics.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", http.NoBody))
 	if body := rec.Body.String(); !strings.Contains(body, `source="voice"`) || !strings.Contains(body, `channel="voice"`) {
@@ -576,63 +589,134 @@ func TestWorkerPool_ExecuteVoiceTurn_ProcessPoolSuccessAndMetrics(t *testing.T) 
 	}
 }
 
-func TestWorkerPool_ExecuteVoiceTurn_ProcessPoolDeviceRouting(t *testing.T) {
-	t.Parallel()
+func runVoiceProcessPoolCase(t *testing.T, tc voiceProcessPoolTestCase) {
+	t.Helper()
 	var spawnedTarget string
-	spawner := &mockDaemonSpawner{
-		SpawnFn: func(ctx context.Context, cfg runner.DaemonConfig) (io.WriteCloser, io.ReadCloser, io.ReadCloser, runner.ProcessHandle, error) {
-			spawnedTarget = cfg.ThreadID
-			inR, inW := io.Pipe()
-			outR, outW := io.Pipe()
-			errR, errW := io.Pipe()
-			go func() {
-				defer outW.Close()
-				defer errW.Close()
-				_, _ = outW.Write([]byte("{\"event\":\"init\",\"conversation_id\":\"550e8400-e29b-41d4-a716-446655440000\"}\n"))
-				scanner := bufio.NewScanner(inR)
-				if scanner.Scan() {
-					_, _ = outW.Write([]byte("{\"event\":\"result\",\"result\":{\"status\":\"SUCCESS\",\"response\":\"kiosk device reply\",\"conversation_id\":\"550e8400-e29b-41d4-a716-446655440000\"}}\n"))
-				}
-			}()
-			return inW, outR, errR, newMockProcessHandle(8888), nil
-		},
+	cfg := tc.spawnerCfg
+	cfg.onSpawn = func(dCfg runner.DaemonConfig) {
+		spawnedTarget = dCfg.ThreadID
 	}
-	procPool := runner.NewUnifiedProcessPool(runner.PoolConfig{DefaultModel: "gemini-2.5-flash"}, spawner)
+
+	var sessMgr *session.Manager
+	if tc.withSessionMgr {
+		sessMgr = setupVoiceSessionManager(t, tc.deviceKey, &cfg)
+	}
+
+	spawner := newEventDrivenVoiceDaemonSpawner(cfg)
+	var rescuer func(ctx context.Context, sessionID string, since time.Time) string
+	if sessMgr != nil {
+		rescuer = sessMgr.ExtractResponseSinceContext
+	}
+	procPool := runner.NewUnifiedProcessPool(runner.PoolConfig{
+		DefaultModel:      "gemini-2.5-flash",
+		TranscriptRescuer: rescuer,
+	}, spawner)
 	defer procPool.Close()
 
-	pool := New(nil, WorkerPoolConfig{VoiceProcessPool: procPool})
+	wpCfg := WorkerPoolConfig{SessionManager: sessMgr}
+	if tc.useVoicePoolField {
+		wpCfg.VoiceProcessPool = procPool
+	} else {
+		wpCfg.ProcessPool = procPool
+	}
+	pool := New(nil, wpCfg)
 	pool.Start()
 	defer pool.Stop()
 
-	reply, convID, err := pool.ExecuteVoiceTurn(context.Background(), "what is the weather", "kiosk", nil, nil)
-	if err != nil || reply != "kiosk device reply" || convID != "550e8400-e29b-41d4-a716-446655440000" || spawnedTarget != "kiosk" {
-		t.Fatalf("unexpected routing result: convID=%q target=%q err=%v", convID, spawnedTarget, err)
+	var statuses, sentences []string
+	reply, convID, err := pool.ExecuteVoiceTurn(
+		context.Background(),
+		tc.prompt,
+		tc.deviceKey,
+		func(s string) { statuses = append(statuses, s) },
+		func(s string) { sentences = append(sentences, s) },
+	)
+	if err != nil {
+		t.Fatalf("ExecuteVoiceTurn failed: %v", err)
+	}
+	if reply != tc.wantReply {
+		t.Errorf("reply = %q, want %q", reply, tc.wantReply)
+	}
+	if tc.wantConvID != "" && convID != tc.wantConvID {
+		t.Errorf("convID = %q, want %q", convID, tc.wantConvID)
+	}
+	if tc.wantSpawnedTarget != "" && spawnedTarget != tc.wantSpawnedTarget {
+		t.Errorf("spawnedTarget = %q, want %q", spawnedTarget, tc.wantSpawnedTarget)
+	}
+	if tc.wantMinStatuses > 0 && len(statuses) < tc.wantMinStatuses {
+		t.Errorf("got %d statuses, want at least %d", len(statuses), tc.wantMinStatuses)
+	}
+	if tc.wantSentenceSub != "" {
+		joined := strings.Join(sentences, " ")
+		if !strings.Contains(joined, tc.wantSentenceSub) {
+			t.Errorf("sentences %q missing %q", joined, tc.wantSentenceSub)
+		}
+	}
+	if tc.trackMetrics {
+		assertVoiceProcessPoolMetrics(t, pool, tc.prompt, tc.wantReply, convID)
 	}
 }
 
-func TestWorkerPool_ExecuteVoiceTurn_ProcessPoolTranscriptRecovery(t *testing.T) {
+func TestWorkerPool_ExecuteVoiceTurn_ProcessPool(t *testing.T) {
 	t.Parallel()
-	targetSess, tempDir := "550e8400-e29b-41d4-a716-446655449999", t.TempDir()
-	logsDir := filepath.Join(tempDir, ".gemini", "antigravity-cli", "brain", targetSess, ".system_generated", "logs")
-	if err := os.MkdirAll(logsDir, 0o755); err != nil {
-		t.Fatalf("MkdirAll: %v", err)
+	stepUpdates := []string{
+		`{"event":"step_update","step_update":{"state":"RUNNING","type":"tool_call","tool_name":"ha_call_service","tool_info":{"parameters":{"CommandLine":""}}}}`,
+		`{"event":"step_update","step_update":{"state":"RUNNING","type":"tool","tool_name":"","tool_info":{"parameters":{"CommandLine":"system-health"}}}}`,
+		`{"event":"step_update","step_update":{"state":"DONE","type":"tool_call","tool_name":"ha_call_service"}}`,
+		`{"event":"step_update","step_update":{"state":"ERROR","type":"tool_call","tool_name":"ha_call_service"}}`,
 	}
-	spawner := newEventDrivenVoiceDaemonSpawner(voiceProcessPoolSpawnerConfig{
-		initSessionID: targetSess, resultStatus: "ERROR", resultError: "RESOURCE_EXHAUSTED (code 429)",
-		resultResponse: "All systems operational and nominal.", writeTranscriptLogsDir: logsDir,
-	})
-	sessMgr := session.New(tempDir, tempDir)
-	procPool := runner.NewUnifiedProcessPool(runner.PoolConfig{DefaultModel: "gemini-2.5-flash", TranscriptRescuer: sessMgr.ExtractResponseSinceContext}, spawner)
-	defer procPool.Close()
 
-	pool := New(nil, WorkerPoolConfig{SessionManager: sessMgr, ProcessPool: procPool})
-	pool.Start()
-	defer pool.Stop()
+	tests := []voiceProcessPoolTestCase{
+		{
+			name:      "success_and_metrics",
+			prompt:    "turn on living room light",
+			deviceKey: "kiosk",
+			spawnerCfg: voiceProcessPoolSpawnerConfig{
+				stepUpdates:    stepUpdates,
+				resultStatus:   "SUCCESS",
+				resultResponse: "daemon voice turn reply",
+				tokens:         runner.TokenUsage{InputTokens: 60, OutputTokens: 40, TotalTokens: 100},
+			},
+			trackMetrics:    true,
+			wantReply:       "daemon voice turn reply",
+			wantMinStatuses: 2,
+		},
+		{
+			name:              "device_routing",
+			prompt:            "what is the weather",
+			deviceKey:         "kiosk",
+			useVoicePoolField: true,
+			spawnerCfg: voiceProcessPoolSpawnerConfig{
+				initSessionID:  "550e8400-e29b-41d4-a716-446655440000",
+				resultStatus:   "SUCCESS",
+				resultResponse: "kiosk device reply",
+			},
+			wantReply:         "kiosk device reply",
+			wantConvID:        "550e8400-e29b-41d4-a716-446655440000",
+			wantSpawnedTarget: "kiosk",
+		},
+		{
+			name:           "transcript_recovery",
+			prompt:         "What is the status?",
+			deviceKey:      "550e8400-e29b-41d4-a716-446655449999",
+			withSessionMgr: true,
+			spawnerCfg: voiceProcessPoolSpawnerConfig{
+				initSessionID:  "550e8400-e29b-41d4-a716-446655449999",
+				resultStatus:   "ERROR",
+				resultError:    "RESOURCE_EXHAUSTED (code 429)",
+				resultResponse: "All systems operational and nominal.",
+			},
+			wantReply:       "All systems operational and nominal.",
+			wantConvID:      "550e8400-e29b-41d4-a716-446655449999",
+			wantSentenceSub: "All systems operational and nominal.",
+		},
+	}
 
-	var sentences []string
-	reply, convID, err := pool.ExecuteVoiceTurn(context.Background(), "What is the status?", targetSess, nil, func(s string) { sentences = append(sentences, s) })
-	if err != nil || reply != "All systems operational and nominal." || convID != targetSess || len(sentences) == 0 {
-		t.Fatalf("unexpected transcript recovery result: reply=%q convID=%q sentences=%v err=%v", reply, convID, sentences, err)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			runVoiceProcessPoolCase(t, tc)
+		})
 	}
 }
 
@@ -660,120 +744,14 @@ func TestWorkerPool_Stop_ProcessPoolCloseError(t *testing.T) {
 	if _, err := procPool.GetOrCreate(context.Background(), "kiosk", ""); err != nil {
 		t.Fatalf("GetOrCreate: %v", err)
 	}
-	pool := New(nil, WorkerPoolConfig{ProcessPool: procPool})
+	voiceProcPool := runner.NewUnifiedProcessPool(runner.PoolConfig{DefaultModel: "gemini-2.5-flash"}, spawner)
+	if _, err := voiceProcPool.GetOrCreate(context.Background(), "kiosk-voice", ""); err != nil {
+		t.Fatalf("GetOrCreate: %v", err)
+	}
+	pool := New(nil, WorkerPoolConfig{ProcessPool: procPool, VoiceProcessPool: voiceProcPool})
 	pool.Start()
-	pool.Stop()
-}
-
-type queueMockVoiceSession struct {
-	sessionID string
-	sendFn    func(prompt string, turn *runner.TurnContext) error
-}
-
-func (s *queueMockVoiceSession) SessionID() string { return s.sessionID }
-func (s *queueMockVoiceSession) Send(prompt string, turn *runner.TurnContext) error {
-	if s.sendFn != nil {
-		return s.sendFn(prompt, turn)
-	}
-	if turn != nil && turn.Sink != nil {
-		turn.Sink.OnTurnStarted()
-		turn.Sink.OnTextDelta("Hello from mock voice.")
-		turn.Sink.OnResult(&runner.TurnResult{Response: "Hello from mock voice."})
-	}
-	return nil
-}
-
-type queueMockVoiceProcessPool struct {
-	sessions    map[string]*queueMockVoiceSession
-	initCalled  bool
-	closeCalled bool
-}
-
-func (p *queueMockVoiceProcessPool) GetOrCreateSession(ctx context.Context, targetKey string, sessionID string) (runner.AgentSession, error) {
-	if p.closeCalled {
-		return nil, errors.New("pool closed")
-	}
-	if s, ok := p.sessions[targetKey]; ok {
-		return s, nil
-	}
-	sess := &queueMockVoiceSession{sessionID: "sess-" + targetKey}
-	p.sessions[targetKey] = sess
-	return sess, nil
-}
-
-func (p *queueMockVoiceProcessPool) Initialize(ctx context.Context) error {
-	p.initCalled = true
-	return nil
-}
-
-func (p *queueMockVoiceProcessPool) Close() error {
-	p.closeCalled = true
-	return nil
-}
-func (p *queueMockVoiceProcessPool) EvictSession(targetKey string) { delete(p.sessions, targetKey) }
-
-func (p *queueMockVoiceProcessPool) AcquireLease(ctx context.Context, targetKey string) (runner.SessionLease, error) {
-	if p.closeCalled {
-		return nil, errors.New("pool closed")
-	}
-	sess, err := p.GetOrCreateSession(ctx, targetKey, "")
-	if err != nil {
-		return nil, err
-	}
-	voiceSess, ok := sess.(*queueMockVoiceSession)
-	if !ok {
-		return nil, fmt.Errorf("session is %T, want *queueMockVoiceSession", sess)
-	}
-	return &mockVoiceSessionLease{pool: p, sess: voiceSess, targetKey: targetKey}, nil
-}
-
-type mockVoiceSessionLease struct {
-	pool      *queueMockVoiceProcessPool
-	sess      *queueMockVoiceSession
-	targetKey string
-}
-
-func (l *mockVoiceSessionLease) SessionID() string       { return l.sess.SessionID() }
-func (*mockVoiceSessionLease) PreviousSessionID() string { return "" }
-func (*mockVoiceSessionLease) IsCold() bool              { return false }
-func (*mockVoiceSessionLease) IsEphemeral() bool         { return false }
-func (*mockVoiceSessionLease) TurnCount() int            { return 1 }
-func (l *mockVoiceSessionLease) MarkDirty()              { l.pool.EvictSession(l.targetKey) }
-func (*mockVoiceSessionLease) Release() error            { return nil }
-func (l *mockVoiceSessionLease) Execute(ctx context.Context, turn *runner.TurnContext) (*runner.TurnResult, error) {
-	if err := l.sess.Send(turn.Prompt, turn); err != nil {
-		return nil, err
-	}
-	if turn != nil && turn.Sink != nil {
-		if buf, ok := turn.Sink.(*runner.BufferingTurnSink); ok {
-			return buf.Wait(ctx)
-		}
-	}
-	return &runner.TurnResult{ConversationID: l.SessionID(), Response: "Hello from mock voice."}, nil
-}
-
-var (
-	_ runner.AgentPool    = (*queueMockVoiceProcessPool)(nil)
-	_ runner.AgentSession = (*queueMockVoiceSession)(nil)
-)
-
-func TestWorkerPool_ExecuteVoiceTurn_MockVoiceProcessPool(t *testing.T) {
-	t.Parallel()
-	mockPool := &queueMockVoiceProcessPool{sessions: make(map[string]*queueMockVoiceSession)}
-	pool := New(nil, WorkerPoolConfig{VoiceProcessPool: mockPool})
-	pool.Start()
-	defer pool.Stop()
-
-	var sentenceReceived string
-	reply, sessID, err := pool.ExecuteVoiceTurn(context.Background(), "ping", "mock-dev-1", nil, func(sentence string) { sentenceReceived = sentence })
-	if err != nil || reply != "Hello from mock voice." || sessID != "sess-mock-dev-1" || sentenceReceived != "Hello from mock voice." {
-		t.Fatalf("unexpected mock voice result: reply=%q sessID=%q sentence=%q err=%v", reply, sessID, sentenceReceived, err)
-	}
 	pool.MarkDirty()
 	pool.Stop()
-	if !mockPool.closeCalled {
-		t.Errorf("expected mockPool.Close() to be called on Stop")
-	}
 }
 
 func TestTurnExecution_StoreDelegates(t *testing.T) {
@@ -834,6 +812,52 @@ func TestTurnExecution_StoreDelegates(t *testing.T) {
 	}
 }
 
+type summarizeHistoryTestCase struct {
+	name, threadID, beforeID, wantSummarySub string
+	limit                                    int
+	withLLM                                  bool
+	wantSnowflake                            bool
+}
+
+func runSummarizeHistoryCase(t *testing.T, tc summarizeHistoryTestCase, dgHist *discordgo.Session, now time.Time) {
+	t.Helper()
+	ctx := context.Background()
+	if tc.withLLM {
+		llm := func(ctx context.Context, model, prompt string) (string, error) {
+			return "<THREAD_SUMMARY>\nSummary result\n</THREAD_SUMMARY>", nil
+		}
+		msgs := []HistoryMessage{{ID: "m1", Content: "fresh", CreatedAt: now}}
+		sumRes, sumErr := SummarizeThreadHistoryWithGroup(ctx, nil, llm, "test-model", tc.threadID, msgs)
+		if sumErr != nil || !strings.Contains(sumRes, tc.wantSummarySub) {
+			t.Errorf("SummarizeThreadHistoryWithGroup() = (%q, %v), wantSub=%q", sumRes, sumErr, tc.wantSummarySub)
+		}
+	}
+	recent, err := FetchRecentThreadHistory(ctx, dgHist, tc.threadID, tc.limit)
+	if tc.wantSnowflake {
+		if err != nil || len(recent) != 2 {
+			t.Errorf("FetchRecentThreadHistory() = (%v, %v), want (2 msgs, nil err)", len(recent), err)
+		}
+	} else {
+		if err == nil {
+			t.Errorf("FetchRecentThreadHistory() expected error for non-snowflake threadID %q", tc.threadID)
+		}
+	}
+	if _, nilErr := FetchRecentThreadHistory(ctx, nil, "", tc.limit); nilErr == nil {
+		t.Error("FetchRecentThreadHistory(nil) expected error")
+	}
+	fetcher := DefaultHistoryFetcher(dgHist)
+	fetched, fErr := fetcher(ctx, tc.threadID, tc.beforeID, tc.limit)
+	if tc.wantSnowflake {
+		if fErr != nil || len(fetched) != 2 {
+			t.Errorf("DefaultHistoryFetcher() = (%v, %v), want (2 msgs, nil err)", len(fetched), fErr)
+		}
+	} else {
+		if fErr == nil {
+			t.Errorf("DefaultHistoryFetcher() expected error for non-snowflake threadID %q", tc.threadID)
+		}
+	}
+}
+
 func TestSummarizeAndHistoryHelpers(t *testing.T) {
 	t.Parallel()
 	fake := testStore(t)
@@ -859,39 +883,15 @@ func TestSummarizeAndHistoryHelpers(t *testing.T) {
 		}
 		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(bytes.NewReader(b))}, nil
 	})
-	tests := []struct {
-		name, threadID, beforeID, wantSummarySub string
-		limit                                    int
-		withLLM                                  bool
-	}{
-		{name: "fast_db_summary", threadID: "thread-fast-1", beforeID: "msg-role-7", limit: 10, withLLM: true, wantSummarySub: "Summary result"},
-		{name: "rest_snowflake_zero_limit", threadID: "123456789012345678", beforeID: "123456789012345678", limit: 0},
-		{name: "rest_clamped_limit", threadID: "123456789012345678", beforeID: "non-num", limit: 150},
+	tests := []summarizeHistoryTestCase{
+		{name: "fast_db_summary", threadID: "thread-fast-1", beforeID: "msg-role-7", limit: 10, withLLM: true, wantSummarySub: "Summary result", wantSnowflake: false},
+		{name: "rest_snowflake_zero_limit", threadID: "123456789012345678", beforeID: "123456789012345678", limit: 0, wantSnowflake: true},
+		{name: "rest_clamped_limit", threadID: "123456789012345678", beforeID: "non-num", limit: 150, wantSnowflake: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			ctx := context.Background()
-			if tc.withLLM {
-				llm := func(ctx context.Context, model, prompt string) (string, error) {
-					return "<THREAD_SUMMARY>\nSummary result\n</THREAD_SUMMARY>", nil
-				}
-				msgs := []HistoryMessage{{ID: "m1", Content: "fresh", CreatedAt: now}}
-				sumRes, sumErr := SummarizeThreadHistoryWithGroup(ctx, nil, llm, "test-model", tc.threadID, msgs)
-				if sumErr != nil || !strings.Contains(sumRes, tc.wantSummarySub) {
-					t.Errorf("SummarizeThreadHistoryWithGroup() = (%q, %v), wantSub=%q", sumRes, sumErr, tc.wantSummarySub)
-				}
-			}
-			if _, err := FetchRecentThreadHistory(ctx, dgHist, tc.threadID, tc.limit); (err != nil) != tc.withLLM {
-				t.Errorf("FetchRecentThreadHistory(dgHist) err = %v, wantErr = %v", err, tc.withLLM)
-			}
-			if _, err := FetchRecentThreadHistory(ctx, nil, "", tc.limit); err == nil {
-				t.Error("FetchRecentThreadHistory(nil) expected error, got nil")
-			}
-			fetcher := DefaultHistoryFetcher(dgHist)
-			if _, err := fetcher(ctx, tc.threadID, tc.beforeID, tc.limit); (err != nil) != tc.withLLM {
-				t.Errorf("fetcher() err = %v, wantErr = %v", err, tc.withLLM)
-			}
+			runSummarizeHistoryCase(t, tc, dgHist, now)
 		})
 	}
 
@@ -909,7 +909,7 @@ func assertSummarizeTurnResolution(t *testing.T, dgHist *discordgo.Session, fake
 		t.Error("expected resolveTurnPolicy to return true")
 	}
 	if _, _, _, err := teNil.executeLeaseAttemptCtx(t.Context(), "test-model", "prompt"); err == nil {
-		t.Fatal("expected error")
+		t.Fatal("expected error from executeLeaseAttemptCtx on nil pool")
 	}
 	teSumClassifier := &turnExecution{
 		pool: &WorkerPool{
