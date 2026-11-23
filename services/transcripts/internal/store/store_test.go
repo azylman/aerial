@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/azylman/aerial/pkg/pgtest"
 	"github.com/azylman/aerial/pkg/pgutil"
 	"github.com/azylman/aerial/pkg/transcriptwire"
@@ -414,13 +416,66 @@ func TestSummaryLockKey(t *testing.T) {
 func TestDestroyConn(t *testing.T) {
 	t.Parallel()
 	store := newTestStore(t, "aerial")
-	conn, err := store.db.Conn(context.Background())
+	ctx := context.Background()
+	conn, err := store.db.Conn(ctx)
 	if err != nil {
 		t.Fatalf("conn: %v", err)
 	}
+	lockKey := summaryLockKey("destroy-conn-test")
+	if _, lockErr := conn.ExecContext(ctx, "SELECT pg_advisory_lock(hashtext($1))", lockKey); lockErr != nil {
+		t.Fatalf("acquire session lock: %v", lockErr)
+	}
+	if n := advisoryLocks(t, store); n != 1 {
+		t.Fatalf("advisory locks held before destroy = %d, want 1", n)
+	}
+
 	destroyConn(conn)
+
+	// A fresh connection should be able to acquire the summary lock immediately,
+	// confirming the destroyed connection's session lock was terminated with its backend.
+	release, lockErr := store.AcquireThreadSummaryLock(ctx, "destroy-conn-test")
+	if lockErr != nil {
+		t.Fatalf("AcquireThreadSummaryLock after destroyConn: %v", lockErr)
+	}
+	release()
+	if n := advisoryLocks(t, store); n != 0 {
+		t.Fatalf("advisory locks held after release = %d, want 0", n)
+	}
+
 	if err := conn.Close(); err == nil {
 		t.Errorf("expected error closing destroyed conn")
+	}
+}
+
+type fakeConnProvider struct {
+	conn *pgx.Conn
+}
+
+func (f fakeConnProvider) Conn() *pgx.Conn {
+	return f.conn
+}
+
+func TestExtractPgxConn(t *testing.T) {
+	t.Parallel()
+	dummy := &pgx.Conn{}
+	tests := []struct {
+		name string
+		dc   any
+		want *pgx.Conn
+	}{
+		{"nil dc", nil, nil},
+		{"unrelated type", "not-a-conn", nil},
+		{"direct pgx.Conn", dummy, dummy},
+		{"conn provider interface", fakeConnProvider{conn: dummy}, dummy},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := extractPgxConn(tc.dc)
+			if got != tc.want {
+				t.Errorf("extractPgxConn(%v) = %v, want %v", tc.dc, got, tc.want)
+			}
+		})
 	}
 }
 
