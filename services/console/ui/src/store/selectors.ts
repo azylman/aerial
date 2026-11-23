@@ -3,7 +3,6 @@ import type {
   BuildsAPIResponse,
   ClusterResponse,
   FactsAPIResponse,
-  QuickLaunchLink,
   SchedulesAPIResponse,
   ServiceStatus,
   VanadisBuildDTO,
@@ -11,12 +10,6 @@ import type {
 
 // Pure derivations for the app shell. Components select the raw (reconciled) snapshot and pass it
 // here, so an unchanged poll yields the same primitive and React bails out of the render.
-
-/** Filter items by agent attribution. When selectedAgent === 'all', all items match. Otherwise, item.agent (defaulting to 'aerial') must match. */
-export function matchAgent<T extends { readonly agent?: string }>(item: T, selectedAgent: string): boolean {
-  if (!selectedAgent || selectedAgent === 'all') return true;
-  return (item.agent || 'aerial') === selectedAgent;
-}
 
 export function filterByAgent<T extends { readonly agent?: string }>(
   items: readonly T[] | null | undefined,
@@ -101,15 +94,4 @@ export function permetScore(services: readonly ServiceStatus[] | null): PermetSc
   return { percent, label, tone: 'warning' };
 }
 
-const EMPTY_LINKS: readonly QuickLaunchLink[] = Object.freeze([]);
 
-/** Links the dock can render (entries without a name or url are dropped). */
-export function dockLinks(links: readonly QuickLaunchLink[] | null): readonly QuickLaunchLink[] {
-  if (links === null || links.length === 0) return EMPTY_LINKS;
-  return links.every((l) => l.name !== '' && l.url !== '') ? links : links.filter((l) => l.name !== '' && l.url !== '');
-}
-
-/** Whether a dock chip is active for the current location pathname. */
-export function isDockLinkActive(url: string, pathname: string): boolean {
-  return url === pathname || (url !== '/' && pathname.startsWith(url));
-}

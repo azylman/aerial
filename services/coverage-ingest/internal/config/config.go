@@ -222,11 +222,8 @@ func writeEntry(dir, name string, r io.Reader) error {
 	return errors.Join(cErr, f.Close())
 }
 
-// protectedServices are never pruned, even when absent from the collector config.
-var protectedServices = []string{"eri-restate"}
-
 // PruneKeepSet returns the sorted services whose rows survive a prune: every pull
-// target and push service in cfg plus protectedServices. An empty configured set is an
+// target and push service in cfg. An empty configured set is an
 // error so a broken config can never wipe the table.
 func PruneKeepSet(cfg Config) ([]string, error) {
 	var keep []string
@@ -243,7 +240,6 @@ func PruneKeepSet(cfg Config) ([]string, error) {
 	if len(keep) == 0 {
 		return nil, errors.New("prune keep set is empty")
 	}
-	keep = append(keep, protectedServices...)
 	slices.Sort(keep)
 	return slices.Compact(keep), nil
 }

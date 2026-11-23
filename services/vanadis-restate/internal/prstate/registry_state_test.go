@@ -895,33 +895,6 @@ func TestPRState_Untracked(t *testing.T) {
 	}
 }
 
-func TestPRState_HasDeployResidue(t *testing.T) {
-	t.Parallel()
-	with := func(f func(*PRState)) *PRState { s := NewPRState("azylman/aerial", 101); f(s); return s }
-	tests := []struct {
-		name string
-		st   *PRState
-		want bool
-	}{
-		{name: "nil state has none"},
-		{name: "fresh state has none", st: with(func(*PRState) {})},
-		{name: "status is residue", st: with(func(s *PRState) { s.Status = RegistryStatusDeploying }), want: true},
-		{name: "jobs are residue", st: with(func(s *PRState) { s.Jobs = []string{"eri"} }), want: true},
-		{name: "started jobs are residue", st: with(func(s *PRState) { s.StartedJobs = []string{"eri"} }), want: true},
-		{name: "requests are residue", st: with(func(s *PRState) { s.KustomizationRequests = map[string]KustomizationRequest{"core": {}} }), want: true},
-		{name: "index membership is residue", st: with(func(s *PRState) { s.RolloutIndexed = true }), want: true},
-		{name: "armed deploy failure is residue", st: with(func(s *PRState) { s.PendingDeployFailure = &PendingDeployFailure{} }), want: true},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			if got := tc.st.HasDeployResidue(); got != tc.want {
-				t.Fatalf("HasDeployResidue() = %v, want %v", got, tc.want)
-			}
-		})
-	}
-}
-
 // TestPRState_ApplySelfRegistration pins the EnsurePRRegistered fill-only
 // upsert: invalid targets write nothing, head/target/title only fill, the
 // branch is replaced, and the owner seeds only when the target was empty.

@@ -11,12 +11,10 @@ import (
 	"regexp"
 	"slices"
 	"strings"
-	"time"
 
 	"github.com/azylman/aerial/pkg/githubapi"
 	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/pkg/prwire"
-	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/pkg/strutil"
 	"github.com/azylman/aerial/services/synapse/internal/buildmeta"
 	"github.com/azylman/aerial/services/synapse/internal/github"
@@ -43,23 +41,6 @@ const (
 type GitHubIssueComment struct {
 	ID   int64  `json:"id"`
 	Body string `json:"body"`
-}
-
-func (s *RouterServer) publishPRLifecycleEvent(ctx context.Context, ev pubsub.PRLifecycleEvent) error {
-	if s == nil || s.bus == nil {
-		return nil
-	}
-	ev.Repo = strings.TrimSpace(ev.Repo)
-	if ev.OccurredAt.IsZero() {
-		ev.OccurredAt = time.Now().UTC()
-	}
-	subject := pubsub.SubjectAerialPRPrefix + strings.TrimSpace(ev.Event)
-	msgID := fmt.Sprintf("pr-life-%s-%d-%s-%d", strings.ReplaceAll(ev.Repo, "/", "-"), ev.PRNumber, ev.Event, ev.OccurredAt.UnixNano())
-	if err := s.bus.Publish(ctx, subject, msgID, ev); err != nil {
-		slog.ErrorContext(ctx, "[synapse] [pr_lifecycle] error publishing event", "event", ev.Event, "repo", ev.Repo, "pr", ev.PRNumber, "error", err)
-		return err
-	}
-	return nil
 }
 
 func (s *RouterServer) ghClient() *github.Client {
@@ -567,7 +548,7 @@ func (s *RouterServer) fetchLatestRoboRevComment(ctx context.Context, repo strin
 		if shortSHA != "" && !strings.Contains(body, "`"+shortSHA) && !strings.Contains(body, headSHA) {
 			continue
 		}
-		return strutil.TruncateRunes(body, maxRoboRevCommentRunes)
+		return strutil.TruncateRunes(body, 4000)
 	}
 	return ""
 }

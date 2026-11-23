@@ -113,11 +113,11 @@ const rows: Row[] = [
   },
   {
     name: 'null to list takes next',
-    prev: '{"quick_launch_links":null}',
-    next: '{"quick_launch_links":[{"name":"grafana"}]}',
+    prev: '{"tags":null}',
+    next: '{"tags":[{"name":"grafana"}]}',
     wantRootReused: false,
     reusedFromPrev: [],
-    freshPaths: ['', 'quick_launch_links'],
+    freshPaths: ['', 'tags'],
   },
   {
     name: 'object to array takes next',

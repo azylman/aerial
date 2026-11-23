@@ -249,7 +249,6 @@ func makeCreateJournalContext(t *testing.T, key string, journal *createJournal, 
 	mc.EXPECT().Request().Return(&restate.Request{ID: "inv-test"}).Maybe()
 	mc.EXPECT().Get("state", mock.Anything).Return(false, nil).Maybe()
 	mc.EXPECT().Get("launched", mock.Anything).Return(false, nil).Maybe()
-	mc.EXPECT().Get(deploygate.PendingDeploymentKey, mock.Anything).Return(false, nil).Maybe()
 	mc.EXPECT().Get(deploygate.DeploymentDeadlineKey, mock.Anything).Return(false, nil).Maybe()
 	mc.EXPECT().Set("state", mock.Anything, mock.Anything).RunAndReturn(func(_ string, value any, _ ...restate.SetOption) {
 		if *stateOut == nil {
@@ -259,7 +258,6 @@ func makeCreateJournalContext(t *testing.T, key string, journal *createJournal, 
 		}
 	}).Maybe()
 	mc.EXPECT().Set("launched", mock.Anything, mock.Anything).Return().Maybe()
-	mc.EXPECT().Set(deploygate.PendingDeploymentKey, mock.Anything, mock.Anything).Return().Maybe()
 	mc.EXPECT().Set(deploygate.DeploymentDeadlineKey, mock.Anything, mock.Anything).Return().Maybe()
 	mc.EXPECT().ClearAll().Return().Maybe()
 	mClient := mocks.NewMockClient(t)

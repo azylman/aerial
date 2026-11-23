@@ -6,14 +6,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"net/http"
 	"strconv"
 	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"github.com/azylman/aerial/pkg/httpkit"
 	"github.com/azylman/aerial/services/vanadis/internal/model"
 )
 
@@ -87,36 +84,6 @@ func (h *Handler) RetryActionChunk(ctx context.Context, req RetryActionChunkRequ
 		return nil, errors.New("invalid durable retry acknowledgement")
 	}
 	return &result, nil
-}
-
-func decodeRetryActionRequest(r *http.Request) (RetryActionChunkRequest, error) {
-	var req RetryActionChunkRequest
-	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
-		return req, fmt.Errorf("%w: invalid retry payload", model.ErrInvalidBuildInput)
-	}
-	if req.BuildID != r.PathValue("id") {
-		return req, fmt.Errorf("%w: build_id must match path", model.ErrInvalidBuildInput)
-	}
-	return req, validateRetryActionRequest(req)
-}
-
-// HandleRetryActionChunk serves POST /builds/{id}/retry-action.
-func (h *Handler) HandleRetryActionChunk(w http.ResponseWriter, r *http.Request) {
-	req, err := decodeRetryActionRequest(r)
-	if err != nil {
-		writeStoreError(r.Context(), w, err)
-		return
-	}
-	result, err := h.RetryActionChunk(r.Context(), req)
-	if errors.Is(err, ErrRetryIngressUnavailable) {
-		httpkit.WriteJSON(w, http.StatusServiceUnavailable, map[string]string{"error": err.Error()})
-		return
-	}
-	if err != nil {
-		writeStoreError(r.Context(), w, err)
-		return
-	}
-	httpkit.WriteJSON(w, http.StatusOK, result)
 }
 
 func (h *Handler) registerRetryActionTool(server *mcp.Server) {

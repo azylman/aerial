@@ -125,7 +125,6 @@ type KustomizationObservation struct {
 type WorkloadRollout struct {
 	UID                                                             string
 	Selector                                                        *KubeLabelSelector
-	StoppedChildren                                                 *StoppedChildObservation
 	Kind, Namespace, Name                                           string
 	Images                                                          []string
 	ChangedAt                                                       time.Time
@@ -205,32 +204,6 @@ type KubeResourceRequirements struct {
 	Requests map[string]string `json:"requests,omitempty"`
 }
 
-// StoppedReplicaSet represents a ReplicaSet examined during stopped workload checks.
-type StoppedReplicaSet struct {
-	Metadata KubeObjectMeta `json:"metadata"`
-	Spec     struct {
-		Replicas *int32 `json:"replicas"`
-	} `json:"spec"`
-	Status struct {
-		ObservedGeneration   int64 `json:"observedGeneration"`
-		Replicas             int32 `json:"replicas"`
-		ReadyReplicas        int32 `json:"readyReplicas"`
-		AvailableReplicas    int32 `json:"availableReplicas"`
-		FullyLabeledReplicas int32 `json:"fullyLabeledReplicas"`
-	} `json:"status"`
-}
-
-// StoppedPod represents a Pod examined during stopped workload checks.
-type StoppedPod struct {
-	Metadata KubeObjectMeta `json:"metadata"`
-}
-
-// StoppedChildObservation proves both inventories were read completely and the parent was re-read.
-type StoppedChildObservation struct {
-	ReplicaSets []StoppedReplicaSet
-	Pods        []StoppedPod
-}
-
 // GitHubWebhookArgs contains payload data for durable background processing of GitHub webhooks.
 type GitHubWebhookArgs struct {
 	Event    string `json:"event"`
@@ -297,9 +270,7 @@ type OutboundDispatcher interface {
 	ListKustomizationConfigMaps(ctx context.Context, ref FluxKustomizationRef) ([]ConfigMapChange, error)
 	ResolveFluxSourceRepo(ctx context.Context, obj FluxInvolvedObject) (string, error)
 	DiscoverRepoKustomizations(ctx context.Context, repo string) ([]FluxKustomizationRef, error)
-	DispatchPrompt(ctx context.Context, req PromptRequest) error
 	DispatchDirectMessage(ctx context.Context, req DirectMessageRequest) error
-	DispatchBackground(ctx context.Context, req DispatchRequest) error
 	DispatchDiscordMessage(ctx context.Context, req DiscordMessageIngressRequest) error
 	DispatchDiscordInteraction(ctx context.Context, interaction *discordgo.Interaction) error
 }
@@ -329,10 +300,6 @@ type GitHubPullRequest struct {
 
 func (pr GitHubPullRequest) GetBody() string {
 	return pr.Body
-}
-
-func (pr GitHubPullRequest) GetNumber() int {
-	return pr.Number
 }
 
 // AerialPRMetadata captures structured metadata trailers in PR descriptions.

@@ -149,7 +149,7 @@ func (s *PRObjectService) afterCommit(ctx restate.ObjectContext, st *PRState) {
 // reconcile. A stored untracked state with rollout residue (created before
 // this guard) is cleaned instead (cleanUntrackedResidue). Returns true when
 // the event must be dropped.
-func (s *PRObjectService) dropUntrackedRollout(ctx restate.ObjectContext, st *PRState, stored bool, handler string) bool {
+func (*PRObjectService) dropUntrackedRollout(ctx restate.ObjectContext, st *PRState, stored bool, handler string) bool {
 	if !st.Untracked() {
 		return false
 	}
@@ -160,9 +160,6 @@ func (s *PRObjectService) dropUntrackedRollout(ctx restate.ObjectContext, st *PR
 			"pr", pr, "handler", handler, "stored", stored)
 		return restate.Void{}, nil
 	}, restate.WithName("untracked-"+handler))
-	if stored {
-		s.cleanUntrackedResidue(ctx, st)
-	}
 	return true
 }
 
@@ -178,51 +175,6 @@ func (s *PRObjectService) dropUntrackedEvent(ctx restate.ObjectContext, ev PREve
 		return false, err
 	}
 	return s.dropUntrackedRollout(ctx, st, stored, handler), nil
-}
-
-// cleanUntrackedResidue clears the rollout fields of a stored untracked
-// state and closes its index entries: the rollout index gets an inactive
-// update (syncRolloutIndex) and RepoObject a deployed update for the
-// indexed generation, so it leaves the deploying set. Idempotent: a state
-// with no residue changes nothing and sends nothing.
-func (s *PRObjectService) cleanUntrackedResidue(ctx restate.ObjectContext, st *PRState) bool {
-	if !st.Untracked() || !st.HasDeployResidue() {
-		return false
-	}
-	st.ClearDeployResidue()
-	restate.Set(ctx, s.stateKey, st)
-	s.syncRolloutIndex(ctx, st)
-	if st.GateGeneration > 0 {
-		restate.ObjectSend(ctx, prwire.RepoObjectServiceName, prwire.RepoObjectKey(st.Repo), prwire.RepoHandlerPRIndex).Send(PRIndexEvent{
-			Repo: st.Repo, PRNumber: st.PRNumber, ReopenEpoch: st.ReopenEpoch, Generation: st.GateGeneration, Lifecycle: IndexDeployed,
-		})
-	}
-	return true
-}
-
-// DropUntrackedRequest is the empty DropUntracked input; the object key
-// names the PR.
-type DropUntrackedRequest struct{}
-
-// DropUntrackedResponse reports whether DropUntracked cleaned anything.
-type DropUntrackedResponse struct {
-	Untracked bool `json:"untracked"`
-	Cleaned   bool `json:"cleaned"`
-}
-
-// DropUntracked is the idempotent operator cleanup for an untracked PR left
-// in rollout before the untracked-event guard: it clears the rollout fields
-// and closes the PR's rollout-index and RepoObject deploying entries. A
-// tracked or unknown PR is untouched.
-func (s *PRObjectService) DropUntracked(ctx restate.ObjectContext, _ DropUntrackedRequest) (DropUntrackedResponse, error) {
-	st, err := restate.Get[*PRState](ctx, s.stateKey)
-	if err != nil || st == nil {
-		return DropUntrackedResponse{}, err
-	}
-	if !st.Untracked() {
-		return DropUntrackedResponse{}, nil
-	}
-	return DropUntrackedResponse{Untracked: true, Cleaned: s.cleanUntrackedResidue(ctx, st)}, nil
 }
 
 // eventPhase selects the disposition guard for one handler: PR-lifecycle

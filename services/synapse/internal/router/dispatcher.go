@@ -69,15 +69,13 @@ func (d *DefaultOutboundDispatcher) resolveEriURL(agent string) string {
 }
 
 func (d *DefaultOutboundDispatcher) DispatchDiscordMessage(ctx context.Context, req DiscordMessageIngressRequest) error {
-	if eriURL := d.resolveEriURL(req.Agent); eriURL != "" {
-		return d.DispatchDiscordMessageToURL(ctx, eriURL, req)
-	}
-	return d.eriClient.DispatchDiscordMessage(ctx, req)
+	return d.DispatchDiscordMessageToURL(ctx, d.resolveEriURL(req.Agent), req)
 }
 
 func (d *DefaultOutboundDispatcher) DispatchDiscordInteractionForAgent(ctx context.Context, agent string, interaction *discordgo.Interaction) error {
-	if eriURL := d.resolveEriURL(agent); eriURL != "" {
-		return d.DispatchDiscordInteractionToURL(ctx, eriURL, interaction)
-	}
-	return d.DispatchDiscordInteraction(ctx, interaction)
+	return d.DispatchDiscordInteractionToURL(ctx, d.resolveEriURL(agent), interaction)
+}
+
+func (d *DefaultOutboundDispatcher) DispatchDiscordInteraction(ctx context.Context, interaction *discordgo.Interaction) error {
+	return d.DispatchDiscordInteractionToURL(ctx, "", interaction)
 }

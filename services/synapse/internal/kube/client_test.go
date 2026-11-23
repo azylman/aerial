@@ -1,6 +1,7 @@
 package kube
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"io"
@@ -17,6 +18,41 @@ import (
 	"github.com/azylman/aerial/pkg/k8sauth"
 	"github.com/azylman/aerial/services/synapse/internal/model"
 )
+
+// kubeRoute is one scripted kube API response; status 0 means 200.
+type kubeRoute struct {
+	status    int
+	body      string
+	wantQuery string
+	wantBody  string
+}
+
+// newMockKubeServer serves routes keyed by "METHOD /path" (query ignored). The "*" route answers every unlisted
+// request; without it unlisted requests get a kube NotFound status.
+func newMockKubeServer(routes map[string]kubeRoute) *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp, ok := routes[r.Method+" "+r.URL.Path]
+		if !ok {
+			resp, ok = routes["*"]
+		}
+		if !ok {
+			resp = kubeRoute{status: http.StatusNotFound, body: `{"kind":"Status","reason":"NotFound"}`}
+		}
+		reqBody, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if resp.wantQuery != "" && r.URL.RawQuery != resp.wantQuery {
+			resp = kubeRoute{status: http.StatusBadRequest, body: "unexpected query " + r.URL.RawQuery}
+		} else if resp.wantBody != "" && string(reqBody) != resp.wantBody {
+			resp = kubeRoute{status: http.StatusBadRequest, body: "unexpected body " + string(reqBody)}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(cmp.Or(resp.status, http.StatusOK))
+		_, _ = w.Write([]byte(resp.body))
+	}))
+}
 
 func TestClientConfig(t *testing.T) {
 	t.Parallel()

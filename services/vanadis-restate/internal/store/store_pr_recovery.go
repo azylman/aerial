@@ -65,11 +65,6 @@ func (s *Store) recoverFailedPR(ctx context.Context, id, head string) error {
 		return ErrPRTransitionSkipped
 	}
 	c := *selected
-	// A legacy failed PR needs a durable baseline before a genuine head change
-	// can recover it. This observation must preserve all failure state.
-	if missingFailedPRBaseline(c, PrHeadVerifiedFromContext(ctx)) {
-		return seedFailedPRBaseline(ctx, tx, id, head)
-	}
 	if !failedPRHeadAccepted(c, head, PrHeadVerifiedFromContext(ctx)) {
 		return ErrPRTransitionSkipped
 	}
@@ -103,20 +98,4 @@ func failedPRHeadAccepted(c model.VanadisChunk, head string, verified bool) bool
 		return false
 	}
 	return true
-}
-
-func missingFailedPRBaseline(c model.VanadisChunk, verified bool) bool {
-	return c.Status == statusFailed && c.HeadSHA == "" && c.Mode == "pr" && c.PRNumber > 0 && strings.TrimSpace(c.MergeSHA) == "" && verified
-}
-
-func seedFailedPRBaseline(ctx context.Context, tx pgx.Tx, id, head string) error {
-	const baseline = `UPDATE vanadis_chunks SET ci_checks = COALESCE(ci_checks, '{}'::jsonb) ||
- jsonb_build_object('_head_sha', $2::text) WHERE id = $1;`
-	if _, err := tx.Exec(ctx, baseline, id, head); err != nil {
-		return err
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return err
-	}
-	return ErrPRTransitionSkipped
 }

@@ -42,12 +42,8 @@ var (
 	ChunksActive = metrics.ChunksActive
 	// BuildsTotal tracks total Vanadis builds by lifecycle or terminal status.
 	BuildsTotal = metrics.BuildsTotal
-	// ChunksTotal tracks total Vanadis chunks by lifecycle event status.
-	ChunksTotal = metrics.ChunksTotal
 	// QueueDepth tracks chunk execution jobs in the Vanadis JetStream queue categorized by state.
 	QueueDepth = metrics.QueueDepth
-	// QueueOldestAgeSeconds tracks the age in seconds of the oldest pending job in the Vanadis queue.
-	QueueOldestAgeSeconds = metrics.QueueOldestAgeSeconds
 	// RecordBuildTotal increments the vanadis_builds_total counter for a given status.
 	RecordBuildTotal = metrics.RecordBuildTotal
 )
@@ -57,11 +53,6 @@ type consumerStatsQuerier = metrics.ConsumerStatsQuerier
 
 // CancelBuildRequest represents a cancel build mutation payload.
 type CancelBuildRequest struct{}
-
-// RemoveChunkRequest represents a request to remove a chunk from a build.
-type RemoveChunkRequest struct {
-	ChunkRef string `json:"chunk_ref"`
-}
 
 // FailChunkRequest carries the chunk and reason for failing a chunk.
 type FailChunkRequest struct {

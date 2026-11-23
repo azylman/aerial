@@ -338,22 +338,6 @@ func (h *RepoHandlers) ExpireHeld(ctx context.Context, repo string, id uint64) (
 	return true, nil
 }
 
-// ResolvePRBySHA resolves a commit SHA to its PR through the durable index,
-// newest claim first. It is a read-only routing helper; authority never
-// consults it for transitions. A store failure reports not-found.
-func (h *RepoHandlers) ResolvePRBySHA(ctx context.Context, repo, sha string) (int, string, bool) {
-	_ = ctx
-	st, err := h.store.LoadRepo(repo)
-	if err != nil {
-		return 0, "", false
-	}
-	entry, ok := st.ResolveSHA(sha)
-	if !ok {
-		return 0, "", false
-	}
-	return entry.PRNumber, entry.Branch, true
-}
-
 // GitHubEffector is the GitHub boundary for restate-owned GitHub effects.
 // *GitHubClient satisfies it directly; the Restate binding wraps every call
 // in one journaled restate.Run so a replay returns the recorded result.

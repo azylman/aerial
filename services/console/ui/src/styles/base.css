@@ -1,5 +1,5 @@
 /* App shell styles: theme tokens, page background, header, tab bar,
-   quick-launch dock and view panels. Class names and DOM structure are preserved. */
+   and view panels. Class names and DOM structure are preserved. */
 
 /* Shared dual-theme palette (web/theme/aerial-tokens.css): Console's colour tokens alias its
    --ae-* semantic vars where the values match, so both themes resolve to the same colours. */
@@ -457,57 +457,6 @@ body::after {
     font-variant-numeric: tabular-nums;
 }
 
-/* Tactical Quick-Launch Dock */
-.quick-launch-dock {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    flex-wrap: wrap;
-}
-
-.dock-chip {
-    background: var(--bg-elevated);
-    border: 1px solid var(--card-border);
-    color: var(--text-primary);
-    text-decoration: none;
-    padding: 4px 10px;
-    border-radius: 6px;
-    font-family: var(--font-main);
-    font-size: 0.75rem;
-    font-weight: 500;
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    white-space: nowrap;
-    min-height: 28px;
-    transition: all 0.15s ease;
-    position: relative;
-}
-
-.dock-chip:hover {
-    border-color: var(--card-border-hover);
-    background: var(--bg-surface);
-    transform: translateY(-1px);
-    box-shadow: var(--accent-glow);
-}
-
-.dock-chip.active {
-    border-color: var(--text-primary);
-    background: var(--bg-surface);
-    box-shadow: var(--accent-glow);
-}
-
-.dock-chip .ping-dot {
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
-    background: var(--accent-emerald);
-}
-
-.dock-chip .ping-dot.custom {
-    background: var(--accent-amber);
-}
-
 /* Shell polish */
 .tab-icon,
 .brand-badge {
@@ -518,8 +467,7 @@ body::after {
     display: inline-flex;
 }
 
-.brand-text,
-.dock-chip > span:last-child {
+.brand-text {
     min-width: 0;
 }
 
@@ -574,22 +522,6 @@ body::after {
     }
     .agent-selector-bar {
         order: 2;
-    }
-    .quick-launch-dock {
-        order: 3;
-        width: 100%;
-        gap: 6px;
-        flex-wrap: nowrap;
-        overflow-x: auto;
-        -webkit-overflow-scrolling: touch;
-        padding-bottom: 2px;
-    }
-    .dock-chip {
-        padding: 5px 8px;
-        font-size: 0.72rem;
-        min-height: 30px;
-        gap: 5px;
-        flex-shrink: 0;
     }
     .hud-view-tabs,
     .hud-nav {

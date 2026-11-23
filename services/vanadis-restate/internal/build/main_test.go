@@ -55,7 +55,6 @@ type fakeObjectRuntime struct {
 	now         time.Time
 	attempts    map[string]deploygate.Attempt
 	attemptsErr error
-	pending     map[string]deploygate.PendingStart
 	scheduled   []deploygate.DeploymentDeadlineRequest
 }
 
@@ -183,12 +182,6 @@ func (f *fakeObjectRuntime) SetAttempts(a map[string]deploygate.Attempt) { f.att
 
 func (f *fakeObjectRuntime) Now() (time.Time, error) { return f.now, nil }
 
-func (f *fakeObjectRuntime) GetPendingStarts() (map[string]deploygate.PendingStart, error) {
-	return f.pending, nil
-}
-
-func (f *fakeObjectRuntime) SetPendingStarts(p map[string]deploygate.PendingStart) { f.pending = p }
-
 func (f *fakeObjectRuntime) ScheduleDeadline(req deploygate.DeploymentDeadlineRequest, _ time.Duration) {
 	f.scheduled = append(f.scheduled, req)
 }
@@ -220,7 +213,6 @@ func makeObjectMockContext(t *testing.T, key string) restate.ObjectContext {
 	mc.EXPECT().Request().Return(&restate.Request{ID: "inv-test"}).Maybe()
 	mc.EXPECT().Get("state", mock.Anything).Return(false, nil).Maybe()
 	mc.EXPECT().Get("launched", mock.Anything).Return(false, nil).Maybe()
-	mc.EXPECT().Get(deploygate.PendingDeploymentKey, mock.Anything).Return(false, nil).Maybe()
 	mc.EXPECT().Run(mock.Anything, mock.Anything, mock.Anything).RunAndReturn(restatetest.RunMockRunContext).Maybe()
 	mc.EXPECT().Set("state", mock.Anything, mock.Anything).Return().Maybe()
 	mc.EXPECT().Set("launched", mock.Anything, mock.Anything).Return().Maybe()

@@ -834,7 +834,6 @@ type ClusterResponse struct {
 	ActiveTasks      []ActiveTaskStatus `json:"active_tasks"`
 	Services         []ServiceStatus    `json:"services"`
 	Deployments      []DeploymentStatus `json:"deployments"`
-	QuickLaunchLinks []QuickLaunchLink  `json:"quick_launch_links"`
 	OngoingDeploy    string             `json:"ongoing_deploy"`
 	IsDeploying      bool               `json:"is_deploying"`
 	ConfiguredAgents []string           `json:"configured_agents,omitempty"`

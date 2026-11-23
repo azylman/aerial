@@ -4,8 +4,7 @@ package prstate
 // over PRState/RepoState with no I/O, no clocks, and no Restate calls, so
 // PRObject and RepoObject handlers journal them directly: per-SHA check
 // failures (RecordFailedCheckRunDetailed returns emit/was-active/ever-failed
-// and resets on a head change, RollbackFailedCheckRun undoes a failed
-// dispatch), the generation-scoped effect keys that dedupe every effect, and
+// and resets on a head change), the generation-scoped effect keys that dedupe every effect, and
 // the RepoObject durable SHA index whose newest claim wins an ambiguous SHA.
 
 import (
@@ -252,30 +251,6 @@ func (s *PRState) RecordFailedCheckRunDetailed(headSHA, checkName string) (emitA
 	return hadPriorFailure && !wasActive, wasActive, hadPriorEverFailed
 }
 
-// RollbackFailedCheckRun restores prior failure state when dispatch failed.
-// It is a no-op when the check was already active before recording or when
-// the entry no longer matches headSHA.
-func (s *PRState) RollbackFailedCheckRun(headSHA, checkName string, wasActive, hadPriorEverFailed bool) {
-	normCheck := prwire.CanonicalFailedCheckKey(checkName)
-	if s == nil || s.PRNumber <= 0 || normCheck == "" || wasActive {
-		return
-	}
-	if !strings.EqualFold(s.Checks.HeadSHA, strings.TrimSpace(headSHA)) {
-		return
-	}
-	if prwire.IsRoboRevCheck(checkName) {
-		s.Checks.RoboRevActiveFailed = false
-		if !hadPriorEverFailed {
-			delete(s.Checks.EverFailed, "roborev")
-		}
-		return
-	}
-	delete(s.Checks.ActiveFailed, normCheck)
-	if !hadPriorEverFailed {
-		delete(s.Checks.EverFailed, normCheck)
-	}
-}
-
 // ClearFailedCheckRun clears one active failure and reports whether an active
 // entry was cleared.
 func (s *PRState) ClearFailedCheckRun(headSHA, checkName string) bool {
@@ -389,11 +364,6 @@ func (s *PRState) RecordKustomizationRequests() uint64 {
 	s.DispatchedEffects = make(map[string]bool)
 	return s.GateGeneration
 }
-
-// RetryPRReadiness is the readiness-retry transition. By contract it never
-// mints a generation and never clears effect keys; it is an explicit no-op
-// so future retry bookkeeping has one frozen home.
-func (*PRState) RetryPRReadiness() {}
 
 // EffectKeyFor builds the generation-scoped journaled key for one effect.
 func (s *PRState) EffectKeyFor(kind, headSHA, jobName, checkName string) EffectKey {
@@ -755,14 +725,6 @@ func (s *RepoState) TouchPRKey(prKey string) bool {
 	return true
 }
 
-// PRKeys returns the journaled index of PR keys touched.
-func (s *RepoState) PRKeys() []string {
-	if s == nil {
-		return nil
-	}
-	return append([]string(nil), s.TouchedPRKeys...)
-}
-
 // RecordTombstone scopes a dispatched SHA to its gate generation.
 func (s *RepoState) RecordTombstone(sha string, generation uint64) {
 	if s == nil {
@@ -772,15 +734,6 @@ func (s *RepoState) RecordTombstone(sha string, generation uint64) {
 		s.Tombstones = make(map[string]uint64)
 	}
 	s.Tombstones[strings.ToLower(strings.TrimSpace(sha))] = generation
-}
-
-// HasTombstone reports whether a dispatched-SHA tombstone exists.
-func (s *RepoState) HasTombstone(sha string) bool {
-	if s == nil || s.Tombstones == nil {
-		return false
-	}
-	_, ok := s.Tombstones[strings.ToLower(strings.TrimSpace(sha))]
-	return ok
 }
 
 // EvictTombstonesBelowGeneration drops tombstones below minGen. Eviction is
