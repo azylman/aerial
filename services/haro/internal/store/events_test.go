@@ -651,8 +651,12 @@ func TestListEventTriggers_MultiAgent(t *testing.T) {
 	db := openStoreTestDB(t)
 	ctx := context.Background()
 
-	_ = InsertEventTrigger(ctx, db, model.EventTrigger{ID: "et-a", ChannelID: "ch", Source: "flux", Target: "t1", EventType: "ev", Prompt: "p1", CreatedAt: now, Agent: "agent-alpha"})
-	_ = InsertEventTrigger(ctx, db, model.EventTrigger{ID: "et-b", ChannelID: "ch", Source: "flux", Target: "t2", EventType: "ev", Prompt: "p2", CreatedAt: now, Agent: "agent-beta"})
+	if err := InsertEventTrigger(ctx, db, model.EventTrigger{ID: "et-a", ChannelID: "ch", Source: "flux", Target: "t1", EventType: "ev", Prompt: "p1", CreatedAt: now, Agent: "agent-alpha"}); err != nil {
+		t.Fatalf("InsertEventTrigger et-a failed: %v", err)
+	}
+	if err := InsertEventTrigger(ctx, db, model.EventTrigger{ID: "et-b", ChannelID: "ch", Source: "flux", Target: "t2", EventType: "ev", Prompt: "p2", CreatedAt: now, Agent: "agent-beta"}); err != nil {
+		t.Fatalf("InsertEventTrigger et-b failed: %v", err)
+	}
 
 	tests := []struct {
 		name        string
@@ -683,8 +687,12 @@ func TestQueryMatchingEventTriggers(t *testing.T) {
 	db := openStoreTestDB(t)
 	ctx := context.Background()
 
-	_ = InsertEventTrigger(ctx, db, model.EventTrigger{ID: "et-q1", ChannelID: "ch", Source: "flux", Target: "t1", EventType: "sync_success", Prompt: "p1", CreatedAt: now})
-	_ = InsertEventTrigger(ctx, db, model.EventTrigger{ID: "et-q2", ChannelID: "ch", Source: "flux", Target: "t2", EventType: "sync_success", Prompt: "p2", CreatedAt: now, Persistent: true})
+	if err := InsertEventTrigger(ctx, db, model.EventTrigger{ID: "et-q1", ChannelID: "ch", Source: "flux", Target: "t1", EventType: "sync_success", Prompt: "p1", CreatedAt: now}); err != nil {
+		t.Fatalf("InsertEventTrigger et-q1 failed: %v", err)
+	}
+	if err := InsertEventTrigger(ctx, db, model.EventTrigger{ID: "et-q2", ChannelID: "ch", Source: "flux", Target: "t2", EventType: "sync_success", Prompt: "p2", CreatedAt: now, Persistent: true}); err != nil {
+		t.Fatalf("InsertEventTrigger et-q2 failed: %v", err)
+	}
 
 	tests := []struct {
 		name      string
@@ -724,8 +732,12 @@ func TestConsumeEventTrigger(t *testing.T) {
 	db := openStoreTestDB(t)
 	ctx := context.Background()
 
-	_ = InsertEventTrigger(ctx, db, model.EventTrigger{ID: "et-c1", ChannelID: "ch", Source: "flux", Target: "t1", EventType: "sync_success", Prompt: "p1", CreatedAt: now})
-	_ = InsertEventTrigger(ctx, db, model.EventTrigger{ID: "et-c2", ChannelID: "ch", Source: "flux", Target: "t2", EventType: "sync_success", Prompt: "p2", CreatedAt: now, Persistent: true})
+	if err := InsertEventTrigger(ctx, db, model.EventTrigger{ID: "et-c1", ChannelID: "ch", Source: "flux", Target: "t1", EventType: "sync_success", Prompt: "p1", CreatedAt: now}); err != nil {
+		t.Fatalf("InsertEventTrigger et-c1 failed: %v", err)
+	}
+	if err := InsertEventTrigger(ctx, db, model.EventTrigger{ID: "et-c2", ChannelID: "ch", Source: "flux", Target: "t2", EventType: "sync_success", Prompt: "p2", CreatedAt: now, Persistent: true}); err != nil {
+		t.Fatalf("InsertEventTrigger et-c2 failed: %v", err)
+	}
 
 	tests := []struct {
 		name        string

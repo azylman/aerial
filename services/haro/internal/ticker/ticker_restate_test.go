@@ -189,7 +189,7 @@ func TestHaroSchedule_Arm(t *testing.T) {
 
 			switch tc.seedType {
 			case "cron":
-				_ = store.InsertCronSchedule(ctx, db, model.CronSchedule{
+				if err := store.InsertCronSchedule(ctx, db, model.CronSchedule{
 					ID:        scheduleID,
 					TargetID:  "100000000000000001",
 					CronExpr:  "0 * * * *",
@@ -197,16 +197,20 @@ func TestHaroSchedule_Arm(t *testing.T) {
 					Timezone:  "UTC",
 					NextRunAt: runAt,
 					Enabled:   tc.enabled,
-				})
+				}); err != nil {
+					t.Fatalf("InsertCronSchedule failed: %v", err)
+				}
 			case "oneshot":
-				_ = store.InsertOneShotSchedule(ctx, db, model.OneShotSchedule{
+				if err := store.InsertOneShotSchedule(ctx, db, model.OneShotSchedule{
 					ID:       scheduleID,
 					ThreadID: "100000000000000002",
 					Prompt:   "Remind me",
 					RunAt:    runAt,
-				})
+				}); err != nil {
+					t.Fatalf("InsertOneShotSchedule failed: %v", err)
+				}
 			case "heartbeat":
-				_ = store.InsertHeartbeatSchedule(ctx, db, model.HeartbeatSchedule{
+				if err := store.InsertHeartbeatSchedule(ctx, db, model.HeartbeatSchedule{
 					ID:        scheduleID,
 					TargetID:  "100000000000000003",
 					CronExpr:  "*/5 * * * *",
@@ -214,7 +218,9 @@ func TestHaroSchedule_Arm(t *testing.T) {
 					Timezone:  "UTC",
 					NextRunAt: runAt,
 					Enabled:   tc.enabled,
-				})
+				}); err != nil {
+					t.Fatalf("InsertHeartbeatSchedule failed: %v", err)
+				}
 			}
 
 			mc, mClient := setupObjectMockContext(t, scheduleID, 0)
@@ -247,7 +253,7 @@ func TestHaroSchedule_Arm_Idempotent(t *testing.T) {
 	scheduleID := "arm-idempotent"
 	now := time.Date(2026, 11, 22, 10, 0, 0, 0, time.UTC)
 
-	_ = store.InsertCronSchedule(ctx, db, model.CronSchedule{
+	if err := store.InsertCronSchedule(ctx, db, model.CronSchedule{
 		ID:        scheduleID,
 		TargetID:  "100000000000000001",
 		CronExpr:  "0 * * * *",
@@ -255,7 +261,9 @@ func TestHaroSchedule_Arm_Idempotent(t *testing.T) {
 		Timezone:  "UTC",
 		NextRunAt: now.Add(time.Hour),
 		Enabled:   true,
-	})
+	}); err != nil {
+		t.Fatalf("InsertCronSchedule failed: %v", err)
+	}
 
 	mc, mClient := setupObjectMockContext(t, scheduleID, 0)
 	objCtx := restate.WithMockContext(mc)
@@ -321,7 +329,10 @@ func TestHaroSchedule_ArmAndCancel_ContextErrors(t *testing.T) {
 func TestHaroSchedule_Cancel(t *testing.T) {
 	t.Parallel()
 	scheduleID := "cancel-test-1"
-	mc, _ := setupObjectMockContext(t, scheduleID, 5)
+	mc, mClient := setupObjectMockContext(t, scheduleID, 5)
+	if mClient == nil {
+		t.Fatal("expected non-nil mock client")
+	}
 	objCtx := restate.WithMockContext(mc)
 
 	s := NewHaroSchedule(nil, nil)
@@ -339,7 +350,7 @@ func TestHaroSchedule_CancelArmFencing(t *testing.T) {
 	scheduleID := "sched-fence-test"
 	now := time.Date(2026, 11, 22, 10, 0, 0, 0, time.UTC)
 
-	_ = store.InsertCronSchedule(ctx, db, model.CronSchedule{
+	if err := store.InsertCronSchedule(ctx, db, model.CronSchedule{
 		ID:        scheduleID,
 		TargetID:  "100000000000000001",
 		CronExpr:  "0 * * * *",
@@ -347,9 +358,14 @@ func TestHaroSchedule_CancelArmFencing(t *testing.T) {
 		Timezone:  "UTC",
 		NextRunAt: now.Add(time.Hour),
 		Enabled:   true,
-	})
+	}); err != nil {
+		t.Fatalf("InsertCronSchedule failed: %v", err)
+	}
 
-	mc, _ := setupObjectMockContext(t, scheduleID, 0)
+	mc, mClient := setupObjectMockContext(t, scheduleID, 0)
+	if mClient == nil {
+		t.Fatal("expected non-nil mock client")
+	}
 	objCtx := restate.WithMockContext(mc)
 
 	disp := &fakeDispatcher{
@@ -434,14 +450,16 @@ func TestBackfillActiveSchedules_PostErrors(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now().UTC()
 
-	_ = store.InsertCronSchedule(ctx, db, model.CronSchedule{
+	if err := store.InsertCronSchedule(ctx, db, model.CronSchedule{
 		ID:        "c-backfill-fail",
 		TargetID:  "100000000000000001",
 		CronExpr:  "0 * * * *",
 		Prompt:    "Cron prompt",
 		NextRunAt: now.Add(time.Hour),
 		Enabled:   true,
-	})
+	}); err != nil {
+		t.Fatalf("InsertCronSchedule failed: %v", err)
+	}
 
 	var hits atomic.Int64
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -480,14 +498,15 @@ type fireTestCase struct {
 	wantFenced     bool
 }
 
-func seedScheduleForFireTest(ctx context.Context, db *sql.DB, tc fireTestCase, now time.Time, scheduleID string, runAt time.Time) {
+func seedScheduleForFireTest(ctx context.Context, t *testing.T, db *sql.DB, tc fireTestCase, now time.Time, scheduleID string, runAt time.Time) {
+	t.Helper()
 	switch tc.seedType {
 	case "cron":
 		cronExpr := "*/5 * * * *"
 		if strings.Contains(tc.name, "invalid cron expr") {
 			cronExpr = "not-a-cron"
 		}
-		_ = store.InsertCronSchedule(ctx, db, model.CronSchedule{
+		if err := store.InsertCronSchedule(ctx, db, model.CronSchedule{
 			ID:        scheduleID,
 			TargetID:  "100000000000000001",
 			CronExpr:  cronExpr,
@@ -495,20 +514,24 @@ func seedScheduleForFireTest(ctx context.Context, db *sql.DB, tc fireTestCase, n
 			Timezone:  "UTC",
 			NextRunAt: runAt,
 			Enabled:   tc.enabled,
-		})
+		}); err != nil {
+			t.Fatalf("InsertCronSchedule failed: %v", err)
+		}
 	case "oneshot":
-		_ = store.InsertOneShotSchedule(ctx, db, model.OneShotSchedule{
+		if err := store.InsertOneShotSchedule(ctx, db, model.OneShotSchedule{
 			ID:       scheduleID,
 			ThreadID: "100000000000000002",
 			Prompt:   "Prompt oneshot",
 			RunAt:    runAt,
-		})
+		}); err != nil {
+			t.Fatalf("InsertOneShotSchedule failed: %v", err)
+		}
 	case "heartbeat":
 		cronExpr := "*/5 * * * *"
 		if strings.Contains(tc.name, "invalid cron expr") {
 			cronExpr = "not-a-cron"
 		}
-		_ = store.InsertHeartbeatSchedule(ctx, db, model.HeartbeatSchedule{
+		if err := store.InsertHeartbeatSchedule(ctx, db, model.HeartbeatSchedule{
 			ID:        scheduleID,
 			TargetID:  "100000000000000003",
 			CronExpr:  cronExpr,
@@ -516,9 +539,11 @@ func seedScheduleForFireTest(ctx context.Context, db *sql.DB, tc fireTestCase, n
 			Timezone:  "UTC",
 			NextRunAt: runAt,
 			Enabled:   tc.enabled,
-		})
+		}); err != nil {
+			t.Fatalf("InsertHeartbeatSchedule failed: %v", err)
+		}
 		if tc.hasActiveHB {
-			_ = store.CreateScheduleRun(ctx, db, model.ScheduleRun{
+			if err := store.CreateScheduleRun(ctx, db, model.ScheduleRun{
 				ID:           "run-active-" + scheduleID,
 				ScheduleID:   scheduleID,
 				ScheduleType: model.ScheduleTypeHeartbeat,
@@ -526,7 +551,9 @@ func seedScheduleForFireTest(ctx context.Context, db *sql.DB, tc fireTestCase, n
 				ThreadID:     "thread-active",
 				Status:       "running",
 				StartedAt:    now.Add(-2 * time.Minute),
-			})
+			}); err != nil {
+				t.Fatalf("CreateScheduleRun failed: %v", err)
+			}
 		}
 	}
 }
@@ -811,7 +838,7 @@ func TestHaroSchedule_Fire(t *testing.T) {
 				runAt = now.Add(-25 * time.Hour)
 			}
 
-			seedScheduleForFireTest(ctx, db, tc, now, scheduleID, runAt)
+			seedScheduleForFireTest(ctx, t, db, tc, now, scheduleID, runAt)
 
 			mc, mClient := setupObjectMockContext(t, scheduleID, tc.generation)
 			objCtx := restate.WithMockContext(mc)
@@ -866,6 +893,34 @@ func verifyEventWatchOutcome(ctx context.Context, t *testing.T, db *sql.DB, tc e
 		}
 		if !tc.wantDeleted && getErr != nil {
 			t.Errorf("expected trigger to exist, got err: %v", getErr)
+		}
+	}
+}
+
+func seedEventWatchTriggerForTest(ctx context.Context, t *testing.T, db *sql.DB, tc eventWatchTestCase, triggerID string, now time.Time) {
+	t.Helper()
+	if tc.closedDB {
+		_ = db.Close()
+		return
+	}
+	if !tc.seedTrigger {
+		return
+	}
+	if err := store.InsertEventTrigger(ctx, db, model.EventTrigger{
+		ID:         triggerID,
+		ChannelID:  "100000000000000001",
+		Source:     "flux",
+		Target:     "aerial",
+		EventType:  "sync_success",
+		Prompt:     "Deploy finished",
+		Persistent: tc.persistent,
+	}); err != nil {
+		t.Fatalf("InsertEventTrigger failed: %v", err)
+	}
+	if tc.preConsume {
+		consumed, cErr := store.ConsumeEventTrigger(ctx, db, triggerID, now)
+		if cErr != nil || !consumed {
+			t.Fatalf("ConsumeEventTrigger setup failed: consumed=%v, err=%v", consumed, cErr)
 		}
 	}
 }
@@ -929,27 +984,12 @@ func TestHaroEventWatch_Fire(t *testing.T) {
 			triggerID := "trig-" + tc.name
 
 			now := time.Now().UTC()
-			if tc.closedDB {
-				_ = db.Close()
-			} else if tc.seedTrigger {
-				_ = store.InsertEventTrigger(ctx, db, model.EventTrigger{
-					ID:         triggerID,
-					ChannelID:  "100000000000000001",
-					Source:     "flux",
-					Target:     "aerial",
-					EventType:  "sync_success",
-					Prompt:     "Deploy finished",
-					Persistent: tc.persistent,
-				})
-				if tc.preConsume {
-					consumed, cErr := store.ConsumeEventTrigger(ctx, db, triggerID, now)
-					if cErr != nil || !consumed {
-						t.Fatalf("ConsumeEventTrigger setup failed: consumed=%v, err=%v", consumed, cErr)
-					}
-				}
-			}
+			seedEventWatchTriggerForTest(ctx, t, db, tc, triggerID, now)
 
-			mc, _ := setupObjectMockContext(t, triggerID, 0)
+			mc, mClient := setupObjectMockContext(t, triggerID, 0)
+			if mClient == nil {
+				t.Fatal("expected non-nil mock client")
+			}
 			objCtx := restate.WithMockContext(mc)
 
 			var disp dispatch.PromptDispatcher
@@ -1050,44 +1090,25 @@ func TestBackfillActiveSchedules(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now().UTC()
 
-	_ = store.InsertCronSchedule(ctx, db, model.CronSchedule{
-		ID:        "c-backfill-1",
-		TargetID:  "100000000000000001",
-		CronExpr:  "0 * * * *",
-		Prompt:    "Cron prompt",
-		NextRunAt: now.Add(time.Hour),
-		Enabled:   true,
-	})
-	_ = store.InsertCronSchedule(ctx, db, model.CronSchedule{
-		ID:        "c-backfill-disabled",
-		TargetID:  "100000000000000001",
-		CronExpr:  "0 * * * *",
-		Prompt:    "Cron prompt disabled",
-		NextRunAt: now.Add(time.Hour),
-		Enabled:   false,
-	})
-	_ = store.InsertOneShotSchedule(ctx, db, model.OneShotSchedule{
-		ID:       "o-backfill-1",
-		ThreadID: "100000000000000002",
-		Prompt:   "OneShot prompt",
-		RunAt:    now.Add(time.Hour),
-	})
-	_ = store.InsertHeartbeatSchedule(ctx, db, model.HeartbeatSchedule{
-		ID:        "hb-backfill-1",
-		TargetID:  "100000000000000003",
-		CronExpr:  "*/5 * * * *",
-		Prompt:    "Heartbeat prompt",
-		NextRunAt: now.Add(time.Hour),
-		Enabled:   true,
-	})
-	_ = store.InsertHeartbeatSchedule(ctx, db, model.HeartbeatSchedule{
-		ID:        "hb-backfill-disabled",
-		TargetID:  "100000000000000003",
-		CronExpr:  "*/5 * * * *",
-		Prompt:    "Heartbeat disabled",
-		NextRunAt: now.Add(time.Hour),
-		Enabled:   false,
-	})
+	for _, c := range []model.CronSchedule{
+		{ID: "c-backfill-1", TargetID: "100000000000000001", CronExpr: "0 * * * *", Prompt: "Cron prompt", NextRunAt: now.Add(time.Hour), Enabled: true},
+		{ID: "c-backfill-disabled", TargetID: "100000000000000001", CronExpr: "0 * * * *", Prompt: "Cron prompt disabled", NextRunAt: now.Add(time.Hour), Enabled: false},
+	} {
+		if err := store.InsertCronSchedule(ctx, db, c); err != nil {
+			t.Fatalf("InsertCronSchedule failed: %v", err)
+		}
+	}
+	if err := store.InsertOneShotSchedule(ctx, db, model.OneShotSchedule{ID: "o-backfill-1", ThreadID: "100000000000000002", Prompt: "OneShot prompt", RunAt: now.Add(time.Hour)}); err != nil {
+		t.Fatalf("InsertOneShotSchedule failed: %v", err)
+	}
+	for _, hb := range []model.HeartbeatSchedule{
+		{ID: "hb-backfill-1", TargetID: "100000000000000003", CronExpr: "*/5 * * * *", Prompt: "Heartbeat prompt", NextRunAt: now.Add(time.Hour), Enabled: true},
+		{ID: "hb-backfill-disabled", TargetID: "100000000000000003", CronExpr: "*/5 * * * *", Prompt: "Heartbeat disabled", NextRunAt: now.Add(time.Hour), Enabled: false},
+	} {
+		if err := store.InsertHeartbeatSchedule(ctx, db, hb); err != nil {
+			t.Fatalf("InsertHeartbeatSchedule failed: %v", err)
+		}
+	}
 
 	called := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1115,20 +1136,56 @@ func TestBackfillActiveSchedules(t *testing.T) {
 	}
 }
 
+type externalEventTestCase struct {
+	name         string
+	source       string
+	targets      []string
+	nilDB        bool
+	seedTrigger  bool
+	triggerCount int
+	statusCode   int
+	wantErr      bool
+}
+
+func seedExternalEventTriggersForTest(ctx context.Context, t *testing.T, db *sql.DB, tc externalEventTestCase, now time.Time) {
+	t.Helper()
+	if tc.name == "closed db returns error" && db != nil {
+		_ = db.Close()
+		return
+	}
+	if tc.seedTrigger {
+		if err := store.InsertEventTrigger(ctx, db, model.EventTrigger{
+			ID:        "trig-ext-" + tc.name,
+			ChannelID: "100000000000000001",
+			Source:    tc.source,
+			Target:    "aerial",
+			EventType: "sync_success",
+			Prompt:    "Prompt",
+			CreatedAt: now,
+		}); err != nil {
+			t.Fatalf("InsertEventTrigger failed: %v", err)
+		}
+	}
+	for i := range tc.triggerCount {
+		if err := store.InsertEventTrigger(ctx, db, model.EventTrigger{
+			ID:        fmt.Sprintf("trig-ext-%s-%d", tc.name, i),
+			ChannelID: "100000000000000001",
+			Source:    tc.source,
+			Target:    "aerial",
+			EventType: "sync_success",
+			Prompt:    "Prompt",
+			CreatedAt: now,
+		}); err != nil {
+			t.Fatalf("InsertEventTrigger failed: %v", err)
+		}
+	}
+}
+
 func TestHandleExternalEvent(t *testing.T) {
 	t.Parallel()
 	now := time.Now().UTC()
 
-	tests := []struct {
-		name         string
-		source       string
-		targets      []string
-		nilDB        bool
-		seedTrigger  bool
-		triggerCount int
-		statusCode   int
-		wantErr      bool
-	}{
+	tests := []externalEventTestCase{
 		{name: "healthcheck source is no-op", source: "healthcheck", targets: []string{"a"}},
 		{name: "empty targets is no-op", source: "flux", targets: []string{}},
 		{name: "nil db returns error", source: "flux", targets: []string{"a"}, nilDB: true, wantErr: true},
@@ -1166,33 +1223,8 @@ func TestHandleExternalEvent(t *testing.T) {
 			ctx := context.Background()
 			if !tc.nilDB {
 				db = openTickerTestDB(t)
-				switch {
-				case tc.name == "closed db returns error":
-					_ = db.Close()
-				case tc.seedTrigger:
-					_ = store.InsertEventTrigger(ctx, db, model.EventTrigger{
-						ID:        "trig-ext-" + tc.name,
-						ChannelID: "100000000000000001",
-						Source:    tc.source,
-						Target:    "aerial",
-						EventType: "sync_success",
-						Prompt:    "Prompt",
-						CreatedAt: now,
-					})
-				case tc.triggerCount > 0:
-					for i := range tc.triggerCount {
-						_ = store.InsertEventTrigger(ctx, db, model.EventTrigger{
-							ID:        fmt.Sprintf("trig-ext-%s-%d", tc.name, i),
-							ChannelID: "100000000000000001",
-							Source:    tc.source,
-							Target:    "aerial",
-							EventType: "sync_success",
-							Prompt:    "Prompt",
-							CreatedAt: now,
-						})
-					}
-				}
 			}
+			seedExternalEventTriggersForTest(ctx, t, db, tc, now)
 
 			called := 0
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1239,14 +1271,16 @@ func TestTicker_EvaluateDueSchedules_RestateSkipsPolling(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now().UTC()
 
-	_ = store.InsertCronSchedule(ctx, db, model.CronSchedule{
+	if err := store.InsertCronSchedule(ctx, db, model.CronSchedule{
 		ID:        "c-due-restate-skip",
 		TargetID:  "100000000000000001",
 		CronExpr:  "0 * * * *",
 		Prompt:    "Due cron prompt",
 		NextRunAt: now.Add(-time.Minute),
 		Enabled:   true,
-	})
+	}); err != nil {
+		t.Fatalf("InsertCronSchedule failed: %v", err)
+	}
 
 	disp := &fakeDispatcher{
 		response: dispatch.PromptDispatchResponse{Status: "ok", MessageID: "msg-due"},
@@ -1303,8 +1337,9 @@ func TestTicker_StartRestateLifecycle(t *testing.T) {
 	tk.httpClient = srv.Client()
 
 	done := make(chan struct{})
+	var startErr error
 	go func() {
-		_ = tk.Start(ctx)
+		startErr = tk.Start(ctx)
 		close(done)
 	}()
 
@@ -1319,6 +1354,9 @@ func TestTicker_StartRestateLifecycle(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for Start to shut down")
+	}
+	if startErr != nil && !errors.Is(startErr, context.Canceled) {
+		t.Fatalf("unexpected start error: %v", startErr)
 	}
 }
 
@@ -1350,14 +1388,16 @@ func TestTicker_EnsureRegisteredAndBackfilled_Retry(t *testing.T) {
 	tk.SetRestateConfig("9080", srv.URL, srv.URL, "http://localhost:9080")
 	tk.httpClient = srv.Client()
 
-	_ = store.InsertCronSchedule(ctx, db, model.CronSchedule{
+	if err := store.InsertCronSchedule(ctx, db, model.CronSchedule{
 		ID:        "c-retry-reg-1",
 		TargetID:  "100000000000000001",
 		CronExpr:  "0 * * * *",
 		Prompt:    "Prompt",
 		NextRunAt: time.Now().UTC().Add(time.Hour),
 		Enabled:   true,
-	})
+	}); err != nil {
+		t.Fatalf("InsertCronSchedule failed: %v", err)
+	}
 
 	// Attempt 1: registration fails, backfill must not run
 	tk.ensureRegisteredAndBackfilled(ctx)
