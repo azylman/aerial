@@ -187,18 +187,71 @@ func TestTurnExecution_OwnsTurnItem(t *testing.T) {
 	}
 }
 
+type finalizeInterruptedTurnCase struct {
+	name          string
+	isDispatch    bool
+	seedStatus    string
+	seedErr       string
+	reason        string
+	wantRowStatus string
+	wantRowErr    string
+	wantTurnErr   string
+}
+
+func runFinalizeInterruptedTurnCase(t *testing.T, tc finalizeInterruptedTurnCase) {
+	t.Helper()
+	store := testStore(t)
+	ctx := context.Background()
+	pool := New(config.NewFromData(&config.ConfigData{}), WorkerPoolConfig{Store: store})
+	te := &turnExecution{pool: pool, threadID: "t-int"}
+	te.setInterruptReason(tc.reason)
+	if tc.isDispatch {
+		d := db.Dispatch{ID: "d-int", Status: db.StatusProcessing}
+		if _, err := store.InsertDispatch(ctx, d); err != nil {
+			t.Fatalf("InsertDispatch: %v", err)
+		}
+		if err := store.UpdateDispatchStatus(ctx, d.ID, tc.seedStatus, tc.seedErr); err != nil {
+			t.Fatalf("UpdateDispatchStatus: %v", err)
+		}
+		te.dispatch = &d
+	} else {
+		m := db.Message{ID: "m-int", ThreadID: "t-int", Status: tc.seedStatus}
+		if err := store.InsertMessage(ctx, m); err != nil {
+			t.Fatalf("InsertMessage: %v", err)
+		}
+		te.burst = []db.Message{m}
+	}
+	te.finalizeInterruptedTurn("model-x")
+	if te.turnStatus != "cancelled" || te.turnError != tc.wantTurnErr {
+		t.Errorf("turn outcome = %q/%q, want cancelled/%q", te.turnStatus, te.turnError, tc.wantTurnErr)
+	}
+	assertInterruptedTurnRow(ctx, t, store, tc.isDispatch, tc.wantRowStatus, tc.wantRowErr)
+}
+
+func assertInterruptedTurnRow(ctx context.Context, t *testing.T, store db.Store, isDispatch bool, wantStatus, wantErr string) {
+	t.Helper()
+	var gotStatus, gotErr string
+	if isDispatch {
+		d, err := store.GetDispatch(ctx, "d-int")
+		if err != nil {
+			t.Fatalf("GetDispatch: %v", err)
+		}
+		gotStatus, gotErr = d.Status, d.ErrorMessage
+	} else {
+		m, err := store.GetMessage(ctx, "m-int")
+		if err != nil {
+			t.Fatalf("GetMessage: %v", err)
+		}
+		gotStatus, gotErr = m.Status, m.ErrorMessage
+	}
+	if gotStatus != wantStatus || gotErr != wantErr {
+		t.Errorf("row = %q/%q, want %q/%q", gotStatus, gotErr, wantStatus, wantErr)
+	}
+}
+
 func TestTurnExecution_FinalizeInterruptedTurn(t *testing.T) {
 	t.Parallel()
-	tests := []struct {
-		name          string
-		isDispatch    bool
-		seedStatus    string
-		seedErr       string
-		reason        string
-		wantRowStatus string
-		wantRowErr    string
-		wantTurnErr   string
-	}{
+	tests := []finalizeInterruptedTurnCase{
 		{name: "burst without reason fails rows as operator interrupt", seedStatus: db.StatusProcessing, wantRowStatus: db.StatusFailed, wantRowErr: "interrupted by operator via slash command", wantTurnErr: "interrupted by operator via slash command"},
 		{name: "burst with stop reason fails rows with that reason", seedStatus: db.StatusProcessing, reason: "operator stop", wantRowStatus: db.StatusFailed, wantRowErr: "operator stop", wantTurnErr: "operator stop"},
 		{name: "dispatch already failed by cancel keeps its row", isDispatch: true, seedStatus: db.StatusFailed, seedErr: "cancelled by operator", reason: "operator stop", wantRowStatus: db.StatusFailed, wantRowErr: "cancelled by operator", wantTurnErr: "operator stop"},
@@ -206,36 +259,7 @@ func TestTurnExecution_FinalizeInterruptedTurn(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			store := testStore(t)
-			ctx := context.Background()
-			pool := New(config.NewFromData(&config.ConfigData{}), WorkerPoolConfig{Store: store})
-			te := &turnExecution{pool: pool, threadID: "t-int"}
-			te.setInterruptReason(tc.reason)
-			if tc.isDispatch {
-				d := db.Dispatch{ID: "d-int", Status: db.StatusProcessing}
-				_, _ = store.InsertDispatch(ctx, d)
-				_ = store.UpdateDispatchStatus(ctx, d.ID, tc.seedStatus, tc.seedErr)
-				te.dispatch = &d
-			} else {
-				m := db.Message{ID: "m-int", ThreadID: "t-int", Status: tc.seedStatus}
-				_ = store.InsertMessage(ctx, m)
-				te.burst = []db.Message{m}
-			}
-			te.finalizeInterruptedTurn("model-x")
-			if te.turnStatus != "cancelled" || te.turnError != tc.wantTurnErr {
-				t.Errorf("turn outcome = %q/%q, want cancelled/%q", te.turnStatus, te.turnError, tc.wantTurnErr)
-			}
-			var gotStatus, gotErr string
-			if tc.isDispatch {
-				d, _ := store.GetDispatch(ctx, "d-int")
-				gotStatus, gotErr = d.Status, d.ErrorMessage
-			} else {
-				m, _ := store.GetMessage(ctx, "m-int")
-				gotStatus, gotErr = m.Status, m.ErrorMessage
-			}
-			if gotStatus != tc.wantRowStatus || gotErr != tc.wantRowErr {
-				t.Errorf("row = %q/%q, want %q/%q", gotStatus, gotErr, tc.wantRowStatus, tc.wantRowErr)
-			}
+			runFinalizeInterruptedTurnCase(t, tc)
 		})
 	}
 }
@@ -377,9 +401,16 @@ func TestTurnExecution_PrepareAttemptPrompt(t *testing.T) {
 			tempData := t.TempDir()
 			mgr := session.New(tmpHome, tempData)
 			if tc.hasOnDiskSess {
-				sessDir, _ := ensureTestSessionDir(mgr, sessUUID)
-				_ = os.MkdirAll(filepath.Join(sessDir, ".system_generated", "logs"), 0o755)
-				_ = os.WriteFile(filepath.Join(sessDir, ".system_generated", "logs", "transcript.jsonl"), []byte("{\"step_index\":0}\n"), 0o644)
+				sessDir, err := ensureTestSessionDir(mgr, sessUUID)
+				if err != nil {
+					t.Fatalf("ensureTestSessionDir: %v", err)
+				}
+				if err := os.MkdirAll(filepath.Join(sessDir, ".system_generated", "logs"), 0o755); err != nil {
+					t.Fatalf("MkdirAll: %v", err)
+				}
+				if err := os.WriteFile(filepath.Join(sessDir, ".system_generated", "logs", "transcript.jsonl"), []byte("{\"step_index\":0}\n"), 0o644); err != nil {
+					t.Fatalf("WriteFile: %v", err)
+				}
 			}
 
 			pool := &WorkerPool{sessionMgr: mgr}
@@ -431,9 +462,9 @@ func assertStatefulEvictionResults(ctx context.Context, t *testing.T, tc statefu
 	}
 
 	if tc.wantSessionInStore {
-		gotSess, _ := store.GetSessionID(ctx, tc.sessionID)
-		if gotSess != sessUUID {
-			t.Errorf("store session ID = %q, want %q", gotSess, sessUUID)
+		gotSess, err := store.GetSessionID(ctx, tc.sessionID)
+		if err != nil || gotSess != sessUUID {
+			t.Errorf("store session ID = %q (err=%v), want %q", gotSess, err, sessUUID)
 		}
 	}
 
@@ -468,11 +499,20 @@ func runStatefulEvictionCase(t *testing.T, tc statefulEvictionTestCase) {
 
 	sessUUID := "33333333-3333-3333-3333-333333333333"
 	if tc.hasExistingTranscript {
-		sessDir, _ := ensureTestSessionDir(sessMgr, sessUUID)
-		_ = os.MkdirAll(filepath.Join(sessDir, ".system_generated", "logs"), 0o755)
-		_ = os.WriteFile(filepath.Join(sessDir, ".system_generated", "logs", "transcript.jsonl"), []byte(`{"step_index":0}
-`), 0o644)
-		_ = store.SaveSessionID(ctx, tc.sessionID, sessUUID)
+		sessDir, err := ensureTestSessionDir(sessMgr, sessUUID)
+		if err != nil {
+			t.Fatalf("ensureTestSessionDir: %v", err)
+		}
+		if err := os.MkdirAll(filepath.Join(sessDir, ".system_generated", "logs"), 0o755); err != nil {
+			t.Fatalf("MkdirAll: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(sessDir, ".system_generated", "logs", "transcript.jsonl"), []byte(`{"step_index":0}
+`), 0o644); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+		if err := store.SaveSessionID(ctx, tc.sessionID, sessUUID); err != nil {
+			t.Fatalf("SaveSessionID: %v", err)
+		}
 	}
 
 	var mu sync.Mutex
@@ -508,7 +548,9 @@ func runStatefulEvictionCase(t *testing.T, tc statefulEvictionTestCase) {
 		CreatedAt:    time.Now().UTC(),
 		UpdatedAt:    time.Now().UTC(),
 	}
-	_, _ = store.InsertDispatch(ctx, disp)
+	if _, err := store.InsertDispatch(ctx, disp); err != nil {
+		t.Fatalf("InsertDispatch: %v", err)
+	}
 	if lt := runLiveDispatch(ctx, pool, tc.sessionID, "turn-1", disp.ID); lt.err != nil {
 		t.Fatalf("turn err = %v", lt.err)
 	}
