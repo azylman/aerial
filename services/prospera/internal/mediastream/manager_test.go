@@ -431,13 +431,15 @@ func TestCallSessionManager_GetRecordingWAV(t *testing.T) {
 		registered   bool
 		haveWAV      bool
 		deregistered bool
+		deleted      bool
 		wantLen      int
-		wantNilNext  bool
+		wantNextLen  int
 	}{
-		{name: "missing call returns nil", registered: false, haveWAV: false, deregistered: false, wantLen: 0, wantNilNext: true},
-		{name: "active session snapshots wav", registered: true, haveWAV: true, deregistered: false, wantLen: 7, wantNilNext: false},
-		{name: "active session without wav returns nil", registered: true, haveWAV: false, deregistered: false, wantLen: 0, wantNilNext: true},
-		{name: "deregistered recording is consumed once", registered: true, haveWAV: true, deregistered: true, wantLen: 7, wantNilNext: true},
+		{name: "missing call returns nil", wantLen: 0, wantNextLen: 0},
+		{name: "active session snapshots wav", registered: true, haveWAV: true, wantLen: 7, wantNextLen: 7},
+		{name: "active session without wav returns nil", registered: true, wantLen: 0, wantNextLen: 0},
+		{name: "deregistered recording survives repeated reads", registered: true, haveWAV: true, deregistered: true, wantLen: 7, wantNextLen: 7},
+		{name: "deleted recording is gone", registered: true, haveWAV: true, deregistered: true, deleted: true, wantLen: 7, wantNextLen: 0},
 	}
 
 	for _, tc := range tests {
@@ -454,16 +456,14 @@ func TestCallSessionManager_GetRecordingWAV(t *testing.T) {
 			if tc.deregistered {
 				mgr.DeregisterSession("call-rec")
 			}
-			got := mgr.GetRecordingWAV("call-rec")
-			if len(got) != tc.wantLen {
+			if got := mgr.GetRecordingWAV("call-rec"); len(got) != tc.wantLen {
 				t.Fatalf("GetRecordingWAV len = %d, want %d", len(got), tc.wantLen)
 			}
-			next := mgr.GetRecordingWAV("call-rec")
-			if tc.wantNilNext && next != nil {
-				t.Fatalf("second GetRecordingWAV = %d bytes, want nil", len(next))
+			if tc.deleted {
+				mgr.DeleteRecording("call-rec")
 			}
-			if !tc.wantNilNext && len(next) != tc.wantLen {
-				t.Fatalf("second GetRecordingWAV len = %d, want %d (active snapshot)", len(next), tc.wantLen)
+			if next := mgr.GetRecordingWAV("call-rec"); len(next) != tc.wantNextLen {
+				t.Fatalf("second GetRecordingWAV len = %d, want %d", len(next), tc.wantNextLen)
 			}
 		})
 	}

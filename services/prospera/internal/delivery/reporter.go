@@ -12,11 +12,14 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	restate "github.com/restatedev/sdk-go"
 
+	"github.com/azylman/aerial/pkg/restateingress"
 	"github.com/azylman/aerial/pkg/tracing"
 	"github.com/azylman/aerial/services/prospera/internal/config"
 	"github.com/azylman/aerial/services/prospera/internal/model"
@@ -49,6 +52,7 @@ type Reporter struct {
 	externalClient    *http.Client
 	geminiBaseURL     string
 	recordingProvider func(callID string) []byte
+	recordingDeleter  func(callID string)
 }
 
 // ReporterOption configures Reporter.
@@ -58,6 +62,14 @@ type ReporterOption func(*Reporter)
 func WithReporterRecordingProvider(fn func(callID string) []byte) ReporterOption {
 	return func(r *Reporter) {
 		r.recordingProvider = fn
+	}
+}
+
+// WithReporterRecordingDeleter configures the callback that drops a call's
+// in-memory recording once its report is delivered.
+func WithReporterRecordingDeleter(fn func(callID string)) ReporterOption {
+	return func(r *Reporter) {
+		r.recordingDeleter = fn
 	}
 }
 
@@ -141,31 +153,45 @@ func (r *Reporter) postDiscordMessage(ctx context.Context, cfg *config.Config, c
 	return nil
 }
 
-// FlushLiveTranscript batches unsent transcript turns and delivers them to Discord.
-func (r *Reporter) FlushLiveTranscript(ctx context.Context, callID string) error {
-	cfg := r.cfgSrc.Current()
-	if r.store == nil {
-		return fmt.Errorf("reporter: store is nil")
-	}
+// transcriptBatch is the slice of live transcript turns not yet posted.
+type transcriptBatch struct {
+	CallID    string `json:"call_id"`
+	ChannelID string `json:"channel_id,omitempty"`
+	ThreadID  string `json:"thread_id,omitempty"`
+	Content   string `json:"content,omitempty"`
+	From      int    `json:"from"`
+	To        int    `json:"to"`
+}
 
+// pendingTranscript loads the unsent live transcript turns for callID.
+func (r *Reporter) pendingTranscript(ctx context.Context, callID string) (transcriptBatch, error) {
+	if r.store == nil {
+		return transcriptBatch{}, fmt.Errorf("reporter: store is nil")
+	}
 	call, err := r.store.GetCall(ctx, callID)
 	if err != nil {
-		return fmt.Errorf("reporter: get call %q: %w", callID, err)
+		return transcriptBatch{}, fmt.Errorf("reporter: get call %q: %w", callID, err)
 	}
 	if call == nil {
-		return fmt.Errorf("reporter: call %q not found", callID)
+		return transcriptBatch{}, fmt.Errorf("reporter: call %q: %w", callID, store.ErrCallNotFound)
 	}
-
-	totalTurns := len(call.Transcript)
-	cursor := call.LiveTranscriptCursor
-	if cursor >= totalTurns {
-		return nil
+	total := len(call.Transcript)
+	batch := transcriptBatch{CallID: callID, From: call.LiveTranscriptCursor, To: total}
+	if batch.From >= total {
+		batch.To = batch.From
+		return batch, nil
 	}
+	batch.Content = formatTranscriptTurns(call.Transcript[batch.From:total])
+	if batch.Content != "" {
+		batch.ChannelID = ResolveDiscordChannel(r.cfgSrc.Current(), call.DiscordChannelID)
+		batch.ThreadID = call.DiscordThreadID
+	}
+	return batch, nil
+}
 
-	newTurns := call.Transcript[cursor:totalTurns]
-
+func formatTranscriptTurns(turns []model.TranscriptTurn) string {
 	var sb strings.Builder
-	for _, turn := range newTurns {
+	for _, turn := range turns {
 		speaker := "Prospera"
 		switch strings.ToLower(turn.Role) {
 		case roleUser, "caller", "human":
@@ -173,27 +199,89 @@ func (r *Reporter) FlushLiveTranscript(ctx context.Context, callID string) error
 		case "system":
 			speaker = "System"
 		}
-		text := strings.TrimSpace(turn.Text)
-		if text != "" {
+		if text := strings.TrimSpace(turn.Text); text != "" {
 			fmt.Fprintf(&sb, "**%s**: %s\n", speaker, text)
 		}
 	}
+	return strings.TrimSpace(sb.String())
+}
 
-	content := strings.TrimSpace(sb.String())
-	if content == "" {
-		if _, advErr := r.store.AdvanceLiveTranscriptCursor(ctx, callID, cursor, totalTurns); advErr != nil {
-			slog.ErrorContext(ctx, "reporter: advance empty transcript cursor", "error", advErr)
-		}
-		return nil
-	}
+func (r *Reporter) postTranscriptBatch(ctx context.Context, batch transcriptBatch) error {
+	return r.postDiscordMessage(ctx, r.cfgSrc.Current(), batch.ChannelID, batch.ThreadID, batch.Content, nil)
+}
 
-	channel := ResolveDiscordChannel(cfg, call.DiscordChannelID)
-	if err := r.postDiscordMessage(ctx, cfg, channel, call.DiscordThreadID, content, nil); err != nil {
+// FlushLiveTranscript batches unsent transcript turns and delivers them to Discord.
+func (r *Reporter) FlushLiveTranscript(ctx context.Context, callID string) error {
+	batch, err := r.pendingTranscript(ctx, callID)
+	if err != nil {
 		return err
 	}
+	if batch.To <= batch.From {
+		return nil
+	}
+	if batch.Content != "" {
+		if err := r.postTranscriptBatch(ctx, batch); err != nil {
+			return err
+		}
+	}
+	if _, err := r.store.AdvanceLiveTranscriptCursor(ctx, callID, batch.From, batch.To); err != nil {
+		return fmt.Errorf("reporter: advance transcript cursor: %w", err)
+	}
+	return nil
+}
 
-	if _, advErr := r.store.AdvanceLiveTranscriptCursor(ctx, callID, cursor, totalTurns); advErr != nil {
-		slog.ErrorContext(ctx, "reporter: advance transcript cursor", "error", advErr)
+// storeStepTimeout bounds every Postgres call made inside a restate.Run step
+// so a hung query becomes a retryable error instead of a stuck step.
+const storeStepTimeout = 5 * time.Second
+
+// reportIdempotencyKey names the single logical "deliver this call's report"
+// operation so every trigger (end_call tool, Twilio status webhook, NATS job,
+// startup sweep) collapses into one ProsperaReport invocation.
+func reportIdempotencyKey(callID string) string {
+	return "prospera:report:" + callID
+}
+
+// classifyStoreError makes deterministic store failures terminal and leaves
+// transient ones (connection, timeout, serialization, deadlock) retryable.
+func classifyStoreError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, store.ErrCallNotFound) {
+		return restate.ToTerminalError(err, restate.WithErrorCode(http.StatusNotFound))
+	}
+	if pgErr, ok := errors.AsType[*pgconn.PgError](err); ok && len(pgErr.Code) >= 2 {
+		switch strings.ToUpper(pgErr.Code[:2]) {
+		case "22", "23", "42", "0A", "2B", "2D", "25":
+			return restate.ToTerminalError(err, restate.WithErrorCode(http.StatusBadRequest))
+		}
+	}
+	return err
+}
+
+// withStoreTimeout runs fn under storeStepTimeout and classifies its error.
+func withStoreTimeout[T any](ctx context.Context, fn func(context.Context) (T, error)) (T, error) {
+	tctx, cancel := context.WithTimeout(ctx, storeStepTimeout)
+	defer cancel()
+	out, err := fn(tctx)
+	return out, classifyStoreError(err)
+}
+
+// TriggerReport asks Restate to deliver callID's report. It is safe to call
+// from every trigger: the idempotency key and the per-call Virtual Object
+// guarantee a single delivery.
+func (r *Reporter) TriggerReport(ctx context.Context, callID string) error {
+	cleanID := strings.TrimSpace(callID)
+	if cleanID == "" {
+		return fmt.Errorf("reporter: call id is required")
+	}
+	cfg := r.cfgSrc.Current()
+	if cfg == nil || strings.TrimSpace(cfg.RestateIngressURL) == "" {
+		return fmt.Errorf("reporter: restate ingress url is not configured")
+	}
+	endpoint := fmt.Sprintf("%s/ProsperaReport/%s/DeliverReport/send", strings.TrimRight(cfg.RestateIngressURL, "/"), url.PathEscape(cleanID))
+	if _, err := restateingress.Post(ctx, r.internalClient, endpoint, reportIdempotencyKey(cleanID), DeliverReportRequest{CallID: cleanID}, 1024); err != nil {
+		return fmt.Errorf("reporter: enqueue report for %s: %w", cleanID, err)
 	}
 	return nil
 }
@@ -203,13 +291,14 @@ type DeliverReportRequest struct {
 	CallID string `json:"call_id,omitempty"`
 }
 
-// DeliverReportStep1Output holds the result of load-and-mark-processing.
-type DeliverReportStep1Output struct {
-	AlreadyDelivered bool             `json:"already_delivered"`
-	Call             *model.VoiceCall `json:"call,omitempty"`
+// claimOutput is the journaled result of the claim-report step.
+type claimOutput struct {
+	Skip   bool   `json:"skip"`
+	Status string `json:"status,omitempty"`
 }
 
-// ProsperaReport is a Restate Virtual Object keyed by call_id that delivers call reports durably.
+// ProsperaReport is a Restate Virtual Object keyed by call_id. It is the only
+// code path that posts a Call Summary.
 type ProsperaReport struct {
 	reporter *Reporter
 }
@@ -227,208 +316,186 @@ func (p *ProsperaReport) Definition() restate.ServiceDefinition {
 	)
 }
 
-func (p *ProsperaReport) step1LoadAndMarkProcessing(rc restate.RunContext, callID string) (DeliverReportStep1Output, error) {
-	if p.reporter == nil || p.reporter.store == nil {
-		return DeliverReportStep1Output{}, restate.TerminalErrorf("reporter: store is nil")
-	}
-
-	call, err := p.reporter.store.GetCall(rc, callID)
+// claim moves the report row to processing. Rows already delivered, or in a
+// status this object does not own (voicemail's awaiting_recording), are skipped.
+func (p *ProsperaReport) claim(rc restate.RunContext, callID string) (claimOutput, error) {
+	st := p.reporter.store
+	call, err := withStoreTimeout(rc, func(ctx context.Context) (*model.VoiceCall, error) { return st.GetCall(ctx, callID) })
 	if err != nil {
-		if errors.Is(err, store.ErrCallNotFound) {
-			return DeliverReportStep1Output{}, restate.ToTerminalError(err, restate.WithErrorCode(http.StatusNotFound))
-		}
-		return DeliverReportStep1Output{}, err
+		return claimOutput{}, err
 	}
 	if call == nil {
-		return DeliverReportStep1Output{}, restate.ToTerminalError(fmt.Errorf("reporter: call %q not found", callID), restate.WithErrorCode(http.StatusNotFound))
+		return claimOutput{}, restate.ToTerminalError(fmt.Errorf("reporter: call %q not found", callID), restate.WithErrorCode(http.StatusNotFound))
 	}
-
 	if call.ReportStatus == reportStatusDelivered {
-		return DeliverReportStep1Output{AlreadyDelivered: true, Call: call}, nil
+		return claimOutput{Skip: true, Status: call.ReportStatus}, nil
 	}
-
-	// Accept pending, failed, or processing on crash replay
-	ok, err := p.reporter.store.TransitionReportStatus(rc, callID, []string{reportStatusPending, reportStatusFailed, reportStatusProcessing}, reportStatusProcessing, "")
+	ok, err := withStoreTimeout(rc, func(ctx context.Context) (bool, error) {
+		return st.TransitionReportStatus(ctx, callID, []string{reportStatusPending, reportStatusFailed, reportStatusProcessing}, reportStatusProcessing, "")
+	})
 	if err != nil {
-		return DeliverReportStep1Output{}, err
+		return claimOutput{}, err
 	}
 	if !ok {
-		// Row could not be transitioned to processing (e.g. awaiting_recording, or concurrently delivered)
-		reloaded, reloadErr := p.reporter.store.GetCall(rc, callID)
-		if reloadErr == nil && reloaded != nil && reloaded.ReportStatus == reportStatusDelivered {
-			return DeliverReportStep1Output{AlreadyDelivered: true, Call: reloaded}, nil
+		return claimOutput{Skip: true, Status: call.ReportStatus}, nil
+	}
+	return claimOutput{Status: reportStatusProcessing}, nil
+}
+
+func (p *ProsperaReport) loadCall(rc restate.RunContext, callID string) (*model.VoiceCall, error) {
+	st := p.reporter.store
+	call, err := withStoreTimeout(rc, func(ctx context.Context) (*model.VoiceCall, error) { return st.GetCall(ctx, callID) })
+	if err != nil {
+		return nil, err
+	}
+	if call == nil {
+		return nil, restate.ToTerminalError(fmt.Errorf("reporter: call %q not found", callID), restate.WithErrorCode(http.StatusNotFound))
+	}
+	return call, nil
+}
+
+func (p *ProsperaReport) generateSummary(rc restate.RunContext, call *model.VoiceCall) (string, error) {
+	cfg := p.reporter.cfgSrc.Current()
+	summary, err := p.reporter.generateGeminiSummary(rc, cfg, model.BuildPostCallSummaryPrompt(call))
+	if err != nil || strings.TrimSpace(summary) == "" {
+		if err != nil {
+			slog.WarnContext(rc, "reporter: gemini summary failed, using fallback", "call_id", call.CallID, "error", err)
 		}
-		return DeliverReportStep1Output{AlreadyDelivered: true, Call: call}, nil
+		summary = fmt.Sprintf("Call %s ended with state %q (reason: %q). Total turns: %d.", call.CallID, call.State, call.EndReason, len(call.Transcript))
 	}
-
-	// Flush any unsent live transcript turns before report
-	if flushErr := p.reporter.FlushLiveTranscript(rc, callID); flushErr != nil {
-		slog.ErrorContext(rc, "reporter: flush live transcript before report", "call_id", callID, "error", flushErr)
-	}
-
-	updatedCall, err := p.reporter.store.GetCall(rc, callID)
-	if err == nil && updatedCall != nil {
-		call = updatedCall
-	}
-
-	return DeliverReportStep1Output{AlreadyDelivered: false, Call: call}, nil
+	return summary, nil
 }
 
-func (p *ProsperaReport) step2GenerateSummary(rc restate.RunContext, call *model.VoiceCall) (string, error) {
-	cfg := p.reporter.cfgSrc.Current()
-	prompt := model.BuildPostCallSummaryPrompt(call)
-	geminiSummary, genErr := p.reporter.generateGeminiSummary(rc, cfg, prompt)
-	if genErr != nil || strings.TrimSpace(geminiSummary) == "" {
-		geminiSummary = fmt.Sprintf("Call %s ended with state %q (reason: %q). Total turns: %d.", call.CallID, call.State, call.EndReason, len(call.Transcript))
-	}
-	return geminiSummary, nil
-}
-
-func (p *ProsperaReport) step3DeliverDiscordAndMarkDelivered(rc restate.RunContext, call *model.VoiceCall, summary string) (struct{}, error) {
-	cfg := p.reporter.cfgSrc.Current()
+// buildCallSummary renders the Call Summary message body.
+func buildCallSummary(call *model.VoiceCall, summary string) string {
 	withNumber := call.ToNumber
 	if call.Direction == directionInbound {
 		withNumber = call.FromNumber
 	}
-
-	channel := ResolveDiscordChannel(cfg, call.DiscordChannelID)
-	msgContent := fmt.Sprintf("📋 **Call Summary (%s)**\n**Direction**: %s | **With**: %s\n**State**: %s | **End Reason**: %s\n\n%s",
+	return fmt.Sprintf("📋 **Call Summary (%s)**\n**Direction**: %s | **With**: %s\n**State**: %s | **End Reason**: %s\n\n%s",
 		call.CallID, call.Direction, withNumber, call.State, call.EndReason, summary)
-
-	var attachments []discordAttachmentPayload
-	if p.reporter.recordingProvider != nil {
-		if wavBytes := p.reporter.recordingProvider(call.CallID); len(wavBytes) > 0 {
-			attachments = []discordAttachmentPayload{
-				{
-					Filename:      call.CallID + ".wav",
-					ContentType:   contentTypeAudioWAV,
-					ContentBase64: base64.StdEncoding.EncodeToString(wavBytes),
-				},
-			}
-		}
-	}
-
-	if postErr := p.reporter.postDiscordMessage(rc, cfg, channel, call.DiscordThreadID, msgContent, attachments); postErr != nil {
-		if _, transErr := p.reporter.store.TransitionReportStatus(rc, call.CallID, []string{reportStatusProcessing}, reportStatusFailed, "discord post failed: "+postErr.Error()); transErr != nil {
-			slog.ErrorContext(rc, "reporter: transition report status to failed", "error", transErr)
-		}
-		return struct{}{}, postErr
-	}
-
-	if _, transErr := p.reporter.store.TransitionReportStatus(rc, call.CallID, []string{reportStatusProcessing, reportStatusFailed, reportStatusPending}, reportStatusDelivered, summary); transErr != nil {
-		slog.ErrorContext(rc, "reporter: transition report status to delivered", "error", transErr)
-		return struct{}{}, transErr
-	}
-	return struct{}{}, nil
 }
 
-// DeliverReport runs a 3-step journaled post-call report delivery chain.
+// postSummary posts the Call Summary with the call recording attached. The
+// recording is read without consuming it so a retried post still carries audio.
+func (p *ProsperaReport) postSummary(rc restate.RunContext, call *model.VoiceCall, summary string) error {
+	cfg := p.reporter.cfgSrc.Current()
+	var attachments []discordAttachmentPayload
+	if p.reporter.recordingProvider != nil {
+		if wav := p.reporter.recordingProvider(call.CallID); len(wav) > 0 {
+			attachments = []discordAttachmentPayload{{
+				Filename:      call.CallID + ".wav",
+				ContentType:   contentTypeAudioWAV,
+				ContentBase64: base64.StdEncoding.EncodeToString(wav),
+			}}
+		}
+	}
+	channel := ResolveDiscordChannel(cfg, call.DiscordChannelID)
+	return p.reporter.postDiscordMessage(rc, cfg, channel, call.DiscordThreadID, buildCallSummary(call, summary), attachments)
+}
+
+func (p *ProsperaReport) markDelivered(rc restate.RunContext, callID, summary string) error {
+	st := p.reporter.store
+	_, err := withStoreTimeout(rc, func(ctx context.Context) (bool, error) {
+		return st.TransitionReportStatus(ctx, callID, []string{reportStatusProcessing, reportStatusFailed, reportStatusPending}, reportStatusDelivered, summary)
+	})
+	return err
+}
+
+// DeliverReport delivers one call's report as journaled steps, one side effect
+// each: claim, flush the live transcript (load, post, advance), load the call,
+// generate the summary, post it, mark it delivered, then drop the recording.
 func (p *ProsperaReport) DeliverReport(ctx restate.ObjectContext, req DeliverReportRequest) error {
 	callID := restate.Key(ctx)
 	if callID == "" {
 		callID = strings.TrimSpace(req.CallID)
 	}
+	if callID == "" {
+		return restate.ToTerminalError(errors.New("reporter: call id is required"), restate.WithErrorCode(http.StatusBadRequest))
+	}
+	if p.reporter == nil || p.reporter.store == nil {
+		return restate.TerminalErrorf("reporter: store is nil")
+	}
 
-	// Step 1: load-and-mark-processing
-	step1, err := restate.Run(ctx, func(rc restate.RunContext) (DeliverReportStep1Output, error) {
-		return p.step1LoadAndMarkProcessing(rc, callID)
-	}, restate.WithName("load-and-mark-processing"))
+	claim, err := restate.Run(ctx, func(rc restate.RunContext) (claimOutput, error) {
+		return p.claim(rc, callID)
+	}, restate.WithName("claim-report"))
 	if err != nil {
 		return err
 	}
-	if step1.AlreadyDelivered {
+	if claim.Skip {
+		ctx.Log().Info("reporter: report not claimable, skipping", "call_id", callID, "status", claim.Status)
 		return nil
 	}
 
-	call := step1.Call
+	batch, err := restate.Run(ctx, func(rc restate.RunContext) (transcriptBatch, error) {
+		return withStoreTimeout(rc, func(c context.Context) (transcriptBatch, error) { return p.reporter.pendingTranscript(c, callID) })
+	}, restate.WithName("load-live-transcript"))
+	if err != nil {
+		return err
+	}
+	if batch.Content != "" {
+		if err := runStep(ctx, "post-live-transcript", func(rc restate.RunContext) error {
+			return p.reporter.postTranscriptBatch(rc, batch)
+		}); err != nil {
+			return err
+		}
+	}
+	if batch.To > batch.From {
+		if err := runStep(ctx, "advance-transcript-cursor", func(rc restate.RunContext) error {
+			_, advErr := withStoreTimeout(rc, func(c context.Context) (bool, error) {
+				return p.reporter.store.AdvanceLiveTranscriptCursor(c, callID, batch.From, batch.To)
+			})
+			return advErr
+		}); err != nil {
+			return err
+		}
+	}
 
-	// Step 2: generate-summary
+	call, err := restate.Run(ctx, func(rc restate.RunContext) (*model.VoiceCall, error) {
+		return p.loadCall(rc, callID)
+	}, restate.WithName("load-report-call"))
+	if err != nil {
+		return err
+	}
 	summary, err := restate.Run(ctx, func(rc restate.RunContext) (string, error) {
-		return p.step2GenerateSummary(rc, call)
+		return p.generateSummary(rc, call)
 	}, restate.WithName("generate-summary"))
 	if err != nil {
 		return err
 	}
 
-	// Step 3: deliver-discord-and-mark-delivered
-	_, err = restate.Run(ctx, func(rc restate.RunContext) (struct{}, error) {
-		return p.step3DeliverDiscordAndMarkDelivered(rc, call, summary)
-	}, restate.WithName("deliver-discord-and-mark-delivered"))
-	if err != nil {
+	// Post first, record delivery second, drop the recording last: a failed
+	// mark replays the journaled post instead of posting again, and a failed
+	// post retries with the recording still available.
+	if err := runStep(ctx, "post-call-summary", func(rc restate.RunContext) error {
+		return p.postSummary(rc, call, summary)
+	}); err != nil {
 		return err
 	}
-
-	restate.ClearAll(ctx)
-	return nil
+	if err := runStep(ctx, "mark-delivered", func(rc restate.RunContext) error {
+		return p.markDelivered(rc, callID, summary)
+	}); err != nil {
+		return err
+	}
+	return runStep(ctx, "delete-recording", func(restate.RunContext) error {
+		p.reporter.deleteRecording(callID)
+		return nil
+	})
 }
 
-// DeliverCallReport generates a post-call summary using Gemini with tools: [] and posts it to Discord.
-func (r *Reporter) DeliverCallReport(ctx context.Context, callID string) error {
-	cfg := r.cfgSrc.Current()
-	if r.store == nil {
-		return fmt.Errorf("reporter: store is nil")
-	}
+// runStep journals one side-effecting step that has no result.
+func runStep(ctx restate.Context, name string, fn func(restate.RunContext) error) error {
+	_, err := restate.Run(ctx, func(rc restate.RunContext) (restate.Void, error) {
+		return restate.Void{}, fn(rc)
+	}, restate.WithName(name))
+	return err
+}
 
-	call, err := r.store.GetCall(ctx, callID)
-	if err != nil {
-		return fmt.Errorf("reporter: get call %q: %w", callID, err)
+func (r *Reporter) deleteRecording(callID string) {
+	if r.recordingDeleter != nil {
+		r.recordingDeleter(callID)
 	}
-	if call == nil {
-		return fmt.Errorf("reporter: call %q not found", callID)
-	}
-
-	// Allow transition from pending or previously failed attempts to re-enter processing on retry
-	ok, err := r.store.TransitionReportStatus(ctx, callID, []string{reportStatusPending, reportStatusFailed}, reportStatusProcessing, "")
-	if err != nil {
-		return fmt.Errorf("reporter: transition status to processing: %w", err)
-	}
-	if !ok {
-		return nil
-	}
-
-	// Flush any unsent live transcript turns before posting summary.
-	if flushErr := r.FlushLiveTranscript(ctx, callID); flushErr != nil {
-		slog.ErrorContext(ctx, "reporter: flush live transcript before report", "error", flushErr)
-	}
-
-	prompt := model.BuildPostCallSummaryPrompt(call)
-	summary, err := r.generateGeminiSummary(ctx, cfg, prompt)
-	if err != nil || strings.TrimSpace(summary) == "" {
-		summary = fmt.Sprintf("Call %s ended with state %q (reason: %q). Total turns: %d.", call.CallID, call.State, call.EndReason, len(call.Transcript))
-	}
-
-	withNumber := call.ToNumber
-	if call.Direction == directionInbound {
-		withNumber = call.FromNumber
-	}
-
-	channel := ResolveDiscordChannel(cfg, call.DiscordChannelID)
-	msgContent := fmt.Sprintf("📋 **Call Summary (%s)**\n**Direction**: %s | **With**: %s\n**State**: %s | **End Reason**: %s\n\n%s",
-		call.CallID, call.Direction, withNumber, call.State, call.EndReason, summary)
-
-	var attachments []discordAttachmentPayload
-	if r.recordingProvider != nil {
-		if wavBytes := r.recordingProvider(callID); len(wavBytes) > 0 {
-			attachments = []discordAttachmentPayload{
-				{
-					Filename:      call.CallID + ".wav",
-					ContentType:   contentTypeAudioWAV,
-					ContentBase64: base64.StdEncoding.EncodeToString(wavBytes),
-				},
-			}
-		}
-	}
-
-	if postErr := r.postDiscordMessage(ctx, cfg, channel, call.DiscordThreadID, msgContent, attachments); postErr != nil {
-		if _, transErr := r.store.TransitionReportStatus(ctx, callID, []string{reportStatusProcessing}, reportStatusFailed, "discord post failed: "+postErr.Error()); transErr != nil {
-			slog.ErrorContext(ctx, "reporter: transition report status to failed", "error", transErr)
-		}
-		return postErr
-	}
-	if _, transErr := r.store.TransitionReportStatus(ctx, callID, []string{reportStatusProcessing}, reportStatusDelivered, summary); transErr != nil {
-		slog.ErrorContext(ctx, "reporter: transition report status to delivered", "error", transErr)
-	}
-	return nil
 }
 
 // ProcessVoicemailRecording handles a completed Tier 3 voicemail recording.

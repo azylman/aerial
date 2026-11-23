@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/nats-io/nats.go"
+	"github.com/prometheus/client_golang/prometheus"
 	restate "github.com/restatedev/sdk-go"
 	"github.com/restatedev/sdk-go/x/mocks"
 	"github.com/stretchr/testify/mock"
@@ -1038,6 +1039,117 @@ func TestCovenDreamer_Dream(t *testing.T) {
 			require.Equal(t, "Dream", calls[0].method)
 			require.True(t, calls[0].delayed)
 			require.Equal(t, restate.WithDelay(tc.wantDelay), calls[0].option)
+		})
+	}
+}
+
+// registrationAdminStub serves Restate admin /deployments and ingress CovenDreamer Arm, recording request order.
+// /deployments fails with 500 for the first `failures` attempts (forever when negative, cancelling on the 3rd);
+// Arm cancels the run so the worker returns.
+type registrationAdminStub struct {
+	mu       sync.Mutex
+	failures int
+	cancel   context.CancelFunc
+	paths    []string
+	bodies   []restateDeploymentRequest
+}
+
+func (s *registrationAdminStub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.paths = append(s.paths, r.URL.Path)
+	switch r.URL.Path {
+	case "/deployments":
+		s.serveDeployments(w, r)
+	case "/CovenDreamer/aerial/Arm":
+		s.cancel()
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+	default:
+		w.WriteHeader(http.StatusNotFound)
+	}
+}
+
+func (s *registrationAdminStub) serveDeployments(w http.ResponseWriter, r *http.Request) {
+	var body restateDeploymentRequest
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	s.bodies = append(s.bodies, body)
+	attempt := len(s.bodies)
+	if s.failures >= 0 && attempt > s.failures {
+		w.WriteHeader(http.StatusCreated)
+		return
+	}
+	if s.failures < 0 && attempt == 3 {
+		s.cancel()
+	}
+	http.Error(w, "boom", http.StatusInternalServerError)
+}
+
+// gatheredGauge reads a registered gauge's value from the default Prometheus gatherer.
+func gatheredGauge(t *testing.T, name string) float64 {
+	t.Helper()
+	families, err := prometheus.DefaultGatherer.Gather()
+	require.NoError(t, err)
+	for _, mf := range families {
+		if mf.GetName() == name {
+			return mf.GetMetric()[0].GetGauge().GetValue()
+		}
+	}
+	t.Fatalf("metric %s not registered", name)
+	return 0
+}
+
+func TestRunWorkerAfterRegistration(t *testing.T) {
+	// Not t.Parallel(): subtests share the process-wide coven_restate_registered gauge.
+	const deployPath = "/deployments"
+	const armPath = "/CovenDreamer/aerial/Arm"
+	const advertise = "http://coven.default.svc.cluster.local:9080"
+
+	tests := []struct {
+		name          string
+		adminFailures int // 500s before success; -1 fails forever (ctx cancelled on 3rd attempt)
+		noAdminURL    bool
+		startWorker   bool
+		wantPaths     []string
+		wantErr       error
+		wantGauge     float64
+	}{
+		{name: "RegistersThenArms", adminFailures: 0, startWorker: true, wantPaths: []string{deployPath, armPath}, wantErr: context.Canceled, wantGauge: 1},
+		{name: "Non2xxRetriesThenArms", adminFailures: 2, startWorker: true, wantPaths: []string{deployPath, deployPath, deployPath, armPath}, wantErr: context.Canceled, wantGauge: 1},
+		{name: "NeverRegisteredNeverArms", adminFailures: -1, startWorker: true, wantPaths: []string{deployPath, deployPath, deployPath}, wantErr: context.Canceled, wantGauge: 0},
+		{name: "ExtractorRegistersWithoutArming", adminFailures: 0, startWorker: false, wantPaths: []string{deployPath}, wantErr: nil, wantGauge: 1},
+		{name: "NoAdminURLSkipsRegistration", noAdminURL: true, startWorker: true, wantPaths: []string{armPath}, wantErr: context.Canceled, wantGauge: 0},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			RestateRegistered.Set(0)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			stub := &registrationAdminStub{failures: tc.adminFailures, cancel: cancel}
+			srv := httptest.NewServer(stub)
+			defer srv.Close()
+
+			adminURL := srv.URL
+			if tc.noAdminURL {
+				adminURL = ""
+			}
+			worker := NewWorker(WorkerConfig{Stack: "aerial", RestateIngressURL: srv.URL, HTTPClient: srv.Client()})
+
+			err := runWorkerAfterRegistration(ctx, srv.Client(), adminURL, advertise, time.Millisecond, worker, tc.startWorker)
+
+			require.ErrorIs(t, err, tc.wantErr) // nil wantErr requires err == nil
+			stub.mu.Lock()
+			defer stub.mu.Unlock()
+			require.Equal(t, tc.wantPaths, stub.paths)
+			for _, b := range stub.bodies {
+				require.Equal(t, restateDeploymentRequest{URI: advertise, Force: true}, b)
+			}
+			require.InDelta(t, tc.wantGauge, gatheredGauge(t, "coven_restate_registered"), 0)
 		})
 	}
 }
