@@ -537,7 +537,7 @@ spec:
                   continue
                 fi
                 s_cnt=$(psql -h postgres-19-rw -U "$PGUSER" -d "$db" -v ON_ERROR_STOP=1 -Atc "
-                  SELECT COUNT(*) FROM pg_subscription WHERE subname = 'pg19_upgrade_sub';
+                  SELECT COUNT(*) FROM pg_subscription WHERE subname = 'pg19_upgrade_sub' AND subdbid = (SELECT oid FROM pg_database WHERE datname = '$db');
                 ")
                 if [ "$s_cnt" -gt 0 ]; then
                   pending_dbs="$pending_dbs $db"
@@ -616,11 +616,11 @@ spec:
                   done <<< "$seq_rows"
                 fi
 
-                sub_exists=$(psql -h postgres-19-rw -U "$PGUSER" -d "$db" -v ON_ERROR_STOP=1 -Atc "
-                  SELECT 1 FROM pg_subscription WHERE subname = 'pg19_upgrade_sub';
+                sub_count=$(psql -h postgres-19-rw -U "$PGUSER" -d "$db" -v ON_ERROR_STOP=1 -Atc "
+                  SELECT COUNT(*) FROM pg_subscription WHERE subname = 'pg19_upgrade_sub' AND subdbid = (SELECT oid FROM pg_database WHERE datname = '$db');
                 ")
 
-                if [ "$sub_exists" = "1" ]; then
+                if [ -n "$sub_count" ] && [ "$sub_count" -gt 0 ]; then
                   echo "Detaching pg19_upgrade_sub on postgres-19-rw/$db..."
                   psql -h postgres-19-rw -U "$PGUSER" -d "$db" -v ON_ERROR_STOP=1 -c "
                     ALTER SUBSCRIPTION pg19_upgrade_sub DISABLE;
@@ -628,9 +628,9 @@ spec:
                     DROP SUBSCRIPTION pg19_upgrade_sub;
                   "
                   sub_rem=$(psql -h postgres-19-rw -U "$PGUSER" -d "$db" -v ON_ERROR_STOP=1 -Atc "
-                    SELECT 1 FROM pg_subscription WHERE subname = 'pg19_upgrade_sub';
+                    SELECT COUNT(*) FROM pg_subscription WHERE subname = 'pg19_upgrade_sub' AND subdbid = (SELECT oid FROM pg_database WHERE datname = '$db');
                   ")
-                  if [ "$sub_rem" = "1" ]; then
+                  if [ "$sub_rem" -gt 0 ]; then
                     echo "ERROR: Subscription pg19_upgrade_sub on postgres-19-rw/$db failed to drop!" >&2
                     exit 1
                   fi
