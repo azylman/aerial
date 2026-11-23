@@ -2,6 +2,7 @@ package transcript
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"strings"
@@ -9,7 +10,6 @@ import (
 	"time"
 
 	"github.com/azylman/aerial/services/eri/pkg/db"
-	"github.com/azylman/aerial/services/eri/pkg/db/dbtest"
 )
 
 func TestClipContent(t *testing.T) {
@@ -215,20 +215,20 @@ func TestIsSubstantiveStep(t *testing.T) {
 	}
 }
 
-func newSearchTestStore(t *testing.T, seedCase int) *dbtest.FakeStore {
+func newSearchTestStore(t *testing.T, seedCase int) (*db.SQLTranscriptStore, *sql.DB) {
 	t.Helper()
-	store := dbtest.NewFakeStore()
+	store, database := newTestTranscriptStore(t)
 	ctx := context.Background()
 
 	switch seedCase {
 	case 1:
-		_ = store.UpsertSessionSummary(ctx, db.SessionSummary{
+		mustSeed(t, store.UpsertSessionSummary(ctx, db.SessionSummary{
 			SessionID: "sess-1",
 			Summary:   "Fixed Docker compose networking issue in staging environment",
 			IsSettled: true,
 			CreatedAt: time.Now().UTC(),
-		})
-		_ = store.BatchInsertTranscriptSteps(ctx, []db.TranscriptStep{
+		}))
+		mustSeed(t, store.BatchInsertTranscriptSteps(ctx, []db.TranscriptStep{
 			{
 				SessionID: "sess-1",
 				StepIndex: 1,
@@ -236,15 +236,15 @@ func newSearchTestStore(t *testing.T, seedCase int) *dbtest.FakeStore {
 				ToolName:  "run_command",
 				Content:   "docker compose up -d",
 			},
-		})
+		}))
 	case 2:
-		_ = store.UpsertSessionSummary(ctx, db.SessionSummary{
+		mustSeed(t, store.UpsertSessionSummary(ctx, db.SessionSummary{
 			SessionID: "sess-2",
 			Summary:   "Database migration runbook",
 			IsSettled: true,
 			CreatedAt: time.Now().UTC(),
-		})
-		_ = store.BatchInsertTranscriptSteps(ctx, []db.TranscriptStep{
+		}))
+		mustSeed(t, store.BatchInsertTranscriptSteps(ctx, []db.TranscriptStep{
 			{
 				SessionID: "sess-2",
 				StepIndex: 1,
@@ -253,18 +253,18 @@ func newSearchTestStore(t *testing.T, seedCase int) *dbtest.FakeStore {
 				ToolKind:  "shell",
 				Content:   "go run ./scripts/migrate.go --up",
 			},
-		})
+		}))
 	case 3:
 		dummyEmb := make([]float32, db.ExpectedEmbeddingDim)
 		dummyEmb[0] = 1.0
-		_ = store.UpsertSessionSummary(ctx, db.SessionSummary{
+		mustSeed(t, store.UpsertSessionSummary(ctx, db.SessionSummary{
 			SessionID: "sess-3",
 			Summary:   "Deploying Postgres pgvector instance",
 			Embedding: dummyEmb,
 			IsSettled: true,
 			CreatedAt: time.Now().UTC(),
-		})
-		_ = store.BatchInsertTranscriptSteps(ctx, []db.TranscriptStep{
+		}))
+		mustSeed(t, store.BatchInsertTranscriptSteps(ctx, []db.TranscriptStep{
 			{
 				SessionID: "sess-3",
 				StepIndex: 1,
@@ -272,17 +272,17 @@ func newSearchTestStore(t *testing.T, seedCase int) *dbtest.FakeStore {
 				ToolName:  "docker",
 				Content:   "docker run --name pgvector -d pgvector/pgvector:pg16",
 			},
-		})
+		}))
 	case 4:
-		_ = store.UpsertSessionSummary(ctx, db.SessionSummary{
+		mustSeed(t, store.UpsertSessionSummary(ctx, db.SessionSummary{
 			SessionID: "sess-4",
 			Summary:   "Configured Grafana monitoring dashboards",
 			IsSettled: true,
 			CreatedAt: time.Now().UTC(),
-		})
+		}))
 	}
 
-	return store
+	return store, database
 }
 
 type executeTranscriptSearchCase struct {
@@ -311,11 +311,13 @@ func setupSearchStore(t *testing.T, tc executeTranscriptSearchCase) db.Transcrip
 	if tc.nilStore {
 		return nil
 	}
-	fakeStore := newSearchTestStore(t, tc.seedCase)
+	store, database := newSearchTestStore(t, tc.seedCase)
 	if tc.closedStore {
-		_ = fakeStore.Close()
+		if err := database.Close(); err != nil {
+			t.Fatalf("close database: %v", err)
+		}
 	}
-	return fakeStore
+	return store
 }
 
 func setupSearchContext(tc executeTranscriptSearchCase) context.Context {
@@ -428,7 +430,7 @@ func TestExecuteTranscriptSearch(t *testing.T) {
 		{
 			name:         "mode steps searches only transcript steps",
 			seedCase:     2,
-			query:        "migrate.go",
+			query:        "run", // Postgres tokenizes "./scripts/migrate.go" as one file token, so "migrate.go" no longer matches
 			mode:         "steps",
 			sessionID:    "sess-2",
 			toolName:     "run_command",
@@ -440,7 +442,7 @@ func TestExecuteTranscriptSearch(t *testing.T) {
 		{
 			name:         "tool kind filter matches native tool name",
 			seedCase:     2,
-			query:        "migrate.go",
+			query:        "run", // Postgres tokenizes "./scripts/migrate.go" as one file token, so "migrate.go" no longer matches
 			mode:         "steps",
 			toolName:     "shell",
 			limit:        5,
@@ -519,13 +521,14 @@ type getTranscriptStepWindowCase struct {
 	wantCenter  int
 }
 
-func setupStepWindowStore(tc getTranscriptStepWindowCase) db.TranscriptStore {
+func setupStepWindowStore(t *testing.T, tc getTranscriptStepWindowCase) db.TranscriptStore {
+	t.Helper()
 	if tc.nilStore {
 		return nil
 	}
-	fake := dbtest.NewFakeStore()
+	fake, database := newTestTranscriptStore(t)
 	ctx := context.Background()
-	_ = fake.UpsertSessionSummary(ctx, db.SessionSummary{SessionID: "sess-win-1"})
+	mustSeed(t, fake.UpsertSessionSummary(ctx, db.SessionSummary{SessionID: "sess-win-1"}))
 	steps := make([]db.TranscriptStep, 10)
 	for i := range 10 {
 		steps[i] = db.TranscriptStep{
@@ -537,9 +540,11 @@ func setupStepWindowStore(tc getTranscriptStepWindowCase) db.TranscriptStore {
 			CreatedAt: time.Now().UTC(),
 		}
 	}
-	_ = fake.BatchInsertTranscriptSteps(ctx, steps)
+	mustSeed(t, fake.BatchInsertTranscriptSteps(ctx, steps))
 	if tc.closedStore {
-		_ = fake.Close()
+		if err := database.Close(); err != nil {
+			t.Fatalf("close database: %v", err)
+		}
 	}
 	return fake
 }
@@ -585,7 +590,7 @@ func assertStepWindowResult(t *testing.T, tc getTranscriptStepWindowCase, res St
 
 func runGetTranscriptStepWindowCase(t *testing.T, tc getTranscriptStepWindowCase) {
 	t.Helper()
-	store := setupStepWindowStore(tc)
+	store := setupStepWindowStore(t, tc)
 	ctx := setupStepWindowContext(tc)
 
 	res, err := GetTranscriptStepWindow(ctx, store, "", tc.sessionID, tc.stepIndex, tc.context)
@@ -679,7 +684,7 @@ func TestExecuteTranscriptSearch_Options(t *testing.T) {
 
 			var store db.TranscriptStore
 			if !tc.nilStore {
-				store = newSearchTestStore(t, 2)
+				store = newSearchTestStoreOnly(t, 2)
 			}
 
 			res, err := ExecuteTranscriptSearch(context.Background(), store, nil, tc.opts)
@@ -703,4 +708,18 @@ func TestExecuteTranscriptSearch_Options(t *testing.T) {
 			}
 		})
 	}
+}
+
+// mustSeed fails the test when a fixture write errors.
+func mustSeed(t testing.TB, err error) {
+	t.Helper()
+	if err != nil {
+		t.Fatalf("seed fixture: %v", err)
+	}
+}
+
+func newSearchTestStoreOnly(t *testing.T, seedCase int) *db.SQLTranscriptStore {
+	t.Helper()
+	store, _ := newSearchTestStore(t, seedCase)
+	return store
 }
