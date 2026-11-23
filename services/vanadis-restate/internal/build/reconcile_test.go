@@ -74,9 +74,7 @@ func TestBuildObject_ValidationFailures(t *testing.T) {
 			}
 			bo := NewBuildObject(url, nil)
 			if !tc.nilStore {
-				st, pool := seededStore(t, []model.VanadisBuild{{ID: "b-validate", Status: "running", ThreadID: "th-1"}}, nil)
-				require.NotNil(t, pool)
-				bo = bo.WithAuthority(st, nil)
+				bo = bo.WithAuthority(seededStoreOnly(t, []model.VanadisBuild{{ID: "b-validate", Status: "running", ThreadID: "th-1"}}, nil), nil)
 			}
 			bo.runtimeFactory = func(_ restate.ObjectContext) objectRuntime { return rt }
 			_, err := bo.Reconcile(nil, ReconcileBuildRequest{})
@@ -232,9 +230,7 @@ func TestExecuteObjectTransition(t *testing.T) {
 				assert.Equal(t, tc.wantStored, chunkStatuses(t, raw, "b1"))
 			}
 			if tc.wantBuildRow != "" {
-				stored, chunks := loadBuild(t, raw, "b1")
-				require.NotNil(t, chunks)
-				assert.Equal(t, tc.wantBuildRow, stored.Status)
+				assert.Equal(t, tc.wantBuildRow, loadBuildBuild(t, raw, "b1").Status)
 			}
 		})
 	}
@@ -313,18 +309,14 @@ func reconcileStore(t *testing.T, build model.VanadisBuild, chunks []model.Vanad
 		return closedStore(t)
 	}
 	if missing {
-		st, pool := openStore(t)
-		require.NotNil(t, pool)
-		return st
+		return openStoreOnly(t)
 	}
 	indexed := make([]model.VanadisChunk, len(chunks))
 	for i, c := range chunks {
 		c.ChunkIndex = i
 		indexed[i] = c
 	}
-	st, pool := seededStore(t, []model.VanadisBuild{build}, indexed)
-	require.NotNil(t, pool)
-	return st
+	return seededStoreOnly(t, []model.VanadisBuild{build}, indexed)
 }
 
 func TestNotifyChunkFailure_NilObjectIsNoop(t *testing.T) {
@@ -402,13 +394,18 @@ func TestCompactStateForStorage(t *testing.T) {
 	}
 }
 
+func openAuthorityHandlerObject(t *testing.T) *BuildObject {
+	t.Helper()
+	b1 := model.VanadisBuild{ID: "b-cov", Status: "running", ThreadID: "th-1"}
+	c1 := model.VanadisChunk{ID: "c1", BuildID: "b-cov", ChunkIndex: 0, Title: "C1", Status: "running", Mode: "action"}
+	return authorityObject(t, seededStoreOnly(t, []model.VanadisBuild{b1}, []model.VanadisChunk{c1}))
+}
+
 func openAuthorityHandlerHarness(t *testing.T) (*BuildObject, *fakeObjectRuntime) {
 	t.Helper()
 	b1 := model.VanadisBuild{ID: "b-cov", Status: "running", ThreadID: "th-1"}
 	c1 := model.VanadisChunk{ID: "c1", BuildID: "b-cov", ChunkIndex: 0, Title: "C1", Status: "running", Mode: "action"}
-	st, pool := seededStore(t, []model.VanadisBuild{b1}, []model.VanadisChunk{c1})
-	require.NotNil(t, pool)
-	bo := authorityObject(t, st)
+	bo := authorityObject(t, seededStoreOnly(t, []model.VanadisBuild{b1}, []model.VanadisChunk{c1}))
 	rt := newFakeObjectRuntime("b-cov")
 	rt.SetState(model.BuildObjectState{Build: b1, Chunks: []model.VanadisChunk{c1}})
 	return bo, rt
@@ -423,8 +420,7 @@ func authorityObject(t *testing.T, st store.VanadisStore) *BuildObject {
 
 func TestBuildObject_AuthorityHandlerOperations(t *testing.T) {
 	t.Parallel()
-	bo, rt := openAuthorityHandlerHarness(t)
-	require.NotNil(t, rt)
+	bo := openAuthorityHandlerObject(t)
 	ctx := makeObjectMockContext(t, "b-cov")
 
 	// Smoke-cover each authority handler once; routes are reusable stubs.
@@ -475,8 +471,7 @@ func TestBuildObject_AuthorityHandlerOperations(t *testing.T) {
 			t.Parallel()
 			bTerm := model.VanadisBuild{ID: tc.buildID, Status: "running", ThreadID: "th-1"}
 			cTerm := model.VanadisChunk{ID: "c1", BuildID: tc.buildID, Status: tc.chunkStatus}
-			st, pool := seededStore(t, []model.VanadisBuild{bTerm}, []model.VanadisChunk{cTerm})
-			require.NotNil(t, pool)
+			st := seededStoreOnly(t, []model.VanadisBuild{bTerm}, []model.VanadisChunk{cTerm})
 			termStatus, err := authorityObject(t, st).evaluateBuildTerminalStatus(context.Background(), &bTerm, []model.VanadisChunk{cTerm}, map[string]bool{}, false)
 			assert.NoError(t, err)
 			assert.Equal(t, tc.wantStatus, termStatus)
@@ -510,8 +505,7 @@ func TestBuildObject_ReconcileErrorBranches(t *testing.T) {
 	for _, tc := range replays {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			bo, rt := openAuthorityHandlerHarness(t)
-			require.NotNil(t, rt)
+			bo := openAuthorityHandlerObject(t)
 			eri := &mockEriClient{}
 			if tc.failNotify {
 				eri.promptFn = func(context.Context, string, string) error { return errors.New("prompt fail") }
@@ -536,8 +530,7 @@ func TestBuildObject_ReconcileErrorBranches(t *testing.T) {
 
 	bMerge := model.VanadisBuild{ID: "b-merge", Status: "running", ThreadID: "th-1"}
 	cMerge := model.VanadisChunk{ID: "c1", BuildID: "b-merge", Status: "open", Mode: "pr", Repo: "aerial"}
-	stMerge, poolMerge := seededStore(t, []model.VanadisBuild{bMerge}, []model.VanadisChunk{cMerge})
-	require.NotNil(t, poolMerge)
+	stMerge := seededStoreOnly(t, []model.VanadisBuild{bMerge}, []model.VanadisChunk{cMerge})
 	busErr := &pubsubtest.FaultBus{PublishErr: errors.New("pub fail")}
 	boMerge := NewBuildObject("", nil).WithAuthority(stMerge, executor.NewExecutor(t.TempDir(), &mockEriClient{}, busErr, "token", "example-owner", nil))
 	assert.NoError(t, boMerge.applyMutation(context.Background(), "b-merge", &BuildMutationRequest{Action: "chunk_merged", ChunkID: "c1"}))
@@ -551,8 +544,7 @@ func TestBuildObject_ReconcileErrorBranches(t *testing.T) {
 	assert.Equal(t, map[string]string{"c1": "running"}, chunkStatuses(t, stBegin, "b-begin"))
 
 	bTerm := model.VanadisBuild{ID: "b-term", Status: "completed", ThreadID: "th-1"}
-	stTerm, poolTerm := seededStore(t, []model.VanadisBuild{bTerm}, nil)
-	require.NotNil(t, poolTerm)
+	stTerm := seededStoreOnly(t, []model.VanadisBuild{bTerm}, nil)
 	boTerm := NewBuildObject("", nil).WithAuthority(stTerm, nil)
 	outTerm, err := boTerm.executeAuthoritativeTransition(context.Background(), "b-term", nil, nil, nil, false)
 	assert.NoError(t, err)
@@ -588,8 +580,7 @@ func TestBuildObject_ReconcileErrorBranches(t *testing.T) {
 
 	bDeadline := model.VanadisBuild{ID: "b-deadline", Status: "running", ThreadID: "th-1"}
 	cDeadline := model.VanadisChunk{ID: "c1", BuildID: "b-deadline", Status: statusDeploying, Mode: "pr", Repo: "aerial", PRNumber: 1, MergeSHA: "sha"}
-	stDeadline, poolDeadline := seededStore(t, []model.VanadisBuild{bDeadline}, []model.VanadisChunk{cDeadline})
-	require.NotNil(t, poolDeadline)
+	stDeadline := seededStoreOnly(t, []model.VanadisBuild{bDeadline}, []model.VanadisChunk{cDeadline})
 	eriDeadlineWidgetFail := &mockEriClient{}
 	eriDeadlineWidgetFail.widgetFn = func(context.Context, executor.StatusWidgetRequest) (string, error) {
 		return "", errors.New("widget fail")
@@ -617,8 +608,7 @@ func TestRunTransitionStep_NotifyOnceAcrossReplay(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			b := model.VanadisBuild{ID: "b1", ThreadID: "th-1", Title: "Build", Objective: "Obj", Status: "running"}
-			st, pool := seededStore(t, []model.VanadisBuild{b}, nil)
-			require.NotNil(t, pool)
+			st := seededStoreOnly(t, []model.VanadisBuild{b}, nil)
 			widgetCalls, deliveries := 0, 0
 			eri := &mockEriClient{}
 			eri.widgetFn = func(context.Context, executor.StatusWidgetRequest) (string, error) {

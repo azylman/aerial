@@ -82,6 +82,15 @@ func newKubeServer(t *testing.T, routes map[string][]int) (*httptest.Server, *ku
 	return srv, ks
 }
 
+// newKubeServerOnly starts a plain-HTTP hermetic server for routes returning only the server.
+func newKubeServerOnly(t *testing.T, routes map[string][]int) *httptest.Server {
+	t.Helper()
+	ks := &kubeServer{routes: routes}
+	srv := httptest.NewServer(ks)
+	t.Cleanup(srv.Close)
+	return srv
+}
+
 // writeToken writes a service-account token file and returns its path.
 func writeToken(t *testing.T, token string) string {
 	t.Helper()
@@ -353,8 +362,7 @@ func TestKubeClientTransportErrorRedactsReceiverURL(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			srv, ks := newKubeServer(t, nil)
-			require.NotNil(t, ks)
+			srv := newKubeServerOnly(t, nil)
 			receiver := srv.URL + "/hook/" + tc.secret
 			srv.Close()
 			kerr := NewKubeClient(srv.Client(), "", "", "", receiver).DispatchGitPush(context.Background(), GitPushRequest{Repo: "azylman/aerial", Ref: "refs/heads/main", Commit: "m1"})

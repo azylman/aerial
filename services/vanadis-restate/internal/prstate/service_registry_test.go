@@ -254,8 +254,7 @@ func TestPRObjectService_GetBuildLifecycle(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			mc, rec := prKV(t, tc.existing, tc.failGet, false)
-			require.NotNil(t, rec)
+			mc := prKVContext(t, tc.existing, tc.failGet, false)
 			got, err := NewPRObjectService().GetBuildLifecycle(restate.WithMockContext(mc), BuildLifecycleRequest{})
 			require.Equal(t, tc.wantErr, err != nil)
 			require.Equal(t, tc.want, got)

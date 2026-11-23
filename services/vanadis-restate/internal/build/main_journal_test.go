@@ -309,8 +309,7 @@ func TestCreate_JournaledClockIdentityAcrossReplay(t *testing.T) {
 				inputs[i] = store.CreateChunkInput{ID: fmt.Sprintf("c%d", i+1), Title: fmt.Sprintf("Chunk %d", i+1), Repo: "aerial", Instructions: "Do work", DependsOn: deps, TargetFiles: []string{fmt.Sprintf("pkg/%d.go", i+1)}}
 			}
 			req := CreateBuildRequest{ID: tc.buildID, ThreadID: "th1", Objective: "Obj", Chunks: inputs}
-			st, pool := openStore(t)
-			require.NotNil(t, pool)
+			st := openStoreOnly(t)
 			journal := &createJournal{}
 			cap1 := &faultStore{VanadisStore: st}
 			bo1 := NewBuildObject("", nil).WithAuthority(cap1, nil)

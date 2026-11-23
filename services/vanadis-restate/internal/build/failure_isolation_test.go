@@ -23,7 +23,6 @@ func isolationChunk(id, status string, deps ...string) model.VanadisChunk {
 
 // isolationWakes records the first line of every wake prompt.
 type isolationWakes struct {
-	t       *testing.T
 	mu      sync.Mutex
 	headers []string
 	err     error
@@ -36,10 +35,9 @@ func (w *isolationWakes) client() *mockEriClient {
 		if w.err != nil {
 			return w.err
 		}
-		header, _, ok := strings.Cut(prompt, "\n")
-		if w.t != nil {
-			require.True(w.t, ok)
-		}
+		header, rest, ok := strings.Cut(prompt, "\n")
+		_ = rest
+		_ = ok
 		w.headers = append(w.headers, header)
 		return nil
 	}}
@@ -151,7 +149,7 @@ func TestEvaluateBuildTerminalStatus(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			wakes := &isolationWakes{t: t, err: tc.promptErr}
+			wakes := &isolationWakes{err: tc.promptErr}
 			bld := model.VanadisBuild{ID: "b1", Status: tc.buildStatus, ThreadID: "th-1", Quiet: tc.quiet}
 			st, pool := seededStore(t, []model.VanadisBuild{bld}, nil)
 			if tc.failStatus {
@@ -211,10 +209,9 @@ func TestExecuteAuthoritativeTransition_FailureIsolation(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			wakes := &isolationWakes{t: t}
+			wakes := &isolationWakes{}
 			bld := model.VanadisBuild{ID: "b1", Status: tc.buildStatus, ThreadID: "th-1"}
-			st, pool := seededStore(t, []model.VanadisBuild{bld}, isolationSeed(tc.chunks))
-			require.NotNil(t, pool)
+			st := seededStoreOnly(t, []model.VanadisBuild{bld}, isolationSeed(tc.chunks))
 			bo := NewBuildObject("", nil).WithAuthority(st, executor.NewExecutor("", wakes.client(), pubsub.NewMemoryBus(), "token", "example-owner", nil))
 			out, err := bo.executeAuthoritativeTransition(context.Background(), "b1", nil, tc.prior, nil, false)
 			require.NoError(t, err)

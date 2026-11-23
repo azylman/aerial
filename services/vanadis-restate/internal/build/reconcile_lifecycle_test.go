@@ -32,8 +32,7 @@ func TestBuildObject_LifecycleTransitionsAndFailures(t *testing.T) {
 
 	// 1. Cancel on already terminal build -> store.ErrBuildConflict
 	bTerm := model.VanadisBuild{ID: "b-term", Status: "completed", ThreadID: "th-1"}
-	storeTerm, poolTerm := seededStore(t, []model.VanadisBuild{bTerm}, nil)
-	require.NotNil(t, poolTerm)
+	storeTerm := seededStoreOnly(t, []model.VanadisBuild{bTerm}, nil)
 	boTerm := NewBuildObject("", nil).WithAuthority(storeTerm, nil)
 	ctxTerm := makeObjectMockContext(t, "b-term")
 	_, err := boTerm.Cancel(ctxTerm, CancelBuildRequest{Reason: "test"})
@@ -171,16 +170,14 @@ func TestBuildObject_LifecycleTransitionsAndFailures(t *testing.T) {
 	assert.Equal(t, statusRunning, lifecycleBuildStatus(t, storeTransErr, "b-fail-trans"))
 
 	// 10. UpdateBuild with widget sync error
-	storeUpdOk, poolUpdOk := seededStore(t, []model.VanadisBuild{b1}, []model.VanadisChunk{c1})
-	require.NotNil(t, poolUpdOk)
+	storeUpdOk := seededStoreOnly(t, []model.VanadisBuild{b1}, []model.VanadisChunk{c1})
 	boUpdWidgetErr := NewBuildObject("", nil).WithAuthority(storeUpdOk, execErr)
 	bldUp, errUp := boUpdWidgetErr.UpdateBuild(ctxCancel, store.UpdateBuildRequest{Title: "new title"})
 	require.NoError(t, errUp)
 	assert.Equal(t, "new title", bldUp.Title)
 
 	// 11. persistBuildCreation with widget sync error
-	storeCreate, poolCreate := openStore(t)
-	require.NotNil(t, poolCreate)
+	storeCreate := openStoreOnly(t)
 	boCreateWidgetErr := NewBuildObject("", nil).WithAuthority(storeCreate, execErr)
 	created, err := restate.Run(ctxCancel, func(rc restate.RunContext) (bool, error) {
 		return boCreateWidgetErr.persistBuildCreation(rc, b1, []model.VanadisChunk{c1})
@@ -913,7 +910,5 @@ func lifecycleChunk(t *testing.T, st *store.Store, buildID, chunkID string) mode
 // lifecycleBuildStatus reads the stored status of build id.
 func lifecycleBuildStatus(t *testing.T, st *store.Store, id string) string {
 	t.Helper()
-	b, chunks := loadBuild(t, st, id)
-	assert.NotNil(t, chunks)
-	return b.Status
+	return loadBuildBuild(t, st, id).Status
 }

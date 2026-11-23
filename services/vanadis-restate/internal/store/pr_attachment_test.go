@@ -42,6 +42,22 @@ func (f paFixture) open(t *testing.T) (*Store, *pgxpool.Pool) {
 	return st, pool
 }
 
+func (f paFixture) store(t *testing.T) *Store {
+	t.Helper()
+	switch {
+	case f.nilReceiver:
+		return nil
+	case f.nilDB:
+		return &Store{}
+	case f.closed:
+		return closedStore(t)
+	}
+	st, pool := openStore(t)
+	seed(t, pool, f.builds, f.chunks)
+	mustExec(t, pool, f.sabotage)
+	return st
+}
+
 // paDeleteOnUpdateSQL deletes a chunk the moment an UPDATE reaches it and
 // skips the UPDATE: the chunk existed when the attachment started but is gone
 // when the attachment write runs.
@@ -326,10 +342,7 @@ func TestAttachPRTransaction(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			st, pool := tc.db.open(t)
-			if tc.db.closed && pool != nil {
-				t.Fatalf("expected nil pool for closed db, got %v", pool)
-			}
+			st := tc.db.store(t)
 			_, _, _, err := st.attachPRTransaction(context.Background(), "c1", attachRequest("c1", "aerial"))
 			assertStoreErr(t, err, tc.wantErrIs, tc.wantErr)
 		})

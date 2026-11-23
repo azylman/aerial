@@ -35,6 +35,15 @@ func rcOpen(t *testing.T, parent string, chunks []model.VanadisChunk, sabotage s
 	return st, pool
 }
 
+// rcOpenStore seeds build b1 in parent status with chunks and applies sabotage, returning only the Store.
+func rcOpenStore(t *testing.T, parent string, chunks []model.VanadisChunk, sabotage string) *Store {
+	t.Helper()
+	st, pool := openStore(t)
+	seed(t, pool, []model.VanadisBuild{{ID: "b1", ThreadID: "thread-1", Status: parent}}, chunks)
+	mustExec(t, pool, sabotage)
+	return st
+}
+
 // rcSetStatus moves a stored chunk to status between recovery steps.
 func rcSetStatus(t *testing.T, pool *pgxpool.Pool, id, status string) {
 	t.Helper()
@@ -75,10 +84,7 @@ func TestPostgresVanadisStore_RecoverFailedPR(t *testing.T) {
 			if tc.skip && !tc.legacySeed {
 				legacyChunk := chunk
 				legacyChunk.HeadSHA = ""
-				legacy, legacyPool := rcOpen(t, tc.parent, []model.VanadisChunk{legacyChunk}, rcFailNoWrites)
-				if legacyPool == nil {
-					t.Fatal("expected non-nil legacyPool")
-				}
+				legacy := rcOpenStore(t, tc.parent, []model.VanadisChunk{legacyChunk}, rcFailNoWrites)
 				if legacyErr := legacy.recoverFailedPR(rcVerified(!tc.unverified), "c1", tc.head); !errors.Is(legacyErr, ErrPRTransitionSkipped) {
 					t.Fatalf("legacy error=%v", legacyErr)
 				}
