@@ -134,6 +134,11 @@ if [ -d "/cache" ]; then
   chmod 0755 /data 2>/dev/null || true
   ln -sfn /cache /data/cache
   chown -h 1000:1000 /data/cache /cache /cache/go-build /cache/go /cache/go/pkg /cache/go/pkg/mod /cache/pip /cache/golangci-lint /cache/cargo-target /cache/npm /cache/buildx-config 2>/dev/null || true
+  if [ -z "$(find /cache -maxdepth 1 -name .last-trim -mmin -360 2>/dev/null)" ]; then
+    touch /cache/.last-trim 2>/dev/null || true
+    chown -h 1000:1000 /cache/.last-trim 2>/dev/null || true
+    find /cache/go-build /cache/golangci-lint -maxdepth 2 -type f -mmin +1440 -delete 2>/dev/null || true
+  fi
   export GOCACHE="/data/cache/go-build"
   export GOPATH="/data/cache/go"
   export GOMODCACHE="/data/cache/go/pkg/mod"
