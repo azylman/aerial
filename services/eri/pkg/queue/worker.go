@@ -110,29 +110,6 @@ func (te *turnExecution) leaseKey() string {
 	return db.DiscordSessionID(te.threadID)
 }
 
-func (te *turnExecution) incrementTurnRetries(errDetail string) {
-	if te == nil {
-		return
-	}
-	if te.isDispatch() {
-		te.incrementDispatchRetry(te.dispatch.ID, errDetail)
-		return
-	}
-	for _, m := range te.burst {
-		te.incrementMessageRetry(m.ID, errDetail)
-	}
-}
-
-func (te *turnExecution) initialRetryCount() int {
-	if te == nil {
-		return 0
-	}
-	if te.isDispatch() {
-		return te.dispatch.RetryCount
-	}
-	return maxBurstRetryCount(te.burst)
-}
-
 func (te *turnExecution) turnEffortAndModel() (string, string) {
 	if te == nil {
 		return "", ""
@@ -156,10 +133,6 @@ func (te *turnExecution) turnCtxValue() context.Context {
 		return te.turnCtx
 	}
 	return te.poolCtx()
-}
-
-func (te *turnExecution) turnDone() <-chan struct{} {
-	return te.turnCtxValue().Done()
 }
 
 func (te *turnExecution) isInterrupted() bool {
@@ -216,22 +189,6 @@ func (te *turnExecution) store() db.Store {
 		return nil
 	}
 	return te.pool.Store()
-}
-
-func (te *turnExecution) incrementDispatchRetry(id, errorMsg string) {
-	if s := te.store(); s != nil {
-		if err := s.IncrementDispatchRetry(context.Background(), id, errorMsg); err != nil {
-			te.logf("[Worker] Warning incrementing retry for dispatch %s: %v", id, err)
-		}
-	}
-}
-
-func (te *turnExecution) incrementMessageRetry(id, errorMsg string) {
-	if s := te.store(); s != nil {
-		if err := s.IncrementMessageRetry(context.Background(), id, errorMsg); err != nil {
-			te.logf("[Worker] Warning incrementing retry for message %s: %v", id, err)
-		}
-	}
 }
 
 func (te *turnExecution) saveSessionID(ctx context.Context, threadID, sessionID string) {
@@ -698,16 +655,6 @@ func (te *turnExecution) abortBurst(reason string) {
 	te.finalizeBurstMessages(te.burst, db.StatusCompleted, skipMsg, "completed", skipMsg, "", true, false)
 }
 
-func maxBurstRetryCount(burst []db.Message) int {
-	maxRetries := 0
-	for _, m := range burst {
-		if m.RetryCount > maxRetries {
-			maxRetries = m.RetryCount
-		}
-	}
-	return maxRetries
-}
-
 func (te *turnExecution) checkGlobalQuotaLockout(currentAPIKey, currentModel string) bool {
 	if currentAPIKey != "" {
 		return false
@@ -812,12 +759,6 @@ func (te *turnExecution) buildLeaseTurnContext(runCtx context.Context, currentMo
 	}
 }
 
-func (te *turnExecution) executeLeaseAttempt(currentModel, promptToSend string, currentTimeout int) (runner.TurnOutcome, *runner.TurnResult, string, error) {
-	runCtx, runCancel := context.WithTimeout(te.turnCtxValue(), attemptRunTimeout(currentTimeout))
-	defer runCancel()
-	return te.executeLeaseAttemptCtx(runCtx, currentModel, promptToSend)
-}
-
 // attemptRunTimeout pads the Go context by +1 minute relative to the runner watchdog ceiling so
 // the runner watchdog always fires cleanly.
 func attemptRunTimeout(timeoutMinutes int) time.Duration {
@@ -826,7 +767,7 @@ func attemptRunTimeout(timeoutMinutes int) time.Duration {
 
 // executeLeaseAttemptCtx runs one lease execution under runCtx.
 //
-//nolint:contextcheck,nolintlint // pool resolution logs on the turn context, as executeLeaseAttempt always did.
+//nolint:contextcheck,nolintlint // pool resolution logs on the turn context.
 func (te *turnExecution) executeLeaseAttemptCtx(runCtx context.Context, currentModel, promptToSend string) (runner.TurnOutcome, *runner.TurnResult, string, error) {
 	activePool := te.activePool
 	if activePool == nil {
@@ -878,71 +819,6 @@ func isWatchdogTimeoutError(errDetail, stderr string) bool {
 		strings.Contains(errDetail, "[watchdog]") ||
 		strings.Contains(errDetail, "inactivity timeout exceeded") ||
 		strings.Contains(errDetail, "max duration exceeded")
-}
-
-func (te *turnExecution) handleSessionCorruptionRetry(attempt, maxAttempts int, currentAgyBin, currentAPIKey, errDetail, stderr, currentModel string) (shutdown bool) {
-	te.deliverFailureNotice(currentAgyBin, currentAPIKey, errDetail, stderr, "session reset due to context corruption", "session reset notice")
-	te.rotateSessionID(te.threadID, "")
-	te.activeSessionMu.Lock()
-	te.currentSessionID = ""
-	te.activeSessionID = ""
-	te.leaseSessionID = ""
-	oldLease := te.lease
-	te.lease = nil
-	te.activeSessionMu.Unlock()
-	te.clearActiveTurn()
-	if oldLease != nil {
-		if relErr := oldLease.Release(); relErr != nil {
-			te.logf("[WorkerPool] Warning releasing lease on corruption reset for %s: %v", te.threadID, relErr)
-		}
-	}
-	activePool := te.activePool
-	if activePool == nil {
-		if resolved, _, resolveErr := te.resolveExecutionPool(); resolveErr == nil {
-			activePool = resolved
-			te.activeSessionMu.Lock()
-			te.activePool = activePool
-			te.activeSessionMu.Unlock()
-		}
-	}
-	if activePool != nil {
-		// Acquire replacement lease using te.leaseKey() so Discord threads retain "discord-<id>" pool scoping.
-		if newLease, lErr := activePool.AcquireLease(te.pool.ctx, te.leaseKey()); lErr == nil {
-			te.activeSessionMu.Lock()
-			te.lease, te.leaseSessionID, te.isEphemeral, te.currentSessionID = newLease, newLease.SessionID(), te.isEphemeral || newLease.IsEphemeral(), newLease.SessionID()
-			te.touchSessionIDLocked(te.leaseSessionID)
-			te.activeSessionMu.Unlock()
-			te.registerActiveTurn()
-		}
-	}
-	return te.handleRetryBackoff(attempt, maxAttempts, errDetail, currentModel)
-}
-
-func (te *turnExecution) handleNonTransientFailure(attempt, maxAttempts int, currentAgyBin, currentAPIKey, errDetail, stderr, currentModel string) {
-	te.stopIndicators()
-	if te.pool.ctx.Err() != nil {
-		te.logf("[WorkerPool] Pool shutting down during non-transient error for thread %s. Resetting to PENDING.", te.threadID)
-		te.cancelBurstOnShutdown(outcomeFailed, false)
-		return
-	}
-
-	te.activeSessionMu.Lock()
-	hasCurr := te.currentSessionID != ""
-	if hasCurr {
-		te.touchSessionIDLocked(te.currentSessionID)
-		te.previousSessionID, te.currentSessionID = te.currentSessionID, ""
-	}
-	te.activeSessionID = ""
-	te.leaseSessionID = ""
-	te.activeSessionMu.Unlock()
-	if hasCurr {
-		te.rotateSessionID(te.threadID, "")
-	}
-	metrics.RecordTurnCompleted(outcomeFailed, te.triggerType, currentModel, time.Since(te.execStart))
-	te.deliverFailureNotice(currentAgyBin, currentAPIKey, errDetail, stderr, "execution failed with non-transient error", "non-transient failure notice")
-	te.incrementTurnRetries(errDetail)
-	te.failBurstWithStatus(outcomeFailed, errDetail, currentModel)
-	te.logf("[WorkerPool] %d message(s) in thread %s marked FAILED due to non-transient error (attempt %d/%d): %s", len(te.burst), te.threadID, attempt, maxAttempts, errDetail)
 }
 
 type attemptOutcomeState struct {
