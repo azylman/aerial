@@ -13,6 +13,7 @@ import (
 	"sync"
 	"testing"
 
+	restatesdk "github.com/restatedev/sdk-go"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/propagation"
@@ -122,6 +123,14 @@ func assertDispatchRecording(t *testing.T, rec dispatchRequest, wantPath, wantId
 	}
 }
 
+// terminalCode returns err's Restate terminal code, or 0 when err is nil or retryable.
+func terminalCode(err error) int {
+	if err == nil || !restatesdk.IsTerminalError(err) {
+		return 0
+	}
+	return int(restatesdk.AsTerminalError(err).Code())
+}
+
 func assertDispatchErr(t *testing.T, err error, wantErr string) bool {
 	t.Helper()
 	if wantErr == "" {
@@ -151,6 +160,7 @@ func TestHTTPPromptDispatcherDispatchPrompt(t *testing.T) {
 		wantPath        string
 		wantIdempotency string
 		wantErr         string
+		wantCode        int
 		wantStatus      string
 		wantChannelID   string
 	}{
@@ -166,7 +176,7 @@ func TestHTTPPromptDispatcherDispatchPrompt(t *testing.T) {
 		},
 		{
 			name: "brain error json 400", target: brain, status: http.StatusBadRequest, body: `{"error":"prompt cannot be empty"}`,
-			req: PromptDispatchRequest{ChannelID: "123456789"}, wantPath: "/prompt", wantErr: "brain /prompt error (400): prompt cannot be empty",
+			req: PromptDispatchRequest{ChannelID: "123456789"}, wantPath: "/prompt", wantErr: "brain /prompt error (400): prompt cannot be empty", wantCode: 400,
 		},
 		{
 			name: "brain non-json error 500", target: brain, status: http.StatusInternalServerError, body: `Internal Server Error`,
@@ -212,11 +222,11 @@ func TestHTTPPromptDispatcherDispatchPrompt(t *testing.T) {
 		{
 			name: "restate missing message_id fails", target: restate(""),
 			req:     PromptDispatchRequest{ChannelID: "ch-auto", Prompt: "missing msg id"},
-			wantErr: "message_id cannot be empty for restate prompt dispatch",
+			wantErr: "message_id cannot be empty for restate prompt dispatch", wantCode: 400,
 		},
 		{
 			name: "restate missing channel_id fails", target: restate("aerial"),
-			req: PromptDispatchRequest{Prompt: "no channel"}, wantErr: "channel_id cannot be empty",
+			req: PromptDispatchRequest{Prompt: "no channel"}, wantErr: "channel_id cannot be empty", wantCode: 400,
 		},
 		{
 			name: "restate error response message", target: restate("aerial"), status: http.StatusInternalServerError,
@@ -227,7 +237,17 @@ func TestHTTPPromptDispatcherDispatchPrompt(t *testing.T) {
 		{
 			name: "restate error response fallback field", target: restate("aerial"), status: http.StatusBadRequest, body: `{"error":"invalid prompt"}`,
 			req: PromptDispatchRequest{ChannelID: "ch-err-2", MessageID: "msg-err-2", Prompt: "trigger err 2"}, wantPath: "/ThreadSession/ch-err-2/Enqueue",
-			wantErr: "restate prompt dispatch error (400): invalid prompt",
+			wantErr: "restate prompt dispatch error (400): invalid prompt", wantCode: 400,
+		},
+		{
+			name: "restate throttled 429 stays retryable", target: restate("aerial"), status: http.StatusTooManyRequests, body: `slow down`,
+			req: PromptDispatchRequest{ChannelID: "ch-429", MessageID: "msg-429", Prompt: "throttled"}, wantPath: "/ThreadSession/ch-429/Enqueue",
+			wantErr: "restate prompt dispatch returned HTTP 429: slow down",
+		},
+		{
+			name: "restate not found 404 is terminal", target: restate("aerial"), status: http.StatusNotFound, body: `{"message":"service not found"}`,
+			req: PromptDispatchRequest{ChannelID: "ch-404", MessageID: "msg-404", Prompt: "missing"}, wantPath: "/ThreadSession/ch-404/Enqueue",
+			wantErr: "restate prompt dispatch error (404): service not found", wantCode: 404,
 		},
 		{
 			name: "restate raw status error", target: restate("aerial"), status: http.StatusBadGateway, body: `bad gateway upstream`,
@@ -247,6 +267,9 @@ func TestHTTPPromptDispatcherDispatchPrompt(t *testing.T) {
 			resp, err := disp.DispatchPrompt(context.Background(), tc.req)
 			got := rec.snapshot()
 			assertDispatchRecording(t, got, tc.wantPath, tc.wantIdempotency)
+			if code := terminalCode(err); code != tc.wantCode {
+				t.Errorf("terminal code = %d, want %d (err %v)", code, tc.wantCode, err)
+			}
 			if assertDispatchErr(t, err, tc.wantErr) {
 				return
 			}
@@ -280,15 +303,16 @@ func TestHTTPPromptDispatcherDispatch(t *testing.T) {
 		wantPath        string
 		wantIdempotency string
 		wantErr         string
+		wantCode        int
 		wantStatus      string
 		wantDispatchID  string
 	}{
 		{name: "nil dispatcher returns error", target: nilDispatcher, req: hb, wantErr: "dispatcher is nil"},
-		{name: "empty source returns error", target: brain, req: eriwire.BrainDispatchRequest{Source: "  ", Prompt: "test"}, wantErr: "source cannot be"},
-		{name: "empty prompt returns error", target: brain, req: eriwire.BrainDispatchRequest{Source: "heartbeat", Prompt: " "}, wantErr: "prompt cannot"},
+		{name: "empty source returns error", target: brain, req: eriwire.BrainDispatchRequest{Source: "  ", Prompt: "test"}, wantErr: "source cannot be", wantCode: 400},
+		{name: "empty prompt returns error", target: brain, req: eriwire.BrainDispatchRequest{Source: "heartbeat", Prompt: " "}, wantErr: "prompt cannot", wantCode: 400},
 		{
 			name: "brain error json 400", target: brain, status: http.StatusBadRequest, body: `{"error":"invalid dispatch"}`,
-			req: hb, wantPath: "/dispatch", wantErr: "brain /dispatch error (400): invalid dispatch",
+			req: hb, wantPath: "/dispatch", wantErr: "brain /dispatch error (400): invalid dispatch", wantCode: 400,
 		},
 		{
 			name: "brain non-json error 500", target: brain, status: http.StatusInternalServerError, body: `Internal Server Error`,
@@ -325,7 +349,7 @@ func TestHTTPPromptDispatcherDispatch(t *testing.T) {
 			name:    "restate missing id fails",
 			target:  restate("aerial"),
 			req:     eriwire.BrainDispatchRequest{Source: "heartbeat", Prompt: "missing id"},
-			wantErr: "id cannot be empty for restate dispatch",
+			wantErr: "id cannot be empty for restate dispatch", wantCode: 400,
 		},
 		{
 			name: "restate forwards full typed brain dispatch request", target: restate("aerial"), status: http.StatusOK, body: `{"status":"accepted","dispatch_id":"disp-vanadis"}`,
@@ -339,7 +363,7 @@ func TestHTTPPromptDispatcherDispatch(t *testing.T) {
 			name: "restate conflict error", target: restate("aerial"), status: http.StatusConflict, body: `{"message":"active turn running"}`,
 			req:      eriwire.BrainDispatchRequest{ID: "disp-conflict", Source: "heartbeat", Prompt: "conflict test"},
 			wantPath: "/DispatchSession/dispatch-disp-conflict/Enqueue", wantIdempotency: "disp-conflict",
-			wantErr: "restate dispatch error (409): active turn running",
+			wantErr: "restate dispatch error (409): active turn running", wantCode: 412,
 		},
 		{
 			name: "restate invalid json on 200", target: restate("aerial"), status: http.StatusOK, body: `not-json`,
@@ -354,6 +378,9 @@ func TestHTTPPromptDispatcherDispatch(t *testing.T) {
 			disp, rec := newTargetDispatcher(t, tc.target, tc.status, tc.body)
 			resp, err := disp.Dispatch(context.Background(), tc.req)
 			assertDispatchRecording(t, rec.snapshot(), tc.wantPath, tc.wantIdempotency)
+			if code := terminalCode(err); code != tc.wantCode {
+				t.Errorf("terminal code = %d, want %d (err %v)", code, tc.wantCode, err)
+			}
 			if assertDispatchErr(t, err, tc.wantErr) {
 				return
 			}

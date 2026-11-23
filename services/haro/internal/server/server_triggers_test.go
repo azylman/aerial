@@ -210,6 +210,72 @@ func TestHandleOneShotJob_Scenarios(t *testing.T) {
 	}
 }
 
+func TestHandleOneShotJob_ArmsSchedule(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name         string
+		payload      string
+		deliveries   int
+		ingress      int
+		wantErr      bool
+		wantRequest  string
+		wantSameArms bool
+	}{
+		{
+			name:        "inserted one-shot is armed for its due tick",
+			payload:     `{"id":"os-arm-ok","thread_id":"th-1","prompt":"p1","run_at":"2026-11-14T12:00:00Z"}`,
+			deliveries:  1,
+			ingress:     http.StatusAccepted,
+			wantRequest: "/HaroSchedule/os-arm-ok/Arm/send key=haro:arm:one_shot:os-arm-ok:2026-11-14T12:00:00Z",
+		},
+		{
+			name:        "arm failure returns error so the job is redelivered",
+			payload:     `{"id":"os-arm-fail","thread_id":"th-1","prompt":"p1","run_at":"2026-11-14T12:00:00Z"}`,
+			deliveries:  1,
+			ingress:     http.StatusServiceUnavailable,
+			wantErr:     true,
+			wantRequest: "/HaroSchedule/os-arm-fail/Arm/send key=haro:arm:one_shot:os-arm-fail:2026-11-14T12:00:00Z",
+		},
+		{
+			name:         "redelivered job without id arms the same schedule",
+			payload:      `{"thread_id":"th-9","prompt":"retry later","run_at":"2026-11-14T13:00:00Z"}`,
+			deliveries:   2,
+			ingress:      http.StatusAccepted,
+			wantSameArms: true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			db := testutil.NewDB(t)
+			var requests []string
+			ingress := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests = append(requests, r.URL.Path+" key="+r.Header.Get("Idempotency-Key"))
+				w.WriteHeader(tc.ingress)
+			}))
+			t.Cleanup(ingress.Close)
+			srv := NewServer(tools.NewToolHandler(&config.Config{DatabaseURL: ":memory:", RestateIngressURL: ingress.URL}, db))
+
+			var err error
+			for range tc.deliveries {
+				err = HandleOneShotJob(context.Background(), srv, nil, &pubsubtest.Message{Payload: []byte(tc.payload)})
+			}
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("HandleOneShotJob() err = %v, wantErr %v", err, tc.wantErr)
+			}
+			if len(requests) != tc.deliveries {
+				t.Fatalf("arm requests = %v, want %d", requests, tc.deliveries)
+			}
+			if tc.wantRequest != "" && requests[0] != tc.wantRequest {
+				t.Errorf("arm request = %q, want %q", requests[0], tc.wantRequest)
+			}
+			if tc.wantSameArms && requests[0] != requests[1] {
+				t.Errorf("redelivered arm = %q, want %q", requests[1], requests[0])
+			}
+		})
+	}
+}
+
 func TestHandleOneShotJob_ClosedDB(t *testing.T) {
 	ctx := context.Background()
 	closedDB := testutil.NewClosedDB(t)
