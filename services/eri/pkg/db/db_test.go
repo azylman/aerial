@@ -2,28 +2,17 @@ package db
 
 import (
 	"context"
-	"database/sql"
 	"errors"
-	"fmt"
+	"net/url"
 	"os"
-	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/azylman/aerial/pkg/pgtest"
 	"github.com/azylman/aerial/services/eri/pkg/config"
 )
-
-func setupTestDB(t *testing.T) *sql.DB {
-	t.Helper()
-	dsn := fmt.Sprintf("file:%s_%d?mode=memory&cache=shared&_busy_timeout=5000", t.Name(), time.Now().UnixNano())
-	database, err := initTestSQLite(dsn)
-	if err != nil {
-		t.Fatalf("Failed to initialize hermetic SQLite test database: %v", err)
-	}
-	database.SetMaxOpenConns(1)
-	return database
-}
 
 func mustOK(t *testing.T, err error, desc string) {
 	t.Helper()
@@ -47,92 +36,73 @@ func (d *dummyTestCloser) Close() error {
 	return d.err
 }
 
-func TestDBInitAndDSN(t *testing.T) {
-	tests := []struct {
-		name, url, errSub        string
-		cfgNil, snapNil, wantErr bool
-	}{
-		{name: "nil_config", cfgNil: true, wantErr: true},
-		{name: "empty_url", url: "", wantErr: true},
-		{name: "mysql_scheme", url: "mysql://user:pass@localhost/db", wantErr: true, errSub: "only postgres://"},
-		{name: "sqlite_prod", url: "sqlite:///tmp/aerial.db", wantErr: true, errSub: "only postgres://"},
-		{name: "nil_snapshot", snapNil: true, wantErr: true},
-		{name: "bad_syntax", url: "postgres://invalid user@localhost:5432/aerial", wantErr: true, errSub: "failed to ping postgres database"},
-		{name: "invalid_percent", url: "postgres://%zz", wantErr: true, errSub: "failed to ping postgres database"},
-		{name: "unreachable_host", url: "postgres://user:pass@127.0.0.1:54399/nonexistent?sslmode=disable&connect_timeout=1", wantErr: true, errSub: "failed to ping postgres database"},
+// pgtestDatabaseDSN returns a DSN on this package's pgtest server naming
+// database instead of the private clone.
+func pgtestDatabaseDSN(t *testing.T, database string) string {
+	t.Helper()
+	u, err := url.Parse(pgtest.NewDSN(t))
+	if err != nil {
+		t.Fatalf("parse pgtest DSN: %v", err)
 	}
+	u.Path = "/" + database
+	return u.String()
+}
 
-	oldHook := sqliteTestInitHook
-	sqliteTestInitHook = nil
-	defer func() { sqliteTestInitHook = oldHook }()
-
+func TestDBInitAndDSN(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		cfg  *config.Config
+		// pgtestDatabase, when set, points the config at that database on the
+		// package's real Postgres server instead of cfg.
+		pgtestDatabase string
+		errSub         string
+	}{
+		{name: "nil_config", cfg: nil, errSub: "config cannot be nil"},
+		{name: "zero_config_has_no_url", cfg: &config.Config{}, errSub: "database URL cannot be empty"},
+		{name: "empty_url", cfg: config.NewFromData(&config.ConfigData{DatabaseURL: "  "}), errSub: "database URL cannot be empty"},
+		{name: "mysql_scheme", cfg: config.NewFromData(&config.ConfigData{DatabaseURL: "mysql://user:pass@localhost/db"}), errSub: "only postgres://"},
+		{name: "sqlite_scheme", cfg: config.NewFromData(&config.ConfigData{DatabaseURL: "sqlite:///tmp/aerial.db"}), errSub: "only postgres://"},
+		{name: "sqlite_memory", cfg: config.NewFromData(&config.ConfigData{DatabaseURL: ":memory:"}), errSub: "only postgres://"},
+		{name: "bad_syntax", cfg: config.NewFromData(&config.ConfigData{DatabaseURL: "postgres://invalid user@localhost:5432/aerial"}), errSub: "failed to ping postgres database"},
+		{name: "invalid_percent", cfg: config.NewFromData(&config.ConfigData{DatabaseURL: "postgres://%zz"}), errSub: "failed to ping postgres database"},
+		{name: "unreachable_host", cfg: config.NewFromData(&config.ConfigData{DatabaseURL: "postgresql://user:pass@127.0.0.1:1/nonexistent?sslmode=disable&connect_timeout=1"}), errSub: "failed to ping postgres database"},
+		{name: "missing_database_fails_ping", pgtestDatabase: "pgtest_missing_database", errSub: "failed to ping postgres database"},
+		{name: "existing_database_opens", pgtestDatabase: "postgres"},
+	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			var err error
-			switch {
-			case tc.cfgNil:
-				_, err = New(nil)
-			case tc.snapNil:
-				_, err = New(&config.Config{})
-			default:
-				cfg := config.NewFromData(&config.ConfigData{DatabaseURL: tc.url})
-				_, err = New(cfg)
+			t.Parallel()
+			cfg := tc.cfg
+			if tc.pgtestDatabase != "" {
+				cfg = config.NewFromData(&config.ConfigData{DatabaseURL: pgtestDatabaseDSN(t, tc.pgtestDatabase)})
 			}
-			if tc.wantErr && err == nil {
-				t.Fatalf("expected error, got nil")
+			database, err := New(cfg)
+			if tc.errSub == "" {
+				if err != nil {
+					t.Fatalf("New: unexpected error: %v", err)
+				}
+				if pingErr := database.PingContext(context.Background()); pingErr != nil {
+					t.Errorf("ping opened database: %v", pingErr)
+				}
+				if closeErr := database.Close(); closeErr != nil {
+					t.Errorf("close opened database: %v", closeErr)
+				}
+				return
 			}
-			if !tc.wantErr && err != nil {
-				t.Fatalf("unexpected error: %v", err)
+			if err == nil || !strings.Contains(err.Error(), tc.errSub) {
+				t.Fatalf("New error = %v, want containing %q", err, tc.errSub)
 			}
-			if tc.errSub != "" && (err == nil || !strings.Contains(err.Error(), tc.errSub)) {
-				t.Fatalf("expected error containing %q, got %v", tc.errSub, err)
+			if database != nil {
+				t.Errorf("New returned a database alongside error %v", err)
 			}
 		})
 	}
-
-	sqliteTestInitHook = oldHook
-	if oldHook != nil {
-		tmpFile := filepath.Join(t.TempDir(), "subfolder", "test.db")
-		cfgHooked := config.NewFromData(&config.ConfigData{DatabaseURL: "sqlite://" + tmpFile})
-		dbHooked, err := New(cfgHooked)
-		mustOK(t, err, "New with hooked sqlite")
-		_ = dbHooked.Close()
-		if _, err := os.Stat(tmpFile); os.IsNotExist(err) {
-			t.Errorf("expected sqlite db file to exist at %s", tmpFile)
-		}
-	}
-	for _, dsn := range []string{"file:mem_1?mode=memory&cache=shared", "file:mem_2?mode=memory&_pragma=busy_timeout(5000)", "sqlite://:memory:"} {
-		dbPragma, err := Open(dsn)
-		mustOK(t, err, "Open")
-		_ = dbPragma.Close()
-	}
-
-	oldSQLOpen := sqlOpen
-	defer func() { sqlOpen = oldSQLOpen }()
-	sqlOpen = func(driverName, dataSourceName string) (*sql.DB, error) {
-		return nil, errors.New("simulated open error")
-	}
-	_, errOpen := Open("postgres://localhost/test")
-	assertErr(t, errOpen, "sqlOpen failure")
-	sqlOpen = oldSQLOpen
-
-	database := setupTestDB(t)
-	defer database.Close()
-	_, err := database.Exec("SELECT id, row_id, thread_id, guild_id, author_id, author_name, content, status, retry_count, restart_count, error_message, response_text, created_at, updated_at FROM messages LIMIT 0")
-	mustOK(t, err, "messages schema check")
-	var fk int
-	if err := database.QueryRow("PRAGMA foreign_keys;").Scan(&fk); err != nil || fk != 1 {
-		t.Errorf("expected foreign_keys=1, got %d, %v", fk, err)
-	}
-	closedDB, _ := initTestSQLite(filepath.Join(t.TempDir(), "closed-mig.db"))
-	_ = closedDB.Close()
-	assertErr(t, initSchemaSQLite(closedDB), "closed db initSchemaSQLite")
 }
 
 func TestStoreUnavailableContract(t *testing.T) {
-	database := setupTestDB(t)
-	_ = database.Close()
-	assertStoreUnavailable(t, NewSQLStore(database))
+	t.Parallel()
+	assertStoreUnavailable(t, closedTestStore(t))
 	assertStoreUnavailable(t, &SQLStore{})
 	closeWarn(nil, "test")
 }
@@ -182,10 +152,8 @@ func assertMessageUpdatesAndTelemetry(ctx context.Context, t *testing.T, store S
 }
 
 func TestMessageLifecycle(t *testing.T) {
-	database := setupTestDB(t)
-	defer database.Close()
-
-	store := NewSQLStore(database)
+	t.Parallel()
+	store := NewSQLStore(newTestDB(t))
 	ctx := context.Background()
 
 	msg := Message{
@@ -273,10 +241,8 @@ func assertSessionEmptyKeyGuards(ctx context.Context, t *testing.T, store Store)
 }
 
 func TestSessionLifecycle(t *testing.T) {
-	database := setupTestDB(t)
-	defer database.Close()
-
-	store := NewSQLStore(database)
+	t.Parallel()
+	store := NewSQLStore(newTestDB(t))
 	ctx := context.Background()
 
 	// 1. Session turn count and rotation
@@ -294,9 +260,14 @@ func TestSessionLifecycle(t *testing.T) {
 	// 3. External conversation mapping
 	_ = store.SaveSessionID(ctx, "ext-1", "int-1")
 
-	// 4. Table-driven ParseDBTime
+	// 4. Empty key validations
+	assertSessionEmptyKeyGuards(ctx, t, store)
+}
+
+func TestParseDBTime(t *testing.T) {
+	t.Parallel()
 	now := time.Now().Truncate(time.Second).UTC()
-	timeTests := []struct {
+	tests := []struct {
 		name   string
 		input  any
 		wantOK bool
@@ -308,270 +279,192 @@ func TestSessionLifecycle(t *testing.T) {
 		{name: "empty_str", input: "", wantOK: false},
 		{name: "whitespace_str", input: "   ", wantOK: false},
 		{name: "rfc3339_str", input: now.Format(time.RFC3339), wantOK: true},
-		{name: "sqlite_str", input: "2026-10-19 12:00:00", wantOK: true},
+		{name: "space_separated_str", input: "2026-10-19 12:00:00", wantOK: true},
 		{name: "monotonic_clock_str", input: "2026-10-19 12:00:00 m=+0.000000001", wantOK: true},
 		{name: "bytes", input: []byte(now.Format(time.RFC3339)), wantOK: true},
 		{name: "invalid_str", input: "not-a-time", wantOK: false},
 		{name: "unsupported_type", input: 12345, wantOK: false},
 	}
-	for _, tc := range timeTests {
+	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			_, ok := ParseDBTime(tc.input)
 			if ok != tc.wantOK {
 				t.Errorf("ParseDBTime(%v) ok = %v, wantOK = %v", tc.input, ok, tc.wantOK)
 			}
 		})
 	}
-
-	// 7. Empty key validations
-	assertSessionEmptyKeyGuards(ctx, t, store)
 }
 
-func TestTaskHelpers(t *testing.T) {
-	// The store resolves its agent from AGENT_NAME; clear it so the default agent applies.
-	t.Setenv("AGENT_NAME", "")
-	// Table-driven CleanTaskSummary
-	summaryTests := []struct {
-		name     string
-		input    string
-		expected string
+func TestCleanTaskSummary(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name, input, want, wantSuffix string
 	}{
-		{name: "plain", input: "Fix bug in auth service", expected: "Fix bug in auth service"},
-		{name: "xml_envelope", input: "<USER_REQUEST>Check logs</USER_REQUEST>", expected: "Check logs"},
-		{name: "markdown_heading", input: "# Deploy service\nNow deploy", expected: "Deploy service Now deploy"},
-		{name: "tag_fallback", input: "<tag>@mention</tag>", expected: "Agent Task"},
-		{name: "whitespace_fallback", input: "   ", expected: "Agent Task"},
-		{name: "long_text_truncated", input: "This is a very long prompt string " + strings.Repeat("with lots of extra words ", 10), expected: ""},
-		{name: "empty", input: "", expected: "Agent Task"},
+		{name: "plain", input: "Fix bug in auth service", want: "Fix bug in auth service"},
+		{name: "xml_envelope", input: "<USER_REQUEST>Check logs</USER_REQUEST>", want: "Check logs"},
+		{name: "markdown_heading", input: "# Deploy service\nNow deploy", want: "Deploy service Now deploy"},
+		{name: "tag_fallback", input: "<tag>@mention</tag>", want: "Agent Task"},
+		{name: "whitespace_fallback", input: "   ", want: "Agent Task"},
+		{name: "long_text_truncated", input: "This is a very long prompt string " + strings.Repeat("with lots of extra words ", 10), wantSuffix: "..."},
+		{name: "empty", input: "", want: "Agent Task"},
+		{name: "role_and_channel_mentions", input: "Alert <@!12345> and notify <@&67890> in <#1122334455>!", want: "Alert and notify in !"},
 	}
-	for _, tc := range summaryTests {
-		t.Run(tc.name, func(t *testing.T) {
-			got := CleanTaskSummary(tc.input)
-			if tc.name == "long_text_truncated" {
-				if !strings.HasSuffix(got, "...") {
-					t.Errorf("CleanTaskSummary expected ... suffix, got %q", got)
-				}
-			} else if got != tc.expected {
-				t.Errorf("CleanTaskSummary(%q) = %q, want %q", tc.input, got, tc.expected)
-			}
-		})
-	}
-
-	// Auto-cleaned task summary in GetActiveTasks
-	database := setupTestDB(t)
-	defer database.Close()
-	_, _ = database.Exec("INSERT INTO messages (id, thread_id, content, summary, status, created_at, updated_at) VALUES ('m-empty-summ', 't-task', 'Prompt from task content', '', 'PENDING', datetime('now'), datetime('now'))")
-	store := NewSQLStore(database)
-	tasks, err := store.GetActiveTasks(context.Background())
-	if err != nil || len(tasks) != 1 || tasks[0].Summary != "Prompt from task content" {
-		t.Errorf("GetActiveTasks auto-cleaned summary failed: %+v, %v", tasks, err)
-	}
-
-	// Table-driven InferTriggerType
-	triggerTests := []struct {
-		name     string
-		authorID string
-		expected string
-	}{
-		{name: "dispatch_prefix", authorID: "dispatch:heartbeat", expected: "heartbeat"},
-		{name: "http_client", authorID: "http-client", expected: "http"},
-		{name: "user_message", authorID: "user-1", expected: "discord"},
-	}
-	for _, tc := range triggerTests {
-		t.Run(tc.name, func(t *testing.T) {
-			got := InferTriggerType(tc.authorID)
-			if got != tc.expected {
-				t.Errorf("InferTriggerType(%q) = %q, want %q", tc.authorID, got, tc.expected)
-			}
-		})
-	}
-
-	// CloseWarn
-	closer := &dummyTestCloser{err: errors.New("dummy close error")}
-	closeWarn(closer, "test closer")
-}
-
-type taskFilterCase struct {
-	name          string
-	filter        TasksFilter
-	wantCount     int
-	wantFirstID   string
-	wantSess      string
-	checkSess     bool
-	wantPrevSess  string
-	wantThreadSum string
-	wantRespText  string
-}
-
-func assertTaskFilterExpectations(t *testing.T, tasks []ActiveTask, tc taskFilterCase) {
-	t.Helper()
-	if tc.wantCount == 0 {
-		return
-	}
-	if tc.wantFirstID != "" && tasks[0].ID != tc.wantFirstID {
-		t.Errorf("got first ID %q, want %q", tasks[0].ID, tc.wantFirstID)
-	}
-	if tc.checkSess && tasks[0].SessionID != tc.wantSess {
-		t.Errorf("got SessionID %q, want %q", tasks[0].SessionID, tc.wantSess)
-	}
-	if tc.wantPrevSess != "" && tasks[0].PreviousSessionID != tc.wantPrevSess {
-		t.Errorf("got PreviousSessionID %q, want %q", tasks[0].PreviousSessionID, tc.wantPrevSess)
-	}
-	if tc.wantThreadSum != "" && tasks[0].ThreadSummary != tc.wantThreadSum {
-		t.Errorf("got ThreadSummary %q, want %q", tasks[0].ThreadSummary, tc.wantThreadSum)
-	}
-	if tc.wantRespText != "" && tasks[0].ResponseText != tc.wantRespText {
-		t.Errorf("got ResponseText %q, want %q", tasks[0].ResponseText, tc.wantRespText)
-	}
-}
-
-func runTaskFilterCase(ctx context.Context, t *testing.T, store Store, tc taskFilterCase) {
-	t.Helper()
-	tasks, err := store.GetActiveTasks(ctx, tc.filter)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(tasks) != tc.wantCount {
-		t.Fatalf("got count %d, want %d", len(tasks), tc.wantCount)
-	}
-	assertTaskFilterExpectations(t, tasks, tc)
-}
-
-func TestGetActiveTasks_FiltersAndOrdering(t *testing.T) {
-	// The store resolves its agent from AGENT_NAME; clear it so the default agent applies.
-	t.Setenv("AGENT_NAME", "")
-	database, err := initTestSQLite(filepath.Join(t.TempDir(), "aerial_tasks_test.db"))
-	if err != nil {
-		t.Fatalf("initTestSQLite failed: %v", err)
-	}
-	defer database.Close()
-	store := NewSQLStore(database)
-	ctx := context.Background()
-
-	// Seed session metadata
-	_, err = database.Exec(`INSERT INTO sessions (session_id, conversation_id, previous_conversation_id, summary) VALUES ('discord-th-filter', 'int-sess-1', 'prev-sess-0', 'Summary of thread filter');`)
-	if err != nil {
-		t.Fatalf("seed session failed: %v", err)
-	}
-
-	adminTrue := true
-	adminFalse := false
-	now := time.Now().UTC().Truncate(time.Second)
-
-	_ = store.InsertMessage(ctx, Message{
-		ID:           "msg-f1",
-		ThreadID:     "th-filter",
-		Content:      "Prompt 1",
-		Summary:      "Summary 1",
-		ResponseText: "Response 1",
-		Status:       StatusCompleted,
-		IsAdmin:      true,
-		CreatedAt:    now.Add(-3 * time.Minute),
-		UpdatedAt:    now.Add(-3 * time.Minute),
-	})
-	_ = store.InsertMessage(ctx, Message{
-		ID:           "msg-f2",
-		ThreadID:     "th-filter",
-		Content:      "Prompt 2",
-		Summary:      "Summary 2",
-		ResponseText: "Response 2",
-		Status:       StatusPending,
-		Effort:       "medium",
-		IsAdmin:      false,
-		CreatedAt:    now.Add(-2 * time.Minute),
-		UpdatedAt:    now.Add(-2 * time.Minute),
-	})
-	_ = store.InsertMessage(ctx, Message{
-		ID:           "msg-f3",
-		ThreadID:     "th-other",
-		Content:      "Prompt 3",
-		Summary:      "Summary 3",
-		ResponseText: "Response 3",
-		Status:       StatusProcessing,
-		IsAdmin:      true,
-		CreatedAt:    now.Add(-1 * time.Minute),
-		UpdatedAt:    now.Add(-1 * time.Minute),
-	})
-
-	tests := []taskFilterCase{
-		{
-			name:          "thread_id filter and session join",
-			filter:        TasksFilter{ThreadID: "th-filter", Statuses: []string{"COMPLETED"}},
-			wantCount:     1,
-			wantFirstID:   "msg-f1",
-			wantSess:      "int-sess-1",
-			checkSess:     true,
-			wantPrevSess:  "prev-sess-0",
-			wantThreadSum: "Summary of thread filter",
-			wantRespText:  "Response 1",
-		},
-		{
-			name:        "is_admin false filter matches thread session",
-			filter:      TasksFilter{IsAdmin: &adminFalse},
-			wantCount:   1,
-			wantFirstID: "msg-f2",
-			wantSess:    "int-sess-1",
-			checkSess:   true,
-		},
-		{
-			name:        "is_admin true filter with status",
-			filter:      TasksFilter{IsAdmin: &adminTrue, Statuses: []string{"PROCESSING"}},
-			wantCount:   1,
-			wantFirstID: "msg-f3",
-		},
-		{
-			name:        "multiple statuses filter",
-			filter:      TasksFilter{Statuses: []string{"PENDING", "PROCESSING"}},
-			wantCount:   2,
-			wantFirstID: "msg-f3",
-		},
-		{
-			name:        "clamped limit above 200",
-			filter:      TasksFilter{Limit: 250},
-			wantCount:   3,
-			wantFirstID: "msg-f3",
-		},
-		{
-			name:        "after_row_id orders asc",
-			filter:      TasksFilter{AfterRowID: 1},
-			wantCount:   2,
-			wantFirstID: "msg-f2",
-		},
-		{
-			name:        "since filter matches recent",
-			filter:      TasksFilter{Since: now.Add(-90 * time.Second)},
-			wantCount:   1,
-			wantFirstID: "msg-f3",
-		},
-		{
-			name:        "before_row_id filter",
-			filter:      TasksFilter{BeforeRowID: 1},
-			wantCount:   1,
-			wantFirstID: "msg-f1",
-		},
-		{
-			name:        "explicit order asc",
-			filter:      TasksFilter{Order: TasksOrderAsc},
-			wantCount:   3,
-			wantFirstID: "msg-f1",
-		},
-		{
-			name:        "explicit order desc",
-			filter:      TasksFilter{Order: TasksOrderDesc},
-			wantCount:   3,
-			wantFirstID: "msg-f3",
-		},
-		{
-			name:        "explicit order desc overrides after_row_id asc",
-			filter:      TasksFilter{AfterRowID: 1, Order: TasksOrderDesc},
-			wantCount:   2,
-			wantFirstID: "msg-f3",
-		},
-	}
-
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			runTaskFilterCase(ctx, t, store, tc)
+			t.Parallel()
+			got := CleanTaskSummary(tc.input)
+			if tc.wantSuffix != "" {
+				if !strings.HasSuffix(got, tc.wantSuffix) || len([]rune(got)) > 140 {
+					t.Errorf("CleanTaskSummary(%q) = %q, want <=140 runes ending %q", tc.input, got, tc.wantSuffix)
+				}
+				return
+			}
+			if got != tc.want {
+				t.Errorf("CleanTaskSummary(%q) = %q, want %q", tc.input, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestInferTriggerType(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name, authorID, want string
+	}{
+		{name: "dispatch_prefix", authorID: "dispatch:heartbeat", want: "heartbeat"},
+		{name: "http_client", authorID: "http-client", want: "http"},
+		{name: "user_message", authorID: "user-1", want: "discord"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := InferTriggerType(tc.authorID); got != tc.want {
+				t.Errorf("InferTriggerType(%q) = %q, want %q", tc.authorID, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestCloseWarn(t *testing.T) {
+	t.Parallel()
+	closeWarn(&dummyTestCloser{err: errors.New("dummy close error")}, "test closer")
+	closeWarn(&dummyTestCloser{}, "test closer")
+}
+
+// activeTaskWant is the observable projection of one ActiveTask row.
+type activeTaskWant struct {
+	ID, ThreadID, SessionID, PreviousSessionID, ThreadSummary string
+	Summary, ResponseText, TriggerType                        string
+	DurationMs                                                int64
+	TotalTokens                                               int
+}
+
+var taskBase = time.Date(2026, 11, 21, 12, 0, 0, 0, time.UTC)
+
+// filterSessionSQL maps thread th-filter to a session with a previous
+// conversation and summary; rows insert under the default agent tenant.
+const filterSessionSQL = `INSERT INTO sessions (session_id, conversation_id, previous_conversation_id, summary) VALUES ('discord-th-filter', 'int-sess-1', 'prev-sess-0', 'Summary of thread filter')`
+
+// Seeded in order, so row_id is 1, 2, 3 in each private database.
+var filterMessages = []Message{
+	{ID: "msg-f1", ThreadID: "th-filter", Content: "Prompt 1", Summary: "Summary 1", ResponseText: "Response 1", Status: StatusCompleted, IsAdmin: true, CreatedAt: taskBase.Add(-3 * time.Minute), UpdatedAt: taskBase.Add(-3 * time.Minute)},
+	{ID: "msg-f2", ThreadID: "th-filter", Content: "Prompt 2", Summary: "Summary 2", ResponseText: "Response 2", Status: StatusPending, Effort: "medium", CreatedAt: taskBase.Add(-2 * time.Minute), UpdatedAt: taskBase.Add(-2 * time.Minute)},
+	{ID: "msg-f3", ThreadID: "th-other", Content: "Prompt 3", Summary: "Summary 3", ResponseText: "Response 3", Status: StatusProcessing, IsAdmin: true, CreatedAt: taskBase.Add(-1 * time.Minute), UpdatedAt: taskBase.Add(-1 * time.Minute)},
+}
+
+var (
+	taskF1 = activeTaskWant{ID: "msg-f1", ThreadID: "th-filter", SessionID: "int-sess-1", PreviousSessionID: "prev-sess-0", ThreadSummary: "Summary of thread filter", Summary: "Summary 1", ResponseText: "Response 1", TriggerType: "discord"}
+	taskF2 = activeTaskWant{ID: "msg-f2", ThreadID: "th-filter", SessionID: "int-sess-1", PreviousSessionID: "prev-sess-0", ThreadSummary: "Summary of thread filter", Summary: "Summary 2", ResponseText: "Response 2", TriggerType: "discord"}
+	taskF3 = activeTaskWant{ID: "msg-f3", ThreadID: "th-other", Summary: "Summary 3", ResponseText: "Response 3", TriggerType: "discord"}
+)
+
+var unionMessages = []Message{
+	{ID: "msg-live-1", ThreadID: "123456", Content: "Discord user prompt", Status: StatusPending, DurationMs: 1500, InputTokens: 120, OutputTokens: 60, ThinkingTokens: 15, CacheReadTokens: 10, TotalTokens: 205, CreatedAt: taskBase.Add(-2 * time.Minute), UpdatedAt: taskBase.Add(-2 * time.Minute)},
+}
+
+var unionDispatches = []Dispatch{
+	{ID: "disp-live-stateful", Source: "heartbeat", SessionID: "heartbeat-hb-1", Prompt: "Heartbeat prompt", Status: StatusPending, DurationMs: 3000, InputTokens: 250, OutputTokens: 100, ThinkingTokens: 30, CacheReadTokens: 20, TotalTokens: 400, CreatedAt: taskBase.Add(-1 * time.Minute), UpdatedAt: taskBase.Add(-1 * time.Minute)},
+	{ID: "disp-live-ephem", Source: "webhook", Prompt: "Webhook prompt", Status: StatusPending, CreatedAt: taskBase, UpdatedAt: taskBase},
+	{ID: "disp-live-done", Source: "webhook", Prompt: "Finished prompt", Status: StatusCompleted, CreatedAt: taskBase, UpdatedAt: taskBase},
+}
+
+var (
+	taskLiveMsg      = activeTaskWant{ID: "msg-live-1", ThreadID: "123456", Summary: "Discord user prompt", TriggerType: "discord", DurationMs: 1500, TotalTokens: 205}
+	taskLiveStateful = activeTaskWant{ID: "disp-live-stateful", ThreadID: "heartbeat-hb-1", Summary: "Heartbeat prompt", TriggerType: "heartbeat", DurationMs: 3000, TotalTokens: 400}
+	taskLiveEphem    = activeTaskWant{ID: "disp-live-ephem", ThreadID: "dispatch-disp-live-ephem", Summary: "Webhook prompt", TriggerType: "webhook"}
+)
+
+func TestGetActiveTasks(t *testing.T) {
+	t.Parallel()
+	adminTrue, adminFalse := true, false
+	tests := []struct {
+		name           string
+		seedSQL        string
+		seedMessages   []Message
+		seedDispatches []Dispatch
+		filter         TasksFilter
+		sabotageSQL    string
+		closeDB        bool
+		wantErr        string
+		want           []activeTaskWant
+	}{
+		{name: "thread_id filter and session join", seedSQL: filterSessionSQL, seedMessages: filterMessages, filter: TasksFilter{ThreadID: "th-filter", Statuses: []string{"COMPLETED"}}, want: []activeTaskWant{taskF1}},
+		{name: "is_admin false filter matches thread session", seedSQL: filterSessionSQL, seedMessages: filterMessages, filter: TasksFilter{IsAdmin: &adminFalse}, want: []activeTaskWant{taskF2}},
+		{name: "is_admin true filter with status", seedSQL: filterSessionSQL, seedMessages: filterMessages, filter: TasksFilter{IsAdmin: &adminTrue, Statuses: []string{"processing"}}, want: []activeTaskWant{taskF3}},
+		{name: "multiple statuses filter skips blanks", seedSQL: filterSessionSQL, seedMessages: filterMessages, filter: TasksFilter{Statuses: []string{"PENDING", " ", "PROCESSING"}}, want: []activeTaskWant{taskF3, taskF2}},
+		{name: "clamped limit above 200", seedSQL: filterSessionSQL, seedMessages: filterMessages, filter: TasksFilter{Limit: 250}, want: []activeTaskWant{taskF3, taskF2, taskF1}},
+		{name: "explicit limit", seedSQL: filterSessionSQL, seedMessages: filterMessages, filter: TasksFilter{Limit: 1}, want: []activeTaskWant{taskF3}},
+		{name: "after_row_id orders asc", seedSQL: filterSessionSQL, seedMessages: filterMessages, filter: TasksFilter{AfterRowID: 1}, want: []activeTaskWant{taskF2, taskF3}},
+		{name: "since filter matches recent", seedSQL: filterSessionSQL, seedMessages: filterMessages, filter: TasksFilter{Since: taskBase.Add(-90 * time.Second)}, want: []activeTaskWant{taskF3}},
+		{name: "before_row_id filter", seedSQL: filterSessionSQL, seedMessages: filterMessages, filter: TasksFilter{BeforeRowID: 1}, want: []activeTaskWant{taskF1}},
+		{name: "explicit order asc", seedSQL: filterSessionSQL, seedMessages: filterMessages, filter: TasksFilter{Order: TasksOrderAsc}, want: []activeTaskWant{taskF1, taskF2, taskF3}},
+		{name: "explicit order desc", seedSQL: filterSessionSQL, seedMessages: filterMessages, filter: TasksFilter{Order: TasksOrderDesc}, want: []activeTaskWant{taskF3, taskF2, taskF1}},
+		{name: "explicit order desc overrides after_row_id asc", seedSQL: filterSessionSQL, seedMessages: filterMessages, filter: TasksFilter{AfterRowID: 1, Order: TasksOrderDesc}, want: []activeTaskWant{taskF3, taskF2}},
+		{name: "unfiltered returns active messages oldest first", seedSQL: filterSessionSQL, seedMessages: filterMessages, want: []activeTaskWant{taskF2, taskF3}},
+		{name: "unfiltered unions active messages and dispatches", seedMessages: unionMessages, seedDispatches: unionDispatches, want: []activeTaskWant{taskLiveMsg, taskLiveStateful, taskLiveEphem}},
+		{name: "filtered query excludes dispatches", seedMessages: unionMessages, seedDispatches: unionDispatches, filter: TasksFilter{Statuses: []string{"PENDING"}}, want: []activeTaskWant{taskLiveMsg}},
+		{
+			name:    "empty stored summary falls back to cleaned prompt",
+			seedSQL: `INSERT INTO messages (id, thread_id, content, summary, status, created_at, updated_at) VALUES ('m-empty-summ', 't-task', 'Prompt from task content', '', 'PENDING', now(), now())`,
+			want:    []activeTaskWant{{ID: "m-empty-summ", ThreadID: "t-task", Summary: "Prompt from task content", TriggerType: "discord"}},
+		},
+		{name: "empty database", want: []activeTaskWant{}},
+		{name: "closed handle fails the query", closeDB: true, wantErr: "query active tasks"},
+		{name: "null created_at fails the scan", seedMessages: filterMessages, sabotageSQL: `ALTER TABLE messages ALTER COLUMN created_at DROP NOT NULL; UPDATE messages SET created_at = NULL`, wantErr: "scan active task"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			store, database := newTestStore(t)
+			store.WithAgent(DefaultAgent)
+			execSQL(t, database, tc.seedSQL)
+			seedMessages(t, store, tc.seedMessages)
+			seedDispatches(t, store, tc.seedDispatches)
+			execSQL(t, database, tc.sabotageSQL)
+			if tc.closeDB {
+				mustOK(t, database.Close(), "close database")
+			}
+			tasks, err := store.GetActiveTasks(context.Background(), tc.filter)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("GetActiveTasks error = %v, want containing %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("GetActiveTasks: %v", err)
+			}
+			got := make([]activeTaskWant, 0, len(tasks))
+			for _, task := range tasks {
+				got = append(got, activeTaskWant{
+					ID: task.ID, ThreadID: task.ThreadID, SessionID: task.SessionID, PreviousSessionID: task.PreviousSessionID, ThreadSummary: task.ThreadSummary,
+					Summary: task.Summary, ResponseText: task.ResponseText, TriggerType: task.TriggerType, DurationMs: task.DurationMs, TotalTokens: task.TotalTokens,
+				})
+			}
+			if !slices.Equal(got, tc.want) {
+				t.Errorf("GetActiveTasks =\n%+v\nwant\n%+v", got, tc.want)
+			}
 		})
 	}
 }
@@ -760,96 +653,13 @@ func assertDispatchPendingAndMessageCompleted(ctx context.Context, t *testing.T,
 	}
 }
 
-func TestDispatchStore_SQLite(t *testing.T) {
-	database := setupTestDB(t)
-	defer database.Close()
-	store := NewSQLStore(database)
+func TestDispatchLifecycle(t *testing.T) {
+	t.Parallel()
+	store := NewSQLStore(newTestDB(t))
 	ctx := context.Background()
 
 	assertDispatchStoreLifecycleTransitions(ctx, t, store)
 	assertDispatchRecent(ctx, t, store)
 	assertDispatchPendingAndMessageCompleted(ctx, t, store)
 	assertDispatchValidationGuards(ctx, t, store)
-}
-
-func TestGetActiveTasks_DispatchesUnion_SQLite(t *testing.T) {
-	database := setupTestDB(t)
-	defer database.Close()
-	store := NewSQLStore(database)
-	ctx := context.Background()
-
-	now := time.Now().UTC().Truncate(time.Second)
-
-	// Insert message
-	mustOK(t, store.InsertMessage(ctx, Message{
-		ID:              "msg-live-1",
-		ThreadID:        "123456",
-		Content:         "Discord user prompt",
-		Status:          StatusPending,
-		DurationMs:      1500,
-		InputTokens:     120,
-		OutputTokens:    60,
-		ThinkingTokens:  15,
-		CacheReadTokens: 10,
-		TotalTokens:     205,
-		CreatedAt:       now.Add(-2 * time.Minute),
-		UpdatedAt:       now.Add(-2 * time.Minute),
-	}), "InsertMessage")
-
-	// Insert stateful dispatch
-	mustInsertDispatch(ctx, t, store, Dispatch{
-		ID:              "disp-live-stateful",
-		Source:          "heartbeat",
-		SessionID:       "heartbeat-hb-1",
-		Prompt:          "Heartbeat prompt",
-		Status:          StatusPending,
-		DurationMs:      3000,
-		InputTokens:     250,
-		OutputTokens:    100,
-		ThinkingTokens:  30,
-		CacheReadTokens: 20,
-		TotalTokens:     400,
-		CreatedAt:       now.Add(-1 * time.Minute),
-		UpdatedAt:       now.Add(-1 * time.Minute),
-	}, "InsertDispatch stateful")
-
-	// Insert ephemeral dispatch
-	mustInsertDispatch(ctx, t, store, Dispatch{
-		ID:        "disp-live-ephem",
-		Source:    "webhook",
-		SessionID: "",
-		Prompt:    "Webhook prompt",
-		Status:    StatusPending,
-		CreatedAt: now,
-		UpdatedAt: now,
-	}, "InsertDispatch ephem")
-
-	// Unfiltered query unions messages and dispatches
-	unfiltered, err := store.GetActiveTasks(ctx)
-	mustOK(t, err, "GetActiveTasks unfiltered")
-	if len(unfiltered) != 3 {
-		t.Fatalf("expected 3 tasks in unfiltered HUD, got %d", len(unfiltered))
-	}
-	if unfiltered[0].ID != "msg-live-1" || unfiltered[1].ID != "disp-live-stateful" || unfiltered[2].ID != "disp-live-ephem" {
-		t.Errorf("unexpected task order: %+v", unfiltered)
-	}
-	if unfiltered[0].DurationMs != 1500 || unfiltered[0].TotalTokens != 205 {
-		t.Errorf("unexpected telemetry on task 0: %+v", unfiltered[0])
-	}
-	if unfiltered[1].DurationMs != 3000 || unfiltered[1].TotalTokens != 400 {
-		t.Errorf("unexpected telemetry on task 1: %+v", unfiltered[1])
-	}
-	if unfiltered[1].TriggerType != "heartbeat" || unfiltered[2].TriggerType != "webhook" {
-		t.Errorf("unexpected trigger types: %s, %s", unfiltered[1].TriggerType, unfiltered[2].TriggerType)
-	}
-	if unfiltered[2].ThreadID != "dispatch-disp-live-ephem" {
-		t.Errorf("unexpected threadID for ephemeral dispatch: %s", unfiltered[2].ThreadID)
-	}
-
-	// Filtered query excludes dispatches
-	filtered, err := store.GetActiveTasks(ctx, TasksFilter{Statuses: []string{"PENDING"}})
-	mustOK(t, err, "GetActiveTasks filtered")
-	if len(filtered) != 1 || filtered[0].ID != "msg-live-1" {
-		t.Errorf("expected filtered tasks to contain only messages, got %+v", filtered)
-	}
 }

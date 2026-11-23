@@ -34,11 +34,7 @@ func runDispatchPersistenceCase(ctx context.Context, t *testing.T, store Store, 
 }
 
 func TestDispatchPersistence_TargetAndChunkID(t *testing.T) {
-	database := setupTestDB(t)
-	defer database.Close()
-
-	store := NewSQLStore(database)
-	ctx := context.Background()
+	t.Parallel()
 
 	tests := []dispatchPersistenceCase{
 		{
@@ -59,16 +55,16 @@ func TestDispatchPersistence_TargetAndChunkID(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			runDispatchPersistenceCase(ctx, t, store, tc)
+			t.Parallel()
+			store := NewSQLStore(newTestDB(t))
+			runDispatchPersistenceCase(context.Background(), t, store, tc)
 		})
 	}
 }
 
 func TestInsertDispatch_IdempotentDuplicate(t *testing.T) {
-	database := setupTestDB(t)
-	defer database.Close()
-
-	store := NewSQLStore(database)
+	t.Parallel()
+	store := NewSQLStore(newTestDB(t))
 	ctx := context.Background()
 
 	d := Dispatch{

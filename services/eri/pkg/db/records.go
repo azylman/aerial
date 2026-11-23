@@ -105,8 +105,8 @@ func (s *SQLStore) skipRecords(ctx context.Context, table string, ids []string, 
 }
 
 // beginAttempt starts attempt ordinal on one row. Two guarded single-row UPDATEs keep it
-// race-free without reading old values in RETURNING (unsupported by SQLite): retry_count only
-// ever grows, so a row the first statement skips (retry_count >= ordinal) always matches the second.
+// race-free without reading pre-update values back: retry_count only ever grows, so a row the
+// first statement skips (retry_count >= ordinal) always matches the second.
 func (s *SQLStore) beginAttempt(ctx context.Context, table, id string, ordinal int) (AttemptStart, error) {
 	if err := s.checkDB(); err != nil {
 		return AttemptStart{}, err

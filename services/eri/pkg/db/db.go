@@ -16,14 +16,6 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/metrics"
 )
 
-var (
-	sqliteTestInitHook func(string) (*sql.DB, error)
-	sqlOpen            = sql.Open
-	dbPingContext      = func(ctx context.Context, db *sql.DB) error {
-		return db.PingContext(ctx)
-	}
-)
-
 // New establishes a database connection pool using the DatabaseURL from cfg.
 func New(cfg *config.Config) (*sql.DB, error) {
 	if cfg == nil {
@@ -46,12 +38,9 @@ func Open(dsn string) (*sql.DB, error) {
 		return nil, fmt.Errorf("database_url is required (PostgreSQL DSN expected)")
 	}
 	if !strings.HasPrefix(dsn, "postgres://") && !strings.HasPrefix(dsn, "postgresql://") {
-		if sqliteTestInitHook != nil {
-			return sqliteTestInitHook(dsn)
-		}
 		return nil, fmt.Errorf("unsupported database DSN scheme in %q: only postgres:// and postgresql:// are supported in production", dsn)
 	}
-	db, err := sqlOpen("pgx", dsn)
+	db, err := sql.Open("pgx", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open postgres database: %w", err)
 	}
@@ -60,7 +49,7 @@ func Open(dsn string) (*sql.DB, error) {
 	db.SetConnMaxLifetime(5 * time.Minute)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if err := dbPingContext(ctx, db); err != nil {
+	if err := db.PingContext(ctx); err != nil {
 		closeWarn(db, "database on ping failure")
 		return nil, fmt.Errorf("failed to ping postgres database: %w", err)
 	}

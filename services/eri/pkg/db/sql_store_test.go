@@ -8,19 +8,19 @@ import (
 )
 
 func TestSQLStoreIsDBTXNil(t *testing.T) {
+	t.Parallel()
 	var nilDB *sql.DB
 	var nilTx *sql.Tx
 	if !isDBTXNil(nil) || !isDBTXNil(nilDB) || !isDBTXNil(nilTx) {
 		t.Errorf("expected isDBTXNil to be true for nils")
 	}
-	database := setupTestDB(t)
-	defer database.Close()
-	if isDBTXNil(database) || isDBTXNil(dummyDBTX{}) {
+	if isDBTXNil(&sql.DB{}) || isDBTXNil(&sql.Tx{}) {
 		t.Errorf("expected isDBTXNil to be false for valid dbtx")
 	}
 }
 
 func TestSQLStoreUnavailable(t *testing.T) {
+	t.Parallel()
 	if store := NewSQLStore(nil); store != nil {
 		t.Errorf("NewSQLStore(nil) expected nil, got %v", store)
 	}
@@ -37,7 +37,8 @@ func TestSQLStoreUnavailable(t *testing.T) {
 }
 
 func TestSQLStoreHoistedMethods(t *testing.T) {
-	store := NewTestStore(t)
+	t.Parallel()
+	store := NewSQLStore(newTestDB(t))
 	ctx := context.Background()
 
 	if sum, wm, err := store.GetThreadSummary(ctx, "thread-test-1"); err != nil || sum != "" || wm != "" {
