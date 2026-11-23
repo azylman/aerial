@@ -195,7 +195,7 @@ cleanup() {
 trap cleanup SIGTERM SIGINT
 
 echo "Starting runner..."
-if [[ ",${RUNNER_LABELS}," == *",ci,"* ]]; then
+if [[ ",${RUNNER_LABELS}," == *",ci,"* || ",${RUNNER_LABELS}," == *",deploy,"* ]]; then
   run_as_ubuntu env -u GITHUB_PAT ./run.sh &
 else
   run_as_ubuntu ./run.sh &
