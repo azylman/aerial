@@ -14,6 +14,7 @@ import (
 
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/azylman/aerial/pkg/restatetest"
 	"github.com/azylman/aerial/services/coven/internal/config"
 	"github.com/azylman/aerial/services/coven/internal/store"
 )
@@ -353,7 +354,7 @@ func TestWorker_Start(t *testing.T) {
 // dreamOnce runs one CovenDreamer consolidation pass (facts, then skills) outside Restate.
 func dreamOnce(w *Worker) error {
 	d := NewCovenDreamer(w)
-	rc := covenRunContext{Context: context.Background()}
+	rc := restatetest.NewRunContext(context.Background())
 	_, factsErr := d.runConsolidateFacts(rc)
 	_, skillsErr := d.runConsolidateSkills(rc)
 	return errors.Join(factsErr, skillsErr)

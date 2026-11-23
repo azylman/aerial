@@ -4,29 +4,24 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"reflect"
 	"slices"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/nats-io/nats.go"
 	"github.com/prometheus/client_golang/prometheus"
 	restate "github.com/restatedev/sdk-go"
-	"github.com/restatedev/sdk-go/x/mocks"
-	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 
 	"github.com/azylman/aerial/pkg/pgtest"
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/pkg/pubsubtest"
+	"github.com/azylman/aerial/pkg/restatetest"
 	"github.com/azylman/aerial/services/coven/internal/config"
 	"github.com/azylman/aerial/services/coven/internal/store"
 )
@@ -438,108 +433,6 @@ func TestRunApp_Lifecycle(t *testing.T) {
 	}
 }
 
-// covenRunContext is the restate.RunContext stub.
-type covenRunContext struct {
-	context.Context
-}
-
-func (covenRunContext) Log() *slog.Logger         { return slog.Default() }
-func (covenRunContext) Request() *restate.Request { return nil }
-
-type covenRunCapture struct {
-	ran         bool
-	fnErr       error
-	isTerminal  bool
-	hasRetryCap bool
-}
-
-func stubCovenRun(mc *mocks.MockContext, keepTerminal bool) *covenRunCapture {
-	rec := &covenRunCapture{}
-	run := func(fn func(restate.RunContext) (any, error), output any, opts ...restate.RunOption) restate.TerminalError {
-		rec.ran = true
-		for _, opt := range opts {
-			if strings.Contains(fmt.Sprintf("%T", opt), "withMaxRetryAttempts") {
-				rec.hasRetryCap = true
-			}
-		}
-		res, err := fn(covenRunContext{Context: context.Background()})
-		rec.fnErr = err
-		rec.isTerminal = restate.IsTerminalError(err)
-		switch {
-		case err != nil && keepTerminal && restate.IsTerminalError(err):
-			return restate.AsTerminalError(err)
-		case err != nil && keepTerminal && rec.hasRetryCap:
-			return restate.TerminalErrorf("retries exhausted: %v", err)
-		case err != nil && keepTerminal:
-			return nil
-		case err != nil:
-			return restate.TerminalErrorf("%v", err)
-		}
-		if out := reflect.ValueOf(output); res != nil && out.Kind() == reflect.Pointer && !out.IsNil() {
-			out.Elem().Set(reflect.ValueOf(res))
-		}
-		return nil
-	}
-	for arity := 2; arity <= 6; arity++ {
-		mc.On("Run", slices.Repeat([]any{mock.Anything}, arity)...).Return(run).Maybe()
-	}
-	return rec
-}
-
-type covenSentCall struct {
-	service string
-	key     string
-	method  string
-	input   any
-	delayed bool
-	option  restate.SendOption
-}
-
-type covenSendCapture struct {
-	mu    sync.Mutex
-	calls []covenSentCall
-}
-
-func (c *covenSendCapture) record(args mock.Arguments) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.calls = append(c.calls, covenSentCall{service: args.String(0), key: args.String(1), method: args.String(2)})
-}
-
-func (c *covenSendCapture) complete(input any, delayed bool, option restate.SendOption) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	last := &c.calls[len(c.calls)-1]
-	last.input = input
-	last.delayed = delayed
-	last.option = option
-}
-
-func (c *covenSendCapture) snapshot() []covenSentCall {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return append([]covenSentCall(nil), c.calls...)
-}
-
-func captureCovenSends(t *testing.T, mc *mocks.MockContext) *covenSendCapture {
-	t.Helper()
-	rec := &covenSendCapture{}
-	client := mocks.NewMockClient(t)
-	invocation := mocks.NewMockInvocation(t)
-	mc.On("Object", mock.Anything, mock.Anything, mock.Anything).Run(rec.record).Return(client).Maybe()
-	client.On("Send", mock.Anything).Run(func(args mock.Arguments) { rec.complete(args.Get(0), false, nil) }).Return(invocation).Maybe()
-	client.On("Send", mock.Anything, mock.Anything).Run(func(args mock.Arguments) {
-		var opt restate.SendOption
-		if len(args) > 1 {
-			if o, ok := args.Get(1).(restate.SendOption); ok {
-				opt = o
-			}
-		}
-		rec.complete(args.Get(0), true, opt)
-	}).Return(invocation).Maybe()
-	return rec
-}
-
 func TestNewRestateServer(t *testing.T) {
 	t.Parallel()
 
@@ -623,20 +516,6 @@ type covenDreamerArmTestCase struct {
 	wantSend    bool
 }
 
-// stubDreamDueState backs dreamDueStateKey with *due: Get reads it, Set writes it.
-func stubDreamDueState(mc *mocks.MockContext, due *int64) {
-	mc.On("Get", dreamDueStateKey, mock.Anything).Run(func(args mock.Arguments) {
-		if p, ok := args.Get(1).(*int64); ok && p != nil {
-			*p = *due
-		}
-	}).Return(*due != 0, nil).Maybe()
-	mc.On("Set", dreamDueStateKey, mock.Anything).Run(func(args mock.Arguments) {
-		if v, ok := args.Get(1).(int64); ok {
-			*due = v
-		}
-	}).Return().Maybe()
-}
-
 func runCovenDreamerArmCase(t *testing.T, tc covenDreamerArmTestCase) {
 	t.Helper()
 	var worker *Worker
@@ -652,37 +531,34 @@ func runCovenDreamerArmCase(t *testing.T, tc covenDreamerArmTestCase) {
 		worker = NewWorker(WorkerConfig{Store: s})
 	}
 
-	mc := mocks.NewMockContext(t)
-	mc.On("Key").Return(tc.key).Maybe()
-	mc.On("Clear", legacyArmedStateKey).Return().Maybe()
-	mc.On("Clear", legacyFailuresStateKey).Return().Maybe()
-	var due int64
-	stubDreamDueState(mc, &due)
-	sends := captureCovenSends(t, mc)
+	opts := []restatetest.Option{restatetest.WithKeepTerminalOnly()}
 	if tc.failRun != nil {
-		mc.On("Run", mock.Anything, mock.Anything, mock.Anything).Return(restate.TerminalErrorf("%v", tc.failRun))
-	} else {
-		stubCovenRun(mc, true)
+		opts = append(opts, restatetest.WithRunError(tc.failRun))
 	}
+	h := restatetest.NewObjectHarness(t, tc.key, opts...)
 
 	dreamer := NewCovenDreamer(worker)
-	err := dreamer.Arm(restate.WithMockContext(mc), struct{}{})
+	err := dreamer.Arm(h.ObjCtx, struct{}{})
 	if tc.wantErrSub != "" {
 		require.Error(t, err)
 		require.Contains(t, err.Error(), tc.wantErrSub)
-		require.Empty(t, sends.snapshot())
+		require.Empty(t, h.Sends())
 		return
 	}
 	require.NoError(t, err)
 
-	calls := sends.snapshot()
+	calls := h.Sends()
 	require.Len(t, calls, 1)
-	require.Equal(t, "CovenDreamer", calls[0].service)
-	require.Equal(t, tc.wantStack, calls[0].key)
-	require.Equal(t, "Dream", calls[0].method)
-	require.Equal(t, tc.wantDelayed, calls[0].delayed)
+	require.Equal(t, "CovenDreamer", calls[0].Service)
+	require.Equal(t, tc.wantStack, calls[0].Key)
+	require.Equal(t, "Dream", calls[0].Method)
+	require.Equal(t, tc.wantDelayed, calls[0].Delayed)
+	dueVal, ok := h.State(dreamDueStateKey)
+	require.True(t, ok)
+	due, ok := dueVal.(int64)
+	require.True(t, ok)
 	require.NotZero(t, due, "Arm must store the due token")
-	require.Equal(t, DreamRequest{Due: due}, calls[0].input, "the sent Dream must carry the stored due token")
+	require.Equal(t, DreamRequest{Due: due}, calls[0].Input, "the sent Dream must carry the stored due token")
 }
 
 func TestCovenDreamer_Arm(t *testing.T) {
@@ -761,12 +637,11 @@ func TestCovenDreamer_Dream(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			mc := mocks.NewMockContext(t)
-			mc.On("Key").Return(tc.key).Maybe()
-			due := tc.storedDue
-			stubDreamDueState(mc, &due)
-			sends := captureCovenSends(t, mc)
-			runs := stubCovenRun(mc, true)
+			opts := []restatetest.Option{restatetest.WithKeepTerminalOnly()}
+			if tc.storedDue != 0 {
+				opts = append(opts, restatetest.WithInitialState(dreamDueStateKey, tc.storedDue))
+			}
+			h := restatetest.NewObjectHarness(t, tc.key, opts...)
 
 			var dreamer *CovenDreamer
 			if !tc.nilDreamer {
@@ -791,29 +666,37 @@ func TestCovenDreamer_Dream(t *testing.T) {
 				dreamer = NewCovenDreamer(worker)
 			}
 
-			err := dreamer.Dream(restate.WithMockContext(mc), DreamRequest{Due: tc.reqDue})
+			err := dreamer.Dream(h.ObjCtx, DreamRequest{Due: tc.reqDue})
 			if tc.wantErr {
 				require.Error(t, err)
 				require.True(t, restate.IsTerminalError(err))
 				return
 			}
 			require.NoError(t, err)
-			require.False(t, runs.hasRetryCap, "CovenDreamer.Dream must not cap retry attempts")
+			require.False(t, h.HasRetryCap(), "CovenDreamer.Dream must not cap retry attempts")
 
-			calls := sends.snapshot()
+			calls := h.Sends()
 			if !tc.wantSend {
 				require.Empty(t, calls)
+				dueVal, ok := h.State(dreamDueStateKey)
+				require.True(t, ok)
+				due, ok := dueVal.(int64)
+				require.True(t, ok)
 				require.Equal(t, tc.storedDue, due, "a superseded Dream must not touch the live token")
 				return
 			}
 			require.Len(t, calls, 1)
-			require.Equal(t, "CovenDreamer", calls[0].service)
-			require.Equal(t, tc.wantStack, calls[0].key)
-			require.Equal(t, "Dream", calls[0].method)
-			require.True(t, calls[0].delayed)
-			require.Equal(t, restate.WithDelay(DefaultDreamingMinInterval), calls[0].option)
+			require.Equal(t, "CovenDreamer", calls[0].Service)
+			require.Equal(t, tc.wantStack, calls[0].Key)
+			require.Equal(t, "Dream", calls[0].Method)
+			require.True(t, calls[0].Delayed)
+			require.Equal(t, restate.WithDelay(DefaultDreamingMinInterval), calls[0].Options[0])
+			dueVal, ok := h.State(dreamDueStateKey)
+			require.True(t, ok)
+			due, ok := dueVal.(int64)
+			require.True(t, ok)
 			require.NotEqual(t, tc.storedDue, due, "Dream must store a fresh due token")
-			require.Equal(t, DreamRequest{Due: due}, calls[0].input)
+			require.Equal(t, DreamRequest{Due: due}, calls[0].Input)
 		})
 	}
 }
@@ -822,11 +705,14 @@ func TestCovenDreamer_Dream(t *testing.T) {
 // /deployments fails with 500 for the first `failures` attempts (forever when negative, cancelling on the 3rd);
 // Arm cancels the run so the worker returns.
 type registrationAdminStub struct {
-	mu       sync.Mutex
-	failures int
-	cancel   context.CancelFunc
-	paths    []string
-	bodies   []restateDeploymentRequest
+	mu          sync.Mutex
+	failures    int
+	armFailures int
+	cancelOn    string
+	cancel      context.CancelFunc
+	paths       []string
+	bodies      []restateDeploymentRequest
+	armHeaders  []http.Header
 }
 
 func (s *registrationAdminStub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -837,9 +723,21 @@ func (s *registrationAdminStub) ServeHTTP(w http.ResponseWriter, r *http.Request
 	case "/deployments":
 		s.serveDeployments(w, r)
 	case "/CovenDreamer/aerial/Arm":
-		s.cancel()
+		s.armHeaders = append(s.armHeaders, r.Header.Clone())
+		armAttempt := len(s.armHeaders)
+		if (s.armFailures > 0 && armAttempt <= s.armFailures) || s.armFailures < 0 {
+			if s.cancelOn == "arm" && s.cancel != nil {
+				s.cancel()
+			}
+			http.Error(w, "arm failed", http.StatusServiceUnavailable)
+			return
+		}
+		if s.cancelOn != "never" && s.cancel != nil {
+			s.cancel()
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{}`))
 	default:
 		w.WriteHeader(http.StatusNotFound)
 	}
@@ -852,12 +750,17 @@ func (s *registrationAdminStub) serveDeployments(w http.ResponseWriter, r *http.
 		return
 	}
 	s.bodies = append(s.bodies, body)
+	if s.cancelOn == "deploy" && s.cancel != nil {
+		s.cancel()
+		http.Error(w, "deploy cancelled", http.StatusServiceUnavailable)
+		return
+	}
 	attempt := len(s.bodies)
 	if s.failures >= 0 && attempt > s.failures {
 		w.WriteHeader(http.StatusCreated)
 		return
 	}
-	if s.failures < 0 && attempt == 3 {
+	if s.failures < 0 && attempt == 3 && s.cancel != nil {
 		s.cancel()
 	}
 	http.Error(w, "boom", http.StatusInternalServerError)
@@ -927,150 +830,6 @@ func TestRunWorkerAfterRegistration(t *testing.T) {
 			require.InDelta(t, tc.wantGauge, gatheredGauge(t, "coven_restate_registered"), 0)
 		})
 	}
-}
-
-func TestWorker_StartDreamerArm_Success(t *testing.T) {
-	t.Parallel()
-
-	armHandled := make(chan struct{})
-	var gotArmEndpoint string
-	var gotArmIdempotency string
-	ingressServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasSuffix(r.URL.Path, "/CovenDreamer/aerial/Arm") {
-			gotArmEndpoint = r.URL.Path
-			gotArmIdempotency = r.Header.Get("Idempotency-Key")
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(`{}`))
-			select {
-			case <-armHandled:
-			default:
-				close(armHandled)
-			}
-			return
-		}
-		w.WriteHeader(http.StatusNotFound)
-	}))
-	defer ingressServer.Close()
-
-	wArm := NewWorker(WorkerConfig{
-		Stack:             "aerial",
-		RestateIngressURL: ingressServer.URL,
-		HTTPClient:        ingressServer.Client(),
-	})
-
-	ctxArm, cancelArm := context.WithCancel(context.Background())
-	go func() {
-		select {
-		case <-armHandled:
-		case <-time.After(2 * time.Second):
-		}
-		cancelArm()
-	}()
-	if err := wArm.Start(ctxArm); err != nil && !errors.Is(err, context.Canceled) {
-		t.Fatalf("unexpected start error: %v", err)
-	}
-
-	select {
-	case <-armHandled:
-	default:
-		t.Fatal("expected arm to be called")
-	}
-	require.Equal(t, "/CovenDreamer/aerial/Arm", gotArmEndpoint)
-	require.Equal(t, "coven:dreamer:arm:aerial", gotArmIdempotency)
-}
-
-func TestWorker_StartDreamerArm_Retry(t *testing.T) {
-	t.Parallel()
-
-	armRetryAttempts := atomic.Int32{}
-	armRetryHandled := make(chan struct{})
-	ingressRetryServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasSuffix(r.URL.Path, "/CovenDreamer/aerial/Arm") {
-			if armRetryAttempts.Add(1) == 1 {
-				w.WriteHeader(http.StatusServiceUnavailable)
-				return
-			}
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(`{}`))
-			select {
-			case <-armRetryHandled:
-			default:
-				close(armRetryHandled)
-			}
-			return
-		}
-		w.WriteHeader(http.StatusNotFound)
-	}))
-	defer ingressRetryServer.Close()
-
-	wArmRetry := NewWorker(WorkerConfig{
-		Stack:             "aerial",
-		RestateIngressURL: ingressRetryServer.URL,
-		HTTPClient:        ingressRetryServer.Client(),
-		ArmRetryInterval:  5 * time.Millisecond,
-	})
-	ctxArmRetry, cancelArmRetry := context.WithCancel(context.Background())
-	go func() {
-		select {
-		case <-armRetryHandled:
-		case <-time.After(2 * time.Second):
-		}
-		cancelArmRetry()
-	}()
-	if err := wArmRetry.Start(ctxArmRetry); err != nil && !errors.Is(err, context.Canceled) {
-		t.Fatalf("unexpected start error: %v", err)
-	}
-
-	select {
-	case <-armRetryHandled:
-	default:
-		t.Fatal("expected arm retry to succeed")
-	}
-	require.GreaterOrEqual(t, armRetryAttempts.Load(), int32(2))
-}
-
-func TestWorker_StartDreamerArm_ErrorAndExtractor(t *testing.T) {
-	t.Parallel()
-
-	errHandled := make(chan struct{})
-	ingressErrServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
-		select {
-		case <-errHandled:
-		default:
-			close(errHandled)
-		}
-	}))
-	defer ingressErrServer.Close()
-	wArmErr := NewWorker(WorkerConfig{
-		Stack:             "aerial",
-		RestateIngressURL: ingressErrServer.URL,
-		HTTPClient:        ingressErrServer.Client(),
-		ArmRetryInterval:  5 * time.Millisecond,
-	})
-	ctxArmErr, cancelArmErr := context.WithCancel(context.Background())
-	go func() {
-		select {
-		case <-errHandled:
-		case <-time.After(2 * time.Second):
-		}
-		cancelArmErr()
-	}()
-	if err := wArmErr.Start(ctxArmErr); err != nil && !errors.Is(err, context.Canceled) {
-		t.Fatalf("unexpected start error: %v", err)
-	}
-
-	select {
-	case <-errHandled:
-	default:
-		t.Fatal("expected arm error endpoint to be called")
-	}
-
-	// Extractor role exits immediately on cancellation
-	wExtractor := NewWorker(WorkerConfig{Role: "extractor"})
-	ctxExt, cancelExt := context.WithCancel(context.Background())
-	cancelExt()
-	require.ErrorIs(t, wExtractor.Start(ctxExt), context.Canceled)
 }
 
 func TestAdminExtract_RestateIngressExtractFn(t *testing.T) {
