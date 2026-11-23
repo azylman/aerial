@@ -169,12 +169,7 @@ func (c *RestateIngressClient) postJSON(ctx context.Context, service, key, metho
 	if c == nil || c.httpClient == nil {
 		return errors.New("restate ingress client is nil")
 	}
-	var reqURL string
-	if key == "" {
-		reqURL = fmt.Sprintf("%s/%s/%s", c.ingressURL, url.PathEscape(service), url.PathEscape(method))
-	} else {
-		reqURL = fmt.Sprintf("%s/%s/%s/%s", c.ingressURL, url.PathEscape(service), url.PathEscape(key), url.PathEscape(method))
-	}
+	reqURL := eriwire.RestateMethodEndpoint(c.ingressURL, service, key, method)
 	idemKey := ""
 	if len(idempotencyKey) > 0 {
 		idemKey = idempotencyKey[0]
@@ -197,7 +192,7 @@ func (c *RestateIngressClient) postJSON(ctx context.Context, service, key, metho
 // EnqueueThread enqueues a message into ThreadSession via Restate Ingress.
 func (c *RestateIngressClient) EnqueueThread(ctx context.Context, threadID string, req queue.ThreadEnqueueRequest, idempotencyKey ...string) (queue.ThreadEnqueueResponse, error) {
 	var resp queue.ThreadEnqueueResponse
-	svcName := queue.ThreadSessionServiceName(c.agentName)
+	svcName := eriwire.ThreadSessionServiceName(c.agentName)
 	err := c.postJSON(ctx, svcName, threadID, "Enqueue", req, &resp, idempotencyKey...)
 	return resp, err
 }
@@ -205,7 +200,7 @@ func (c *RestateIngressClient) EnqueueThread(ctx context.Context, threadID strin
 // CancelThreadTurn cancels pending messages and active turns for a thread.
 func (c *RestateIngressClient) CancelThreadTurn(ctx context.Context, threadID string, req queue.CancelTurnRequest) (queue.CancelTurnResponse, error) {
 	var resp queue.CancelTurnResponse
-	svcName := queue.ThreadSessionServiceName(c.agentName)
+	svcName := eriwire.ThreadSessionServiceName(c.agentName)
 	err := c.postJSON(ctx, svcName, threadID, "CancelTurn", req, &resp)
 	return resp, err
 }
@@ -213,7 +208,7 @@ func (c *RestateIngressClient) CancelThreadTurn(ctx context.Context, threadID st
 // EnqueueDispatch enqueues a dispatch request into DispatchSession via Restate Ingress.
 func (c *RestateIngressClient) EnqueueDispatch(ctx context.Context, sessionKey string, req eriwire.BrainDispatchRequest, idempotencyKey ...string) (eriwire.DispatchEnqueueResponse, error) {
 	var resp eriwire.DispatchEnqueueResponse
-	svcName := queue.DispatchSessionServiceName(c.agentName)
+	svcName := eriwire.DispatchSessionServiceName(c.agentName)
 	err := c.postJSON(ctx, svcName, sessionKey, "Enqueue", req, &resp, idempotencyKey...)
 	return resp, err
 }
@@ -221,7 +216,7 @@ func (c *RestateIngressClient) EnqueueDispatch(ctx context.Context, sessionKey s
 // AskVoice executes a synchronous voice turn via Restate Ingress.
 func (c *RestateIngressClient) AskVoice(ctx context.Context, deviceKey string, req queue.VoiceSessionRequest) (queue.VoiceSessionResult, error) {
 	var resp queue.VoiceSessionResult
-	svcName := queue.VoiceSessionServiceName(c.agentName)
+	svcName := eriwire.VoiceSessionServiceName(c.agentName)
 	err := c.postJSON(ctx, svcName, deviceKey, "Ask", req, &resp)
 	return resp, err
 }
@@ -229,7 +224,7 @@ func (c *RestateIngressClient) AskVoice(ctx context.Context, deviceKey string, r
 // CancelDispatchImmediate delivers cancellation to the unkeyed SessionManager service to preempt running dispatches without key queuing.
 func (c *RestateIngressClient) CancelDispatchImmediate(ctx context.Context, req queue.CancelDispatchControlRequest) (queue.CancelDispatchResponse, error) {
 	var resp queue.CancelDispatchResponse
-	svcName := queue.SessionManagerServiceName(c.agentName)
+	svcName := eriwire.SessionManagerServiceName(c.agentName)
 	err := c.postJSON(ctx, svcName, "", "CancelDispatch", req, &resp)
 	return resp, err
 }

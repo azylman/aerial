@@ -10,29 +10,29 @@ import (
 	"github.com/google/uuid"
 	restate "github.com/restatedev/sdk-go"
 
-	"github.com/azylman/aerial/pkg/agent"
+	"github.com/azylman/aerial/pkg/eriwire"
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
 )
 
 // ThreadSessionServiceName returns the Restate service name for ThreadSession.
 func ThreadSessionServiceName(name string) string {
-	return agent.ScopedServiceName("ThreadSession", name)
+	return eriwire.ThreadSessionServiceName(name)
 }
 
 // DispatchSessionServiceName returns the Restate service name for DispatchSession.
 func DispatchSessionServiceName(name string) string {
-	return agent.ScopedServiceName("DispatchSession", name)
+	return eriwire.DispatchSessionServiceName(name)
 }
 
 // VoiceSessionServiceName returns the Restate service name for VoiceSession.
 func VoiceSessionServiceName(name string) string {
-	return agent.ScopedServiceName("VoiceSession", name)
+	return eriwire.VoiceSessionServiceName(name)
 }
 
 // SessionManagerServiceName returns the Restate service name for SessionManager.
 func SessionManagerServiceName(name string) string {
-	return agent.ScopedServiceName("SessionManager", name)
+	return eriwire.SessionManagerServiceName(name)
 }
 
 // CancelDispatchControlRequest defines the request to cancel dispatches from the unkeyed session manager.
