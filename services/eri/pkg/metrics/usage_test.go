@@ -419,9 +419,10 @@ const museUsageFixture = `{"allowance":{"asOfMs":1795020360826,"source":"mint","
 func TestMuseUsageToGroups(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name, payload string
-		want          []QuotaGroup
-		wantErr       bool
+		name, payload   string
+		want            []QuotaGroup
+		wantErr         bool
+		wantErrContains []string
 	}{
 		{name: "live fixture", payload: museUsageFixture, want: []QuotaGroup{{Name: "Muse", Buckets: []QuotaBucket{
 			{ID: "muse-seven-day", Window: "weekly", ResetTime: "2026-11-23T00:00:00Z", RemainingFraction: 0.8},
@@ -435,6 +436,7 @@ func TestMuseUsageToGroups(t *testing.T) {
 			{ID: "muse-five-hour", Window: "5h", ResetTime: "", RemainingFraction: 1},
 		}}}},
 		{name: "missing allowance", payload: `{"hint":null}`, wantErr: true},
+		{name: "missing allowance surfaces reason and hint", payload: `{"reason":"credential_rejected","hint":"run muse auth login"}`, wantErr: true, wantErrContains: []string{"contains no allowance object", "credential_rejected", "run muse auth login"}},
 		{name: "all null windows", payload: `{"allowance":{"weekly":null,"window":null}}`, wantErr: true},
 		{name: "malformed", payload: `{bad`, wantErr: true},
 	}
@@ -444,6 +446,11 @@ func TestMuseUsageToGroups(t *testing.T) {
 			got, err := MuseUsageToGroups([]byte(tc.payload))
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("MuseUsageToGroups() error = %v, wantErr %v", err, tc.wantErr)
+			}
+			for _, wantSub := range tc.wantErrContains {
+				if err == nil || !strings.Contains(err.Error(), wantSub) {
+					t.Errorf("MuseUsageToGroups() error = %v, want substring %q", err, wantSub)
+				}
 			}
 			if !reflect.DeepEqual(got, tc.want) {
 				t.Errorf("MuseUsageToGroups() = %+v, want %+v", got, tc.want)
@@ -468,11 +475,11 @@ func TestRecordMuseUsageJSON(t *testing.T) {
 	}
 }
 
-func TestMuseUsageRunner(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	script := filepath.Join(dir, "mock-muse.sh")
-	body := `#!/bin/sh
+func mockMuseScriptBody(failStderr string) string {
+	if failStderr != "" {
+		return "#!/bin/sh\necho '" + failStderr + "' >&2\nexit 1\n"
+	}
+	return `#!/bin/sh
 if [ "$1" = "usage" ] && [ "$2" = "--json" ]; then
 	echo "HOME=$HOME"
 	echo "XDG_CONFIG_HOME=$XDG_CONFIG_HOME"
@@ -484,33 +491,66 @@ else
 	exit 1
 fi
 `
-	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	baseEnv := []string{
-		"HOME=/old",
-		"XDG_CONFIG_HOME=/old/config",
-		"XDG_DATA_HOME=/old/data",
-		"MUSE_AUTH_PATH=/old/auth.json",
-		"FOO=bar",
-	}
-	out, err := NewMuseUsageRunner(script, dir, baseEnv)(context.Background())
-	if err != nil || !strings.Contains(string(out), `"Muse Code Power Usage"`) {
-		t.Fatalf("NewMuseUsageRunner failed: err=%v, out=%s", err, string(out))
-	}
-	wantEnvChecks := []string{
+}
+
+func checkMuseRunnerHomeEnv(t *testing.T, dir, out string) {
+	t.Helper()
+	for _, check := range []string{
 		"HOME=" + dir,
 		"XDG_CONFIG_HOME=" + filepath.Join(dir, ".config"),
 		"XDG_DATA_HOME=" + filepath.Join(dir, ".local", "share"),
 		"MUSE_AUTH_PATH=" + filepath.Join(dir, ".config", "muse", "auth.json"),
-	}
-	for _, check := range wantEnvChecks {
-		if !strings.Contains(string(out), check) {
-			t.Errorf("NewMuseUsageRunner output missing expected env %q; got output:\n%s", check, string(out))
+	} {
+		if !strings.Contains(out, check) {
+			t.Errorf("NewMuseUsageRunner output missing expected env %q; got output:\n%s", check, out)
 		}
 	}
-	if strings.Contains(string(out), "/old") {
-		t.Errorf("NewMuseUsageRunner output contains leaked old env; got output:\n%s", string(out))
+	if strings.Contains(out, "/old") {
+		t.Errorf("NewMuseUsageRunner output contains leaked old env; got output:\n%s", out)
+	}
+}
+
+func TestMuseUsageRunner(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name            string
+		failStderr      string
+		wantErr         bool
+		wantErrContains string
+	}{
+		{name: "success pins home env"},
+		{name: "failure surfaces stderr", failStderr: "credential_rejected: run muse auth login", wantErr: true, wantErrContains: "credential_rejected: run muse auth login"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			script := filepath.Join(dir, "mock-muse.sh")
+			if err := os.WriteFile(script, []byte(mockMuseScriptBody(tc.failStderr)), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			baseEnv := []string{
+				"HOME=/old",
+				"XDG_CONFIG_HOME=/old/config",
+				"XDG_DATA_HOME=/old/data",
+				"MUSE_AUTH_PATH=/old/auth.json",
+				"FOO=bar",
+			}
+			out, err := NewMuseUsageRunner(script, dir, baseEnv)(context.Background())
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("NewMuseUsageRunner() error = %v, wantErr %v (out=%s)", err, tc.wantErr, string(out))
+			}
+			if tc.wantErrContains != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErrContains)) {
+				t.Errorf("NewMuseUsageRunner() error = %v, want substring %q", err, tc.wantErrContains)
+			}
+			if tc.wantErr {
+				return
+			}
+			if !strings.Contains(string(out), `"Muse Code Power Usage"`) {
+				t.Fatalf("NewMuseUsageRunner failed: err=%v, out=%s", err, string(out))
+			}
+			checkMuseRunnerHomeEnv(t, dir, string(out))
+		})
 	}
 	if got := DefaultMuseUsageRunner("", "", nil, true); got != nil {
 		t.Error("DefaultMuseUsageRunner in test mode = non-nil, want nil")

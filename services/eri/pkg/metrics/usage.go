@@ -342,6 +342,45 @@ type museUsageResponse struct {
 		Weekly *museUsageWindow `json:"weekly"`
 		Window *museUsageWindow `json:"window"`
 	} `json:"allowance"`
+	Hint   *string `json:"hint"`
+	Reason *string `json:"reason"`
+}
+
+// usageDiagnosticMaxLen bounds CLI-supplied diagnostic strings surfaced in
+// errors so UsagePoller warnings stay compact and never echo bulk payloads.
+const usageDiagnosticMaxLen = 200
+
+func truncateUsageDiagnostic(s string) string {
+	s = strings.TrimSpace(s)
+	if len(s) > usageDiagnosticMaxLen {
+		s = s[:usageDiagnosticMaxLen] + "..."
+	}
+	return s
+}
+
+func optUsageDiagnostic(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return truncateUsageDiagnostic(*s)
+}
+
+// museAllowanceMissingError keeps the frozen allowance-missing error prefix
+// while appending the CLI's own reason/hint diagnostics when present, so the
+// UsagePoller warning names a stale-auth failure instead of going silent.
+func museAllowanceMissingError(resp museUsageResponse) error {
+	msg := "muse usage payload contains no allowance object"
+	var details []string
+	if s := optUsageDiagnostic(resp.Reason); s != "" {
+		details = append(details, "reason="+s)
+	}
+	if s := optUsageDiagnostic(resp.Hint); s != "" {
+		details = append(details, "hint="+s)
+	}
+	if len(details) > 0 {
+		msg += " (" + strings.Join(details, ", ") + ")"
+	}
+	return errors.New(msg)
 }
 
 // MuseUsageToGroups maps a `muse usage --json` payload onto the shared QuotaGroup contract.
@@ -352,7 +391,7 @@ func MuseUsageToGroups(raw []byte) ([]QuotaGroup, error) {
 		return nil, err
 	}
 	if resp.Allowance == nil {
-		return nil, errors.New("muse usage payload contains no allowance object")
+		return nil, museAllowanceMissingError(resp)
 	}
 	windows := []struct {
 		id, window string
@@ -444,7 +483,20 @@ func newExecUsageRunner(bin, defaultBin, homeDir string, baseEnv []string, args 
 		cmd := exec.CommandContext(runCtx, resolved, args...)
 		cmd.Env = env
 		configureUsageCmd(cmd)
-		return cmd.Output()
+		var stderr strings.Builder
+		cmd.Stderr = &stderr
+		out, err := cmd.Output()
+		if err != nil {
+			// Surface the CLI's own stderr (e.g. credential_rejected) so the
+			// UsagePoller warning names the failure instead of logging a bare
+			// exit status. Only the trimmed, length-bounded stderr text is
+			// included: never env, tokens, or auth file contents.
+			if trimmed := truncateUsageDiagnostic(stderr.String()); trimmed != "" {
+				return nil, fmt.Errorf("usage command %q failed: %w (stderr: %s)", resolved, err, trimmed)
+			}
+			return nil, fmt.Errorf("usage command %q failed: %w", resolved, err)
+		}
+		return out, nil
 	}
 }
 

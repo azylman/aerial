@@ -206,7 +206,7 @@ type appOptions struct {
 	appConfig      *config.Config
 }
 
-func startUsagePoller(ctx context.Context, cur *config.ConfigData, ephemeralHome string, envVars []string) {
+func startUsagePoller(ctx context.Context, cur *config.ConfigData, ephemeralHome, discordHome string, envVars []string) {
 	if cur == nil {
 		return
 	}
@@ -218,7 +218,12 @@ func startUsagePoller(ctx context.Context, cur *config.ConfigData, ephemeralHome
 	case config.EngineCodex:
 		startUsagePollerFn(ctx, 10*time.Minute, metrics.DefaultCodexUsageRunner(filepath.Join(cur.DataDir, "codex", "auth.json"), false), metrics.RecordCodexUsageJSON)
 	case config.EngineMuse:
-		startUsagePollerFn(ctx, 10*time.Minute, metrics.DefaultMuseUsageRunner(cur.MuseBin, ephemeralHome, envVars, false), metrics.RecordMuseUsageJSON)
+		// The long-lived muse serve daemons keep Meta auth and session state
+		// fresh under the discord runtime home; the ephemeral home is a cold
+		// summarizer pool whose stale auth silently yields allowance-less
+		// payloads. Only muse runs here; every other engine keeps its
+		// existing home.
+		startUsagePollerFn(ctx, 10*time.Minute, metrics.DefaultMuseUsageRunner(cur.MuseBin, discordHome, envVars, false), metrics.RecordMuseUsageJSON)
 	}
 }
 
@@ -233,6 +238,7 @@ type agentPoolsBundle struct {
 	voicePool     *runner.DynamicVoicePool
 	allPools      []runner.AgentPool
 	ephemeralHome string
+	discordHome   string
 	poolEnv       []string
 }
 
@@ -310,6 +316,7 @@ func initializeAgentPools(cur *config.ConfigData, cfg Config, sessionMgr *sessio
 		voicePool:     voicePool,
 		allPools:      allPools,
 		ephemeralHome: ephemeralHome,
+		discordHome:   discordHome,
 		poolEnv:       poolEnv,
 	}
 }
@@ -410,7 +417,7 @@ func RunApp(ctx context.Context, cfg Config, opts ...AppOption) error {
 	}()
 
 	PrewarmProcessPoolsSequentially(ctx, pools.allPools...)
-	startUsagePoller(ctx, cur, pools.ephemeralHome, pools.poolEnv)
+	startUsagePoller(ctx, cur, pools.ephemeralHome, pools.discordHome, pools.poolEnv)
 
 	cls := classifier.New(appCfg, classifier.WithProcessPool(pools.ephemeralPool))
 
