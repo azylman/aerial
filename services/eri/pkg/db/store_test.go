@@ -58,9 +58,7 @@ func assertIsolatedMessageContent(ctx context.Context, t *testing.T, s Store, ms
 
 func TestStore_MultiAgentIsolation_Messages(t *testing.T) {
 	t.Parallel()
-	database := setupTestDB(t)
-	t.Cleanup(func() { _ = database.Close() })
-
+	database := newTestDB(t)
 	storeAlpha := NewSQLStore(database).WithAgent("agent-alpha")
 	storeBeta := NewSQLStore(database).WithAgent("agent-beta")
 	ctx := context.Background()
@@ -130,9 +128,7 @@ func TestStore_MultiAgentIsolation_Messages(t *testing.T) {
 
 func TestStore_MultiAgentIsolation_Sessions(t *testing.T) {
 	t.Parallel()
-	database := setupTestDB(t)
-	t.Cleanup(func() { _ = database.Close() })
-
+	database := newTestDB(t)
 	storeAlpha := NewSQLStore(database).WithAgent("agent-alpha")
 	storeBeta := NewSQLStore(database).WithAgent("agent-beta")
 	ctx := context.Background()
@@ -195,9 +191,7 @@ func TestStore_MultiAgentIsolation_Sessions(t *testing.T) {
 
 func TestStore_MultiAgentIsolation_TurnCounts(t *testing.T) {
 	t.Parallel()
-	database := setupTestDB(t)
-	t.Cleanup(func() { _ = database.Close() })
-
+	database := newTestDB(t)
 	storeAlpha := NewSQLStore(database).WithAgent("agent-alpha")
 	storeBeta := NewSQLStore(database).WithAgent("agent-beta")
 	ctx := context.Background()
@@ -248,9 +242,7 @@ func TestStore_MultiAgentIsolation_TurnCounts(t *testing.T) {
 
 func TestStore_MultiAgentIsolation_Records(t *testing.T) {
 	t.Parallel()
-	database := setupTestDB(t)
-	t.Cleanup(func() { _ = database.Close() })
-
+	database := newTestDB(t)
 	storeAlpha := NewSQLStore(database).WithAgent("agent-alpha")
 	storeBeta := NewSQLStore(database).WithAgent("agent-beta")
 	ctx := context.Background()

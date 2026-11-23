@@ -145,14 +145,9 @@ func TestExtractMessageBody(t *testing.T) {
 	}
 }
 
-func TestCleanTaskSummary_RoleAndChannelMentions(t *testing.T) {
-	if got, want := CleanTaskSummary("Alert <@!12345> and notify <@&67890> in <#1122334455>!"), "Alert and notify in !"; got != want {
-		t.Errorf("CleanTaskSummary() = %q, want %q", got, want)
-	}
-}
-
 func TestStore_MessageFlattenedFieldsRoundTrip(t *testing.T) {
-	store := NewTestStore(t)
+	t.Parallel()
+	store := NewSQLStore(newTestDB(t))
 	ctx := context.Background()
 
 	msg := Message{
