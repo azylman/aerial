@@ -20,7 +20,13 @@ import (
 	"github.com/azylman/aerial/services/prospera/internal/twilio"
 )
 
-func setupTestToolHandler() (*ToolHandler, *fakes.FakeStore, *fakes.FakeTwilio) {
+type testToolEnv struct {
+	handler *ToolHandler
+	store   *fakes.FakeStore
+	twilio  *fakes.FakeTwilio
+}
+
+func setupTestToolEnv() testToolEnv {
 	cfg := &config.Config{
 		TwilioFromNumber:      "+15105550100",
 		PublicWebhookBaseURL:  "https://webhooks.example.com",
@@ -34,7 +40,11 @@ func setupTestToolHandler() (*ToolHandler, *fakes.FakeStore, *fakes.FakeTwilio) 
 	reporter := delivery.NewReporter(fakes.StaticConfig{Cfg: cfg}, store, twilioMock)
 
 	handler := NewToolHandler(fakes.StaticConfig{Cfg: cfg}, store, twilioMock, sessionMgr, reporter)
-	return handler, store, twilioMock
+	return testToolEnv{
+		handler: handler,
+		store:   store,
+		twilio:  twilioMock,
+	}
 }
 
 type toolHandlerInitiateCallTestCase struct {
@@ -122,15 +132,15 @@ func TestToolHandler_InitiateCall(t *testing.T) {
 
 func runToolHandlerInitiateCallCase(t *testing.T, tc toolHandlerInitiateCallTestCase) {
 	t.Helper()
-	handler, store, twilioMock := setupTestToolHandler()
+	env := setupTestToolEnv()
 	if tc.twilioErr != "" {
-		twilioMock.CreateCallErr = errors.New(tc.twilioErr)
+		env.twilio.CreateCallErr = errors.New(tc.twilioErr)
 	}
 	if tc.updateStateErr != "" {
-		store.UpdateStateErr = errors.New(tc.updateStateErr)
+		env.store.UpdateStateErr = errors.New(tc.updateStateErr)
 	}
 
-	out, err := handler.InitiateCall(context.Background(), tc.args)
+	out, err := env.handler.InitiateCall(context.Background(), tc.args)
 	if (err != nil) != tc.wantErr {
 		t.Fatalf("InitiateCall() err = %v, wantErr = %v", err, tc.wantErr)
 	}
@@ -143,7 +153,7 @@ func runToolHandlerInitiateCallCase(t *testing.T, tc toolHandlerInitiateCallTest
 		}
 		return
 	}
-	assertToolHandlerInitiateCallSuccess(t, tc, out, store, twilioMock)
+	assertToolHandlerInitiateCallSuccess(t, tc, out, env.store, env.twilio)
 }
 
 func assertToolHandlerInitiateCallSuccess(t *testing.T, tc toolHandlerInitiateCallTestCase, out InitiateCallOutput, store *fakes.FakeStore, twilioMock *fakes.FakeTwilio) {
@@ -235,12 +245,12 @@ func setupMockGeminiSession(t *testing.T, callID string, handler *ToolHandler) {
 
 func runToolHandlerSteerCallCase(t *testing.T, tc toolHandlerSteerCallTestCase) {
 	t.Helper()
-	handler, _, _ := setupTestToolHandler()
+	env := setupTestToolEnv()
 	if tc.callID == "call-steer-active" {
-		setupMockGeminiSession(t, tc.callID, handler)
+		setupMockGeminiSession(t, tc.callID, env.handler)
 	}
 
-	_, err := handler.SteerCall(context.Background(), SteerCallArgs{
+	_, err := env.handler.SteerCall(context.Background(), SteerCallArgs{
 		CallID:  tc.callID,
 		Message: tc.msg,
 		Mode:    tc.mode,
@@ -287,20 +297,22 @@ func TestToolHandler_EndCall(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			handler, store, _ := setupTestToolHandler()
+			env := setupTestToolEnv()
 
 			if tc.callID == "call-active-1" {
-				_ = store.CreateOutboundCall(context.Background(), model.VoiceCall{
+				if err := env.store.CreateOutboundCall(context.Background(), model.VoiceCall{
 					CallID:          "call-active-1",
 					ProviderCallSID: "CA999",
 					State:           "in-progress",
 					FromNumber:      "+15105550100",
 					ToNumber:        "+15105550199",
 					ReportStatus:    tc.reportStatus,
-				}, 5)
+				}, 5); err != nil {
+					t.Fatalf("CreateOutboundCall failed: %v", err)
+				}
 			}
 
-			out, err := handler.EndCall(context.Background(), EndCallArgs{CallID: tc.callID})
+			out, err := env.handler.EndCall(context.Background(), EndCallArgs{CallID: tc.callID})
 			if (err != nil) != tc.wantErr {
 				t.Fatalf("EndCall() err = %v, wantErr = %v", err, tc.wantErr)
 			}
@@ -308,7 +320,7 @@ func TestToolHandler_EndCall(t *testing.T) {
 				t.Fatalf("EndCall() status = %s, want 'ended'", out.Status)
 			}
 			if tc.wantReportStatus != "" {
-				updated, getErr := store.GetCall(context.Background(), tc.callID)
+				updated, getErr := env.store.GetCall(context.Background(), tc.callID)
 				if getErr != nil || updated == nil {
 					t.Fatalf("GetCall() err = %v, call = %+v", getErr, updated)
 				}
@@ -323,17 +335,19 @@ func TestToolHandler_EndCall(t *testing.T) {
 func TestToolHandler_GetAndListCalls(t *testing.T) {
 	t.Parallel()
 
-	handler, store, _ := setupTestToolHandler()
-	_ = store.CreateOutboundCall(context.Background(), model.VoiceCall{
+	env := setupTestToolEnv()
+	if err := env.store.CreateOutboundCall(context.Background(), model.VoiceCall{
 		CallID:     "call-test-get",
 		State:      "in-progress",
 		FromNumber: "+15105550100",
 		ToNumber:   "+15105550199",
-	}, 5)
+	}, 5); err != nil {
+		t.Fatalf("CreateOutboundCall failed: %v", err)
+	}
 
 	t.Run("get existing call", func(t *testing.T) {
 		t.Parallel()
-		out, err := handler.GetCallStatus(context.Background(), GetCallStatusArgs{CallID: "call-test-get"})
+		out, err := env.handler.GetCallStatus(context.Background(), GetCallStatusArgs{CallID: "call-test-get"})
 		if err != nil || out.Call == nil || out.Call.CallID != "call-test-get" {
 			t.Fatalf("GetCallStatus() err = %v, out = %+v", err, out)
 		}
@@ -341,7 +355,7 @@ func TestToolHandler_GetAndListCalls(t *testing.T) {
 
 	t.Run("get empty call id fails", func(t *testing.T) {
 		t.Parallel()
-		_, err := handler.GetCallStatus(context.Background(), GetCallStatusArgs{CallID: ""})
+		_, err := env.handler.GetCallStatus(context.Background(), GetCallStatusArgs{CallID: ""})
 		if err == nil {
 			t.Fatal("expected error for empty call id")
 		}
@@ -349,7 +363,7 @@ func TestToolHandler_GetAndListCalls(t *testing.T) {
 
 	t.Run("get non-existent call", func(t *testing.T) {
 		t.Parallel()
-		_, err := handler.GetCallStatus(context.Background(), GetCallStatusArgs{CallID: "call-does-not-exist"})
+		_, err := env.handler.GetCallStatus(context.Background(), GetCallStatusArgs{CallID: "call-does-not-exist"})
 		if err == nil {
 			t.Fatal("expected error for non-existent call")
 		}
@@ -357,7 +371,7 @@ func TestToolHandler_GetAndListCalls(t *testing.T) {
 
 	t.Run("list calls", func(t *testing.T) {
 		t.Parallel()
-		out, err := handler.ListCalls(context.Background(), ListCallsArgs{Limit: 10})
+		out, err := env.handler.ListCalls(context.Background(), ListCallsArgs{Limit: 10})
 		if err != nil || len(out.Calls) == 0 {
 			t.Fatalf("ListCalls() err = %v, calls = %d", err, len(out.Calls))
 		}
@@ -367,19 +381,19 @@ func TestToolHandler_GetAndListCalls(t *testing.T) {
 func TestToolHandler_SMSAndPhone(t *testing.T) {
 	t.Parallel()
 
-	handler, _, _ := setupTestToolHandler()
+	env := setupTestToolEnv()
 
 	t.Run("send sms", func(t *testing.T) {
 		t.Parallel()
-		testToolHandlerSendSMS(t, handler)
+		testToolHandlerSendSMS(t, env.handler)
 	})
 	t.Run("list sms and calls", func(t *testing.T) {
 		t.Parallel()
-		testToolHandlerListSMSAndCalls(t, handler)
+		testToolHandlerListSMSAndCalls(t, env.handler)
 	})
 	t.Run("ensure phone number", func(t *testing.T) {
 		t.Parallel()
-		testToolHandlerEnsurePhone(t, handler)
+		testToolHandlerEnsurePhone(t, env.handler)
 	})
 }
 
@@ -399,11 +413,11 @@ func TestToolHandler_SendSMSStoreError(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			handler, store, _ := setupTestToolHandler()
+			env := setupTestToolEnv()
 			if tc.saveErr != "" {
-				store.SaveErr = errors.New(tc.saveErr)
+				env.store.SaveErr = errors.New(tc.saveErr)
 			}
-			out, err := handler.SendSMS(context.Background(), SendSMSArgs{
+			out, err := env.handler.SendSMS(context.Background(), SendSMSArgs{
 				To:   "+15105550199",
 				Body: "Test SMS message",
 			})
@@ -460,10 +474,18 @@ func testToolHandlerListSMSAndCalls(t *testing.T, handler *ToolHandler) {
 		t.Fatalf("ListSMS() err = %v", err)
 	}
 
-	_, _ = handler.ListSMS(context.Background(), ListSMSArgs{Limit: -1})
-	_, _ = handler.ListSMS(context.Background(), ListSMSArgs{Limit: 100})
-	_, _ = handler.ListCalls(context.Background(), ListCallsArgs{Limit: -1})
-	_, _ = handler.ListCalls(context.Background(), ListCallsArgs{Limit: 100})
+	if _, err := handler.ListSMS(context.Background(), ListSMSArgs{Limit: -1}); err != nil {
+		t.Fatalf("ListSMS(-1): %v", err)
+	}
+	if _, err := handler.ListSMS(context.Background(), ListSMSArgs{Limit: 100}); err != nil {
+		t.Fatalf("ListSMS(100): %v", err)
+	}
+	if _, err := handler.ListCalls(context.Background(), ListCallsArgs{Limit: -1}); err != nil {
+		t.Fatalf("ListCalls(-1): %v", err)
+	}
+	if _, err := handler.ListCalls(context.Background(), ListCallsArgs{Limit: 100}); err != nil {
+		t.Fatalf("ListCalls(100): %v", err)
+	}
 
 	emptyStore := fakes.NewFakeStore()
 	h := NewToolHandler(handler.cfgSrc, emptyStore, &fakes.FakeTwilio{}, nil, nil)
@@ -479,13 +501,13 @@ func testToolHandlerListSMSAndCalls(t *testing.T, handler *ToolHandler) {
 
 func testToolHandlerEnsurePhone(t *testing.T, handler *ToolHandler) {
 	t.Helper()
-	h, _, twilioMock := setupTestToolHandler()
-	out, err := h.EnsurePhoneNumber(context.Background(), EnsurePhoneNumberArgs{AreaCode: "510"})
+	env := setupTestToolEnv()
+	out, err := env.handler.EnsurePhoneNumber(context.Background(), EnsurePhoneNumberArgs{AreaCode: "510"})
 	if err != nil || out.PhoneNumber == "" || out.Status != "configured" {
 		t.Fatalf("EnsurePhoneNumber() err = %v, out = %+v", err, out)
 	}
-	if twilioMock.LastWebhookBaseURL != "https://webhooks.example.com/api/webhooks" {
-		t.Fatalf("lastWebhookBaseURL = %q, want https://webhooks.example.com/api/webhooks", twilioMock.LastWebhookBaseURL)
+	if env.twilio.LastWebhookBaseURL != "https://webhooks.example.com/api/webhooks" {
+		t.Fatalf("lastWebhookBaseURL = %q, want https://webhooks.example.com/api/webhooks", env.twilio.LastWebhookBaseURL)
 	}
 
 	outDef, errDef := handler.EnsurePhoneNumber(context.Background(), EnsurePhoneNumberArgs{AreaCode: ""})
@@ -497,9 +519,9 @@ func testToolHandlerEnsurePhone(t *testing.T, handler *ToolHandler) {
 func TestMCPStreamableHTTPHandler(t *testing.T) {
 	t.Parallel()
 
-	handler, store, _ := setupTestToolHandler()
+	env := setupTestToolEnv()
 	mcpServer := mcp.NewServer(&mcp.Implementation{Name: "prospera", Version: "1.0.0"}, nil)
-	RegisterProsperaMCPTools(mcpServer, handler)
+	RegisterProsperaMCPTools(mcpServer, env.handler)
 
 	streamHandler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server {
 		return mcpServer
@@ -517,13 +539,15 @@ func TestMCPStreamableHTTPHandler(t *testing.T) {
 	client := srv.Client()
 
 	// Prepopulate a call for MCP call tests
-	_ = store.CreateOutboundCall(context.Background(), model.VoiceCall{
+	if err := env.store.CreateOutboundCall(context.Background(), model.VoiceCall{
 		CallID:          "call-mcp-active",
 		ProviderCallSID: "CA-mcp-1",
 		State:           "in-progress",
 		FromNumber:      "+15105550100",
 		ToNumber:        "+15105550199",
-	}, 5)
+	}, 5); err != nil {
+		t.Fatalf("CreateOutboundCall failed: %v", err)
+	}
 
 	tests := []struct {
 		name     string
@@ -608,7 +632,10 @@ func TestMCPStreamableHTTPHandler(t *testing.T) {
 			}
 			defer resp.Body.Close()
 
-			respBytes, _ := io.ReadAll(resp.Body)
+			respBytes, err := io.ReadAll(resp.Body)
+			if err != nil {
+				t.Fatalf("ReadAll: %v", err)
+			}
 			if resp.StatusCode != tc.wantCode {
 				t.Fatalf("status code = %d, want %d, body: %s", resp.StatusCode, tc.wantCode, string(respBytes))
 			}
@@ -825,11 +852,13 @@ func TestToolHandler_SteerEndAndEnsurePhoneFallbacks(t *testing.T) {
 	t.Run("end call with twilio hangup error and reporter error", func(t *testing.T) {
 		t.Parallel()
 		store := fakes.NewFakeStore()
-		_ = store.CreateOutboundCall(context.Background(), model.VoiceCall{
+		if err := store.CreateOutboundCall(context.Background(), model.VoiceCall{
 			CallID:          "call-hangup-err",
 			ProviderCallSID: "CA-hangup-err",
 			State:           "in-progress",
-		}, 5)
+		}, 5); err != nil {
+			t.Fatalf("CreateOutboundCall failed: %v", err)
+		}
 		twilioMock := &fakes.FakeTwilio{HangupErr: errors.New("hangup failed")}
 		rep := delivery.NewReporter(fakes.StaticConfig{Cfg: &config.Config{BrainURL: ""}}, store, twilioMock)
 		h := NewToolHandler(fakes.StaticConfig{Cfg: cfg}, store, twilioMock, nil, rep)
@@ -870,10 +899,12 @@ func TestToolHandler_SteerEndAndEnsurePhoneFallbacks(t *testing.T) {
 	t.Run("end call update state error", func(t *testing.T) {
 		t.Parallel()
 		store := fakes.NewFakeStore()
-		_ = store.CreateOutboundCall(context.Background(), model.VoiceCall{
+		if err := store.CreateOutboundCall(context.Background(), model.VoiceCall{
 			CallID: "call-upd-err",
 			State:  "in-progress",
-		}, 5)
+		}, 5); err != nil {
+			t.Fatalf("CreateOutboundCall failed: %v", err)
+		}
 		store.UpdateStateErr = errors.New("update state failure")
 		h := NewToolHandler(fakes.StaticConfig{Cfg: cfg}, store, &fakes.FakeTwilio{}, nil, nil)
 

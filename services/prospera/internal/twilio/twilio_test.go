@@ -13,6 +13,9 @@ import (
 	"testing"
 	"time"
 
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/azylman/aerial/services/prospera/internal/fakes"
 	"github.com/azylman/aerial/services/prospera/internal/twilio"
 )
@@ -532,7 +535,10 @@ func runCreateCallCase(t *testing.T, tc createCallTestCase) {
 			http.Error(w, "not found", http.StatusNotFound)
 			return
 		}
-		_ = r.ParseForm()
+		if err := r.ParseForm(); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 		if tc.req.StatusCallback != "" && r.FormValue("StatusCallback") != tc.req.StatusCallback {
 			http.Error(w, "missing StatusCallback", http.StatusBadRequest)
 			return
@@ -610,7 +616,10 @@ func TestHTTPTwilioClient_HangupCall(t *testing.T) {
 					http.Error(w, "not found", http.StatusNotFound)
 					return
 				}
-				_ = r.ParseForm()
+				if err := r.ParseForm(); err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
 				if r.FormValue("Status") != "completed" {
 					http.Error(w, "expected completed status", http.StatusBadRequest)
 					return
@@ -724,19 +733,21 @@ func TestHTTPTwilioClient_IsCallActive(t *testing.T) {
 	}
 }
 
+type sendSMSTestCase struct {
+	name       string
+	to         string
+	from       string
+	body       string
+	statusCode int
+	respBody   string
+	wantSID    string
+	wantErr    bool
+}
+
 func TestHTTPTwilioClient_SendSMS(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
-		name       string
-		to         string
-		from       string
-		body       string
-		statusCode int
-		respBody   string
-		wantSID    string
-		wantErr    bool
-	}{
+	tests := []sendSMSTestCase{
 		{
 			name:       "successful sms dispatch",
 			to:         "+15105550199",
@@ -776,38 +787,46 @@ func TestHTTPTwilioClient_SendSMS(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.Method != http.MethodPost || r.URL.Path != "/2010-04-01/Accounts/AC123/Messages.json" {
-					http.Error(w, "not found", http.StatusNotFound)
-					return
-				}
-				_ = r.ParseForm()
-				if r.FormValue("To") != tc.to || r.FormValue("Body") != tc.body {
-					http.Error(w, "bad form", http.StatusBadRequest)
-					return
-				}
-				if tc.statusCode != 0 {
-					w.WriteHeader(tc.statusCode)
-				}
-				_, _ = w.Write([]byte(tc.respBody))
-			}))
-			t.Cleanup(server.Close)
-
-			client := twilio.NewHTTPTwilioClient("AC123", "token123", twilio.WithTwilioBaseURL(server.URL), twilio.WithTwilioHTTPClient(server.Client()))
-			sid, err := client.SendSMS(context.Background(), tc.to, tc.from, tc.body)
-			if tc.wantErr {
-				if err == nil {
-					t.Fatal("expected error, got nil")
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if sid != tc.wantSID {
-				t.Fatalf("sid = %q, want %q", sid, tc.wantSID)
-			}
+			runSendSMSCase(t, tc)
 		})
+	}
+}
+
+func runSendSMSCase(t *testing.T, tc sendSMSTestCase) {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/2010-04-01/Accounts/AC123/Messages.json" {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		if err := r.ParseForm(); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if r.FormValue("To") != tc.to || r.FormValue("Body") != tc.body {
+			http.Error(w, "bad form", http.StatusBadRequest)
+			return
+		}
+		if tc.statusCode != 0 {
+			w.WriteHeader(tc.statusCode)
+		}
+		_, _ = w.Write([]byte(tc.respBody))
+	}))
+	t.Cleanup(server.Close)
+
+	client := twilio.NewHTTPTwilioClient("AC123", "token123", twilio.WithTwilioBaseURL(server.URL), twilio.WithTwilioHTTPClient(server.Client()))
+	sid, err := client.SendSMS(context.Background(), tc.to, tc.from, tc.body)
+	if tc.wantErr {
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+		return
+	}
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if sid != tc.wantSID {
+		t.Fatalf("sid = %q, want %q", sid, tc.wantSID)
 	}
 }
 
@@ -977,7 +996,9 @@ func handleEnsurePhoneMock(t *testing.T, w http.ResponseWriter, r *http.Request,
 
 func handleUpdatePhoneNumberMock(t *testing.T, w http.ResponseWriter, r *http.Request, code int) {
 	t.Helper()
-	_ = r.ParseForm()
+	if err := r.ParseForm(); err != nil {
+		t.Errorf("ParseForm failed: %v", err)
+	}
 	if r.FormValue("VoiceUrl") != "https://prospera.aerial/api/webhooks/twilio/voice" {
 		t.Errorf("VoiceUrl = %q, want https://prospera.aerial/api/webhooks/twilio/voice", r.FormValue("VoiceUrl"))
 	}
@@ -994,7 +1015,9 @@ func handleUpdatePhoneNumberMock(t *testing.T, w http.ResponseWriter, r *http.Re
 
 func handleBuyPhoneNumberMock(t *testing.T, w http.ResponseWriter, r *http.Request, code int, body string) {
 	t.Helper()
-	_ = r.ParseForm()
+	if err := r.ParseForm(); err != nil {
+		t.Errorf("ParseForm failed: %v", err)
+	}
 	if r.FormValue("VoiceUrl") != "" && r.FormValue("VoiceUrl") != "https://prospera.aerial/api/webhooks/twilio/voice" {
 		t.Errorf("buy VoiceUrl = %q, want https://prospera.aerial/api/webhooks/twilio/voice", r.FormValue("VoiceUrl"))
 	}
@@ -1134,7 +1157,12 @@ func TestNewHTTPTwilioClient_TraceHeaders(t *testing.T) {
 				w.WriteHeader(http.StatusOK)
 			}))
 			t.Cleanup(srv.Close)
-			ctx, _ := fakes.TraceCaller(tc.withParent)
+			ctx := context.Background()
+			if tc.withParent {
+				var span trace.Span
+				ctx, span = otel.Tracer("test").Start(ctx, "caller")
+				span.End()
+			}
 			if err := twilio.NewHTTPTwilioClient("AC1", "tok", twilio.WithTwilioBaseURL(srv.URL)).HangupCall(ctx, "CA1"); err != nil {
 				t.Fatalf("HangupCall: %v", err)
 			}

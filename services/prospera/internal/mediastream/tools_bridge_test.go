@@ -294,7 +294,7 @@ func TestMediaStreamSession_HandleTwilioHangupMark(t *testing.T) {
 	t.Parallel()
 
 	st := testutil.SetUpTestStore(t)
-	_ = st.CreateOutboundCall(context.Background(), model.VoiceCall{
+	if err := st.CreateOutboundCall(context.Background(), model.VoiceCall{
 		CallID:     "call-hangup-stored",
 		Direction:  "outbound",
 		State:      "in-progress",
@@ -303,7 +303,9 @@ func TestMediaStreamSession_HandleTwilioHangupMark(t *testing.T) {
 		Brief:      model.CallBrief{Task: "Confirm doctor visit"},
 		StartedAt:  time.Now().UTC(),
 		UpdatedAt:  time.Now().UTC(),
-	}, 5)
+	}, 5); err != nil {
+		t.Fatalf("CreateOutboundCall failed: %v", err)
+	}
 
 	failingClient := &fakes.FakeTwilio{HangupErr: errors.New("hangup boom")}
 	plainClient := &fakes.FakeTwilio{}

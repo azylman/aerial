@@ -92,7 +92,11 @@ func runMainSignalCase(t *testing.T, tc runAppMainSignalTestCase) {
 		if tc.reloadCfg == nil {
 			return tc.runErr
 		}
-		gotStatus, _ = cfgSrc.Reload()
+		var reloadErr error
+		gotStatus, reloadErr = cfgSrc.Reload()
+		if reloadErr != nil {
+			t.Errorf("cfgSrc.Reload() error: %v", reloadErr)
+		}
 		if !tc.wantCanceled {
 			canceled = ctx.Err() != nil
 			return tc.runErr
