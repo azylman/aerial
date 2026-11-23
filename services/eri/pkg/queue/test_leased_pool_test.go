@@ -130,9 +130,15 @@ func (p *testRunnerAgentPool) AcquireLease(ctx context.Context, targetKey string
 	}
 	var rec runner.SessionRecord
 	if p.cfg.Store != nil {
-		rec.ActiveSessionID, _ = p.cfg.Store.GetSessionID(ctx, trimmedKey)
-		rec.TurnCount, _ = p.cfg.Store.GetSessionTurnCount(ctx, trimmedKey)
-		rec.PreviousSessionID, _ = p.cfg.Store.GetPreviousSessionID(ctx, trimmedKey)
+		if id, err := p.cfg.Store.GetSessionID(ctx, trimmedKey); err == nil {
+			rec.ActiveSessionID = id
+		}
+		if cnt, err := p.cfg.Store.GetSessionTurnCount(ctx, trimmedKey); err == nil {
+			rec.TurnCount = cnt
+		}
+		if prev, err := p.cfg.Store.GetPreviousSessionID(ctx, trimmedKey); err == nil {
+			rec.PreviousSessionID = prev
+		}
 	} else {
 		s.mu.Lock()
 		rec.ActiveSessionID, rec.TurnCount, rec.PreviousSessionID = s.sessionID, s.turnCount, s.prevSessionID

@@ -179,10 +179,13 @@ func mockJSONResponseWithUsage(convID, responseText string, usage runner.TokenUs
 	if convID == "" {
 		convID = uuid.New().String()
 	}
-	payload, _ := json.Marshal(map[string]any{
+	payload, err := json.Marshal(map[string]any{
 		"conversation_id": convID, "status": "SUCCESS", "response": responseText,
 		"duration_seconds": 1.0, "num_turns": 1, "usage": usage,
 	})
+	if err != nil {
+		panic(err)
+	}
 	return string(payload)
 }
 
@@ -190,10 +193,13 @@ func mockMultiTurnJSONResponse(convID, responseText string, numTurns int) string
 	if convID == "" {
 		convID = uuid.New().String()
 	}
-	payload, _ := json.Marshal(map[string]any{
+	payload, err := json.Marshal(map[string]any{
 		"conversation_id": convID, "status": "SUCCESS", "response": responseText,
 		"duration_seconds": 1.0, "num_turns": numTurns,
 	})
+	if err != nil {
+		panic(err)
+	}
 	return string(payload)
 }
 
@@ -209,6 +215,25 @@ type mockRunnerStep struct {
 	writeTranscript bool
 }
 
+func writeMockRunnerTranscript(tmpHome, convID string) error {
+	sessDir := filepath.Join(tmpHome, ".gemini", "antigravity-cli", "brain", convID)
+	if err := os.MkdirAll(filepath.Join(sessDir, ".system_generated", "logs"), 0o755); err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(sessDir, ".system_generated", "logs", "transcript.jsonl"), []byte(`{"step_index":0}`+"\n"), 0o644); err != nil {
+		return err
+	}
+	cliPbDir := filepath.Join(tmpHome, ".gemini", "antigravity-cli", "conversations")
+	if err := os.MkdirAll(cliPbDir, 0o755); err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(cliPbDir, convID+".pb"), []byte("mock-pb"), 0o644); err != nil {
+		return err
+	}
+	now := time.Now()
+	return os.Chtimes(sessDir, now, now)
+}
+
 func execMockRunnerStep(step mockRunnerStep, tmpHome, sessionID string) (string, string, int, error) {
 	if step.panicMsg != "" {
 		panic(step.panicMsg)
@@ -221,14 +246,9 @@ func execMockRunnerStep(step mockRunnerStep, tmpHome, sessionID string) (string,
 		if convID == "" {
 			convID = uuid.New().String()
 		}
-		sessDir := filepath.Join(tmpHome, ".gemini", "antigravity-cli", "brain", convID)
-		_ = os.MkdirAll(filepath.Join(sessDir, ".system_generated", "logs"), 0o755)
-		_ = os.WriteFile(filepath.Join(sessDir, ".system_generated", "logs", "transcript.jsonl"), []byte(`{"step_index":0}`+"\n"), 0o644)
-		cliPbDir := filepath.Join(tmpHome, ".gemini", "antigravity-cli", "conversations")
-		_ = os.MkdirAll(cliPbDir, 0o755)
-		_ = os.WriteFile(filepath.Join(cliPbDir, convID+".pb"), []byte("mock-pb"), 0o644)
-		now := time.Now()
-		_ = os.Chtimes(sessDir, now, now)
+		if err := writeMockRunnerTranscript(tmpHome, convID); err != nil {
+			return "", "", 1, err
+		}
 	}
 	if step.errMsg != "" {
 		return step.rawStdout, step.stderr, step.exitCode, errors.New(step.errMsg)
@@ -278,6 +298,52 @@ type workerTestCase struct {
 	wantAttemptPromptContains, wantAttemptPromptExcludes                                                                                map[int][]string
 }
 
+func seedWorkerSessionFiles(t *testing.T, tmpHome string, sessMgr *session.Manager, store *db.SQLStore, sqlDB *sql.DB, threadID, sessionID string, seedIdleAge time.Duration, seedTurnCount int) {
+	t.Helper()
+	sessDir, err := ensureTestSessionDir(sessMgr, sessionID)
+	if err != nil {
+		t.Fatalf("ensureTestSessionDir: %v", err)
+	}
+	cliPbDir := filepath.Join(tmpHome, ".gemini", "antigravity-cli", "conversations")
+	if err := os.MkdirAll(cliPbDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	pbFile := filepath.Join(cliPbDir, sessionID+".pb")
+	if err := os.WriteFile(pbFile, []byte("mock-pb"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if seedIdleAge <= 0 {
+		return
+	}
+	idleTime := time.Now().UTC().Add(-seedIdleAge)
+	seedSessionInfo(t, store, sqlDB, db.SessionInfo{ThreadID: threadID, InternalSessionID: sessionID, TurnCount: seedTurnCount, CreatedAt: idleTime, UpdatedAt: idleTime})
+	if err := os.Chtimes(pbFile, idleTime, idleTime); err != nil {
+		t.Fatalf("Chtimes: %v", err)
+	}
+	if err := os.Chtimes(cliPbDir, idleTime, idleTime); err != nil {
+		t.Fatalf("Chtimes: %v", err)
+	}
+	if err := os.Chtimes(sessDir, idleTime, idleTime); err != nil {
+		t.Fatalf("Chtimes: %v", err)
+	}
+}
+
+func seedWorkerTranscriptFiles(t *testing.T, tmpHome string, seedFiles map[string]string) {
+	t.Helper()
+	tNow := time.Now().UTC()
+	for sessID, fileContent := range seedFiles {
+		sessDir := filepath.Join(tmpHome, ".gemini", "antigravity-cli", "brain", sessID, ".system_generated", "logs")
+		if err := os.MkdirAll(sessDir, 0o755); err != nil {
+			t.Fatalf("MkdirAll: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(sessDir, "transcript.jsonl"), []byte(strings.NewReplacer(
+			"{{TS0}}", tNow.Format(time.RFC3339Nano), "{{TS1}}", tNow.Add(time.Second).Format(time.RFC3339Nano), "{{TS2}}", tNow.Add(2*time.Second).Format(time.RFC3339Nano),
+		).Replace(fileContent)), 0o600); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+	}
+}
+
 func initWorkerTestSession(t *testing.T, tc workerTestCase, store *db.SQLStore, sqlDB *sql.DB) (string, *session.Manager, string) {
 	t.Helper()
 	var tmpHome, threadID string
@@ -290,30 +356,14 @@ func initWorkerTestSession(t *testing.T, tc workerTestCase, store *db.SQLStore, 
 		threadID = tc.messages[0].ThreadID
 	}
 	if tc.initialSessionID != "" {
-		_ = saveSessionID(store, threadID, tc.initialSessionID)
+		if err := saveSessionID(store, threadID, tc.initialSessionID); err != nil {
+			t.Fatalf("saveSessionID: %v", err)
+		}
 		if sessMgr != nil && len(tc.seedTranscriptFiles) == 0 {
-			sessDir, _ := ensureTestSessionDir(sessMgr, tc.initialSessionID)
-			cliPbDir := filepath.Join(tmpHome, ".gemini", "antigravity-cli", "conversations")
-			_ = os.MkdirAll(cliPbDir, 0o755)
-			pbFile := filepath.Join(cliPbDir, tc.initialSessionID+".pb")
-			_ = os.WriteFile(pbFile, []byte("mock-pb"), 0o644)
-			if tc.seedIdleAge > 0 {
-				idleTime := time.Now().UTC().Add(-tc.seedIdleAge)
-				seedSessionInfo(t, store, sqlDB, db.SessionInfo{ThreadID: threadID, InternalSessionID: tc.initialSessionID, TurnCount: tc.seedTurnCount, CreatedAt: idleTime, UpdatedAt: idleTime})
-				_ = os.Chtimes(pbFile, idleTime, idleTime)
-				_ = os.Chtimes(cliPbDir, idleTime, idleTime)
-				_ = os.Chtimes(sessDir, idleTime, idleTime)
-			}
+			seedWorkerSessionFiles(t, tmpHome, sessMgr, store, sqlDB, threadID, tc.initialSessionID, tc.seedIdleAge, tc.seedTurnCount)
 		}
 	}
-	tNow := time.Now().UTC()
-	for sessID, fileContent := range tc.seedTranscriptFiles {
-		sessDir := filepath.Join(tmpHome, ".gemini", "antigravity-cli", "brain", sessID, ".system_generated", "logs")
-		_ = os.MkdirAll(sessDir, 0o755)
-		_ = os.WriteFile(filepath.Join(sessDir, "transcript.jsonl"), []byte(strings.NewReplacer(
-			"{{TS0}}", tNow.Format(time.RFC3339Nano), "{{TS1}}", tNow.Add(time.Second).Format(time.RFC3339Nano), "{{TS2}}", tNow.Add(2*time.Second).Format(time.RFC3339Nano),
-		).Replace(fileContent)), 0o600)
-	}
+	seedWorkerTranscriptFiles(t, tmpHome, tc.seedTranscriptFiles)
 	return tmpHome, sessMgr, threadID
 }
 
@@ -325,7 +375,9 @@ func setupWorkerTestPNG(t *testing.T, tc workerTestCase, steps []mockRunnerStep,
 	var imgBuf bytes.Buffer
 	_ = (&png.Encoder{CompressionLevel: tc.seedPNGLevel}).Encode(&imgBuf, tc.seedPNGImage)
 	testImgPath := filepath.Join(t.TempDir(), tc.seedPNGFilename)
-	_ = os.WriteFile(testImgPath, imgBuf.Bytes(), 0o600)
+	if err := os.WriteFile(testImgPath, imgBuf.Bytes(), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
 	for i := range steps {
 		steps[i].response = strings.ReplaceAll(steps[i].response, "{{IMAGE_PATH}}", testImgPath)
 	}
@@ -428,12 +480,20 @@ func assertWorkerPromptsAndState(t *testing.T, tc workerTestCase, store db.Store
 		assertExcludesAll(t, promptsSeen[attemptIdx], subs, fmt.Sprintf("attempt %d prompt", attemptIdx))
 	}
 	if tc.wantSavedSession != "" {
-		if s, _ := getSessionID(store, threadID); s != tc.wantSavedSession {
+		s, err := getSessionID(store, threadID)
+		if err != nil {
+			t.Fatalf("getSessionID: %v", err)
+		}
+		if s != tc.wantSavedSession {
 			t.Errorf("savedSession = %q, want %q", s, tc.wantSavedSession)
 		}
 	}
 	if tc.checkTurnCount {
-		if c, _ := getSessionTurnCount(store, threadID); c != tc.wantTurnCount {
+		c, err := getSessionTurnCount(store, threadID)
+		if err != nil {
+			t.Fatalf("getSessionTurnCount: %v", err)
+		}
+		if c != tc.wantTurnCount {
 			t.Errorf("turnCount = %d, want %d", c, tc.wantTurnCount)
 		}
 	}
@@ -497,7 +557,9 @@ func runWorkerTestCase(t *testing.T, tc workerTestCase) {
 
 	if tc.seedTurnCount > 0 && tc.seedIdleAge == 0 {
 		for range tc.seedTurnCount {
-			_, _ = incrementSessionTurnCount(store, threadID)
+			if _, err := incrementSessionTurnCount(store, threadID); err != nil {
+				t.Fatalf("incrementSessionTurnCount: %v", err)
+			}
 		}
 	}
 
@@ -555,18 +617,45 @@ type burstTestCase struct {
 	wantTurnPromptContains, wantTurnPromptExcludes                                                                                                                                                                                  map[int][]string
 }
 
+func setupBurstChannelInstructions(t *testing.T, tmpDir string, instructions map[string]string) {
+	t.Helper()
+	if len(instructions) == 0 {
+		return
+	}
+	channelsDir := filepath.Join(tmpDir, "channels")
+	if err := os.MkdirAll(channelsDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	for fname, fileContent := range instructions {
+		if err := os.WriteFile(filepath.Join(channelsDir, fname), []byte(fileContent), 0o644); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+	}
+	oldDirs := config.ChannelInstructionsDirs
+	config.ChannelInstructionsDirs = []string{channelsDir}
+	t.Cleanup(func() { config.ChannelInstructionsDirs = oldDirs })
+}
+
+func seedBurstTranscripts(t *testing.T, tmpDir string, transcripts []string) {
+	t.Helper()
+	for _, sessID := range transcripts {
+		sessDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", sessID)
+		if err := os.MkdirAll(filepath.Join(sessDir, ".system_generated", "logs"), 0o755); err != nil {
+			t.Fatalf("MkdirAll: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(sessDir, ".system_generated", "logs", "transcript.jsonl"), []byte(`{"step_index":0}`+"\n"), 0o644); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+		past := time.Now().Add(-10 * time.Second)
+		if err := os.Chtimes(sessDir, past, past); err != nil {
+			t.Fatalf("Chtimes: %v", err)
+		}
+	}
+}
+
 func setupBurstTestEnv(t *testing.T, tc burstTestCase, tmpDir string, store *db.SQLStore, sessMgr *session.Manager) string {
 	t.Helper()
-	if len(tc.channelInstructions) > 0 {
-		channelsDir := filepath.Join(tmpDir, "channels")
-		_ = os.MkdirAll(channelsDir, 0o755)
-		for fname, fileContent := range tc.channelInstructions {
-			_ = os.WriteFile(filepath.Join(channelsDir, fname), []byte(fileContent), 0o644)
-		}
-		oldDirs := config.ChannelInstructionsDirs
-		config.ChannelInstructionsDirs = []string{channelsDir}
-		t.Cleanup(func() { config.ChannelInstructionsDirs = oldDirs })
-	}
+	setupBurstChannelInstructions(t, tmpDir, tc.channelInstructions)
 	for _, ch := range tc.cachedChannels {
 		CacheDiscordChannel(ch)
 		chID := ch.ID
@@ -576,25 +665,31 @@ func setupBurstTestEnv(t *testing.T, tc burstTestCase, tmpDir string, store *db.
 	var initialSessionID string
 	if tc.seedSession {
 		initialSessionID = uuid.New().String()
-		_ = saveSessionID(store, tc.channelID, initialSessionID)
-		_, _ = ensureTestSessionDir(sessMgr, initialSessionID)
+		if err := saveSessionID(store, tc.channelID, initialSessionID); err != nil {
+			t.Fatalf("saveSessionID: %v", err)
+		}
+		if _, err := ensureTestSessionDir(sessMgr, initialSessionID); err != nil {
+			t.Fatalf("ensureTestSessionDir: %v", err)
+		}
 		cliPbDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "conversations")
-		_ = os.MkdirAll(cliPbDir, 0o755)
-		_ = os.WriteFile(filepath.Join(cliPbDir, initialSessionID+".pb"), []byte("mock-pb"), 0o644)
+		if err := os.MkdirAll(cliPbDir, 0o755); err != nil {
+			t.Fatalf("MkdirAll: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(cliPbDir, initialSessionID+".pb"), []byte("mock-pb"), 0o644); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
 	}
 	if tc.seedSessionID != "" {
 		initialSessionID = tc.seedSessionID
-		_ = saveSessionID(store, tc.channelID, tc.seedSessionID)
+		if err := saveSessionID(store, tc.channelID, tc.seedSessionID); err != nil {
+			t.Fatalf("saveSessionID: %v", err)
+		}
 	}
-	for _, sessID := range tc.seedTranscripts {
-		sessDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", sessID)
-		_ = os.MkdirAll(filepath.Join(sessDir, ".system_generated", "logs"), 0o755)
-		_ = os.WriteFile(filepath.Join(sessDir, ".system_generated", "logs", "transcript.jsonl"), []byte(`{"step_index":0}`+"\n"), 0o644)
-		past := time.Now().Add(-10 * time.Second)
-		_ = os.Chtimes(sessDir, past, past)
-	}
+	seedBurstTranscripts(t, tmpDir, tc.seedTranscripts)
 	for range tc.seedTurnCount {
-		_, _ = incrementSessionTurnCount(store, tc.channelID)
+		if _, err := incrementSessionTurnCount(store, tc.channelID); err != nil {
+			t.Fatalf("incrementSessionTurnCount: %v", err)
+		}
 	}
 	return initialSessionID
 }
@@ -674,7 +769,11 @@ func assertBurstPrompts(t *testing.T, tc burstTestCase, receivedPrompt, captured
 func assertBurstState(t *testing.T, tc burstTestCase, store db.Store, tmpDir string, burst []db.Message) {
 	t.Helper()
 	if tc.checkSavedSession {
-		if s, _ := getSessionID(store, tc.channelID); s != tc.wantSavedSession {
+		s, err := getSessionID(store, tc.channelID)
+		if err != nil {
+			t.Fatalf("getSessionID: %v", err)
+		}
+		if s != tc.wantSavedSession {
 			t.Errorf("savedSession = %q, want %q", s, tc.wantSavedSession)
 		}
 	}
@@ -685,7 +784,11 @@ func assertBurstState(t *testing.T, tc burstTestCase, store db.Store, tmpDir str
 			}
 		}
 	}
-	if turnCount, _ := getSessionTurnCount(store, tc.channelID); turnCount != tc.wantTurnCount {
+	turnCount, err := getSessionTurnCount(store, tc.channelID)
+	if err != nil {
+		t.Fatalf("getSessionTurnCount: %v", err)
+	}
+	if turnCount != tc.wantTurnCount {
 		t.Errorf("turnCount = %d, want %d", turnCount, tc.wantTurnCount)
 	}
 	wantStatus := tc.wantFinalStatus
@@ -825,9 +928,13 @@ func runBurstTestCase(t *testing.T, tc burstTestCase) {
 
 	for i, m := range burst {
 		if tc.sequentialBursts && tc.rotateBeforeTurn > 0 && i+1 == tc.rotateBeforeTurn {
-			_ = store.RotateSessionID(context.Background(), tc.channelID, "")
+			if err := store.RotateSessionID(context.Background(), tc.channelID, ""); err != nil {
+				t.Fatalf("RotateSessionID: %v", err)
+			}
 		}
-		_ = insertMessage(store, m)
+		if err := insertMessage(store, m); err != nil {
+			t.Fatalf("insertMessage: %v", err)
+		}
 		if tc.sequentialBursts {
 			runLiveBurst(context.Background(), pool, m.ThreadID, "turn-"+m.ID, m.ID)
 		}
@@ -879,7 +986,9 @@ func newScriptedDaemonSpawner(conversationID string, turnResponses ...string) *m
 			}
 			go func() {
 				defer outW.Close()
-				_, _ = fmt.Fprintf(outW, "{\"event\":\"init\",\"conversation_id\":%q}\n", convID)
+				if _, err := fmt.Fprintf(outW, "{\"event\":\"init\",\"conversation_id\":%q}\n", convID); err != nil {
+					return
+				}
 				scanner := bufio.NewScanner(inR)
 				for idx := 0; scanner.Scan(); idx++ {
 					if idx < len(turnResponses) {
@@ -956,7 +1065,9 @@ func ensureTestSessionDir(mgr *session.Manager, sessionID string) (string, error
 	for _, name := range []string{"transcript.jsonl", "transcript_full.jsonl"} {
 		p := filepath.Join(logsDir, name)
 		if _, err := os.Stat(p); os.IsNotExist(err) {
-			_ = os.WriteFile(p, nil, 0o600)
+			if err := os.WriteFile(p, nil, 0o600); err != nil {
+				return "", err
+			}
 		}
 	}
 	return dir, nil
@@ -997,17 +1108,25 @@ func spawnDefaultQueueMockPipes(cfg runner.DaemonConfig, closeOutW bool) (io.Wri
 		if sessID == "" || !runner.IsValidUUID(sessID) {
 			sessID = "550e8400-e29b-41d4-a716-446655440000"
 		}
-		_, _ = fmt.Fprintf(outW, "{\"event\":\"init\",\"conversation_id\":%q}\n", sessID)
+		if _, err := fmt.Fprintf(outW, "{\"event\":\"init\",\"conversation_id\":%q}\n", sessID); err != nil {
+			return
+		}
 		_ = errW.Close()
 		if closeOutW {
 			var buf [4096]byte
 			if _, err := inR.Read(buf[:]); err == nil {
-				go func() { _, _ = io.Copy(io.Discard, inR) }()
+				go func() {
+					if _, err := io.Copy(io.Discard, inR); err != nil {
+						return
+					}
+				}()
 			}
 			_ = outW.Close()
 			return
 		}
-		_, _ = io.Copy(io.Discard, inR)
+		if _, err := io.Copy(io.Discard, inR); err != nil {
+			return
+		}
 	}()
 	return inW, outR, errR, newMockProcessHandle(12345), nil
 }
