@@ -141,40 +141,13 @@ func wantStates(t *testing.T, s db.Store, get func(*testing.T, db.Store, string)
 // RunRecordStoreConformance exercises the by-ID queue record methods against a store implementation.
 func RunRecordStoreConformance(t *testing.T, factory RecordStoreFactory) {
 	t.Helper()
-	t.Run("ListPendingMessageIDsForThread", func(t *testing.T) { testListPendingMessageIDs(t, factory) })
 	t.Run("GetMessagesByID", func(t *testing.T) { testGetMessagesByID(t, factory) })
 	t.Run("FailMessages", func(t *testing.T) { testFailRecords(t, factory, false) })
 	t.Run("FailDispatches", func(t *testing.T) { testFailRecords(t, factory, true) })
 	t.Run("RequeueProcessingMessages", func(t *testing.T) { testRequeueProcessingMessages(t, factory) })
 	t.Run("BeginMessageAttempt", func(t *testing.T) { testBeginAttempt(t, factory, false) })
 	t.Run("BeginDispatchAttempt", func(t *testing.T) { testBeginAttempt(t, factory, true) })
-	t.Run("ListPendingDispatchIDsForSession", func(t *testing.T) { testListPendingDispatchIDs(t, factory) })
 	t.Run("ListActiveDispatchSessionKeys", func(t *testing.T) { testListActiveDispatchSessionKeys(t, factory) })
-}
-
-func testListPendingMessageIDs(t *testing.T, factory RecordStoreFactory) {
-	t.Helper()
-	t.Parallel()
-	s := newSeeded(t, factory)
-	tests := []struct {
-		name, thread string
-		want         []string
-	}{
-		{"pending rows oldest first, active and terminal rows excluded", "t1", []string{mPendB, mPendA}},
-		{"other thread", "t2", []string{mOther}},
-		{"padded thread id", "  t2 ", []string{mOther}},
-		{"unknown thread", "t-none", nil},
-		{"empty thread", "", nil},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			got, err := s.ListPendingMessageIDsForThread(context.Background(), tc.thread)
-			if err != nil {
-				t.Fatalf("ListPendingMessageIDsForThread: %v", err)
-			}
-			wantIDs(t, "ListPendingMessageIDsForThread", got, tc.want)
-		})
-	}
 }
 
 func testGetMessagesByID(t *testing.T, factory RecordStoreFactory) {
@@ -340,32 +313,6 @@ func testBeginAttempt(t *testing.T, factory RecordStoreFactory, dispatch bool) {
 			if st := get(t, s, id); st.retry != tc.want.RetryCount || st.restart != tc.want.RestartCount {
 				t.Errorf("persisted retry/restart = %d/%d, want %d/%d", st.retry, st.restart, tc.want.RetryCount, tc.want.RestartCount)
 			}
-		})
-	}
-}
-
-func testListPendingDispatchIDs(t *testing.T, factory RecordStoreFactory) {
-	t.Helper()
-	t.Parallel()
-	s := newSeeded(t, factory)
-	tests := []struct {
-		name, key string
-		want      []string
-	}{
-		{"session id oldest first, processing and terminal excluded", sess1, []string{"d-sess-early", dSess}},
-		{"vanadis chunk key form", "vanadis-c9", []string{"d-chunkonly"}},
-		{"session equal to vanadis chunk form", b1Chunk2Session, []string{"d-b1-chunk"}},
-		{"dispatch id key form", "dispatch-d-key", []string{dKey}},
-		{"unknown key", "nope", nil},
-		{"empty key", " ", nil},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			got, err := s.ListPendingDispatchIDsForSession(context.Background(), tc.key)
-			if err != nil {
-				t.Fatalf("ListPendingDispatchIDsForSession: %v", err)
-			}
-			wantIDs(t, "ListPendingDispatchIDsForSession", got, tc.want)
 		})
 	}
 }

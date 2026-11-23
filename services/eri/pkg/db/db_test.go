@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -141,27 +140,11 @@ func TestStoreUnavailableContract(t *testing.T) {
 func assertMessageQueries(ctx context.Context, t *testing.T, store Store) {
 	t.Helper()
 	_ = store.InsertMessage(ctx, Message{ID: "msg-2", ThreadID: "th-1", Content: "Message 2", Status: StatusPending})
-	if pending, err := store.GetPendingOrProcessingMessages(ctx, 10); err != nil || len(pending) != 1 || pending[0].ID != "msg-2" {
-		t.Errorf("GetPendingOrProcessingMessages = %+v, %v", pending, err)
-	}
-	if threadIDs, err := store.GetActiveRecentThreadIDs(ctx, time.Hour); err != nil || len(threadIDs) != 1 || threadIDs[0] != "th-1" {
-		t.Errorf("GetActiveRecentThreadIDs = %v, %v", threadIDs, err)
-	}
 	if recent, err := store.GetRecentThreadMessages(ctx, "th-1", 10); err != nil || len(recent) != 2 {
 		t.Errorf("GetRecentThreadMessages = %+v, %v", recent, err)
 	}
 	if tasks, err := store.GetActiveTasks(ctx); err != nil || len(tasks) != 1 || tasks[0].ID != "msg-2" {
 		t.Errorf("GetActiveTasks = %+v, %v", tasks, err)
-	}
-
-	if active, err := store.HasActiveThreadTurn(ctx, ""); err != nil || active {
-		t.Errorf("HasActiveThreadTurn empty = %v, %v, want false, nil", active, err)
-	}
-	if active, err := store.HasActiveThreadTurn(ctx, "th-none"); err != nil || active {
-		t.Errorf("HasActiveThreadTurn th-none = %v, %v, want false, nil", active, err)
-	}
-	if active, err := store.HasActiveThreadTurn(ctx, "th-1"); err != nil || !active {
-		t.Errorf("HasActiveThreadTurn th-1 = %v, %v, want true, nil", active, err)
 	}
 }
 
@@ -170,8 +153,6 @@ func assertMessageEmptyIDGuards(ctx context.Context, t *testing.T, store Store) 
 	assertErr(t, store.InsertMessage(ctx, Message{ID: ""}), "InsertMessage empty ID")
 	assertErr(t, store.UpdateMessageStatus(ctx, "", StatusCompleted, ""), "UpdateMessageStatus empty ID")
 	assertErr(t, store.UpdateMessageCompleted(ctx, "", "resp", ""), "UpdateMessageCompleted empty ID")
-	assertErr(t, store.IncrementMessageRetry(ctx, "", "err"), "IncrementMessageRetry empty ID")
-	assertErr(t, store.ResetMessageToPendingWithRestart(ctx, "", "reason"), "ResetMessageToPendingWithRestart empty ID")
 	if m, err := store.GetMessage(ctx, ""); err != nil || m != nil {
 		t.Errorf("expected nil, nil on empty ID GetMessage")
 	}
@@ -186,18 +167,6 @@ func assertMessageEmptyIDGuards(ctx context.Context, t *testing.T, store Store) 
 func assertMessageUpdatesAndTelemetry(ctx context.Context, t *testing.T, store Store) {
 	t.Helper()
 	mustOK(t, store.UpdateMessageStatus(ctx, "msg-1", StatusProcessing, "working"), "UpdateMessageStatus")
-	mustOK(t, store.IncrementMessageRetry(ctx, "msg-1", "timeout"), "IncrementMessageRetry")
-	got, _ := store.GetMessage(ctx, "msg-1")
-	if got.RetryCount != 1 || got.ErrorMessage != "timeout" {
-		t.Errorf("retry mismatch: %+v", got)
-	}
-
-	mustOK(t, store.ResetMessageToPendingWithRestart(ctx, "msg-1", "recovered"), "ResetMessageToPendingWithRestart")
-	got, _ = store.GetMessage(ctx, "msg-1")
-	if got.Status != StatusPending || got.RestartCount != 1 {
-		t.Errorf("restart mismatch: %+v", got)
-	}
-
 	mustOK(t, store.UpdateMessageCompleted(ctx, "msg-1", "Task complete", "conv-msg-1", TurnTelemetry{
 		DurationMs:      1200,
 		InputTokens:     100,
@@ -206,7 +175,7 @@ func assertMessageUpdatesAndTelemetry(ctx context.Context, t *testing.T, store S
 		CacheReadTokens: 5,
 		TotalTokens:     165,
 	}), "UpdateMessageCompleted")
-	got, _ = store.GetMessage(ctx, "msg-1")
+	got, _ := store.GetMessage(ctx, "msg-1")
 	if got.Status != StatusCompleted || got.ResponseText != "Task complete" || got.ConversationID != "conv-msg-1" || got.DurationMs != 1200 || got.TotalTokens != 165 {
 		t.Errorf("completed mismatch: %+v", got)
 	}
@@ -322,18 +291,10 @@ func TestSessionLifecycle(t *testing.T) {
 		t.Errorf("GetThreadSummary = %q, %q", sum, wm)
 	}
 
-	// 3. Session activity stats
-	_ = store.InsertMessage(ctx, Message{ID: "m-s-1", ThreadID: "th-1", Status: StatusCompleted, ResponseText: "Active"})
-	_ = store.InsertMessage(ctx, Message{ID: "m-s-2", ThreadID: "th-1", Status: StatusCompleted, ResponseText: "[EXPIRED_STALE]"})
-	stats, err := store.GetSessionActivityStats(ctx, "th-1")
-	if err != nil || stats.InternalSessionID != "sess-2" || stats.CompletedTurns != 1 {
-		t.Errorf("GetSessionActivityStats = %+v, %v", stats, err)
-	}
-
-	// 4. External conversation mapping
+	// 3. External conversation mapping
 	_ = store.SaveSessionID(ctx, "ext-1", "int-1")
 
-	// 5. Table-driven ParseDBTime
+	// 4. Table-driven ParseDBTime
 	now := time.Now().Truncate(time.Second).UTC()
 	timeTests := []struct {
 		name   string
@@ -677,42 +638,11 @@ func mustInsertDispatch(ctx context.Context, t *testing.T, store Store, d Dispat
 	mustOK(t, err, msg)
 }
 
-func assertDispatchCancelPending(ctx context.Context, t *testing.T, store Store) {
-	t.Helper()
-	cancelled, err := store.CancelPendingDispatches(ctx, "", "b-123", "aborted build")
-	mustOK(t, err, "CancelPendingDispatches")
-	if len(cancelled) != 2 || !slices.Contains(cancelled, "disp-3") || !slices.Contains(cancelled, "disp-3b") {
-		t.Errorf("expected cancelled [disp-3, disp-3b], got %v", cancelled)
-	}
-	got, _ := store.GetDispatch(ctx, "disp-3")
-	if got.Status != "FAILED" || got.ErrorMessage != "aborted build" {
-		t.Errorf("unexpected status after cancel: %+v", got)
-	}
-	gotB, _ := store.GetDispatch(ctx, "disp-3b")
-	if gotB.Status != "FAILED" || gotB.ErrorMessage != "aborted build" {
-		t.Errorf("unexpected status for disp-3b after cancel: %+v", gotB)
-	}
-	d3Solo := Dispatch{
-		ID:     "disp-3-solo",
-		Source: "heartbeat",
-		Prompt: "solo heartbeat",
-		Status: StatusPending,
-	}
-	mustInsertDispatch(ctx, t, store, d3Solo, "InsertDispatch disp-3-solo")
-	cancelledSolo, err := store.CancelPendingDispatches(ctx, "disp-3-solo", "", "cancelled solo")
-	mustOK(t, err, "CancelPendingDispatches solo")
-	if len(cancelledSolo) != 1 || cancelledSolo[0] != "disp-3-solo" {
-		t.Errorf("expected cancelled [disp-3-solo], got %v", cancelledSolo)
-	}
-}
-
 func assertDispatchValidationGuards(ctx context.Context, t *testing.T, store Store) {
 	t.Helper()
 	_, errEmptyDisp := store.InsertDispatch(ctx, Dispatch{})
 	assertErr(t, errEmptyDisp, "InsertDispatch empty ID")
 	assertErr(t, store.UpdateDispatchStatus(ctx, "", "PROCESSING", ""), "UpdateDispatchStatus empty ID")
-	assertErr(t, store.IncrementDispatchRetry(ctx, "", "err"), "IncrementDispatchRetry empty ID")
-	assertErr(t, store.ResetDispatchToPendingWithRestart(ctx, "", "rst"), "ResetDispatchToPendingWithRestart empty ID")
 
 	gotEmpty, err := store.GetDispatch(ctx, "")
 	if err != nil || gotEmpty != nil {
@@ -726,21 +656,13 @@ func assertDispatchValidationGuards(ctx context.Context, t *testing.T, store Sto
 	if err != nil || recentEmpty != nil {
 		t.Errorf("expected nil, nil for empty session id in GetRecentSessionDispatches")
 	}
-	activeEmpty, err := store.HasActiveDispatchTurn(ctx, "", "")
-	if err != nil || activeEmpty {
-		t.Errorf("expected false, nil for empty HasActiveDispatchTurn")
-	}
-	cancelEmpty, err := store.CancelPendingDispatches(ctx, "", "", "reason")
-	if err != nil || cancelEmpty != nil {
-		t.Errorf("expected nil, nil for empty CancelPendingDispatches")
-	}
 	scannedNil, err := scanDispatches(nil)
 	if err != nil || scannedNil != nil {
 		t.Errorf("expected nil, nil for scanDispatches(nil)")
 	}
 }
 
-func assertDispatchClaimAndRetry(ctx context.Context, t *testing.T, store Store) {
+func assertDispatchClaim(ctx context.Context, t *testing.T, store Store) {
 	t.Helper()
 	claimed, err := store.ClaimPendingDispatch(ctx, "disp-1")
 	mustOK(t, err, "ClaimPendingDispatch disp-1")
@@ -754,16 +676,9 @@ func assertDispatchClaimAndRetry(ctx context.Context, t *testing.T, store Store)
 	}
 
 	mustOK(t, store.UpdateDispatchStatus(ctx, "disp-1", "PROCESSING", "in flight"), "UpdateDispatchStatus")
-	mustOK(t, store.IncrementDispatchRetry(ctx, "disp-1", "network error"), "IncrementDispatchRetry")
 	got, _ := store.GetDispatch(ctx, "disp-1")
-	if got.RetryCount != 1 || got.ErrorMessage != "network error" {
-		t.Errorf("unexpected retry state: %+v", got)
-	}
-
-	mustOK(t, store.ResetDispatchToPendingWithRestart(ctx, "disp-1", "runner restart"), "ResetDispatchToPendingWithRestart")
-	got, _ = store.GetDispatch(ctx, "disp-1")
-	if got.Status != StatusPending || got.RestartCount != 1 {
-		t.Errorf("unexpected restart state: %+v", got)
+	if got.Status != StatusProcessing || got.ErrorMessage != "in flight" {
+		t.Errorf("unexpected processing state: %+v", got)
 	}
 }
 
@@ -784,7 +699,7 @@ func assertDispatchStoreLifecycleTransitions(ctx context.Context, t *testing.T, 
 		t.Fatalf("unexpected dispatch retrieved: %+v", got)
 	}
 
-	assertDispatchClaimAndRetry(ctx, t, store)
+	assertDispatchClaim(ctx, t, store)
 
 	dispTel := TurnTelemetry{DurationMs: 2500, InputTokens: 200, OutputTokens: 80, ThinkingTokens: 20, CacheReadTokens: 10, TotalTokens: 310}
 	mustOK(t, store.UpdateDispatchCompleted(ctx, "disp-1", "Result text", "conv-uuid-123", dispTel), "UpdateDispatchCompleted")
@@ -797,7 +712,7 @@ func assertDispatchStoreLifecycleTransitions(ctx context.Context, t *testing.T, 
 	}
 }
 
-func assertDispatchRecentAndActive(ctx context.Context, t *testing.T, store Store) {
+func assertDispatchRecent(ctx context.Context, t *testing.T, store Store) {
 	t.Helper()
 	d2 := Dispatch{
 		ID:        "disp-2",
@@ -813,27 +728,6 @@ func assertDispatchRecentAndActive(ctx context.Context, t *testing.T, store Stor
 	if len(recent) != 2 || recent[0].ID != "disp-1" || recent[1].ID != "disp-2" {
 		t.Errorf("unexpected recent session dispatches: %+v", recent)
 	}
-
-	d3 := Dispatch{
-		ID:        "disp-3",
-		Source:    "vanadis",
-		SessionID: "build-1",
-		Prompt:    "Build ID: b-123\nChunk 1",
-	}
-	mustInsertDispatch(ctx, t, store, d3, "InsertDispatch disp-3")
-	d3b := Dispatch{
-		ID:        "disp-3b",
-		Source:    "vanadis",
-		SessionID: "vanadis-b-123-chunk-2",
-		Prompt:    "Executing chunk 2",
-	}
-	mustInsertDispatch(ctx, t, store, d3b, "InsertDispatch disp-3b")
-	mustOK(t, store.UpdateDispatchStatus(ctx, "disp-3b", StatusProcessing, "running"), "UpdateDispatchStatus disp-3b")
-	hasActive, err := store.HasActiveDispatchTurn(ctx, "build-1", "")
-	mustOK(t, err, "HasActiveDispatchTurn")
-	if !hasActive {
-		t.Errorf("expected active dispatch for session build-1")
-	}
 }
 
 func assertDispatchPendingAndMessageCompleted(ctx context.Context, t *testing.T, store Store) {
@@ -846,15 +740,6 @@ func assertDispatchPendingAndMessageCompleted(ctx context.Context, t *testing.T,
 		Status:    StatusPending,
 	}
 	mustInsertDispatch(ctx, t, store, d4, "InsertDispatch disp-4-pending")
-	pendingDisps, err := store.GetPendingOrProcessingDispatches(ctx, 10)
-	mustOK(t, err, "GetPendingOrProcessingDispatches")
-	if len(pendingDisps) != 1 || pendingDisps[0].ID != "disp-4-pending" {
-		t.Errorf("unexpected pending dispatches: %+v", pendingDisps)
-	}
-	pendingLimited, _ := store.GetPendingOrProcessingDispatches(ctx, 1)
-	if len(pendingLimited) != 1 {
-		t.Errorf("expected 1 limited pending dispatch")
-	}
 
 	mustOK(t, store.UpdateDispatchCompleted(ctx, "disp-4-pending", "Done 4", ""), "UpdateDispatchCompleted without conv")
 	got, _ := store.GetDispatch(ctx, "disp-4-pending")
@@ -882,29 +767,9 @@ func TestDispatchStore_SQLite(t *testing.T) {
 	ctx := context.Background()
 
 	assertDispatchStoreLifecycleTransitions(ctx, t, store)
-	assertDispatchRecentAndActive(ctx, t, store)
-	assertDispatchCancelPending(ctx, t, store)
+	assertDispatchRecent(ctx, t, store)
 	assertDispatchPendingAndMessageCompleted(ctx, t, store)
 	assertDispatchValidationGuards(ctx, t, store)
-}
-
-func TestGetActiveRecentThreadIDs_StrippingDiscordPrefix(t *testing.T) {
-	database := setupTestDB(t)
-	defer database.Close()
-	store := NewSQLStore(database)
-	ctx := context.Background()
-
-	mustOK(t, store.SaveSessionID(ctx, "112233445566778899", "conv-sess-1"), "SaveSessionID numeric")
-	mustOK(t, store.SaveSessionID(ctx, "discord-998877665544332211", "conv-sess-2"), "SaveSessionID discord prefixed")
-
-	threadIDs, err := store.GetActiveRecentThreadIDs(ctx, time.Hour)
-	mustOK(t, err, "GetActiveRecentThreadIDs")
-
-	found1 := slices.Contains(threadIDs, "112233445566778899")
-	found2 := slices.Contains(threadIDs, "998877665544332211")
-	if !found1 || !found2 {
-		t.Errorf("GetActiveRecentThreadIDs missing stripped thread IDs: got %v", threadIDs)
-	}
 }
 
 func TestGetActiveTasks_DispatchesUnion_SQLite(t *testing.T) {

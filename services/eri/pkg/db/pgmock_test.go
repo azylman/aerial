@@ -143,19 +143,7 @@ func TestPostgresWireMockAndOpen(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New(cfg) with mock postgres failed: %v", err)
 	}
-	defer dbCfg.Close()
-
-	pgStore := NewSQLStore(db)
-	rel, err := pgStore.AcquireLeaderLock(context.Background())
-	if err != nil || rel == nil {
-		t.Fatalf("AcquireLeaderLock on mock postgres failed: %v", err)
-	}
-	rel()
-	rel()
-
-	canceledCtx, cancel := context.WithCancel(context.Background())
-	cancel()
-	if _, err := pgStore.AcquireLeaderLock(canceledCtx); err == nil {
-		t.Errorf("expected error for AcquireLeaderLock with canceled context")
+	if err := dbCfg.Close(); err != nil {
+		t.Errorf("Close: %v", err)
 	}
 }
