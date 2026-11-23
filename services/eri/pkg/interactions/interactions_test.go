@@ -39,7 +39,11 @@ func (m *mockTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	defer m.mu.Unlock()
 	var bodyBytes []byte
 	if req.Body != nil {
-		bodyBytes, _ = io.ReadAll(req.Body)
+		var err error
+		bodyBytes, err = io.ReadAll(req.Body)
+		if err != nil {
+			return nil, err
+		}
 		req.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 	}
 	m.requests = append(m.requests, capturedRequest{Method: req.Method, URL: req.URL.String(), Body: bodyBytes})
@@ -77,7 +81,10 @@ func (m *mockTransport) Requests() []capturedRequest {
 }
 
 func newMockDiscordSession(transport *mockTransport) *discordgo.Session {
-	s, _ := discordgo.New("Bot mock-token")
+	s, err := discordgo.New("Bot mock-token")
+	if err != nil {
+		panic(err)
+	}
 	s.Client = &http.Client{Transport: transport}
 	s.State = discordgo.NewState()
 	s.State.User = &discordgo.User{ID: "bot-123", Username: "Aerial"}

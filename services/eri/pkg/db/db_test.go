@@ -109,7 +109,7 @@ func TestStoreUnavailableContract(t *testing.T) {
 
 func assertMessageQueries(ctx context.Context, t *testing.T, store Store) {
 	t.Helper()
-	_ = store.InsertMessage(ctx, Message{ID: "msg-2", ThreadID: "th-1", Content: "Message 2", Status: StatusPending})
+	mustOK(t, store.InsertMessage(ctx, Message{ID: "msg-2", ThreadID: "th-1", Content: "Message 2", Status: StatusPending}), "InsertMessage msg-2")
 	if recent, err := store.GetRecentThreadMessages(ctx, "th-1", 10); err != nil || len(recent) != 2 {
 		t.Errorf("GetRecentThreadMessages = %+v, %v", recent, err)
 	}
@@ -145,7 +145,8 @@ func assertMessageUpdatesAndTelemetry(ctx context.Context, t *testing.T, store S
 		CacheReadTokens: 5,
 		TotalTokens:     165,
 	}), "UpdateMessageCompleted")
-	got, _ := store.GetMessage(ctx, "msg-1")
+	got, err := store.GetMessage(ctx, "msg-1")
+	mustOK(t, err, "GetMessage msg-1")
 	if got.Status != StatusCompleted || got.ResponseText != "Task complete" || got.ConversationID != "conv-msg-1" || got.DurationMs != 1200 || got.TotalTokens != 165 {
 		t.Errorf("completed mismatch: %+v", got)
 	}
@@ -180,8 +181,8 @@ func TestMessageLifecycle(t *testing.T) {
 	if claimed, err := store.ClaimPendingMessage(ctx, "msg-1"); err != nil || !claimed {
 		t.Fatalf("ClaimPendingMessage failed: %v, claimed=%v", err, claimed)
 	}
-	if claimed, _ := store.ClaimPendingMessage(ctx, "msg-1"); claimed {
-		t.Errorf("ClaimPendingMessage already claimed = true, want false")
+	if claimed, err := store.ClaimPendingMessage(ctx, "msg-1"); err != nil || claimed {
+		t.Errorf("ClaimPendingMessage already claimed = %v, err = %v, want false and nil", claimed, err)
 	}
 
 	assertMessageUpdatesAndTelemetry(ctx, t, store)
@@ -195,22 +196,27 @@ func assertSessionTurnCountAndRotation(ctx context.Context, t *testing.T, store 
 		t.Errorf("expected empty session ID, got %q, %v", id, err)
 	}
 	mustOK(t, store.SaveSessionID(ctx, "th-1", "sess-1"), "SaveSessionID")
-	if id, _ := store.GetSessionID(ctx, "th-1"); id != "sess-1" {
-		t.Errorf("expected sess-1, got %q", id)
+	if id, err := store.GetSessionID(ctx, "th-1"); err != nil || id != "sess-1" {
+		t.Errorf("expected sess-1, got %q, %v", id, err)
 	}
 
 	if cnt, err := store.IncrementSessionTurnCount(ctx, "th-1"); err != nil || cnt != 1 {
 		t.Errorf("IncrementSessionTurnCount = %d, %v, want 1", cnt, err)
 	}
-	_, _ = store.IncrementSessionTurnCount(ctx, "th-1")
-	if cnt, _ := store.GetSessionTurnCount(ctx, "th-1"); cnt != 2 {
-		t.Errorf("GetSessionTurnCount = %d, want 2", cnt)
+	if _, err := store.IncrementSessionTurnCount(ctx, "th-1"); err != nil {
+		t.Fatalf("IncrementSessionTurnCount: %v", err)
+	}
+	if cnt, err := store.GetSessionTurnCount(ctx, "th-1"); err != nil || cnt != 2 {
+		t.Errorf("GetSessionTurnCount = %d, %v, want 2", cnt, err)
 	}
 
 	mustOK(t, store.RotateSessionID(ctx, "th-1", "sess-2"), "RotateSessionID")
-	curr, _ := store.GetSessionID(ctx, "th-1")
-	prev, _ := store.GetPreviousSessionID(ctx, "th-1")
-	turns, _ := store.GetSessionTurnCount(ctx, "th-1")
+	curr, errCurr := store.GetSessionID(ctx, "th-1")
+	mustOK(t, errCurr, "GetSessionID")
+	prev, errPrev := store.GetPreviousSessionID(ctx, "th-1")
+	mustOK(t, errPrev, "GetPreviousSessionID")
+	turns, errTurns := store.GetSessionTurnCount(ctx, "th-1")
+	mustOK(t, errTurns, "GetSessionTurnCount")
 	if curr != "sess-2" || prev != "sess-1" || turns != 0 {
 		t.Errorf("post-rotation: curr=%q, prev=%q, turns=%d", curr, prev, turns)
 	}
@@ -221,7 +227,9 @@ func assertSessionEmptyKeyGuards(ctx context.Context, t *testing.T, store Store)
 	if id, err := store.GetSessionID(ctx, ""); err != nil || id != "" {
 		t.Errorf("expected empty GetSessionID")
 	}
-	_ = store.SaveSessionID(ctx, "", "s1")
+	if err := store.SaveSessionID(ctx, "", "s1"); err != nil {
+		t.Fatalf("unexpected error on empty key guard: %v", err)
+	}
 	_, errEmptyTurn := store.IncrementSessionTurnCount(ctx, "")
 	assertErr(t, errEmptyTurn, "IncrementSessionTurnCount empty key")
 	if cnt, err := store.GetSessionTurnCount(ctx, ""); err != nil || cnt != 0 {
@@ -234,7 +242,9 @@ func assertSessionEmptyKeyGuards(ctx context.Context, t *testing.T, store Store)
 	if prev, err := store.GetPreviousSessionID(ctx, ""); err != nil || prev != "" {
 		t.Errorf("GetPreviousSessionID empty key = %q, %v", prev, err)
 	}
-	_ = store.SaveThreadSummary(ctx, "", "sum", "mid")
+	if err := store.SaveThreadSummary(ctx, "", "sum", "mid"); err != nil {
+		t.Fatalf("unexpected error on empty key guard: %v", err)
+	}
 	if sum, last, err := store.GetThreadSummary(ctx, ""); err != nil || sum != "" || last != "" {
 		t.Errorf("GetThreadSummary empty thread = %q, %q, %v", sum, last, err)
 	}
@@ -253,12 +263,12 @@ func TestSessionLifecycle(t *testing.T) {
 		t.Errorf("GetThreadSummary empty = %q, %q, %v", sum, wm, err)
 	}
 	mustOK(t, store.SaveThreadSummary(ctx, "th-1", "Thread summary", "msg-100"), "SaveThreadSummary")
-	if sum, wm, _ := store.GetThreadSummary(ctx, "th-1"); sum != "Thread summary" || wm != "msg-100" {
-		t.Errorf("GetThreadSummary = %q, %q", sum, wm)
+	if sum, wm, err := store.GetThreadSummary(ctx, "th-1"); err != nil || sum != "Thread summary" || wm != "msg-100" {
+		t.Errorf("GetThreadSummary = %q, %q, %v", sum, wm, err)
 	}
 
 	// 3. External conversation mapping
-	_ = store.SaveSessionID(ctx, "ext-1", "int-1")
+	mustOK(t, store.SaveSessionID(ctx, "ext-1", "int-1"), "SaveSessionID ext-1")
 
 	// 4. Empty key validations
 	assertSessionEmptyKeyGuards(ctx, t, store)
@@ -569,7 +579,8 @@ func assertDispatchClaim(ctx context.Context, t *testing.T, store Store) {
 	}
 
 	mustOK(t, store.UpdateDispatchStatus(ctx, "disp-1", "PROCESSING", "in flight"), "UpdateDispatchStatus")
-	got, _ := store.GetDispatch(ctx, "disp-1")
+	got, err := store.GetDispatch(ctx, "disp-1")
+	mustOK(t, err, "GetDispatch disp-1")
 	if got.Status != StatusProcessing || got.ErrorMessage != "in flight" {
 		t.Errorf("unexpected processing state: %+v", got)
 	}
@@ -596,7 +607,8 @@ func assertDispatchStoreLifecycleTransitions(ctx context.Context, t *testing.T, 
 
 	dispTel := TurnTelemetry{DurationMs: 2500, InputTokens: 200, OutputTokens: 80, ThinkingTokens: 20, CacheReadTokens: 10, TotalTokens: 310}
 	mustOK(t, store.UpdateDispatchCompleted(ctx, "disp-1", "Result text", "conv-uuid-123", dispTel), "UpdateDispatchCompleted")
-	got, _ = store.GetDispatch(ctx, "disp-1")
+	got, err = store.GetDispatch(ctx, "disp-1")
+	mustOK(t, err, "GetDispatch disp-1")
 	if got.Status != StatusCompleted || got.ResponseText != "Result text" || got.ConversationID != "conv-uuid-123" {
 		t.Errorf("unexpected completed state: %+v", got)
 	}
@@ -635,19 +647,22 @@ func assertDispatchPendingAndMessageCompleted(ctx context.Context, t *testing.T,
 	mustInsertDispatch(ctx, t, store, d4, "InsertDispatch disp-4-pending")
 
 	mustOK(t, store.UpdateDispatchCompleted(ctx, "disp-4-pending", "Done 4", ""), "UpdateDispatchCompleted without conv")
-	got, _ := store.GetDispatch(ctx, "disp-4-pending")
+	got, err := store.GetDispatch(ctx, "disp-4-pending")
+	mustOK(t, err, "GetDispatch disp-4-pending")
 	if got.Status != StatusCompleted || got.ResponseText != "Done 4" {
 		t.Errorf("unexpected completed state without conv: %+v", got)
 	}
 
 	mustOK(t, store.InsertMessage(ctx, Message{ID: "msg-cov-1", Content: "Coverage"}), "InsertMessage")
 	mustOK(t, store.UpdateMessageCompleted(ctx, "msg-cov-1", "Done without conv", ""), "UpdateMessageCompleted without conv")
-	covMsg, _ := store.GetMessage(ctx, "msg-cov-1")
+	covMsg, err := store.GetMessage(ctx, "msg-cov-1")
+	mustOK(t, err, "GetMessage msg-cov-1")
 	if covMsg.ResponseText != "Done without conv" {
 		t.Errorf("unexpected response text")
 	}
 	mustOK(t, store.UpdateMessageCompleted(ctx, "msg-cov-1", "Done with conv", "conv-cov-uuid"), "UpdateMessageCompleted with conv")
-	covMsg, _ = store.GetMessage(ctx, "msg-cov-1")
+	covMsg, err = store.GetMessage(ctx, "msg-cov-1")
+	mustOK(t, err, "GetMessage msg-cov-1")
 	if covMsg.ResponseText != "Done with conv" || covMsg.ConversationID != "conv-cov-uuid" {
 		t.Errorf("unexpected response text or conversation ID: %+v", covMsg)
 	}
