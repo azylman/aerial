@@ -134,9 +134,13 @@ func ofsBytes(off int) []byte {
 
 func pkt(s string) string { return fmt.Sprintf("%04x%s", len(s)+4, s) }
 
-func pushBody(objs ...fixtureObj) []byte {
-	head := pkt(zeroSHA+" "+strings.Repeat("a", 40)+" refs/heads/main\x00report-status side-band-64k ofs-delta\n") + "0000"
+func pushBodyRef(ref string, objs ...fixtureObj) []byte {
+	head := pkt(zeroSHA+" "+strings.Repeat("a", 40)+" "+ref+"\x00report-status side-band-64k ofs-delta\n") + "0000"
 	return append([]byte(head), packOf(objs...)...)
+}
+
+func pushBody(objs ...fixtureObj) []byte {
+	return pushBodyRef("refs/heads/main", objs...)
 }
 
 type fakeFetcher map[string]string
@@ -197,6 +201,15 @@ func deltaFilePush(name, result string, delta fixtureObj, extra ...fixtureObj) [
 
 const ghpFixture = "ghp_" + "abcdefghijklmnopqrstuvwxyz0123456789"
 
+type scanReceivePackCase struct {
+	name    string
+	body    []byte
+	policy  PushScanPolicy
+	fetch   ObjectFetcher
+	want    []Violation
+	wantErr string
+}
+
 func TestScanReceivePack(t *testing.T) {
 	sanitizer.ResetSensitiveTokensForTest()
 	sanitizer.RegisterSensitiveTokens("dummy-push-secret-value")
@@ -213,18 +226,40 @@ func TestScanReceivePack(t *testing.T) {
 	ofsResult := "base\nk=192.168.4.4\n"
 
 	submoduleTree := treeOf("160000", "mod", strings.Repeat("1", 40), "40000", "old", strings.Repeat("2", 40), "100644", "a.txt", fixtureSHA("blob", "ip 10.5.5.5\n"))
+
+	tests := append(
+		scanReceivePackSecretCases(public, private, allowCfg, allowAll, fetcher, spanDelta, ofsBase, ofsResult, submoduleTree),
+		scanReceivePackHygieneCases(private)...,
+	)
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := ScanReceivePackContext(context.Background(), bytes.NewReader(tc.body), tc.policy, tc.fetch)
+			if tc.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("err = %v, want %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			for i := range got {
+				got[i].Pattern = ""
+			}
+			if fmt.Sprint(got) != fmt.Sprint(tc.want) {
+				t.Fatalf("violations = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
+func scanReceivePackSecretCases(public, private, allowCfg, allowAll PushScanPolicy, fetcher fakeFetcher, spanDelta, ofsBase fixtureObj, ofsResult, submoduleTree string) []scanReceivePackCase {
 	rawPack := func(tail string) []byte {
 		return []byte(pkt(zeroSHA+" "+zeroSHA+" refs/heads/x\n") + "0000PACK\x00\x00\x00\x02" + tail)
 	}
 
-	tests := []struct {
-		name    string
-		body    []byte
-		policy  PushScanPolicy
-		fetch   ObjectFetcher
-		want    []Violation
-		wantErr string
-	}{
+	return []scanReceivePackCase{
 		{
 			name: "literal blob private ip", body: pushBody(literalFilePush("cfg/hosts.yaml", "hosts:\n  db: 10.20.30.40\n", "add hosts")...), policy: public,
 			want: []Violation{{Category: "PrivateIPv4", File: "cfg/hosts.yaml", LineNum: 2, Sample: "10.20.30.40"}},
@@ -312,26 +347,55 @@ func TestScanReceivePack(t *testing.T) {
 		{name: "truncated pkt-line", body: []byte("00"), policy: public, wantErr: "truncated pkt-line header"},
 		{name: "malformed command", body: []byte(pkt("garbage\n") + "0000"), policy: public, wantErr: "malformed receive-pack command"},
 	}
+}
 
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			got, err := ScanReceivePackContext(context.Background(), bytes.NewReader(tc.body), tc.policy, tc.fetch)
-			if tc.wantErr != "" {
-				if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
-					t.Fatalf("err = %v, want %q", err, tc.wantErr)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			for i := range got {
-				got[i].Pattern = ""
-			}
-			if fmt.Sprint(got) != fmt.Sprint(tc.want) {
-				t.Fatalf("violations = %+v, want %+v", got, tc.want)
-			}
-		})
+func scanReceivePackHygieneCases(private PushScanPolicy) []scanReceivePackCase {
+	return []scanReceivePackCase{
+		{
+			name:   "direct push to refs/heads/main rejected",
+			body:   pushBody(literalFilePush("clean.txt", "clean\n", "add")...),
+			policy: PushScanPolicy{BlockMainPush: true, Owner: "acme", Repo: "widgets"},
+			want:   []Violation{{Category: "DirectMainPush", File: "refs/heads/main", Sample: "direct push to refs/heads/main is prohibited"}},
+		},
+		{
+			name:   "committed PR_DESCRIPTION.md rejected without secrets",
+			body:   pushBody(literalFilePush("PR_DESCRIPTION.md", "title\n\nbody\n", "add pr desc")...),
+			policy: private,
+			want:   []Violation{{Category: "TransientPRDescriptionFile", File: "PR_DESCRIPTION.md", Sample: "PR_DESCRIPTION.md"}},
+		},
+		{
+			name:   "committed .pr_description.md rejected without secrets",
+			body:   pushBody(literalFilePush(".pr_description.md", "title\n\nbody\n", "add pr desc")...),
+			policy: private,
+			want:   []Violation{{Category: "TransientPRDescriptionFile", File: ".pr_description.md", Sample: ".pr_description.md"}},
+		},
+		{
+			name:   "oversized GEMINI.md rejected",
+			body:   pushBody(literalFilePush("GEMINI.md", strings.Repeat("x", 23041), "add gemini")...),
+			policy: private,
+			want:   []Violation{{Category: "RuleFileSizeCeiling", File: "GEMINI.md", Sample: "23041 bytes"}},
+		},
+		{
+			name:   "oversized AGENTS.md rejected",
+			body:   pushBody(literalFilePush("AGENTS.md", strings.Repeat("x", 23041), "add agents")...),
+			policy: private,
+			want:   []Violation{{Category: "RuleFileSizeCeiling", File: "AGENTS.md", Sample: "23041 bytes"}},
+		},
+		{
+			name:   "GEMINI.md within limit allowed",
+			body:   pushBody(literalFilePush("GEMINI.md", strings.Repeat("x", 23040), "add gemini")...),
+			policy: private,
+		},
+		{
+			name:   "nested GEMINI.md oversized allowed",
+			body:   pushBody(literalFilePush("docs/GEMINI.md", strings.Repeat("x", 23041), "add nested gemini")...),
+			policy: private,
+		},
+		{
+			name:   "feature branch push with BlockMainPush allowed",
+			body:   pushBodyRef("refs/heads/feat/patch", literalFilePush("clean.txt", "clean\n", "add")...),
+			policy: PushScanPolicy{BlockMainPush: true, Owner: "acme", Repo: "widgets"},
+		},
 	}
 }
 
@@ -479,6 +543,26 @@ func TestTreeNames(t *testing.T) {
 			t.Parallel()
 			if got := treeNames([]byte(tc.data)); got != tc.want {
 				t.Fatalf("treeNames = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestIsZeroOID(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		oid  string
+		want bool
+	}{
+		{name: "all zeros", oid: "0000000000000000000000000000000000000000", want: true},
+		{name: "non-zero sha", oid: "050b8d2253f6fe4d510d8d6c88431500374086ee", want: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := isZeroOID(tc.oid); got != tc.want {
+				t.Fatalf("isZeroOID(%q) = %v, want %v", tc.oid, got, tc.want)
 			}
 		})
 	}

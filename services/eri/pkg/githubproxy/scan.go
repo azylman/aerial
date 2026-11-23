@@ -173,6 +173,7 @@ func scanPolicy(ctx context.Context, cfg *config.Config, owner, repo, pat string
 	return guard.PushScanPolicy{
 		PublicRepo:     repoVisibility.isPublic(ctx, upstreamBase(apiBaseEnv, defaultAPIBase), owner, repo, pat),
 		RegexAllowlist: allow,
+		BlockMainPush:  true,
 		Owner:          owner,
 		Repo:           repo,
 	}

@@ -543,6 +543,177 @@ func TestParseAerialPRMetadata(t *testing.T) {
 	}
 }
 
+const testChunkTag = "van" + "adis"
+
+func TestExtractChunkIDFromBranch(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name, repo, branch, want string
+	}{
+		{name: "empty repo", repo: "", branch: "feat/aerial-pr-" + testChunkTag + "-c1-012345", want: ""},
+		{name: "empty branch", repo: "aerial", branch: "", want: ""},
+		{name: "standalone branch without chunk tag", repo: "aerial", branch: "feat/aerial-pr-20261116-123456", want: ""},
+		{name: "valid with refs/heads", repo: "azylman/aerial", branch: "refs/heads/feat/aerial-pr-" + testChunkTag + "-chunk-1-router-a1b2c3", want: "chunk-1-router"},
+		{name: "valid bare branch", repo: "aerial", branch: "feat/aerial-pr-" + testChunkTag + "-c1-012345", want: "c1"},
+		{name: "valid with target id", repo: "azylman/aerial", branch: "feat/aerial-pr-" + testChunkTag + "-chunk-1-t111111111111111111-a1b2c3", want: "chunk-1"},
+		{name: "valid uppercase hex", repo: "aerial", branch: "feat/aerial-pr-" + testChunkTag + "-c1-ABCDEF", want: "c1"},
+		{name: "git suffix repo", repo: "aerial.git", branch: "feat/aerial-pr-" + testChunkTag + "-c1-012345", want: "c1"},
+		{name: "repo and chunk containing delimiter", repo: "owner/demo-pr-" + testChunkTag + "-tools", branch: "feat/demo-pr-" + testChunkTag + "-tools-pr-" + testChunkTag + "-c1-pr-" + testChunkTag + "-2-a1b2c3", want: "c1-pr-" + testChunkTag + "-2"},
+		{name: "invalid suffix too short", repo: "aerial", branch: "feat/aerial-pr-" + testChunkTag + "-c1-12345", want: ""},
+		{name: "invalid suffix too long", repo: "aerial", branch: "feat/aerial-pr-" + testChunkTag + "-c1-1234567", want: ""},
+		{name: "invalid suffix non-hex", repo: "aerial", branch: "feat/aerial-pr-" + testChunkTag + "-c1-12345g", want: ""},
+		{name: "no separator after chunk tag", repo: "aerial", branch: "feat/aerial-pr-" + testChunkTag + "-c1", want: ""},
+		{name: "empty chunk id", repo: "aerial", branch: "feat/aerial-pr-" + testChunkTag + "--123456", want: ""},
+		{name: "invalid chunk characters", repo: "aerial", branch: "feat/aerial-pr-" + testChunkTag + "-c1!-012345", want: ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := ExtractChunkIDFromBranch(tc.repo, tc.branch); got != tc.want {
+				t.Fatalf("ExtractChunkIDFromBranch(%q, %q) = %q, want %q", tc.repo, tc.branch, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestExtractTargetIDFromBranch(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name, repo, branch, want string
+	}{
+		{name: "empty repo", repo: "", branch: "feat/aerial-pr-t111111111111111111-012345", want: ""},
+		{name: "empty branch", repo: "aerial", branch: "", want: ""},
+		{name: "standalone branch with target id", repo: "aerial", branch: "feat/aerial-pr-t111111111111111111-a1b2c3", want: "111111111111111111"},
+		{name: "standalone branch with refs/heads and target id", repo: "azylman/aerial", branch: "refs/heads/feat/aerial-pr-t111111111111111111-a1b2c3", want: "111111111111111111"},
+		{name: "standalone branch timestamp without target", repo: "aerial", branch: "feat/aerial-pr-20261116-123456", want: ""},
+		{name: "chunk branch with target id", repo: "aerial", branch: "feat/aerial-pr-" + testChunkTag + "-chunk-1-t111111111111111111-a1b2c3", want: "111111111111111111"},
+		{name: "chunk branch without target id", repo: "aerial", branch: "feat/aerial-pr-" + testChunkTag + "-chunk-1-a1b2c3", want: ""},
+		{name: "target id too short (16 digits)", repo: "aerial", branch: "feat/aerial-pr-t1111111111111111-a1b2c3", want: ""},
+		{name: "target id too long (21 digits)", repo: "aerial", branch: "feat/aerial-pr-t111111111111111111111-a1b2c3", want: ""},
+		{name: "target id non digits", repo: "aerial", branch: "feat/aerial-pr-tabcdefabcdefabcde-a1b2c3", want: ""},
+		{name: "invalid suffix non-hex", repo: "aerial", branch: "feat/aerial-pr-t111111111111111111-12345g", want: ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := ExtractTargetIDFromBranch(tc.repo, tc.branch); got != tc.want {
+				t.Fatalf("ExtractTargetIDFromBranch(%q, %q) = %q, want %q", tc.repo, tc.branch, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestResolveAerialPRMetadata(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name, repo, branch, body, wantTarget, wantBotID string
+		wantOK                                          bool
+	}{
+		{
+			name:       "body trailer wins over branch target",
+			repo:       "aerial",
+			branch:     "feat/aerial-pr-t111111111111111111-a1b2c3",
+			body:       "<!-- aerial-pr: {\"target_id\":\"222222222222222222\",\"bot_id\":\"aerial\"} -->",
+			wantTarget: "222222222222222222",
+			wantBotID:  "aerial",
+			wantOK:     true,
+		},
+		{
+			name:       "empty body resolves branch target",
+			repo:       "aerial",
+			branch:     "feat/aerial-pr-t111111111111111111-a1b2c3",
+			body:       "Just a regular PR body with no comment",
+			wantTarget: "111111111111111111",
+			wantOK:     true,
+		},
+		{
+			name:       "body with bot id only resolves branch target",
+			repo:       "aerial",
+			branch:     "feat/aerial-pr-t111111111111111111-a1b2c3",
+			body:       "<!-- aerial-pr: {\"bot_id\":\"eri\"} -->",
+			wantTarget: "111111111111111111",
+			wantBotID:  "eri",
+			wantOK:     true,
+		},
+		{
+			name:   "empty body and timestamp branch yields empty metadata",
+			repo:   "aerial",
+			branch: "feat/aerial-pr-20261116-123456",
+			body:   "Plain body",
+			wantOK: false,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := ResolveAerialPRMetadata(tc.repo, tc.branch, tc.body)
+			if got.OK() != tc.wantOK || got.TargetID != tc.wantTarget || got.BotID != tc.wantBotID {
+				t.Fatalf("ResolveAerialPRMetadata() = %+v (ok=%v), want target=%q bot=%q ok=%v", got, got.OK(), tc.wantTarget, tc.wantBotID, tc.wantOK)
+			}
+		})
+	}
+}
+
+func TestResolveCollaboratorAlertTargetBranchMetadata(t *testing.T) {
+	t.Parallel()
+	srv := newTestRouter(Config{
+		CollaboratorCIAlerts: []config.CollaboratorCIAlertRule{
+			{
+				Repo:      "azylman/aerial",
+				ChannelID: "111111111111111111",
+				Authors:   map[string]string{"collab-user": "<@123>"},
+			},
+		},
+	}, nil, nil)
+
+	tests := []struct {
+		name   string
+		branch string
+		body   string
+		wantOK bool
+	}{
+		{
+			name:   "collaborator branch with no metadata is alerted",
+			branch: "feat/some-collab-branch",
+			body:   "Plain body",
+			wantOK: true,
+		},
+		{
+			name:   "branch with encoded target is treated as bot managed",
+			branch: "feat/aerial-pr-t111111111111111111-a1b2c3",
+			body:   "Plain body",
+			wantOK: false,
+		},
+		{
+			name:   "chunk branch without target is treated as bot managed",
+			branch: "feat/aerial-pr-" + testChunkTag + "-c1-a1b2c3",
+			body:   "Plain body",
+			wantOK: false,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			pr := GitHubPullRequest{
+				Number: 1,
+				State:  "open",
+				Head:   GitHubPRRef{Ref: tc.branch, SHA: "sha1"},
+				Body:   tc.body,
+				User: struct {
+					Login string `json:"login"`
+				}{Login: "collab-user"},
+			}
+			_, _, _, ok, err := srv.resolveCollaboratorAlertTarget(context.Background(), "azylman/aerial", 1, "sha1", pr)
+			if err != nil {
+				t.Fatalf("resolveCollaboratorAlertTarget() unexpected err = %v", err)
+			}
+			if ok != tc.wantOK {
+				t.Fatalf("resolveCollaboratorAlertTarget() ok = %v, want %v", ok, tc.wantOK)
+			}
+		})
+	}
+}
+
 func TestAutoUpdatePolicy(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
