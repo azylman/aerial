@@ -58,34 +58,6 @@ RUN mkdir -p /out/usr/local/bin /out/actions-runner && \
     tar -xzf /tmp/runner.tar.gz -C /out/actions-runner && \
     rm -f /tmp/runner.tar.gz
 
-FROM ubuntu:24.04 AS python-venv
-
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates \
-    git \
-    python3 \
-    python3-pip \
-    python3-venv \
-    && rm -rf /var/lib/apt/lists/*
-
-RUN python3 -m venv /opt/venv && \
-    /opt/venv/bin/pip install --no-cache-dir \
-        "pip" \
-        "pytest>=8.3.0" \
-        "pytest-asyncio>=0.24.0" \
-        "ruff>=0.6.0" \
-        "pyyaml>=6.0.2" \
-        "httpx>=0.27.2" \
-        "fastapi>=0.115.0" \
-        "uvicorn[standard]>=0.30.6" \
-        "pydantic>=2.6.0" \
-        "aiohttp>=3.9.0" \
-        "numpy>=2.1.0" \
-        "scipy>=1.14.0" \
-        "soundfile>=0.12.1" \
-        "prometheus-client>=0.20.0" \
-        "git+https://github.com/brockventures/banana-protocol.git@v0.6.1"
-
 FROM ubuntu:24.04
 
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -111,14 +83,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libc6-dev \
     libatomic1 \
     pkg-config \
-    libespeak-ng-dev \
     make \
     procps \
     python3 \
     python3-venv \
     python3-pip \
     postgresql-client \
-    libsndfile1 \
     && rm -rf /var/lib/apt/lists/*
 
 # Install GitHub CLI (gh)
@@ -173,11 +143,10 @@ COPY --link --from=docker:27-cli /usr/local/bin/docker /usr/local/bin/docker
 COPY --link --from=docker:27-cli /usr/local/libexec/docker/cli-plugins/ /usr/local/libexec/docker/cli-plugins/
 COPY --link --from=cli-tools /out/usr/local/bin/muse /usr/local/bin/muse
 COPY --link --chown=1000:1000 --from=cli-tools /out/actions-runner /actions-runner
-COPY --link --from=python-venv /opt/venv /opt/venv
 
 ENV RUSTUP_HOME="/usr/local/rustup" \
     CARGO_HOME="/usr/local/cargo" \
-    PATH="/opt/npm-global/bin:/usr/local/cargo/bin:/opt/venv/bin:/usr/local/go/bin:/data/cache/go/bin:/home/ubuntu/go/bin:/root/go/bin:${PATH}"
+    PATH="/opt/npm-global/bin:/usr/local/cargo/bin:/usr/local/go/bin:/data/cache/go/bin:/home/ubuntu/go/bin:/root/go/bin:${PATH}"
 
 RUN (useradd -m -u 1000 runner 2>/dev/null || true) && \
     mkdir -p /data && \

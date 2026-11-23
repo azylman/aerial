@@ -8,7 +8,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 	"net/http"
 	"strings"
 
@@ -304,41 +303,6 @@ func NewHandler(st store.VanadisStore, rc *restate.Client, restateEnabled bool, 
 
 func (h *Handler) authEnabled() bool {
 	return h != nil && h.Auth != nil && h.Auth.Enabled()
-}
-
-// storeErrorStatus maps a store or Restate error onto its HTTP status.
-func storeErrorStatus(err error) int {
-	switch {
-	case errors.Is(err, restate.ErrRestateTimeout):
-		return http.StatusGatewayTimeout
-	case errors.Is(err, model.ErrInvalidBuildInput):
-		return http.StatusBadRequest
-	case errors.Is(err, model.ErrBuildNotFound) || errors.Is(err, model.ErrChunkNotFound):
-		return http.StatusNotFound
-	case errors.Is(err, model.ErrBuildConflict):
-		return http.StatusConflict
-	}
-	if _, ok := errors.AsType[*k8sauth.ValidationError](err); ok {
-		return http.StatusBadRequest
-	}
-	if _, ok := errors.AsType[*k8sauth.UnauthorizedError](err); ok {
-		return http.StatusUnauthorized
-	}
-	if _, ok := errors.AsType[*k8sauth.ForbiddenError](err); ok {
-		return http.StatusForbidden
-	}
-	return http.StatusInternalServerError
-}
-
-// writeStoreError maps a store or Restate error onto its HTTP status and writes
-// it. Server-side failures (5xx) are logged with ctx so the line carries the
-// request's trace_id and span_id.
-func writeStoreError(ctx context.Context, w http.ResponseWriter, err error) {
-	status := storeErrorStatus(err)
-	if status >= http.StatusInternalServerError {
-		slog.ErrorContext(ctx, "[vanadis] store request failed", "status", status, "error", err)
-	}
-	httpkit.WriteJSON(w, status, map[string]string{"error": err.Error()})
 }
 
 // NewHTTPHandler constructs and returns the Streamable HTTP MCP server handler.

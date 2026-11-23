@@ -29,14 +29,6 @@ func (r restateObjectRuntime) Now() (time.Time, error) {
 	return restate.Run(r.ctx, func(restate.RunContext) (time.Time, error) { return time.Now(), nil }, restate.WithName("deployment-clock"))
 }
 
-func (r restateObjectRuntime) GetPendingStarts() (map[string]deploygate.PendingStart, error) {
-	return restate.Get[map[string]deploygate.PendingStart](r.ctx, deploygate.PendingDeploymentKey)
-}
-
-func (r restateObjectRuntime) SetPendingStarts(p map[string]deploygate.PendingStart) {
-	restate.Set(r.ctx, deploygate.PendingDeploymentKey, p)
-}
-
 func (r restateObjectRuntime) ScheduleDeadline(req deploygate.DeploymentDeadlineRequest, delay time.Duration) {
 	if delay < 0 {
 		delay = 0

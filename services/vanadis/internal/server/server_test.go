@@ -229,49 +229,6 @@ func TestRoutes_ServerSpanPropagatesToRestate(t *testing.T) {
 	}
 }
 
-// TestRetryActionRouteWiring exercises the POST /builds/{id}/retry-action
-// route through SetupMux so the root delegation wrapper stays covered.
-func TestRetryActionRouteWiring(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name       string
-		body       string
-		wantStatus int
-		wantSubstr string
-	}{
-		{name: "invalid json rejected", body: `{`, wantStatus: http.StatusBadRequest, wantSubstr: "invalid retry payload"},
-		{name: "unavailable ingress reported", body: `{"build_id":"b1","chunk_id":"c1","expected_dispatch_id":"vanadis-c1-turn-0","reason":"retry"}`, wantStatus: http.StatusServiceUnavailable, wantSubstr: "durable Restate ingress is required"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			mem := newMemoryVanadisStore()
-			if err := mem.CreateBuild(context.Background(), storetest.Build("b1", "1555999", "Retry", "obj", "failed"), nil); err != nil {
-				t.Fatalf("seed retry build: %v", err)
-			}
-			srv := NewVanadisServer(Config{Port: "0"}, RestateConfig{}, mem, nil)
-			srv.restateCfg = RestateConfig{}
-			ts := httptest.NewServer(srv.Routes())
-			t.Cleanup(ts.Close)
-			resp, err := ts.Client().Post(ts.URL+"/builds/b1/retry-action", "application/json", strings.NewReader(tc.body))
-			if err != nil {
-				t.Fatalf("request failed: %v", err)
-			}
-			defer resp.Body.Close()
-			body, err := io.ReadAll(resp.Body)
-			if err != nil {
-				t.Fatalf("failed to read body: %v", err)
-			}
-			if resp.StatusCode != tc.wantStatus {
-				t.Fatalf("status = %d, want %d (body: %s)", resp.StatusCode, tc.wantStatus, string(body))
-			}
-			if !strings.Contains(string(body), tc.wantSubstr) {
-				t.Fatalf("body %q does not contain %q", string(body), tc.wantSubstr)
-			}
-		})
-	}
-}
-
 // TestMCPHandlerReceivers pins the observable wiring of the root MCP
 // delegation helpers: which store instance is propagated, the RestateEnabled
 // flag value, and that a nil server reports a missing store (it cannot
@@ -585,11 +542,6 @@ var routeCases = []routeCase{
 	{name: "build unknown subpath", method: http.MethodGet, path: "/builds/b1/unknown", store: routesSeeded, wantStatus: http.StatusNotFound},
 	{name: "build three parts not chunks", method: http.MethodGet, path: "/builds/b1/notchunks/c1", store: routesSeeded, wantStatus: http.StatusNotFound},
 	{name: "build deep unknown subpath", method: http.MethodGet, path: "/builds/b1/chunks/c1/deep", store: routesSeeded, wantStatus: http.StatusNotFound},
-	{name: "build chunks list not allowed", method: http.MethodGet, path: "/builds/b1/chunks", store: routesSeeded, wantStatus: http.StatusMethodNotAllowed},
-	{name: "build chunk ref trailing slash", method: http.MethodGet, path: "/builds/b1/chunks/", store: routesSeeded, wantStatus: http.StatusBadRequest, wantSubstr: "chunk_ref is required"},
-	{name: "build chunk ref blank", method: http.MethodGet, path: "/builds/b1/chunks/%20", store: routesSeeded, wantStatus: http.StatusBadRequest, wantSubstr: "chunk_ref is required"},
-	{name: "build chunk method not allowed", method: http.MethodPost, path: "/builds/b1/chunks/c1", store: routesSeeded, wantStatus: http.StatusMethodNotAllowed},
-
 	// Cancel build.
 	{name: "cancel allowed", method: http.MethodPost, path: "/builds/b1/cancel", body: `{"reason":"cancel"}`, store: routesSeeded, auth: routesAllow, token: routesToken, wantStatus: http.StatusOK, wantSubstr: `"status":"cancelled"`},
 	{name: "cancel forbidden", method: http.MethodPost, path: "/builds/b1/cancel", body: `{"reason":"cancel"}`, store: routesSeeded, auth: routesDeny, token: routesToken, wantStatus: http.StatusForbidden},
@@ -599,49 +551,6 @@ var routeCases = []routeCase{
 	{name: "cancel routes to runner build", method: http.MethodPost, path: "/builds/b-runner-alpha/cancel", store: routesSeeded, wantStatus: http.StatusOK},
 	{name: "cancel store error", method: http.MethodPost, path: "/builds/b1/cancel", store: routesGetFails, wantStatus: http.StatusInternalServerError},
 	{name: "cancel method not allowed", method: http.MethodGet, path: "/builds/b1/cancel", store: routesSeeded, wantStatus: http.StatusMethodNotAllowed},
-
-	// Update build.
-	{name: "update build allowed", method: http.MethodPatch, path: "/builds/b1", body: `{"title":"new"}`, store: routesSeeded, auth: routesAllow, token: routesToken, wantStatus: http.StatusOK, wantSubstr: `"status":"updated"`},
-	{name: "update build forbidden", method: http.MethodPatch, path: "/builds/b1", body: `{"title":"new"}`, store: routesSeeded, auth: routesDeny, token: routesToken, wantStatus: http.StatusForbidden},
-	{name: "update build not found", method: http.MethodPatch, path: "/builds/b-missing", body: `{"title":"new"}`, store: routesSeeded, auth: routesAllow, token: routesToken, wantStatus: http.StatusNotFound},
-	{name: "update build empty agent fallback", method: http.MethodPatch, path: "/builds/b-empty", body: `{"title":"new"}`, store: routesSeeded, auth: routesAllow, token: routesToken, wantStatus: http.StatusOK},
-	{name: "update build body read error", method: http.MethodPatch, path: "/builds/b1", errBody: true, store: routesSeeded, wantStatus: http.StatusBadRequest, wantSubstr: "failed to read request body"},
-	{name: "update build bad json", method: http.MethodPatch, path: "/builds/b1", body: `{bad json}`, store: routesSeeded, wantStatus: http.StatusBadRequest, wantSubstr: "invalid json payload"},
-	{name: "update build no fields", method: http.MethodPatch, path: "/builds/b1", body: `{"title":""}`, store: routesSeeded, wantStatus: http.StatusBadRequest, wantSubstr: "at least one of title"},
-	{name: "update build objective only", method: http.MethodPatch, path: "/builds/b1", body: `{"objective":"New Obj"}`, store: routesSeeded, wantStatus: http.StatusOK},
-	{name: "update build conflict", method: http.MethodPatch, path: "/builds/b-done", body: `{"title":"T"}`, store: routesSeeded, wantStatus: http.StatusConflict},
-	{name: "update build routes to runner build", method: http.MethodPatch, path: "/builds/b-runner-alpha", body: `{"title":"New Title"}`, store: routesSeeded, wantStatus: http.StatusOK},
-
-	// Get, update and remove a build chunk.
-	{name: "get chunk allowed", method: http.MethodGet, path: "/builds/b1/chunks/c1", store: routesSeeded, auth: routesAllow, token: routesToken, wantStatus: http.StatusOK, wantSubstr: `"id":"c1"`},
-	{name: "get chunk forbidden", method: http.MethodGet, path: "/builds/b1/chunks/c1", store: routesSeeded, auth: routesDeny, token: routesToken, wantStatus: http.StatusForbidden},
-	{name: "get chunk not found", method: http.MethodGet, path: "/builds/b1/chunks/c-missing", store: routesSeeded, auth: routesAllow, token: routesToken, wantStatus: http.StatusNotFound},
-	{name: "get chunk build not found", method: http.MethodGet, path: "/builds/b-missing/chunks/c1", store: routesSeeded, wantStatus: http.StatusNotFound},
-	{name: "get chunk by index", method: http.MethodGet, path: "/builds/b1/chunks/1", store: routesSeeded, wantStatus: http.StatusOK, wantSubstr: `"id":"c2"`},
-	{name: "update chunk allowed", method: http.MethodPatch, path: "/builds/b1/chunks/c1", body: `{"title":"new"}`, store: routesSeeded, auth: routesAllow, token: routesToken, wantStatus: http.StatusOK, wantSubstr: `"status":"updated"`},
-	{name: "update chunk forbidden", method: http.MethodPatch, path: "/builds/b1/chunks/c1", body: `{"title":"new"}`, store: routesSeeded, auth: routesDeny, token: routesToken, wantStatus: http.StatusForbidden},
-	{name: "update chunk empty agent fallback", method: http.MethodPatch, path: "/builds/b-empty/chunks/c-empty", body: `{"title":"new"}`, store: routesSeeded, auth: routesAllow, token: routesToken, wantStatus: http.StatusOK},
-	{name: "update chunk bad json", method: http.MethodPatch, path: "/builds/b1/chunks/c1", body: `{bad json}`, store: routesSeeded, wantStatus: http.StatusBadRequest, wantSubstr: "invalid json payload"},
-	{name: "update chunk no fields", method: http.MethodPatch, path: "/builds/b1/chunks/c1", body: `{}`, store: routesSeeded, wantStatus: http.StatusBadRequest, wantSubstr: "at least one updated field"},
-	{name: "update chunk not found", method: http.MethodPatch, path: "/builds/b1/chunks/c-missing", body: `{"title":"T"}`, store: routesSeeded, wantStatus: http.StatusNotFound},
-	{name: "update chunk conflict", method: http.MethodPatch, path: "/builds/b1/chunks/c-conflict", body: `{"title":"T"}`, store: routesSeeded, wantStatus: http.StatusConflict},
-	{name: "update chunk routes to runner build", method: http.MethodPatch, path: "/builds/b-runner-alpha/chunks/c-alpha-1", body: `{"title":"T"}`, store: routesSeeded, wantStatus: http.StatusOK},
-	{name: "remove chunk allowed", method: http.MethodDelete, path: "/builds/b1/chunks/c2", store: routesSeeded, auth: routesAllow, token: routesToken, wantStatus: http.StatusOK, wantSubstr: `"removed_chunk_id":"c2"`},
-	{name: "remove chunk forbidden", method: http.MethodDelete, path: "/builds/b1/chunks/c1", store: routesSeeded, auth: routesDeny, token: routesToken, wantStatus: http.StatusForbidden},
-	{name: "remove chunk build not found", method: http.MethodDelete, path: "/builds/b-missing/chunks/c1", store: routesSeeded, auth: routesAllow, token: routesToken, wantStatus: http.StatusNotFound},
-	{name: "remove chunk empty agent fallback", method: http.MethodDelete, path: "/builds/b-empty/chunks/c-empty", store: routesSeeded, auth: routesAllow, token: routesToken, wantStatus: http.StatusOK},
-	{name: "remove chunk conflict", method: http.MethodDelete, path: "/builds/b1/chunks/c-conflict", store: routesSeeded, wantStatus: http.StatusConflict},
-	{name: "remove chunk routes to runner build", method: http.MethodDelete, path: "/builds/b-runner-alpha/chunks/c-alpha-2", store: routesSeeded, wantStatus: http.StatusOK},
-
-	// Append chunks.
-	{name: "append allowed", method: http.MethodPost, path: "/builds/b1/chunks", body: routesAppend, store: routesSeeded, auth: routesAllow, token: routesToken, wantStatus: http.StatusOK, wantSubstr: `"status":"appended"`},
-	{name: "append forbidden", method: http.MethodPost, path: "/builds/b1/chunks", body: routesAppend, store: routesSeeded, auth: routesDeny, token: routesToken, wantStatus: http.StatusForbidden},
-	{name: "append empty agent fallback", method: http.MethodPost, path: "/builds/b-empty/chunks", body: routesAppend, store: routesSeeded, auth: routesAllow, token: routesToken, wantStatus: http.StatusOK},
-	{name: "append bad json", method: http.MethodPost, path: "/builds/b1/chunks", body: `{bad json}`, store: routesSeeded, wantStatus: http.StatusBadRequest, wantSubstr: "invalid json payload"},
-	{name: "append empty chunks", method: http.MethodPost, path: "/builds/b1/chunks", body: `{"chunks":[]}`, store: routesSeeded, wantStatus: http.StatusBadRequest, wantSubstr: "chunks cannot be empty"},
-	{name: "append build not found", method: http.MethodPost, path: "/builds/b-missing/chunks", body: routesAppend, store: routesSeeded, wantStatus: http.StatusNotFound},
-	{name: "append conflict", method: http.MethodPost, path: "/builds/b-done/chunks", body: routesAppend, store: routesSeeded, wantStatus: http.StatusConflict},
-	{name: "append routes to runner build", method: http.MethodPost, path: "/builds/b-runner-alpha/chunks", body: routesAppend, store: routesSeeded, wantStatus: http.StatusOK},
 
 	// Active routesStep via /chunks/active-routesStep.
 	{name: "chunks active step nil store", method: http.MethodPost, path: "/chunks/active-step", body: routesStep, wantStatus: http.StatusInternalServerError},

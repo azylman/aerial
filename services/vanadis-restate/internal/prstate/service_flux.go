@@ -228,7 +228,6 @@ func (s *PRObjectService) HandleReadinessRetry(ctx restate.ObjectContext, ev PRE
 	if s.dropUntrackedRollout(ctx, st, stored, "HandleReadinessRetry") || st.ApplyDeployEvent(ev) != DispositionApply {
 		return nil
 	}
-	st.RetryPRReadiness()
 	if resp := s.applyReadinessRetry(ctx, st, merge); resp.Status != http.StatusAccepted {
 		restate.Set(ctx, s.stateKey, st)
 	}

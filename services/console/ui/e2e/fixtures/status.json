@@ -406,48 +406,6 @@
       "started_at": "2026-11-08T10:01:40.000Z"
     }
   ],
-  "quick_launch_links": [
-    {
-      "name": "Console",
-      "url": "/console/",
-      "icon": "🛰️",
-      "target": "_self",
-      "is_core": true
-    },
-    {
-      "name": "Grafana",
-      "url": "/grafana/",
-      "icon": "📈",
-      "description": "Telemetry dashboards",
-      "is_core": true
-    },
-    {
-      "name": "Docs",
-      "url": "/docs/",
-      "icon": "📚",
-      "is_core": true
-    },
-    {
-      "name": "Agentsview",
-      "url": "/agentsview/",
-      "icon": "🔭",
-      "is_core": true
-    },
-    {
-      "name": "Homepage",
-      "url": "/",
-      "icon": "🏠",
-      "target": "_self",
-      "is_core": true
-    },
-    {
-      "name": "Home Assistant",
-      "url": "http://homeassistant.example.test:8123/",
-      "icon": "🏡",
-      "description": "Smart home",
-      "is_custom": true
-    }
-  ],
   "ongoing_deploy": "console",
   "is_deploying": true
 }

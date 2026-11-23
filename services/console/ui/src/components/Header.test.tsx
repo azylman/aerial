@@ -24,11 +24,6 @@ const CLUSTER = {
     { name: 'coven', status: 'healthy' },
     { name: 'vision', status: 'down' },
   ],
-  quick_launch_links: [
-    { name: 'Console', url: '/console/', icon: '◆', target: '_self' },
-    { name: 'Grafana', url: '/grafana/', description: 'Dashboards' },
-    { name: 'Custom', url: 'https://example.test/', is_custom: true },
-  ],
 } as unknown as ClusterResponse;
 
 const SCHEDULES = { summary: { total_active: 40 }, crons: [], one_shots: [] } as unknown as SchedulesAPIResponse;
@@ -61,13 +56,12 @@ describe('Header', () => {
     expect(screen.getByRole('heading', { level: 1 }).textContent).toBe('Aerial Console');
     expect(screen.getByText('Ready')).toBeTruthy();
     expect(badges()).toEqual({ Overview: null, Tasks: '0', Schedules: '0', Memory: '0', Builds: '0', Docket: null });
-    expect(screen.queryByRole('navigation', { name: 'Tactical Gateway Launcher' })).toBeNull();
     const telemetry = screen.getByRole('tab', { name: /Overview/ });
     expect(telemetry.getAttribute('aria-selected')).toBe('true');
     expect(telemetry.getAttribute('aria-controls')).toBe('telemetry-view');
   });
 
-  it('renders badge counts, permet score and dock from the store', () => {
+  it('renders badge counts and permet score from the store', () => {
     render(<Header />);
     act(() => {
       const s = useConsoleStore.getState();
@@ -79,15 +73,6 @@ describe('Header', () => {
     expect(badges()).toEqual({ Overview: null, Tasks: '2', Schedules: '40', Memory: '150', Builds: '5', Docket: null });
     const score = screen.getByText('3 / 4 Healthy');
     expect(score.getAttribute('style')).toContain('var(--accent-amber)');
-
-    const dock = screen.getByRole('navigation', { name: 'Tactical Gateway Launcher' });
-    const chips = within(dock).getAllByRole('link');
-    expect(chips.map((a) => [a.textContent, a.className, a.getAttribute('target'), a.getAttribute('rel'), a.getAttribute('title')])).toEqual([
-      ['◆ Console', 'dock-chip active', '_self', null, null],
-      ['Grafana', 'dock-chip', '_blank', 'noopener noreferrer', 'Dashboards'],
-      ['Custom', 'dock-chip', '_blank', 'noopener noreferrer', null],
-    ]);
-    expect(chips.map((a) => a.querySelector('.ping-dot')?.className)).toEqual(['ping-dot', 'ping-dot', 'ping-dot custom']);
   });
 
   it('clicking a tab navigates through the store', () => {

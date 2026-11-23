@@ -360,30 +360,6 @@ func (s *PRState) Untracked() bool {
 		strings.TrimSpace(s.TargetID) == ""
 }
 
-// HasDeployResidue reports whether st still holds rollout state: a status,
-// recorded or started jobs, reconcile requests, or rollout-index membership.
-func (s *PRState) HasDeployResidue() bool {
-	return s != nil && (s.Status != "" || len(s.Jobs) > 0 || len(s.StartedJobs) > 0 ||
-		len(s.KustomizationRequests) > 0 || s.RolloutIndexed || s.PendingDeployFailure != nil)
-}
-
-// ClearDeployResidue drops every rollout field of st, so an untracked state
-// created before the untracked-event guard stops reading as a rollout. It
-// keeps the generation and index sequences, so a later index update for the
-// PR still orders after the inactive one this clear sends.
-func (s *PRState) ClearDeployResidue() {
-	if s == nil {
-		return
-	}
-	s.Status = ""
-	s.Jobs, s.StartedJobs, s.DeployedJobs = nil, nil, nil
-	s.JobStates = nil
-	s.KustomizationRequests, s.DeployedKustomizations = nil, nil
-	s.DeploySuccessPending = false
-	s.PendingDeployFailure = nil
-	s.Banner = ""
-}
-
 // TransitionDeploying mirrors TransitionDeploying: when at least one
 // requested job is not yet deployed and the PR is not closed or in conflict,
 // the PR moves to deploying, jobs gain the undeployed requests, started_jobs

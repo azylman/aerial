@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -84,17 +83,6 @@ func (m *mockDeliverer) DeleteStatusWidget(_ context.Context, agent, channelID, 
 
 func (m *mockDeliverer) DeliverStatusWidget(_ context.Context, _ StatusWidgetRequest) (string, error) {
 	return m.msgID, m.err
-}
-
-func (m *mockDeliverer) DeliverDirectMessage(_ context.Context, channelID, content string) error {
-	m.lastChannel = channelID
-	m.lastContent = content
-	return m.err
-}
-
-// delivered is the last direct message as "<channel> <content>", or "".
-func (m *mockDeliverer) delivered() string {
-	return strings.TrimSpace(m.lastChannel + " " + m.lastContent)
 }
 
 var errBoom = errors.New("boom")
@@ -389,6 +377,12 @@ func TestRestateEriClient_DeleteWidget(t *testing.T) {
 	}
 }
 
+func errorDeliverer(err error) *agentDeliverer {
+	d := &agentDeliverer{}
+	d.err = err
+	return d
+}
+
 func TestRestateEriClient_Message(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -402,9 +396,9 @@ func TestRestateEriClient_Message(t *testing.T) {
 		wantDelivered string
 		wantCalls     []string
 	}{
-		{name: "plain deliverer with auth and restate", auth: true, deliverer: &mockDeliverer{}, channel: "ch-1", wantDelivered: "ch-1 test content"},
+		{name: "plain deliverer fails without agent routing", auth: true, deliverer: &mockDeliverer{}, channel: "ch-1", wantErr: "direct message delivery is unconfigured"},
 		{name: "agent deliverer routes through the client agent", auth: true, deliverer: &agentDeliverer{}, channel: "ch-1", wantDelivered: "aerial ch-1 test content"},
-		{name: "deliverer error propagates", auth: true, deliverer: &mockDeliverer{err: errBoom}, channel: "ch-1", wantErr: "boom", wantDelivered: "ch-1 test content"},
+		{name: "deliverer error propagates", auth: true, deliverer: errorDeliverer(errBoom), channel: "ch-1", wantErr: "boom", wantDelivered: "aerial ch-1 test content"},
 		{name: "missing auth errors", deliverer: &mockDeliverer{}, channel: "ch-1", wantErr: "direct message delivery is unconfigured"},
 		{name: "missing restate url errors", auth: true, noRestate: true, deliverer: &mockDeliverer{}, channel: "ch-1", wantErr: "restate url not configured"},
 		{name: "no deliverer errors", auth: true, channel: "ch-1", wantErr: "direct message delivery is unconfigured"},

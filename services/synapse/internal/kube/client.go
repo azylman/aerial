@@ -29,10 +29,11 @@ const (
 	fluxReconcileRequestedAtAnnotation = "reconcile.fluxcd.io/requestedAt"
 	fluxManagedSelector                = fluxKustomizationNameLabel
 
-	kindConfigMap      = "ConfigMap"
-	kindStatefulSet    = "StatefulSet"
-	kindRestateCluster = "RestateCluster"
-	kindKustomization  = "Kustomization"
+	kindConfigMap         = "ConfigMap"
+	kindStatefulSet       = "StatefulSet"
+	kindRestateDeployment = "RestateDeployment"
+	kindRestateCluster    = "RestateCluster"
+	kindKustomization     = "Kustomization"
 
 	configMapAerialImageTags = "aerial-image-tags"
 )
@@ -224,15 +225,6 @@ func (c *Client) ListKustomizationWorkloads(ctx context.Context, ref model.FluxK
 		decoded, err := DecodeWorkloadRollouts(k.Kind, body)
 		if err != nil {
 			return nil, fmt.Errorf("decode %s: %w", k.Path, err)
-		}
-		for i := range decoded {
-			if decoded[i].Kind == kindRestateDeployment && decoded[i].Replicas == 0 {
-				observation, err := c.CollectStoppedChildren(ctx, decoded[i])
-				if err != nil {
-					return nil, err
-				}
-				decoded[i].StoppedChildren = observation
-			}
 		}
 		workloads = append(workloads, decoded...)
 	}

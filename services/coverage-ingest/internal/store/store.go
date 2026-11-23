@@ -112,11 +112,10 @@ func (s PostgresStore) UpsertService(ctx context.Context, service string, rows [
 	return nil
 }
 
-// pruneServicesSQL deletes rows of services outside the keep set. eri-restate is
-// excluded in SQL as well as by PruneKeepSet.
+// pruneServicesSQL deletes rows of services outside the keep set.
 const pruneServicesSQL = `WITH pruned AS (
     DELETE FROM production_code_coverage
-    WHERE service <> ALL($1::text[]) AND service <> 'eri-restate'
+    WHERE service <> ALL($1::text[])
     RETURNING service)
 SELECT service, count(*) FROM pruned GROUP BY service ORDER BY service`
 

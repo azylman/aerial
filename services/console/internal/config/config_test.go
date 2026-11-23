@@ -25,48 +25,6 @@ func configTestPath(t *testing.T, name, yaml string) string {
 	return path
 }
 
-func TestLoadQuickLaunchLinks(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name string
-		file string
-		yaml string
-		want []QuickLaunchLink
-	}{
-		{name: "empty path", want: []QuickLaunchLink{}},
-		{name: "missing file", file: "missing.yaml", want: []QuickLaunchLink{}},
-		{name: "invalid yaml", file: "c.yaml", yaml: "console: [invalid-yaml\ninvalid: [yaml: broken\n", want: []QuickLaunchLink{}},
-		{name: "repos only", file: "c.yaml", yaml: "github_repos: [\"example/alpha\"]\n", want: []QuickLaunchLink{}},
-		{
-			name: "console quick_launch_links skip nameless and urlless",
-			file: "c.yaml",
-			yaml: "console:\n  quick_launch_links:\n    - {name: HOME, url: \"https://home.example.com\", icon: \"🏠\", description: Hub}\n" +
-				"    - {name: \"\", url: \"https://skip.example.com\"}\n    - {name: NO_URL, url: \"\"}\n",
-			want: []QuickLaunchLink{{Name: "HOME", URL: "https://home.example.com", Icon: "🏠", Description: "Hub", Target: "_blank", IsCustom: true}},
-		},
-		{
-			name: "root quick_links keeps target",
-			file: "c.yaml",
-			yaml: "quick_links:\n  - {name: ROOT, url: \"https://root.example.com\", target: _self}\n",
-			want: []QuickLaunchLink{{Name: "ROOT", URL: "https://root.example.com", Target: "_self", IsCustom: true}},
-		},
-		{
-			name: "root quick_launch_links",
-			file: "c.yaml",
-			yaml: "quick_launch_links:\n  - {name: GRAFANA, url: \"https://grafana.example.com\", icon: \"📊\"}\n",
-			want: []QuickLaunchLink{{Name: "GRAFANA", URL: "https://grafana.example.com", Icon: "📊", Target: "_blank", IsCustom: true}},
-		},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			if got := LoadQuickLaunchLinks(configTestPath(t, tc.file, tc.yaml)); !slices.Equal(got, tc.want) {
-				t.Errorf("LoadQuickLaunchLinks() = %+v, want %+v", got, tc.want)
-			}
-		})
-	}
-}
-
 func TestLoadConsoleRepos(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

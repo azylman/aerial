@@ -583,37 +583,6 @@ func TestDeleteStatusWidget(t *testing.T) {
 	}
 }
 
-func TestDeliverDirectMessage(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name        string
-		d           *DiscordWidgetDeliverer
-		wantErr     string
-		wantChannel string
-	}{
-		{name: "nil deliverer returns error", wantErr: "discord widget deliverer is nil"},
-		{name: "routes through the default agent sender", d: newSenderDeliverer(&mockWidgetSender{}, ""), wantChannel: "123456"},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			err := tc.d.DeliverDirectMessage(context.Background(), "123456", "alert")
-			if tc.wantErr != "" {
-				require.Error(t, err)
-				assert.Contains(t, err.Error(), tc.wantErr)
-			} else {
-				require.NoError(t, err)
-			}
-			var mock mockWidgetSender
-			if m := senderMock(tc.d, defaultAgent); m != nil {
-				mock = *m
-			}
-			assert.Equal(t, tc.wantChannel, mock.lastSendChannelID)
-		})
-	}
-}
-
 func TestFormatChunkDurationTable(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
