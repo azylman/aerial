@@ -562,9 +562,10 @@ func (*dummySpawner) Spawn(ctx context.Context, cfg runner.DaemonConfig) (io.Wri
 }
 
 type usagePollerCase struct {
-	name        string
-	cur         *config.ConfigData
-	wantStarted bool
+	name             string
+	cur              *config.ConfigData
+	wantStarted      bool
+	proveDiscordHome bool
 }
 
 func TestStartUsagePoller(t *testing.T) {
@@ -590,9 +591,10 @@ func TestStartUsagePoller(t *testing.T) {
 			wantStarted: true,
 		},
 		{
-			name:        "muse engine",
-			cur:         &config.ConfigData{Engine: config.EngineMuse, MuseBin: "muse"},
-			wantStarted: true,
+			name:             "muse engine",
+			cur:              &config.ConfigData{Engine: config.EngineMuse, MuseBin: "muse"},
+			wantStarted:      true,
+			proveDiscordHome: true,
 		},
 	}
 
@@ -612,21 +614,42 @@ func TestStartUsagePoller(t *testing.T) {
 			}
 			defer func() { startUsagePollerFn = oldStarter }()
 
-			tmpDir := t.TempDir()
+			ephemeralHome := t.TempDir()
+			discordHome := t.TempDir()
+			recordFile := filepath.Join(t.TempDir(), "home-record.txt")
 			cur := tc.cur
 			if cur != nil {
-				cur.DataDir = tmpDir
+				cur.DataDir = ephemeralHome
 				if cur.GetEngine() == config.EngineClaude {
 					t.Setenv("CLAUDE_CODE_OAUTH_TOKEN", "mock-token")
 				}
+				if tc.proveDiscordHome {
+					script := filepath.Join(t.TempDir(), "mock-muse.sh")
+					scriptBody := "#!/bin/sh\nprintf 'HOME=%s\\nMUSE_AUTH_PATH=%s\\n' \"$HOME\" \"$MUSE_AUTH_PATH\" > \"" + recordFile + "\"\necho '{\"allowance\":{\"window\":{\"resetsAtMs\":1795037083000,\"usedPercent\":25}}}'\n"
+					if err := os.WriteFile(script, []byte(scriptBody), 0o755); err != nil {
+						t.Fatal(err)
+					}
+					cur.MuseBin = script
+				}
 			}
-			startUsagePoller(context.Background(), cur, tmpDir, []string{"A=B"})
+			startUsagePoller(context.Background(), cur, ephemeralHome, discordHome, []string{"A=B"})
 
 			assert.Equal(t, tc.wantStarted, started)
 			if tc.wantStarted {
 				assert.Equal(t, 10*time.Minute, gotInterval)
 				assert.NotNil(t, gotRunner)
 				assert.NotNil(t, gotRecord)
+			}
+			if tc.proveDiscordHome {
+				require.NotNil(t, gotRunner)
+				out, err := gotRunner(context.Background())
+				require.NoError(t, err)
+				require.Contains(t, string(out), "allowance")
+				recorded, err := os.ReadFile(recordFile)
+				require.NoError(t, err, "fake MuseBin should record the HOME it ran under")
+				assert.Contains(t, string(recorded), "HOME="+discordHome+"\n")
+				assert.Contains(t, string(recorded), "MUSE_AUTH_PATH="+filepath.Join(discordHome, ".config", "muse", "auth.json"))
+				assert.NotContains(t, string(recorded), ephemeralHome)
 			}
 		})
 	}

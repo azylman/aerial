@@ -119,8 +119,9 @@ func start(env setup) (*server, error) {
 	if err != nil {
 		return nil, err
 	}
-	// A short os.MkdirTemp path keeps the unix socket under the ~107-byte limit.
-	dir, err := os.MkdirTemp("", "pg")
+	// A short os.MkdirTemp path in /tmp keeps the unix socket under the ~107-byte limit
+	// even when Bazel sets $TMPDIR/$TEST_TMPDIR to a deeply nested execroot path.
+	dir, err := os.MkdirTemp("/tmp", "pg")
 	if err != nil {
 		return nil, fmt.Errorf("create server dir: %w", err)
 	}
