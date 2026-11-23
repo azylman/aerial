@@ -22,10 +22,15 @@ import (
 
 // Push scan categories and limits.
 const (
-	categoryRegisteredSecret = "InfisicalSecret"
-	patternRegisteredSecret  = "registered_secret"
-	categoryPrivateIPv4      = "PrivateIPv4"
-	categoryRFC1918          = "RFC1918_192_168"
+	categoryRegisteredSecret       = "InfisicalSecret"
+	patternRegisteredSecret        = "registered_secret"
+	categoryPrivateIPv4            = "PrivateIPv4"
+	categoryRFC1918                = "RFC1918_192_168"
+	categoryDirectMainPush         = "DirectMainPush"
+	categoryTransientPRDescription = "TransientPRDescriptionFile"
+	categoryRuleFileSizeCeiling    = "RuleFileSizeCeiling"
+	maxRuleFileBytes               = 23040
+	refMain                        = "refs/heads/main"
 
 	objBlob   = "blob"
 	objTree   = "tree"
@@ -59,9 +64,14 @@ var PrivateIPv4Pattern = PatternRule{
 type PushScanPolicy struct {
 	PublicRepo     bool
 	RegexAllowlist []string
+	BlockMainPush  bool
 	// Owner and Repo identify the destination repository for ObjectFetcher lookups.
 	Owner string
 	Repo  string
+}
+
+func isZeroOID(oid string) bool {
+	return strings.Trim(strings.TrimSpace(oid), "0") == ""
 }
 
 // ObjectFetcher loads an existing git object from the destination repository.
@@ -568,6 +578,72 @@ func scanObjectRaw(i int, obj packObject, rules []PatternRule) ([]pushHit, error
 	return hits, nil
 }
 
+func checkCommandHygiene(commands []RefCommand, policy PushScanPolicy) []Violation {
+	var out []Violation
+	for _, cmd := range commands {
+		if !isZeroOID(cmd.New) && policy.BlockMainPush && cmd.Ref == refMain {
+			out = append(out, Violation{
+				Category: categoryDirectMainPush,
+				Pattern:  refMain,
+				Sample:   "direct push to refs/heads/main is prohibited",
+				File:     refMain,
+			})
+		}
+	}
+	return out
+}
+
+func checkResolvedHygiene(res *packResolver, objs []packObject) []Violation {
+	var out []Violation
+	for i := range objs {
+		ro, ok := res.resolved[i]
+		if !ok || ro.typ != objBlob {
+			continue
+		}
+		for _, p := range res.paths[i] {
+			base := path.Base(p)
+			if p == "PR_DESCRIPTION.md" || p == ".pr_description.md" || base == "PR_DESCRIPTION.md" || base == ".pr_description.md" {
+				out = append(out, Violation{
+					Category: categoryTransientPRDescription,
+					Pattern:  p,
+					Sample:   p,
+					File:     p,
+				})
+			}
+			if (p == "GEMINI.md" || p == "AGENTS.md") && len(ro.data) > maxRuleFileBytes {
+				out = append(out, Violation{
+					Category: categoryRuleFileSizeCeiling,
+					Pattern:  "max_bytes=23040",
+					Sample:   fmt.Sprintf("%d bytes", len(ro.data)),
+					File:     p,
+				})
+			}
+		}
+	}
+	return out
+}
+
+var hygieneTargetBytes = [][]byte{
+	[]byte("PR_DESCRIPTION.md"),
+	[]byte(".pr_description.md"),
+	[]byte("GEMINI.md"),
+	[]byte("AGENTS.md"),
+}
+
+func hasHygieneCandidates(objs []packObject) bool {
+	for _, obj := range objs {
+		switch obj.kind {
+		case packTree, packOfsDelta, packRefDelta:
+			for _, target := range hygieneTargetBytes {
+				if bytes.Contains(obj.data, target) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
 // ScanReceivePackContext scans a git-receive-pack request body (gzip already removed)
 // and returns violations with file:line locations where resolvable; ctx bounds object fetches.
 func ScanReceivePackContext(ctx context.Context, body io.Reader, policy PushScanPolicy, fetch ObjectFetcher) ([]Violation, error) {
@@ -579,9 +655,13 @@ func ScanReceivePackContext(ctx context.Context, body io.Reader, policy PushScan
 	if err != nil {
 		return nil, err
 	}
+	out := checkCommandHygiene(req.Commands, policy)
 	objs, err := parsePack(req.Pack)
 	if err != nil {
 		return nil, err
+	}
+	if len(objs) == 0 {
+		return dedupeViolations(out), nil
 	}
 	var rules []PatternRule
 	if policy.PublicRepo {
@@ -595,13 +675,12 @@ func ScanReceivePackContext(ctx context.Context, body io.Reader, policy PushScan
 		}
 		hits = append(hits, h...)
 	}
-	if len(hits) == 0 {
-		return nil, nil
+	if len(hits) == 0 && !hasHygieneCandidates(objs) {
+		return dedupeViolations(out), nil
 	}
 	res := newPackResolver(ctx, objs, policy, fetch)
 	res.resolveAll()
 	res.buildPaths()
-	var out []Violation
 	for _, h := range hits {
 		if v, keep := res.locate(h, policy.RegexAllowlist); keep {
 			// Paths and filenames can embed the secret itself.
@@ -609,6 +688,7 @@ func ScanReceivePackContext(ctx context.Context, body io.Reader, policy PushScan
 			out = append(out, v)
 		}
 	}
+	out = append(out, checkResolvedHygiene(res, objs)...)
 	return dedupeViolations(out), nil
 }
 
@@ -644,6 +724,7 @@ type packResolver struct {
 	external   map[string]resolvedObject
 	blobPaths  map[string][]string // every pushed path referencing a blob
 	treePaths  map[string][]string // every directory a pushed tree appears at
+	paths      map[int][]string    // resolved blob paths by object index
 	walked     map[string]bool     // tree sha + "\x00" + dir already walked
 }
 
@@ -657,6 +738,7 @@ func newPackResolver(ctx context.Context, objs []packObject, policy PushScanPoli
 		external:   map[string]resolvedObject{},
 		blobPaths:  map[string][]string{},
 		treePaths:  map[string][]string{},
+		paths:      make(map[int][]string, len(objs)),
 		walked:     map[string]bool{},
 	}
 	for i, o := range objs {
@@ -760,6 +842,11 @@ func (r *packResolver) buildPaths() {
 		}
 		if tree, ok := commitTree(ro.data); ok {
 			r.walkTree(tree, "", 0)
+		}
+	}
+	for i, ro := range r.resolved {
+		if ro.typ == objBlob {
+			r.paths[i] = r.blobPaths[ro.sha]
 		}
 	}
 }
