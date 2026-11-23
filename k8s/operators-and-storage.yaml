@@ -277,7 +277,7 @@ spec:
 apiVersion: postgresql.cnpg.io/v1
 kind: Database
 metadata:
-  name: postgres-aerial
+  name: postgres-19-aerial
   namespace: default
 spec:
   cluster:
@@ -293,7 +293,7 @@ spec:
 apiVersion: postgresql.cnpg.io/v1
 kind: Database
 metadata:
-  name: postgres-infisical
+  name: postgres-19-infisical
   namespace: default
 spec:
   cluster:
@@ -306,7 +306,7 @@ spec:
 apiVersion: postgresql.cnpg.io/v1
 kind: Database
 metadata:
-  name: postgres-grafana
+  name: postgres-19-grafana
   namespace: default
 spec:
   cluster:
@@ -319,7 +319,7 @@ spec:
 apiVersion: postgresql.cnpg.io/v1
 kind: Database
 metadata:
-  name: postgres-docket
+  name: postgres-19-docket
   namespace: default
 spec:
   cluster:
