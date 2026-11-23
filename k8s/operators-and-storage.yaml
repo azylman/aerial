@@ -258,7 +258,7 @@ spec:
       protocol: TCP
       targetPort: 9187
   selector:
-    cnpg.io/cluster: postgres
+    cnpg.io/cluster: postgres-19
     role: primary
   type: ClusterIP
 ---
@@ -270,7 +270,7 @@ metadata:
 spec:
   backupOwnerReference: self
   cluster:
-    name: postgres
+    name: postgres-19
   method: barmanObjectStore
   schedule: 0 0 3 * * *
 ---
@@ -281,7 +281,7 @@ metadata:
   namespace: default
 spec:
   cluster:
-    name: postgres
+    name: postgres-19
   databaseReclaimPolicy: retain
   ensure: present
   extensions:
@@ -297,7 +297,7 @@ metadata:
   namespace: default
 spec:
   cluster:
-    name: postgres
+    name: postgres-19
   databaseReclaimPolicy: retain
   ensure: present
   name: infisical
@@ -310,7 +310,7 @@ metadata:
   namespace: default
 spec:
   cluster:
-    name: postgres
+    name: postgres-19
   databaseReclaimPolicy: retain
   ensure: present
   name: grafana
@@ -323,7 +323,7 @@ metadata:
   namespace: default
 spec:
   cluster:
-    name: postgres
+    name: postgres-19
   databaseReclaimPolicy: retain
   ensure: present
   extensions:
@@ -331,6 +331,267 @@ spec:
       name: vector
   name: docket
   owner: aerial
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  annotations:
+    kustomize.toolkit.fluxcd.io/force: enabled
+  labels:
+    app.kubernetes.io/name: postgres-19-cutover-drain
+  name: postgres-19-cutover-drain
+  namespace: default
+spec:
+  activeDeadlineSeconds: 600
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: postgres-19-cutover-drain
+    spec:
+      containers:
+        - name: cutover-drain
+          image: ghcr.io/cloudnative-pg/postgresql:19-system-trixie@sha256:789b58fff514c28a42844962951c0556cedecaa8d3f35678bc86162fddad9f18
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: PGUSER
+              # CloudNativePG Cluster/postgres and Cluster/postgres-19 configure role "aerial"
+              # with superuser: true and replication: true (lines 28-31 and 148-152).
+              valueFrom:
+                secretKeyRef:
+                  key: username
+                  name: postgres-aerial-role
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  key: password
+                  name: postgres-aerial-role
+          resources:
+            limits:
+              cpu: 500m
+              memory: 256Mi
+            requests:
+              cpu: 50m
+              memory: 64Mi
+          command:
+            - /bin/bash
+            - -c
+            - |
+              set -euo pipefail
+
+              DATABASES=("aerial" "docket" "gatus" "grafana" "homeassistant" "infisical")
+              CUTOVER_COMPLETED=0
+
+              marker_has() {
+                local k="$1"
+                local tbl
+                tbl=$(psql -h postgres-19-rw -U "$PGUSER" -d aerial -v ON_ERROR_STOP=1 -Atc "
+                  SELECT 1 FROM pg_tables WHERE schemaname = 'public' AND tablename = '_cutover_marker';
+                ")
+                if [ "$tbl" = "1" ]; then
+                  local res
+                  res=$(psql -h postgres-19-rw -U "$PGUSER" -d aerial -v ON_ERROR_STOP=1 -Atc "
+                    SELECT 1 FROM public._cutover_marker WHERE key = '$k';
+                  ")
+                  [ "$res" = "1" ]
+                else
+                  return 1
+                fi
+              }
+
+              if marker_has "cutover_completed"; then
+                echo "=== Cutover was already completed in a prior run. Exiting successfully. ==="
+                exit 0
+              fi
+
+              cleanup_on_failure() {
+                local exit_code=$?
+                if [ "$exit_code" -ne 0 ] && [ "${CUTOVER_COMPLETED:-0}" -ne 1 ]; then
+                  echo "❌ FATAL: Cutover drain Job failed with exit code $exit_code." >&2
+                  echo "CRITICAL: Leaving postgres-rw read-only to prevent split-brain writes while Service/postgres routes to PG19." >&2
+                fi
+              }
+              trap cleanup_on_failure EXIT
+
+              echo "=== [Cutover 1/5] Waiting for Service/postgres to route to PostgreSQL 19... ==="
+              svc_count=0
+              while true; do
+                ver=$(psql -h postgres -U "$PGUSER" -d postgres -Atc "SHOW server_version_num;" 2>/dev/null || true)
+                if [ -n "$ver" ] && [ "$ver" -ge 190000 ] 2>/dev/null; then
+                  echo "Confirmed: Service/postgres is routing to PostgreSQL 19 (server_version_num=$ver)"
+                  break
+                fi
+                svc_count=$((svc_count + 1))
+                if [ "$svc_count" -ge 60 ]; then
+                  echo "ERROR: Timed out waiting for Service/postgres to route to PG19 after 60s" >&2
+                  exit 1
+                fi
+                sleep 1
+              done
+
+              echo "=== [Cutover 2/5] Locking non-template databases on postgres-rw read-only... ==="
+              psql -h postgres-rw -U "$PGUSER" -d postgres -v ON_ERROR_STOP=1 -c "
+              DO \$\$
+              DECLARE
+                r RECORD;
+              BEGIN
+                FOR r IN SELECT datname FROM pg_database WHERE NOT datistemplate AND datallowconn LOOP
+                  EXECUTE format('ALTER DATABASE %I SET default_transaction_read_only = on', r.datname);
+                END LOOP;
+              END \$\$;
+              "
+
+              echo "=== [Cutover 3/5] Terminating non-replication client backends on postgres-rw... ==="
+              terminate_client_backends() {
+                psql -h postgres-rw -U "$PGUSER" -d postgres -v ON_ERROR_STOP=1 -c "
+                SELECT pg_terminate_backend(pid)
+                FROM pg_stat_activity
+                WHERE pid <> pg_backend_pid()
+                  AND usename IS NOT NULL
+                  AND usename <> 'streaming_replica'
+                  AND backend_type = 'client backend'
+                  AND application_name NOT LIKE 'pg19_upgrade_sub%';
+                "
+              }
+              terminate_client_backends
+              sleep 1
+              terminate_client_backends
+
+              echo "=== [Cutover 4/5] Polling replication lag on postgres-rw until zero... ==="
+              pending_dbs=()
+              for db in "${DATABASES[@]}"; do
+                if marker_has "detached_${db}"; then
+                  echo "Database $db was already detached in a prior run; skipping lag check."
+                  continue
+                fi
+                s_cnt=$(psql -h postgres-19-rw -U "$PGUSER" -d "$db" -v ON_ERROR_STOP=1 -Atc "
+                  SELECT COUNT(*) FROM pg_subscription WHERE subname = 'pg19_upgrade_sub';
+                ")
+                if [ "$s_cnt" -gt 0 ]; then
+                  pending_dbs+=("$db")
+                fi
+              done
+
+              if [ "${#pending_dbs[@]}" -eq 0 ]; then
+                echo "All subscriptions already detached across active databases; skipping replication lag wait."
+              else
+                echo "Pending subscription databases: ${pending_dbs[*]}"
+                poll_count=0
+                while true; do
+                  lag_count=$(psql -h postgres-rw -U "$PGUSER" -d postgres -v ON_ERROR_STOP=1 -Atc "
+                    SELECT COUNT(*)
+                    FROM pg_stat_replication
+                    WHERE application_name LIKE 'pg19_upgrade_sub%'
+                      AND (sent_lsn IS NULL OR flush_lsn IS NULL OR sent_lsn <> flush_lsn);
+                  ")
+                  if [ "$lag_count" = "0" ]; then
+                    echo "Confirmed: zero lagging pg19_upgrade_sub walsenders on postgres-rw (sent_lsn = flush_lsn)"
+                    break
+                  fi
+
+                  poll_count=$((poll_count + 1))
+                  if [ "$poll_count" -ge 60 ]; then
+                    echo "ERROR: Timed out waiting for logical replication lag to clear after 60s" >&2
+                    exit 1
+                  fi
+                  sleep 1
+                done
+              fi
+
+              echo "=== [Cutover 5/5] Advancing sequences and detaching subscriptions across active databases... ==="
+              psql -h postgres-19-rw -U "$PGUSER" -d aerial -v ON_ERROR_STOP=1 -c "
+                CREATE TABLE IF NOT EXISTS public._cutover_marker (
+                  key text PRIMARY KEY,
+                  recorded_at timestamptz DEFAULT now()
+                );
+                INSERT INTO public._cutover_marker (key) VALUES ('detach_started') ON CONFLICT (key) DO NOTHING;
+              "
+
+              for db in "${DATABASES[@]}"; do
+                echo "--- Processing database: $db ---"
+                if marker_has "detached_${db}"; then
+                  echo "Database $db was already detached in a prior run; skipping."
+                  continue
+                fi
+
+                seq_rows=$(psql -h postgres-rw -U "$PGUSER" -d "$db" -v ON_ERROR_STOP=1 -At -F '|' -c "
+                  SELECT schemaname, sequencename, last_value + 1000000
+                  FROM pg_sequences
+                  WHERE last_value IS NOT NULL;
+                ")
+
+                if [ -n "$seq_rows" ]; then
+                  while IFS='|' read -r schema seq pub_target; do
+                    [ -z "$schema" ] && continue
+                    psql -h postgres-19-rw -U "$PGUSER" -d "$db" -v ON_ERROR_STOP=1 -c "
+                      DO \$\$
+                      DECLARE
+                        v_last bigint;
+                      BEGIN
+                        IF EXISTS (SELECT 1 FROM pg_sequences WHERE schemaname = '$schema' AND sequencename = '$seq') THEN
+                          SELECT last_value INTO v_last FROM pg_sequences WHERE schemaname = '$schema' AND sequencename = '$seq';
+                          PERFORM setval(format('%I.%I', '$schema', '$seq'), GREATEST(COALESCE(v_last, 0), $pub_target));
+                        END IF;
+                      END \$\$;
+                    "
+                    sub_val=$(psql -h postgres-19-rw -U "$PGUSER" -d "$db" -v ON_ERROR_STOP=1 -Atc "
+                      SELECT COALESCE(last_value, 0) FROM pg_sequences WHERE schemaname = '$schema' AND sequencename = '$seq';
+                    ")
+                    if [ -n "$sub_val" ] && [ "$sub_val" -lt "$pub_target" ]; then
+                      echo "ERROR: Sequence $schema.$seq on postgres-19-rw ($sub_val) is behind publisher target ($pub_target)!" >&2
+                      exit 1
+                    fi
+                  done <<< "$seq_rows"
+                fi
+
+                sub_exists=$(psql -h postgres-19-rw -U "$PGUSER" -d "$db" -v ON_ERROR_STOP=1 -Atc "
+                  SELECT 1 FROM pg_subscription WHERE subname = 'pg19_upgrade_sub';
+                ")
+
+                if [ "$sub_exists" = "1" ]; then
+                  echo "Detaching pg19_upgrade_sub on postgres-19-rw/$db..."
+                  psql -h postgres-19-rw -U "$PGUSER" -d "$db" -v ON_ERROR_STOP=1 -c "
+                    ALTER SUBSCRIPTION pg19_upgrade_sub DISABLE;
+                    ALTER SUBSCRIPTION pg19_upgrade_sub SET (slot_name = NONE);
+                    DROP SUBSCRIPTION pg19_upgrade_sub;
+                  "
+                  sub_rem=$(psql -h postgres-19-rw -U "$PGUSER" -d "$db" -v ON_ERROR_STOP=1 -Atc "
+                    SELECT 1 FROM pg_subscription WHERE subname = 'pg19_upgrade_sub';
+                  ")
+                  if [ "$sub_rem" = "1" ]; then
+                    echo "ERROR: Subscription pg19_upgrade_sub on postgres-19-rw/$db failed to drop!" >&2
+                    exit 1
+                  fi
+                fi
+
+                echo "Dropping replication slot and publication on postgres-rw/$db..."
+                psql -h postgres-rw -U "$PGUSER" -d "$db" -v ON_ERROR_STOP=1 -c "
+                  DO \$\$
+                  DECLARE
+                    s RECORD;
+                  BEGIN
+                    FOR s IN SELECT slot_name FROM pg_replication_slots WHERE slot_name IN ('pg19_upgrade_sub', 'pg19_upgrade_sub_' || '$db') LOOP
+                      PERFORM pg_drop_replication_slot(s.slot_name);
+                    END LOOP;
+                  END \$\$;
+                  DROP PUBLICATION IF EXISTS pg19_upgrade_pub;
+                "
+
+                echo "Running ANALYZE on postgres-19-rw/$db..."
+                psql -h postgres-19-rw -U "$PGUSER" -d "$db" -v ON_ERROR_STOP=1 -c "ANALYZE;"
+
+                psql -h postgres-19-rw -U "$PGUSER" -d aerial -v ON_ERROR_STOP=1 -c "
+                  INSERT INTO public._cutover_marker (key) VALUES ('detached_${db}') ON CONFLICT (key) DO NOTHING;
+                "
+              done
+
+              psql -h postgres-19-rw -U "$PGUSER" -d aerial -v ON_ERROR_STOP=1 -c "
+                INSERT INTO public._cutover_marker (key) VALUES ('cutover_completed') ON CONFLICT (key) DO NOTHING;
+              "
+              CUTOVER_COMPLETED=1
+              trap - EXIT
+              echo "=== PostgreSQL 19 atomic cutover and drain completed successfully ==="
+      restartPolicy: OnFailure
 ---
 apiVersion: helm.toolkit.fluxcd.io/v2
 kind: HelmRelease
