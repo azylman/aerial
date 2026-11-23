@@ -279,7 +279,7 @@ func (b *BuildObject) notifyBuildTerminal(ctx context.Context, build *model.Vana
 		slog.WarnContext(ctx, "[vanadis-restate] publish event warning", "error", err)
 	}
 	var wakeErr error
-	if !build.Quiet {
+	if !build.Quiet && promptHeader != "" {
 		prompt := fmt.Sprintf("[%s]\nBuild ID: %s\nObjective: %s\n\n%s", promptHeader, build.ID, build.Objective, promptMsg)
 		if err := b.executor.DispatchWakePrompt(ctx, build.ThreadID, prompt); err != nil {
 			slog.WarnContext(ctx, "[vanadis-restate] wake prompt warning", "error", err)
@@ -433,6 +433,10 @@ func chunkFailureLine(c model.VanadisChunk) string {
 	return fmt.Sprintf("Chunk %d failed [%s]", c.ChunkIndex+1, c.ID)
 }
 
+func isCapReachedChunkFailure(c model.VanadisChunk) bool {
+	return strings.HasSuffix(strings.TrimSpace(c.Banner), ": ci_remediation_cap_reached")
+}
+
 // notifyChunkFailures wakes the build's thread once per newly failed chunk and
 // publishes its vanadis_chunk failed event, recording each in notified. A
 // failed wake returns its error so the journaled step retries: a retry may
@@ -443,7 +447,7 @@ func (b *BuildObject) notifyChunkFailures(ctx context.Context, build *model.Vana
 	}
 	for _, c := range failures {
 		if b.executor != nil {
-			if !build.Quiet {
+			if !build.Quiet && !isCapReachedChunkFailure(c) {
 				prompt := fmt.Sprintf("[VANADIS CHUNK FAILED]\nBuild ID: %s\nObjective: %s\n\n%s\nOther chunks continue; only this chunk's dependents wait. Repair in place with retry_action_chunk.", build.ID, build.Objective, chunkFailureLine(c))
 				if err := b.executor.DispatchWakePrompt(ctx, build.ThreadID, prompt); err != nil {
 					slog.WarnContext(ctx, "[vanadis-restate] chunk failure wake warning", "chunk_id", c.ID, "error", err)
@@ -498,6 +502,44 @@ func (b *BuildObject) evaluateBuildTerminalStatus(ctx context.Context, build *mo
 	}
 }
 
+func (b *BuildObject) notifyInitialBuildFailure(ctx context.Context, build *model.VanadisBuild, chunks, failures []model.VanadisChunk, notified map[string]bool) error {
+	var wakeFailures []model.VanadisChunk
+	for _, c := range failures {
+		if !isCapReachedChunkFailure(c) {
+			wakeFailures = append(wakeFailures, c)
+		}
+	}
+	allFailedAreCap := true
+	for _, c := range chunks {
+		if strings.ToLower(strings.TrimSpace(c.Status)) == statusFailed && !isCapReachedChunkFailure(c) {
+			allFailedAreCap = false
+			break
+		}
+	}
+	promptHeader := "VANADIS BUILD FAILED"
+	promptMsg := ""
+	if len(wakeFailures) == 0 && allFailedAreCap {
+		promptHeader = ""
+	} else {
+		lines := make([]string, 1, 1+len(wakeFailures))
+		lines[0] = "Build encountered failures."
+		for _, c := range wakeFailures {
+			lines = append(lines, chunkFailureLine(c))
+		}
+		promptMsg = strings.Join(lines, "\n")
+	}
+	if err := b.notifyBuildTerminal(ctx, build, chunks, statusFailed, "chunk failed", promptHeader, promptMsg); err != nil {
+		return err
+	}
+	for _, c := range failures {
+		if b.executor != nil {
+			b.publishChunkFailed(ctx, c)
+		}
+		notified[failureNotifyKey(c)] = true
+	}
+	return nil
+}
+
 // settleFailedBuild fails a quiesced build. Only the running->failed edge
 // sends the combined build-failed wake, before the status write, so a step
 // retry may duplicate a wake but never loses one.
@@ -509,18 +551,8 @@ func (b *BuildObject) settleFailedBuild(ctx context.Context, build *model.Vanadi
 			return "", err
 		}
 	} else {
-		lines := []string{"Build encountered failures."}
-		for _, c := range failures {
-			lines = append(lines, chunkFailureLine(c))
-		}
-		if err := b.notifyBuildTerminal(ctx, build, chunks, statusFailed, "chunk failed", "VANADIS BUILD FAILED", strings.Join(lines, "\n")); err != nil {
+		if err := b.notifyInitialBuildFailure(ctx, build, chunks, failures, notified); err != nil {
 			return "", err
-		}
-		for _, c := range failures {
-			if b.executor != nil {
-				b.publishChunkFailed(ctx, c)
-			}
-			notified[failureNotifyKey(c)] = true
 		}
 	}
 	if err := b.store.UpdateBuildStatus(ctx, build.ID, statusFailed); err != nil {
