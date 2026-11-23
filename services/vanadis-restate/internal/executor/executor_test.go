@@ -290,6 +290,54 @@ func TestExecutorResolveCIFailureDetailsChecked(t *testing.T) {
 	}
 }
 
+func TestExecutorResolveCIFailureChecked(t *testing.T) {
+	t.Parallel()
+	const jobURL = "https://github.com/o/r/actions/runs/1/job/42"
+	routes := map[string][]githubapitest.Response{
+		"GET /repos/example-owner/aerial/actions/runs/1/jobs?filter=latest&per_page=100": {{Body: `{"jobs":[{"id":42,"name":"unit","status":"completed","conclusion":"failure"}]}`}},
+		"GET /repos/example-owner/aerial/actions/jobs/42/logs":                           {{Body: "--- FAIL: TestDelegated (0.01s)\n"}},
+	}
+	tests := []struct {
+		name         string
+		nilExec      bool
+		noHTTPClient bool
+		wantDetails  string
+		wantChecks   []string
+		wantPaths    []string
+	}{
+		{name: "nil executor returns details", nilExec: true, wantDetails: "failure", wantChecks: []string{"unit"}, wantPaths: []string{}},
+		{name: "missing http client returns details", noHTTPClient: true, wantDetails: "failure", wantChecks: []string{"unit"}, wantPaths: []string{}},
+		{name: "job log fetched through coordinator", wantDetails: "FAIL: TestDelegated", wantChecks: []string{"unit"}, wantPaths: []string{
+			"/repos/example-owner/aerial/actions/runs/1/jobs?filter=latest&per_page=100",
+			"/repos/example-owner/aerial/actions/jobs/42/logs",
+		}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			api := githubapitest.New(t, routes)
+			exec := NewExecutor("", nil, nil, "token", "example-owner", api.Client())
+			exec.GitHubAPIURL = api.URL()
+			if tc.noHTTPClient {
+				exec.HTTPClient = nil
+			}
+			if tc.nilExec {
+				exec = nil
+			}
+			res, err := exec.ResolveCIFailureChecked(context.Background(), "aerial", 0, "unit", "abc", jobURL, "failure")
+			require.NoError(t, err)
+			assert.Contains(t, res.Details, tc.wantDetails)
+			assert.Equal(t, tc.wantChecks, res.FailedChecks)
+			requests := api.Requests()
+			paths := make([]string, 0, len(requests))
+			for _, req := range requests {
+				paths = append(paths, req.Path)
+			}
+			assert.Equal(t, tc.wantPaths, paths)
+		})
+	}
+}
+
 func TestExecutor_SyncBuildWidget(t *testing.T) {
 	t.Parallel()
 	errCAS := errors.New("cas unavailable")

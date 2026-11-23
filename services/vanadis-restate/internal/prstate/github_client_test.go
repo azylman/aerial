@@ -389,6 +389,7 @@ func TestGitHubClientRerunFailedJobs(t *testing.T) {
 		wantNil       bool
 	}{
 		{name: "created", runID: 55, routes: map[string][]apiResponse{rerunRoute: {{Status: 201}}}, wantNil: true},
+		{name: "forbidden already running is a no-op", runID: 55, routes: map[string][]apiResponse{rerunRoute: {{Status: 403, Body: `{"message":"The workflow run is already running"}`}}}, wantNil: true},
 		{name: "forbidden is a terminal error", runID: 55, routes: map[string][]apiResponse{rerunRoute: {{Status: 403}}}, wantErrStatus: 403},
 		{name: "not found", runID: 55, wantErrStatus: 404},
 		{name: "invalid run id", runID: 0, wantErrStatus: 400},
