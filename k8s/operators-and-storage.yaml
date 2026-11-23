@@ -501,7 +501,8 @@ spec:
               done
 
               echo "=== [Cutover 2/5] Locking non-template databases on postgres-rw read-only... ==="
-              psql -h postgres-rw -U "$PGUSER" -d postgres -v ON_ERROR_STOP=1 -c "
+              PGOPTIONS='-c default_transaction_read_only=off' psql -h postgres-rw -U "$PGUSER" -d postgres -v ON_ERROR_STOP=1 -c "
+              SET default_transaction_read_only = off;
               DO \$\$
               DECLARE
                 r RECORD;
