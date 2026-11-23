@@ -2,7 +2,6 @@ package store
 
 import (
 	"context"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -81,7 +80,7 @@ func TestIndexerClient_GetTrajectoryContext(t *testing.T) {
 				gotAgent = r.URL.Query().Get("agent")
 				gotThread = r.URL.Path
 				w.WriteHeader(tc.statusCode)
-				_, _ = fmt.Fprint(w, tc.body)
+				_, _ = w.Write([]byte(tc.body))
 			}))
 			defer srv.Close()
 
@@ -145,7 +144,7 @@ func TestIndexerClient_SetMaxSteps(t *testing.T) {
 			var gotQuery string
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				gotQuery = r.URL.RawQuery
-				_, _ = fmt.Fprint(w, `{"retrieved_facts":[],"tool_calls":[]}`)
+				_, _ = w.Write([]byte(`{"retrieved_facts":[],"tool_calls":[]}`))
 			}))
 			defer srv.Close()
 			client := NewIndexerClient(srv.URL, "aerial", srv.Client())

@@ -39,7 +39,11 @@ func newMockKubeServer(routes map[string]kubeRoute) *httptest.Server {
 		if !ok {
 			resp = kubeRoute{status: http.StatusNotFound, body: `{"kind":"Status","reason":"NotFound"}`}
 		}
-		reqBody, _ := io.ReadAll(r.Body)
+		reqBody, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 		if resp.wantQuery != "" && r.URL.RawQuery != resp.wantQuery {
 			resp = kubeRoute{status: http.StatusBadRequest, body: "unexpected query " + r.URL.RawQuery}
 		} else if resp.wantBody != "" && string(reqBody) != resp.wantBody {
@@ -128,9 +132,15 @@ func TestStoppedWorkloadEvidence(t *testing.T) {
 			if len(ws) != 1 {
 				t.Fatalf("workloads = %v", ws)
 			}
-			done, failed, _ := StoppedRestateDeploymentComplete(ws[0])
+			done, failed, reason := StoppedRestateDeploymentComplete(ws[0])
 			if done != tc.wantDone || failed {
-				t.Fatalf("done=%v failed=%v, want done %v", done, failed, tc.wantDone)
+				t.Fatalf("done=%v failed=%v (reason: %q), want done %v", done, failed, reason, tc.wantDone)
+			}
+			if tc.wantDone && reason != "" {
+				t.Errorf("reason = %q, want empty", reason)
+			}
+			if !tc.wantDone && reason != "waiting for stopped child evidence" {
+				t.Errorf("reason = %q, want %q", reason, "waiting for stopped child evidence")
 			}
 		})
 	}

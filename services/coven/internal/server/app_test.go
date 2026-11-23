@@ -226,7 +226,11 @@ func TestHandleCovenExtractJob_Scenarios(t *testing.T) {
 	aerialFact := []toolFactRow{{id: 1, text: "User always drinks oolong tea", reinforceCount: 1, sourceAgent: "aerial"}}
 
 	restateSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, _ := io.ReadAll(r.Body)
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 		if strings.Contains(string(body), "th-ext-fail") {
 			http.Error(w, `{"error":"restate invoke error"}`, http.StatusInternalServerError)
 			return
@@ -1075,7 +1079,9 @@ func TestWorker_StartDreamerArm_Success(t *testing.T) {
 		}
 		cancelArm()
 	}()
-	_ = wArm.Start(ctxArm)
+	if err := wArm.Start(ctxArm); err != nil && !errors.Is(err, context.Canceled) {
+		t.Fatalf("unexpected start error: %v", err)
+	}
 
 	select {
 	case <-armHandled:
@@ -1124,7 +1130,9 @@ func TestWorker_StartDreamerArm_Retry(t *testing.T) {
 		}
 		cancelArmRetry()
 	}()
-	_ = wArmRetry.Start(ctxArmRetry)
+	if err := wArmRetry.Start(ctxArmRetry); err != nil && !errors.Is(err, context.Canceled) {
+		t.Fatalf("unexpected start error: %v", err)
+	}
 
 	select {
 	case <-armRetryHandled:
@@ -1161,7 +1169,9 @@ func TestWorker_StartDreamerArm_ErrorAndFallbacks(t *testing.T) {
 		}
 		cancelArmErr()
 	}()
-	_ = wArmErr.Start(ctxArmErr)
+	if err := wArmErr.Start(ctxArmErr); err != nil && !errors.Is(err, context.Canceled) {
+		t.Fatalf("unexpected start error: %v", err)
+	}
 
 	select {
 	case <-errHandled:

@@ -28,7 +28,11 @@ type registryCall struct {
 func newRegistryServer(t *testing.T, status int, body string, calls *[]registryCall, mu *sync.Mutex) string {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		raw, _ := io.ReadAll(r.Body)
+		raw, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 		mu.Lock()
 		*calls = append(*calls, registryCall{path: r.URL.EscapedPath(), body: string(raw), idKey: r.Header.Get("Idempotency-Key")})
 		mu.Unlock()

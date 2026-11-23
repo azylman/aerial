@@ -198,7 +198,10 @@ func (e *acceptEdge) synapseEffects() int {
 func (e *acceptEdge) ownedHandlers(t *testing.T) map[string]int {
 	t.Helper()
 	got := map[string]int{}
-	paths, _ := e.ingress.sends()
+	paths, bodies := e.ingress.sends()
+	if len(paths) != len(bodies) {
+		t.Fatalf("mismatched paths and bodies: %d != %d", len(paths), len(bodies))
+	}
 	for _, p := range paths {
 		trimmed := strings.TrimSuffix(p, "/send")
 		got[trimmed[strings.LastIndex(trimmed, "/")+1:]]++
@@ -541,9 +544,12 @@ func TestResolveOwnedSHAPRMergeRecovery(t *testing.T) {
 			ctx := context.Background()
 			counter := metrics.RestateMergeRecoveredTotal.WithLabelValues(mergeRecoveryPathOwnedDeploy)
 			before := testutil.ToFloat64(counter)
-			prNum, _ := srv.resolveOwnedSHAPR(ctx, "azylman/aerial", recoveryMerge)
+			prNum, branch := srv.resolveOwnedSHAPR(ctx, "azylman/aerial", recoveryMerge)
 			if prNum != tc.wantPR {
 				t.Errorf("resolveOwnedSHAPR() pr = %d, want %d", prNum, tc.wantPR)
+			}
+			if tc.wantPR != 0 && branch == "" {
+				t.Errorf("resolveOwnedSHAPR() branch = %q, want non-empty", branch)
 			}
 			sends := recoverySends(ingress)
 			handlers := make([]string, 0, len(sends))
