@@ -48,6 +48,7 @@ type checkStatusSpyStore struct {
 	skipFailApply   bool
 	failBanner      string
 	quiet           bool
+	agent           string
 }
 
 func (s *checkStatusSpyStore) chunk(chunkID string) *model.VanadisChunk {
@@ -85,7 +86,7 @@ func (s *checkStatusSpyStore) GetBuild(_ context.Context, buildID string) (*mode
 	if len(chunks) == 0 {
 		chunks = []model.VanadisChunk{{ID: "c1", BuildID: buildID, Effort: effortMedium, CIFailCount: s.failCount}}
 	}
-	return &model.VanadisBuild{ID: buildID, Status: statusRunning, ThreadID: "th-1"}, chunks, nil
+	return &model.VanadisBuild{ID: buildID, Status: statusRunning, ThreadID: "th-1", Agent: s.agent}, chunks, nil
 }
 
 func (s *checkStatusSpyStore) RecordPRCheckStatus(_ context.Context, chunkID, headSHA, checkName, checkState string) error {
@@ -121,7 +122,7 @@ func (s *checkStatusSpyStore) FailChunk(_ context.Context, chunkID, reason, _ st
 	} else if !s.skipFailApply && banner == "" {
 		banner = "Chunk 1 failed: " + reason
 	}
-	return &model.VanadisBuild{ID: "b1", Status: statusRunning, Objective: "Obj", ThreadID: "th-1", Quiet: s.quiet}, &model.VanadisChunk{ID: chunkID, BuildID: "b1", Status: statusFailed, Banner: banner}, !s.skipFailApply, nil
+	return &model.VanadisBuild{ID: "b1", Status: statusRunning, Objective: "Obj", ThreadID: "th-1", Quiet: s.quiet, Agent: s.agent}, &model.VanadisChunk{ID: chunkID, BuildID: "b1", Status: statusFailed, Banner: banner}, !s.skipFailApply, nil
 }
 
 func (s *checkStatusSpyStore) UpdateChunkBannerAndStatus(_ context.Context, chunkID, status, banner string) error {
@@ -226,6 +227,9 @@ type prEventCase struct {
 	failBanner    string
 	dispatchErr   error
 	notifyErr     error
+	agent         string
+	cancelErr     error
+	widgetErr     error
 
 	wantErr            string
 	wantFailed         []string
@@ -243,12 +247,15 @@ type prEventCase struct {
 	wantCancel         string
 	wantMsgChan        string
 	wantWidget         string
+	wantThreadID       string
+	wantPrompt         string
 }
 
 func newPREventSpy(tc prEventCase) *checkStatusSpyStore {
 	spy := &checkStatusSpyStore{
 		getBuildErr: tc.getBuildErr, bannerErr: tc.bannerErr, failErr: tc.failErr, failCount: tc.failCount, failCountErr: tc.failCountErr,
 		skipFailApply: tc.skipFailApply, failBanner: tc.failBanner, err: tc.checkErr, resetErr: tc.resetErr, statusErr: tc.statusErr,
+		agent: tc.agent,
 	}
 	if tc.chunk != nil {
 		c := *tc.chunk
@@ -280,6 +287,8 @@ func TestFlow_HandlePREventType(t *testing.T) {
 	mergedHead := pubsub.PRLifecycleEvent{HeadSHA: "head", MergeSHA: "merge-event"}
 	mergedChunk := &model.VanadisChunk{Status: "merged", HeadSHA: "head"}
 	capChunk := &model.VanadisChunk{Status: "failed", Banner: lifecycleCapText, HeadSHA: "abcdef1234"}
+	capProgress := fmt.Sprintf("CI remediation cap (%d/%d) reached — inline thread remediation in progress", executor.MaxCIRemediationAttempts, executor.MaxCIRemediationAttempts)
+	capPrompt := "[VANADIS INLINE THREAD CI REMEDIATION — MANDATORY]"
 	headAPI := `{"state":"open","merged":false,"head":{"sha":"sha-2"}}`
 
 	tests := []prEventCase{
@@ -305,23 +314,28 @@ func TestFlow_HandlePREventType(t *testing.T) {
 		{name: "ci_failed get build error propagates", event: "ci_failed", ev: ciFailEv("unit-tests", "abcdef1234"), getBuildErr: errLifecycleDB, wantErr: "db error", wantBanners: []string{lifecycleCIBanner}},
 		{name: "ci_failed increment count error after accepted dispatch propagates", event: "ci_failed", ev: ciFailEv("unit-tests", "abcdef1234"), failCountErr: errLifecycleDB, wantErr: "db error", wantBanners: []string{lifecycleCIBanner}, wantFailCountCalls: 1, wantDispatch: true, wantSkipIfActive: &no},
 		{name: "ci_failed increment count error at cap propagates", event: "ci_failed", ev: ciFailEv("unit-tests", "abcdef1234"), failCount: 5, failCountErr: errLifecycleDB, wantErr: "db error", wantBanners: []string{lifecycleCIBanner}, wantFailCountCalls: 1},
-		{name: "ci_failed exceeding cap marks chunk failed and sends alert message", event: "ci_failed", ev: ciFailEv("unit-tests", "abcdef1234"), failCount: 5, wantFailed: []string{lifecycleCapFail}, wantBanners: []string{lifecycleCIBanner}, wantFailCountCalls: 1, wantCancel: "c1", wantMsgChan: "th-1"},
-		{name: "ci_failed tripping cap increments fail count without overwriting RemediatedSHA", event: "ci_failed", ev: ciFailEv("unit-tests", "new-failing-sha"), failCount: 5, chunk: &model.VanadisChunk{RemediatedSHA: "attempt5-active-sha"}, wantFailed: []string{lifecycleCapFail}, wantBanners: []string{lifecycleCIBanner}, wantFailCountCalls: 1, wantRemediatedSHA: "attempt5-active-sha", wantCancel: "c1", wantMsgChan: "th-1"},
-		{name: "ci_failed retry with failCount 6 skips increment and completes cap reached", event: "ci_failed", ev: ciFailEv("unit-tests", "new-failing-sha"), failCount: 6, chunk: &model.VanadisChunk{RemediatedSHA: "attempt5-active-sha"}, wantFailed: []string{lifecycleCapFail}, wantBanners: []string{lifecycleCIBanner}, wantRemediatedSHA: "attempt5-active-sha", wantCancel: "c1", wantMsgChan: "th-1"},
+		{name: "ci_failed exceeding cap marks chunk failed and sends alert message", event: "ci_failed", ev: ciFailEv("unit-tests", "abcdef1234"), failCount: 5, wantFailed: []string{lifecycleCapFail}, wantBanners: []string{lifecycleCIBanner}, wantFailCountCalls: 1, wantCancel: "c1", wantThreadID: "th-1", wantPrompt: capPrompt, wantWidget: capProgress},
+		{name: "ci_failed tripping cap increments fail count without overwriting RemediatedSHA", event: "ci_failed", ev: ciFailEv("unit-tests", "new-failing-sha"), failCount: 5, chunk: &model.VanadisChunk{RemediatedSHA: "attempt5-active-sha"}, wantFailed: []string{lifecycleCapFail}, wantBanners: []string{lifecycleCIBanner}, wantFailCountCalls: 1, wantRemediatedSHA: "attempt5-active-sha", wantCancel: "c1", wantThreadID: "th-1", wantPrompt: capPrompt, wantWidget: capProgress},
+		{name: "ci_failed retry with failCount 6 skips increment and completes cap reached", event: "ci_failed", ev: ciFailEv("unit-tests", "new-failing-sha"), failCount: 6, chunk: &model.VanadisChunk{RemediatedSHA: "attempt5-active-sha"}, wantFailed: []string{lifecycleCapFail}, wantBanners: []string{lifecycleCIBanner}, wantRemediatedSHA: "attempt5-active-sha", wantCancel: "c1", wantThreadID: "th-1", wantPrompt: capPrompt, wantWidget: capProgress},
 		{name: "trailing same-SHA failure at cap neither increments, fails nor cancels the active remediation", event: "ci_failed", ev: ciFailEv("unit-tests", "abcdef1234"), extraEvents: trailing, failCount: 4, wantBanners: []string{lifecycleCIBanner, lifecycleCIBanner}, wantFailCountCalls: 1, wantCIFailCount: 5, wantDispatch: true, wantDispatchID: "vanadis-c1-cifail-abcdef1234-5", wantSkipIfActive: &no},
-		{name: "new head after trailing same-SHA failure trips cap and keeps RemediatedSHA", event: "ci_failed", ev: ciFailEv("unit-tests", "abcdef1234"), extraEvents: trailingThenNewHead, failCount: 4, wantFailed: []string{lifecycleCapFail}, wantBanners: []string{lifecycleCIBanner, lifecycleCIBanner, lifecycleCIBanner}, wantFailCountCalls: 2, wantCIFailCount: 6, wantDispatch: true, wantRemediatedSHA: "abcdef1234", wantCancel: "c1", wantMsgChan: "th-1"},
-		{name: "retry of the cap-tripping head does not increment again", event: "ci_failed", ev: ciFailEv("unit-tests", "abcdef1234"), extraEvents: newHeadRetry, failCount: 4, wantFailed: []string{lifecycleCapFail, lifecycleCapFail}, wantBanners: []string{lifecycleCIBanner, lifecycleCIBanner, lifecycleCIBanner, lifecycleCIBanner}, wantFailCountCalls: 2, wantCIFailCount: 6, wantDispatch: true, wantCancel: "c1", wantMsgChan: "th-1"},
-		{name: "ci_failed record check skipped on already failed chunk resumes cap reached notifications", event: "ci_failed", ev: ciFailEv("unit-tests", "abcdef1234"), checkErr: ErrPRTransitionSkipped, chunk: capChunk, skipFailApply: true, failBanner: lifecycleCapText, wantFailed: []string{lifecycleCapFail}, wantCancel: "c1", wantMsgChan: "th-1"},
-		{name: "ci_failed update banner skipped on already failed chunk resumes cap reached notifications", event: "ci_failed", ev: ciFailEv("unit-tests", "abcdef1234"), bannerErr: ErrPRTransitionSkipped, chunk: capChunk, skipFailApply: true, failBanner: lifecycleCapText, wantBanners: []string{lifecycleCIBanner}, wantFailed: []string{lifecycleCapFail}, wantCancel: "c1", wantMsgChan: "th-1"},
+		{name: "new head after trailing same-SHA failure trips cap and keeps RemediatedSHA", event: "ci_failed", ev: ciFailEv("unit-tests", "abcdef1234"), extraEvents: trailingThenNewHead, failCount: 4, wantFailed: []string{lifecycleCapFail}, wantBanners: []string{lifecycleCIBanner, lifecycleCIBanner, lifecycleCIBanner}, wantFailCountCalls: 2, wantCIFailCount: 6, wantDispatch: true, wantRemediatedSHA: "abcdef1234", wantCancel: "c1", wantThreadID: "th-1", wantPrompt: capPrompt, wantWidget: capProgress},
+		{name: "retry of the cap-tripping head does not increment again", event: "ci_failed", ev: ciFailEv("unit-tests", "abcdef1234"), extraEvents: newHeadRetry, failCount: 4, wantFailed: []string{lifecycleCapFail, lifecycleCapFail}, wantBanners: []string{lifecycleCIBanner, lifecycleCIBanner, lifecycleCIBanner, lifecycleCIBanner}, wantFailCountCalls: 2, wantCIFailCount: 6, wantDispatch: true, wantCancel: "c1", wantThreadID: "th-1", wantPrompt: capPrompt, wantWidget: capProgress},
+		{name: "ci_failed record check skipped on already failed chunk resumes cap reached notifications", event: "ci_failed", ev: ciFailEv("unit-tests", "abcdef1234"), checkErr: ErrPRTransitionSkipped, chunk: capChunk, skipFailApply: true, failBanner: lifecycleCapText, wantFailed: []string{lifecycleCapFail}, wantCancel: "c1", wantThreadID: "th-1", wantPrompt: capPrompt, wantWidget: capProgress},
+		{name: "ci_failed update banner skipped on already failed chunk resumes cap reached notifications", event: "ci_failed", ev: ciFailEv("unit-tests", "abcdef1234"), bannerErr: ErrPRTransitionSkipped, chunk: capChunk, skipFailApply: true, failBanner: lifecycleCapText, wantBanners: []string{lifecycleCIBanner}, wantFailed: []string{lifecycleCapFail}, wantCancel: "c1", wantThreadID: "th-1", wantPrompt: capPrompt, wantWidget: capProgress},
 		{name: "ci_failed record check skipped with stale head does not re-notify", event: "ci_failed", ev: ciFailEv("unit-tests", "stale-sha"), checkErr: ErrPRTransitionSkipped, chunk: &model.VanadisChunk{Status: "failed", Banner: lifecycleCapText, HeadSHA: "current-sha"}, wantErr: lifecycleSkipped},
 		{name: "ci_failed record check skipped with lookup error propagates", event: "ci_failed", ev: ciFailEv("unit-tests", "abcdef1234"), checkErr: ErrPRTransitionSkipped, getBuildErr: errLifecycleDB, wantErr: "db error"},
-		{name: "ci_failed exceeding cap preserves chunk failure and propagates notification error", event: "ci_failed", ev: ciFailEv("unit-tests", "abcdef1234"), failCount: 5, notifyErr: errLifecycleDB, wantErr: "db error", wantFailed: []string{lifecycleCapFail}, wantBanners: []string{lifecycleCIBanner}, wantFailCountCalls: 1, wantCancel: "c1", wantMsgChan: "th-1"},
-		{name: "ci_failed exceeding cap retry with matching banner completes notifications", event: "ci_failed", ev: ciFailEv("unit-tests", "abcdef1234"), failCount: 5, skipFailApply: true, failBanner: lifecycleCapText, wantFailed: []string{lifecycleCapFail}, wantBanners: []string{lifecycleCIBanner}, wantFailCountCalls: 1, wantCancel: "c1", wantMsgChan: "th-1"},
+		{name: "ci_failed exceeding cap preserves chunk failure and propagates notification error", event: "ci_failed", ev: ciFailEv("unit-tests", "abcdef1234"), failCount: 5, notifyErr: errLifecycleDB, wantErr: "db error", wantFailed: []string{lifecycleCapFail}, wantBanners: []string{lifecycleCIBanner}, wantFailCountCalls: 1, wantCancel: "c1", wantThreadID: "th-1", wantPrompt: capPrompt},
+		{name: "ci_failed exceeding cap retry with matching banner completes notifications", event: "ci_failed", ev: ciFailEv("unit-tests", "abcdef1234"), failCount: 5, skipFailApply: true, failBanner: lifecycleCapText, wantFailed: []string{lifecycleCapFail}, wantBanners: []string{lifecycleCIBanner}, wantFailCountCalls: 1, wantCancel: "c1", wantThreadID: "th-1", wantPrompt: capPrompt, wantWidget: capProgress},
 		{name: "ci_failed exceeding cap fail chunk error propagates", event: "ci_failed", ev: ciFailEv("unit-tests", "abcdef1234"), failCount: 5, failErr: errLifecycleDB, wantErr: "db error", wantFailed: []string{lifecycleCapFail}, wantBanners: []string{lifecycleCIBanner}, wantFailCountCalls: 1},
 		{name: "ci_failed at cap with unapplied fail chunk skips cap without cancelling", event: "ci_failed", ev: ciFailEv("unit-tests", "abcdef1234"), failCount: 5, skipFailApply: true, wantFailed: []string{lifecycleCapFail}, wantBanners: []string{lifecycleCIBanner}, wantFailCountCalls: 1},
+		{name: "ci_failed exceeding cap dispatches with build agent", event: "ci_failed", ev: ciFailEv("unit-tests", "abcdef1234"), failCount: 5, agent: "reviewer-bot", wantFailed: []string{lifecycleCapFail}, wantBanners: []string{lifecycleCIBanner}, wantFailCountCalls: 1, wantCancel: "c1", wantThreadID: "th-1", wantPrompt: capPrompt, wantWidget: capProgress},
+		{name: "ci_failed exceeding cap failure details error propagates", event: "ci_failed", ev: pubsub.PRLifecycleEvent{Event: "ci_failed", CheckName: "roborev", HeadSHA: "abc123", Repo: "aerial", PRNumber: 42, Details: "failure"}, failCount: 5, apiStatus: http.StatusInternalServerError, wantErr: "500", wantFailed: []string{lifecycleCapFail}, wantBanners: []string{`c1:ci_failed:CI check "roborev" failed`}, wantFailCountCalls: 1},
+		{name: "ci_failed exceeding cap cancel warning logged and continues", event: "ci_failed", ev: ciFailEv("unit-tests", "abcdef1234"), failCount: 5, cancelErr: errors.New("cancel down"), wantFailed: []string{lifecycleCapFail}, wantBanners: []string{lifecycleCIBanner}, wantFailCountCalls: 1, wantCancel: "c1", wantThreadID: "th-1", wantPrompt: capPrompt, wantWidget: capProgress},
+		{name: "ci_failed exceeding cap widget warning logged and continues", event: "ci_failed", ev: ciFailEv("unit-tests", "abcdef1234"), failCount: 5, widgetErr: errors.New("widget down"), wantFailed: []string{lifecycleCapFail}, wantBanners: []string{lifecycleCIBanner}, wantFailCountCalls: 1, wantCancel: "c1", wantThreadID: "th-1", wantPrompt: capPrompt, wantWidget: capProgress},
 		{name: "ci_failed on new head_sha dispatches with SkipIfActive false and records RemediatedSHA", event: "ci_failed", ev: ciFailEv("unit-tests", "new-head-sha"), chunk: &model.VanadisChunk{RemediatedSHA: "old-head-sha"}, wantBanners: []string{lifecycleCIBanner}, wantFailCountCalls: 1, wantDispatch: true, wantDispatchID: "vanadis-c1-cifail-new-head-sha-1", wantSkipIfActive: &no, wantRemediatedSHA: "new-head-sha"},
 
 		{name: "conflict updates chunk banner and dispatches background remediation", event: "conflict", ev: conflictEv("abcdef1234"), wantBanners: []string{lifecycleConflict}, wantDispatch: true, wantSkipIfActive: &yes},
+		{name: "conflict on failed chunk transitions to conflict and dispatches remediation", event: "conflict", ev: conflictEv("abcdef1234"), chunk: &model.VanadisChunk{Status: "failed"}, wantBanners: []string{lifecycleConflict}, wantDispatch: true, wantSkipIfActive: &yes},
 		{name: "conflict with nil executor records banner only", event: "conflict", ev: pubsub.PRLifecycleEvent{Event: "conflict", HeadSHA: "abc"}, execNil: true, wantBanners: []string{lifecycleConflict}},
 		{name: "conflict with nil store and executor is a no-op", event: "conflict", ev: pubsub.PRLifecycleEvent{Event: "conflict"}, execNil: true, storeNil: true},
 		{name: "conflict on superseded head skipped", event: "conflict", ev: pubsub.PRLifecycleEvent{Event: "conflict", HeadSHA: "superseded-sha"}, chunk: &model.VanadisChunk{HeadSHA: "current-sha"}, wantErr: lifecycleSkipped},
@@ -364,7 +378,15 @@ func TestFlow_HandlePREventType(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			spy := newPREventSpy(tc)
-			eri := &eritest.Client{DispatchErr: tc.dispatchErr, SimulateActive: true, CancelErr: tc.notifyErr, MessageErr: tc.notifyErr, WidgetErr: tc.notifyErr}
+			cancelErr := tc.notifyErr
+			if tc.cancelErr != nil {
+				cancelErr = tc.cancelErr
+			}
+			widgetErr := tc.notifyErr
+			if tc.widgetErr != nil {
+				widgetErr = tc.widgetErr
+			}
+			eri := &eritest.Client{DispatchErr: tc.dispatchErr, SimulateActive: true, CancelErr: cancelErr, MessageErr: tc.notifyErr, WidgetErr: widgetErr, PromptErr: tc.notifyErr}
 			var st store.VanadisStore = spy
 			if tc.storeNil {
 				st = nil
@@ -410,8 +432,16 @@ func assertPREventStore(t *testing.T, tc prEventCase, spy *checkStatusSpyStore) 
 
 func assertPREventEri(t *testing.T, tc prEventCase, eri *eritest.Client) {
 	t.Helper()
-	assert.Empty(t, eri.LastPrompt)
+	if tc.wantPrompt != "" {
+		assert.Contains(t, eri.LastPrompt, tc.wantPrompt)
+	} else {
+		assert.Empty(t, eri.LastPrompt)
+	}
+	assert.Equal(t, tc.wantThreadID, eri.LastThreadID)
 	assert.Equal(t, tc.wantCancel, eri.LastCancel)
+	if tc.agent != "" {
+		assert.Equal(t, tc.agent, eri.CancelAgent)
+	}
 	assert.Equal(t, tc.wantMsgChan, eri.LastMsgChan)
 	if tc.wantWidget != "" && assert.NotNil(t, eri.LastWidget) {
 		assert.Equal(t, tc.wantWidget, eri.LastWidget.Banner)
@@ -517,6 +547,82 @@ func TestFlow_SyncAttachedPRWidget(t *testing.T) {
 			}
 			NewFlow(&checkStatusSpyStore{getBuildErr: tc.getBuildErr}, exec).SyncAttachedPRWidget(context.Background(), "b1")
 			assert.Equal(t, tc.wantWidget, eri.LastWidget != nil)
+		})
+	}
+}
+
+func TestFlow_SyncBuildWidget(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		execNil     bool
+		storeNil    bool
+		flowNil     bool
+		getBuildErr error
+		nilBuild    bool
+		widgetErr   error
+		wantWidget  bool
+	}{
+		{name: "success syncs widget", wantWidget: true},
+		{name: "nil flow skips", flowNil: true},
+		{name: "nil executor skips", execNil: true},
+		{name: "nil store skips", storeNil: true},
+		{name: "get build error skips", getBuildErr: errLifecycleRead},
+		{name: "nil build skips", nilBuild: true},
+		{name: "widget error swallowed", widgetErr: errors.New("widget unavailable"), wantWidget: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			eri := &eritest.Client{WidgetErr: tc.widgetErr}
+			var exec *executor.Executor
+			if !tc.execNil {
+				exec = newLifecycleExecutor(t, eri, nil, 0, "")
+			}
+			spy := &checkStatusSpyStore{getBuildErr: tc.getBuildErr, nilBuild: tc.nilBuild}
+			var st store.VanadisStore = spy
+			if tc.storeNil {
+				st = nil
+			}
+			f := NewFlow(st, exec)
+			if tc.flowNil {
+				f = nil
+			}
+			f.syncBuildWidget(context.Background(), "b1", "notice")
+			assert.Equal(t, tc.wantWidget, eri.LastWidget != nil)
+		})
+	}
+}
+
+func TestFlow_HandleCIRemediationCapReached(t *testing.T) {
+	t.Parallel()
+	ev := ciFailEv("unit-tests", "abcdef1234")
+	tests := []struct {
+		name     string
+		flowNil  bool
+		storeNil bool
+		execNil  bool
+	}{
+		{name: "nil flow returns nil", flowNil: true},
+		{name: "nil store returns nil", storeNil: true},
+		{name: "nil exec returns nil", execNil: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var st store.VanadisStore = &checkStatusSpyStore{}
+			if tc.storeNil {
+				st = nil
+			}
+			var exec *executor.Executor
+			if !tc.execNil {
+				exec = newLifecycleExecutor(t, &eritest.Client{}, nil, 0, "")
+			}
+			f := NewFlow(st, exec)
+			if tc.flowNil {
+				f = nil
+			}
+			assert.NoError(t, f.HandleCIRemediationCapReached(context.Background(), "c1", 5, ev))
 		})
 	}
 }

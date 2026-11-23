@@ -38,6 +38,17 @@ func TestFormatChunkActiveStep(t *testing.T) {
 		}}, "", []string{"`svc-a`: ✅ healthy", "`svc-b`: 🔄 starting", "`svc-c`: 🔄 verifying health", "`svc-d`: ⏳ building image"}},
 		{"merged with container image builds", model.VanadisChunk{ID: "c-images", Status: statusMerged, CIChecks: map[string]string{"build-check-1": "passed", "build-check-2": "passed"}}, "", []string{"Building container images (2/2 completed)"}},
 		{"merged with matched build job service", model.VanadisChunk{ID: "c-svc", Status: statusMerged, CIChecks: map[string]string{"Build & Push Images (eri)": "passed"}}, "", []string{"`eri`: 🔄 starting"}},
+		{"open with merge queue pos 1 and all passed", model.VanadisChunk{ID: "c-mq1", Status: "open", CIChecks: map[string]string{"lint": "passed", "test": "passed", "_merge_queue": "1/3"}}, "", []string{"Updating branch with main (#1 of 3 · 2/2 passed)"}},
+		{"open with merge queue pos 2 and all passed", model.VanadisChunk{ID: "c-mq2", Status: "open", CIChecks: map[string]string{"lint": "passed", "test": "passed", "_merge_queue": "2/3"}}, "", []string{"Waiting in merge queue (#2 of 3 · 2/2 passed)"}},
+		{"open with merge queue and pending checks", model.VanadisChunk{ID: "c-mq-pend", Status: "open", CIChecks: map[string]string{"lint": "passed", "test": "pending", "_merge_queue": "2/4"}}, "", []string{"Waiting on CI (1/2 passed · #2 of 4 in merge queue)"}},
+		{"open with unqueued merge queue 1/1", model.VanadisChunk{ID: "c-mq-unqueued", Status: "open", CIChecks: map[string]string{"lint": "passed", "test": "pending", "_merge_queue": "1/1"}}, "", []string{"Waiting on CI (1/2 passed)"}},
+		{"open with failed check and merge queue is empty", model.VanadisChunk{ID: "c-mq-fail", Status: "open", CIChecks: map[string]string{"lint": "failed", "_merge_queue": "1/2"}}, "", nil},
+		{"open with only underscore metadata is empty", model.VanadisChunk{ID: "c-mq-only", Status: "open", CIChecks: map[string]string{"_merge_queue": "1/2", "_head_sha": "abc"}}, "", nil},
+		{"merged with underscore keys not counted in image builds", model.VanadisChunk{ID: "c-mq-img", Status: statusMerged, CIChecks: map[string]string{"_merge_queue": "1/2", "build-check-1": "passed"}}, "", []string{"Building container images (1/1 completed)"}},
+		{"ci_failed without active step uses banner", model.VanadisChunk{ID: "c-cifail", Status: "ci_failed", Banner: "Lint failed"}, "", []string{"Lint failed — remediation in progress"}},
+		{"ci_failed with active step appends step", model.VanadisChunk{ID: "c-cifail-step", Status: "ci_failed", Banner: "Lint failed", ActiveStep: "Fixing formatting"}, "", []string{"Lint failed — remediation in progress", "Fixing formatting"}},
+		{"conflict without active step uses default banner", model.VanadisChunk{ID: "c-conf", Status: "conflict"}, "", []string{"Remediation in progress"}},
+		{"conflict with active step appends step", model.VanadisChunk{ID: "c-conf-step", Status: "conflict", Banner: "Merge conflict", ActiveStep: "Rebasing onto main"}, "", []string{"Merge conflict — remediation in progress", "Rebasing onto main"}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -327,7 +338,9 @@ func TestBuildStatusWidgetChunk(t *testing.T) {
 		{"ActionChunkWithPRNoRepoDefaults", model.VanadisChunk{ID: "c6", Mode: "action", PRNumber: 7, Status: "running"}, "action", "aerial", "", false},
 		{"ActionChunkHasNoRepo", model.VanadisChunk{ID: "c3", Mode: "action", Status: "pending"}, "action", "", "", false},
 		{"CIFailedStaysLive", model.VanadisChunk{ID: "c7", Mode: "pr", Repo: "aerial", Status: "ci_failed", Banner: `CI check "lint" failed`}, "pr", "aerial", "remediation", true},
+		{"CIFailedWithActiveStep", model.VanadisChunk{ID: "c7-step", Mode: "pr", Repo: "aerial", Status: "ci_failed", Banner: `CI check "lint" failed`, ActiveStep: "Fixing linter error"}, "pr", "aerial", "Fixing linter error", true},
 		{"ConflictStaysLive", model.VanadisChunk{ID: "c8", Mode: "pr", Repo: "aerial", Status: "conflict", Banner: "Merge conflict detected"}, "pr", "aerial", "remediation", true},
+		{"ConflictWithActiveStep", model.VanadisChunk{ID: "c8-step", Mode: "pr", Repo: "aerial", Status: "conflict", Banner: "Merge conflict detected", ActiveStep: "Resolving git conflict"}, "pr", "aerial", "Resolving git conflict", true},
 		{"FailedIsTerminal", model.VanadisChunk{ID: "c9", Mode: "pr", Repo: "aerial", Status: "failed"}, "pr", "aerial", "", false},
 		{"ActiveStepOnLiveChunk", model.VanadisChunk{ID: "c10", Mode: "action", Status: "running", ActiveStep: "Compiling binary..."}, "action", "", "Compiling binary...", true},
 	}
@@ -367,6 +380,38 @@ func TestNormalizeRepo(t *testing.T) {
 			full, short := NormalizeRepo(tc.owner, tc.repo)
 			assert.Equal(t, tc.wantFull, full)
 			assert.Equal(t, tc.wantShort, short)
+		})
+	}
+}
+
+func TestParseMergeQueuePosition(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		raw       string
+		wantPos   int
+		wantTotal int
+		wantOK    bool
+	}{
+		{name: "empty", raw: "", wantPos: 0, wantTotal: 0, wantOK: false},
+		{name: "missing slash", raw: "123", wantPos: 0, wantTotal: 0, wantOK: false},
+		{name: "extra slash", raw: "1/2/3", wantPos: 0, wantTotal: 0, wantOK: false},
+		{name: "non-numeric pos", raw: "a/2", wantPos: 0, wantTotal: 0, wantOK: false},
+		{name: "non-numeric total", raw: "1/b", wantPos: 0, wantTotal: 0, wantOK: false},
+		{name: "total less than two", raw: "1/1", wantPos: 0, wantTotal: 0, wantOK: false},
+		{name: "pos less than one", raw: "0/2", wantPos: 0, wantTotal: 0, wantOK: false},
+		{name: "pos greater than total", raw: "3/2", wantPos: 0, wantTotal: 0, wantOK: false},
+		{name: "valid head of queue", raw: "1/2", wantPos: 1, wantTotal: 2, wantOK: true},
+		{name: "valid tail of queue", raw: "3/3", wantPos: 3, wantTotal: 3, wantOK: true},
+		{name: "valid with whitespace", raw: " 2 / 5 ", wantPos: 2, wantTotal: 5, wantOK: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			pos, total, ok := parseMergeQueuePosition(tc.raw)
+			assert.Equal(t, tc.wantOK, ok)
+			assert.Equal(t, tc.wantPos, pos)
+			assert.Equal(t, tc.wantTotal, total)
 		})
 	}
 }
