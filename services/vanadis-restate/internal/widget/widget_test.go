@@ -38,6 +38,10 @@ func TestFormatChunkActiveStep(t *testing.T) {
 		}}, "", []string{"`svc-a`: ✅ healthy", "`svc-b`: 🔄 starting", "`svc-c`: 🔄 verifying health", "`svc-d`: ⏳ building image"}},
 		{"merged with container image builds", model.VanadisChunk{ID: "c-images", Status: statusMerged, CIChecks: map[string]string{"build-check-1": "passed", "build-check-2": "passed"}}, "", []string{"Building container images (2/2 completed)"}},
 		{"merged with matched build job service", model.VanadisChunk{ID: "c-svc", Status: statusMerged, CIChecks: map[string]string{"Build & Push Images (eri)": "passed"}}, "", []string{"`eri`: 🔄 starting"}},
+		{"ci_failed without active step uses banner", model.VanadisChunk{ID: "c-cifail", Status: "ci_failed", Banner: "Lint failed"}, "", []string{"Lint failed — remediation in progress"}},
+		{"ci_failed with active step appends step", model.VanadisChunk{ID: "c-cifail-step", Status: "ci_failed", Banner: "Lint failed", ActiveStep: "Fixing formatting"}, "", []string{"Lint failed — remediation in progress", "Fixing formatting"}},
+		{"conflict without active step uses default banner", model.VanadisChunk{ID: "c-conf", Status: "conflict"}, "", []string{"Remediation in progress"}},
+		{"conflict with active step appends step", model.VanadisChunk{ID: "c-conf-step", Status: "conflict", Banner: "Merge conflict", ActiveStep: "Rebasing onto main"}, "", []string{"Merge conflict — remediation in progress", "Rebasing onto main"}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -327,7 +331,9 @@ func TestBuildStatusWidgetChunk(t *testing.T) {
 		{"ActionChunkWithPRNoRepoDefaults", model.VanadisChunk{ID: "c6", Mode: "action", PRNumber: 7, Status: "running"}, "action", "aerial", "", false},
 		{"ActionChunkHasNoRepo", model.VanadisChunk{ID: "c3", Mode: "action", Status: "pending"}, "action", "", "", false},
 		{"CIFailedStaysLive", model.VanadisChunk{ID: "c7", Mode: "pr", Repo: "aerial", Status: "ci_failed", Banner: `CI check "lint" failed`}, "pr", "aerial", "remediation", true},
+		{"CIFailedWithActiveStep", model.VanadisChunk{ID: "c7-step", Mode: "pr", Repo: "aerial", Status: "ci_failed", Banner: `CI check "lint" failed`, ActiveStep: "Fixing linter error"}, "pr", "aerial", "Fixing linter error", true},
 		{"ConflictStaysLive", model.VanadisChunk{ID: "c8", Mode: "pr", Repo: "aerial", Status: "conflict", Banner: "Merge conflict detected"}, "pr", "aerial", "remediation", true},
+		{"ConflictWithActiveStep", model.VanadisChunk{ID: "c8-step", Mode: "pr", Repo: "aerial", Status: "conflict", Banner: "Merge conflict detected", ActiveStep: "Resolving git conflict"}, "pr", "aerial", "Resolving git conflict", true},
 		{"FailedIsTerminal", model.VanadisChunk{ID: "c9", Mode: "pr", Repo: "aerial", Status: "failed"}, "pr", "aerial", "", false},
 		{"ActiveStepOnLiveChunk", model.VanadisChunk{ID: "c10", Mode: "action", Status: "running", ActiveStep: "Compiling binary..."}, "action", "", "Compiling binary...", true},
 	}
