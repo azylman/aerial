@@ -590,7 +590,12 @@ type RepoState struct {
 	// cascades, workflow reruns) already executed, oldest
 	// first, bounded by MaxRepoEffects.
 	RepoEffects    []string
-	UpdatedForMain map[int]bool   `json:"updated_for_main,omitempty"`
+	UpdatedForMain map[int]bool `json:"updated_for_main,omitempty"`
+	// BlockedHeads maps an open PR number to the normalized head SHA that
+	// failed CI checks or was skipped as blocked by updateFirstEligibleBranch.
+	// A blocked PR is excluded from broadcastMergeQueue candidates until its
+	// head SHA advances, its checks pass, or it merges/closes.
+	BlockedHeads   map[int]string `json:"blocked_heads,omitempty"`
 	QueuePositions map[int]string `json:"queue_positions,omitempty"`
 }
 
@@ -648,6 +653,38 @@ func (s *RepoState) ClearPRUpdatedForMain(prNumber int) {
 	if len(s.UpdatedForMain) == 0 {
 		s.UpdatedForMain = nil
 	}
+}
+
+// MarkPRHeadBlocked records that prNumber is blocked at headSHA and clears
+// any cached QueuePositions entry so re-entry broadcasts fresh.
+func (s *RepoState) MarkPRHeadBlocked(prNumber int, headSHA string) {
+	head := normalizeIndexSHA(headSHA)
+	if s == nil || prNumber <= 0 || head == "" {
+		return
+	}
+	if s.BlockedHeads == nil {
+		s.BlockedHeads = make(map[int]string)
+	}
+	s.BlockedHeads[prNumber] = head
+	s.ClearPRQueuePosition(prNumber)
+}
+
+// ClearPRHeadBlocked removes prNumber from the blocked-heads set.
+func (s *RepoState) ClearPRHeadBlocked(prNumber int) {
+	if s == nil || len(s.BlockedHeads) == 0 {
+		return
+	}
+	delete(s.BlockedHeads, prNumber)
+}
+
+// IsPRHeadBlocked reports whether prNumber is currently recorded as blocked
+// at headSHA.
+func (s *RepoState) IsPRHeadBlocked(prNumber int, headSHA string) bool {
+	head := normalizeIndexSHA(headSHA)
+	if s == nil || prNumber <= 0 || head == "" || len(s.BlockedHeads) == 0 {
+		return false
+	}
+	return s.BlockedHeads[prNumber] == head
 }
 
 // RecordPRQueuePosition records the last broadcast merge queue position for prNumber.
@@ -839,30 +876,44 @@ func (s *RepoState) ApplyPRIndex(ev PRIndexEvent) (bool, []string) {
 		status.Branch = branch
 		changed = true
 	}
+	if head := normalizeIndexSHA(ev.HeadSHA); head != "" && len(s.BlockedHeads) > 0 && s.BlockedHeads[ev.PRNumber] != "" && s.BlockedHeads[ev.PRNumber] != head {
+		s.ClearPRHeadBlocked(ev.PRNumber)
+	}
 	if ev.Lifecycle == IndexMerged || ev.Lifecycle == IndexClosed {
 		s.ClearPRUpdatedForMain(ev.PRNumber)
 		s.ClearPRQueuePosition(ev.PRNumber)
+		s.ClearPRHeadBlocked(ev.PRNumber)
 	}
 	if s.applyIndexLifecycle(status, ev) {
 		changed = true
 	}
+	shasChanged, replay := s.indexSHAs(ev, status.Branch)
+	if shasChanged {
+		changed = true
+	}
+	s.evictPRSHAs(ev.PRNumber)
+	s.evictClosedPRs()
+	return changed, replay
+}
+
+// indexSHAs updates the SHA lookup entries for ev and returns any newly indexed SHAs with held events.
+func (s *RepoState) indexSHAs(ev PRIndexEvent, branch string) (bool, []string) {
+	var changed bool
 	var replay []string
 	for _, sha := range []string{ev.HeadSHA, ev.MergeSHA} {
 		clean := normalizeIndexSHA(sha)
 		if clean == "" {
 			continue
 		}
-		if cur, ok := s.SHAIndex[clean]; ok && cur.PRNumber == ev.PRNumber && cur.Branch == status.Branch {
+		if cur, ok := s.SHAIndex[clean]; ok && cur.PRNumber == ev.PRNumber && cur.Branch == branch {
 			continue
 		}
-		s.SHAIndex[clean] = SHAIndexEntry{PRNumber: ev.PRNumber, Branch: status.Branch, Seq: s.nextSeq()}
+		s.SHAIndex[clean] = SHAIndexEntry{PRNumber: ev.PRNumber, Branch: branch, Seq: s.nextSeq()}
 		changed = true
 		if s.hasHeld(clean) && !slices.Contains(replay, clean) {
 			replay = append(replay, clean)
 		}
 	}
-	s.evictPRSHAs(ev.PRNumber)
-	s.evictClosedPRs()
 	return changed, replay
 }
 

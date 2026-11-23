@@ -536,3 +536,78 @@ func TestRepoState_QueuePositions(t *testing.T) {
 		})
 	}
 }
+
+type blockedHeadsCase struct {
+	name          string
+	nilState      bool
+	seedPR        int
+	seedHead      string
+	seedPos       string
+	markPR        int
+	markHead      string
+	clearPR       int
+	idxEvent      *PRIndexEvent
+	checkPR       int
+	checkHead     string
+	wantIsBlocked bool
+	wantMapIsNil  bool
+}
+
+func seedBlockedHeadsRepo(nilState bool, seedPR int, seedHead, seedPos string) *RepoState {
+	if nilState {
+		return nil
+	}
+	st := NewRepoState("azylman/aerial")
+	if seedPR > 0 && seedHead != "" {
+		st.MarkPRHeadBlocked(seedPR, seedHead)
+		if seedPos != "" {
+			st.RecordPRQueuePosition(seedPR, seedHead, seedPos)
+		}
+	}
+	return st
+}
+
+func applyBlockedHeadsStep(st *RepoState, tc blockedHeadsCase) {
+	if tc.markPR != 0 {
+		st.MarkPRHeadBlocked(tc.markPR, tc.markHead)
+	}
+	if tc.clearPR != 0 {
+		st.ClearPRHeadBlocked(tc.clearPR)
+	}
+	if tc.idxEvent != nil {
+		st.ApplyPRIndex(*tc.idxEvent)
+	}
+}
+
+func TestRepoState_BlockedHeads(t *testing.T) {
+	t.Parallel()
+	tests := []blockedHeadsCase{
+		{name: "nil state operations are safe", nilState: true, markPR: 1, markHead: "h1", checkPR: 1, checkHead: "h1", wantIsBlocked: false, wantMapIsNil: true},
+		{name: "zero or negative pr number is no-op", markPR: 0, markHead: "h1", checkPR: 0, checkHead: "h1", wantIsBlocked: false, wantMapIsNil: true},
+		{name: "empty head sha is no-op", markPR: 101, markHead: "", checkPR: 101, checkHead: "h1", wantIsBlocked: false, wantMapIsNil: true},
+		{name: "mark records pr blocked at head sha and clears queue pos", seedPR: 101, seedHead: "h0", seedPos: "1/2", markPR: 101, markHead: "h1", checkPR: 101, checkHead: "h1", wantIsBlocked: true, wantMapIsNil: false},
+		{name: "different head sha is not reported as blocked", seedPR: 101, seedHead: "h1", checkPR: 101, checkHead: "h2", wantIsBlocked: false, wantMapIsNil: false},
+		{name: "different pr is not reported as blocked", seedPR: 101, seedHead: "h1", checkPR: 102, checkHead: "h1", wantIsBlocked: false, wantMapIsNil: false},
+		{name: "clear removes blocked head", seedPR: 101, seedHead: "h1", clearPR: 101, checkPR: 101, checkHead: "h1", wantIsBlocked: false, wantMapIsNil: false},
+		{name: "apply index with same head retains block", seedPR: 101, seedHead: "h1", idxEvent: &PRIndexEvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "h1", Lifecycle: IndexActive}, checkPR: 101, checkHead: "h1", wantIsBlocked: true, wantMapIsNil: false},
+		{name: "apply index with new head clears blocked head", seedPR: 101, seedHead: "h1", idxEvent: &PRIndexEvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "h2", Lifecycle: IndexActive}, checkPR: 101, checkHead: "h1", wantIsBlocked: false, wantMapIsNil: false},
+		{name: "apply index with merged clears blocked head", seedPR: 101, seedHead: "h1", idxEvent: &PRIndexEvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "h1", MergeSHA: "m1", Lifecycle: IndexMerged}, checkPR: 101, checkHead: "h1", wantIsBlocked: false, wantMapIsNil: false},
+		{name: "apply index with closed clears blocked head", seedPR: 101, seedHead: "h1", idxEvent: &PRIndexEvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "h1", Lifecycle: IndexClosed}, checkPR: 101, checkHead: "h1", wantIsBlocked: false, wantMapIsNil: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			st := seedBlockedHeadsRepo(tc.nilState, tc.seedPR, tc.seedHead, tc.seedPos)
+			applyBlockedHeadsStep(st, tc)
+			if got := st.IsPRHeadBlocked(tc.checkPR, tc.checkHead); got != tc.wantIsBlocked {
+				t.Fatalf("IsPRHeadBlocked(%d, %q) = %v, want %v", tc.checkPR, tc.checkHead, got, tc.wantIsBlocked)
+			}
+			if st != nil && (st.BlockedHeads == nil) != tc.wantMapIsNil {
+				t.Fatalf("st.BlockedHeads == nil is %v, want %v", st.BlockedHeads == nil, tc.wantMapIsNil)
+			}
+			if tc.seedPos != "" && st != nil && st.HasPRQueuePosition(tc.seedPR) {
+				t.Fatalf("st.HasPRQueuePosition(%d) = true, want false after mark", tc.seedPR)
+			}
+		})
+	}
+}
