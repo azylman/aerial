@@ -158,7 +158,7 @@ func TestTurnExecution_GetRecentThreadMessages(t *testing.T) {
 
 func TestWorker_RotateSessionID_EvictsDaemons(t *testing.T) {
 	t.Parallel()
-	fakeStore := setupTestStore(t)
+	fakeStore := testStore(t)
 	procPool := runner.NewUnifiedProcessPool(runner.PoolConfig{DefaultModel: "gemini-2.5-flash"}, newMockDaemonSpawner())
 	defer procPool.Close()
 
@@ -208,7 +208,8 @@ func execSessionDBRotationStep(tc sessionDBRotationCase, sessionID, oldSess, con
 
 func runSessionDBRotationCase(t *testing.T, tc sessionDBRotationCase) {
 	t.Helper()
-	store, tmpDir := setupTestStore(t), t.TempDir()
+	store := testStore(t)
+	tmpDir := t.TempDir()
 	sessMgr := session.New(tmpDir, tmpDir)
 	oldSess, convDir := "sess-"+tc.name, filepath.Join(tmpDir, "conversations")
 	_ = os.MkdirAll(convDir, 0o755)
@@ -287,7 +288,8 @@ type sessionRotationInjectCase struct {
 
 func runSessionRotationInjectCase(t *testing.T, tt sessionRotationInjectCase) {
 	t.Helper()
-	tmpHome, tempData, store := t.TempDir(), t.TempDir(), setupTestStore(t)
+	store := testStore(t)
+	tmpHome, tempData := t.TempDir(), t.TempDir()
 	validUUID := uuid.New().String()
 	sessDir := filepath.Join(tempData, "brain", validUUID, ".system_generated", "logs")
 	_ = os.MkdirAll(sessDir, 0o755)
@@ -382,7 +384,7 @@ type buildTurnPromptCase struct {
 
 func newBuildTurnPromptFixture(t *testing.T, tc buildTurnPromptCase, threadID string, tp trace.TracerProvider, resolverCalled *atomic.Bool) *turnExecution {
 	t.Helper()
-	store := setupTestStore(t)
+	store := testStore(t)
 	if tc.cachedSum != "" {
 		if err := store.SaveThreadSummary(context.Background(), threadID, tc.cachedSum, tc.cachedMsgID); err != nil {
 			t.Fatalf("seed thread summary: %v", err)
@@ -562,7 +564,8 @@ func TestBuildTurnPrompt(t *testing.T) {
 
 func TestWorker_RotatedSession_TreatsTurnOneAsColdStart(t *testing.T) {
 	t.Parallel()
-	store, tmpDir := setupTestStore(t), t.TempDir()
+	store := testStore(t)
+	tmpDir := t.TempDir()
 	sessMgr := session.New(tmpDir, tmpDir)
 	threadID, oldSessionID, newSessionID := "thread-rotated-cold-test", "11111111-1111-1111-1111-111111111111", "22222222-2222-2222-2222-222222222222"
 
@@ -653,7 +656,7 @@ func TestResolveThreadColdStartSummary_LoadOnly(t *testing.T) {
 			var llmPrompts []string
 			var fetchLimits []int
 
-			store := setupTestStore(t)
+			store := testStore(t)
 			if tc.cachedSum != "" {
 				_ = store.SaveThreadSummary(context.Background(), "th-test", tc.cachedSum, tc.cachedMsgID)
 			}
@@ -806,7 +809,7 @@ func runTurnEndRefreshCase(t *testing.T, tc turnEndRefreshCase, llmOut string) {
 	t.Helper()
 	var mu sync.Mutex
 	var llmPrompts, fetchBeforeIDs []string
-	store := setupTestStore(t)
+	store := testStore(t)
 	if tc.cachedSum != "" {
 		_ = store.SaveThreadSummary(context.Background(), "th-end", tc.cachedSum, tc.cachedMsgID)
 	}
