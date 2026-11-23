@@ -491,6 +491,10 @@ func (s *fakeStore) LookupPRChunk(context.Context, string, int) (store.BuildRout
 	return store.BuildRoute{}, "", s.unimplemented("LookupPRChunk")
 }
 
+func (s *fakeStore) LookupPRBuildRoutes(context.Context, string, int) ([]store.BuildRoute, error) {
+	return nil, s.unimplemented("LookupPRBuildRoutes")
+}
+
 func (s *fakeStore) LookupChunkBuildID(context.Context, string) (store.BuildRoute, error) {
 	return store.BuildRoute{}, s.unimplemented("LookupChunkBuildID")
 }

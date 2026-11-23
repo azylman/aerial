@@ -126,6 +126,7 @@ type VanadisStore interface {
 	CompareAndSwapBuildStatusMessageID(ctx context.Context, buildID, oldID, newID string) (bool, error)
 	GetChunkByPR(ctx context.Context, repo string, prNumber int) (*VanadisChunkPRLookup, error)
 	LookupPRChunk(ctx context.Context, repo string, prNumber int) (route BuildRoute, chunkID string, err error)
+	LookupPRBuildRoutes(ctx context.Context, repo string, prNumber int) ([]BuildRoute, error)
 	LookupChunkBuildID(ctx context.Context, chunkID string) (route BuildRoute, err error)
 	LookupUnattachedChunkByThreadAndRepo(ctx context.Context, threadID, repo string) (route BuildRoute, chunkID string, err error)
 	AttachChunkPR(ctx context.Context, req AttachChunkPRRequest) (buildID, chunkID, threadID string, err error)

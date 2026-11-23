@@ -58,6 +58,30 @@ func TestPostgresVanadisStore_LookupPRChunk(t *testing.T) {
 		{name: "cancelled build ignored", repo: "aerial", pr: 123, db: bmFixture{builds: bmBuilds("cancelled"), chunks: mutateChunks(bmPRChunk("c1", 0, "aerial", 123, "pr_opened"))}, wantErrIs: ErrChunkNotFound},
 		{name: "success", repo: "aerial", pr: 123, db: bmFixture{builds: running, chunks: mutateChunks(bmPRChunk("c1", 0, "aerial", 123, "pr_opened"))}, wantRoute: BuildRoute{BuildID: "b1"}, wantChunk: "c1"},
 		{
+			name: "active chunk preferred over recently updated completed chunk", repo: "aerial", pr: 123,
+			db: bmFixture{
+				builds: []model.VanadisBuild{
+					{ID: "b-completed", ThreadID: "t1", Status: "completed"},
+					{ID: "b-active", ThreadID: "t2", Status: "running"},
+				},
+				chunks: mutateChunks(
+					func() model.VanadisChunk {
+						c := bmPRChunk("c-completed", 0, "aerial", 123, "completed")
+						c.BuildID = "b-completed"
+						c.UpdatedAt = time.Now().UTC()
+						return c
+					}(),
+					func() model.VanadisChunk {
+						c := bmPRChunk("c-active", 0, "aerial", 123, "pr_opened")
+						c.BuildID = "b-active"
+						c.UpdatedAt = time.Now().UTC().Add(-10 * time.Minute)
+						return c
+					}(),
+				),
+			},
+			wantRoute: BuildRoute{BuildID: "b-active"}, wantChunk: "c-active",
+		},
+		{
 			name: "qualified spelling matches bare repo", repo: "example-org/aerial", pr: 123,
 			db:        bmFixture{builds: running, chunks: mutateChunks(bmPRChunk("c0", 0, "aerial", 7, "merged"), bmPRChunk("c1", 1, "aerial", 123, "pr_opened"))},
 			wantRoute: BuildRoute{BuildID: "b1"}, wantChunk: "c1",
@@ -70,6 +94,116 @@ func TestPostgresVanadisStore_LookupPRChunk(t *testing.T) {
 			route, chunkID, err := st.LookupPRChunk(context.Background(), tc.repo, tc.pr)
 			if !assertStoreErr(t, err, tc.wantErrIs, tc.wantErr) && (route != tc.wantRoute || chunkID != tc.wantChunk) {
 				t.Errorf("LookupPRChunk = (%+v, %q), want (%+v, %q)", route, chunkID, tc.wantRoute, tc.wantChunk)
+			}
+		})
+	}
+}
+
+func TestPostgresVanadisStore_LookupPRBuildRoutes(t *testing.T) {
+	t.Parallel()
+	running := bmBuilds("running")
+	now := time.Now().UTC()
+	tests := []struct {
+		name       string
+		repo       string
+		pr         int
+		db         bmFixture
+		wantErrIs  error
+		wantErr    bool
+		wantRoutes []BuildRoute
+	}{
+		{name: "nil db", repo: "aerial", pr: 123, db: bmFixture{nilDB: true}, wantErr: true},
+		{name: "empty repo", repo: " ", pr: 123, wantErrIs: ErrChunkNotFound},
+		{name: "zero pr", repo: "aerial", wantErrIs: ErrChunkNotFound},
+		{name: "query error", repo: "aerial", pr: 123, db: bmFixture{closed: true}, wantErr: true},
+		{name: "not found", repo: "aerial", pr: 123, db: bmFixture{builds: running}, wantErrIs: ErrChunkNotFound},
+		{
+			name: "single active build route", repo: "aerial", pr: 123,
+			db:         bmFixture{builds: running, chunks: mutateChunks(bmPRChunk("c1", 0, "aerial", 123, "pr_opened"))},
+			wantRoutes: []BuildRoute{{BuildID: "b1"}},
+		},
+		{
+			name: "multiple active build routes ordered by build_id", repo: "aerial", pr: 123,
+			db: bmFixture{
+				builds: []model.VanadisBuild{
+					{ID: "b-z", ThreadID: "t1", Status: "running"},
+					{ID: "b-a", ThreadID: "t2", Status: "running"},
+				},
+				chunks: mutateChunks(
+					func() model.VanadisChunk {
+						c := bmPRChunk("c-z", 0, "aerial", 123, "pr_opened")
+						c.BuildID = "b-z"
+						return c
+					}(),
+					func() model.VanadisChunk {
+						c := bmPRChunk("c-a", 0, "aerial", 123, "pr_opened")
+						c.BuildID = "b-a"
+						return c
+					}(),
+				),
+			},
+			wantRoutes: []BuildRoute{{BuildID: "b-a"}, {BuildID: "b-z"}},
+		},
+		{
+			name: "all matches completed falls back to most recent non-cancelled", repo: "aerial", pr: 123,
+			db: bmFixture{
+				builds: []model.VanadisBuild{
+					{ID: "b-old", ThreadID: "t1", Status: "completed"},
+					{ID: "b-new", ThreadID: "t2", Status: "completed"},
+				},
+				chunks: mutateChunks(
+					func() model.VanadisChunk {
+						c := bmPRChunk("c-old", 0, "aerial", 123, "completed")
+						c.BuildID = "b-old"
+						c.UpdatedAt = now.Add(-1 * time.Hour)
+						return c
+					}(),
+					func() model.VanadisChunk {
+						c := bmPRChunk("c-new", 0, "aerial", 123, "completed")
+						c.BuildID = "b-new"
+						c.UpdatedAt = now
+						return c
+					}(),
+				),
+			},
+			wantRoutes: []BuildRoute{{BuildID: "b-new"}},
+		},
+		{
+			name: "cancelled builds and chunks ignored", repo: "aerial", pr: 123,
+			db: bmFixture{
+				builds: []model.VanadisBuild{
+					{ID: "b-canc", ThreadID: "t1", Status: "cancelled"},
+				},
+				chunks: mutateChunks(
+					func() model.VanadisChunk {
+						c := bmPRChunk("c-canc", 0, "aerial", 123, "cancelled")
+						c.BuildID = "b-canc"
+						return c
+					}(),
+				),
+			},
+			wantErrIs: ErrChunkNotFound,
+		},
+		{
+			name: "qualified spelling matches bare repo", repo: "example-org/aerial", pr: 123,
+			db:         bmFixture{builds: running, chunks: mutateChunks(bmPRChunk("c1", 0, "aerial", 123, "pr_opened"))},
+			wantRoutes: []BuildRoute{{BuildID: "b1"}},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			st := bmOpenStore(t, tc.db)
+			routes, err := st.LookupPRBuildRoutes(context.Background(), tc.repo, tc.pr)
+			if !assertStoreErr(t, err, tc.wantErrIs, tc.wantErr) {
+				if len(routes) != len(tc.wantRoutes) {
+					t.Fatalf("LookupPRBuildRoutes = %+v, want %+v", routes, tc.wantRoutes)
+				}
+				for i := range routes {
+					if routes[i] != tc.wantRoutes[i] {
+						t.Errorf("routes[%d] = %+v, want %+v", i, routes[i], tc.wantRoutes[i])
+					}
+				}
 			}
 		})
 	}

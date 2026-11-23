@@ -225,6 +225,46 @@ func TestLivePRState(t *testing.T) {
 	}
 }
 
+func TestMergedPRState(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		status     int
+		body       string
+		wantMerged bool
+		wantHead   string
+		wantMerge  string
+		wantErr    bool
+	}{
+		{"merged pr with head and merge sha", 200, `{"state":"closed","merged":true,"head":{"sha":" abc123 "},"merge_commit_sha":" def456 "}`, true, "abc123", "def456", false},
+		{"open unmerged pr", 200, `{"state":"open","merged":false,"head":{"sha":"abc123"}}`, false, "abc123", "", false},
+		{"open pr without merged field", 200, `{"state":"open","head":{"sha":"abc123"}}`, false, "abc123", "", false},
+		{"closed unmerged pr", 200, `{"state":"closed","merged":false,"head":{"sha":"abc123"}}`, false, "abc123", "", false},
+		{"missing pr reads unmerged", 404, `{"message":"Not Found"}`, false, "", "", false},
+		{"server error returned", 500, `{}`, false, "", "", true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				assert.Equal(t, "/repos/example-owner/aerial/pulls/42", r.URL.Path)
+				w.WriteHeader(tc.status)
+				n, writeErr := w.Write([]byte(tc.body))
+				assert.NoError(t, writeErr)
+				assert.Positive(t, n)
+			}))
+			defer srv.Close()
+			exec := NewExecutor("", nil, nil, "", "example-owner", srv.Client())
+			exec.GitHubAPIURL = srv.URL
+			merged, head, merge, err := exec.MergedPRState(context.Background(), "aerial", 42)
+			assert.Equal(t, tc.wantErr, err != nil)
+			assert.Equal(t, tc.wantMerged, merged)
+			assert.Equal(t, tc.wantHead, head)
+			assert.Equal(t, tc.wantMerge, merge)
+		})
+	}
+}
+
 func TestHasActiveOrRecoveredChecks(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

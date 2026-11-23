@@ -98,6 +98,13 @@ func (s *MetadataMutationStore) LookupPRChunk(context.Context, string, int) (sto
 	return store.BuildRoute{}, "", s.Err
 }
 
+func (s *MetadataMutationStore) LookupPRBuildRoutes(context.Context, string, int) ([]store.BuildRoute, error) {
+	if s.Err != nil {
+		return nil, s.Err
+	}
+	return nil, nil
+}
+
 func (*MetadataMutationStore) GetBuild(_ context.Context, id string) (*model.VanadisBuild, []model.VanadisChunk, error) {
 	return &model.VanadisBuild{ID: id}, nil, nil
 }
