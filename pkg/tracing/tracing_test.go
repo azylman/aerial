@@ -1028,8 +1028,14 @@ func TestTransportErrorMessage(t *testing.T) {
 
 func TestSlogHandler(t *testing.T) {
 	t.Parallel()
-	tid, _ := trace.TraceIDFromHex(parentTraceID)
-	sid, _ := trace.SpanIDFromHex(parentSpanID)
+	tid, err := trace.TraceIDFromHex(parentTraceID)
+	if err != nil {
+		t.Fatalf("TraceIDFromHex: %v", err)
+	}
+	sid, err := trace.SpanIDFromHex(parentSpanID)
+	if err != nil {
+		t.Fatalf("SpanIDFromHex: %v", err)
+	}
 	spanCtx := trace.ContextWithSpanContext(context.Background(), trace.NewSpanContext(trace.SpanContextConfig{TraceID: tid, SpanID: sid, TraceFlags: trace.FlagsSampled}))
 	tests := []struct {
 		name    string

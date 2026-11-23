@@ -123,8 +123,8 @@ func TestReloadable_Reload(t *testing.T) {
 			if restarting != tc.wantRestarting {
 				t.Errorf("RestartRequested closed = %v, want %v", restarting, tc.wantRestarting)
 			}
-			if status2, _ := r.Reload(); status2 != tc.wantSecond {
-				t.Errorf("second reload status = %q, want %q", status2, tc.wantSecond)
+			if status2, err2 := r.Reload(); status2 != tc.wantSecond || (err2 != nil) != tc.wantErr {
+				t.Errorf("second reload status = %q, err = %v; want status %q, wantErr %v", status2, err2, tc.wantSecond, tc.wantErr)
 			}
 		})
 	}

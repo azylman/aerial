@@ -125,7 +125,10 @@ func TestTransportRoundTrip(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			api, apiSeen, blobSeen := newTransportServers(t, tc.upstreamStatus, tc.upstreamRemain)
-			apiURL, _ := url.Parse(api.URL)
+			apiURL, err := url.Parse(api.URL)
+			if err != nil {
+				t.Fatalf("url.Parse: %v", err)
+			}
 			apiHost := strings.NewReplacer("{apiurl}", api.URL, "{apihost}", apiURL.Host).Replace(tc.apiHost)
 
 			src := &fakeSource{value: tc.srcValue, source: tc.srcSource}
@@ -194,6 +197,20 @@ func newTransportServers(t *testing.T, status int, remaining string) (*httptest.
 	}))
 	t.Cleanup(api.Close)
 	return api, apiSeen, blobSeen
+}
+
+// newAPIServer starts an API server answering status with an optional
+// X-Ratelimit-Remaining header.
+func newAPIServer(t *testing.T, status int, remaining string) *httptest.Server {
+	t.Helper()
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if remaining != "" {
+			w.Header().Set("X-Ratelimit-Remaining", remaining)
+		}
+		w.WriteHeader(status)
+	}))
+	t.Cleanup(api.Close)
+	return api
 }
 
 func TestIsRateLimited(t *testing.T) {
@@ -327,15 +344,21 @@ func TestRateLimitResetAt(t *testing.T) {
 
 func TestTransportRateLimitState(t *testing.T) {
 	t.Parallel()
-	api, _, _ := newTransportServers(t, 200, "5000")
-	apiURL, _ := url.Parse(api.URL)
+	api := newAPIServer(t, 200, "5000")
+	apiURL, err := url.Parse(api.URL)
+	if err != nil {
+		t.Fatalf("url.Parse: %v", err)
+	}
 	tr := NewTransport(nil, &fakeSource{value: "tok", source: "app"}, apiURL.Host)
 	tr.rateLimitResetUnix.Store(time.Now().Add(time.Minute).Unix())
 	if tr.RateLimitResetAt().IsZero() {
 		t.Fatal("expected active rate limit")
 	}
 	client := &http.Client{Transport: tr}
-	req, _ := http.NewRequest(http.MethodGet, api.URL+"/repos/o/r", http.NoBody)
+	req, err := http.NewRequest(http.MethodGet, api.URL+"/repos/o/r", http.NoBody)
+	if err != nil {
+		t.Fatalf("http.NewRequest: %v", err)
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		t.Fatalf("Do: %v", err)
@@ -348,12 +371,18 @@ func TestTransportRateLimitState(t *testing.T) {
 
 func TestRateLimitResetAtWithTracing(t *testing.T) {
 	t.Parallel()
-	api, _, _ := newTransportServers(t, http.StatusTooManyRequests, "")
-	apiURL, _ := url.Parse(api.URL)
+	api := newAPIServer(t, http.StatusTooManyRequests, "")
+	apiURL, err := url.Parse(api.URL)
+	if err != nil {
+		t.Fatalf("url.Parse: %v", err)
+	}
 	tr := NewTransport(nil, &fakeSource{value: "tok", source: "app"}, apiURL.Host)
 	client := tracing.Client(&http.Client{Transport: tr})
 
-	req, _ := http.NewRequest(http.MethodGet, api.URL+"/repos/o/r", http.NoBody)
+	req, err := http.NewRequest(http.MethodGet, api.URL+"/repos/o/r", http.NoBody)
+	if err != nil {
+		t.Fatalf("http.NewRequest: %v", err)
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		t.Fatalf("Do: %v", err)
