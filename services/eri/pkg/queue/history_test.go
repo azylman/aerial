@@ -29,7 +29,10 @@ type roundTripperFunc func(*http.Request) (*http.Response, error)
 func (f roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
 
 func jsonHTTPResponse(v any) *http.Response {
-	b, _ := json.Marshal(v)
+	b, err := json.Marshal(v)
+	if err != nil {
+		panic(err)
+	}
 	return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(bytes.NewReader(b))}
 }
 
@@ -334,7 +337,10 @@ func TestFetchDiscordChannelHistory_Table(t *testing.T) {
 	t.Parallel()
 	now := time.Now().UTC()
 
-	dgErr, _ := discordgo.New("Bot test-token")
+	dgErr, err := discordgo.New("Bot test-token")
+	if err != nil {
+		t.Fatalf("discordgo.New: %v", err)
+	}
 	dgErr.Client.Transport = roundTripperFunc(func(req *http.Request) (*http.Response, error) { return nil, errors.New("502 bad gateway") })
 
 	sampleMsgs := []*discordgo.Message{
@@ -343,7 +349,10 @@ func TestFetchDiscordChannelHistory_Table(t *testing.T) {
 		{ID: "1001", Content: "Hey everyone", Timestamp: now.Add(-15 * time.Minute), Author: &discordgo.User{ID: "777777", Username: "Alice", Bot: false}},
 	}
 
-	dgSuccess, _ := discordgo.New("Bot test-token")
+	dgSuccess, err := discordgo.New("Bot test-token")
+	if err != nil {
+		t.Fatalf("discordgo.New: %v", err)
+	}
 	dgSuccess.State = discordgo.NewState()
 	dgSuccess.State.User = &discordgo.User{ID: "999999", Username: "Aerial", Bot: true}
 	dgSuccess.Client.Transport = roundTripperFunc(func(req *http.Request) (*http.Response, error) {
@@ -351,7 +360,10 @@ func TestFetchDiscordChannelHistory_Table(t *testing.T) {
 	})
 
 	var flakyCalls atomic.Int32
-	dgFlaky, _ := discordgo.New("Bot test-token")
+	dgFlaky, err := discordgo.New("Bot test-token")
+	if err != nil {
+		t.Fatalf("discordgo.New: %v", err)
+	}
 	dgFlaky.State = discordgo.NewState()
 	dgFlaky.State.User = &discordgo.User{ID: "999999", Username: "Aerial", Bot: true}
 	dgFlaky.Client.Transport = roundTripperFunc(func(req *http.Request) (*http.Response, error) {
@@ -407,10 +419,16 @@ func TestFetchRecentThreadHistory_Table(t *testing.T) {
 	t.Parallel()
 	now := time.Now().UTC()
 
-	dgErr, _ := discordgo.New("Bot test")
+	dgErr, err := discordgo.New("Bot test")
+	if err != nil {
+		t.Fatalf("discordgo.New: %v", err)
+	}
 	dgErr.Client.Transport = roundTripperFunc(func(req *http.Request) (*http.Response, error) { return nil, errors.New("503 service unavailable") })
 
-	dg, _ := discordgo.New("Bot test")
+	dg, err := discordgo.New("Bot test")
+	if err != nil {
+		t.Fatalf("discordgo.New: %v", err)
+	}
 	dg.State = discordgo.NewState()
 	dg.State.User = &discordgo.User{ID: "bot-user-123", Username: "aerial", Bot: true}
 	dg.Client.Transport = roundTripperFunc(func(req *http.Request) (*http.Response, error) {
@@ -646,7 +664,10 @@ func TestSummarizeThreadHistory_SingleflightBarrier(t *testing.T) {
 	for range 3 {
 		go func() {
 			ctx, caller := tracer.Start(context.Background(), spanPromptThreadSummary)
-			summary, _ := SummarizeThreadHistoryWithGroup(ctx, sfg, mockLLM, "test-model", "thread-sf", msgs)
+			summary, err := SummarizeThreadHistoryWithGroup(ctx, sfg, mockLLM, "test-model", "thread-sf", msgs)
+			if err != nil {
+				t.Errorf("SummarizeThreadHistoryWithGroup: %v", err)
+			}
 			caller.End()
 			done <- summary
 		}()

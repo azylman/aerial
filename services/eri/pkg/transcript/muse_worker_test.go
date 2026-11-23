@@ -401,13 +401,21 @@ func TestDiscoverMuseSessions(t *testing.T) {
 	tmp := t.TempDir()
 
 	museDir1 := filepath.Join(tmp, "muse", "sessions")
-	_ = os.MkdirAll(filepath.Join(museDir1, "sess-1"), 0o755)
-	_ = os.WriteFile(filepath.Join(museDir1, "sess-1", "session.jsonl"), []byte(`{"payload_type":"runtime.session"}`+"\n"), 0o644)
+	if err := os.MkdirAll(filepath.Join(museDir1, "sess-1"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(sess-1): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(museDir1, "sess-1", "session.jsonl"), []byte(`{"payload_type":"runtime.session"}`+"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(sess-1): %v", err)
+	}
 
-	_ = os.WriteFile(filepath.Join(museDir1, "sess-2.jsonl"), []byte(`{"payload_type":"runtime.session"}`+"\n"), 0o644)
+	if err := os.WriteFile(filepath.Join(museDir1, "sess-2.jsonl"), []byte(`{"payload_type":"runtime.session"}`+"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(sess-2): %v", err)
+	}
 
 	// Hidden file should be skipped
-	_ = os.WriteFile(filepath.Join(museDir1, ".hidden.jsonl"), []byte(`{"payload_type":"runtime.session"}`+"\n"), 0o644)
+	if err := os.WriteFile(filepath.Join(museDir1, ".hidden.jsonl"), []byte(`{"payload_type":"runtime.session"}`+"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(.hidden): %v", err)
+	}
 
 	discovered := make(map[string]discoveredSession)
 	discoverMuseSessions([]string{museDir1}, discovered)
@@ -467,14 +475,20 @@ func TestFindTranscriptFile_Muse(t *testing.T) {
 	}
 
 	brainDir := filepath.Join(tmp, "brain")
-	_ = os.MkdirAll(brainDir, 0o755)
+	if err := os.MkdirAll(brainDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(brainDir): %v", err)
+	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			fullPath := filepath.Join(tmp, tc.relPath)
-			_ = os.MkdirAll(filepath.Dir(fullPath), 0o755)
-			_ = os.WriteFile(fullPath, []byte(`{"payload_type":"runtime.session"}`+"\n"), 0o644)
+			if err := os.MkdirAll(filepath.Dir(fullPath), 0o755); err != nil {
+				t.Fatalf("MkdirAll(%s): %v", filepath.Dir(fullPath), err)
+			}
+			if err := os.WriteFile(fullPath, []byte(`{"payload_type":"runtime.session"}`+"\n"), 0o644); err != nil {
+				t.Fatalf("WriteFile(%s): %v", fullPath, err)
+			}
 
 			gotPath := findTranscriptFile(brainDir, tc.sessionID)
 			if tc.wantFound {

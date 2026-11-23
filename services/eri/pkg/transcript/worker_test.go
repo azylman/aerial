@@ -73,12 +73,18 @@ func TestFindTranscriptFile_PathResolution(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			tmp := t.TempDir()
 			brainDir := filepath.Join(tmp, "sub1", "sub2", "brain")
-			_ = os.MkdirAll(brainDir, 0o755)
+			if err := os.MkdirAll(brainDir, 0o755); err != nil {
+				t.Fatalf("MkdirAll(brainDir): %v", err)
+			}
 
 			if tc.relPath != "" {
 				fullPath := filepath.Join(brainDir, tc.relPath)
-				_ = os.MkdirAll(filepath.Dir(fullPath), 0o755)
-				_ = os.WriteFile(fullPath, []byte("content"), 0o644)
+				if err := os.MkdirAll(filepath.Dir(fullPath), 0o755); err != nil {
+					t.Fatalf("MkdirAll: %v", err)
+				}
+				if err := os.WriteFile(fullPath, []byte("content"), 0o644); err != nil {
+					t.Fatalf("WriteFile: %v", err)
+				}
 			}
 
 			got := FindTranscriptFile(brainDir, tc.sessionID)
@@ -260,7 +266,10 @@ func TestDiscoverSessions(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			entries, _ := os.ReadDir(brainDir)
+			entries, err := os.ReadDir(brainDir)
+			if err != nil && !os.IsNotExist(err) {
+				t.Fatalf("ReadDir(%s): %v", brainDir, err)
+			}
 			var claudeDir string
 			var dirs []string
 			if tc.customDirs {

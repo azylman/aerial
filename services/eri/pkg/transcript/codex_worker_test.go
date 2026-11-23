@@ -14,20 +14,30 @@ func TestExtractCodexSessionID_TableDriven(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	fileWithID := filepath.Join(tmpDir, "meta_id.jsonl")
-	_ = os.WriteFile(fileWithID, []byte("{\"type\":\"session_meta\",\"payload\":{\"id\":\"sess_from_id\"}}\n"), 0o644)
+	if err := os.WriteFile(fileWithID, []byte("{\"type\":\"session_meta\",\"payload\":{\"id\":\"sess_from_id\"}}\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
 
 	fileWithSessionID := filepath.Join(tmpDir, "meta_sess_id.jsonl")
-	_ = os.WriteFile(fileWithSessionID, []byte("\n{\"type\":\"session_meta\",\"payload\":{\"session_id\":\"sess_from_session_id\"}}\n"), 0o644)
+	if err := os.WriteFile(fileWithSessionID, []byte("\n{\"type\":\"session_meta\",\"payload\":{\"session_id\":\"sess_from_session_id\"}}\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
 
 	fileOther := filepath.Join(tmpDir, "meta_other.jsonl")
-	_ = os.WriteFile(fileOther, []byte("{\"type\":\"response_item\"}\n"), 0o644)
+	if err := os.WriteFile(fileOther, []byte("{\"type\":\"response_item\"}\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
 
 	fileEmpty := filepath.Join(tmpDir, "empty.jsonl")
-	_ = os.WriteFile(fileEmpty, []byte("\n\n"), 0o644)
+	if err := os.WriteFile(fileEmpty, []byte("\n\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
 
 	fileLargeMeta := filepath.Join(tmpDir, "large_meta.jsonl")
 	largeLine := fmt.Sprintf("{\"type\":\"session_meta\",\"payload\":{\"id\":\"sess_large_meta_id\"},\"instructions\":%q}\n", strings.Repeat("x", 80*1024))
-	_ = os.WriteFile(fileLargeMeta, []byte(largeLine), 0o644)
+	if err := os.WriteFile(fileLargeMeta, []byte(largeLine), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
 
 	tests := []struct {
 		name     string

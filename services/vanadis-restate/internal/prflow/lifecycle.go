@@ -546,6 +546,20 @@ func (f *Flow) HandleDeployFailureEvent(ctx context.Context, buildID, chunkID st
 	return nil
 }
 
+func (f *Flow) ensureOpenedPRAutoMerge(ctx context.Context, buildID, chunkID string, prNumber int) {
+	bld, chunks, err := f.Store.GetBuild(ctx, buildID)
+	if err != nil || bld == nil {
+		return
+	}
+	idx := FindChunkIndex(chunks, chunkID)
+	if idx < 0 {
+		return
+	}
+	if aErr := f.Exec.EnsurePRAutoMergeAndContext(ctx, *bld, chunks, chunks[idx], prNumber); aErr != nil {
+		slog.WarnContext(ctx, "[vanadis-restate] ensure pr auto-merge warning", "error", aErr)
+	}
+}
+
 // HandlePREventType routes one PR lifecycle event to its transition.
 func (f *Flow) HandlePREventType(ctx context.Context, buildID, chunkID, event string, ev pubsub.PRLifecycleEvent) error {
 	if ericlient.AgentFromContext(ctx) == "" && f.Store != nil {
@@ -555,6 +569,9 @@ func (f *Flow) HandlePREventType(ctx context.Context, buildID, chunkID, event st
 	}
 	switch event {
 	case prEventOpened, "synchronize":
+		if event == prEventOpened && f.Exec != nil && f.Store != nil {
+			f.ensureOpenedPRAutoMerge(ctx, buildID, chunkID, ev.PRNumber)
+		}
 		return f.RecordPRHeadRevision(ctx, chunkID, ev)
 	case "check_updated":
 		return f.HandlePRCheckEvent(ctx, chunkID, event, ev)
@@ -621,21 +638,43 @@ func (f *Flow) LocateOrAttachPRChunk(ctx context.Context, buildID string, ev pub
 	return f.ResolveOrAttachPRChunk(ctx, buildID, ev)
 }
 
-// IsEligibleUnattachedChunk reports whether a chunk may adopt an unattached PR.
-func IsEligibleUnattachedChunk(owner string, build *model.VanadisBuild, c *model.VanadisChunk, ev pubsub.PRLifecycleEvent) bool {
-	if build == nil || c == nil {
+func isEligibleBranchChunk(owner string, build *model.VanadisBuild, c *model.VanadisChunk, ev pubsub.PRLifecycleEvent) bool {
+	req := store.AttachChunkPRRequest{Repo: strings.TrimSpace(ev.Repo), PRNumber: ev.PRNumber}
+	if c.Mode == chunkModeAction {
+		return c.Status == statusRunning && (c.Repo == "" || store.AttachmentMatches(owner, *c, *build, req))
+	}
+	if (c.Mode != "" && c.Mode != "pr") || c.StartedAt.IsZero() {
 		return false
 	}
-	if (c.Mode != "" && c.Mode != "pr") || c.PRNumber != 0 || c.StartedAt.IsZero() {
+	if c.Status != statusRunning && c.Status != statusCoding && (c.Status != statusFailed || c.CIFailCount != 0) {
+		return false
+	}
+	return store.AttachmentMatches(owner, *c, *build, req)
+}
+
+func isEligibleThreadChunk(owner string, build *model.VanadisBuild, c *model.VanadisChunk, ev pubsub.PRLifecycleEvent) bool {
+	if (c.Mode != "" && c.Mode != "pr") || c.StartedAt.IsZero() {
 		return false
 	}
 	if c.Status != statusRunning && c.Status != statusCoding {
 		return false
 	}
+	return store.AttachmentMatches(owner, *c, *build, store.AttachChunkPRRequest{Repo: strings.TrimSpace(ev.Repo), PRNumber: ev.PRNumber})
+}
+
+// IsEligibleUnattachedChunk reports whether a chunk may adopt an unattached PR.
+func IsEligibleUnattachedChunk(owner string, build *model.VanadisBuild, c *model.VanadisChunk, ev pubsub.PRLifecycleEvent) bool {
+	if build == nil || c == nil || c.PRNumber != 0 {
+		return false
+	}
 	if buildThread := model.NormalizeDiscordThreadID(build.ThreadID); buildThread != "" && strings.TrimSpace(ev.TargetID) != "" && model.NormalizeDiscordThreadID(ev.TargetID) != buildThread {
 		return false
 	}
-	return store.AttachmentMatches(owner, *c, *build, store.AttachChunkPRRequest{Repo: strings.TrimSpace(ev.Repo), PRNumber: ev.PRNumber})
+	branchChunkID := model.ExtractChunkIDFromBranch(ev.Repo, ev.Branch)
+	if branchChunkID != "" && branchChunkID == c.ID {
+		return isEligibleBranchChunk(owner, build, c, ev)
+	}
+	return isEligibleThreadChunk(owner, build, c, ev)
 }
 
 // SyncAttachedPRWidget refreshes the build widget after a PR attachment.
@@ -726,8 +765,69 @@ func (f *Flow) ResolveOrAttachPRChunk(ctx context.Context, buildID string, ev pu
 		return "", aErr
 	}
 
+	if !strings.EqualFold(strings.TrimSpace(ev.Event), prEventOpened) {
+		if eErr := f.Exec.EnsurePRAutoMergeAndContext(ctx, *build, chunks, *targetChunk, ev.PRNumber); eErr != nil {
+			slog.WarnContext(ctx, "[vanadis-restate] ensure pr auto-merge warning", "error", eErr)
+		}
+	}
+
 	f.SyncAttachedPRWidget(ctx, buildID)
 	return attachedChunkID, nil
+}
+
+// TryAttachOpenPRForChunk searches open PRs for a branch matching chunk.ID, attaches it to the chunk,
+// and ensures auto-merge and build context.
+func (f *Flow) TryAttachOpenPRForChunk(ctx context.Context, build *model.VanadisBuild, chunks []model.VanadisChunk, chunk model.VanadisChunk) (bool, error) {
+	if f == nil || f.Exec == nil || f.Store == nil || build == nil {
+		return false, nil
+	}
+	prs, err := f.Exec.ListOpenPullRequests(ctx, chunk.Repo)
+	if err != nil {
+		return false, err
+	}
+	for _, pr := range prs {
+		headRef := strings.TrimPrefix(strings.TrimSpace(pr.Head.Ref), "refs/heads/")
+		if model.ExtractChunkIDFromBranch(chunk.Repo, headRef) != chunk.ID {
+			continue
+		}
+		ev := pubsub.PRLifecycleEvent{
+			Event:    prEventOpened,
+			Repo:     strings.TrimSpace(chunk.Repo),
+			PRNumber: pr.Number,
+			Branch:   pr.Head.Ref,
+			HeadSHA:  pr.Head.SHA,
+			Title:    pr.Title,
+			TargetID: build.ThreadID,
+			Quiet:    build.Quiet,
+		}
+		if vErr := f.Exec.ValidateChunkPRAttachment(ctx, *build, chunk, ev); vErr != nil {
+			if errors.Is(vErr, store.ErrPRTransitionSkipped) {
+				continue
+			}
+			return false, vErr
+		}
+		_, _, _, aErr := f.Store.AttachChunkPR(ctx, store.AttachChunkPRRequest{
+			ChunkID:  chunk.ID,
+			PRNumber: pr.Number,
+			Repo:     strings.TrimSpace(chunk.Repo),
+			Branch:   pr.Head.Ref,
+			Title:    pr.Title,
+			TargetID: build.ThreadID,
+			Quiet:    build.Quiet,
+		})
+		if aErr != nil {
+			if errors.Is(aErr, store.ErrBuildConflict) || errors.Is(aErr, store.ErrChunkNotFound) {
+				return false, nil
+			}
+			return false, aErr
+		}
+		if eErr := f.Exec.EnsurePRAutoMergeAndContext(ctx, *build, chunks, chunk, pr.Number); eErr != nil {
+			slog.WarnContext(ctx, "[vanadis-restate] ensure pr auto-merge warning", "error", eErr)
+		}
+		f.SyncAttachedPRWidget(ctx, build.ID)
+		return true, nil
+	}
+	return false, nil
 }
 
 // NoPRAction is the recovery decision for a PR chunk turn that ended dirty.

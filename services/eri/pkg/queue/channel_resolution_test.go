@@ -154,13 +154,19 @@ func setupResolveTargetThreadPool(tc resolveTargetThreadCase) *WorkerPool {
 		pool.appCfg = config.NewFromData(&config.ConfigData{SystemChannel: tc.systemChannel})
 	}
 	if tc.withDiscordSess {
-		dg, _ := discordgo.New("Bot test-token")
+		dg, err := discordgo.New("Bot test-token")
+		if err != nil {
+			panic(err)
+		}
 		tid, derr := tc.discordThreadID, tc.discordErr
 		dg.Client.Transport = roundTripperFunc(func(req *http.Request) (*http.Response, error) {
 			if derr != nil {
 				return nil, derr
 			}
-			b, _ := json.Marshal(&discordgo.Channel{ID: tid, Type: discordgo.ChannelTypeGuildPublicThread, Name: "auto-thread"})
+			b, err := json.Marshal(&discordgo.Channel{ID: tid, Type: discordgo.ChannelTypeGuildPublicThread, Name: "auto-thread"})
+			if err != nil {
+				return nil, err
+			}
 			return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(bytes.NewReader(b))}, nil
 		})
 		pool.cfg.DiscordSession = dg

@@ -127,7 +127,9 @@ func TestWorkerPool_ResolveChannelPolicy(t *testing.T) {
 	}
 
 	poolDefault := &WorkerPool{}
-	_ = poolDefault.resolveChannelPolicy("ch-default", "default")
+	if got := poolDefault.resolveChannelPolicy("ch-default", "default"); got.Mode == "" {
+		t.Fatal("expected non-empty channel policy mode")
+	}
 }
 
 func TestWorkerPool_CloseTurnExecution(t *testing.T) {

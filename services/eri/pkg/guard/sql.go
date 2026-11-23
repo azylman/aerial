@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
+	"os"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -13,6 +15,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+
+	"github.com/azylman/aerial/pkg/strutil"
 )
 
 const (
@@ -26,6 +30,7 @@ const (
 
 var (
 	psqlFormatFlags    = map[string]bool{"-A": true, "--no-align": true, "--csv": true, "-H": true, "--html": true}
+	psqlPasswordFlags  = map[string]bool{"-w": true, "--no-password": true, "-W": true, "--password": true}
 	schemaErrCodes     = map[string]bool{"42703": true, "42P01": true, "42704": true, "42883": true}
 	dockerExecValFlags = map[string]bool{"-e": true, "--env": true, "--env-file": true, "-u": true, "--user": true, "-w": true, "--workdir": true, "--detach-keys": true}
 )
@@ -126,10 +131,27 @@ func (c *livePgxConn) Close(ctx context.Context) {
 	}
 }
 
-// DefaultSQLDescriber returns a PostgreSQL describer backed by DATABASE_URL resolved through getenv,
-// or nil if unconfigured. It connects lazily, on the first described query.
+// DefaultSQLDescriber returns a PostgreSQL describer backed by DATABASE_URL resolved through getenv
+// (falling back to the local Unix socket proxy when present), or nil if unconfigured. It connects
+// lazily, on the first described query.
 func DefaultSQLDescriber(getenv func(string) string) SQLDescriber {
 	dsn := strings.TrimSpace(getenv("DATABASE_URL"))
+	if dsn == "" {
+		pgHost := strings.TrimSpace(getenv("PGHOST"))
+		if pgHost != "" {
+			if _, err := os.Stat(filepath.Join(pgHost, ".s.PGSQL.5432")); err == nil {
+				user := strutil.FirstNonEmpty(strings.TrimSpace(getenv("PGUSER")), "aerial")
+				dbName := strutil.FirstNonEmpty(strings.TrimSpace(getenv("PGDATABASE")), "aerial")
+				u := url.URL{
+					Scheme:   "postgres",
+					User:     url.User(user),
+					Path:     "/" + dbName,
+					RawQuery: url.Values{"host": {pgHost}, "sslmode": {"disable"}}.Encode(),
+				}
+				dsn = u.String()
+			}
+		}
+	}
 	if dsn == "" {
 		return nil
 	}
@@ -386,9 +408,10 @@ type locatedToken struct {
 }
 
 type psqlInvocation struct {
-	insertOffset  int
-	hasFormatFlag bool
-	queries       []string
+	insertOffset    int
+	hasFormatFlag   bool
+	hasPasswordFlag bool
+	queries         []string
 }
 
 func inspectPsqlPipeline(cmdLine string, describer SQLDescriber) *Decision {
@@ -405,8 +428,15 @@ func inspectPsqlPipeline(cmdLine string, describer SQLDescriber) *Decision {
 
 	rewritten := cmdLine
 	for _, inv := range slices.Backward(invocations) {
-		if !inv.hasFormatFlag && inv.insertOffset > 0 && inv.insertOffset <= len(rewritten) {
-			rewritten = rewritten[:inv.insertOffset] + " -A" + rewritten[inv.insertOffset:]
+		var inject string
+		if !inv.hasFormatFlag {
+			inject += " -A"
+		}
+		if !inv.hasPasswordFlag {
+			inject += " -w"
+		}
+		if inject != "" && inv.insertOffset > 0 && inv.insertOffset <= len(rewritten) {
+			rewritten = rewritten[:inv.insertOffset] + inject + rewritten[inv.insertOffset:]
 		}
 	}
 	if rewritten != cmdLine {
@@ -504,6 +534,10 @@ func parsePsqlArgs(insertOffset int, tokens []locatedToken) psqlInvocation {
 			inv.hasFormatFlag = true
 			continue
 		}
+		if psqlPasswordFlags[t] {
+			inv.hasPasswordFlag = true
+			continue
+		}
 		if (t == "-P" || t == "--pset") && i+1 < len(tokens) {
 			i++
 			if strings.HasPrefix(tokens[i].value, "format=") {
@@ -548,6 +582,10 @@ func parseShortPsqlFlags(inv *psqlInvocation, flags string, tokens []locatedToke
 				i++
 			}
 			return i
+		}
+		if ch == 'w' || ch == 'W' {
+			inv.hasPasswordFlag = true
+			continue
 		}
 	}
 	return i

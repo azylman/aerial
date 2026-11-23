@@ -183,7 +183,11 @@ type deliveryAPI struct {
 func (f *deliveryAPI) RoundTrip(req *http.Request) (*http.Response, error) {
 	var body []byte
 	if req.Body != nil {
-		body, _ = io.ReadAll(req.Body)
+		var err error
+		body, err = io.ReadAll(req.Body)
+		if err != nil {
+			return nil, err
+		}
 	}
 	f.mu.Lock()
 	f.requests = append(f.requests, deliveryRequest{Method: req.Method, Path: req.URL.Path, Body: string(body)})
@@ -204,7 +208,10 @@ func (f *deliveryAPI) RoundTrip(req *http.Request) (*http.Response, error) {
 
 // session returns a bot session whose REST calls go to the fake.
 func (f *deliveryAPI) session() *discordgo.Session {
-	s, _ := discordgo.New("Bot mock_token")
+	s, err := discordgo.New("Bot mock_token")
+	if err != nil {
+		panic(err)
+	}
 	s.Client = &http.Client{Transport: f}
 	return s
 }
@@ -431,7 +438,9 @@ func TestResolveChannelByNameOrID(t *testing.T) {
 			t.Parallel()
 			sess := deliverySession(tc.nilSession, &tc.api)
 			if tc.inState {
-				_ = sess.State.GuildAdd(resolveStateGuild())
+				if err := sess.State.GuildAdd(resolveStateGuild()); err != nil {
+					t.Fatalf("GuildAdd: %v", err)
+				}
 			}
 			got, err := ResolveChannelByNameOrID(sess, tc.in)
 			if checkDeliveryErr(t, err, tc.wantErr) {
@@ -463,7 +472,9 @@ func TestSendSystemAlert(t *testing.T) {
 			t.Parallel()
 			sess := deliverySession(tc.nilSession, &tc.api)
 			if sess != nil {
-				_ = sess.State.GuildAdd(resolveStateGuild())
+				if err := sess.State.GuildAdd(resolveStateGuild()); err != nil {
+					t.Fatalf("GuildAdd: %v", err)
+				}
 			}
 			err := SendSystemAlert(sess, tc.channel, " System Alert ", " Everything operational ")
 			if checkDeliveryErr(t, err, tc.wantErr) {

@@ -63,8 +63,14 @@ func (h *recordCaptureHandler) snapshot() []capturedRecord {
 }
 
 func makeTestSpanContext(tidHex, sidHex string) trace.SpanContext {
-	tid, _ := trace.TraceIDFromHex(tidHex)
-	sid, _ := trace.SpanIDFromHex(sidHex)
+	tid, err := trace.TraceIDFromHex(tidHex)
+	if err != nil {
+		panic(err)
+	}
+	sid, err := trace.SpanIDFromHex(sidHex)
+	if err != nil {
+		panic(err)
+	}
 	return trace.NewSpanContext(trace.SpanContextConfig{
 		TraceID:    tid,
 		SpanID:     sid,

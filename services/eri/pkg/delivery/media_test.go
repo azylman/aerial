@@ -132,7 +132,9 @@ func TestResolveAndValidateLocalImage_SecuritySandboxing(t *testing.T) {
 
 	// 1. Non-image file masquerading as png
 	fakeImg := filepath.Join(tempDir, "fake.png")
-	_ = os.WriteFile(fakeImg, []byte("NOT_A_PNG_HEADER_DATA_SECRET_KEY=12345"), 0o600)
+	if err := os.WriteFile(fakeImg, []byte("NOT_A_PNG_HEADER_DATA_SECRET_KEY=12345"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
 
 	_, err := ResolveAndValidateLocalImage(fakeImg, tempDir)
 	if err == nil {
@@ -169,7 +171,9 @@ func TestResolveAndValidateLocalImage_SecuritySandboxing(t *testing.T) {
 
 	// 4. Zero byte file
 	zeroFile := filepath.Join(tempDir, "zero.png")
-	_ = os.WriteFile(zeroFile, []byte{}, 0o600)
+	if writeErr := os.WriteFile(zeroFile, []byte{}, 0o600); writeErr != nil {
+		t.Fatalf("WriteFile: %v", writeErr)
+	}
 	_, err = ResolveAndValidateLocalImage(zeroFile, tempDir)
 	if err == nil {
 		t.Errorf("Expected error for 0-byte file, got nil")
@@ -313,14 +317,18 @@ func TestResolveAndValidateLocalImage_MIMETypesAndEdges(t *testing.T) {
 
 	// Empty file
 	emptyFile := filepath.Join(tmpDir, "empty.png")
-	_ = os.WriteFile(emptyFile, []byte(""), 0o644)
+	if err := os.WriteFile(emptyFile, []byte(""), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
 	if _, err := ResolveAndValidateLocalImage(emptyFile, tmpDir); err == nil {
 		t.Error("expected error for empty file")
 	}
 
 	// Non-regular file (directory)
 	subDir := filepath.Join(tmpDir, "dir.png")
-	_ = os.MkdirAll(subDir, 0o755)
+	if err := os.MkdirAll(subDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
 	if _, err := ResolveAndValidateLocalImage(subDir, tmpDir); err == nil {
 		t.Error("expected error for directory")
 	}
@@ -328,7 +336,9 @@ func TestResolveAndValidateLocalImage_MIMETypesAndEdges(t *testing.T) {
 	// Octet stream extensions (.png, .jpg, .gif, .webp, audio files)
 	for _, ext := range []string{".png", ".jpg", ".jpeg", ".gif", ".webp", ".wav", ".mp3", ".ogg", ".m4a", ".flac"} {
 		f := filepath.Join(tmpDir, "sample"+ext)
-		_ = os.WriteFile(f, []byte{0x00, 0x01, 0x02, 0x03, 0x04}, 0o644)
+		if err := os.WriteFile(f, []byte{0x00, 0x01, 0x02, 0x03, 0x04}, 0o644); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
 		att, err := ResolveAndValidateLocalImage(f, tmpDir)
 		if err != nil {
 			t.Errorf("unexpected error for %s: %v", ext, err)
@@ -340,22 +350,33 @@ func TestResolveAndValidateLocalImage_MIMETypesAndEdges(t *testing.T) {
 
 	// Octet stream unsupported extension (.bin)
 	unsupportedFile := filepath.Join(tmpDir, "sample.bin")
-	_ = os.WriteFile(unsupportedFile, []byte{0x00, 0x01, 0x02, 0x03, 0x04}, 0o644)
+	if err := os.WriteFile(unsupportedFile, []byte{0x00, 0x01, 0x02, 0x03, 0x04}, 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
 	if _, err := ResolveAndValidateLocalImage(unsupportedFile, tmpDir); err == nil {
 		t.Error("expected error for unsupported bin MIME type")
 	}
 
 	// Oversized file > MaxAttachmentSizeBytes
 	bigFile := filepath.Join(tmpDir, "big.png")
-	bf, _ := os.Create(bigFile)
-	_ = bf.Truncate(9 * 1024 * 1024)
-	_ = bf.Close()
+	bf, err := os.Create(bigFile)
+	if err != nil {
+		t.Fatalf("os.Create: %v", err)
+	}
+	if err := bf.Truncate(9 * 1024 * 1024); err != nil {
+		t.Fatalf("Truncate: %v", err)
+	}
+	if err := bf.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
 	if _, err := ResolveAndValidateLocalImage(bigFile, tmpDir); err == nil {
 		t.Error("expected error for file exceeding max attachment size")
 	}
 
 	// Relative path without baseDir
-	_, _ = ResolveAndValidateLocalImage("relative/path.png", "")
+	if _, err := ResolveAndValidateLocalImage("relative/path.png", ""); err == nil {
+		t.Error("expected error for relative path without baseDir")
+	}
 }
 
 func TestResolveAndValidateLocalImage_AudioAndHeaderSniffing(t *testing.T) {
@@ -463,9 +484,15 @@ func TestAutoAttachNewMedia_NilGuardsAndStatFilters(t *testing.T) {
 
 	// 3. Scan directory with hidden file and non-image file
 	tmpDir := t.TempDir()
-	_ = os.WriteFile(filepath.Join(tmpDir, ".hidden.png"), []byte("data"), 0o644)
-	_ = os.WriteFile(filepath.Join(tmpDir, "notes.txt"), []byte("data"), 0o644)
-	_ = os.WriteFile(filepath.Join(tmpDir, "zero.png"), []byte(""), 0o644)
+	if err := os.WriteFile(filepath.Join(tmpDir, ".hidden.png"), []byte("data"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, "notes.txt"), []byte("data"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, "zero.png"), []byte(""), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
 	res2 := AutoAttachNewMedia(tmpDir, time.Now().Add(-1*time.Minute), nil)
 	if len(res2) != 0 {
 		t.Errorf("expected 0 attachments for hidden, txt, and empty files, got %d", len(res2))
@@ -489,13 +516,19 @@ func TestAutoAttachNewMedia_BreakLimitsAndErrors(t *testing.T) {
 
 	// 2. Old image with ModTime before cutoff
 	oldFile := filepath.Join(tmpDir, "old.png")
-	_ = os.WriteFile(oldFile, []byte("pngdata"), 0o644)
+	if err := os.WriteFile(oldFile, []byte("pngdata"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
 	oldTime := now.Add(-10 * time.Minute)
-	_ = os.Chtimes(oldFile, oldTime, oldTime)
+	if err := os.Chtimes(oldFile, oldTime, oldTime); err != nil {
+		t.Fatalf("Chtimes: %v", err)
+	}
 
 	// 3. Corrupt image that fails ResolveAndValidateLocalImage
 	badImg := filepath.Join(tmpDir, "bad.png")
-	_ = os.WriteFile(badImg, []byte("not really a png"), 0o644)
+	if err := os.WriteFile(badImg, []byte("not really a png"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
 
 	res := AutoAttachNewMedia(tmpDir, now.Add(-5*time.Second), nil)
 	if len(res) != MaxAttachmentsPerMessage {
@@ -507,13 +540,19 @@ func TestExtractAndSanitizeMedia_EdgePaths(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	// 1. Dot path: ![Alt](.)
-	out, _ := ExtractAndSanitizeMedia("Here is: ![My Dot](.)", tmpDir)
+	out, media := ExtractAndSanitizeMedia("Here is: ![My Dot](.)", tmpDir)
+	if len(media) != 0 {
+		t.Fatalf("expected 0 attachments for dot path, got %d", len(media))
+	}
 	if !strings.Contains(out, "*(Image attachment unavailable: My Dot - image)*") {
 		t.Errorf("expected fallback with 'image' basename, got %s", out)
 	}
 
 	// 2. Missing image without alt text: ![](/does/not/exist.png)
-	out2, _ := ExtractAndSanitizeMedia("Here is: ![](/does/not/exist.png)", tmpDir)
+	out2, media2 := ExtractAndSanitizeMedia("Here is: ![](/does/not/exist.png)", tmpDir)
+	if len(media2) != 0 {
+		t.Fatalf("expected 0 attachments for missing image, got %d", len(media2))
+	}
 	if !strings.Contains(out2, "*(Image attachment unavailable: exist.png)*") {
 		t.Errorf("expected fallback without alt text, got %s", out2)
 	}
