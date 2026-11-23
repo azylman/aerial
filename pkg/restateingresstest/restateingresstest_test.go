@@ -67,6 +67,9 @@ func postIngress(t *testing.T, srv *restateingresstest.Server, path, key, body s
 		t.Fatalf("Do: %v", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
-	got, _ := io.ReadAll(resp.Body)
+	got, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
 	return resp.StatusCode, string(got)
 }

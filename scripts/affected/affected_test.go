@@ -22,7 +22,10 @@ func copyFixture(t *testing.T, fixture string, overlay map[string]string) string
 			if err != nil || d.IsDir() {
 				return err
 			}
-			rel, _ := filepath.Rel(src, p)
+			rel, err := filepath.Rel(src, p)
+			if err != nil {
+				return err
+			}
 			data, err := os.ReadFile(p)
 			if err != nil {
 				return err

@@ -14,7 +14,9 @@ import (
 func TestMain_Execution_TableDriven(t *testing.T) {
 	tmpDir := t.TempDir()
 	badConfigPath := filepath.Join(tmpDir, "bad_config.yaml")
-	_ = os.WriteFile(badConfigPath, []byte("port: [unclosed"), 0o600)
+	if err := os.WriteFile(badConfigPath, []byte("port: [unclosed"), 0o600); err != nil {
+		t.Fatalf("write bad config: %v", err)
+	}
 
 	tests := []struct {
 		name             string
