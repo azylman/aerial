@@ -978,6 +978,17 @@ func TestWorkerPool_RunnerFallbackAdaptersAndLifecycle(t *testing.T) {
 	if unwrapUnifiedPool(nil) != nil || unwrapUnifiedPool(&testRunnerAgentPool{}) != nil {
 		t.Errorf("expected nil from unwrapUnifiedPool")
 	}
+	upWrap := runner.NewUnifiedProcessPool(runner.PoolConfig{}, nil)
+	t.Cleanup(func() { _ = upWrap.Close() })
+	ipWrap := runner.NewInterchangeablePool(upWrap, runner.InterchangeablePoolConfig{WorkerCount: 1})
+	t.Cleanup(func() { _ = ipWrap.Close() })
+	if got := unwrapUnifiedPool(ipWrap); got != upWrap {
+		t.Errorf("expected unwrapUnifiedPool(ipWrap) = %p, want %p", got, upWrap)
+	}
+	wrappedPools := map[PoolKey]runner.AgentPool{
+		{Ephemeral: false, Effort: config.EffortHigh}: ipWrap,
+	}
+	wirePoolSessionDependencies(wrappedPools, nil, fake)
 }
 
 func TestStatusUpdater_GuardrailsAndRESTTransport(t *testing.T) {

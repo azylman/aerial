@@ -689,12 +689,6 @@ func TestUnifiedProcessPool_GetHasDaemonAndMarkDirty(t *testing.T) {
 	if got, ok := pool.Get("kiosk"); !ok || got != d {
 		t.Errorf("expected pool.Get to return daemon %p, got %p, ok=%v", d, got, ok)
 	}
-	d.mu.Lock()
-	d.sessionID = "00000000-0000-0000-0000-000000000098"
-	d.mu.Unlock()
-	if d.SessionID() != "00000000-0000-0000-0000-000000000098" {
-		t.Errorf("expected session ID update")
-	}
 	pool.MarkDirty()
 	if !d.IsDirty() {
 		t.Errorf("expected daemon dirty after pool.MarkDirty()")

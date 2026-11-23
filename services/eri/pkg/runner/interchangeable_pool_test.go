@@ -856,3 +856,32 @@ func TestInterchangeablePool_Model(t *testing.T) {
 		})
 	}
 }
+
+func TestInterchangeablePool_UnderlyingAndSessionCallbacks(t *testing.T) {
+	t.Parallel()
+	var nilPool *InterchangeablePool
+	if nilPool.Underlying() != nil {
+		t.Errorf("expected nil Underlying from nil pool")
+	}
+	nilPool.SetSessionCallbacks(nil, nil)
+
+	pool, underlying := newTestInterchangeablePool(t, 2, "test", "test-model", nil)
+	if got := pool.Underlying(); got != underlying {
+		t.Errorf("Underlying() = %p, want %p", got, underlying)
+	}
+
+	getFn := func(ctx context.Context, targetKey string) (SessionRecord, error) {
+		return SessionRecord{ActiveSessionID: "sess-123"}, nil
+	}
+	onRotFn := func(ctx context.Context, targetKey, oldSessionID, newSessionID string) error {
+		return nil
+	}
+	pool.SetSessionCallbacks(getFn, onRotFn)
+	underlying.mu.Lock()
+	hasGet := underlying.cfg.GetSessionRecord != nil
+	hasRot := underlying.cfg.OnSessionRotated != nil
+	underlying.mu.Unlock()
+	if !hasGet || !hasRot {
+		t.Errorf("expected SetSessionCallbacks to configure underlying callbacks: get=%v rot=%v", hasGet, hasRot)
+	}
+}

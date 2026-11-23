@@ -292,6 +292,14 @@ func (p *InterchangeablePool) Model() string {
 	return p.underlying.Model()
 }
 
+// Underlying returns the wrapped UnifiedProcessPool, or nil.
+func (p *InterchangeablePool) Underlying() *UnifiedProcessPool {
+	if p == nil {
+		return nil
+	}
+	return p.underlying
+}
+
 func (p *InterchangeablePool) SetTranscriptRescuer(r func(context.Context, string, time.Time) string) {
 	if p != nil && p.underlying != nil {
 		p.underlying.SetTranscriptRescuer(r)
@@ -301,6 +309,12 @@ func (p *InterchangeablePool) SetTranscriptRescuer(r func(context.Context, strin
 func (p *InterchangeablePool) SetSessionManager(sm *session.Manager) {
 	if p != nil && p.underlying != nil {
 		p.underlying.SetSessionManager(sm)
+	}
+}
+
+func (p *InterchangeablePool) SetSessionCallbacks(getRec func(ctx context.Context, targetKey string) (SessionRecord, error), onRot func(ctx context.Context, targetKey, oldSessionID, newSessionID string) error) {
+	if p != nil && p.underlying != nil {
+		p.underlying.SetSessionCallbacks(getRec, onRot)
 	}
 }
 
