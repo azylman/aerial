@@ -37,7 +37,7 @@ const (
 )
 
 var (
-	splitTestRegex = regexp.MustCompile(`^Test.*_(Extra|More.*|Additional.*|Uncovered.*|EdgeCases|CornerCases|Branches|AllBranches|Chunk\d+.*|Coverage.*)$`)
+	splitTestRegex = regexp.MustCompile(`^Test.*(_(Extra|More.*|Additional.*|Uncovered.*|EdgeCases.*|CornerCases.*|Branches.*|AllBranches.*|Chunk\d+.*|Coverage.*)|[a-z0-9](EdgeCases.*|CornerCases.*|Branches.*|AllBranches.*|Coverage$|CoverageGaps.*|Uncovered.*))$`)
 	partTestRegex  = regexp.MustCompile(`^.*_part\d+_test\.go$`)
 )
 

@@ -353,14 +353,24 @@ func analyzeTestFile(fullPath, rel string, r rules) (FileMetrics, []string, erro
 		}
 	}
 
+	tableStructs := make(map[string]bool)
 	ast.Inspect(f, func(n ast.Node) bool {
-		return inspectTestNode(n, fset, rel, r, &violations)
+		if arr, ok := n.(*ast.ArrayType); ok && arr.Len == nil {
+			if ident, ok := arr.Elt.(*ast.Ident); ok {
+				tableStructs[ident.Name] = true
+			}
+		}
+		return true
+	})
+
+	ast.Inspect(f, func(n ast.Node) bool {
+		return inspectTestNode(n, fset, rel, r, tableStructs, &violations)
 	})
 
 	return FileMetrics{Lines: countLines(src)}, violations, nil
 }
 
-func inspectTestNode(n ast.Node, fset *token.FileSet, rel string, r rules, violations *[]string) bool {
+func inspectTestNode(n ast.Node, fset *token.FileSet, rel string, r rules, tableStructs map[string]bool, violations *[]string) bool {
 	if sel, ok := n.(*ast.SelectorExpr); ok && r.testRuleEnabled(ruleHTTPDefaultClient) {
 		if isSelectorNamed(sel.X, "http", "DefaultClient") && sel.Sel.Name == "CloseIdleConnections" {
 			return false
@@ -380,6 +390,20 @@ func inspectTestNode(n ast.Node, fset *token.FileSet, rel string, r rules, viola
 		if rule, reason := checkBannedTestCall(call); reason != "" && r.testRuleEnabled(rule) {
 			line := fset.Position(call.Pos()).Line
 			*violations = append(*violations, fmt.Sprintf("%s:%d: %s", rel, line, reason))
+		}
+	}
+	return inspectTestNodeStructs(n, fset, rel, r, tableStructs, violations)
+}
+
+func inspectTestNodeStructs(n ast.Node, fset *token.FileSet, rel string, r rules, tableStructs map[string]bool, violations *[]string) bool {
+	if ts, ok := n.(*ast.TypeSpec); ok {
+		if st, ok := ts.Type.(*ast.StructType); ok && st.Fields != nil {
+			if tableStructs[ts.Name.Name] {
+				checkTestTableStructFields(st, fset, rel, violations)
+				return false
+			}
+			checkTestStructFields(st, fset, rel, r, violations)
+			return false
 		}
 	}
 	if arr, ok := n.(*ast.ArrayType); ok && arr.Len == nil {

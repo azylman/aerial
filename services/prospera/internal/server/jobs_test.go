@@ -976,7 +976,7 @@ func TestRunApp_TranscriptBatcher(t *testing.T) {
 	runTranscriptBatcher(ctx, sessionMgr, reporter)
 }
 
-func TestRoutes_HealthAndCoverage(t *testing.T) {
+func TestRoutes_HealthAndDebug(t *testing.T) {
 	t.Parallel()
 
 	cfg := &config.Config{Port: "4019"}

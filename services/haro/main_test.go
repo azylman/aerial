@@ -394,7 +394,7 @@ func TestInitHaroJetStreamWithFactory(t *testing.T) {
 	}
 }
 
-func TestHaro_InitJetStreamEdgeCases(t *testing.T) {
+func TestInitHaroJetStream_DeliveryGuards(t *testing.T) {
 	memBus := pubsub.NewMemoryBus()
 	t.Cleanup(func() { _ = memBus.Close() })
 	closedDB := testutil.NewClosedDB(t)

@@ -107,7 +107,6 @@ type registerTestCase struct {
 	statusCode   int
 	expectBody   string
 	closeServer  bool
-	nilClient    bool
 	wantErr      bool
 }
 
@@ -139,10 +138,7 @@ func runRegisterRestateDeploymentCase(t *testing.T, tc registerTestCase) {
 		advURL = "http://prospera.default.svc.cluster.local:9080"
 	}
 
-	var client *http.Client
-	if !tc.nilClient {
-		client = srv.Client()
-	}
+	client := srv.Client()
 	if tc.closeServer {
 		srv.Close()
 	}
@@ -184,13 +180,6 @@ func TestRegisterRestateDeployment(t *testing.T) {
 			wantErr:    false,
 		},
 		{
-			name:       "successful registration with nil client defaults",
-			statusCode: http.StatusOK,
-			expectBody: `{"uri":"http://prospera.default.svc.cluster.local:9080","force":true}`,
-			nilClient:  true,
-			wantErr:    false,
-		},
-		{
 			name:       "admin api error returns error",
 			statusCode: http.StatusInternalServerError,
 			wantErr:    true,
@@ -214,7 +203,6 @@ type sweepTestCase struct {
 	name       string
 	ingressURL string
 	nilStore   bool
-	nilClient  bool
 	storeErr   error
 	calls      []model.VoiceCall
 	postStatus int
@@ -260,10 +248,7 @@ func runSweepUnfinishedReportsTest(t *testing.T, tc sweepTestCase) {
 		storeArg = st
 	}
 
-	var client *http.Client
-	if !tc.nilClient {
-		client = srv.Client()
-	}
+	client := srv.Client()
 
 	err := SweepUnfinishedReports(context.Background(), client, storeArg, ingressURL)
 	if (err != nil) != tc.wantErr {
@@ -329,16 +314,6 @@ func TestSweepUnfinishedReports(t *testing.T) {
 			},
 			postStatus: http.StatusOK,
 			wantCount:  0,
-		},
-		{
-			name:       "nil client defaults to http.DefaultClient",
-			ingressURL: "test-server",
-			nilClient:  true,
-			calls: []model.VoiceCall{
-				{CallID: "call-sweep-nilclient", ReportStatus: "pending", EndedAt: &now},
-			},
-			postStatus: http.StatusOK,
-			wantCount:  1,
 		},
 		{
 			name:       "post failure logs and returns joined error",

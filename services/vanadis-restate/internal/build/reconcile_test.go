@@ -482,7 +482,7 @@ func TestBuildObject_AuthorityHandlerOperations(t *testing.T) {
 	}
 }
 
-func TestBuildObject_ReconcileErrorBranches(t *testing.T) {
+func TestBuildObject_ReconcileErrorHandling(t *testing.T) {
 	t.Parallel()
 
 	replays := []struct {

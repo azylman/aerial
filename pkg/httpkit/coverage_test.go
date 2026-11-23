@@ -177,7 +177,7 @@ func archiveEntries(t *testing.T, r io.Reader) []string {
 	}
 }
 
-func TestArchiveCoverage(t *testing.T) {
+func TestArchiveCoverage_ArchiveFiles(t *testing.T) {
 	// Not t.Parallel(): the mkdir row overrides TMPDIR via t.Setenv.
 	// A writer is passed only when its row sets a file or an error; otherwise it is nil.
 	tests := []struct {

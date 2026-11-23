@@ -498,7 +498,7 @@ func (f *fakeObjectRuntime) SendCrossBuildDeploySuccess(service, buildID, chunkI
 	f.reconcilesSent = append(f.reconcilesSent, sentCrossBuildDeploySuccess{Service: service, BuildID: buildID, ChunkID: chunkID})
 }
 
-func TestBuildObject_NilStoreBranches(t *testing.T) {
+func TestBuildObject_NilStoreFaults(t *testing.T) {
 	t.Parallel()
 	ctx := makeObjectMockContext(t, "b1")
 	var typedNilStore *store.Store

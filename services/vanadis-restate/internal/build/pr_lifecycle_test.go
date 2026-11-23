@@ -28,7 +28,7 @@ import (
 	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
 )
 
-func TestBuildObject_ExecutorErrorBranches(t *testing.T) {
+func TestBuildObject_ExecutorErrorHandling(t *testing.T) {
 	t.Parallel()
 	b1 := model.VanadisBuild{ID: "b-err", Status: "running", ThreadID: "th-1"}
 	c1 := model.VanadisChunk{ID: "c1", BuildID: "b-err", ChunkIndex: 0, Title: "C1", Status: "running", Mode: "action"}
