@@ -16,14 +16,15 @@ func TestDispatchCancelRouter_CancelDispatch(t *testing.T) {
 		return d
 	}
 	tests := []struct {
-		name      string
-		rows      []db.Dispatch
-		req       CancelDispatchControlRequest
-		replies   map[string]CancelDispatchResponse
-		failList  error
-		wantResp  CancelDispatchResponse
-		wantSends []sentCall
-		wantCode  int
+		name        string
+		rows        []db.Dispatch
+		req         CancelDispatchControlRequest
+		replies     map[string]CancelDispatchResponse
+		cancelStep  string
+		sabotageSQL string
+		wantResp    CancelDispatchResponse
+		wantSends   []sentCall
+		wantCode    int
 	}{
 		{
 			name: "FansOutInSortedKeyOrder",
@@ -55,20 +56,24 @@ func TestDispatchCancelRouter_CancelDispatch(t *testing.T) {
 			wantResp: CancelDispatchResponse{Status: "ok"},
 		},
 		{
-			name:     "ResolveStepCancelSurfacesAsConflict",
-			req:      CancelDispatchControlRequest{BuildID: "b1"},
-			failList: errRestateCancel,
-			wantCode: CodeQueueConflict,
+			name:       "ResolveStepCancelSurfacesAsConflict",
+			req:        CancelDispatchControlRequest{BuildID: "b1"},
+			cancelStep: stepResolveDispatchSessionKeys,
+			wantCode:   CodeQueueConflict,
+		},
+		{
+			name:        "ResolveStepStoreFailureIsTerminal",
+			req:         CancelDispatchControlRequest{BuildID: "b1"},
+			sabotageSQL: "DROP TABLE dispatches",
+			wantCode:    500,
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			store := seedStore(t, nil, tc.rows)
-			if tc.failList != nil {
-				store.FailNext("ListActiveDispatchSessionKeys", tc.failList)
-			}
+			store := seedStore(t, nil, tc.rows, tc.sabotageSQL)
 			h := newCoordHarness(t, "", tcInv, coordinatorState{})
+			h.cancelStep = tc.cancelStep
 			h.replies = tc.replies
 			resp, err := NewDispatchCancelRouter(store, "aerial").CancelDispatch(h.plainCtx(), tc.req)
 			if assertCoordinatorErr(t, err, tc.wantCode) {

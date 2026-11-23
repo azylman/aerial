@@ -38,7 +38,8 @@ func TestDispatchCoordinator_Enqueue(t *testing.T) {
 		state           coordinatorState
 		rows            []db.Dispatch
 		req             eriwire.BrainDispatchRequest
-		failInsert      error
+		cancelStep      string
+		sabotageSQL     string
 		wantResp        eriwire.DispatchEnqueueResponse
 		wantSends       []sentCall
 		wantRows        map[string]rowWant
@@ -82,18 +83,23 @@ func TestDispatchCoordinator_Enqueue(t *testing.T) {
 			name:       "RecordStepCancelSurfacesAsConflict",
 			key:        dcKey,
 			req:        eriwire.BrainDispatchRequest{ID: "d4", Prompt: "go"},
-			failInsert: errRestateCancel,
+			cancelStep: StepRecordQueued,
 			wantCode:   CodeQueueConflict,
+		},
+		{
+			name:        "RecordStepStoreFailureIsTerminal",
+			key:         dcKey,
+			req:         eriwire.BrainDispatchRequest{ID: "d6", Prompt: "go"},
+			sabotageSQL: failTriggerSQL("dispatches", "INSERT", "23505"),
+			wantCode:    500,
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			store := seedStore(t, nil, tc.rows)
-			if tc.failInsert != nil {
-				store.FailNext("InsertDispatch", tc.failInsert)
-			}
+			store := seedStore(t, nil, tc.rows, tc.sabotageSQL)
 			h := newCoordHarness(t, tc.key, tcInv, tc.state)
+			h.cancelStep = tc.cancelStep
 			resp, err := NewDispatchCoordinator(store, "aerial").Enqueue(h.sharedCtx(), tc.req)
 			if assertCoordinatorErr(t, err, tc.wantCode) {
 				return
@@ -101,7 +107,7 @@ func TestDispatchCoordinator_Enqueue(t *testing.T) {
 			assert.Equal(t, tc.wantResp, resp)
 			assert.Equal(t, tc.wantSends, h.sends)
 			assertDispatchRows(t, store, tc.wantRows)
-			if tc.wantResp.DispatchID != "" && tc.wantResp.Status != eriwire.StatusSkippedActive && tc.failInsert == nil && tc.wantCode == 0 {
+			if tc.wantResp.Status != eriwire.StatusSkippedActive {
 				d, getErr := store.GetDispatch(context.Background(), tc.wantResp.DispatchID)
 				require.NoError(t, getErr)
 				require.NotNil(t, d)
@@ -140,12 +146,17 @@ func TestDispatchCoordinator_Append(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			store := seedStore(t, nil, tc.rows)
+			var store coordinatorStore
+			var sqlStore *db.SQLStore
+			if len(tc.rows) > 0 || len(tc.wantRows) > 0 {
+				sqlStore = seedStore(t, nil, tc.rows, "")
+				store = sqlStore
+			}
 			h := newCoordHarness(t, dcKey, tcInv, tc.state)
 			require.NoError(t, NewDispatchCoordinator(store, "aerial").Append(h.objectCtx(), tc.req))
 			assert.Equal(t, tc.wantState, h.snapshot(t))
 			assert.Equal(t, tc.wantSends, h.sends)
-			assertDispatchRows(t, store, tc.wantRows)
+			assertDispatchRows(t, sqlStore, tc.wantRows)
 		})
 	}
 }
@@ -203,14 +214,19 @@ func TestDispatchCoordinator_Cancel(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			store := seedStore(t, nil, tc.rows)
+			var store coordinatorStore
+			var sqlStore *db.SQLStore
+			if len(tc.rows) > 0 || len(tc.wantRows) > 0 {
+				sqlStore = seedStore(t, nil, tc.rows, "")
+				store = sqlStore
+			}
 			h := newCoordHarness(t, dcKey, tcInv, tc.state)
 			resp, err := NewDispatchCoordinator(store, "aerial").Cancel(h.sharedCtx(), tc.req)
 			require.NoError(t, err)
 			assert.Equal(t, tc.wantResp, resp)
 			assert.Equal(t, tc.wantSends, h.sends)
 			assert.Empty(t, h.cancels)
-			assertDispatchRows(t, store, tc.wantRows)
+			assertDispatchRows(t, sqlStore, tc.wantRows)
 		})
 	}
 }
