@@ -497,8 +497,5 @@ func (u *StatusUpdater) resetState(deleteRemote, disable bool, warnSuffix string
 	}
 }
 
-// Reset resets updater state for retry attempts and deletes any active message.
-func (u *StatusUpdater) Reset() { u.resetState(true, false, "") }
-
 // DeleteStatusMessage cleans up the status message from Discord with zero tombstone.
 func (u *StatusUpdater) DeleteStatusMessage() { u.resetState(true, true, " on shutdown") }

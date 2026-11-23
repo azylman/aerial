@@ -447,19 +447,6 @@ func TestStatusUpdater_TransientSendErrorSelfHeals(t *testing.T) {
 
 func TestStatusUpdater_LifecycleAndConcurrency(t *testing.T) {
 	t.Parallel()
-	// 1. Reset cleans up active message
-	hReset := newStatusUpdaterHarness()
-	u := NewStatusUpdater(nil, "thread-reset", true, hReset.options(WithStatusInterval(time.Hour), WithStatusDebounce(0))...)
-	u.HandleStep(&runner.StepUpdateEvent{StepType: "tool", ToolName: "flaky_tool", State: "ACTIVE"})
-	u.flush()
-	u.Reset()
-	select {
-	case <-hReset.deleteDone:
-	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for reset delete")
-	}
-	u.Stop()
-
 	// 2. Immediate flush on tool start
 	hImm := newStatusUpdaterHarness()
 	uImm := NewStatusUpdater(nil, "thread-imm", true, hImm.options(WithStatusInterval(time.Hour), WithStatusDebounce(time.Hour))...)
