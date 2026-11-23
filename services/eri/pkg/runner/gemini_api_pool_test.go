@@ -134,7 +134,12 @@ func makeSendSuiteHandler(tc sendTestCase, lastReqBody *[]byte) http.HandlerFunc
 	var turnCounter atomic.Int32
 	return func(w http.ResponseWriter, r *http.Request) {
 		if tc.checkThinkingBody && lastReqBody != nil {
-			*lastReqBody, _ = io.ReadAll(r.Body)
+			body, err := io.ReadAll(r.Body)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			*lastReqBody = body
 		}
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -155,7 +160,9 @@ func makeSendSuiteHandler(tc sendTestCase, lastReqBody *[]byte) http.HandlerFunc
 			flusher.Flush()
 		}
 		if reply.countedChunk != "" {
-			_, _ = fmt.Fprintf(w, reply.countedChunk, turnCounter.Add(1))
+			if _, err := fmt.Fprintf(w, reply.countedChunk, turnCounter.Add(1)); err != nil {
+				return
+			}
 		}
 		_, _ = w.Write([]byte(reply.body))
 	}
@@ -433,7 +440,10 @@ func makeToolCallingMCPHandler(mode string) http.HandlerFunc {
 			var req struct {
 				Method string `json:"method"`
 			}
-			_ = json.NewDecoder(r.Body).Decode(&req)
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
 			w.Header().Set("Content-Type", "application/json")
 			switch req.Method {
 			case "tools/list":
@@ -447,7 +457,10 @@ func makeToolCallingMCPHandler(mode string) http.HandlerFunc {
 			var req struct {
 				Method string `json:"method"`
 			}
-			_ = json.NewDecoder(r.Body).Decode(&req)
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
 			if req.Method == "tools/list" {
 				w.Header().Set("Content-Type", "application/json")
 				_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"failing_tool","description":"fails"}]}}`))
@@ -577,7 +590,9 @@ func TestGeminiAPISession_PersistenceAndHydrationCycle(t *testing.T) {
 	(&GeminiAPISession{dataDir: ""}).appendTranscript("p", "r")
 	(&GeminiAPISession{sessionID: "test-err-dir", dataDir: "/dev/null/forbidden"}).appendTranscript("p", "r")
 	forbiddenFileSess := &GeminiAPISession{sessionID: "test-err-file", dataDir: tmpDir}
-	_ = os.MkdirAll(forbiddenFileSess.transcriptPath(), 0o755)
+	if err := os.MkdirAll(forbiddenFileSess.transcriptPath(), 0o755); err != nil {
+		t.Fatalf("MkdirAll failed: %v", err)
+	}
 	forbiddenFileSess.appendTranscript("p", "r")
 }
 
@@ -586,8 +601,14 @@ func TestGeminiAPISession_TranscriptPersistence_Suite(t *testing.T) {
 	fileContent30 := func() string {
 		var sb strings.Builder
 		for i := 1; i <= 30; i++ {
-			u, _ := json.Marshal(map[string]any{"type": "USER_INPUT", "content": fmt.Sprintf("prompt %d", i)})
-			m, _ := json.Marshal(map[string]any{"type": "PLANNER_RESPONSE", "content": fmt.Sprintf("reply %d", i)})
+			u, err := json.Marshal(map[string]any{"type": "USER_INPUT", "content": fmt.Sprintf("prompt %d", i)})
+			if err != nil {
+				t.Fatalf("Marshal: %v", err)
+			}
+			m, err := json.Marshal(map[string]any{"type": "PLANNER_RESPONSE", "content": fmt.Sprintf("reply %d", i)})
+			if err != nil {
+				t.Fatalf("Marshal: %v", err)
+			}
 			sb.WriteString(string(u) + "\n" + string(m) + "\n")
 		}
 		return sb.String()
@@ -604,8 +625,12 @@ func TestGeminiAPISession_TranscriptPersistence_Suite(t *testing.T) {
 			t.Parallel()
 			tmpDir := t.TempDir()
 			p := filepath.Join(tmpDir, "brain", "sess-"+tc.name, ".system_generated", "logs", "transcript.jsonl")
-			_ = os.MkdirAll(filepath.Dir(p), 0o755)
-			_ = os.WriteFile(p, []byte(tc.fileContent), 0o644)
+			if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+				t.Fatalf("MkdirAll: %v", err)
+			}
+			if err := os.WriteFile(p, []byte(tc.fileContent), 0o644); err != nil {
+				t.Fatalf("WriteFile: %v", err)
+			}
 			sess := &GeminiAPISession{targetKey: "sess-" + tc.name, sessionID: "sess-" + tc.name, pool: NewGeminiAPIPool(GeminiAPIPoolConfig{DataDir: tmpDir}), dataDir: tmpDir}
 			sess.hydrateHistory()
 			hist := sess.History()
@@ -749,13 +774,18 @@ func TestGeminiAPIPool_MultipleToolCallsGrouping(t *testing.T) {
 				Name string `json:"name"`
 			} `json:"params"`
 		}
-		_ = json.NewDecoder(r.Body).Decode(&req)
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		switch req.Method {
 		case "tools/list":
 			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"tool_a"},{"name":"tool_b"}]}}`))
 		case "tools/call":
-			_, _ = fmt.Fprintf(w, `{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"Result of %s"}]}}`, req.Params.Name)
+			if _, err := fmt.Fprintf(w, `{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"Result of %s"}]}}`, req.Params.Name); err != nil {
+				return
+			}
 		default:
 			http.Error(w, "not found", http.StatusNotFound)
 		}
@@ -770,9 +800,16 @@ func TestGeminiAPIPool_MultipleToolCallsGrouping(t *testing.T) {
 		if reqNum == 1 {
 			_, _ = w.Write([]byte("data: {\"candidates\":[{\"content\":{\"parts\":[{\"functionCall\":{\"name\":\"tool_a\",\"args\":{\"arg\":\"1\"}},\"thoughtSignature\":\"sig_shared\"},{\"functionCall\":{\"name\":\"tool_b\",\"args\":{\"arg\":\"2\"}}}],\"role\":\"model\"}}],\"index\":0}\n\n"))
 		} else {
-			body, _ := io.ReadAll(r.Body)
+			body, err := io.ReadAll(r.Body)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
 			var streamReq geminiStreamRequest
-			_ = json.Unmarshal(body, &streamReq)
+			if err := json.Unmarshal(body, &streamReq); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
 			capturedTurn2Contents = streamReq.Contents
 			_, _ = w.Write([]byte("data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"Both tools finished.\"}],\"role\":\"model\"}}],\"finishReason\":\"STOP\",\"index\":0}\n\n"))
 		}
@@ -795,10 +832,18 @@ func TestGeminiAPIPool_MultipleToolCallsGrouping(t *testing.T) {
 	}
 	sink.mu.Lock()
 	defer sink.mu.Unlock()
-	if len(sink.toolCalls) != 2 || sink.result == nil || sink.result.Response != "Both tools finished." || len(capturedTurn2Contents) != 3 {
-		t.Fatalf("unexpected sink state: calls=%d, result=%+v, turn2Contents=%d", len(sink.toolCalls), sink.result, len(capturedTurn2Contents))
+	if len(sink.toolCalls) != 2 || sink.result == nil || sink.result.Response != "Both tools finished." {
+		t.Fatalf("unexpected sink state: calls=%d, result=%+v", len(sink.toolCalls), sink.result)
 	}
-	modelContent, funcContent := capturedTurn2Contents[1], capturedTurn2Contents[2]
+	assertTurn2Contents(t, capturedTurn2Contents)
+}
+
+func assertTurn2Contents(t *testing.T, captured []geminiContent) {
+	t.Helper()
+	if len(captured) != 3 {
+		t.Fatalf("expected 3 contents, got %d", len(captured))
+	}
+	modelContent, funcContent := captured[1], captured[2]
 	if modelContent.Role != "model" || len(modelContent.Parts) != 2 || modelContent.Parts[0].ThoughtSignature != "sig_shared" || modelContent.Parts[1].ThoughtSignature != "sig_shared" {
 		t.Errorf("modelContent grouping failed: %+v", modelContent)
 	}
@@ -842,7 +887,11 @@ func TestGeminiAPIPool_FallbackTextWhenToolIterationsExhausted(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		requestCount++
-		body, _ := io.ReadAll(r.Body)
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 		switch requestCount {
 		case 1:
 			_, _ = w.Write([]byte(`data: {"candidates":[{"content":{"parts":[{"functionCall":{"name":"test_tool","args":{"foo":"bar"}}}]}}]}` + "\n\n"))
@@ -881,14 +930,19 @@ func newAllowedToolsMockServer() *httptest.Server {
 				Name string `json:"name"`
 			} `json:"params"`
 		}
-		_ = json.NewDecoder(r.Body).Decode(&req)
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		if req.Method == "tools/list" {
 			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"ha_call_read_tool","description":"Read HA"},{"name":"get_events","description":"Get calendar"},{"name":"batch_modify_gmail_message_labels","description":"Gmail"}]}}`))
 			return
 		}
 		if req.Method == "tools/call" {
-			_, _ = fmt.Fprintf(w, `{"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"executed: %s"}]}}`, req.Params.Name)
+			if _, err := fmt.Fprintf(w, `{"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"executed: %s"}]}}`, req.Params.Name); err != nil {
+				return
+			}
 			return
 		}
 		http.Error(w, "unknown method", http.StatusBadRequest)
@@ -972,9 +1026,16 @@ func runGeminiAPISessionRetrieverCase(t *testing.T, tc retrieverTestCase) {
 	retrieverCalled := false
 	var receivedBody []byte
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		receivedBody, _ = io.ReadAll(r.Body)
+		var err error
+		receivedBody, err = io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = fmt.Fprintf(w, "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":%q}],\"role\":\"model\"}}]}\n\n", tc.modelResponse)
+		if _, err := fmt.Fprintf(w, "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":%q}],\"role\":\"model\"}}]}\n\n", tc.modelResponse); err != nil {
+			return
+		}
 	}))
 	defer ts.Close()
 
@@ -1070,7 +1131,9 @@ func TestGeminiAPIPool_AcquireLease_ConcurrencySerialization(t *testing.T) {
 	if err3 != nil {
 		t.Fatalf("lease3 AcquireLease error: %v", err3)
 	}
-	_ = lease3.Release()
+	if err := lease3.Release(); err != nil {
+		t.Fatalf("lease3 release error: %v", err)
+	}
 }
 
 type acquireLeaseTestCase struct {

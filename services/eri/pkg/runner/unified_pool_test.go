@@ -46,21 +46,24 @@ type pipeMockSpawnerOpts struct {
 }
 
 func handlePipeMockUserLine(outW io.Writer, line string, attemptCount *atomic.Int32, opts pipeMockSpawnerOpts) {
-	if opts.onUser != nil {
-		att := int(attemptCount.Add(1))
-		resp, errStr, status := opts.onUser(att, line)
-		if status == "" {
-			if errStr != "" && resp == "" {
-				status = "ERROR"
-			} else {
-				status = "SUCCESS"
+	if opts.onUser == nil {
+		if opts.echoRes != "" {
+			if _, err := fmt.Fprintf(outW, `{"event":"result","result":{"status":"SUCCESS","response":%q}}`+"\n", opts.echoRes); err != nil {
+				return
 			}
 		}
-		_, _ = fmt.Fprintf(outW, `{"event":"result","response":%q,"error":%q,"status":%q}`+"\n", resp, errStr, status)
 		return
 	}
-	if opts.echoRes != "" {
-		_, _ = fmt.Fprintf(outW, `{"event":"result","result":{"status":"SUCCESS","response":%q}}`+"\n", opts.echoRes)
+	att := int(attemptCount.Add(1))
+	resp, errStr, status := opts.onUser(att, line)
+	if status == "" {
+		status = "SUCCESS"
+		if errStr != "" && resp == "" {
+			status = "ERROR"
+		}
+	}
+	if _, err := fmt.Fprintf(outW, `{"event":"result","response":%q,"error":%q,"status":%q}`+"\n", resp, errStr, status); err != nil {
+		return
 	}
 }
 
@@ -77,15 +80,23 @@ func runCodexPipeMockPump(inR io.Reader, outW io.WriteCloser, sessID string, idx
 		}
 		switch req.Method {
 		case "initialize":
-			_, _ = fmt.Fprintf(outW, `{"jsonrpc":"2.0","id":%d,"result":{}}`+"\n", req.ID)
+			if _, err := fmt.Fprintf(outW, `{"jsonrpc":"2.0","id":%d,"result":{}}`+"\n", req.ID); err != nil {
+				return
+			}
 		case "initialized":
 		case "thread/start", "thread/resume":
-			_, _ = fmt.Fprintf(outW, `{"jsonrpc":"2.0","id":%d,"result":{"thread":{"id":%q}}}`+"\n", req.ID, sessID)
+			if _, err := fmt.Fprintf(outW, `{"jsonrpc":"2.0","id":%d,"result":{"thread":{"id":%q}}}`+"\n", req.ID, sessID); err != nil {
+				return
+			}
 		case "turn/start":
 			if opts.echoRes != "" {
-				_, _ = fmt.Fprintf(outW, `{"jsonrpc":"2.0","method":"item/completed","params":{"item":{"id":"item-1","type":"agentMessage","text":%q}}}`+"\n", opts.echoRes)
+				if _, err := fmt.Fprintf(outW, `{"jsonrpc":"2.0","method":"item/completed","params":{"item":{"id":"item-1","type":"agentMessage","text":%q}}}`+"\n", opts.echoRes); err != nil {
+					return
+				}
 			}
-			_, _ = fmt.Fprintf(outW, `{"jsonrpc":"2.0","method":"turn/completed","params":{"turn":{"status":"completed"}}}`+"\n")
+			if _, err := fmt.Fprintf(outW, `{"jsonrpc":"2.0","method":"turn/completed","params":{"turn":{"status":"completed"}}}`+"\n"); err != nil {
+				return
+			}
 		}
 	}
 }
@@ -103,17 +114,27 @@ func runMusePipeMockPump(inR io.Reader, outW io.WriteCloser, sessID string, idx 
 		}
 		switch req.Method {
 		case "initialize":
-			_, _ = fmt.Fprintf(outW, `{"jsonrpc":"2.0","id":%d,"result":{}}`+"\n", req.ID)
+			if _, err := fmt.Fprintf(outW, `{"jsonrpc":"2.0","id":%d,"result":{}}`+"\n", req.ID); err != nil {
+				return
+			}
 		case "initialized":
 		case "session/start", "session/resume":
-			_, _ = fmt.Fprintf(outW, `{"jsonrpc":"2.0","id":%d,"result":{"session":{"id":%q}}}`+"\n", req.ID, sessID)
+			if _, err := fmt.Fprintf(outW, `{"jsonrpc":"2.0","id":%d,"result":{"session":{"id":%q}}}`+"\n", req.ID, sessID); err != nil {
+				return
+			}
 		case "session/setApprovalMode":
-			_, _ = fmt.Fprintf(outW, `{"jsonrpc":"2.0","id":%d,"result":{}}`+"\n", req.ID)
+			if _, err := fmt.Fprintf(outW, `{"jsonrpc":"2.0","id":%d,"result":{}}`+"\n", req.ID); err != nil {
+				return
+			}
 		case "turn/start":
 			if opts.echoRes != "" {
-				_, _ = fmt.Fprintf(outW, `{"jsonrpc":"2.0","method":"item/completed","params":{"item":{"id":"item-1","type":"agentMessage","text":%q}}}`+"\n", opts.echoRes)
+				if _, err := fmt.Fprintf(outW, `{"jsonrpc":"2.0","method":"item/completed","params":{"item":{"id":"item-1","type":"agentMessage","text":%q}}}`+"\n", opts.echoRes); err != nil {
+					return
+				}
 			}
-			_, _ = fmt.Fprintf(outW, `{"jsonrpc":"2.0","method":"turn/completed","params":{"turn":{"status":"completed"}}}`+"\n")
+			if _, err := fmt.Fprintf(outW, `{"jsonrpc":"2.0","method":"turn/completed","params":{"turn":{"status":"completed"}}}`+"\n"); err != nil {
+				return
+			}
 		}
 	}
 }
@@ -129,7 +150,9 @@ func runPipeMockPump(inR io.Reader, outW io.WriteCloser, sessID string, idx int,
 	}
 	defer outW.Close()
 	if opts.skipInitOnAttempt == 0 || idx != opts.skipInitOnAttempt {
-		_, _ = fmt.Fprintf(outW, `{"event":"init","session_id":%q}`+"\n", sessID)
+		if _, err := fmt.Fprintf(outW, `{"event":"init","session_id":%q}`+"\n", sessID); err != nil {
+			return
+		}
 	}
 	buf := make([]byte, 4096)
 	for {
@@ -167,7 +190,8 @@ func newPipeMockSpawner(opts pipeMockSpawnerOpts) *MockDaemonSpawner {
 			}
 			outR, outW := io.Pipe()
 			inR, inW := io.Pipe()
-			errR, _ := io.Pipe()
+			errR, errW := io.Pipe()
+			defer errW.Close()
 
 			if opts.closeIn {
 				_ = inR.Close()
@@ -450,18 +474,28 @@ func TestUnifiedProcessPool_Initialize_ContextCancellation(t *testing.T) {
 
 func createTranscriptFixture(tmpDir, sessID string, steps, turns int, bBytes, dbBytes int64) {
 	logsDir := filepath.Join(tmpDir, ".gemini", "antigravity-cli", "brain", sessID, ".system_generated", "logs")
-	_ = os.MkdirAll(logsDir, 0o755)
+	if err := os.MkdirAll(logsDir, 0o755); err != nil {
+		panic(err)
+	}
 	tPath := filepath.Join(logsDir, "transcript.jsonl")
 	if steps > 0 {
-		_ = os.WriteFile(tPath, []byte(fmt.Sprintf(`{"step_index": %d, "type": "PLANNER_RESPONSE"}`+"\n", steps)), 0o644)
+		if err := os.WriteFile(tPath, []byte(fmt.Sprintf(`{"step_index": %d, "type": "PLANNER_RESPONSE"}`+"\n", steps)), 0o644); err != nil {
+			panic(err)
+		}
 	}
 	if bBytes > 0 {
-		_ = os.WriteFile(tPath, make([]byte, bBytes), 0o644)
+		if err := os.WriteFile(tPath, make([]byte, bBytes), 0o644); err != nil {
+			panic(err)
+		}
 	}
 	if dbBytes > 0 {
 		convDir := filepath.Join(tmpDir, "conversations")
-		_ = os.MkdirAll(convDir, 0o755)
-		_ = os.WriteFile(filepath.Join(convDir, sessID+".db"), make([]byte, dbBytes), 0o644)
+		if err := os.MkdirAll(convDir, 0o755); err != nil {
+			panic(err)
+		}
+		if err := os.WriteFile(filepath.Join(convDir, sessID+".db"), make([]byte, dbBytes), 0o644); err != nil {
+			panic(err)
+		}
 	}
 	if turns > 0 {
 		var sb strings.Builder
@@ -469,7 +503,9 @@ func createTranscriptFixture(tmpDir, sessID string, steps, turns int, bBytes, db
 			fmt.Fprintf(&sb, `{"step_index": %d, "source": "USER_EXPLICIT", "type": "USER_INPUT", "content": "Turn %d"}`+"\n", i*2, i+1)
 			fmt.Fprintf(&sb, `{"step_index": %d, "source": "MODEL", "type": "PLANNER_RESPONSE", "content": "Resp %d"}`+"\n", i*2+1, i+1)
 		}
-		_ = os.WriteFile(tPath, []byte(sb.String()), 0o644)
+		if err := os.WriteFile(tPath, []byte(sb.String()), 0o644); err != nil {
+			panic(err)
+		}
 	}
 }
 
@@ -1092,8 +1128,8 @@ func TestUnifiedProcessPool_InflightRotatedOnCompletion(t *testing.T) {
 		t.Fatalf("expected in-flight daemon marked dirty and not closed")
 	}
 	d1.dispatchNDJSONLine(`{"event":"result","result":{"status":"SUCCESS","response":"finished"}}`)
-	if should, _ := pool.ShouldRotate(d1); !should {
-		t.Fatalf("expected dirty daemon to indicate rotation needed after turn completion")
+	if should, reason := pool.ShouldRotate(d1); !should || reason == "" {
+		t.Fatalf("expected dirty daemon to indicate rotation needed after turn completion: should=%v, reason=%q", should, reason)
 	}
 	rotatedSess, err := pool.RotateDaemon(context.Background(), "thread-inflight-rot", "")
 	if err != nil || rotatedSess == nil || rotatedSess == d1 || d1.State() != StateClosed || spawnCounter.Load() != 2 {
