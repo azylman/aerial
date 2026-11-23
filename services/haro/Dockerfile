@@ -2,11 +2,10 @@
 FROM golang:1.27.3-alpine AS builder
 
 WORKDIR /src
-COPY pkg/go.mod pkg/go.sum* ./pkg/
-COPY services/haro/go.mod services/haro/go.sum* ./services/haro/
-WORKDIR /src/services/haro
+COPY go.mod go.sum ./
 RUN --mount=type=cache,target=/go/pkg/mod go mod download
 
+WORKDIR /src/services/haro
 COPY pkg/ /src/pkg/
 COPY services/haro/ ./
 RUN --mount=type=cache,target=/go/pkg/mod \

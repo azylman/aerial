@@ -6,8 +6,9 @@
 FROM golang:1.27.3-alpine AS builder
 
 WORKDIR /src
+COPY go.mod go.sum ./
+RUN --mount=type=cache,target=/go/pkg/mod go mod download
 COPY pkg/ ./pkg/
-COPY services/eri/go.mod services/eri/go.sum ./services/eri/
 COPY services/eri/cmd/redact-pattern/ ./services/eri/cmd/redact-pattern/
 WORKDIR /src/services/eri
 RUN --mount=type=cache,target=/root/.cache/go-build \

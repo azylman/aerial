@@ -115,9 +115,12 @@ NC='\033[0m'
 echo "${CYAN}⚡ [Aerial Coverage] Starting monorepo coverage measurement...${NC}"
 
 # Dynamically discover all Go modules in the monorepo
-DISCOVERED_GO_SERVICES=$(find . -maxdepth 3 -name "go.mod" ! -path "*/.*" ! -path "*/vendor/*" | sed 's|^\./||; s|/go\.mod$||' | sort | tr '\n' ' ' | sed 's/[[:space:]]*$//')
+DISCOVERED_GO_SERVICES=$(discover_go_services)
 
 # Define Services to Check
+if [ "$TARGET_SERVICE" = "." ]; then
+    TARGET_SERVICE=""
+fi
 if [ -n "$TARGET_SERVICE" ]; then
     for svc in $DISCOVERED_GO_SERVICES; do
         if [ "$svc" = "$TARGET_SERVICE" ] || [ "${svc##*/}" = "$TARGET_SERVICE" ]; then

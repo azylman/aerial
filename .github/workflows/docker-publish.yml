@@ -200,7 +200,8 @@ jobs:
           FORCE_ALL: ${{ inputs.force_all }}
         run: |
           set -euo pipefail
-          GO_MODULES=$(find . -maxdepth 3 -name "go.mod" ! -path "*/.*" ! -path "*/vendor/*" | sed 's|^\./||; s|/go\.mod$||' | sort)
+          . scripts/lib/hermetic-go-env.sh
+          GO_MODULES=$(discover_go_services)
           CHANGED_FILES=$(git diff --name-only HEAD^1 HEAD 2>/dev/null || true)
           # Same import-graph selection as the test gate; .golangci.yml selects every module.
           LINT_ALL=0
@@ -216,25 +217,39 @@ jobs:
           if [ "$LINT_ALL" -eq 0 ]; then
             LINT_MODULES=$(printf '%s' "$AFFECTED" | jq -r '.lint.selected[]')
           fi
+          NEW_LINT_MODULES=""
+          for m in $LINT_MODULES; do
+            if [ "$m" = "." ]; then
+              NEW_LINT_MODULES="${NEW_LINT_MODULES} ${GO_MODULES}"
+            else
+              NEW_LINT_MODULES="${NEW_LINT_MODULES} ${m}"
+            fi
+          done
+          LINT_MODULES=$(printf '%s\n' $NEW_LINT_MODULES | sort -u)
           for svc in $LINT_MODULES; do
             echo "=== Linting & checking deadcode in $svc ==="
             (
               cd "$svc"
               golangci-lint run --path-prefix="$svc/" --config "$GITHUB_WORKSPACE/.golangci.yml" ./...
-              MAIN_PKGS=$(go list -f '{{if eq .Name "main"}}{{.ImportPath}}{{end}}' ./...)
+              FILTER_FLAG="-filter=^github\.com/azylman/aerial/${svc}(/|$)"
+              if [ "$svc" = "services/eri" ]; then
+                MAIN_PKGS=$(cd "$GITHUB_WORKSPACE" && go list -f '{{if eq .Name "main"}}{{.ImportPath}}{{end}}' ./services/eri/... ./services/eri-restate/...)
+              else
+                MAIN_PKGS=$(go list -f '{{if eq .Name "main"}}{{.ImportPath}}{{end}}' ./...)
+              fi
               if [ -n "$MAIN_PKGS" ]; then
-                FILTER_FLAG=""
-                if [ "$svc" = "services/eri" ]; then
-                  # Scope deadcode to services/eri root package during the Restate transition while
-                  # shared packages are consumed by eri-restate and legacy queue fallbacks await chunk c09f.
-                  FILTER_FLAG="-filter=^github\.com/azylman/aerial/services/eri$"
-                fi
-                DEAD_PROD=$(deadcode $FILTER_FLAG $MAIN_PKGS)
+                DEAD_PROD=$(cd "$GITHUB_WORKSPACE" && deadcode $FILTER_FLAG $MAIN_PKGS)
                 if [ -n "$DEAD_PROD" ]; then
                   echo "::error::Unreachable production code or compiled-in test hooks detected in $svc:"
                   echo "$DEAD_PROD"
                   exit 1
                 fi
+              fi
+              DEAD_TEST=$(deadcode -test $FILTER_FLAG ./...)
+              if [ -n "$DEAD_TEST" ]; then
+                echo "::error::Unreachable functions detected by deadcode -test in $svc:"
+                echo "$DEAD_TEST"
+                exit 1
               fi
             )
           done

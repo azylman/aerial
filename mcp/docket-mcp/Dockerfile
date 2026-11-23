@@ -2,11 +2,10 @@
 FROM golang:1.27.3-alpine AS builder
 
 WORKDIR /src
-COPY pkg/go.mod pkg/go.sum* ./pkg/
-COPY mcp/docket-mcp/go.mod mcp/docket-mcp/go.sum* ./mcp/docket-mcp/
-WORKDIR /src/mcp/docket-mcp
+COPY go.mod go.sum ./
 RUN --mount=type=cache,target=/go/pkg/mod go mod download
 
+WORKDIR /src/mcp/docket-mcp
 COPY pkg/ /src/pkg/
 COPY mcp/docket-mcp/ ./
 RUN --mount=type=cache,target=/go/pkg/mod \
