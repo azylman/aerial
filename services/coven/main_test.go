@@ -32,7 +32,6 @@ eri_url: "http://eri.aerial"
 eri_llm_url: "http://eri.aerial/internal/llm"
 pr_register_url: "http://synapse.aerial/internal/pr/register"
 custom_skills_dir: "/config/custom-skills"
-rules_dir: "/config/rules"
 config_repo_owner: "example"
 config_repo_name: "example-config"
 ollama:
@@ -90,7 +89,7 @@ func TestMainFunc(t *testing.T) {
 	t.Cleanup(func() { runAppFn, exitFn, configPath = oldRun, oldExit, oldPath })
 
 	testCfg := filepath.Join(t.TempDir(), "config.yaml")
-	if err := os.WriteFile(testCfg, []byte("port: \"4008\"\neri_url: \"http://eri.aerial\"\neri_llm_url: \"http://eri.aerial/internal/llm\"\npr_register_url: \"http://synapse.aerial/internal/pr/register\"\ncustom_skills_dir: \"/config/custom-skills\"\nrules_dir: \"/config/rules\"\nconfig_repo_owner: \"example\"\nconfig_repo_name: \"example-config\"\nollama:\n  base_url: \"http://senses.aerial:8080\"\n  model: \"bge-small-en-v1.5\"\n  num_ctx: 512\n"), 0o644); err != nil {
+	if err := os.WriteFile(testCfg, []byte("port: \"4008\"\neri_url: \"http://eri.aerial\"\neri_llm_url: \"http://eri.aerial/internal/llm\"\npr_register_url: \"http://synapse.aerial/internal/pr/register\"\ncustom_skills_dir: \"/config/custom-skills\"\nconfig_repo_owner: \"example\"\nconfig_repo_name: \"example-config\"\nollama:\n  base_url: \"http://senses.aerial:8080\"\n  model: \"bge-small-en-v1.5\"\n  num_ctx: 512\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	configPath = testCfg

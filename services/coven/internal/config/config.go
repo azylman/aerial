@@ -42,9 +42,6 @@ const DefaultOllamaNumCtx = 512
 // DefaultCustomSkillsDir is the default path to scanned custom skills.
 const DefaultCustomSkillsDir = "/config/custom-skills"
 
-// DefaultRulesDir is the default path to configuration rules.
-const DefaultRulesDir = "/config/rules"
-
 // DefaultConfigRepoOwner is the default owner of the configuration repository.
 const DefaultConfigRepoOwner = "azylman"
 
@@ -93,7 +90,6 @@ type Config struct {
 	EriLLMURL             string         `yaml:"eri_llm_url"`
 	Ollama                OllamaConfig   `yaml:"ollama"`
 	CustomSkillsDir       string         `yaml:"custom_skills_dir"`
-	RulesDir              string         `yaml:"rules_dir"`
 	GitHubPAT             string         `yaml:"github_pat"`
 	ConfigRepoOwner       string         `yaml:"config_repo_owner"`
 	ConfigRepoName        string         `yaml:"config_repo_name"`
@@ -103,7 +99,6 @@ type Config struct {
 	Stack                 string         `yaml:"stack"`
 	Role                  string         `yaml:"role"`
 	TranscriptsURL        string         `yaml:"transcripts_url"`
-	LLMEffort             string         `yaml:"llm_effort"`
 	ExtractTimeoutSeconds int            `yaml:"extract_timeout_seconds"`
 	ExtractMaxSteps       int            `yaml:"extract_max_steps"`
 	Auth                  k8sauth.Config `yaml:"auth"`
@@ -193,7 +188,6 @@ func LoadConfigFile(path string, dbURL string, getenv func(string) string) (*Con
 		EriLLMURL           string         `yaml:"eri_llm_url"`
 		Ollama              OllamaConfig   `yaml:"ollama"`
 		CustomSkillsDir     string         `yaml:"custom_skills_dir"`
-		RulesDir            string         `yaml:"rules_dir"`
 		GitHubPAT           string         `yaml:"github_pat"`
 		ConfigRepoOwner     string         `yaml:"config_repo_owner"`
 		ConfigRepoName      string         `yaml:"config_repo_name"`
@@ -205,7 +199,6 @@ func LoadConfigFile(path string, dbURL string, getenv func(string) string) (*Con
 		Role                string         `yaml:"role"`
 		TranscriptsURL      string         `yaml:"transcripts_url"`
 		IndexerURL          string         `yaml:"indexer_url"`
-		LLMEffort           string         `yaml:"llm_effort"`
 		ExtractTimeout      int            `yaml:"extract_timeout_seconds"`
 		ExtractMaxSteps     int            `yaml:"extract_max_steps"`
 		Auth                k8sauth.Config `yaml:"auth"`
@@ -231,11 +224,10 @@ func LoadConfigFile(path string, dbURL string, getenv func(string) string) (*Con
 
 	prRegisterURL := strutil.FirstNonEmpty(getenv("PR_REGISTER_URL"), getenv("SYNAPSE_PR_REGISTER_URL"), ycfg.PRRegisterURL, ycfg.EriPRRegisterURL)
 	customSkillsDir := strings.TrimSpace(ycfg.CustomSkillsDir)
-	rulesDir := strings.TrimSpace(ycfg.RulesDir)
 	configRepoOwner := strings.TrimSpace(ycfg.ConfigRepoOwner)
 	configRepoName := strings.TrimSpace(ycfg.ConfigRepoName)
 
-	if err := validateSkillSynthesisConfig(role, prRegisterURL, customSkillsDir, rulesDir, configRepoOwner, configRepoName, cleanPath); err != nil {
+	if err := validateSkillSynthesisConfig(role, prRegisterURL, customSkillsDir, configRepoOwner, configRepoName, cleanPath); err != nil {
 		return nil, err
 	}
 	ollamaBaseURL := strings.TrimSpace(ycfg.Ollama.BaseURL)
@@ -265,7 +257,6 @@ func LoadConfigFile(path string, dbURL string, getenv func(string) string) (*Con
 	if transcriptsURL == "" && NormalizeStack(stack) == DefaultStack {
 		transcriptsURL = "http://transcripts.aerial"
 	}
-	llmEffort := strutil.FirstNonEmpty(getenv("LLM_EFFORT"), ycfg.LLMEffort)
 
 	authCfg := ycfg.Auth
 	if err := k8sauth.ApplyEnvOverride(&authCfg, getenv); err != nil {
@@ -287,7 +278,6 @@ func LoadConfigFile(path string, dbURL string, getenv func(string) string) (*Con
 		EriURL:                eriURL,
 		EriLLMURL:             eriLLMURL,
 		CustomSkillsDir:       customSkillsDir,
-		RulesDir:              rulesDir,
 		GitHubPAT:             gitHubPAT,
 		ConfigRepoOwner:       configRepoOwner,
 		ConfigRepoName:        configRepoName,
@@ -297,7 +287,6 @@ func LoadConfigFile(path string, dbURL string, getenv func(string) string) (*Con
 		Stack:                 strings.TrimSpace(stack),
 		Role:                  strings.TrimSpace(role),
 		TranscriptsURL:        strings.TrimSpace(transcriptsURL),
-		LLMEffort:             strings.TrimSpace(llmEffort),
 		ExtractTimeoutSeconds: resolvePositiveInt(getenv("EXTRACT_TIMEOUT_SECONDS"), ycfg.ExtractTimeout),
 		ExtractMaxSteps:       resolvePositiveInt(getenv("EXTRACT_MAX_STEPS"), ycfg.ExtractMaxSteps),
 		Ollama: OllamaConfig{
@@ -310,7 +299,7 @@ func LoadConfigFile(path string, dbURL string, getenv func(string) string) (*Con
 	}, nil
 }
 
-func validateSkillSynthesisConfig(role, prRegisterURL, customSkillsDir, rulesDir, configRepoOwner, configRepoName, cleanPath string) error {
+func validateSkillSynthesisConfig(role, prRegisterURL, customSkillsDir, configRepoOwner, configRepoName, cleanPath string) error {
 	if strings.EqualFold(role, "extractor") {
 		return nil
 	}
@@ -319,9 +308,6 @@ func validateSkillSynthesisConfig(role, prRegisterURL, customSkillsDir, rulesDir
 	}
 	if customSkillsDir == "" {
 		return fmt.Errorf("config: custom_skills_dir is required in %s", cleanPath)
-	}
-	if rulesDir == "" {
-		return fmt.Errorf("config: rules_dir is required in %s", cleanPath)
 	}
 	if configRepoOwner == "" {
 		return fmt.Errorf("config: config_repo_owner is required in %s", cleanPath)

@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"slices"
-	"strings"
 	"testing"
 
 	"github.com/azylman/aerial/services/coven/internal/config"
@@ -143,48 +142,6 @@ func TestMMRSelect(t *testing.T) {
 			}
 			if tc.wantCount > 1 && tc.wantSecond > 0 && got[1].Fact.ID != tc.wantSecond {
 				t.Errorf("MMRSelect()[1].Fact.ID = %d, want %d", got[1].Fact.ID, tc.wantSecond)
-			}
-		})
-	}
-}
-
-func TestFormatMemoryContext(t *testing.T) {
-	tests := []struct {
-		name         string
-		facts        []store.Fact
-		wantContains []string
-		wantEmpty    bool
-	}{
-		{
-			name:      "EmptyFacts",
-			facts:     nil,
-			wantEmpty: true,
-		},
-		{
-			name: "FormattedFacts",
-			facts: []store.Fact{
-				{ID: 1, FactText: "Prefers Pacific timezone"},
-				{ID: 2, FactText: "Default category fallback"},
-			},
-			wantContains: []string{
-				"<retrieved_memory>",
-				"- [id:1] Prefers Pacific timezone",
-				"- [id:2] Default category fallback",
-				"</retrieved_memory>",
-			},
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			got := FormatMemoryContext(tc.facts)
-			if tc.wantEmpty && got != "" {
-				t.Errorf("FormatMemoryContext() = %q, want empty", got)
-			}
-			for _, substr := range tc.wantContains {
-				if !strings.Contains(got, substr) {
-					t.Errorf("FormatMemoryContext() missing %q, got: %s", substr, got)
-				}
 			}
 		})
 	}
@@ -464,57 +421,6 @@ func TestToolHandler_MemoryStoreWithInput(t *testing.T) {
 			}
 			if got := toolFactRows(t, db); !slices.Equal(got, tc.wantRows) {
 				t.Errorf("facts = %+v, want %+v", got, tc.wantRows)
-			}
-		})
-	}
-}
-
-func TestToolHandler_GetContext(t *testing.T) {
-	t.Parallel()
-	// One seeded fact, id 1 "Profile fact" (dim 0); the query embedding is dim 0,
-	// so the vector hit alone scores 0.70/61*60 ≈ 0.69 > 0.20.
-	const profileContext = "<retrieved_memory>\n- [id:1] Profile fact\n</retrieved_memory>\n"
-	tests := []struct {
-		name        string
-		query       string
-		limit       int
-		cancelCtx   bool
-		ollamaErr   error
-		sabotage    string
-		wantErr     bool
-		wantContext string
-	}{
-		{name: "EmptyQuery", query: "", limit: 5},
-		{name: "ValidQuery", query: "Profile", limit: 5, wantContext: profileContext},
-		{name: "NegativeLimitAndOllamaWarning", query: "Profile", limit: -1, ollamaErr: errors.New("ollama down")},
-		{name: "HighLimitClamped", query: "Profile", limit: 50, wantContext: profileContext},
-		{name: "CandidateSearchErrorGracefulEmpty", query: "Profile", limit: 5, sabotage: sabotageFactSearch},
-		{name: "CanceledContextReturnsError", query: "Profile", limit: 5, cancelCtx: true, wantErr: true},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			db := newTestDB(t)
-			s := store.NewSQLStore(db)
-			if _, err := s.InsertFact(context.Background(), "Profile fact", testEmbedding(1.0)); err != nil {
-				t.Fatalf("seed: %v", err)
-			}
-			execSQL(t, db, tc.sabotage)
-			ollama := &MockOllamaClient{embedding: testEmbedding(1.0), err: tc.ollamaErr}
-			handler := NewToolHandler(&config.Config{}, s, ollama)
-			ctx := context.Background()
-			if tc.cancelCtx {
-				var cancel context.CancelFunc
-				ctx, cancel = context.WithCancel(ctx)
-				cancel()
-			}
-			res, err := handler.GetContext(ctx, tc.query, tc.limit)
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("GetContext() err = %v, wantErr = %v", err, tc.wantErr)
-			}
-			if !tc.wantErr && res.Context != tc.wantContext {
-				t.Errorf("res.Context = %q, want %q", res.Context, tc.wantContext)
 			}
 		})
 	}

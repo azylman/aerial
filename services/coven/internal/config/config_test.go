@@ -15,7 +15,6 @@ eri_url: 'http://eri.aerial'
 eri_llm_url: 'http://eri.aerial/internal/llm'
 pr_register_url: 'http://synapse.aerial/internal/pr/register'
 custom_skills_dir: '/custom/skills'
-rules_dir: '/custom/rules'
 config_repo_owner: 'example-owner'
 config_repo_name: 'example-config'
 ollama:
@@ -55,14 +54,12 @@ func covenConfigFields(cfg *Config) map[string]string {
 		"EriLLMURL":           cfg.EriLLMURL,
 		"PRRegisterURL":       cfg.PRRegisterURL,
 		"CustomSkillsDir":     cfg.CustomSkillsDir,
-		"RulesDir":            cfg.RulesDir,
 		"GitHubPAT":           cfg.GitHubPAT,
 		"ConfigRepoOwner":     cfg.ConfigRepoOwner,
 		"ConfigRepoName":      cfg.ConfigRepoName,
 		"SystemChannelID":     cfg.SystemChannelID,
 		"Role":                cfg.Role,
 		"TranscriptsURL":      cfg.TranscriptsURL,
-		"LLMEffort":           cfg.LLMEffort,
 		"EffectiveStack":      cfg.EffectiveStack(),
 		"ExtractTimeout":      cfg.ExtractTimeout().String(),
 		"ExtractBatchLimit":   strconv.Itoa(cfg.ExtractBatchLimit()),
@@ -126,7 +123,6 @@ var covenLoadConfigCases = []struct {
 			"EffectiveStack":      "aerial",
 			"Role":                "",
 			"TranscriptsURL":      "http://transcripts.aerial",
-			"LLMEffort":           "",
 			"ExtractTimeout":      "2m0s",
 			"ExtractBatchLimit":   "50",
 			"Auth.Enabled":        "false",
@@ -168,12 +164,11 @@ var covenLoadConfigCases = []struct {
 		name:  "explicit stack fields load",
 		dbArg: covenTestDSN,
 		yaml: covenDarkBaseConfig + "stack: 'canary'\nrole: 'coven_aerial'\ntranscripts_url: 'http://indexer:4020'\n" +
-			"llm_effort: ''\nextract_timeout_seconds: 30\nextract_max_steps: 25\n",
+			"extract_timeout_seconds: 30\nextract_max_steps: 25\n",
 		want: map[string]string{
 			"EffectiveStack":    "canary",
 			"Role":              "coven_aerial",
 			"TranscriptsURL":    "http://indexer:4020",
-			"LLMEffort":         "",
 			"ExtractTimeout":    "30s",
 			"ExtractBatchLimit": "25",
 		},
@@ -186,7 +181,6 @@ var covenLoadConfigCases = []struct {
 			"EffectiveStack":    "canary",
 			"Role":              "",
 			"TranscriptsURL":    "http://indexer-alias:4020",
-			"LLMEffort":         "",
 			"ExtractTimeout":    "2m0s",
 			"ExtractBatchLimit": "50",
 		},
@@ -199,7 +193,6 @@ var covenLoadConfigCases = []struct {
 			"EffectiveStack":    "canary",
 			"Role":              "",
 			"TranscriptsURL":    "",
-			"LLMEffort":         "",
 			"ExtractTimeout":    "2m0s",
 			"ExtractBatchLimit": "50",
 		},
@@ -209,26 +202,20 @@ var covenLoadConfigCases = []struct {
 		yaml:  covenDarkBaseConfig + "extract_timeout_seconds: 30\nextract_max_steps: 25\n",
 		dbArg: covenTestDSN,
 		env:   map[string]string{"EXTRACT_TIMEOUT_SECONDS": "45", "EXTRACT_MAX_STEPS": "10"},
-		want:  map[string]string{"ExtractTimeout": "45s", "ExtractBatchLimit": "10", "LLMEffort": ""},
+		want:  map[string]string{"ExtractTimeout": "45s", "ExtractBatchLimit": "10"},
 	},
 	{
 		name:  "invalid extract env falls back to yaml",
 		yaml:  covenDarkBaseConfig + "extract_timeout_seconds: 30\nextract_max_steps: 25\n",
 		dbArg: covenTestDSN,
 		env:   map[string]string{"EXTRACT_TIMEOUT_SECONDS": "not-a-number", "EXTRACT_MAX_STEPS": "0"},
-		want:  map[string]string{"ExtractTimeout": "30s", "ExtractBatchLimit": "25", "LLMEffort": ""},
+		want:  map[string]string{"ExtractTimeout": "30s", "ExtractBatchLimit": "25"},
 	},
 	{
 		name:  "unset extract env keeps yaml values",
 		yaml:  covenDarkBaseConfig + "extract_timeout_seconds: 30\nextract_max_steps: 25\n",
 		dbArg: covenTestDSN,
-		want:  map[string]string{"ExtractTimeout": "30s", "ExtractBatchLimit": "25", "LLMEffort": ""},
-	},
-	{
-		name:  "llm effort loads from yaml when env unset",
-		yaml:  covenDarkBaseConfig + "llm_effort: 'high'\n",
-		dbArg: covenTestDSN,
-		want:  map[string]string{"LLMEffort": "high", "ExtractTimeout": "2m0s", "ExtractBatchLimit": "50"},
+		want:  map[string]string{"ExtractTimeout": "30s", "ExtractBatchLimit": "25"},
 	},
 	{
 		name:  "extractor role succeeds without pr and config repo keys",
@@ -282,7 +269,6 @@ var covenLoadConfigCases = []struct {
 		env:  map[string]string{"DATABASE_URL": "postgres://localhost/testdb"},
 		want: map[string]string{
 			"Port":          "4011",
-			"RulesDir":      "/custom/rules",
 			"DatabaseURL":   "postgres://localhost/testdb",
 			"EriURL":        "http://eri.aerial",
 			"EriLLMURL":     "http://eri.aerial/internal/llm",
@@ -292,7 +278,7 @@ var covenLoadConfigCases = []struct {
 	{
 		name: "yaml database url used when env has none",
 		yaml: covenDarkBaseConfig,
-		want: map[string]string{"Port": "4011", "RulesDir": "/custom/rules", "DatabaseURL": "postgres://localhost/coven_test"},
+		want: map[string]string{"Port": "4011", "DatabaseURL": "postgres://localhost/coven_test"},
 	},
 	{
 		name: "custom eri urls load from yaml",
@@ -331,7 +317,6 @@ var covenLoadConfigCases = []struct {
 		env:  map[string]string{"POSTGRES_PASSWORD": "secretpass"},
 		want: map[string]string{
 			"Port":        "4011",
-			"RulesDir":    "/custom/rules",
 			"DatabaseURL": "postgres://aerial:secretpass@postgres:5432/aerial?sslmode=disable",
 		},
 	},
@@ -399,11 +384,6 @@ var covenLoadConfigCases = []struct {
 		name:    "missing custom_skills_dir returns error",
 		yaml:    covenConfigSwap(covenDarkBaseConfig, "custom_skills_dir: '/custom/skills'", "custom_skills_dir: ''"),
 		wantErr: "config: custom_skills_dir is required in ",
-	},
-	{
-		name:    "missing rules_dir returns error",
-		yaml:    covenConfigSwap(covenDarkBaseConfig, "rules_dir: '/custom/rules'", "rules_dir: ''"),
-		wantErr: "config: rules_dir is required in ",
 	},
 	{
 		name:    "missing config_repo_owner returns error",

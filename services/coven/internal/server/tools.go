@@ -48,19 +48,6 @@ type FactInput struct {
 	SourceAgent  string `json:"source_agent,omitempty"`
 }
 
-// FactSummary summarizes a fact for listing or response payloads.
-type FactSummary struct {
-	ID          int64  `json:"id"`
-	FactText    string `json:"fact_text"`
-	SourceAgent string `json:"source_agent,omitempty"`
-}
-
-// ContextResponse defines the structure returned by GET /context.
-type ContextResponse struct {
-	Context string       `json:"context"`
-	Facts   []store.Fact `json:"facts"`
-}
-
 // ToolHandler provides methods executing MCP tool invocations and HTTP endpoints.
 type ToolHandler struct {
 	cfg       *config.Config
@@ -103,47 +90,6 @@ func (h *ToolHandler) Extract(ctx context.Context, threadID string) error {
 		return errors.New("extract handler not configured")
 	}
 	return ExtractThreadFacts(ctx, h.store, h.ollama, h.llmClient, threadID)
-}
-
-// Consolidate runs a complete-linkage clique dreaming pass over all stored facts,
-// and if a publisher is configured, triggers procedural skill consolidation.
-func (h *ToolHandler) Consolidate(ctx context.Context) (int, error) {
-	start := time.Now()
-	consolidated, err := ConsolidateFactClusters(ctx, h.store, h.ollama, h.llmClient)
-	if err != nil {
-		RecordOperation("consolidate", "error", time.Since(start).Seconds())
-		return consolidated, err
-	}
-	log.Printf("[Memory] Fact consolidation dreaming completed: %d clusters consolidated", consolidated)
-
-	if h.publisher != nil && h.store != nil {
-		customDir := config.DefaultCustomSkillsDir
-		if h.cfg != nil && h.cfg.CustomSkillsDir != "" {
-			customDir = h.cfg.CustomSkillsDir
-		}
-		if prNum, err := ConsolidateProceduralSkills(ctx, h.store, h.ollama, h.llmClient, h.publisher, customDir); err != nil {
-			log.Printf("[Memory] Procedural skill consolidation failed: %v", err)
-		} else if prNum > 0 {
-			log.Printf("[Memory] Procedural skill consolidation opened PR #%d", prNum)
-		}
-	}
-
-	RecordOperation("consolidate", "success", time.Since(start).Seconds())
-	return consolidated, nil
-}
-
-// FormatMemoryContext converts retrieved facts into a markdown prompt block.
-func FormatMemoryContext(facts []store.Fact) string {
-	if len(facts) == 0 {
-		return ""
-	}
-	var sb strings.Builder
-	sb.WriteString("<retrieved_memory>\n")
-	for _, f := range facts {
-		fmt.Fprintf(&sb, "- [id:%d] %s\n", f.ID, f.FactText)
-	}
-	sb.WriteString("</retrieved_memory>\n")
-	return sb.String()
 }
 
 // MemorySearch executes semantic search with 70/30 Hybrid RRF and MMR diversity re-ranking.
@@ -309,63 +255,4 @@ func (h *ToolHandler) MemoryStoreWithInput(ctx context.Context, input FactInput)
 // GetFacts retrieves paginated facts matching the filter.
 func (h *ToolHandler) GetFacts(ctx context.Context, filter store.FactsFilter) (*store.FactsResult, error) {
 	return h.store.GetFactsPaginated(ctx, filter)
-}
-
-// GetContext retrieves relevant memory facts and formats them as a prompt context block.
-func (h *ToolHandler) GetContext(ctx context.Context, query string, limit int) (*ContextResponse, error) {
-	start := time.Now()
-	if ctx != nil && ctx.Err() != nil {
-		RecordOperation("context", "error", time.Since(start).Seconds())
-		return nil, ctx.Err()
-	}
-
-	cleanQuery := strings.TrimSpace(query)
-	if cleanQuery == "" {
-		RecordOperation("context", "success", time.Since(start).Seconds())
-		return &ContextResponse{
-			Context: "",
-			Facts:   []store.Fact{},
-		}, nil
-	}
-
-	if limit <= 0 {
-		limit = 5
-	}
-	if limit > 20 {
-		limit = 20
-	}
-
-	candidateLimit := max(limit*3, 30)
-
-	var emb []float32
-	if h.ollama != nil {
-		vec, err := h.ollama.GenerateEmbedding(ctx, cleanQuery, true, 1)
-		if err != nil {
-			log.Printf("[Memory] Warning: Vector search embedding failed: %v", err)
-		} else {
-			emb = vec
-		}
-	}
-
-	candidates, err := h.store.SearchCandidateFacts(ctx, emb, cleanQuery, candidateLimit, store.DefaultMinScore)
-	if err != nil {
-		log.Printf("[Memory] Warning: Candidate search failed: %v. Proceeding with empty context.", err)
-		RecordOperation("context", "success", time.Since(start).Seconds())
-		return &ContextResponse{
-			Context: "",
-			Facts:   []store.Fact{},
-		}, nil
-	}
-
-	scored := MMRSelect(candidates, 0.70, limit)
-	facts := make([]store.Fact, len(scored))
-	for i, s := range scored {
-		facts[i] = s.Fact
-	}
-
-	RecordOperation("context", "success", time.Since(start).Seconds())
-	return &ContextResponse{
-		Context: FormatMemoryContext(facts),
-		Facts:   facts,
-	}, nil
 }

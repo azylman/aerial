@@ -98,21 +98,22 @@ func HeaderTraceID(h http.Header) string {
 // FakeStore is an in-memory store.Store. The exported error fields inject
 // failures; FailTrans fails TransitionReportStatus per target status.
 type FakeStore struct {
-	mu             sync.Mutex
-	calls          map[string]*model.VoiceCall
-	messages       map[string]*model.VoiceMessage
-	advances       int
-	statusTrans    []string
-	vmRecordings   map[string]string
-	OpErr          error
-	BindErr        error
-	UpdateStateErr error
-	TransErr       error
-	AdvanceErr     error
-	VMRecErr       error
-	MarkErr        error
-	SaveErr        error
-	FailTrans      map[string]bool
+	mu               sync.Mutex
+	calls            map[string]*model.VoiceCall
+	messages         map[string]*model.VoiceMessage
+	advances         int
+	statusTrans      []string
+	vmRecordings     map[string]string
+	LastRecentWindow time.Duration
+	OpErr            error
+	BindErr          error
+	UpdateStateErr   error
+	TransErr         error
+	AdvanceErr       error
+	VMRecErr         error
+	MarkErr          error
+	SaveErr          error
+	FailTrans        map[string]bool
 }
 
 // NewFakeStore returns an empty FakeStore.
@@ -205,13 +206,23 @@ func (m *FakeStore) ListCalls(ctx context.Context, limit int) ([]model.VoiceCall
 func (m *FakeStore) FindRecentOutboundCall(ctx context.Context, fromE164 string, window time.Duration) (*model.VoiceCall, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.LastRecentWindow = window
 	for _, c := range m.calls {
 		if c.Direction == "outbound" && c.ToNumber == fromE164 {
+			if !c.StartedAt.IsZero() && window > 0 && time.Since(c.StartedAt) > window {
+				continue
+			}
 			cpy := *c
 			return &cpy, nil
 		}
 	}
 	return nil, nil //nolint:nilnil // store contract: no recent outbound call is (nil, nil)
+}
+
+func (m *FakeStore) GetLastRecentWindow() time.Duration {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.LastRecentWindow
 }
 
 func (m *FakeStore) UpdateCallState(ctx context.Context, callID, state, endReason, answeredBy string) error {
