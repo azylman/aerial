@@ -27,7 +27,6 @@ func TestMetricsRegistryAndHandler(t *testing.T) {
 	RecordMessageChunked()
 	RecordThreadCreated("created")
 	RecordThreadTitleDuration("success", "gemini-2.5-flash", 150*time.Millisecond)
-	RecordEmbedding("nomic-embed-text", "query", "success", 30*time.Millisecond)
 	RecordDBQuery("insert_message", "success", 5*time.Millisecond)
 	RecordHTTPRequest("/prompt", "POST", "200", 15*time.Millisecond)
 	RecordChannelHistoryFetch("discord_api", "success", 150*time.Millisecond, 15)
@@ -91,8 +90,6 @@ func TestMetricsRegistryAndHandler(t *testing.T) {
 		"aerial_brain_scheduler_execution_duration_seconds",
 		"aerial_brain_memory_operations_total",
 		"aerial_brain_memory_search_duration_seconds",
-		"aerial_brain_embeddings_generated_total",
-		"aerial_brain_embedding_duration_seconds",
 		"aerial_brain_db_query_duration_seconds",
 		"aerial_brain_http_requests_total",
 		"aerial_brain_http_request_duration_seconds",
@@ -139,7 +136,6 @@ func TestMetrics_DefaultFallbacks(t *testing.T) {
 	RecordDelivery("", 10*time.Millisecond)
 	RecordThreadCreated("")
 	RecordThreadTitleDuration("", "", 10*time.Millisecond)
-	RecordEmbedding("", "", "", 10*time.Millisecond)
 	RecordDBQuery("", "", 10*time.Millisecond)
 	RecordHTTPRequest("", "", "", 10*time.Millisecond)
 	RecordChannelHistoryFetch("", "", 10*time.Millisecond, 0)

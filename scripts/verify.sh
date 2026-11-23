@@ -267,20 +267,26 @@ run_deadcode() {
             echo "   [deadcode] Checking $svc for unreachable code (production graph)..."
         fi
         ensure_deadcode
-        main_pkgs=$(cd "$svc" && go list -f '{{if eq .Name "main"}}{{.ImportPath}}{{end}}' ./...) || {
-            echo "🚨 [Aerial Verify] Error: failed to list main packages in $svc" >&2
-            exit 1
-        }
+        dead_dir="$svc"
+        filter_flag=""
+        if [ "$svc" = "services/eri" ]; then
+            # services/eri exports shared worker packages to services/eri-restate;
+            # evaluate the production call graph from services/eri-restate across both binaries' main packages.
+            dead_dir="$REPO_ROOT/services/eri-restate"
+            filter_flag="-filter=^github\.com/azylman/aerial/services/eri(/|$)"
+            main_pkgs=$(cd "$dead_dir" && go list -f '{{if eq .Name "main"}}{{.ImportPath}}{{end}}' ./... github.com/azylman/aerial/services/eri/...) || {
+                echo "🚨 [Aerial Verify] Error: failed to list main packages in $svc + services/eri-restate" >&2
+                exit 1
+            }
+        else
+            main_pkgs=$(cd "$svc" && go list -f '{{if eq .Name "main"}}{{.ImportPath}}{{end}}' ./...) || {
+                echo "🚨 [Aerial Verify] Error: failed to list main packages in $svc" >&2
+                exit 1
+            }
+        fi
         if [ -n "$main_pkgs" ]; then
-            filter_flag=""
-            if [ "$svc" = "services/eri" ]; then
-                # services/eri exports shared worker packages (pkg/env, pkg/runner, pkg/mcp) to services/eri-restate,
-                # while legacy queue recovery fallbacks are scheduled for deletion in chunk c09f.
-                # Scope deadcode to services/eri root package and its internal domain packages during the Restate transition.
-                filter_flag="-filter=^github\.com/azylman/aerial/services/eri($|/internal/)"
-            fi
             # shellcheck disable=SC2086
-            dead_prod=$(cd "$svc" && "$DEADCODE_BIN" $filter_flag $main_pkgs 2>&1) || {
+            dead_prod=$(cd "$dead_dir" && "$DEADCODE_BIN" $filter_flag $main_pkgs 2>&1) || {
                 echo "🚨 [Aerial Verify] Error: deadcode (production) execution failed on $svc:" >&2
                 echo "$dead_prod" >&2
                 exit 1

@@ -6,6 +6,7 @@ const (
 	eventInit                 = "init"
 	eventResult               = "result"
 	eventUser                 = "user"
+	roleUser                  = "user"
 	fieldType                 = "type"
 	fieldContent              = "content"
 	fieldResult               = "result"

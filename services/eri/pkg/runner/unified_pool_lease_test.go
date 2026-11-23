@@ -921,3 +921,15 @@ func TestUnifiedProcessPool_StartupCancellation(t *testing.T) {
 		})
 	}
 }
+
+// requireType asserts v's concrete type, failing the test with the actual
+// type on mismatch.
+func requireType[T any](t *testing.T, v any) T {
+	t.Helper()
+	got, ok := v.(T)
+	if !ok {
+		var want T
+		t.Fatalf("value is %T, want %T", v, want)
+	}
+	return got
+}

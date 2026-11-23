@@ -138,55 +138,6 @@ func TestTurnExecution_TurnEffortAndModel(t *testing.T) {
 	}
 }
 
-func TestTurnExecution_OwnsTurnItem(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name   string
-		te     *turnExecution
-		itemID string
-		want   bool
-	}{
-		{
-			name:   "nil receiver",
-			te:     nil,
-			itemID: "item-1",
-			want:   false,
-		},
-		{
-			name:   "dispatch matching id",
-			te:     &turnExecution{dispatch: &db.Dispatch{ID: "d-123"}},
-			itemID: "d-123",
-			want:   true,
-		},
-		{
-			name:   "dispatch mismatching id",
-			te:     &turnExecution{dispatch: &db.Dispatch{ID: "d-123"}},
-			itemID: "d-999",
-			want:   false,
-		},
-		{
-			name:   "burst message matching id",
-			te:     &turnExecution{burst: []db.Message{{ID: "m-100"}, {ID: "m-101"}}},
-			itemID: "m-101",
-			want:   true,
-		},
-		{
-			name:   "burst message mismatching id",
-			te:     &turnExecution{burst: []db.Message{{ID: "m-100"}}},
-			itemID: "m-200",
-			want:   false,
-		},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			if got := tc.te.ownsTurnItem(tc.itemID); got != tc.want {
-				t.Errorf("ownsTurnItem(%q) = %t, want %t", tc.itemID, got, tc.want)
-			}
-		})
-	}
-}
-
 type finalizeInterruptedTurnCase struct {
 	name          string
 	isDispatch    bool

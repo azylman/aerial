@@ -306,23 +306,6 @@ var (
 		},
 	)
 
-	EmbeddingsGeneratedTotal = prometheus.NewCounterVec(
-		prometheus.CounterOpts{
-			Name: "aerial_brain_embeddings_generated_total",
-			Help: "Total vector embeddings generated via Ollama or local model.",
-		},
-		[]string{labelModel, labelType, labelStatus},
-	)
-
-	EmbeddingDurationSeconds = prometheus.NewHistogramVec(
-		prometheus.HistogramOpts{
-			Name:    "aerial_brain_embedding_duration_seconds",
-			Help:    "Latency of vector embedding generation in seconds.",
-			Buckets: []float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 3.0},
-		},
-		[]string{labelModel, labelType, labelStatus},
-	)
-
 	// DBQueryDurationSeconds tracks database query latency telemetry.
 	DBQueryDurationSeconds = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
@@ -498,8 +481,6 @@ func init() {
 		SchedulerExecutionDurationSeconds,
 		MemoryOperationsTotal,
 		MemorySearchDurationSeconds,
-		EmbeddingsGeneratedTotal,
-		EmbeddingDurationSeconds,
 		DBQueryDurationSeconds,
 		HTTPRequestsTotal,
 		HTTPRequestDurationSeconds,
@@ -739,21 +720,6 @@ func RecordThreadCreated(status string) {
 		status = unknownLabelValue
 	}
 	DiscordThreadsCreatedTotal.WithLabelValues(status).Inc()
-}
-
-// RecordEmbedding records embedding generation count and latency.
-func RecordEmbedding(model, embedType, status string, duration time.Duration) {
-	if model == "" {
-		model = defaultModelLabel
-	}
-	if embedType == "" {
-		embedType = "document"
-	}
-	if status == "" {
-		status = unknownLabelValue
-	}
-	EmbeddingsGeneratedTotal.WithLabelValues(model, embedType, status).Inc()
-	EmbeddingDurationSeconds.WithLabelValues(model, embedType, status).Observe(duration.Seconds())
 }
 
 // RecordDBQuery records database query duration with bounded symbolic operation name.

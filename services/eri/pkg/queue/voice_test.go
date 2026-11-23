@@ -139,7 +139,6 @@ type voiceTurnTestCase struct {
 	wantTurnStatus                             string
 	wantChatSpan, wantRegistered, wantUntraced bool
 	appVoiceModel, appLowModel                 string
-	useGeminiAPIPool                           bool
 	wantModel, wantProvider                    string
 }
 
@@ -183,31 +182,6 @@ func buildVoiceTestAppConfig(tt *voiceTurnTestCase) *config.Config {
 	})
 }
 
-func setupGeminiVoiceTestPool(t *testing.T, appCfg *config.Config, h *voiceTraceHarness) *WorkerPool {
-	t.Helper()
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/event-stream")
-		w.WriteHeader(http.StatusOK)
-		flusher, _ := w.(http.Flusher)
-		_, _ = w.Write([]byte("data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"gemini voice reply\"}],\"role\":\"model\"}}],\"index\":0}\n\n"))
-		if flusher != nil {
-			flusher.Flush()
-		}
-	}))
-	t.Cleanup(ts.Close)
-	geminiPool := runner.NewGeminiAPIPool(runner.GeminiAPIPoolConfig{
-		APIKey: "test-api-key", Model: "gemini-2.5-flash", BaseURL: ts.URL, HTTPClient: ts.Client(),
-	})
-	t.Cleanup(func() { _ = geminiPool.Close() })
-	p := New(appCfg, WorkerPoolConfig{
-		VoiceProcessPool: geminiPool,
-		TracerProvider:   h.tp,
-		ActiveTurns:      h.registry,
-	})
-	p.Start()
-	return p
-}
-
 func setupVoiceTestPool(t *testing.T, tt *voiceTurnTestCase, h *voiceTraceHarness, cancelCaller context.CancelFunc, onRecordPrompt func(string)) (*WorkerPool, *runner.UnifiedProcessPool, bool) {
 	t.Helper()
 	if tt.poolNil {
@@ -227,9 +201,6 @@ func setupVoiceTestPool(t *testing.T, tt *voiceTurnTestCase, h *voiceTraceHarnes
 		return p, nil, false
 	}
 	appCfg := buildVoiceTestAppConfig(tt)
-	if tt.useGeminiAPIPool {
-		return setupGeminiVoiceTestPool(t, appCfg, h), nil, true
-	}
 	if tt.useVoiceHook {
 		p := New(appCfg, WorkerPoolConfig{
 			TracerProvider: h.tp, ActiveTurns: h.registry,
@@ -290,7 +261,7 @@ func setupVoiceTestPool(t *testing.T, tt *voiceTurnTestCase, h *voiceTraceHarnes
 		cancelCallerOnScan: onScan, blockUntilDone: blockCh,
 	})
 	procPool := runner.NewUnifiedProcessPool(runner.PoolConfig{DefaultModel: "gemini-2.5-flash", GeminiHomeDir: filepath.Join(t.TempDir(), voiceTestTarget)}, spawner)
-	p := New(appCfg, WorkerPoolConfig{ProcessPool: procPool, TracerProvider: h.tp, ActiveTurns: h.registry})
+	p := New(appCfg, WorkerPoolConfig{ProcessPool: procPool, VoiceProcessPool: procPool, TracerProvider: h.tp, ActiveTurns: h.registry})
 	p.Start()
 	return p, procPool, true
 }
@@ -453,13 +424,12 @@ func TestWorkerPool_ExecuteVoiceTurn_TableDriven(t *testing.T) {
 		{name: "ForwardCleanPrompt", prompt: "what is the cluster node status?", sessionID: "dev-voice-1", useVoiceHook: true, wantReply: "All three nodes are online.", wantConvID: "dev-voice-1"},
 		{name: "AcquisitionFailure", prompt: "test", sessionID: "sess-acq-fail", spawnerErr: errors.New("spawner failed to start"), wantErrSub: "failed to acquire voice daemon", wantTurnStatus: "failed"},
 		{name: "DaemonExecutionError", prompt: "test", sessionID: "sess-daemon-err", resultStatus: "ERROR", resultError: "simulated failure in daemon", wantErrSub: "simulated failure in daemon", wantTurnStatus: "failed", wantChatSpan: true, wantRegistered: true},
-		{name: "DaemonTurnTraced", prompt: "test", sessionID: "sess-daemon-ok", resultStatus: "SUCCESS", resultResponse: "lights on", wantReply: "lights on", wantTurnStatus: "success", wantChatSpan: true, wantRegistered: true},
+		{name: "DaemonTurnTraced", prompt: "test", sessionID: "sess-daemon-ok", resultStatus: "SUCCESS", resultResponse: "lights on", wantReply: "lights on", wantTurnStatus: "success", wantChatSpan: true, wantRegistered: true, wantModel: "gemini-2.5-flash", wantProvider: "gcp.gemini"},
 		{name: "SendFailureBrokenPipe", prompt: "test", sessionID: "sess-pipe-err", closePipeImmediately: true, wantErrSub: "failed sending turn to voice daemon"},
 		{name: "ContextCanceledWaitingForResult", prompt: "test", sessionID: "sess-ctx-cancel", cancelCallerOnScan: true, wantErrSub: "context canceled", wantTurnStatus: "cancelled", wantRegistered: true},
 		{name: "ExitCodeNonZeroAndEmptySessionFallback", prompt: "test", sessionID: "sess-exit-fallback", resultStatus: "SUCCESS", resultExitCode: 1, wantErrSub: "empty response", wantRegistered: true},
 		{name: "VoiceModelSet", prompt: "test", sessionID: "sess-voice-model", appVoiceModel: "haiku", appLowModel: "opus-low", resultStatus: "SUCCESS", resultResponse: "lights on", wantReply: "lights on", wantTurnStatus: "success", wantChatSpan: true, wantRegistered: true, wantModel: "haiku", wantProvider: "anthropic"},
 		{name: "VoiceModelEmptyFallbackLow", prompt: "test", sessionID: "sess-voice-empty", appVoiceModel: "", appLowModel: "opus-low", resultStatus: "SUCCESS", resultResponse: "lights on", wantReply: "lights on", wantTurnStatus: "success", wantChatSpan: true, wantRegistered: true, wantModel: "opus-low", wantProvider: "anthropic"},
-		{name: "GeminiAPIPoolVoiceModel", prompt: "test", sessionID: "sess-gemini-voice", useGeminiAPIPool: true, wantReply: "gemini voice reply", wantTurnStatus: "success", wantChatSpan: true, wantModel: "gemini-2.5-flash", wantProvider: "gcp.gemini"},
 	}
 
 	for _, tt := range tests {
