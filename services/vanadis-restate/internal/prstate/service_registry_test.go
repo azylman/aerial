@@ -9,7 +9,7 @@ import (
 	"github.com/azylman/aerial/pkg/prwire"
 )
 
-// registryRowView is the slice of PRState a pr_registry row projects.
+// registryRowView is the slice of PRState the registry tests assert on.
 type registryRowView struct {
 	Status                 string
 	HeadSHA                string

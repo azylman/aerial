@@ -1,12 +1,10 @@
 package prstate
 
-// Registry row state. PRState carries everything a pr_registry row holds
-// (the branch/head/merge/target/title/status columns plus every metadata key
-// observed in prod: jobs, started_jobs, deployed_jobs, job_states,
-// kustomization_requests, deployed_kustomizations, deploy_failed_published,
-// deploy_success_pending, build_metadata, banner, ci_checks, ci_fail_count,
-// vanadis_chunk_id, agent, bot_id, widget_state) so PRObject can become the
-// single registry writer. The transitions below are pure ports of the
+// Registry state. PRState carries the per-PR registry fields (branch, head,
+// merge, target, title and status plus jobs, started_jobs, deployed_jobs,
+// job_states, kustomization_requests, deployed_kustomizations,
+// deploy_failed_published, deploy_success_pending, build_metadata, banner,
+// ci_checks and agent). The transitions below are pure ports of the
 // synapse registry SQL (services/synapse/internal/registry/registry.go and
 // kustomization.go): each names the statement it mirrors, and none performs
 // I/O, reads clocks, or touches Restate.
@@ -19,7 +17,7 @@ import (
 	"github.com/azylman/aerial/pkg/prwire"
 )
 
-// Registry status values. They match the pr_registry status column exactly.
+// Registry status values.
 const (
 	RegistryStatusOpen         = "open"
 	RegistryStatusCIFailed     = "ci_failed"
@@ -31,16 +29,6 @@ const (
 	RegistryStatusDeployed     = "deployed"
 	RegistryStatusDeployFailed = "deploy_failed"
 )
-
-// Register metadata keys PRObject records as typed row fields.
-const (
-	MetaVanadisChunkID = "vanadis_chunk_id"
-	MetaWidgetState    = "widget_state"
-)
-
-// ciFailCountResetThreshold mirrors the registry rule that a head change
-// drops ci_fail_count only once it exceeded three.
-const ciFailCountResetThreshold = 3
 
 // buildMetadataPhase orders snapshot kinds: final is phase 2, every other
 // recordable kind (manifest, progress) is phase 1.
@@ -93,14 +81,11 @@ func (s *PRState) RegistryStatus() string {
 }
 
 // clearHeadScoped drops the metadata a head change invalidates: banner,
-// ci_checks and build_metadata, plus ci_fail_count once it exceeded three.
+// ci_checks and build_metadata.
 func (s *PRState) clearHeadScoped() {
 	s.Banner = ""
 	s.CIChecks = nil
 	s.BuildMetadata = nil
-	if s.CIFailCount > ciFailCountResetThreshold {
-		s.CIFailCount = 0
-	}
 }
 
 // ResolveRegister validates a register request against the stored row and
@@ -159,13 +144,6 @@ func (s *PRState) ApplyRegister(req RegisterRequest, targetID string) {
 	}
 	if agent != "" {
 		s.ClaimOwner(agent)
-		s.BotID = agent
-	}
-	if v := strings.TrimSpace(req.Metadata[MetaVanadisChunkID]); v != "" {
-		s.VanadisChunkID = v
-	}
-	if v := strings.TrimSpace(req.Metadata[MetaWidgetState]); v != "" {
-		s.WidgetState = v
 	}
 }
 
@@ -192,9 +170,8 @@ func (s *PRState) ApplyIdentity(branch, title string) {
 // empty. The owner is seeded only when the registration creates the row,
 // which for PRObject means no target was stored yet (Register always
 // stores one): it is then claimed as the inserted row's owner
-// (claimRowOwner) and also fills BotID, the two keys the insert writes. The
-// status is untouched. Filling the target makes the PR tracked, so the
-// untracked guard stops applying and Project writes the row.
+// (claimRowOwner). The status is untouched. Filling the target makes the PR
+// tracked, so the untracked guard stops applying.
 // Returns true when the state changed.
 func (s *PRState) ApplySelfRegistration(branch, head, targetID, title, agent string) bool {
 	targetID = strings.TrimSpace(targetID)
@@ -220,9 +197,6 @@ func (s *PRState) ApplySelfRegistration(branch, head, targetID, title, agent str
 	s.TargetID = targetID
 	if agent = strings.ToLower(strings.TrimSpace(agent)); agent != "" {
 		s.claimRowOwner(agent)
-		if strings.TrimSpace(s.BotID) == "" {
-			s.BotID = agent
-		}
 	}
 	return true
 }
@@ -402,15 +376,15 @@ func (s *PRState) RecordExpectedJobs(jobs []string) bool {
 
 // Untracked reports whether st never saw any event that makes a PR
 // tracked: no register or self-registration (Registered,
-// TargetID), no opened (it carries the head SHA, and PR-body bot metadata
-// sets BotID), and no merge or close (Terminal, MergeSHA). Such a state was built only from deploy-phase
+// TargetID), no opened (it carries the head SHA), and no merge or close
+// (Terminal, MergeSHA). Such a state was built only from deploy-phase
 // events, for example an upstream Flux source commit resolved to a PR of a
 // repo nobody registers. prstate never starts a rollout for it. A nil state is not untracked: there is
 // nothing to drop.
 func (s *PRState) Untracked() bool {
 	return s != nil && !s.Registered && s.Terminal == TerminalNone &&
 		strings.TrimSpace(s.HeadSHA) == "" && strings.TrimSpace(s.MergeSHA) == "" &&
-		strings.TrimSpace(s.TargetID) == "" && strings.TrimSpace(s.BotID) == ""
+		strings.TrimSpace(s.TargetID) == ""
 }
 
 // HasDeployResidue reports whether st still holds rollout state: a status,

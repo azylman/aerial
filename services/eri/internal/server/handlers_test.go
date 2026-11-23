@@ -28,7 +28,6 @@ import (
 	"github.com/azylman/aerial/services/eri/pkg/delivery"
 	"github.com/azylman/aerial/services/eri/pkg/llmcall"
 	"github.com/azylman/aerial/services/eri/pkg/queue"
-	"github.com/azylman/aerial/services/eri/pkg/runner"
 	"github.com/azylman/aerial/services/eri/pkg/transcript"
 )
 
@@ -744,47 +743,6 @@ func runHandleTasksErrorCases(t *testing.T, handler http.HandlerFunc) {
 	}
 }
 
-func runHandleTasksEphemeralCase(t *testing.T, now time.Time) {
-	t.Helper()
-	ephemStore := dbtest.NewFakeStore()
-	_ = ephemStore.SaveSessionID(context.Background(), "1564704264645902626", "parent-thread-sess-uuid")
-	turnStarted := make(chan struct{})
-	releaseTurn := make(chan struct{})
-	ephemPool := queue.New(nil, queue.WorkerPoolConfig{
-		Store: ephemStore,
-		MediumEffortProcessPool: &blockingTaskTestPool{
-			sessionID:   "88888888-4444-4444-4444-121212121212",
-			turnStarted: turnStarted,
-			releaseTurn: releaseTurn,
-		},
-	})
-	defer ephemPool.Stop()
-
-	ephemDisp := db.Dispatch{
-		ID:        "msg-vanadis-chunk",
-		Source:    "vanadis",
-		Prompt:    "[VANADIS BUILD CHUNK EXECUTION]",
-		Effort:    "medium",
-		Status:    db.StatusPending,
-		CreatedAt: now,
-		UpdatedAt: now,
-	}
-	_, _ = ephemStore.InsertDispatch(context.Background(), ephemDisp)
-	ephemPool.EnqueueDispatch(ephemDisp)
-	<-turnStarted
-
-	liveRR := runHTTP(handleTasks(ephemStore, ephemPool), http.MethodGet, "/tasks", nil)
-	close(releaseTurn)
-	if liveRR.Code != http.StatusOK {
-		t.Fatalf("expected 200 OK from live tasks handler, got %d", liveRR.Code)
-	}
-	var liveResp TasksResponse
-	_ = json.NewDecoder(liveRR.Body).Decode(&liveResp)
-	if len(liveResp.Tasks) != 1 || liveResp.Tasks[0].SessionID != "88888888-4444-4444-4444-121212121212" {
-		t.Fatalf("expected live ephemeral session ID instead of parent thread session, got %+v", liveResp.Tasks)
-	}
-}
-
 func TestHandleTasks(t *testing.T) {
 	store := dbtest.NewFakeStore()
 	now := time.Now().UTC()
@@ -845,37 +803,6 @@ func TestHandleTasks(t *testing.T) {
 		})
 	}
 	wg.Wait()
-
-	runHandleTasksEphemeralCase(t, now)
-}
-
-type blockingTaskTestPool struct {
-	sessionID   string
-	turnStarted chan struct{}
-	releaseTurn chan struct{}
-}
-
-func (p *blockingTaskTestPool) AcquireLease(ctx context.Context, targetKey string) (runner.SessionLease, error) {
-	return &blockingTaskTestLease{pool: p}, nil
-}
-func (*blockingTaskTestPool) Initialize(ctx context.Context) error { return nil }
-func (*blockingTaskTestPool) Close() error                         { return nil }
-
-type blockingTaskTestLease struct {
-	pool *blockingTaskTestPool
-}
-
-func (l *blockingTaskTestLease) SessionID() string       { return l.pool.sessionID }
-func (*blockingTaskTestLease) PreviousSessionID() string { return "" }
-func (*blockingTaskTestLease) IsCold() bool              { return false }
-func (*blockingTaskTestLease) IsEphemeral() bool         { return true }
-func (*blockingTaskTestLease) TurnCount() int            { return 0 }
-func (*blockingTaskTestLease) MarkDirty()                {}
-func (*blockingTaskTestLease) Release() error            { return nil }
-func (l *blockingTaskTestLease) Execute(ctx context.Context, turn *runner.TurnContext) (*runner.TurnResult, error) {
-	close(l.pool.turnStarted)
-	<-l.pool.releaseTurn
-	return &runner.TurnResult{ConversationID: l.pool.sessionID, Response: "done"}, nil
 }
 
 func TestNormalizeRoute(t *testing.T) {

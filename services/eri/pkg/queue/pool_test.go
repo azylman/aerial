@@ -270,27 +270,3 @@ func TestWorkerPool_NilReceiverAccessors(t *testing.T) {
 		})
 	}
 }
-
-func TestIsScopeKeyForThread(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name     string
-		scopeKey string
-		threadID string
-		want     bool
-	}{
-		{name: "raw thread key", scopeKey: "1234567890", threadID: "1234567890", want: true},
-		{name: "normalized discord key", scopeKey: "discord-1234567890", threadID: "1234567890", want: true},
-		{name: "scoped raw suffix", scopeKey: "lock:1234567890", threadID: "1234567890", want: true},
-		{name: "scoped normalized suffix", scopeKey: "lock:discord-1234567890", threadID: "1234567890", want: true},
-		{name: "other thread", scopeKey: "discord-9876543210", threadID: "1234567890", want: false},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			if got := isScopeKeyForThread(tc.scopeKey, tc.threadID); got != tc.want {
-				t.Errorf("isScopeKeyForThread(%q, %q) = %v, want %v", tc.scopeKey, tc.threadID, got, tc.want)
-			}
-		})
-	}
-}

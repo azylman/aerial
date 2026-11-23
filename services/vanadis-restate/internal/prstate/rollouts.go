@@ -1,9 +1,8 @@
 package prstate
 
 // Restate-owned deploy path support: the read model and observation handlers
-// synapse's deploy paths use,
-// so the Flux/Kustomization watcher, deploy alerts and main-branch workflow
-// runs never touch pr_registry.
+// synapse's deploy paths use (the Flux/Kustomization watcher, deploy alerts
+// and main-branch workflow runs).
 //
 //   - GetDeployView (shared, read-only) is the per-PR deploy read model the
 //     deploy paths route on: status, identity, recorded reconcile requests

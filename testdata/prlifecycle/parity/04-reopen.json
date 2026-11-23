@@ -135,8 +135,7 @@
       "status": "closed",
       "title": "Reopen PR",
       "metadata": {
-        "agent": "aerial",
-        "bot_id": "aerial"
+        "agent": "aerial"
       }
     }
   ]

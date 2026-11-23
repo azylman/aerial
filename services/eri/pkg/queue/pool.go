@@ -126,43 +126,30 @@ type WorkerPoolConfig struct {
 	SATokenPath                      string
 }
 
-type queueItem struct {
-	msg      *db.Message
-	dispatch *db.Dispatch
-}
-
-type threadWorkerState struct {
-	ch                       chan queueItem
-	activeEnqueuers          int
-	inFlight                 bool
-	lastEnqueuedDiscordMsgID string
-}
-
 type WorkerPool struct {
-	appCfg              *config.Config
-	hasExplicitAppCfg   bool
-	overrideModel       string
-	cfg                 WorkerPoolConfig
-	sessionMgr          *session.Manager
-	mu                  sync.Mutex
-	threadChs           map[string]*threadWorkerState
-	activeTurns         map[string]*turnExecution
-	turns               *TurnRegistry // Restate TurnRunner attempts live on this pod, by turn ID
-	wg                  sync.WaitGroup
-	ctx                 context.Context
-	cancel              context.CancelFunc
-	stopped, leaderHold bool
-	quotaLockedUntil    atomic.Int64
-	vanadisURLWarned    atomic.Bool // set once the unconfigured-vanadis_url skip has been logged
-	scopeLocks          sync.Map
-	webhookDispatcher   WebhookDispatcher
-	summaryGroup        singleflight.Group
-	pools               map[PoolKey]runner.AgentPool
-	voiceProcessPool    runner.AgentPool
-	eventBus            pubsub.Bus
-	createThreadFn      func(channelID, title string) (string, error)
-	startedAt           time.Time // anchors queue.wait for rows resumed after a restart
-	agentName           string
+	appCfg            *config.Config
+	hasExplicitAppCfg bool
+	overrideModel     string
+	cfg               WorkerPoolConfig
+	sessionMgr        *session.Manager
+	mu                sync.Mutex
+	activeTurns       map[string]*turnExecution
+	turns             *TurnRegistry // Restate TurnRunner attempts live on this pod, by turn ID
+	wg                sync.WaitGroup
+	ctx               context.Context
+	cancel            context.CancelFunc
+	stopped           bool
+	quotaLockedUntil  atomic.Int64
+	vanadisURLWarned  atomic.Bool // set once the unconfigured-vanadis_url skip has been logged
+	scopeLocks        sync.Map
+	webhookDispatcher WebhookDispatcher
+	summaryGroup      singleflight.Group
+	pools             map[PoolKey]runner.AgentPool
+	voiceProcessPool  runner.AgentPool
+	eventBus          pubsub.Bus
+	createThreadFn    func(channelID, title string) (string, error)
+	startedAt         time.Time // anchors queue.wait for rows resumed after a restart
+	agentName         string
 
 	TranscriptStore         db.TranscriptStore
 	TranscriptsIndexerURL   string
@@ -512,8 +499,8 @@ func New(appCfg *config.Config, cfg WorkerPoolConfig) *WorkerPool {
 	ctx, cancel := context.WithCancel(parentCtx)
 	p := &WorkerPool{
 		appCfg: resolvedAppCfg, hasExplicitAppCfg: isExplicitAppCfg, cfg: cfg, pools: pools, voiceProcessPool: cfg.VoiceProcessPool,
-		eventBus:   cfg.EventBus,
-		sessionMgr: cfg.SessionManager, threadChs: make(map[string]*threadWorkerState),
+		eventBus:    cfg.EventBus,
+		sessionMgr:  cfg.SessionManager,
 		activeTurns: make(map[string]*turnExecution), ctx: ctx, cancel: cancel, startedAt: time.Now().UTC(),
 		agentName:         cfg.AgentName,
 		webhookDispatcher: cfg.WebhookDispatcher, createThreadFn: cfg.CreateThreadFunc,
@@ -818,14 +805,6 @@ func (p *WorkerPool) registerActiveTurn(scopeKey string, te *turnExecution) {
 	p.mu.Unlock()
 }
 
-func (p *WorkerPool) unregisterActiveTurn(scopeKey string, te *turnExecution) {
-	p.mu.Lock()
-	if p.activeTurns[scopeKey] == te {
-		delete(p.activeTurns, scopeKey)
-	}
-	p.mu.Unlock()
-}
-
 // ActiveTurnSessionID returns the live session ID for an in-flight message ID if the message
 // belongs to an active turn in the worker pool.
 func (p *WorkerPool) ActiveTurnSessionID(msgID string) (string, bool) {
@@ -846,25 +825,6 @@ func (p *WorkerPool) ActiveTurnSessionID(msgID string) (string, bool) {
 		}
 	}
 	return "", false
-}
-
-func isScopeKeyForThread(scopeKey, threadID string) bool {
-	norm := db.DiscordSessionID(threadID)
-	return scopeKey == threadID || scopeKey == norm || strings.HasSuffix(scopeKey, ":"+threadID) || strings.HasSuffix(scopeKey, ":"+norm)
-}
-
-func (p *WorkerPool) hasNewerEnqueuedDiscordMessage(threadID, triggerID string) bool {
-	if p == nil || threadID == "" || !discordutil.IsSnowflake(triggerID) {
-		return false
-	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	for scopeKey, state := range p.threadChs {
-		if state != nil && isScopeKeyForThread(scopeKey, threadID) && compareSnowflakeIDs(state.lastEnqueuedDiscordMsgID, triggerID) > 0 {
-			return true
-		}
-	}
-	return false
 }
 
 func logInterruptWarning(op string, err error) {

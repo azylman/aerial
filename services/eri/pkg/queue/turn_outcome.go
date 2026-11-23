@@ -224,9 +224,6 @@ func hasNewerSnowflakeInSlice(msgs []db.Message, triggerID string, burstIDs map[
 }
 
 func (te *turnExecution) hasNewerChannelActivity(triggerID string, burstIDs map[string]bool) bool {
-	if te.pool != nil && te.pool.hasNewerEnqueuedDiscordMessage(te.threadID, triggerID) {
-		return true
-	}
 	if s := te.store(); s != nil {
 		if recent, err := s.GetRecentThreadMessages(te.poolCtx(), te.threadID, 10); err == nil {
 			if hasNewerSnowflakeInSlice(recent, triggerID, burstIDs) {
@@ -468,37 +465,6 @@ func (te *turnExecution) handleQuotaPause(errDetail, stderr, currentModel, burst
 	reason := fmt.Sprintf("[QUOTA_PAUSED reset_in=%v scheduled=%t] %s", resetDur, scheduled, errDetail)
 	te.failBurstWithStatus(outcomeFailed, reason, currentModel)
 	return false
-}
-
-func (te *turnExecution) handleYieldTrap(resp *runner.AgyResponse, exitCode int, stdout, stderr string, autoResumeCount *int, accumulatedUsage *runner.TokenUsage, promptToSend *string, currentModel string) bool {
-	isYield, taskCount := runner.IsYieldTrap(exitCode, stdout, stderr)
-	if !isYield {
-		return false
-	}
-	detectionSource := "stderr_signature"
-	if *autoResumeCount >= MaxYieldTrapAutoResumes {
-		te.logf("[YieldTrap] Circuit breaker tripped for thread %s in session %s after %d auto-resumptions (source=%s). Delivering final output.",
-			te.threadID, te.currentSessionID, *autoResumeCount, detectionSource)
-		metrics.RecordYieldTrap("circuit_breaker", detectionSource, currentModel)
-		metrics.RecordRunnerError("yield_trap_circuit_breaker", currentModel)
-		return false
-	}
-	*autoResumeCount++
-	accumulatedUsage.InputTokens += resp.Usage.InputTokens
-	accumulatedUsage.OutputTokens += resp.Usage.OutputTokens
-	accumulatedUsage.ThinkingTokens += resp.Usage.ThinkingTokens
-	accumulatedUsage.CacheReadTokens += resp.Usage.CacheReadTokens
-	accumulatedUsage.TotalTokens += resp.Usage.TotalTokens
-	accumulatedUsage.CacheCreationTokens += resp.Usage.CacheCreationTokens
-
-	if *promptToSend != YieldTrapResumePrompt && !strings.Contains(*promptToSend, "<SYSTEM_MESSAGE>") {
-		*promptToSend = YieldTrapResumePrompt
-	}
-	te.logf("[YieldTrap] Intercepted background command exit for thread %s in session %s (auto-resume %d/%d, source=%s, taskCount=%d): suppressing intermediate waiting output and auto-resuming turn.",
-		te.threadID, te.currentSessionID, *autoResumeCount, MaxYieldTrapAutoResumes, detectionSource, taskCount)
-	metrics.RecordYieldTrap("resumed", detectionSource, currentModel)
-	metrics.RecordRunnerError("yield_trap_intercepted", currentModel)
-	return true
 }
 
 func newDiscordTurnSink(statusUpdater *StatusUpdater) *runner.BufferingTurnSink {

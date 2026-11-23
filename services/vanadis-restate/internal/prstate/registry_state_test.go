@@ -95,37 +95,27 @@ func TestPRState_ApplyRegister(t *testing.T) {
 	t.Parallel()
 	seeded := func(head, status string) *PRState {
 		s := rowState(head, "", status)
-		s.Title, s.Banner, s.CIFailCount = "Old title", "boom", 5
+		s.Title, s.Banner = "Old title", "boom"
 		s.CIChecks = map[string]string{"ci": "failed"}
 		s.BuildMetadata = meta("final", 1, 1, 10, head, 1)
 		return s
 	}
-	lowFails := func() *PRState {
-		s := seeded("h0", RegistryStatusCIFailed)
-		s.CIFailCount = 2
-		return s
-	}
 	tests := []struct {
-		name          string
-		state         *PRState
-		req           RegisterRequest
-		wantStatus    string
-		wantHead      string
-		wantTitle     string
-		wantBanner    string
-		wantChecks    map[string]string
-		wantMeta      bool
-		wantFailCount int
-		wantAgent     string
-		wantBotID     string
-		wantChunk     string
-		wantWidget    string
+		name       string
+		state      *PRState
+		req        RegisterRequest
+		wantStatus string
+		wantHead   string
+		wantTitle  string
+		wantBanner string
+		wantChecks map[string]string
+		wantMeta   bool
+		wantAgent  string
 	}{
-		{name: "new head clears head-scoped metadata and reopens", state: seeded("h0", RegistryStatusCIFailed), req: RegisterRequest{Branch: "feat", HeadSHA: "h1", Title: "New", Agent: "aerial", Metadata: map[string]string{"vanadis_chunk_id": "chunk-1", "widget_state": "w", "other": "x"}}, wantStatus: RegistryStatusOpen, wantHead: "h1", wantTitle: "New", wantAgent: "aerial", wantBotID: "aerial", wantChunk: "chunk-1", wantWidget: "w"},
-		{name: "new head keeps low ci fail count", state: lowFails(), req: RegisterRequest{Branch: "feat", HeadSHA: "h1"}, wantStatus: RegistryStatusOpen, wantHead: "h1", wantTitle: "Old title", wantFailCount: 2},
-		{name: "same head clears only banner", state: seeded("h0", RegistryStatusConflict), req: RegisterRequest{Branch: "feat", HeadSHA: "h0", BotID: "agent-alpha"}, wantStatus: RegistryStatusOpen, wantHead: "h0", wantTitle: "Old title", wantChecks: map[string]string{"ci": "failed"}, wantMeta: true, wantFailCount: 5, wantAgent: "agent-alpha", wantBotID: "agent-alpha"},
-		{name: "post-merge status and metadata are kept", state: seeded("h0", RegistryStatusDeployed), req: RegisterRequest{Branch: "feat", HeadSHA: "h1"}, wantStatus: RegistryStatusDeployed, wantHead: "h1", wantTitle: "Old title", wantBanner: "boom", wantChecks: map[string]string{"ci": "failed"}, wantMeta: true, wantFailCount: 5},
-		{name: "closed status reopens", state: seeded("h0", RegistryStatusClosed), req: RegisterRequest{Branch: "feat", HeadSHA: "h0"}, wantStatus: RegistryStatusOpen, wantHead: "h0", wantTitle: "Old title", wantChecks: map[string]string{"ci": "failed"}, wantMeta: true, wantFailCount: 5},
+		{name: "new head clears head-scoped metadata and reopens", state: seeded("h0", RegistryStatusCIFailed), req: RegisterRequest{Branch: "feat", HeadSHA: "h1", Title: "New", Agent: "aerial", Metadata: map[string]string{"vanadis_chunk_id": "chunk-1", "widget_state": "w", "other": "x"}}, wantStatus: RegistryStatusOpen, wantHead: "h1", wantTitle: "New", wantAgent: "aerial"},
+		{name: "same head clears only banner", state: seeded("h0", RegistryStatusConflict), req: RegisterRequest{Branch: "feat", HeadSHA: "h0", BotID: "agent-alpha"}, wantStatus: RegistryStatusOpen, wantHead: "h0", wantTitle: "Old title", wantChecks: map[string]string{"ci": "failed"}, wantMeta: true, wantAgent: "agent-alpha"},
+		{name: "post-merge status and metadata are kept", state: seeded("h0", RegistryStatusDeployed), req: RegisterRequest{Branch: "feat", HeadSHA: "h1"}, wantStatus: RegistryStatusDeployed, wantHead: "h1", wantTitle: "Old title", wantBanner: "boom", wantChecks: map[string]string{"ci": "failed"}, wantMeta: true},
+		{name: "closed status reopens", state: seeded("h0", RegistryStatusClosed), req: RegisterRequest{Branch: "feat", HeadSHA: "h0"}, wantStatus: RegistryStatusOpen, wantHead: "h0", wantTitle: "Old title", wantChecks: map[string]string{"ci": "failed"}, wantMeta: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -141,11 +131,7 @@ func TestPRState_ApplyRegister(t *testing.T) {
 			require.Equal(t, tc.wantBanner, s.Banner)
 			require.Equal(t, tc.wantChecks, s.CIChecks)
 			require.Equal(t, tc.wantMeta, s.BuildMetadata != nil)
-			require.Equal(t, tc.wantFailCount, s.CIFailCount)
 			require.Equal(t, tc.wantAgent, s.Agent)
-			require.Equal(t, tc.wantBotID, s.BotID)
-			require.Equal(t, tc.wantChunk, s.VanadisChunkID)
-			require.Equal(t, tc.wantWidget, s.WidgetState)
 		})
 	}
 }
@@ -956,10 +942,13 @@ func TestPRState_Untracked(t *testing.T) {
 		{name: "pre-guard deploying residue stays untracked", st: untrackedResidue(), want: true},
 		{name: "registered pr is tracked", st: with(func(s *PRState) { s.Registered = true })},
 		{name: "opened head is tracked", st: with(func(s *PRState) { s.HeadSHA = "h1" })},
-		{name: "shadow-built opened pr without register is tracked", st: with(func(s *PRState) { s.HeadSHA, s.BotID, s.Agent = "h2304", "miorine", "miorine" })},
+		{name: "shadow-built opened pr without register is tracked", st: with(func(s *PRState) { s.HeadSHA, s.Agent = "h2304", "miorine" })},
 		{name: "merge sha is tracked", st: with(func(s *PRState) { s.MergeSHA = "m1" })},
 		{name: "target thread is tracked", st: with(func(s *PRState) { s.TargetID = "100000000000000001" })},
-		{name: "body bot id is tracked", st: with(func(s *PRState) { s.BotID = "suletta" })},
+		{name: "opened with body bot metadata is tracked", st: with(func(s *PRState) {
+			applyEventRow(s, PREvent{Repo: s.Repo, PRNumber: s.PRNumber, HeadSHA: "h1", Agent: "suletta"})
+			s.ClaimOwner("suletta")
+		})},
 		{name: "merged terminal is tracked", st: with(func(s *PRState) { s.Terminal = TerminalMerged })},
 		{name: "closed terminal is tracked", st: with(func(s *PRState) { s.Terminal = TerminalClosed })},
 	}
@@ -1014,7 +1003,7 @@ func TestPRState_ApplySelfRegistration(t *testing.T) {
 		want                       bool
 		wantBranch, wantHead       string
 		wantTarget, wantTitle      string
-		wantAgent, wantBotID       string
+		wantAgent                  string
 		wantPriorHeads             []string
 		wantRegistered, wantUntrkd bool
 	}{
@@ -1026,20 +1015,20 @@ func TestPRState_ApplySelfRegistration(t *testing.T) {
 		},
 		{
 			name: "insert seeds the lowercased body owner", head: "h1", target: "100000000000000002", title: "T", agent: " Miorine ", want: true,
-			wantHead: "h1", wantTarget: "100000000000000002", wantTitle: "T", wantAgent: "miorine", wantBotID: "miorine",
+			wantHead: "h1", wantTarget: "100000000000000002", wantTitle: "T", wantAgent: "miorine",
 		},
 		{
 			name: "insert claims over a hinted owner", stored: PRState{Agent: "aerial"}, target: "100000000000000002", agent: "miorine", want: true,
-			wantTarget: "100000000000000002", wantAgent: "miorine", wantBotID: "miorine",
+			wantTarget: "100000000000000002", wantAgent: "miorine",
 		},
 		{
 			name: "insert after register only fills an empty owner", stored: PRState{Registered: true, Agent: "aerial"}, target: "100000000000000002", agent: "miorine", want: true,
-			wantTarget: "100000000000000002", wantAgent: "aerial", wantBotID: "miorine", wantRegistered: true,
+			wantTarget: "100000000000000002", wantAgent: "aerial", wantRegistered: true,
 		},
 		{
-			name: "stored target wins and keeps the owner", stored: PRState{Branch: "feat", HeadSHA: "h1", TargetID: "100000000000000001", Title: "Old", Agent: "aerial", BotID: "aerial"},
+			name: "stored target wins and keeps the owner", stored: PRState{Branch: "feat", HeadSHA: "h1", TargetID: "100000000000000001", Title: "Old", Agent: "aerial"},
 			branch: "feat", head: "h2", target: "100000000000000009", title: "New", agent: "miorine",
-			wantBranch: "feat", wantHead: "h1", wantTarget: "100000000000000001", wantTitle: "Old", wantAgent: "aerial", wantBotID: "aerial",
+			wantBranch: "feat", wantHead: "h1", wantTarget: "100000000000000001", wantTitle: "Old", wantAgent: "aerial",
 		},
 		{
 			name: "tracked PR fills a missing title and replaces the branch", stored: PRState{Branch: "old", HeadSHA: "h1", TargetID: "100000000000000001"},
@@ -1068,7 +1057,6 @@ func TestPRState_ApplySelfRegistration(t *testing.T) {
 			require.Equal(t, tc.wantTarget, s.TargetID)
 			require.Equal(t, tc.wantTitle, s.Title)
 			require.Equal(t, tc.wantAgent, s.Agent)
-			require.Equal(t, tc.wantBotID, s.BotID)
 			require.Equal(t, tc.wantPriorHeads, s.PriorHeads)
 			require.Equal(t, tc.wantRegistered, s.Registered)
 			require.Equal(t, tc.wantUntrkd, s.Untracked())

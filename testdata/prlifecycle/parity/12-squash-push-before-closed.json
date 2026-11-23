@@ -190,8 +190,7 @@
       "status": "merged",
       "title": "Squash PR",
       "metadata": {
-        "agent": "aerial",
-        "bot_id": "aerial"
+        "agent": "aerial"
       }
     }
   ]
