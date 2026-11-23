@@ -1,4 +1,4 @@
-package main
+package server
 
 import (
 	"context"
@@ -48,7 +48,7 @@ func TestSetupTracing(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			withTracing, shutdown := setupTracing(context.Background(), path)
+			withTracing, shutdown := SetupTracing(context.Background(), path)
 			shutdown()
 			var opts brainAppOptions
 			withTracing(&opts)

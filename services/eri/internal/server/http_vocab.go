@@ -1,4 +1,4 @@
-package main
+package server
 
 // JSON field names shared by the HTTP handlers' response bodies.
 const (

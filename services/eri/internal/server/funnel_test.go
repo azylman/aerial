@@ -1,4 +1,4 @@
-package main
+package server
 
 import (
 	"context"
@@ -17,6 +17,7 @@ import (
 
 	"github.com/bwmarrin/discordgo"
 
+	"github.com/azylman/aerial/services/eri/internal/restateclient"
 	"github.com/azylman/aerial/services/eri/pkg/classifier"
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
@@ -1243,7 +1244,7 @@ channels:
 				_, _ = w.Write([]byte(`{"status":"accepted"}`))
 			}))
 			defer ts.Close()
-			client := NewRestateIngressClient(ts.URL, "aerial", ts.Client())
+			client := restateclient.NewRestateIngressClient(ts.URL, "aerial", ts.Client())
 
 			s := newMockDiscordSession(t, nil)
 			if tc.sessionUser != "" {
@@ -1309,7 +1310,7 @@ func TestProcessFunnelMessageIngress_Restate(t *testing.T) {
 			}))
 			defer ts.Close()
 
-			client := NewRestateIngressClient(ts.URL, "aerial", ts.Client())
+			client := restateclient.NewRestateIngressClient(ts.URL, "aerial", ts.Client())
 			s := newMockDiscordSession(t, nil)
 			s.State.User = &discordgo.User{ID: "bot-123", Username: "AerialBot"}
 
@@ -1346,16 +1347,16 @@ func TestProcessFunnelMessageIngress_Restate(t *testing.T) {
 func TestActiveTurnCanceller(t *testing.T) {
 	tests := []struct {
 		name    string
-		client  *RestateIngressClient
+		client  *restateclient.RestateIngressClient
 		wantNil bool
 	}{
 		{name: "no restate client yields untyped nil", client: nil, wantNil: true},
-		{name: "restate client is the canceller", client: NewRestateIngressClient("http://restate.invalid", "aerial"), wantNil: false},
+		{name: "restate client is the canceller", client: restateclient.NewRestateIngressClient("http://restate.invalid", "aerial"), wantNil: false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			orig := activeRestateIngressClient.Swap(tc.client)
-			defer activeRestateIngressClient.Store(orig)
+			orig := restateclient.SwapActiveRestateIngressClient(tc.client)
+			defer restateclient.StoreActiveRestateIngressClient(orig)
 
 			got := activeTurnCanceller()
 			if (got == nil) != tc.wantNil {

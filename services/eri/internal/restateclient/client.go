@@ -1,4 +1,4 @@
-package main
+package restateclient
 
 import (
 	"context"
@@ -13,7 +13,6 @@ import (
 
 	"github.com/azylman/aerial/pkg/eriwire"
 	"github.com/azylman/aerial/pkg/restateingress"
-	"github.com/azylman/aerial/pkg/tracing"
 	"github.com/azylman/aerial/services/eri/pkg/llmcall"
 	"github.com/azylman/aerial/services/eri/pkg/metrics"
 	"github.com/azylman/aerial/services/eri/pkg/queue"
@@ -96,7 +95,18 @@ func ActiveRestateIngressClient() *RestateIngressClient {
 	return activeRestateIngressClient.Load()
 }
 
-func resolveRestateClient(clients ...*RestateIngressClient) *RestateIngressClient {
+// SwapActiveRestateIngressClient atomically swaps the active RestateIngressClient with c and returns the previous client.
+func SwapActiveRestateIngressClient(c *RestateIngressClient) *RestateIngressClient {
+	return activeRestateIngressClient.Swap(c)
+}
+
+// StoreActiveRestateIngressClient atomically stores c as the active RestateIngressClient.
+func StoreActiveRestateIngressClient(c *RestateIngressClient) {
+	activeRestateIngressClient.Store(c)
+}
+
+// ResolveRestateClient returns the first non-nil client in clients, or ActiveRestateIngressClient().
+func ResolveRestateClient(clients ...*RestateIngressClient) *RestateIngressClient {
 	if len(clients) > 0 && clients[0] != nil {
 		return clients[0]
 	}
@@ -220,57 +230,4 @@ func (c *RestateIngressClient) CancelDispatchImmediate(ctx context.Context, req 
 	svcName := queue.SessionManagerServiceName(c.agentName)
 	err := c.postJSON(ctx, svcName, "", "CancelDispatch", req, &resp)
 	return resp, err
-}
-
-func handlePromptViaRestate(ctx context.Context, client *RestateIngressClient, req PromptRequest, channelID, msgID string) (string, error) {
-	reqEnqueue := queue.ThreadEnqueueRequest{
-		Prompt:       req.Prompt,
-		ChannelID:    channelID,
-		Title:        strings.TrimSpace(req.Title),
-		MessageID:    msgID,
-		Model:        strings.TrimSpace(req.Model),
-		Effort:       strings.TrimSpace(req.Effort),
-		SkipIfActive: req.SkipIfActive,
-		Traceparent:  tracing.Traceparent(ctx),
-	}
-	idempotencyKey := "prompt:" + channelID + ":" + msgID
-	resp, err := client.EnqueueThread(ctx, channelID, reqEnqueue, idempotencyKey)
-	if err != nil {
-		return "", err
-	}
-	return resp.Status, nil
-}
-
-func handleDispatchViaRestate(ctx context.Context, client *RestateIngressClient, req DispatchRequest, sessionKey, dispatchID string) (string, error) {
-	bReq := eriwire.BrainDispatchRequest{
-		ID:             dispatchID,
-		Source:         strings.ToLower(strings.TrimSpace(req.Source)),
-		SessionID:      sessionKey,
-		TargetID:       req.TargetID,
-		VanadisChunkID: strings.TrimSpace(req.VanadisChunkID),
-		Prompt:         req.Prompt,
-		Effort:         strings.ToLower(strings.TrimSpace(req.Effort)),
-		Model:          strings.TrimSpace(req.Model),
-		SkipIfActive:   req.SkipIfActive,
-		Traceparent:    tracing.Traceparent(ctx),
-	}
-	idempotencyKey := dispatchID
-	resp, err := client.EnqueueDispatch(ctx, sessionKey, bReq, idempotencyKey)
-	if err != nil {
-		return "", err
-	}
-	return resp.Status, nil
-}
-
-func handleCancelDispatchViaRestate(ctx context.Context, client *RestateIngressClient, dispatchID, buildID, reason string) (int, []string, error) {
-	resp, err := client.CancelDispatchImmediate(ctx, queue.CancelDispatchControlRequest{
-		DispatchID: dispatchID,
-		BuildID:    buildID,
-		ChunkID:    buildID,
-		Reason:     reason,
-	})
-	if err != nil {
-		return 0, nil, err
-	}
-	return resp.CancelledCount, resp.CancelledIDs, nil
 }
