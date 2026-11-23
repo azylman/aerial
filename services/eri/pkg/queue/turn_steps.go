@@ -539,7 +539,7 @@ func (p *WorkerPool) RecordBurstOutcome(ctx context.Context, ids []string, summa
 		return nil
 	}
 	if recordsFailure(summary.Outcome) {
-		if err := p.failActiveBurstRows(ctx, s, ids, summary); err != nil {
+		if _, err := p.failActiveBurstRows(ctx, s, ids, summary); err != nil {
 			return err
 		}
 	}
@@ -547,10 +547,10 @@ func (p *WorkerPool) RecordBurstOutcome(ctx context.Context, ids []string, summa
 }
 
 //nolint:contextcheck,nolintlint // the reused turn helpers own their contexts; store calls take ctx.
-func (p *WorkerPool) failActiveBurstRows(ctx context.Context, s db.Store, ids []string, summary AttemptSummary) error {
+func (p *WorkerPool) failActiveBurstRows(ctx context.Context, s db.Store, ids []string, summary AttemptSummary) (int, error) {
 	rows, err := messagesByIDOrdered(ctx, s, ids)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	var active []db.Message
 	for _, m := range rows {
@@ -559,7 +559,7 @@ func (p *WorkerPool) failActiveBurstRows(ctx context.Context, s db.Store, ids []
 		}
 	}
 	if len(active) == 0 {
-		return nil
+		return 0, nil
 	}
 	reason := summary.failureReason()
 	te := p.newStepTurnExecution(ctx, active[0].ThreadID, active)
@@ -573,7 +573,7 @@ func (p *WorkerPool) failActiveBurstRows(ctx context.Context, s db.Store, ids []
 	}
 	changed, err := storeCall(ctx, func(c context.Context) ([]string, error) { return s.FailMessagesIfActive(c, activeIDs, reason) })
 	if err != nil {
-		return err
+		return 0, err
 	}
 	telemetry := summary.telemetry()
 	for _, m := range active {
@@ -584,14 +584,14 @@ func (p *WorkerPool) failActiveBurstRows(ctx context.Context, s db.Store, ids []
 			if _, err := storeCall(ctx, func(c context.Context) (struct{}, error) {
 				return struct{}{}, s.UpdateMessageStatus(c, m.ID, db.StatusFailed, reason, telemetry...)
 			}); err != nil {
-				return err
+				return 0, err
 			}
 		}
 		if p.cfg.OnMessageCompleted != nil {
 			p.cfg.OnMessageCompleted(m, db.StatusFailed)
 		}
 	}
-	return nil
+	return len(changed), nil
 }
 
 // RecordDispatchOutcome records a dispatch's non-success outcome (dispatches deliver no notice),
@@ -752,7 +752,8 @@ func (p *WorkerPool) StopBurstTurn(ctx context.Context, turnID string, ids []str
 		return err
 	}
 	p.turns.Stop(turnID, CancelledByOperatorReason)
-	return p.failActiveBurstRows(ctx, s, normalizeStepIDs(ids), AttemptSummary{Outcome: OutcomeCancelled})
+	_, err = p.failActiveBurstRows(ctx, s, normalizeStepIDs(ids), AttemptSummary{Outcome: OutcomeCancelled})
+	return err
 }
 
 // StopDispatchTurn is the stop-turn step of a cancelled dispatch; cancelled dispatches publish nothing.
@@ -764,16 +765,48 @@ func (p *WorkerPool) StopDispatchTurn(ctx context.Context, turnID string, ids []
 	return p.RecordDispatchOutcome(ctx, ids, AttemptSummary{Outcome: OutcomeCancelled})
 }
 
+func anyAttempted(rows []db.Message) bool {
+	for _, m := range rows {
+		if m.RetryCount > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 // FailBurstTurn is the fail-turn step of a burst that hit a terminal error: it stops the turn on
 // this pod, delivers the failure notice and records its still-active rows FAILED with reason. A
 // replay finds the rows terminal and sends no second notice.
-func (p *WorkerPool) FailBurstTurn(ctx context.Context, turnID string, ids []string, reason string) error {
+func (p *WorkerPool) FailBurstTurn(ctx context.Context, turnID string, ids []string, reason string, hookMetadata ...map[string]string) error {
 	s, err := p.stepStore()
 	if err != nil {
 		return err
 	}
 	p.turns.Stop(turnID, reason)
-	return p.failActiveBurstRows(ctx, s, normalizeStepIDs(ids), AttemptSummary{Outcome: OutcomeFailed, Reason: reason})
+	ids = normalizeStepIDs(ids)
+	failed, err := p.failActiveBurstRows(ctx, s, ids, AttemptSummary{Outcome: OutcomeFailed, Reason: reason})
+	if err != nil {
+		return err
+	}
+	if failed == 0 {
+		return nil
+	}
+	var rows []db.Message
+	rows, err = messagesByIDOrdered(ctx, s, ids)
+	if err != nil {
+		return err
+	}
+	var meta map[string]string
+	for _, m := range hookMetadata {
+		if m != nil {
+			meta = m
+			break
+		}
+	}
+	if len(rows) > 0 && (anyAttempted(rows) || len(meta) > 0) {
+		return p.RunBurstPostTurnHook(ctx, rows[0].ThreadID, ids, true, OutcomeFailed, meta)
+	}
+	return nil
 }
 
 // FailDispatchTurn is the fail-turn step of a dispatch that hit a terminal error: it stops the
