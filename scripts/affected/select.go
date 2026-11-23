@@ -209,13 +209,9 @@ func (r *repo) roots(dirs []string) (*module, []*goPackage, error) {
 	var main *module
 	var out []*goPackage
 	for _, d := range dirs {
-		var pkgs []*goPackage
-		if m := r.byDir[d]; m != nil {
-			pkgs = mainPackages(r.modulePackages(m))
-		} else if p := r.pkgs[d]; p != nil {
-			pkgs = []*goPackage{p}
-		} else {
-			return nil, nil, fmt.Errorf("go root %q is neither a module nor a package", d)
+		pkgs, err := r.expandRoot(d)
+		if err != nil {
+			return nil, nil, err
 		}
 		if main == nil && len(pkgs) > 0 {
 			main = pkgs[0].mod
@@ -223,6 +219,27 @@ func (r *repo) roots(dirs []string) (*module, []*goPackage, error) {
 		out = append(out, pkgs...)
 	}
 	return main, out, nil
+}
+
+func (r *repo) expandRoot(d string) ([]*goPackage, error) {
+	if m := r.byDir[d]; m != nil {
+		return mainPackages(r.modulePackages(m)), nil
+	}
+	if p := r.pkgs[d]; p != nil {
+		return []*goPackage{p}, nil
+	}
+	prefix := d + "/"
+	var matched []*goPackage
+	for _, p := range r.pkgs {
+		if strings.HasPrefix(p.dir, prefix) {
+			matched = append(matched, p)
+		}
+	}
+	if len(matched) == 0 {
+		return nil, fmt.Errorf("go root %q is neither a module nor a package", d)
+	}
+	sort.Slice(matched, func(i, j int) bool { return matched[i].dir < matched[j].dir })
+	return mainPackages(matched), nil
 }
 
 // affectedPackages maps changed files to package dirs. A non-test, non-Go file affects

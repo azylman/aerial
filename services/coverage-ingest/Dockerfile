@@ -5,10 +5,12 @@
 # deliberately NOT built with -cover.
 FROM golang:1.27.3-alpine AS builder
 
-WORKDIR /src/services/coverage-ingest
-COPY services/coverage-ingest/go.mod services/coverage-ingest/go.sum ./
+WORKDIR /src
+COPY go.mod go.sum ./
 RUN --mount=type=cache,target=/go/pkg/mod go mod download
 
+WORKDIR /src/services/coverage-ingest
+COPY pkg/ /src/pkg/
 COPY services/coverage-ingest/ ./
 RUN --mount=type=cache,target=/root/.cache/go-build \
     --mount=type=cache,target=/go/pkg/mod \

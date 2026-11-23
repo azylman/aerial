@@ -71,9 +71,10 @@ var (
 		{Service: "tool", Select: selectRule{GoRoots: []string{"tool"}, Inputs: []string{"tool/**"}}},
 		{Service: "static", Select: selectRule{Inputs: []string{"static/**", "web/style.css"}}},
 	}
-	rootCatalog = []image{{Service: "root", Select: selectRule{GoRoots: []string{"."}, Inputs: []string{"Dockerfile"}}}}
-	staticOnly  = []image{{Service: "static", Select: selectRule{Inputs: []string{"static/**"}}}}
-	badRoot     = []image{{Service: "bad", Select: selectRule{GoRoots: []string{"nowhere"}}}}
+	rootCatalog       = []image{{Service: "root", Select: selectRule{GoRoots: []string{"."}, Inputs: []string{"Dockerfile"}}}}
+	nestedRootCatalog = []image{{Service: "nested", Select: selectRule{GoRoots: []string{"services/nested"}, Inputs: []string{"services/nested/**"}}}}
+	staticOnly        = []image{{Service: "static", Select: selectRule{Inputs: []string{"static/**"}}}}
+	badRoot           = []image{{Service: "bad", Select: selectRule{GoRoots: []string{"nowhere"}}}}
 )
 
 // selectAffectedCase is one TestSelectAffected row.
@@ -252,6 +253,14 @@ var selectAffectedCases = []selectAffectedCase{
 	{
 		name: "root module non-Go file", fixture: "rootmod", catalog: rootCatalog, changed: []string{"README.md"},
 		want: result{Images: sel(false, "root"), Test: sel(false, "."), Lint: sel(false, "."), Reasons: []string{}},
+	},
+	{
+		name: "root module nested package root fallback", fixture: "rootmod", catalog: nestedRootCatalog,
+		overlay: map[string]string{
+			"services/nested/cmd/nested/main.go": "package main\n\nimport \"example.com/rootmod/internal/x\"\n\nfunc main() { _ = x.X }\n",
+		},
+		changed: []string{"internal/x/x.go"},
+		want:    result{Images: sel(false, "nested"), Test: sel(false, "."), Lint: sel(false, "."), Reasons: []string{}},
 	},
 }
 
