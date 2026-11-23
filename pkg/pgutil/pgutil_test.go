@@ -100,12 +100,12 @@ func TestParsePGTextArray_TableDriven(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			got, err := ParsePGTextArray(tc.input)
+			got, err := parsePGTextArray(tc.input)
 			if (err != nil) != tc.expectErr {
-				t.Fatalf("ParsePGTextArray(%v) err = %v, expectErr = %v", tc.input, err, tc.expectErr)
+				t.Fatalf("parsePGTextArray(%v) err = %v, expectErr = %v", tc.input, err, tc.expectErr)
 			}
 			if !tc.expectErr && !reflect.DeepEqual(got, tc.expected) {
-				t.Errorf("ParsePGTextArray(%v) = %v, want %v", tc.input, got, tc.expected)
+				t.Errorf("parsePGTextArray(%v) = %v, want %v", tc.input, got, tc.expected)
 			}
 		})
 	}

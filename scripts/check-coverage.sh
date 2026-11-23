@@ -192,22 +192,95 @@ for svc in $ALL_GO_SERVICES; do
     done
 done
 
-# Phase 1: Run coverage collection for all packages in parallel batches
+# Phase 1: Run coverage collection once per Go module in parallel batches, then split profile by package
+SVC_LIST_FILE="${PROF_DIR}/svcs.txt"
+: > "$SVC_LIST_FILE"
+
+for svc in $ALL_GO_SERVICES; do
+    if grep -q "^${svc}|" "$SVC_PKG_FILE" 2>/dev/null; then
+        echo "$svc" >> "$SVC_LIST_FILE"
+    fi
+done
+
+split_module_profile() {
+    svc_name="$1"
+    src_prof="$2"
+    [ -f "$src_prof" ] || return 0
+    awk -v svc="$svc_name" -v prof_dir="$PROF_DIR" '
+        /^mode:/ {
+            mode_line = $0
+            next
+        }
+        NF >= 3 {
+            col_idx = index($1, ":")
+            if (col_idx > 0) {
+                fpath = substr($1, 1, col_idx - 1)
+                slash_idx = 0
+                for (i = length(fpath); i >= 1; i--) {
+                    if (substr(fpath, i, 1) == "/") {
+                        slash_idx = i
+                        break
+                    }
+                }
+                if (slash_idx > 1) {
+                    pkg = substr(fpath, 1, slash_idx - 1)
+                    safe_pkg = svc "_" pkg
+                    gsub(/[\/\.]/, "_", safe_pkg)
+                    out_file = prof_dir "/" safe_pkg ".out"
+                    if (!(out_file in initialized)) {
+                        print mode_line > out_file
+                        initialized[out_file] = 1
+                    }
+                    print $0 > out_file
+                }
+            }
+        }
+    ' "$src_prof"
+}
+
 job_count=0
-while IFS='|' read -r svc pkg; do
-    [ -n "$svc" ] && [ -n "$pkg" ] || continue
-    safe_pkg=$(echo "${svc}_${pkg}" | tr '/.' '__')
-    prof_file="${PROF_DIR}/${safe_pkg}.out"
-    log_file="${PROF_DIR}/${safe_pkg}.log"
-    status_file="${PROF_DIR}/${safe_pkg}.status"
+while IFS= read -r svc; do
+    [ -n "$svc" ] || continue
+    safe_svc=$(echo "$svc" | tr '/.' '__')
+    svc_prof_file="${PROF_DIR}/${safe_svc}_module.out"
+    svc_log_file="${PROF_DIR}/${safe_svc}_module.log"
 
     (
+        svc_pkgs=$(awk -F'|' -v s="$svc" '$1 == s { print $2 }' "$SVC_PKG_FILE")
+        for pkg in $svc_pkgs; do
+            safe_pkg=$(echo "${svc}_${pkg}" | tr '/.' '__')
+            rm -f "${PROF_DIR}/${safe_pkg}.out" "${PROF_DIR}/${safe_pkg}.log" "${PROF_DIR}/${safe_pkg}.status"
+        done
         if (cd "$svc" && hermetic_go \
             CGO_ENABLED="$cgo_val" \
-            go test ${race_flag:+"$race_flag"} -trimpath -timeout ${AERIAL_TEST_TIMEOUT:-180s} -coverprofile="$prof_file" "$pkg" >"$log_file" 2>&1); then
-            echo "PASS" > "$status_file"
+            go test ${race_flag:+"$race_flag"} -trimpath -timeout ${AERIAL_TEST_TIMEOUT:-180s} -coverprofile="$svc_prof_file" ./... >"$svc_log_file" 2>&1); then
+            split_module_profile "$svc" "$svc_prof_file"
+            for pkg in $svc_pkgs; do
+                safe_pkg=$(echo "${svc}_${pkg}" | tr '/.' '__')
+                echo "PASS" > "${PROF_DIR}/${safe_pkg}.status"
+            done
         else
-            echo "FAIL" > "$status_file"
+            split_module_profile "$svc" "$svc_prof_file"
+            found_fail=0
+            first_pkg=""
+            for pkg in $svc_pkgs; do
+                [ -n "$first_pkg" ] || first_pkg="$pkg"
+                safe_pkg=$(echo "${svc}_${pkg}" | tr '/.' '__')
+                if grep -q -E "^FAIL[[:space:]]+$(printf '%s' "$pkg" | sed 's/[.[\*^$()+?{|]/\\&/g')([[:space:]]|$)" "$svc_log_file" 2>/dev/null; then
+                    echo "FAIL" > "${PROF_DIR}/${safe_pkg}.status"
+                    if [ "$found_fail" -eq 0 ]; then
+                        cp "$svc_log_file" "${PROF_DIR}/${safe_pkg}.log"
+                    fi
+                    found_fail=1
+                else
+                    echo "PASS" > "${PROF_DIR}/${safe_pkg}.status"
+                fi
+            done
+            if [ "$found_fail" -eq 0 ] && [ -n "$first_pkg" ]; then
+                safe_pkg=$(echo "${svc}_${first_pkg}" | tr '/.' '__')
+                echo "FAIL" > "${PROF_DIR}/${safe_pkg}.status"
+                cp "$svc_log_file" "${PROF_DIR}/${safe_pkg}.log"
+            fi
         fi
     ) &
 
@@ -216,7 +289,7 @@ while IFS='|' read -r svc pkg; do
         wait
         job_count=0
     fi
-done < "$SVC_PKG_FILE"
+done < "$SVC_LIST_FILE"
 wait
 
 # Phase 2: Process results, print logs in order, and record violations

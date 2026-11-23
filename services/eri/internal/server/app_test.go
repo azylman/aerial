@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"net"
 	"net/http"
@@ -15,12 +14,10 @@ import (
 	"testing"
 	"time"
 
-	_ "modernc.org/sqlite"
-
+	"github.com/azylman/aerial/pkg/pgtest"
 	"github.com/azylman/aerial/services/eri/pkg/bootstrap"
 	"github.com/azylman/aerial/services/eri/pkg/config"
 	"github.com/azylman/aerial/services/eri/pkg/db"
-	"github.com/azylman/aerial/services/eri/pkg/db/dbtest"
 )
 
 func WithStore(store db.Store) BrainAppOption {
@@ -41,6 +38,10 @@ func WithOnReload(fn func(source string)) BrainAppOption {
 		o.onReload = fn
 	}
 }
+
+// unopenedDSN is a well-formed Postgres DSN for configs whose store is
+// injected or whose run ends before the database is opened.
+const unopenedDSN = "postgres://eri@unopened.invalid/eri"
 
 func newTestConfig(mutators ...func(*config.ConfigData)) *config.Config {
 	data := config.DefaultConfigData()
@@ -109,21 +110,9 @@ func runBrainAppUntilReady(t *testing.T, cfg *config.Config, opts ...BrainAppOpt
 
 	ctx, cancel := context.WithCancel(context.Background())
 
-	var checkOpts brainAppOptions
-	for _, opt := range opts {
-		if opt != nil {
-			opt(&checkOpts)
-		}
-	}
-	var effectiveOpts []BrainAppOption
-	if checkOpts.store == nil {
-		effectiveOpts = append(effectiveOpts, WithStore(dbtest.NewFakeStore()))
-	}
-	effectiveOpts = append(effectiveOpts, opts...)
-
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- RunBrainApp(ctx, cfg, effectiveOpts...)
+		errCh <- RunBrainApp(ctx, cfg, opts...)
 	}()
 
 	select {
@@ -200,26 +189,26 @@ func TestRunBrainApp_ValidationAndErrors(t *testing.T) {
 			case "nil_cfg":
 				cfg = nil
 			case "canceled":
-				cfg = mkCfg(tmpDir, filepath.Join(tmpDir, "data"), "0", ":memory:")
+				cfg = mkCfg(tmpDir, filepath.Join(tmpDir, "data"), "0", unopenedDSN)
 				cancel()
 			case "canceled_init_err":
 				blockDir := filepath.Join(t.TempDir(), "block")
 				_ = os.WriteFile(blockDir, []byte("file"), 0o644)
-				cfg = mkCfg(blockDir, filepath.Join(tmpDir, "data"), "0", ":memory:")
+				cfg = mkCfg(blockDir, filepath.Join(tmpDir, "data"), "0", unopenedDSN)
 				cancel()
 			case "missing_db":
 				cfg = mkCfg(tmpDir, filepath.Join(tmpDir, "data"), "0", "")
 			case "missing_home":
-				cfg = mkCfg("", filepath.Join(tmpDir, "data"), "0", ":memory:")
+				cfg = mkCfg("", filepath.Join(tmpDir, "data"), "0", unopenedDSN)
 			case "missing_data":
-				cfg = mkCfg(tmpDir, "", "0", ":memory:")
+				cfg = mkCfg(tmpDir, "", "0", unopenedDSN)
 			case "missing_port":
-				cfg = mkCfg(tmpDir, filepath.Join(tmpDir, "data"), "", ":memory:")
+				cfg = mkCfg(tmpDir, filepath.Join(tmpDir, "data"), "", unopenedDSN)
 			case "unsupported_db":
 				cfg = mkCfg(tmpDir, filepath.Join(tmpDir, "data"), "0", "mysql://user:pass@localhost/db")
 			case "invalid_port":
-				cfg = mkCfg(tmpDir, filepath.Join(tmpDir, "data"), "-1", ":memory:")
-				opts = []BrainAppOption{WithStore(dbtest.NewFakeStore())}
+				cfg = mkCfg(tmpDir, filepath.Join(tmpDir, "data"), "-1", unopenedDSN)
+				opts = []BrainAppOption{WithStore(newTestStore(t))}
 			}
 
 			err := RunBrainApp(ctx, cfg, opts...)
@@ -250,11 +239,11 @@ func TestRunBrainApp_ValidationAndErrors(t *testing.T) {
 			t.Fatalf("failed to split host port: %v", err)
 		}
 
-		conflictCfg := mkCfg(tmpDir, filepath.Join(tmpDir, "data"), portStr, ":memory:")
+		conflictCfg := mkCfg(tmpDir, filepath.Join(tmpDir, "data"), portStr, unopenedDSN)
 		ctx, cancel := context.WithTimeout(context.Background(), 1*time.Second)
 		defer cancel()
 
-		err = RunBrainApp(ctx, conflictCfg, WithStore(dbtest.NewFakeStore()))
+		err = RunBrainApp(ctx, conflictCfg, WithStore(newTestStore(t)))
 		if err == nil {
 			t.Fatalf("expected error from port conflict, got nil")
 		}
@@ -273,7 +262,7 @@ func newLifecycleCfg(t *testing.T, mutators ...func(*config.ConfigData)) (string
 		d.SystemPrompt = "test"
 		d.GeminiHomeDir = tmpDir
 		d.DataDir = filepath.Join(tmpDir, "data")
-		d.DatabaseURL = ":memory:"
+		d.DatabaseURL = unopenedDSN
 		for _, m := range mutators {
 			m(d)
 		}
@@ -288,6 +277,7 @@ func TestRunBrainApp_FullLifecycleAndPools(t *testing.T) {
 		reloadReceived := make(chan string, 1)
 
 		_, cancel, wait := runBrainAppUntilReady(t, cfg,
+			WithStore(newTestStore(t)),
 			WithHupChannel(hupChan),
 			WithOnReload(func(src string) {
 				select {
@@ -314,13 +304,9 @@ func TestRunBrainApp_FullLifecycleAndPools(t *testing.T) {
 	})
 
 	t.Run("DefaultStoreSuccess", func(t *testing.T) {
-		oldOpen := openDefaultDB
-		openDefaultDB = func(*config.Config) (*sql.DB, error) {
-			return sql.Open("sqlite", ":memory:")
-		}
-		defer func() { openDefaultDB = oldOpen }()
-
-		_, cfg := newLifecycleCfg(t)
+		// No injected store: RunBrainApp opens the configured Postgres
+		// through bootstrap.InitDefaultStores and db.New.
+		_, cfg := newLifecycleCfg(t, func(d *config.ConfigData) { d.DatabaseURL = pgtest.NewDSN(t) })
 		_, cancel, wait := runBrainAppUntilReady(t, cfg, WithStore(nil))
 		cancel()
 		if err := wait(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -344,7 +330,7 @@ func TestRunBrainApp_RestateIngressEnabled(t *testing.T) {
 	t.Setenv("RESTATE_INGRESS_URL", "http://127.0.0.1:8080")
 
 	_, cfg := newLifecycleCfg(t)
-	_, cancel, wait := runBrainAppUntilReady(t, cfg)
+	_, cancel, wait := runBrainAppUntilReady(t, cfg, WithStore(newTestStore(t)))
 
 	qp := currentFunnelQuotaProvider()
 	if qp == nil {
@@ -363,7 +349,7 @@ func TestRunBrainApp_RestateIngressEnabled(t *testing.T) {
 
 func TestBrainAppOptions_FunctionalOptionMutators(t *testing.T) {
 	var opts brainAppOptions
-	store := dbtest.NewFakeStore()
+	store := newTestStore(t)
 	WithStore(store)(&opts)
 	if opts.store != store {
 		t.Errorf("expected store to be set")

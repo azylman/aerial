@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -93,6 +94,24 @@ func (r *mockRows) Next() bool {
 	return false
 }
 
+func mockChunkBytes(c model.VanadisChunk) ([]byte, []byte) {
+	rawCIChecks := []byte(`{"lint":"passed"}`)
+	if len(c.CIChecks) > 0 {
+		if b, err := json.Marshal(c.CIChecks); err == nil {
+			rawCIChecks = b
+		}
+	}
+	rawRolloutState := []byte(`{"expected_jobs":["eri"]}`)
+	switch c.Title {
+	case "bad-json":
+		return []byte(`{invalid`), []byte(`{invalid`)
+	case "null-json":
+		return []byte(`null`), []byte(`{}`)
+	default:
+		return rawCIChecks, rawRolloutState
+	}
+}
+
 func (r *mockRows) Scan(dest ...any) error {
 	if r.scanErr != nil {
 		return r.scanErr
@@ -106,16 +125,7 @@ func (r *mockRows) Scan(dest ...any) error {
 		if len(dest) == 5 {
 			return scanValues(dest, c.ID, c.BuildID, c.ChunkIndex, c.Effort, true)
 		}
-		rawCIChecks := []byte(`{"lint":"passed"}`)
-		rawRolloutState := []byte(`{"expected_jobs":["eri"]}`)
-		if c.Title == "bad-json" {
-			rawCIChecks = []byte(`{invalid`)
-			rawRolloutState = []byte(`{invalid`)
-		}
-		if c.Title == "null-json" {
-			rawCIChecks = []byte(`null`)
-			rawRolloutState = []byte(`{}`)
-		}
+		rawCIChecks, rawRolloutState := mockChunkBytes(c)
 		return scanValues(dest, c.ID, c.BuildID, c.ChunkIndex, c.Mode, c.Repo, c.Title, c.Instructions, c.TargetFiles, c.TargetSymbols, c.Effort, c.AcceptanceCriteria, c.Status, c.PRNumber, c.StallNudges, c.DependsOn, c.CIFailCount, rawCIChecks, rawRolloutState, c.Banner, sql.NullTime{Time: c.StartedAt, Valid: !c.StartedAt.IsZero()}, sql.NullTime{Time: c.CompletedAt, Valid: !c.CompletedAt.IsZero()}, c.CreatedAt, c.UpdatedAt)
 	}
 	return nil
@@ -565,13 +575,47 @@ func TestGetChunk(t *testing.T) {
 }
 
 type scanChunksCase struct {
-	name       string
-	items      []model.VanadisChunk
-	scanErr    error
-	rowsErr    error
-	wantTotal  int
-	wantEffort string
-	wantChecks bool
+	name          string
+	items         []model.VanadisChunk
+	scanErr       error
+	rowsErr       error
+	wantTotal     int
+	wantEffort    string
+	wantChecks    bool
+	wantHeadSHA   string
+	wantRemedSHA  string
+	wantMergeSHA  string
+	wantCheckKeys []string
+	wantOmitKeys  []string
+}
+
+func assertScannedChunk(t *testing.T, tc scanChunksCase, got model.VanadisChunk, start, complete time.Time) {
+	t.Helper()
+	if got.Effort != tc.wantEffort {
+		t.Errorf("ScanChunks effort = %q, want %q", got.Effort, tc.wantEffort)
+	}
+	if tc.wantChecks && (got.CIChecks == nil || got.RolloutState == nil || !got.StartedAt.Equal(start) || !got.CompletedAt.Equal(complete)) {
+		t.Errorf("ScanChunks decoded fields mismatch: %+v", got)
+	}
+	if tc.wantHeadSHA != "" && got.HeadSHA != tc.wantHeadSHA {
+		t.Errorf("HeadSHA = %q, want %q", got.HeadSHA, tc.wantHeadSHA)
+	}
+	if tc.wantRemedSHA != "" && got.RemediatedSHA != tc.wantRemedSHA {
+		t.Errorf("RemediatedSHA = %q, want %q", got.RemediatedSHA, tc.wantRemedSHA)
+	}
+	if tc.wantMergeSHA != "" && got.MergeSHA != tc.wantMergeSHA {
+		t.Errorf("MergeSHA = %q, want %q", got.MergeSHA, tc.wantMergeSHA)
+	}
+	for _, k := range tc.wantCheckKeys {
+		if _, ok := got.CIChecks[k]; !ok {
+			t.Errorf("expected CIChecks to contain %q: %+v", k, got.CIChecks)
+		}
+	}
+	for _, k := range tc.wantOmitKeys {
+		if _, ok := got.CIChecks[k]; ok {
+			t.Errorf("expected CIChecks to omit %q: %+v", k, got.CIChecks)
+		}
+	}
 }
 
 func TestScanChunks(t *testing.T) {
@@ -586,6 +630,31 @@ func TestScanChunks(t *testing.T) {
 		{name: "rows error propagates", items: []model.VanadisChunk{storetest.Chunk("c-1", "b-1", 0, "T", "I", "", "")}, rowsErr: errors.New("rows down")},
 		{name: "times and checks decode", items: []model.VanadisChunk{timed}, wantTotal: 1, wantEffort: "medium", wantChecks: true},
 		{name: "low effort preserved", items: []model.VanadisChunk{storetest.Chunk("c-2", "b-1", 1, "T2", "I2", "low", "")}, wantTotal: 1, wantEffort: "low"},
+		{
+			name: "metadata extracted and internal keys stripped",
+			items: []model.VanadisChunk{
+				{
+					ID:     "c-ci",
+					Title:  "CI chunk",
+					Effort: "medium",
+					CIChecks: map[string]string{
+						"_head_sha":       "sha-head-123",
+						"_remediated_sha": "sha-rem-456",
+						"_merge_sha":      "sha-merge-789",
+						"_merge_queue":    "enqueued",
+						"_internal_debug": "strip-me",
+						"test":            "passed",
+					},
+				},
+			},
+			wantTotal:     1,
+			wantEffort:    "medium",
+			wantHeadSHA:   "sha-head-123",
+			wantRemedSHA:  "sha-rem-456",
+			wantMergeSHA:  "sha-merge-789",
+			wantCheckKeys: []string{"_merge_queue", "test"},
+			wantOmitKeys:  []string{"_head_sha", "_remediated_sha", "_merge_sha", "_internal_debug"},
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -603,14 +672,8 @@ func TestScanChunks(t *testing.T) {
 			if len(got) != tc.wantTotal {
 				t.Fatalf("ScanChunks total = %d, want %d", len(got), tc.wantTotal)
 			}
-			if tc.wantTotal == 0 {
-				return
-			}
-			if got[0].Effort != tc.wantEffort {
-				t.Errorf("ScanChunks effort = %q, want %q", got[0].Effort, tc.wantEffort)
-			}
-			if tc.wantChecks && (got[0].CIChecks == nil || got[0].RolloutState == nil || !got[0].StartedAt.Equal(start) || !got[0].CompletedAt.Equal(complete)) {
-				t.Errorf("ScanChunks decoded fields mismatch: %+v", got[0])
+			if tc.wantTotal > 0 {
+				assertScannedChunk(t, tc, got[0], start, complete)
 			}
 		})
 	}

@@ -292,6 +292,7 @@ func (p *InterchangeablePool) Model() string {
 	return p.underlying.Model()
 }
 
+// Underlying returns the wrapped UnifiedProcessPool, or nil.
 func (p *InterchangeablePool) Underlying() *UnifiedProcessPool {
 	if p == nil {
 		return nil
@@ -333,13 +334,6 @@ func (p *InterchangeablePool) MarkDirty() {
 	if p != nil && p.underlying != nil {
 		p.underlying.MarkDirty()
 	}
-}
-
-func (p *InterchangeablePool) Get(targetKey string) (*StreamingDaemon, bool) {
-	if p == nil || p.underlying == nil {
-		return nil, false
-	}
-	return p.underlying.Get(targetKey)
 }
 
 func (p *InterchangeablePool) returnWorker(workerKey string) {

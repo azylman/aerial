@@ -125,12 +125,20 @@ func assertHandshakeReplySession(t *testing.T, cfg DaemonConfig, mockReplies []s
 
 	switch {
 	case len(mockReplies) > 0 && mockReplies[0] == "CLOSE":
-		go func() { _, _ = io.Copy(io.Discard, inR) }()
+		go func() {
+			if _, err := io.Copy(io.Discard, inR); err != nil {
+				return
+			}
+		}()
 		closeQuietly(outW)
 	case mockReplies != nil:
 		go runMockCodexHandshakeServer(inR, outW, mockReplies, nil)
 	default:
-		go func() { _, _ = io.Copy(io.Discard, inR) }()
+		go func() {
+			if _, err := io.Copy(io.Discard, inR); err != nil {
+				return
+			}
+		}()
 	}
 
 	handle := &MockProcessHandle{pid: 888}
@@ -476,7 +484,7 @@ func TestCodexProtocol_DispatchStreamEvents(t *testing.T) {
 		claudeToolIDs: make(map[string]int),
 		stderrTail:    newTailBuffer(4096),
 	}
-	daemon.SetSessionID("root-thread-1")
+	daemon.sessionID = "root-thread-1"
 
 	daemon.dispatchCodexJSONRPCLine("")
 	daemon.dispatchCodexJSONRPCLine("not-json")
@@ -665,7 +673,7 @@ func TestCodexProtocol_CommentaryBufferingTurnSink(t *testing.T) {
 				claudeToolIDs: make(map[string]int),
 				stderrTail:    newTailBuffer(4096),
 			}
-			daemon.SetSessionID("root-thread-1")
+			daemon.sessionID = "root-thread-1"
 
 			var hookDeltas int
 			innerBuf := NewBufferingTurnSink(BufferingTurnSinkConfig{
@@ -716,7 +724,7 @@ func TestCodexProtocol_DispatchStreamToolEvents(t *testing.T) {
 		},
 		claudeToolIDs: make(map[string]int),
 	}
-	daemon.SetSessionID("root-thread-1")
+	daemon.sessionID = "root-thread-1"
 
 	sink := newMockTurnSink()
 	enqueueInflightTurn(daemon, "turn-tools", sink)
@@ -829,8 +837,8 @@ func TestCodexProtocol_DispatchStreamToolVarieties(t *testing.T) {
 func TestCodexProtocol_TurnOutcomeAndErrors(t *testing.T) {
 	t.Parallel()
 
-	if status, _ := parseCodexTurnOutcome(nil); status != statusUpperDone {
-		t.Errorf("expected %s, got %s", statusUpperDone, status)
+	if status, errStr := parseCodexTurnOutcome(nil); status != statusUpperDone || errStr != "" {
+		t.Errorf("expected %s and empty error, got %s, %s", statusUpperDone, status, errStr)
 	}
 	if status, errStr := parseCodexTurnOutcome(map[string]any{"status": "custom_fail"}); status != statusUpperDone || errStr != "" {
 		t.Errorf("expected non-error status to remain done, got %s, %s", status, errStr)

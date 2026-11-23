@@ -2,7 +2,6 @@ package delivery
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -12,7 +11,6 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/azylman/aerial/services/prospera/internal/audio"
 	"github.com/azylman/aerial/services/prospera/internal/config"
 	"github.com/azylman/aerial/services/prospera/internal/fakes"
 	"github.com/azylman/aerial/services/prospera/internal/model"
@@ -48,7 +46,7 @@ func TestFlushLiveTranscript(t *testing.T) {
 			wantAdvance: true,
 		},
 		{
-			name: "empty turns with advance error still returns nil",
+			name: "empty turns with advance error returns error",
 			call: &model.VoiceCall{
 				CallID:               "call-10-empty-err",
 				LiveTranscriptCursor: 0,
@@ -58,10 +56,11 @@ func TestFlushLiveTranscript(t *testing.T) {
 			},
 			discordResp: http.StatusOK,
 			advanceErr:  errors.New("advance failed"),
+			wantErr:     true,
 			wantAdvance: false,
 		},
 		{
-			name: "posted turns with advance error still returns nil",
+			name: "posted turns with advance error returns error",
 			call: &model.VoiceCall{
 				CallID:               "call-10-posted-err",
 				LiveTranscriptCursor: 0,
@@ -71,6 +70,7 @@ func TestFlushLiveTranscript(t *testing.T) {
 			},
 			discordResp: http.StatusOK,
 			advanceErr:  errors.New("advance failed"),
+			wantErr:     true,
 			wantAdvance: false,
 		},
 		{
@@ -132,213 +132,6 @@ func TestFlushLiveTranscript(t *testing.T) {
 				t.Fatalf("cursor advanced = %v, want = %v", advanced, tc.wantAdvance)
 			}
 		})
-	}
-}
-
-type deliverCallReportTestCase struct {
-	name            string
-	initialStatus   string
-	direction       string
-	fromNumber      string
-	toNumber        string
-	geminiCode      int
-	geminiResp      string
-	discordCode     int
-	recordingWAV    []byte
-	failTransitions []string
-	wantDelivered   bool
-	wantFailed      bool
-	wantErr         bool
-	wantErrContains string
-	wantWith        string
-	wantFilename    string
-}
-
-func TestDeliverCallReport(t *testing.T) {
-	t.Parallel()
-
-	tests := []deliverCallReportTestCase{
-		{
-			name:          "successful report with gemini tools empty",
-			initialStatus: "pending",
-			direction:     "outbound",
-			fromNumber:    "+15105550100",
-			toNumber:      "+15105550199",
-			geminiCode:    http.StatusOK,
-			geminiResp:    `{"candidates":[{"content":{"parts":[{"text":"Call resolved successfully."}]}}]}`,
-			recordingWAV:  audio.EncodePCM16WAV([]int16{100, -100, 200}, 8000),
-			wantDelivered: true,
-			wantWith:      "+15105550199",
-			wantFilename:  "call-rep-1.wav",
-		},
-		{
-			name:          "already processing skipped",
-			initialStatus: "processing",
-			wantDelivered: false,
-		},
-		{
-			name:          "retry after failed status succeeds",
-			initialStatus: "failed",
-			direction:     "outbound",
-			fromNumber:    "+15105550100",
-			toNumber:      "+15105550199",
-			geminiCode:    http.StatusOK,
-			geminiResp:    `{"candidates":[{"content":{"parts":[{"text":"Retry call resolved."}]}}]}`,
-			wantDelivered: true,
-			wantWith:      "+15105550199",
-		},
-		{
-			name:          "inbound call formats with caller from number",
-			initialStatus: "pending",
-			direction:     "inbound",
-			fromNumber:    "+15105550222",
-			toNumber:      "+15105550111",
-			geminiCode:    http.StatusOK,
-			geminiResp:    `{"candidates":[{"content":{"parts":[{"text":"Inbound call resolved."}]}}]}`,
-			wantDelivered: true,
-			wantWith:      "+15105550222",
-		},
-		{
-			name:          "discord post failure transitions to failed",
-			initialStatus: "pending",
-			direction:     "outbound",
-			fromNumber:    "+15105550100",
-			toNumber:      "+15105550199",
-			geminiCode:    http.StatusOK,
-			geminiResp:    `{"candidates":[{"content":{"parts":[{"text":"Call resolved."}]}}]}`,
-			discordCode:   http.StatusInternalServerError,
-			wantDelivered: false,
-			wantFailed:    true,
-			wantErr:       true,
-		},
-		{
-			name:            "discord failure with failed-transition error still returns error",
-			initialStatus:   "pending",
-			direction:       "outbound",
-			fromNumber:      "+15105550100",
-			toNumber:        "+15105550199",
-			geminiCode:      http.StatusOK,
-			geminiResp:      `{"candidates":[{"content":{"parts":[{"text":"Call resolved."}]}}]}`,
-			discordCode:     http.StatusInternalServerError,
-			failTransitions: []string{"failed"},
-			wantDelivered:   false,
-			wantErr:         true,
-			wantErrContains: "discord returned status",
-		},
-		{
-			name:            "delivered transition error still succeeds",
-			initialStatus:   "pending",
-			direction:       "outbound",
-			fromNumber:      "+15105550100",
-			toNumber:        "+15105550199",
-			geminiCode:      http.StatusOK,
-			geminiResp:      `{"candidates":[{"content":{"parts":[{"text":"Call resolved."}]}}]}`,
-			failTransitions: []string{"delivered"},
-			wantDelivered:   false,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			runDeliverCallReportCase(t, tc)
-		})
-	}
-}
-
-func runDeliverCallReportCase(t *testing.T, tc deliverCallReportTestCase) {
-	t.Helper()
-
-	store := fakes.NewFakeStore()
-	fakes.SeedFailTransitions(store, tc.failTransitions)
-	call := model.VoiceCall{
-		CallID:       "call-rep-1",
-		ReportStatus: tc.initialStatus,
-		Direction:    tc.direction,
-		FromNumber:   tc.fromNumber,
-		ToNumber:     tc.toNumber,
-		Transcript: []model.TranscriptTurn{
-			{Role: "user", Text: "Book table for 2"},
-			{Role: "model", Text: "Table booked for 7pm"},
-		},
-	}
-	_ = store.CreateOutboundCall(context.Background(), call, 5)
-
-	var deliveredDiscordMsg string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.Contains(r.URL.Path, "generateContent") {
-			if strings.Contains(r.URL.Path, "live") {
-				t.Errorf("REST generateContent should not use live websocket model in path: %s", r.URL.Path)
-			}
-			var reqBody map[string]any
-			_ = json.NewDecoder(r.Body).Decode(&reqBody)
-			tools, hasTools := reqBody["tools"].([]any)
-			if !hasTools || len(tools) != 0 {
-				t.Errorf("expected empty tools array in gemini request, got %v", reqBody["tools"])
-			}
-			w.WriteHeader(tc.geminiCode)
-			_, _ = w.Write([]byte(tc.geminiResp))
-			return
-		}
-		if tc.discordCode != 0 {
-			w.WriteHeader(tc.discordCode)
-			return
-		}
-		bodyBytes, _ := io.ReadAll(r.Body)
-		deliveredDiscordMsg = string(bodyBytes)
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer srv.Close()
-
-	cfg := &config.Config{
-		BrainURL:              srv.URL,
-		GeminiAPIKey:          "test-key",
-		GeminiFallbackModel:   "gemini-3.1-flash-live-preview",
-		DefaultDiscordChannel: "prospera",
-	}
-
-	reporter := NewReporter(fakes.StaticConfig{Cfg: cfg},
-		store,
-		&fakes.FakeTwilio{},
-		WithReporterHTTPClient(srv.Client()),
-		WithReporterGeminiBaseURL(srv.URL),
-		WithReporterRecordingProvider(func(id string) []byte {
-			return tc.recordingWAV
-		}),
-	)
-	err := reporter.DeliverCallReport(context.Background(), call.CallID)
-	if tc.wantErr {
-		if err == nil {
-			t.Fatal("expected error, got nil")
-		}
-		if tc.wantErrContains != "" && !strings.Contains(err.Error(), tc.wantErrContains) {
-			t.Fatalf("DeliverCallReport() error = %v, want substring %q", err, tc.wantErrContains)
-		}
-	} else if err != nil {
-		t.Fatalf("DeliverCallReport() error: %v", err)
-	}
-
-	assertDeliverCallReportResult(t, tc, store, call, deliveredDiscordMsg)
-}
-
-func assertDeliverCallReportResult(t *testing.T, tc deliverCallReportTestCase, store *fakes.FakeStore, call model.VoiceCall, deliveredDiscordMsg string) {
-	t.Helper()
-	updated, _ := store.GetCall(context.Background(), call.CallID)
-	isDelivered := updated.ReportStatus == "delivered"
-	if isDelivered != tc.wantDelivered {
-		t.Fatalf("report status = %s, want delivered=%v", updated.ReportStatus, tc.wantDelivered)
-	}
-	if tc.wantFailed && updated.ReportStatus != "failed" {
-		t.Fatalf("report status = %s, want failed", updated.ReportStatus)
-	}
-	if tc.wantDelivered && updated.LiveTranscriptCursor != len(call.Transcript) {
-		t.Fatalf("LiveTranscriptCursor = %d, want %d", updated.LiveTranscriptCursor, len(call.Transcript))
-	}
-	if tc.wantWith != "" && !strings.Contains(deliveredDiscordMsg, tc.wantWith) {
-		t.Fatalf("delivered discord msg %q does not contain wantWith %q", deliveredDiscordMsg, tc.wantWith)
-	}
-	if tc.wantFilename != "" && !strings.Contains(deliveredDiscordMsg, tc.wantFilename) {
-		t.Fatalf("delivered discord msg %q does not contain wantFilename %q", deliveredDiscordMsg, tc.wantFilename)
 	}
 }
 
@@ -612,49 +405,6 @@ func TestDelivery_ErrorBranches(t *testing.T) {
 		}
 	})
 
-	t.Run("deliver call report error cases", func(t *testing.T) {
-		t.Parallel()
-		nilStoreReporter := NewReporter(fakes.StaticConfig{Cfg: &config.Config{BrainURL: "http://brain"}}, nil, &fakes.FakeTwilio{})
-		if err := nilStoreReporter.DeliverCallReport(context.Background(), "call-1"); err == nil {
-			t.Fatal("expected error with nil store")
-		}
-
-		store := fakes.NewFakeStore()
-		reporter := NewReporter(fakes.StaticConfig{Cfg: &config.Config{BrainURL: "http://brain"}}, store, &fakes.FakeTwilio{})
-		if err := reporter.DeliverCallReport(context.Background(), "call-nonexistent"); err == nil {
-			t.Fatal("expected error with nonexistent call")
-		}
-
-		// Post call report with empty gemini key triggers fallback summary
-		_ = store.CreateOutboundCall(context.Background(), model.VoiceCall{
-			CallID:       "call-fallback-sum",
-			ReportStatus: "pending",
-		}, 5)
-		discordSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(http.StatusOK)
-		}))
-		defer discordSrv.Close()
-
-		fallbackReporter := NewReporter(fakes.StaticConfig{Cfg: &config.Config{
-			BrainURL:              discordSrv.URL,
-			DefaultDiscordChannel: "prospera",
-		}}, store, &fakes.FakeTwilio{}, WithReporterHTTPClient(discordSrv.Client()))
-		if err := fallbackReporter.DeliverCallReport(context.Background(), "call-fallback-sum"); err != nil {
-			t.Fatalf("unexpected error in fallback report: %v", err)
-		}
-
-		storeTransErr := fakes.NewFakeStore()
-		_ = storeTransErr.CreateOutboundCall(context.Background(), model.VoiceCall{
-			CallID:       "call-trans-err",
-			ReportStatus: "pending",
-		}, 5)
-		storeTransErr.TransErr = errors.New("transition failed")
-		transReporter := NewReporter(fakes.StaticConfig{Cfg: &config.Config{BrainURL: "http://brain"}}, storeTransErr, &fakes.FakeTwilio{})
-		if err := transReporter.DeliverCallReport(context.Background(), "call-trans-err"); err == nil {
-			t.Fatal("expected error on transition failure")
-		}
-	})
-
 	t.Run("process voicemail recording error cases", func(t *testing.T) {
 		t.Parallel()
 		nilStoreReporter := NewReporter(fakes.StaticConfig{Cfg: &config.Config{BrainURL: "http://brain"}}, nil, &fakes.FakeTwilio{})
@@ -834,9 +584,6 @@ func TestDelivery_WebhookAndStoreErrorPropagation(t *testing.T) {
 	storeErr.OpErr = errors.New("db error")
 	rStoreErr := NewReporter(fakes.StaticConfig{Cfg: &config.Config{BrainURL: "http://brain.local"}}, storeErr, nil)
 	if err := rStoreErr.FlushLiveTranscript(context.Background(), "c1"); err == nil {
-		t.Fatal("expected get call error")
-	}
-	if err := rStoreErr.DeliverCallReport(context.Background(), "c1"); err == nil {
 		t.Fatal("expected get call error")
 	}
 	if err := rStoreErr.ProcessVoicemailRecording(context.Background(), "c1", "http://rec"); err == nil {

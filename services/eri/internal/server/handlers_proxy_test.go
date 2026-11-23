@@ -10,7 +10,6 @@ import (
 	"testing"
 
 	"github.com/azylman/aerial/services/eri/pkg/config"
-	"github.com/azylman/aerial/services/eri/pkg/db/dbtest"
 	"github.com/azylman/aerial/services/eri/pkg/queue"
 )
 
@@ -108,8 +107,8 @@ func executeProxyTest(t *testing.T, tc proxyTestCase) {
 		}
 	}
 
-	store := dbtest.NewFakeStore()
-	mux := SetupBrainMuxWithEmbedder(store, store, pool, nil)
+	store := newTestStore(t)
+	mux := SetupBrainMux(store, pool)
 
 	reqURL := tc.reqPath
 	if tc.reqQuery != "" {
@@ -236,7 +235,7 @@ func proxyFallbackAndErrorCases() []proxyTestCase {
 			reqQuery:         "q=localtest",
 			configuredURL:    "",
 			expectProxied:    false,
-			expectedStatus:   http.StatusOK,
+			expectedStatus:   http.StatusServiceUnavailable,
 			expectedUpstream: "",
 			expectedQuery:    "",
 		},
@@ -247,7 +246,7 @@ func proxyFallbackAndErrorCases() []proxyTestCase {
 			reqQuery:         "",
 			configuredURL:    "",
 			expectProxied:    false,
-			expectedStatus:   http.StatusOK,
+			expectedStatus:   http.StatusServiceUnavailable,
 			expectedUpstream: "",
 			expectedQuery:    "",
 		},
@@ -258,7 +257,7 @@ func proxyFallbackAndErrorCases() []proxyTestCase {
 			reqQuery:         "session=s1&step=0",
 			configuredURL:    "",
 			expectProxied:    false,
-			expectedStatus:   http.StatusOK,
+			expectedStatus:   http.StatusServiceUnavailable,
 			expectedUpstream: "",
 			expectedQuery:    "",
 		},

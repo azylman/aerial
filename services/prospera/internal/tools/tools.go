@@ -298,9 +298,11 @@ func (h *ToolHandler) EndCall(ctx context.Context, args EndCallArgs) (EndCallOut
 		slog.ErrorContext(ctx, "prospera: update call state", "error", updateErr)
 	}
 
+	// The Twilio status webhook for the hangup triggers the same idempotent
+	// report, so a failed enqueue here is logged rather than surfaced.
 	if h.reporter != nil {
-		if repErr := h.reporter.DeliverCallReport(ctx, callID); repErr != nil {
-			slog.ErrorContext(ctx, "prospera: deliver call report", "error", repErr)
+		if repErr := h.reporter.TriggerReport(ctx, callID); repErr != nil {
+			slog.ErrorContext(ctx, "prospera: trigger call report", "call_id", callID, "error", repErr)
 		}
 	}
 

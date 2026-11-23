@@ -258,7 +258,7 @@ func RunApp(ctx context.Context, cfgSrc *httpkit.Reloadable[config.Config]) erro
 	defer httpkit.CloseWarn(consultClient, "prospera consult client on shutdown")
 	sessionMgr := mediastream.NewCallSessionManager(cfgSrc, st, twilioClient, consultClient, tokenMgr,
 		mediastream.WithSessionFactory(newProsperaMediaSession))
-	reporter := delivery.NewReporter(cfgSrc, st, twilioClient, delivery.WithReporterRecordingProvider(sessionMgr.GetRecordingWAV))
+	reporter := delivery.NewReporter(cfgSrc, st, twilioClient, delivery.WithReporterRecordingProvider(sessionMgr.GetRecordingWAV), delivery.WithReporterRecordingDeleter(sessionMgr.DeleteRecording))
 
 	server := NewServer(cfgSrc, st, twilioClient, tokenMgr, sessionMgr, reporter)
 
