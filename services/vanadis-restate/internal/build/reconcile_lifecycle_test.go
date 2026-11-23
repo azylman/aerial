@@ -659,19 +659,6 @@ func TestBuildObject_GenerationRecoveryOrdering(t *testing.T) {
 	}
 }
 
-type retryingObjectRuntime struct {
-	*fakeObjectRuntime
-}
-
-func (r *retryingObjectRuntime) RunReconcileStep(name string, fn func(ctx context.Context) (reconcileStepOutput, error)) (reconcileStepOutput, error) {
-	r.stepsRun = append(r.stepsRun, name)
-	out, err := fn(context.Background())
-	if err != nil {
-		return fn(context.Background())
-	}
-	return out, nil
-}
-
 func TestBuildObject_NotifyTransitionError(t *testing.T) {
 	t.Parallel()
 	quiet := model.VanadisBuild{ID: "b-quiet", Quiet: true}
@@ -739,7 +726,7 @@ func TestRunTransitionStep_InStepRetry(t *testing.T) {
 	active := model.VanadisBuild{ID: "b-active", Title: "Active Build", Status: "running"}
 	st := lifecycleStore(t, active, "", model.VanadisChunk{ID: "c1", Mode: "action", Status: "pending", Title: "Chunk 1"})
 	bo := NewBuildObject("", nil).WithAuthority(st, executor.NewExecutor(t.TempDir(), eri, nil, "", "example-owner", nil))
-	rt := &retryingObjectRuntime{fakeObjectRuntime: newFakeObjectRuntime("b-active")}
+	rt := &fakeObjectRuntime{key: "b-active", retryFailedSteps: true}
 	before := restatetest.MetricValue(t, "vanadis_restate_reconcile_errors_total", "reconcile-retry-test")
 	res, err := bo.executeObjectTransition(rt, "reconcile-retry-test", nil)
 	require.NoError(t, err)

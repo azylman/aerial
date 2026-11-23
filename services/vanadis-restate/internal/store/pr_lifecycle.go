@@ -344,7 +344,7 @@ func (s *Store) UpdatePRLifecycleStatus(ctx context.Context, chunkID, status str
 	if strings.TrimSpace(chunkID) == "" {
 		return errors.New("chunk_id cannot be empty")
 	}
-	tag, err := s.db.Exec(ctx, `WITH reopened_build AS (UPDATE vanadis_builds AS rb SET status = 'running', updated_at = CURRENT_TIMESTAMP FROM vanadis_chunks AS target WHERE target.id = $2 AND rb.id = target.build_id AND rb.status = 'failed' AND target.mode = 'pr' AND COALESCE(target.pr_number, 0) > 0 AND target.status = 'failed' AND $1 IN ('merged', 'deploying') AND NOT EXISTS (SELECT 1 FROM vanadis_chunks AS s WHERE s.build_id = target.build_id AND s.id != target.id AND s.status IN ('failed', 'cancelled'))) UPDATE vanadis_chunks SET status = $1, banner = CASE WHEN status = 'failed' THEN '' ELSE banner END, completed_at = CASE WHEN $1 = 'merged' THEN COALESCE(completed_at, CURRENT_TIMESTAMP) WHEN $1 = 'deploying' THEN completed_at ELSE NULL END, updated_at = CURRENT_TIMESTAMP WHERE id = $2 AND status NOT IN ('completed', 'failed', 'cancelled') OR (id = $2 AND $1 IN ('merged', 'deploying') AND mode = 'pr' AND COALESCE(pr_number, 0) > 0 AND status = 'failed');`, status, strings.TrimSpace(chunkID))
+	tag, err := s.db.Exec(ctx, `WITH reopened_build AS (UPDATE vanadis_builds AS rb SET status = 'running', updated_at = CURRENT_TIMESTAMP FROM vanadis_chunks AS target WHERE target.id = $2 AND rb.id = target.build_id AND rb.status = 'failed' AND target.mode = 'pr' AND COALESCE(target.pr_number, 0) > 0 AND target.status = 'failed' AND $1 IN ('merged', 'deploying') AND NOT EXISTS (SELECT 1 FROM vanadis_chunks AS s WHERE s.build_id = target.build_id AND s.id != target.id AND s.status IN ('failed', 'cancelled'))) UPDATE vanadis_chunks SET status = $1, banner = CASE WHEN status IN ('failed', 'conflict', 'ci_failed') OR $1 IN ('merged', 'synced', 'deploying', 'deployed', 'pr_opened') THEN '' ELSE banner END, completed_at = CASE WHEN $1 = 'merged' THEN COALESCE(completed_at, CURRENT_TIMESTAMP) WHEN $1 = 'deploying' THEN completed_at ELSE NULL END, updated_at = CURRENT_TIMESTAMP WHERE id = $2 AND status NOT IN ('completed', 'failed', 'cancelled') OR (id = $2 AND $1 IN ('merged', 'deploying') AND mode = 'pr' AND COALESCE(pr_number, 0) > 0 AND status = 'failed');`, status, strings.TrimSpace(chunkID))
 	if err != nil {
 		return fmt.Errorf("update pr lifecycle status: %w", err)
 	}
@@ -404,14 +404,14 @@ SET ci_checks = jsonb_set(
         true
     ),
     status = CASE
-        WHEN c.status IN ('ci_failed', 'failed') AND COALESCE(c.ci_checks->>'_merge_sha', '') = '' AND $2 = 'passed' AND NOT EXISTS (
+        WHEN c.status IN ('ci_failed', 'conflict', 'failed') AND COALESCE(c.ci_checks->>'_merge_sha', '') = '' AND $2 = 'passed' AND NOT EXISTS (
             SELECT 1 FROM jsonb_each_text(jsonb_set(COALESCE(c.ci_checks, '{}'::jsonb), ARRAY[$1], to_jsonb($2::text), true))
             WHERE key NOT LIKE '\_%' AND value = 'failed'
         ) THEN 'pr_opened'
         ELSE c.status
     END,
     banner = CASE
-        WHEN c.status IN ('ci_failed', 'failed') AND COALESCE(c.ci_checks->>'_merge_sha', '') = '' AND $2 = 'passed' AND NOT EXISTS (
+        WHEN c.status IN ('ci_failed', 'conflict', 'failed') AND COALESCE(c.ci_checks->>'_merge_sha', '') = '' AND $2 = 'passed' AND NOT EXISTS (
             SELECT 1 FROM jsonb_each_text(jsonb_set(COALESCE(c.ci_checks, '{}'::jsonb), ARRAY[$1], to_jsonb($2::text), true))
             WHERE key NOT LIKE '\_%' AND value = 'failed'
         ) THEN ''
