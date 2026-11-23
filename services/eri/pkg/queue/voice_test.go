@@ -911,9 +911,6 @@ func TestSummarizeAndHistoryHelpers(t *testing.T) {
 	_, _ = teFail.deliverSuccessAndFinalize(&runner.AgyResponse{Response: "   "}, runner.TokenUsage{}, "m", 1, 1)
 	teFail.deliverDiscordSuccess("hello", nil)
 	_ = teFail.createOneShotSchedule(oneShotScheduleRequest{ID: "os-bad", ThreadID: "t-fail", Prompt: "p", RunAt: now})
-	drainState := &threadWorkerState{ch: make(chan queueItem, 2)}
-	drainState.ch <- queueItem{dispatch: &db.Dispatch{ID: "d-held"}}
-	_, _ = drainBurstMessages(drainState, db.Message{ID: "m-init"})
 }
 
 func TestWorkerPool_RunnerFallbackAdaptersAndLifecycle(t *testing.T) {
@@ -990,19 +987,6 @@ func TestWorkerPool_RunnerFallbackAdaptersAndLifecycle(t *testing.T) {
 	if unwrapUnifiedPool(nil) != nil || unwrapUnifiedPool(&testRunnerAgentPool{}) != nil {
 		t.Errorf("expected nil from unwrapUnifiedPool")
 	}
-
-	p := New(nil, WorkerPoolConfig{Store: fake})
-	p.EnqueueBurst()
-	p.processBurst(nil)
-	p.processBurst([]db.Message{})
-	p.cancel()
-	stF := &threadWorkerState{ch: make(chan queueItem, 1)}
-	msg0 := db.Message{ID: "m0"}
-	stF.ch <- queueItem{msg: &msg0}
-	p.threadChs["t-full"] = stF
-	p.EnqueueBurst(db.Message{ID: "m-blocked", ThreadID: "t-full"})
-	p.Stop()
-	p.EnqueueBurst(db.Message{ID: "m-after-stop"})
 }
 
 func TestStatusUpdater_GuardrailsAndRESTTransport(t *testing.T) {
@@ -1238,20 +1222,6 @@ func TestWorkerPool_ProcessBurstEdgeCases(t *testing.T) {
 				ids[i] = m.ID
 			}
 			_ = runLiveBurst(context.Background(), pool, tc.msg.ThreadID, "turn-1", ids...)
-			assertBurstEdgeCase(t, tc, store)
-		})
-	}
-}
-
-// TestWorkerPool_ProcessBurstEdgeCases_LegacyQueue runs burstEdgeCases through the legacy
-// processBurst path; it exists only while that path does (c06b deletes both).
-func TestWorkerPool_ProcessBurstEdgeCases_LegacyQueue(t *testing.T) {
-	t.Parallel()
-	for _, tc := range burstEdgeCases() {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			pool, store, burst := setupBurstEdgeCase(t, tc)
-			pool.processBurst(burst)
 			assertBurstEdgeCase(t, tc, store)
 		})
 	}

@@ -140,21 +140,22 @@ func init() {}
 `
 
 type testRunCase struct {
-	name                  string
-	files                 map[string]string
-	baselineJSON          string
-	configJSON            string
-	readOnlyBase          bool
-	customArgs            []string
-	rawArgs               []string // replaces the generated -root/-baseline prefix and targets
-	targetArgs            []string
-	relTargets            []string
-	wantBaselineFiles     map[string]int
-	wantBaselineRootFiles map[string]int
-	wantFileContains      map[string]string
-	wantCode              int
-	wantOut               string
-	wantErr               string
+	name                     string
+	files                    map[string]string
+	baselineJSON             string
+	configJSON               string
+	readOnlyBase             bool
+	customArgs               []string
+	rawArgs                  []string // replaces the generated -root/-baseline prefix and targets
+	targetArgs               []string
+	relTargets               []string
+	wantBaselineFiles        map[string]int
+	wantBaselineBlankAssigns map[string]int
+	wantBaselineRootFiles    map[string]int
+	wantFileContains         map[string]string
+	wantCode                 int
+	wantOut                  string
+	wantErr                  string
 }
 
 func TestRun(t *testing.T) {
@@ -174,12 +175,14 @@ func testRunCases() []testRunCase {
 	targets := testRunTargetCases()
 	roots := testRunRootFileCases()
 	configs := testRunConfigCases()
-	all := make([]testRunCase, 0, len(base)+len(clones)+len(targets)+len(roots)+len(configs))
+	blank := testRunBlankDiscardCases()
+	all := make([]testRunCase, 0, len(base)+len(clones)+len(targets)+len(roots)+len(configs)+len(blank))
 	all = append(all, base...)
 	all = append(all, clones...)
 	all = append(all, targets...)
 	all = append(all, roots...)
 	all = append(all, configs...)
+	all = append(all, blank...)
 	return all
 }
 
@@ -602,6 +605,7 @@ func runTestRunCase(t *testing.T, tc testRunCase) {
 		t.Errorf("stderr %q does not contain %q", stderr.String(), tc.wantErr)
 	}
 	verifyBaselineFiles(t, basePath, tc.wantBaselineFiles)
+	verifyBaselineBlankAssigns(t, basePath, tc.wantBaselineBlankAssigns)
 	verifyBaselineRootFiles(t, basePath, tc.wantBaselineRootFiles)
 	verifyFileContains(t, dir, tc.wantFileContains)
 }
@@ -661,6 +665,22 @@ func verifyBaselineFiles(t *testing.T, basePath string, wantBaselineFiles map[st
 	for k, wantLines := range wantBaselineFiles {
 		if gotLines := base.Files[k].Lines; gotLines != wantLines {
 			t.Errorf("baseline file %q lines = %d, want %d", k, gotLines, wantLines)
+		}
+	}
+}
+
+func verifyBaselineBlankAssigns(t *testing.T, basePath string, wantBaselineBlankAssigns map[string]int) {
+	t.Helper()
+	if wantBaselineBlankAssigns == nil {
+		return
+	}
+	base, err := loadBaseline(basePath)
+	if err != nil {
+		t.Fatalf("load written baseline: %v", err)
+	}
+	for k, wantBlank := range wantBaselineBlankAssigns {
+		if gotBlank := base.Files[k].BlankAssigns; gotBlank != wantBlank {
+			t.Errorf("baseline file %q blank_assigns = %d, want %d", k, gotBlank, wantBlank)
 		}
 	}
 }
@@ -1276,4 +1296,152 @@ func TestEditSimilarity(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestIsCleanupCall(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		src  string
+		want bool
+	}{
+		{name: "selector Cleanup", src: "package p\nfunc f(t T) { t.Cleanup(nil) }\ntype T struct{}\nfunc (T) Cleanup(any) {}", want: true},
+		{name: "selector Other", src: "package p\nfunc f(t T) { t.Other(nil) }\ntype T struct{}\nfunc (T) Other(any) {}", want: false},
+		{name: "ident call", src: "package p\nfunc f() { Cleanup() }\nfunc Cleanup() {}", want: false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			call := findFirstCallExpr(t, tc.src)
+			if got := isCleanupCall(call); got != tc.want {
+				t.Errorf("isCleanupCall() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestIsNonExemptBlankCall(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		src  string
+		want bool
+	}{
+		{name: "non-exempt ident call", src: "package p\nfunc f() { _ = fn() }\nfunc fn() error { return nil }", want: true},
+		{name: "non-exempt selector call", src: "package p\nfunc f(s S) { _ = s.Do() }\ntype S struct{}\nfunc (S) Do() error { return nil }", want: true},
+		{name: "exempt close call", src: "package p\nfunc f(s S) { _ = s.Close() }\ntype S struct{}\nfunc (S) Close() error { return nil }", want: false},
+		{name: "exempt encode call", src: "package p\nfunc f(s S) { _ = s.Encode(1) }\ntype S struct{}\nfunc (S) Encode(any) error { return nil }", want: false},
+		{name: "exempt write call", src: "package p\nfunc f(s S) { _ = s.Write(nil) }\ntype S struct{}\nfunc (S) Write([]byte) (int, error) { return 0, nil }", want: false},
+		{name: "exempt write header call", src: "package p\nfunc f(s S) { _ = s.WriteHeader(200) }\ntype S struct{}\nfunc (S) WriteHeader(int) error { return nil }", want: false},
+		{name: "exempt write string call", src: "package p\nfunc f(s S) { _ = s.WriteString(\"a\") }\ntype S struct{}\nfunc (S) WriteString(string) (int, error) { return 0, nil }", want: false},
+		{name: "exempt flush call", src: "package p\nfunc f(s S) { _ = s.Flush() }\ntype S struct{}\nfunc (S) Flush() error { return nil }", want: false},
+		{name: "exempt remove call", src: "package p\nfunc f(s S) { _ = s.Remove(\"a\") }\ntype S struct{}\nfunc (S) Remove(string) error { return nil }", want: false},
+		{name: "exempt remove all call", src: "package p\nfunc f(s S) { _ = s.RemoveAll(\"a\") }\ntype S struct{}\nfunc (S) RemoveAll(string) error { return nil }", want: false},
+		{name: "exempt setenv call", src: "package p\nfunc f(s S) { _ = s.Setenv(\"a\", \"b\") }\ntype S struct{}\nfunc (S) Setenv(string, string) error { return nil }", want: false},
+		{name: "exempt unsetenv call", src: "package p\nfunc f(s S) { _ = s.Unsetenv(\"a\") }\ntype S struct{}\nfunc (S) Unsetenv(string) error { return nil }", want: false},
+		{name: "exempt chdir call", src: "package p\nfunc f(s S) { _ = s.Chdir(\"a\") }\ntype S struct{}\nfunc (S) Chdir(string) error { return nil }", want: false},
+		{name: "exempt unsubscribe call", src: "package p\nfunc f(s S) { _ = s.Unsubscribe() }\ntype S struct{}\nfunc (S) Unsubscribe() error { return nil }", want: false},
+		{name: "exempt stop call", src: "package p\nfunc f(s S) { _ = s.Stop() }\ntype S struct{}\nfunc (S) Stop() bool { return true }", want: false},
+		{name: "exempt cancel call", src: "package p\nfunc f(s S) { _ = s.Cancel() }\ntype S struct{}\nfunc (S) Cancel() error { return nil }", want: false},
+		{name: "lhs not blank ident", src: "package p\nfunc f() { x := fn() }\nfunc fn() error { return nil }", want: false},
+		{name: "rhs not call expr", src: "package p\nfunc f() { var x int; _ = x }", want: false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			lhs, rhs := findFirstAssignExprs(t, tc.src)
+			if got := isNonExemptBlankCall(lhs, rhs); got != tc.want {
+				t.Errorf("isNonExemptBlankCall() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestCountTestBlankCallAssigns(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		src  string
+		want int
+	}{
+		{name: "single blank call discard", src: "package p\nfunc f() { _ = fn() }\nfunc fn() error { return nil }", want: 1},
+		{name: "multi return blank discard", src: "package p\nfunc f() { v, _ := fn(); _ = v }\nfunc fn() (int, error) { return 0, nil }", want: 1},
+		{name: "multi assign blank discard", src: "package p\nfunc f() { var a int; a, _ = f1(), f2(); _ = a }\nfunc f1() int { return 0 }\nfunc f2() error { return nil }", want: 1},
+		{name: "allowed value discard", src: "package p\nfunc f() { _, err := fn(); _ = err }\nfunc fn() (int, error) { return 0, nil }", want: 0},
+		{name: "exempt cleanup and defer discards", src: "package p\ntype C struct{}\nfunc (C) Close() error { return nil }\nfunc (C) Cleanup(any) {}\nfunc fn() error { return nil }\nfunc f(c C) {\n\t_ = c.Close()\n\tdefer func() { _ = fn() }()\n\tc.Cleanup(func() { _ = fn() })\n}\n", want: 0},
+		{name: "non cleanup selector call with closure", src: "package p\ntype C struct{}\nfunc (C) Custom(any) {}\nfunc fn() error { return nil }\nfunc f(c C) {\n\tc.Custom(func() { _ = fn() })\n}\n", want: 1},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			fset := token.NewFileSet()
+			f, err := parser.ParseFile(fset, "p_test.go", tc.src, 0)
+			if err != nil {
+				t.Fatalf("parse: %v", err)
+			}
+			if got := countTestBlankCallAssigns(f); got != tc.want {
+				t.Errorf("countTestBlankCallAssigns() = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+func findFirstCallExpr(t *testing.T, src string) *ast.CallExpr {
+	t.Helper()
+	f, err := parser.ParseFile(token.NewFileSet(), "p.go", src, 0)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	var found *ast.CallExpr
+	ast.Inspect(f, func(n ast.Node) bool {
+		if found != nil {
+			return false
+		}
+		if call, ok := n.(*ast.CallExpr); ok {
+			found = call
+			return false
+		}
+		return true
+	})
+	if found == nil {
+		t.Fatal("no call expression found")
+	}
+	return found
+}
+
+func findFirstAssignExprs(t *testing.T, src string) (ast.Expr, ast.Expr) {
+	t.Helper()
+	f, err := parser.ParseFile(token.NewFileSet(), "p.go", src, 0)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	var lhs, rhs ast.Expr
+	ast.Inspect(f, func(n ast.Node) bool {
+		if lhs != nil {
+			return false
+		}
+		if assign, ok := n.(*ast.AssignStmt); ok {
+			if len(assign.Lhs) > 0 && len(assign.Rhs) == 1 {
+				lhs = assign.Lhs[len(assign.Lhs)-1]
+				rhs = assign.Rhs[0]
+				return false
+			}
+			if len(assign.Lhs) > 0 && len(assign.Rhs) == len(assign.Lhs) {
+				lhs = assign.Lhs[0]
+				rhs = assign.Rhs[0]
+				return false
+			}
+		}
+		return true
+	})
+	if lhs == nil || rhs == nil {
+		t.Fatal("no assign expressions found")
+	}
+	return lhs, rhs
 }
