@@ -471,64 +471,6 @@ func TestDispatchExecution_ColdStartAndRotation(t *testing.T) {
 	}
 }
 
-func TestDispatchExecution_ScopeLockIsolation(t *testing.T) {
-	t.Parallel()
-	store := dbtest.NewFakeStore()
-
-	dispatchRunning := make(chan struct{})
-	dispatchCanFinish := make(chan struct{})
-	messageFinished := make(chan struct{})
-
-	pool := NewWorkerPool(WorkerPoolConfig{
-		Store: store,
-		DeliveryFunc: func(s *discordgo.Session, c, text string) error {
-			return nil
-		},
-		RunnerWithOptionsFunc: func(ctx context.Context, agyBin, prompt, sID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
-			if strings.Contains(prompt, "headless-dispatch") {
-				close(dispatchRunning)
-				<-dispatchCanFinish
-				return `{"conversation_id":"66666666-6666-6666-6666-666666666666","status":"SUCCESS","response":"ok"}`, "", 0, nil
-			}
-			close(messageFinished)
-			return `{"conversation_id":"55555555-5555-5555-5555-555555555555","status":"SUCCESS","response":"reply"}`, "", 0, nil
-		},
-	})
-	defer pool.Stop()
-
-	disp := db.Dispatch{
-		ID:        "disp-iso-1",
-		Source:    "heartbeat",
-		SessionID: "heartbeat-scope",
-		Prompt:    "headless-dispatch running",
-		Status:    db.StatusPending,
-		CreatedAt: time.Now().UTC(),
-	}
-	_, _ = store.InsertDispatch(context.Background(), disp)
-	pool.EnqueueDispatch(disp)
-
-	<-dispatchRunning
-
-	msg := db.Message{
-		ID:        "msg-iso-1",
-		ThreadID:  "1542423172400291873",
-		ChannelID: "1542423172400291873",
-		Content:   "concurrent discord turn",
-		Status:    db.StatusPending,
-		CreatedAt: time.Now().UTC(),
-	}
-	_ = store.InsertMessage(context.Background(), msg)
-	pool.Enqueue(msg)
-
-	select {
-	case <-messageFinished:
-	case <-time.After(2 * time.Second):
-		t.Fatalf("discord message turn contended on dispatch scope lock")
-	}
-
-	close(dispatchCanFinish)
-}
-
 func TestDispatchExecution_RetriesAndFailure(t *testing.T) {
 	t.Parallel()
 

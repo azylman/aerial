@@ -1,122 +1,14 @@
 package queue
 
 import (
-	"context"
 	"fmt"
-	"log"
 	"regexp"
 	"strconv"
 	"strings"
-	"sync"
-	"time"
 
 	"github.com/azylman/aerial/services/eri/pkg/db"
-	"github.com/azylman/aerial/services/eri/pkg/metrics"
 	"github.com/azylman/aerial/services/eri/pkg/runner"
 )
-
-func (p *WorkerPool) processDispatch(d db.Dispatch, scopeKey string) {
-	if p.ctx.Err() != nil {
-		return
-	}
-
-	metrics.ActiveWorkers.Inc()
-	defer metrics.ActiveWorkers.Dec()
-
-	lockVal, _ := p.scopeLocks.LoadOrStore(scopeKey, &sync.Mutex{})
-	scopeLock, ok := lockVal.(*sync.Mutex)
-	if !ok {
-		scopeLock = &sync.Mutex{}
-		p.scopeLocks.Store(scopeKey, scopeLock)
-	}
-	scopeLock.Lock()
-	defer scopeLock.Unlock()
-
-	if p.cfg.Store == nil {
-		log.Printf("[WorkerPool] Store is nil, dropping dispatch %s", d.ID)
-		return
-	}
-	claimed, claimErr := p.cfg.Store.ClaimPendingDispatch(p.ctx, d.ID)
-	if claimErr != nil {
-		p.requeueDispatchOnClaimError(d, claimErr)
-		return
-	}
-	if !claimed {
-		return
-	}
-
-	isEphem := strings.TrimSpace(d.SessionID) == ""
-	leaseKey := d.SessionID
-	if isEphem {
-		leaseKey = "dispatch-" + d.ID
-	}
-
-	execStart := time.Now().UTC()
-	triggerType := "dispatch:" + d.Source
-	spanCtx, turnSpan := p.beginTurnTrace([]queuedTurnItem{dispatchTraceItem(d, p.startedAt)}, leaseKey, triggerType, execStart)
-	turnCtx, turnCancel := context.WithCancel(spanCtx)
-	defer turnCancel()
-
-	te := &turnExecution{
-		pool:        p,
-		dispatch:    &d,
-		threadID:    leaseKey,
-		triggerType: triggerType,
-		execStart:   execStart,
-		wakeIdx:     -1,
-		isEphemeral: isEphem,
-		stopTyping:  func() {},
-		turnCtx:     turnCtx,
-		turnCancel:  turnCancel,
-		turnSpan:    turnSpan,
-	}
-
-	p.registerActiveTurn(scopeKey, te)
-	defer p.unregisterActiveTurn(scopeKey, te)
-	defer te.endTurnSpan()
-	te.beginSetupSpan()
-	defer te.endSetupSpan()
-
-	cleanupDispatch := p.setupDispatchTurn(d, te)
-	defer cleanupDispatch()
-
-	defer func() {
-		if r := recover(); r != nil {
-			te.handleBurstPanic(r)
-		}
-	}()
-
-	if !te.acquirePoolAndLease() {
-		return
-	}
-	defer te.releaseActivePoolLease()
-	markTurnInactive := te.markTurnActive()
-	defer markTurnInactive()
-
-	te.turnAttempted = true
-	promptCtx, promptSpan := te.startSetupChildSpan(te.turnCtxValue(), spanPrompt)
-	te.turnPrompt = te.buildDispatchPrompt(promptCtx)
-	promptSpan.End()
-	te.executeWithRetries()
-}
-
-func (p *WorkerPool) requeueDispatchOnClaimError(d db.Dispatch, claimErr error) {
-	log.Printf("[WorkerPool] Failed to claim dispatch %s: %v", d.ID, claimErr)
-	if p.ctx != nil && p.ctx.Err() != nil {
-		return
-	}
-	delay := time.Second
-	if p.cfg.RetryDelayOverride > 0 {
-		delay = p.cfg.RetryDelayOverride
-	}
-	dCopy := d
-	time.AfterFunc(delay, func() {
-		if p.ctx != nil && p.ctx.Err() != nil {
-			return
-		}
-		p.EnqueueDispatch(dCopy)
-	})
-}
 
 var standalonePRRemediationRegex = regexp.MustCompile(`PR #(\d+)\s+on\s+([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)|(?:on|for repo)\s+([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)\s+\((?:commit: [^,]+,\s*)?PR #(\d+)`)
 
