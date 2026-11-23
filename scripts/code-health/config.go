@@ -17,6 +17,7 @@ const (
 	ruleTimeSleep         = "time-sleep"
 	ruleSyscallKill       = "syscall-kill"
 	ruleReservedPort      = "reserved-port"
+	ruleBlankErrorDiscard = "blank-error-discard"
 )
 
 var knownTestRules = map[string]bool{
@@ -25,6 +26,7 @@ var knownTestRules = map[string]bool{
 	ruleTimeSleep:         true,
 	ruleSyscallKill:       true,
 	ruleReservedPort:      true,
+	ruleBlankErrorDiscard: true,
 }
 
 // defaultBannedTestFilenameSuffixes rejects catch-all test filenames that
