@@ -154,7 +154,11 @@ func newCalendarMCPServer(t *testing.T, parts []string, fail bool, gotArgs *atom
 	srv := mcp.NewServer(&mcp.Implementation{Name: "fake-google-mcp", Version: "1.0"}, nil)
 	srv.AddTool(&mcp.Tool{Name: "get_events", InputSchema: map[string]any{"type": "object"}}, func(_ context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		var args map[string]any
-		_ = json.Unmarshal(req.Params.Arguments, &args)
+		if len(req.Params.Arguments) > 0 {
+			if err := json.Unmarshal(req.Params.Arguments, &args); err != nil {
+				t.Errorf("json.Unmarshal arguments: %v", err)
+			}
+		}
 		gotArgs.Store(args)
 		content := make([]mcp.Content, 0, len(parts))
 		for _, p := range parts {
