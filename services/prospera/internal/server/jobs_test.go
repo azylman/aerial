@@ -301,6 +301,92 @@ func TestServer_HandleReportJob(t *testing.T) {
 	runJobHandlerCases(t, tests, (*Server).HandleReportJob)
 }
 
+type handleReportJobTestCase struct {
+	name          string
+	callID        string
+	ingressStatus int
+	wantIngress   bool
+	wantErr       bool
+}
+
+func runHandleReportJobTest(t *testing.T, tc handleReportJobTestCase) {
+	t.Helper()
+	var calledIngress bool
+	var mu sync.Mutex
+
+	ingressCode := tc.ingressStatus
+	if ingressCode == 0 {
+		ingressCode = http.StatusOK
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "ProsperaReport") {
+			mu.Lock()
+			calledIngress = true
+			mu.Unlock()
+			w.WriteHeader(ingressCode)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	cfg := &config.Config{
+		Port:                  "4019",
+		RestateIngressURL:     srv.URL,
+		BrainURL:              srv.URL,
+		DefaultDiscordChannel: "prospera",
+	}
+	st := fakes.NewFakeStore()
+	if err := st.CreateOutboundCall(context.Background(), model.VoiceCall{
+		CallID:       tc.callID,
+		ReportStatus: "pending",
+	}, 5); err != nil {
+		t.Fatalf("CreateOutboundCall: %v", err)
+	}
+
+	rep := delivery.NewReporter(fakes.StaticConfig{Cfg: cfg}, st, &fakes.FakeTwilio{})
+	server := NewServer(newTestConfigSource(cfg), st, &fakes.FakeTwilio{}, nil, nil, rep, WithServerHTTPClient(srv.Client()))
+
+	msg := &pubsubtest.Message{
+		Payload: []byte(`{"call_id":"` + tc.callID + `"}`),
+	}
+	err := server.HandleReportJob(context.Background(), msg)
+	if (err != nil) != tc.wantErr {
+		t.Fatalf("HandleReportJob() err = %v, wantErr = %v", err, tc.wantErr)
+	}
+
+	mu.Lock()
+	gotIngress := calledIngress
+	mu.Unlock()
+	if gotIngress != tc.wantIngress {
+		t.Errorf("calledIngress = %v, want %v", gotIngress, tc.wantIngress)
+	}
+
+	call, err := st.GetCall(context.Background(), tc.callID)
+	if err != nil {
+		t.Fatalf("GetCall: %v", err)
+	}
+	if call.ReportStatus != "pending" {
+		t.Errorf("call report status = %q, want pending", call.ReportStatus)
+	}
+}
+
+func TestServer_HandleReportJob_RestateIngress(t *testing.T) {
+	t.Parallel()
+
+	tests := []handleReportJobTestCase{
+		{name: "restate ingress accepts the report", callID: "call-job-restate-ok", ingressStatus: http.StatusOK, wantIngress: true},
+		{name: "restate ingress failure naks for redelivery", callID: "call-job-restate-fail", ingressStatus: http.StatusInternalServerError, wantIngress: true, wantErr: true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			runHandleReportJobTest(t, tc)
+		})
+	}
+}
+
 func testVoicemailPayload(callID, recordingURL string) []byte {
 	b, err := json.Marshal(pubsub.ProsperaVoicemailJobArgs{
 		CallID:       callID,

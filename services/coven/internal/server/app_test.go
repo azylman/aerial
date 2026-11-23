@@ -1081,6 +1081,7 @@ func TestAdminExtract_RestateIngressExtractFn(t *testing.T) {
 		path      string
 		header    string
 		body      string
+		wantCode  int
 		wantSends []string
 	}{
 		{name: "UnscopedThreadDefaultsToConfigStackWithoutKey", path: "/admin/extract?thread_id=th-test-admin", wantSends: []string{"/CovenThread/custom-stack/th-test-admin/Extract/send key="}},
@@ -1088,6 +1089,7 @@ func TestAdminExtract_RestateIngressExtractFn(t *testing.T) {
 		{name: "RequestIDHeaderKeysOperation", path: "/admin/extract?thread_id=th-1", header: "req-42", wantSends: []string{"/CovenThread/custom-stack/th-1/Extract/send key=admin:extract:custom-stack:req-42"}},
 		{name: "RequestIDBodyKeysOperation", path: "/admin/extract", body: `{"thread_id":"aerial/th-2","request_id":" req-7 "}`, wantSends: []string{"/CovenThread/aerial/th-2/Extract/send key=admin:extract:aerial:req-7"}},
 		{name: "HeaderWinsOverBodyRequestID", path: "/admin/extract", header: "req-h", body: `{"thread_id":"th-3","request_id":"req-b"}`, wantSends: []string{"/CovenThread/custom-stack/th-3/Extract/send key=admin:extract:custom-stack:req-h"}},
+		{name: "ExtractErrorReturns500", path: "/admin/extract?thread_id=th-ext-fail", wantCode: http.StatusInternalServerError, wantSends: []string{"/CovenThread/custom-stack/th-ext-fail/Extract/send key="}},
 	}
 
 	for _, tc := range tests {
@@ -1106,7 +1108,11 @@ func TestAdminExtract_RestateIngressExtractFn(t *testing.T) {
 			}
 			rr := httptest.NewRecorder()
 			server.Routes().ServeHTTP(rr, req)
-			require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+			wantCode := http.StatusOK
+			if tc.wantCode != 0 {
+				wantCode = tc.wantCode
+			}
+			require.Equal(t, wantCode, rr.Code, rr.Body.String())
 			require.Equal(t, tc.wantSends, rec.snapshot())
 		})
 	}

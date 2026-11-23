@@ -15,7 +15,6 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/azylman/aerial/pkg/httpkit"
-	"github.com/azylman/aerial/pkg/pubsubtest"
 	"github.com/azylman/aerial/services/prospera/internal/config"
 	"github.com/azylman/aerial/services/prospera/internal/delivery"
 	"github.com/azylman/aerial/services/prospera/internal/fakes"
@@ -625,13 +624,52 @@ func TestServer_StoreErrorsInHandlers(t *testing.T) {
 	mux := server.Routes()
 	store.OpErr = errors.New("db down")
 
-	// 1. Voice webhook with store error
+	vURL := cfg.PublicWebhookBaseURL + "/api/webhooks/twilio/voice"
+
+	// 1a. Voice webhook with store error on tier 1 (covers create inbound call error)
+	formTier1 := url.Values{
+		"CallSid": []string{"CA-store-err-tier1"},
+		"From":    []string{"+15105550111"},
+		"To":      []string{cfg.TwilioFromNumber},
+	}
+	sigTier1 := fakes.TwilioSignature(cfg.TwilioAuthToken, vURL, formTier1)
+	reqTier1 := httptest.NewRequest(http.MethodPost, vURL, strings.NewReader(formTier1.Encode()))
+	reqTier1.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	reqTier1.Header.Set("X-Twilio-Signature", sigTier1)
+	recTier1 := httptest.NewRecorder()
+	mux.ServeHTTP(recTier1, reqTier1)
+	if recTier1.Code != http.StatusOK {
+		t.Fatalf("voice tier1 returned %d, want 200", recTier1.Code)
+	}
+	if !strings.Contains(recTier1.Body.String(), "<Connect>") {
+		t.Errorf("expected <Connect> in response body, got %s", recTier1.Body.String())
+	}
+
+	// 1b. Voice webhook with store error on tier 2 (covers find recent call error falling back to voicemail recording)
+	formTier2 := url.Values{
+		"CallSid": []string{"CA-store-err-tier2"},
+		"From":    []string{"+15105550222"},
+		"To":      []string{cfg.TwilioFromNumber},
+	}
+	sigTier2 := fakes.TwilioSignature(cfg.TwilioAuthToken, vURL, formTier2)
+	reqTier2 := httptest.NewRequest(http.MethodPost, vURL, strings.NewReader(formTier2.Encode()))
+	reqTier2.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	reqTier2.Header.Set("X-Twilio-Signature", sigTier2)
+	recTier2 := httptest.NewRecorder()
+	mux.ServeHTTP(recTier2, reqTier2)
+	if recTier2.Code != http.StatusOK {
+		t.Fatalf("voice tier2 returned %d, want 200", recTier2.Code)
+	}
+	if !strings.Contains(recTier2.Body.String(), "<Record") {
+		t.Errorf("expected <Record> fallback in response body, got %s", recTier2.Body.String())
+	}
+
+	// 1c. Voice webhook with store error on tier 3
 	form := url.Values{
 		"CallSid": []string{"CA-store-err"},
 		"From":    []string{"+15105550999"},
 		"To":      []string{cfg.TwilioFromNumber},
 	}
-	vURL := cfg.PublicWebhookBaseURL + "/api/webhooks/twilio/voice"
 	sig := fakes.TwilioSignature(cfg.TwilioAuthToken, vURL, form)
 	req := httptest.NewRequest(http.MethodPost, vURL, strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
@@ -640,6 +678,22 @@ func TestServer_StoreErrorsInHandlers(t *testing.T) {
 	mux.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("voice returned %d, want 200", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "<Record") {
+		t.Errorf("expected <Record> in response body, got %s", rec.Body.String())
+	}
+
+	// Reset OpErr and configure specific error hooks for state update and message save.
+	store.OpErr = nil
+	store.UpdateStateErr = errors.New("update state failed")
+	store.SaveErr = errors.New("save message failed")
+	if err := store.CreateOutboundCall(context.Background(), model.VoiceCall{
+		CallID:          "call-store-err",
+		ProviderCallSID: "CA-store-err",
+		Direction:       "outbound",
+		State:           "in-progress",
+	}, 5); err != nil {
+		t.Fatalf("CreateOutboundCall failed: %v", err)
 	}
 
 	// 2. AMD webhook with store error
@@ -657,6 +711,9 @@ func TestServer_StoreErrorsInHandlers(t *testing.T) {
 	if recAMD.Code != http.StatusOK {
 		t.Fatalf("amd returned %d, want 200", recAMD.Code)
 	}
+	if !strings.Contains(recAMD.Body.String(), "<Response/>") {
+		t.Errorf("expected <Response/> in amd response, got %s", recAMD.Body.String())
+	}
 
 	// 3. Status webhook with store error
 	statForm := url.Values{
@@ -672,6 +729,9 @@ func TestServer_StoreErrorsInHandlers(t *testing.T) {
 	mux.ServeHTTP(recStat, reqStat)
 	if recStat.Code != http.StatusOK {
 		t.Fatalf("status returned %d, want 200", recStat.Code)
+	}
+	if !strings.Contains(recStat.Body.String(), "<Response/>") {
+		t.Errorf("expected <Response/> in status response, got %s", recStat.Body.String())
 	}
 	server.Wait()
 
@@ -691,6 +751,66 @@ func TestServer_StoreErrorsInHandlers(t *testing.T) {
 	mux.ServeHTTP(recSMS, reqSMS)
 	if recSMS.Code != http.StatusOK {
 		t.Fatalf("sms returned %d, want 200", recSMS.Code)
+	}
+	if !strings.Contains(recSMS.Body.String(), "<Response/>") {
+		t.Errorf("expected <Response/> in sms response, got %s", recSMS.Body.String())
+	}
+}
+
+func TestServer_InboundVoiceRouting_ZeroWindow(t *testing.T) {
+	t.Parallel()
+	server, store, defaultCfg := setupTestServer()
+	if defaultCfg == nil {
+		t.Fatal("setupTestServer returned nil config")
+	}
+	cfg := &config.Config{
+		Port:                  "4019",
+		TwilioAuthToken:       "secret-token-123",
+		TwilioFromNumber:      "+15105550100",
+		PublicWebhookBaseURL:  "https://webhooks.example.com",
+		DefaultDiscordChannel: "prospera",
+		CallbackWindowMinutes: 0,
+	}
+	server.cfgSrc = newTestConfigSource(cfg)
+	mux := server.Routes()
+
+	// Seed an outbound call placed 48 hours ago to caller +15105550333.
+	// With CallbackWindowMinutes == 0, webhooks.go falls back to the default 7-day (10080 min) window.
+	// Because 48 hours is well within 7 days, this call is matched, yielding <Connect>.
+	if err := store.CreateOutboundCall(context.Background(), model.VoiceCall{
+		CallID:       "call-out-prior-zero",
+		Direction:    "outbound",
+		FromNumber:   cfg.TwilioFromNumber,
+		ToNumber:     "+15105550333",
+		State:        "completed",
+		ReportStatus: "delivered",
+		StartedAt:    time.Now().UTC().Add(-48 * time.Hour),
+		UpdatedAt:    time.Now().UTC().Add(-48 * time.Hour),
+		Brief:        model.CallBrief{Task: "Verify zero window fallback"},
+	}, 5); err != nil {
+		t.Fatalf("CreateOutboundCall failed: %v", err)
+	}
+
+	vURL := cfg.PublicWebhookBaseURL + "/api/webhooks/twilio/voice"
+	form := url.Values{
+		"CallSid": []string{"CA-zero-window"},
+		"From":    []string{"+15105550333"},
+		"To":      []string{cfg.TwilioFromNumber},
+	}
+	sig := fakes.TwilioSignature(cfg.TwilioAuthToken, vURL, form)
+	req := httptest.NewRequest(http.MethodPost, vURL, strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("X-Twilio-Signature", sig)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("voice zero window returned %d, want 200", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "<Connect>") {
+		t.Errorf("expected <Connect> stream response with default window fallback, got %s", rec.Body.String())
+	}
+	if gotWin := store.GetLastRecentWindow(); gotWin != 10080*time.Minute {
+		t.Errorf("expected default callback window 10080m, got %v", gotWin)
 	}
 }
 
@@ -1277,92 +1397,6 @@ func TestServer_TriggerPostCallReport_RestateIngress(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			runTriggerPostCallReportTest(t, tc)
-		})
-	}
-}
-
-type handleReportJobTestCase struct {
-	name          string
-	callID        string
-	ingressStatus int
-	wantIngress   bool
-	wantErr       bool
-}
-
-func runHandleReportJobTest(t *testing.T, tc handleReportJobTestCase) {
-	t.Helper()
-	var calledIngress bool
-	var mu sync.Mutex
-
-	ingressCode := tc.ingressStatus
-	if ingressCode == 0 {
-		ingressCode = http.StatusOK
-	}
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.Contains(r.URL.Path, "ProsperaReport") {
-			mu.Lock()
-			calledIngress = true
-			mu.Unlock()
-			w.WriteHeader(ingressCode)
-			return
-		}
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer srv.Close()
-
-	cfg := &config.Config{
-		Port:                  "4019",
-		RestateIngressURL:     srv.URL,
-		BrainURL:              srv.URL,
-		DefaultDiscordChannel: "prospera",
-	}
-	st := fakes.NewFakeStore()
-	if err := st.CreateOutboundCall(context.Background(), model.VoiceCall{
-		CallID:       tc.callID,
-		ReportStatus: "pending",
-	}, 5); err != nil {
-		t.Fatalf("CreateOutboundCall: %v", err)
-	}
-
-	rep := delivery.NewReporter(fakes.StaticConfig{Cfg: cfg}, st, &fakes.FakeTwilio{})
-	server := NewServer(newTestConfigSource(cfg), st, &fakes.FakeTwilio{}, nil, nil, rep, WithServerHTTPClient(srv.Client()))
-
-	msg := &pubsubtest.Message{
-		Payload: []byte(`{"call_id":"` + tc.callID + `"}`),
-	}
-	err := server.HandleReportJob(context.Background(), msg)
-	if (err != nil) != tc.wantErr {
-		t.Fatalf("HandleReportJob() err = %v, wantErr = %v", err, tc.wantErr)
-	}
-
-	mu.Lock()
-	gotIngress := calledIngress
-	mu.Unlock()
-	if gotIngress != tc.wantIngress {
-		t.Errorf("calledIngress = %v, want %v", gotIngress, tc.wantIngress)
-	}
-
-	call, err := st.GetCall(context.Background(), tc.callID)
-	if err != nil {
-		t.Fatalf("GetCall: %v", err)
-	}
-	if call.ReportStatus != "pending" {
-		t.Errorf("call report status = %q, want pending", call.ReportStatus)
-	}
-}
-
-func TestServer_HandleReportJob_RestateIngress(t *testing.T) {
-	t.Parallel()
-
-	tests := []handleReportJobTestCase{
-		{name: "restate ingress accepts the report", callID: "call-job-restate-ok", ingressStatus: http.StatusOK, wantIngress: true},
-		{name: "restate ingress failure naks for redelivery", callID: "call-job-restate-fail", ingressStatus: http.StatusInternalServerError, wantIngress: true, wantErr: true},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			runHandleReportJobTest(t, tc)
 		})
 	}
 }

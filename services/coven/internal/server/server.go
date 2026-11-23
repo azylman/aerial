@@ -133,8 +133,6 @@ func (s *Server) Routes() http.Handler {
 	}
 
 	mux.HandleFunc("/facts", s.handleFacts)
-	mux.HandleFunc("/context", s.handleContext)
-	mux.Handle("/consolidate", tracing.Middleware("coven", http.HandlerFunc(s.handleConsolidate)))
 
 	mcpBridge := tracing.Middleware("coven", http.HandlerFunc(s.handleMCP))
 	mux.Handle("/mcp", mcpBridge)
@@ -193,76 +191,6 @@ func (s *Server) handleFacts(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewEncoder(w).Encode(res); err != nil {
 		log.Printf("[coven] json encode error: %v", err)
 	}
-}
-
-func (s *Server) handleContext(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		w.Header().Set("Allow", "GET")
-		http.Error(w, `{"error":"Method not allowed"}`, http.StatusMethodNotAllowed)
-		return
-	}
-
-	if s.authEnabled() {
-		caller, _ := k8sauth.CallerFromContext(r.Context())
-		if err := s.auth.Authorize(r.Context(), caller, "memories", "get", ""); err != nil {
-			k8sauth.WriteError(w, err)
-			return
-		}
-	}
-
-	q := r.URL.Query().Get("q")
-	limit, err := strconv.Atoi(r.URL.Query().Get("limit"))
-	if err != nil {
-		limit = 0
-	}
-
-	res, err := s.handler.GetContext(r.Context(), q, limit)
-	if err != nil {
-		log.Printf("[coven] error getting context: %v", err)
-		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
-		return
-	}
-
-	accept := r.Header.Get("Accept")
-	if strings.Contains(accept, "text/plain") && !strings.Contains(accept, "application/json") {
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		httpkit.WriteResponse(w, r, "coven", []byte(res.Context))
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	if err := json.NewEncoder(w).Encode(res); err != nil {
-		log.Printf("[coven] json encode error: %v", err)
-	}
-}
-
-func (s *Server) handleConsolidate(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		w.Header().Set("Allow", "POST")
-		http.Error(w, `{"error":"Method not allowed"}`, http.StatusMethodNotAllowed)
-		return
-	}
-
-	if s.authEnabled() {
-		caller, _ := k8sauth.CallerFromContext(r.Context())
-		if err := s.auth.Authorize(r.Context(), caller, "memories", "update", ""); err != nil {
-			k8sauth.WriteError(w, err)
-			return
-		}
-	}
-
-	consolidated, err := s.handler.Consolidate(context.WithoutCancel(r.Context()))
-	if err != nil {
-		log.Printf("[memory-mcp] error consolidating facts: %v", err)
-		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	httpkit.WriteResponse(w, r, "coven", []byte(fmt.Sprintf(`{"status":"ok","consolidated":%d}`, consolidated)))
 }
 
 func (s *Server) handleMCP(w http.ResponseWriter, r *http.Request) {
