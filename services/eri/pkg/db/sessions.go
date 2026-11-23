@@ -52,46 +52,6 @@ func (s *SQLStore) GetPreviousSessionID(ctx context.Context, threadID string) (s
 	return s.querySessionString(ctx, DiscordSessionID(threadID), "SELECT previous_conversation_id FROM sessions WHERE agent = $1 AND session_id = $2")
 }
 
-var dbTimeLayouts = []string{
-	"2006-01-02 15:04:05.999999999 -0700 MST", "2006-01-02 15:04:05.999999999 -0700 -0700",
-	"2006-01-02 15:04:05.999999999-07:00", "2006-01-02 15:04:05.999999999",
-	time.RFC3339Nano, time.RFC3339, time.DateTime, "2006-01-02 15:04:05", "2006-01-02T15:04:05Z",
-	"2006-01-02 15:04:05 -0700 MST", "2006-01-02 15:04:05.999999999Z07:00",
-	"2006-01-02 15:04:05-07:00", "2006-01-02T15:04:05",
-}
-
-// ParseDBTime attempts to parse a database time value from various types and layouts.
-func ParseDBTime(val any) (time.Time, bool) {
-	if val == nil {
-		return time.Time{}, false
-	}
-	switch v := val.(type) {
-	case time.Time:
-		return v, true
-	case *time.Time:
-		if v != nil {
-			return *v, true
-		}
-		return time.Time{}, false
-	case string:
-		trimmed := strings.TrimSpace(v)
-		if trimmed == "" {
-			return time.Time{}, false
-		}
-		if idx := strings.Index(trimmed, " m="); idx != -1 {
-			trimmed = strings.TrimSpace(trimmed[:idx])
-		}
-		for _, layout := range dbTimeLayouts {
-			if t, err := time.Parse(layout, trimmed); err == nil {
-				return t, true
-			}
-		}
-	case []byte:
-		return ParseDBTime(string(v))
-	}
-	return time.Time{}, false
-}
-
 // SessionInfo encapsulates active session state and lifecycle timestamps.
 type SessionInfo struct {
 	ThreadID          string

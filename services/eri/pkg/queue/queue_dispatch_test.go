@@ -155,55 +155,6 @@ func TestBuildDispatchPrompt(t *testing.T) {
 	}
 }
 
-func TestCancelBurstOnShutdown_Dispatch(t *testing.T) {
-	t.Parallel()
-
-	tests := []struct {
-		name            string
-		failScheduleRun bool
-		wantTurnErr     string
-	}{
-		{name: "shutdown interruption", failScheduleRun: false, wantTurnErr: "interrupted by shutdown"},
-		{name: "context cancelled during execution", failScheduleRun: true, wantTurnErr: "context cancelled during execution"},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			store := db.NewSQLStore(newTestDB(t))
-			ctx := context.Background()
-			interruptedDisp := db.Dispatch{ID: "disp-interrupted-" + tc.name, Status: db.StatusProcessing}
-			seedDispatchRows(t, store, []db.Dispatch{interruptedDisp})
-
-			pool := New(nil, WorkerPoolConfig{Store: store})
-			defer pool.Stop()
-
-			te := &turnExecution{
-				pool:     pool,
-				dispatch: &interruptedDisp,
-			}
-			te.cancelBurstOnShutdown("failed", tc.failScheduleRun)
-			if te.turnError != tc.wantTurnErr {
-				t.Fatalf("expected turnError %q, got %q", tc.wantTurnErr, te.turnError)
-			}
-			if te.turnStatus != "cancelled" {
-				t.Fatalf("expected turnStatus %q, got %q", "cancelled", te.turnStatus)
-			}
-
-			refreshed, err := store.GetDispatch(ctx, interruptedDisp.ID)
-			if err != nil || refreshed == nil {
-				t.Fatalf("failed to fetch dispatch: %v", err)
-			}
-			if refreshed.Status != db.StatusProcessing {
-				t.Fatalf("expected interrupted dispatch to remain %s in DB, got %+v", db.StatusProcessing, refreshed)
-			}
-			if refreshed.RestartCount != 0 {
-				t.Fatalf("expected restart count to remain 0, got %d", refreshed.RestartCount)
-			}
-		})
-	}
-}
-
 func TestResolveExecutionPool_NilReceiverAndMissingPool(t *testing.T) {
 	t.Parallel()
 

@@ -121,13 +121,6 @@ func (te *turnExecution) turnEffortAndModel() (string, string) {
 	return resolveBurstEffort(te.burst), resolveBurstModel(te.burst)
 }
 
-func (te *turnExecution) ownsTurnItem(id string) bool {
-	if te == nil {
-		return false
-	}
-	return te.isBurstMessage(id) || (te.isDispatch() && te.dispatch.ID == id)
-}
-
 func (te *turnExecution) turnCtxValue() context.Context {
 	if te != nil && te.turnCtx != nil {
 		return te.turnCtx

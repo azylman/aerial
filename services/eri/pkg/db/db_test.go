@@ -274,38 +274,6 @@ func TestSessionLifecycle(t *testing.T) {
 	assertSessionEmptyKeyGuards(ctx, t, store)
 }
 
-func TestParseDBTime(t *testing.T) {
-	t.Parallel()
-	now := time.Now().Truncate(time.Second).UTC()
-	tests := []struct {
-		name   string
-		input  any
-		wantOK bool
-	}{
-		{name: "nil", input: nil, wantOK: false},
-		{name: "time_val", input: now, wantOK: true},
-		{name: "time_ptr", input: &now, wantOK: true},
-		{name: "nil_time_ptr", input: (*time.Time)(nil), wantOK: false},
-		{name: "empty_str", input: "", wantOK: false},
-		{name: "whitespace_str", input: "   ", wantOK: false},
-		{name: "rfc3339_str", input: now.Format(time.RFC3339), wantOK: true},
-		{name: "space_separated_str", input: "2026-10-19 12:00:00", wantOK: true},
-		{name: "monotonic_clock_str", input: "2026-10-19 12:00:00 m=+0.000000001", wantOK: true},
-		{name: "bytes", input: []byte(now.Format(time.RFC3339)), wantOK: true},
-		{name: "invalid_str", input: "not-a-time", wantOK: false},
-		{name: "unsupported_type", input: 12345, wantOK: false},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			_, ok := ParseDBTime(tc.input)
-			if ok != tc.wantOK {
-				t.Errorf("ParseDBTime(%v) ok = %v, wantOK = %v", tc.input, ok, tc.wantOK)
-			}
-		})
-	}
-}
-
 func TestCleanTaskSummary(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
