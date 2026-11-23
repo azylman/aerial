@@ -263,8 +263,12 @@ func pktFixture(s string) string { return fmt.Sprintf("%04x%s", len(s)+4, s) }
 
 // receivePackBody builds a one-ref push whose pack holds one object per blob.
 func receivePackBody(caps string, blobs ...string) []byte {
+	return receivePackRefBody("refs/heads/feat/test", caps, blobs...)
+}
+
+func receivePackRefBody(ref, caps string, blobs ...string) []byte {
 	var buf bytes.Buffer
-	buf.WriteString(pktFixture(strings.Repeat("0", 40) + " " + strings.Repeat("a", 40) + " refs/heads/main\x00" + caps + "\n"))
+	buf.WriteString(pktFixture(strings.Repeat("0", 40) + " " + strings.Repeat("a", 40) + " " + ref + "\x00" + caps + "\n"))
 	buf.WriteString("0000PACK")
 	buf.Write([]byte{0, 0, 0, 2, 0, 0, 0, byte(len(blobs))})
 	for _, blob := range blobs {
@@ -276,8 +280,12 @@ func receivePackBody(caps string, blobs ...string) []byte {
 		}
 		buf.WriteByte(c)
 		zw := zlib.NewWriter(&buf)
-		_, _ = zw.Write([]byte(blob))
-		_ = zw.Close()
+		if _, err := zw.Write([]byte(blob)); err != nil {
+			panic(err)
+		}
+		if err := zw.Close(); err != nil {
+			panic(err)
+		}
 	}
 	buf.Write(make([]byte, 20))
 	return buf.Bytes()
@@ -326,9 +334,14 @@ func TestScanWrites(t *testing.T) {
 			body: cleanPush, wantStatus: http.StatusOK, wantEcho: true, wantBody: cleanPush,
 		},
 		{
+			name: "direct push to refs/heads/main rejected", method: http.MethodPost, target: "/internal/github-git/acme/private-repo.git/git-receive-pack",
+			body: string(receivePackRefBody("refs/heads/main", "report-status side-band-64k", "hello\n")), wantStatus: http.StatusOK,
+			wantSubstrs: []string{"ng refs/heads/main secret scan blocked push: refs/heads/main [DirectMainPush]", "direct push to refs/heads/main is prohibited"},
+		},
+		{
 			name: "secret push rejected over side-band", method: http.MethodPost, target: "/internal/github-git/acme/private-repo.git/git-receive-pack",
 			body: string(receivePackBody("report-status side-band-64k", secretBlob)), wantStatus: http.StatusOK,
-			wantSubstrs: []string{"\x02secret scan blocked push: blob ", "[InfisicalSecret]", "sample du***ue", "\x01000eunpack ok\n", "ng refs/heads/main secret scan blocked push"},
+			wantSubstrs: []string{"\x02secret scan blocked push: blob ", "[InfisicalSecret]", "sample du***ue", "\x01000eunpack ok\n", "ng refs/heads/feat/test secret scan blocked push"},
 		},
 		{
 			name: "secret push rejected over small side-band", method: http.MethodPost, target: "/internal/github-git/acme/repo/git-receive-pack",
@@ -338,17 +351,17 @@ func TestScanWrites(t *testing.T) {
 		{
 			name: "secret push rejected without side-band", method: http.MethodPost, target: "/internal/github-git/acme/private-repo.git/git-receive-pack",
 			body: string(receivePackBody("report-status", secretBlob)), wantStatus: http.StatusOK,
-			wantSubstrs: []string{"000eunpack ok\n", "ng refs/heads/main secret scan blocked push: blob "},
+			wantSubstrs: []string{"000eunpack ok\n", "ng refs/heads/feat/test secret scan blocked push: blob "},
 		},
 		{
 			name: "gzip secret push decoded and rejected", method: http.MethodPost, target: "/internal/github-git/acme/private-repo.git/git-receive-pack",
 			encoding: "gzip", body: gzipped(receivePackBody("report-status", secretBlob)), wantStatus: http.StatusOK,
-			wantSubstrs: []string{"ng refs/heads/main secret scan blocked push"},
+			wantSubstrs: []string{"ng refs/heads/feat/test secret scan blocked push"},
 		},
 		{
 			name: "corrupt pack fails closed", method: http.MethodPost, target: "/internal/github-git/acme/private-repo.git/git-receive-pack",
-			body: pktFixture(strings.Repeat("0", 40)+" "+strings.Repeat("a", 40)+" refs/heads/main\x00report-status\n") + "0000PACKjunk", wantStatus: http.StatusOK,
-			wantSubstrs: []string{"ng refs/heads/main secret scan failed: missing PACK header"},
+			body: pktFixture(strings.Repeat("0", 40)+" "+strings.Repeat("a", 40)+" refs/heads/feat/test\x00report-status\n") + "0000PACKjunk", wantStatus: http.StatusOK,
+			wantSubstrs: []string{"ng refs/heads/feat/test secret scan failed: missing PACK header"},
 		},
 		{
 			name: "malformed receive-pack is 400", method: http.MethodPost, target: "/internal/github-git/acme/repo.git/git-receive-pack",
