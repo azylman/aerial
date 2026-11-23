@@ -22,6 +22,9 @@ import (
 	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
 )
 
+// fakeObjectRuntime is the one in-memory objectRuntime and deploygate.Runtime
+// for build tests. Zero-valued configuration fields run every step inline.
+// Wrap it as struct{ objectRuntime }{rt} to hide the deployment surface.
 type fakeObjectRuntime struct {
 	key                string
 	launched           map[string]bool
@@ -33,6 +36,27 @@ type fakeObjectRuntime struct {
 	cleared            bool
 	reconcileScheduled bool
 	reconcilesSent     []sentCrossBuildDeploySuccess
+
+	// stepErrs fails the named steps on every call without running them.
+	stepErrs map[string]error
+	// failOnce fails the named step once before it runs.
+	failOnce map[string]error
+	// lostAcks runs the named step, then reports this error once instead of
+	// journaling its result.
+	lostAcks map[string]error
+	// retryFailedSteps reruns a failed step once inside the same call.
+	retryFailedSteps bool
+	// journal, when non-nil, memoizes successful step outputs by name and
+	// replays them instead of rerunning the step.
+	journal map[string]reconcileStepOutput
+	// terminalJournal memoizes terminal step errors while journal is enabled.
+	terminalJournal map[string]error
+
+	now         time.Time
+	attempts    map[string]deploygate.Attempt
+	attemptsErr error
+	pending     map[string]deploygate.PendingStart
+	scheduled   []deploygate.DeploymentDeadlineRequest
 }
 
 // sentCrossBuildDeploySuccess records one cross-build Mutate(chunk_deploy_success) send.
@@ -109,10 +133,72 @@ func (f *fakeObjectRuntime) ClearState() {
 
 func (f *fakeObjectRuntime) RunReconcileStep(name string, fn func(ctx context.Context) (reconcileStepOutput, error)) (reconcileStepOutput, error) {
 	f.stepsRun = append(f.stepsRun, name)
+	if err := f.terminalJournal[name]; err != nil {
+		return reconcileStepOutput{}, err
+	}
+	if out, ok := f.journal[name]; ok {
+		return out, nil
+	}
 	if f.runStepErr != nil {
 		return reconcileStepOutput{}, f.runStepErr
 	}
-	return fn(context.Background())
+	if err := f.stepErrs[name]; err != nil {
+		return reconcileStepOutput{}, err
+	}
+	if err := f.failOnce[name]; err != nil {
+		delete(f.failOnce, name)
+		return reconcileStepOutput{}, err
+	}
+	out, err := fn(context.Background())
+	if err != nil && f.retryFailedSteps {
+		out, err = fn(context.Background())
+	}
+	if err != nil {
+		if f.journal != nil && restate.IsTerminalError(err) {
+			if f.terminalJournal == nil {
+				f.terminalJournal = map[string]error{}
+			}
+			f.terminalJournal[name] = err
+		}
+		return out, err
+	}
+	if err := f.lostAcks[name]; err != nil {
+		delete(f.lostAcks, name)
+		return reconcileStepOutput{}, err
+	}
+	if f.journal != nil {
+		f.journal[name] = out
+	}
+	return out, nil
+}
+
+func (f *fakeObjectRuntime) GetAttempts() (map[string]deploygate.Attempt, error) {
+	if f.attemptsErr != nil {
+		return nil, f.attemptsErr
+	}
+	return f.attempts, nil
+}
+
+func (f *fakeObjectRuntime) SetAttempts(a map[string]deploygate.Attempt) { f.attempts = a }
+
+func (f *fakeObjectRuntime) Now() (time.Time, error) { return f.now, nil }
+
+func (f *fakeObjectRuntime) GetPendingStarts() (map[string]deploygate.PendingStart, error) {
+	return f.pending, nil
+}
+
+func (f *fakeObjectRuntime) SetPendingStarts(p map[string]deploygate.PendingStart) { f.pending = p }
+
+func (f *fakeObjectRuntime) ScheduleDeadline(req deploygate.DeploymentDeadlineRequest, _ time.Duration) {
+	f.scheduled = append(f.scheduled, req)
+}
+
+func (f *fakeObjectRuntime) RunStep(name string, fn func(ctx context.Context) (deploygate.StepOutput, error)) (deploygate.StepOutput, error) {
+	out, err := f.RunReconcileStep(name, func(ctx context.Context) (reconcileStepOutput, error) {
+		o, runErr := fn(ctx)
+		return reconcileStepOutput(o), runErr
+	})
+	return deploygate.StepOutput(out), err
 }
 
 func TestBuildObject_ReflectionAndInterface(t *testing.T) {

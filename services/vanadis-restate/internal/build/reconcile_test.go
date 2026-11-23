@@ -14,7 +14,6 @@ import (
 
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/pkg/pubsubtest"
-	"github.com/azylman/aerial/services/vanadis-restate/internal/deploygate"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/eritest"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/executor"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
@@ -474,37 +473,6 @@ func TestBuildObject_AuthorityHandlerOperations(t *testing.T) {
 	}
 }
 
-type errDeploymentAttemptsRuntime struct {
-	*fakeObjectRuntime
-}
-
-func (errDeploymentAttemptsRuntime) GetAttempts() (map[string]deploygate.Attempt, error) {
-	return nil, errors.New("attempts read fail")
-}
-
-func (errDeploymentAttemptsRuntime) SetAttempts(map[string]deploygate.Attempt) {}
-
-func (errDeploymentAttemptsRuntime) Now() (time.Time, error) {
-	return time.Now().UTC(), nil
-}
-
-func (errDeploymentAttemptsRuntime) GetPendingStarts() (map[string]deploygate.PendingStart, error) {
-	return map[string]deploygate.PendingStart{}, nil
-}
-
-func (errDeploymentAttemptsRuntime) SetPendingStarts(map[string]deploygate.PendingStart) {}
-
-func (errDeploymentAttemptsRuntime) ScheduleDeadline(deploygate.DeploymentDeadlineRequest, time.Duration) {
-}
-
-func (e errDeploymentAttemptsRuntime) RunStep(name string, fn func(ctx context.Context) (deploygate.StepOutput, error)) (deploygate.StepOutput, error) {
-	out, err := e.RunReconcileStep(name, func(ctx context.Context) (reconcileStepOutput, error) {
-		o, runErr := fn(ctx)
-		return reconcileStepOutput(o), runErr
-	})
-	return deploygate.StepOutput(out), err
-}
-
 func TestBuildObject_ReconcileErrorBranches(t *testing.T) {
 	t.Parallel()
 
@@ -610,37 +578,10 @@ func TestBuildObject_ReconcileErrorBranches(t *testing.T) {
 	}
 	boDeadline := NewBuildObject("", nil).WithAuthority(stDeadline,
 		executor.NewExecutor(t.TempDir(), eriDeadlineWidgetFail, &mockBusExecutor{}, "token", "example-owner", nil))
-	rtDeadline := &errDeploymentAttemptsRuntime{fakeObjectRuntime: newFakeObjectRuntime("b-deadline")}
+	rtDeadline := &fakeObjectRuntime{key: "b-deadline", now: time.Now().UTC(), attemptsErr: errors.New("attempts read fail")}
 	rtDeadline.SetState(model.BuildObjectState{Build: bDeadline, Chunks: []model.VanadisChunk{cDeadline}})
 	_, err = boDeadline.executeObjectTransition(rtDeadline, "reconcile", nil)
 	assert.Error(t, err)
-}
-
-type replayNotifyRuntime struct {
-	*fakeObjectRuntime
-
-	primaryErr error
-	notifyDone bool
-}
-
-func (r *replayNotifyRuntime) RunReconcileStep(name string, fn func(ctx context.Context) (reconcileStepOutput, error)) (reconcileStepOutput, error) {
-	if name == "notify-transition-error" {
-		r.stepsRun = append(r.stepsRun, name)
-		if r.notifyDone {
-			return reconcileStepOutput{}, nil
-		}
-		out, err := fn(context.Background())
-		if err != nil {
-			return out, err
-		}
-		r.notifyDone = true
-		return out, nil
-	}
-	if r.primaryErr != nil {
-		r.stepsRun = append(r.stepsRun, name)
-		return reconcileStepOutput{}, r.primaryErr
-	}
-	return fn(context.Background())
 }
 
 func TestRunTransitionStep_NotifyOnceAcrossReplay(t *testing.T) {
@@ -671,7 +612,7 @@ func TestRunTransitionStep_NotifyOnceAcrossReplay(t *testing.T) {
 			}
 			exec := executor.NewExecutor(t.TempDir(), eri, nil, "token", "example-owner", nil)
 			bo := NewBuildObject("", nil).WithAuthority(st, exec)
-			rt := &replayNotifyRuntime{fakeObjectRuntime: newFakeObjectRuntime("b1"), primaryErr: errors.New("boom")}
+			rt := &fakeObjectRuntime{key: "b1", journal: map[string]reconcileStepOutput{}, stepErrs: map[string]error{"reconcile": errors.New("boom")}}
 			prior := &model.BuildObjectState{Build: b}
 			for range 2 {
 				_, err := bo.runTransitionStep(rt, "reconcile", "b1", nil, prior, nil)
