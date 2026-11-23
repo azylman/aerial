@@ -216,6 +216,43 @@ func (d *DiscordWidgetDeliverer) senderForAgent(agent string) (DiscordWidgetSend
 	return s, nil
 }
 
+func firstTextDisplayContent(components []discordgo.MessageComponent) string {
+	for _, comp := range components {
+		switch c := comp.(type) {
+		case *discordgo.TextDisplay:
+			if trimmed := strings.TrimSpace(c.Content); trimmed != "" {
+				return trimmed
+			}
+		case *discordgo.Section:
+			if c != nil {
+				if found := firstTextDisplayContent(c.Components); found != "" {
+					return found
+				}
+			}
+		case *discordgo.Container:
+			if c != nil {
+				if found := firstTextDisplayContent(c.Components); found != "" {
+					return found
+				}
+			}
+		}
+	}
+	return ""
+}
+
+// widgetMessageHasHeader reports whether m is a Components V2 message whose first non-empty
+// TextDisplay component content equals wantHeader (trimmed).
+func widgetMessageHasHeader(m *discordgo.Message, wantHeader string) bool {
+	if m == nil || m.Flags&discordgo.MessageFlagsIsComponentsV2 == 0 {
+		return false
+	}
+	cleanHeader := strings.TrimSpace(wantHeader)
+	if cleanHeader == "" {
+		return false
+	}
+	return firstTextDisplayContent(m.Components) == cleanHeader
+}
+
 // shouldSinkWidget reports whether the status widget messageID is buried enough to re-post: either
 // WidgetSinkMessageThreshold regular messages sit below it, or at least one does and the newest of
 // them is at least WidgetSinkIdleThreshold older than now. Other Components V2 widgets never count.
@@ -242,6 +279,47 @@ func shouldSinkWidget(s DiscordWidgetSender, channelID, messageID string, now ti
 		}
 	}
 	return !newest.IsZero() && now.Sub(newest) >= WidgetSinkIdleThreshold
+}
+
+// inspectWidgetSink queries messages after messageID, inspecting for any newer message that shares
+// wantHeader (as adoptedID) and determining if messageID should sink.
+func inspectWidgetSink(s DiscordWidgetSender, channelID, messageID, wantHeader string, now time.Time, opts ...discordgo.RequestOption) (string, bool) {
+	if s == nil || strings.TrimSpace(channelID) == "" || strings.TrimSpace(messageID) == "" {
+		return "", false
+	}
+	trimmedHeader := strings.TrimSpace(wantHeader)
+	if trimmedHeader == "" {
+		return "", shouldSinkWidget(s, channelID, messageID, now, opts...)
+	}
+	msgs, err := s.ChannelMessages(channelID, WidgetSinkQueryLimit, "", messageID, "", opts...)
+	if err != nil {
+		return "", false
+	}
+	nonWidgetCount := 0
+	var newest time.Time
+	var adoptedID string
+	var newestAdopted time.Time
+
+	for _, m := range msgs {
+		if m == nil || m.ID == messageID {
+			continue
+		}
+		if widgetMessageHasHeader(m, trimmedHeader) {
+			if adoptedID == "" || m.Timestamp.After(newestAdopted) || (m.Timestamp.Equal(newestAdopted) && m.ID > adoptedID) {
+				adoptedID = m.ID
+				newestAdopted = m.Timestamp
+			}
+		}
+		if m.Flags&discordgo.MessageFlagsIsComponentsV2 != 0 {
+			continue
+		}
+		nonWidgetCount++
+		if m.Timestamp.After(newest) {
+			newest = m.Timestamp
+		}
+	}
+	shouldSink := nonWidgetCount >= WidgetSinkMessageThreshold || (!newest.IsZero() && now.Sub(newest) >= WidgetSinkIdleThreshold)
+	return adoptedID, shouldSink
 }
 
 const (
@@ -601,15 +679,19 @@ func (d *DiscordWidgetDeliverer) DeliverStatusWidget(ctx context.Context, req er
 	now := d.now()
 	req.ChannelID = d.redirectChannelIfNoBuildUpdates(req.Agent, req.ChannelID, now)
 
-	var opts []discordgo.RequestOption
-	if ctx != nil {
-		opts = append(opts, discordgo.WithContext(ctx))
-	}
-
 	lockVal, _ := d.channelLocks.LoadOrStore(req.ChannelID, &sync.Mutex{})
 	if chLock, ok := lockVal.(*sync.Mutex); ok && chLock != nil {
 		chLock.Lock()
 		defer chLock.Unlock()
+	}
+
+	var opts []discordgo.RequestOption
+	if baseCtx, timeout := ericlient.WidgetTimeoutFromContext(ctx); timeout > 0 {
+		callCtx, cancel := context.WithTimeout(baseCtx, timeout)
+		defer cancel()
+		opts = append(opts, discordgo.WithContext(callCtx))
+	} else if ctx != nil {
+		opts = append(opts, discordgo.WithContext(ctx))
 	}
 
 	origMsgID := strings.TrimSpace(req.MessageID)
@@ -751,21 +833,62 @@ func newWidgetMessageSend(components []discordgo.MessageComponent) *discordgo.Me
 	}
 }
 
-func trySinkStatusWidget(s DiscordWidgetSender, channelID, trimmedMsgID string, components []discordgo.MessageComponent, opts ...discordgo.RequestOption) (string, bool) {
+func trySinkStatusWidget(s DiscordWidgetSender, channelID, trimmedMsgID string, components []discordgo.MessageComponent, opts ...discordgo.RequestOption) (string, error) {
 	send := newWidgetMessageSend(components)
 	created, sendErr := s.ChannelMessageSendComplex(channelID, send, opts...)
-	if sendErr != nil || created == nil {
-		return "", false
+	if sendErr != nil {
+		return "", sendErr
+	}
+	if created == nil {
+		return "", errors.New("received nil message on sink send")
 	}
 	deleteOldWidgetBestEffort(s, channelID, trimmedMsgID, opts...)
-	return created.ID, true
+	return created.ID, nil
+}
+
+func tryAdoptOrSinkWidget(s DiscordWidgetSender, req ericlient.StatusWidgetRequest, trimmedMsgID string, components []discordgo.MessageComponent, now time.Time, opts ...discordgo.RequestOption) (string, bool, error) {
+	if req.SkipSink {
+		return "", false, nil
+	}
+	adoptedID, shouldSink := inspectWidgetSink(s, req.ChannelID, trimmedMsgID, buildWidgetHeaderText(req), now, opts...)
+	if adoptedID != "" {
+		edit := &discordgo.MessageEdit{
+			Channel:         req.ChannelID,
+			ID:              adoptedID,
+			Content:         nil,
+			Embeds:          nil,
+			Flags:           discordgo.MessageFlagsIsComponentsV2,
+			Components:      &components,
+			AllowedMentions: &discordgo.MessageAllowedMentions{Parse: []discordgo.AllowedMentionType{}},
+		}
+		msg, editErr := s.ChannelMessageEditComplex(edit, opts...)
+		if editErr == nil && msg != nil {
+			deleteOldWidgetBestEffort(s, req.ChannelID, trimmedMsgID, opts...)
+			return adoptedID, true, nil
+		}
+		if errors.Is(editErr, context.DeadlineExceeded) || errors.Is(editErr, context.Canceled) {
+			return "", false, fmt.Errorf("failed to edit adopted status widget message %s: %w", adoptedID, editErr)
+		}
+		slog.Warn("[Widget] failed to edit adopted status widget message; falling back to in-place edit",
+			"adopted_id", adoptedID, "channel_id", req.ChannelID, "error", editErr)
+	}
+	if shouldSink {
+		sunkID, sendErr := trySinkStatusWidget(s, req.ChannelID, trimmedMsgID, components, opts...)
+		if sendErr == nil && sunkID != "" {
+			return sunkID, true, nil
+		}
+		if errors.Is(sendErr, context.DeadlineExceeded) || errors.Is(sendErr, context.Canceled) {
+			return "", false, fmt.Errorf("failed to sink status widget message %s: %w", trimmedMsgID, sendErr)
+		}
+	}
+	return "", false, nil
 }
 
 func updateExistingStatusWidget(s DiscordWidgetSender, req ericlient.StatusWidgetRequest, trimmedMsgID string, components []discordgo.MessageComponent, now time.Time, opts ...discordgo.RequestOption) (string, error) {
-	if !req.SkipSink && shouldSinkWidget(s, req.ChannelID, trimmedMsgID, now, opts...) {
-		if id, ok := trySinkStatusWidget(s, req.ChannelID, trimmedMsgID, components, opts...); ok {
-			return id, nil
-		}
+	if handledID, ok, err := tryAdoptOrSinkWidget(s, req, trimmedMsgID, components, now, opts...); err != nil {
+		return "", err
+	} else if ok {
+		return handledID, nil
 	}
 
 	edit := &discordgo.MessageEdit{

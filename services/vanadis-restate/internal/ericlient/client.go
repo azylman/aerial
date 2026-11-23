@@ -15,6 +15,45 @@ const statusOK = "ok"
 
 type agentContextKey struct{}
 
+type widgetTimeoutContextKey struct{}
+
+type widgetTimeoutConfig struct {
+	parentCtx context.Context //nolint:containedctx // preserves un-timed base context for post-lock timeout derivation
+	timeout   time.Duration
+}
+
+// WithWidgetTimeout returns a copy of parent context carrying the requested widget timeout duration
+// and storing the un-timed parent context so post-lock timers can derive a fresh deadline.
+// It returns ctx unchanged if ctx == nil or timeout <= 0.
+func WithWidgetTimeout(ctx context.Context, timeout time.Duration) context.Context {
+	if ctx == nil || timeout <= 0 {
+		return ctx
+	}
+	parentCtx := ctx
+	if cfg, ok := ctx.Value(widgetTimeoutContextKey{}).(widgetTimeoutConfig); ok && cfg.parentCtx != nil {
+		parentCtx = cfg.parentCtx
+	}
+	return context.WithValue(ctx, widgetTimeoutContextKey{}, widgetTimeoutConfig{
+		parentCtx: parentCtx,
+		timeout:   timeout,
+	})
+}
+
+// WidgetTimeoutFromContext extracts the stored un-timed parent context and timeout duration > 0
+// when present, else returns (ctx, 0).
+func WidgetTimeoutFromContext(ctx context.Context) (context.Context, time.Duration) {
+	if ctx == nil {
+		return nil, 0
+	}
+	if cfg, ok := ctx.Value(widgetTimeoutContextKey{}).(widgetTimeoutConfig); ok && cfg.timeout > 0 {
+		if cfg.parentCtx != nil {
+			return cfg.parentCtx, cfg.timeout
+		}
+		return ctx, cfg.timeout
+	}
+	return ctx, 0
+}
+
 // WithAgent returns a copy of parent context carrying the given agent identifier.
 func WithAgent(ctx context.Context, agent string) context.Context {
 	clean := strings.TrimSpace(agent)

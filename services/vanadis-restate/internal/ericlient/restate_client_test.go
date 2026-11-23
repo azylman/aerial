@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -522,6 +523,77 @@ func TestAgentContextAndEffectiveResolution(t *testing.T) {
 			}
 			if got != tc.wantAgent {
 				t.Errorf("effectiveAgent() = %q, want %q", got, tc.wantAgent)
+			}
+		})
+	}
+}
+
+func TestWidgetTimeoutContext(t *testing.T) {
+	t.Parallel()
+
+	type keyType struct{}
+	parent := context.WithValue(context.Background(), keyType{}, "base-val")
+
+	tests := []struct {
+		name        string
+		setupCtx    context.Context
+		wantTimeout time.Duration
+		wantBaseVal any
+	}{
+		{
+			name:        "nil context returns nil and zero duration",
+			setupCtx:    nil,
+			wantTimeout: 0,
+			wantBaseVal: nil,
+		},
+		{
+			name:        "context without timeout returns original context and zero duration",
+			setupCtx:    parent,
+			wantTimeout: 0,
+			wantBaseVal: "base-val",
+		},
+		{
+			name:        "timeout <= 0 returns original context and zero duration",
+			setupCtx:    WithWidgetTimeout(parent, 0),
+			wantTimeout: 0,
+			wantBaseVal: "base-val",
+		},
+		{
+			name:        "positive timeout stores un-timed parent and duration",
+			setupCtx:    WithWidgetTimeout(parent, 10*time.Second),
+			wantTimeout: 10 * time.Second,
+			wantBaseVal: "base-val",
+		},
+		{
+			name:        "nested WithWidgetTimeout preserves original un-timed parent",
+			setupCtx:    WithWidgetTimeout(WithWidgetTimeout(parent, 5*time.Second), 10*time.Second),
+			wantTimeout: 10 * time.Second,
+			wantBaseVal: "base-val",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			baseCtx, timeout := WidgetTimeoutFromContext(tc.setupCtx)
+			if timeout != tc.wantTimeout {
+				t.Errorf("WidgetTimeoutFromContext() timeout = %v, want %v", timeout, tc.wantTimeout)
+			}
+			if tc.wantBaseVal == nil {
+				if baseCtx != nil {
+					t.Errorf("WidgetTimeoutFromContext() baseCtx = %v, want nil", baseCtx)
+				}
+				return
+			}
+			if baseCtx == nil {
+				t.Fatal("WidgetTimeoutFromContext() baseCtx = nil, want non-nil")
+			}
+			if val := baseCtx.Value(keyType{}); val != tc.wantBaseVal {
+				t.Errorf("baseCtx.Value() = %v, want %v", val, tc.wantBaseVal)
+			}
+			// Verify that baseCtx does not have an active deadline
+			if _, hasDeadline := baseCtx.Deadline(); hasDeadline {
+				t.Error("expected baseCtx to have no deadline")
 			}
 		})
 	}

@@ -30,12 +30,13 @@ type Client struct {
 	WidgetID            string
 	SimulateActive      bool
 
-	LastDispatch *eriwire.BrainDispatchRequest
-	LastCancel   string
-	CancelAgent  string
-	LastThreadID string
-	LastPrompt   string
-	LastWidget   *ericlient.StatusWidgetRequest
+	LastDispatch  *eriwire.BrainDispatchRequest
+	LastCancel    string
+	CancelAgent   string
+	LastThreadID  string
+	LastPrompt    string
+	LastWidget    *ericlient.StatusWidgetRequest
+	LastWidgetCtx context.Context //nolint:containedctx // test double records call arguments
 	// DeletedWidgets records every DeleteWidget messageID in call order.
 	DeletedWidgets []string
 	LastMsgChan    string
@@ -88,8 +89,9 @@ func (c *Client) Prompt(_ context.Context, threadID, prompt string) error {
 
 // Widget records req and returns ("", WidgetErr) on error, else WidgetID
 // (DefaultWidgetID when empty).
-func (c *Client) Widget(_ context.Context, req ericlient.StatusWidgetRequest) (string, error) {
+func (c *Client) Widget(ctx context.Context, req ericlient.StatusWidgetRequest) (string, error) {
 	c.LastWidget = &req
+	c.LastWidgetCtx = ctx
 	if c.WidgetErr != nil {
 		return "", c.WidgetErr
 	}

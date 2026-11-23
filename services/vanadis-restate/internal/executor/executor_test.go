@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -16,6 +17,7 @@ import (
 	"github.com/azylman/aerial/pkg/githubapitest"
 	"github.com/azylman/aerial/pkg/pubsub"
 	"github.com/azylman/aerial/pkg/pubsubtest"
+	"github.com/azylman/aerial/services/vanadis-restate/internal/ericlient"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/eritest"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
@@ -51,15 +53,17 @@ func (m *mockBusExecutor) Publish(_ context.Context, subject, _ string, _ any) e
 type casWidgetStore struct {
 	store.VanadisStore
 
-	mu     sync.Mutex
-	stored string
-	casErr error
-	writes int
+	mu      sync.Mutex
+	stored  string
+	casErr  error
+	writes  int
+	lastCtx context.Context
 }
 
-func (m *casWidgetStore) CompareAndSwapBuildStatusMessageID(_ context.Context, _, oldID, newID string) (bool, error) {
+func (m *casWidgetStore) CompareAndSwapBuildStatusMessageID(ctx context.Context, _, oldID, newID string) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.lastCtx = ctx
 	if m.casErr != nil {
 		return false, m.casErr
 	}
@@ -349,6 +353,7 @@ func TestExecutor_SyncBuildWidget(t *testing.T) {
 		known       string
 		stored      string
 		casErr      error
+		withTimeout time.Duration
 		wantID      string
 		wantErr     string
 		wantStored  string
@@ -361,7 +366,8 @@ func TestExecutor_SyncBuildWidget(t *testing.T) {
 		{name: "sink win stores the new card", eri: eritest.Client{WidgetID: "new"}, known: "old", stored: "old", wantID: "new", wantStored: "new", wantWrites: 1},
 		{name: "sink loss deletes the new card", eri: eritest.Client{WidgetID: "new"}, known: "old", stored: "other", wantStored: "other", wantDeleted: []string{"new"}},
 		{name: "sink loss tolerates delete failure", eri: eritest.Client{WidgetID: "new", DeleteWidgetErr: errors.New("discord down")}, known: "old", stored: "other", wantStored: "other", wantDeleted: []string{"new"}},
-		{name: "cas error keeps the new card", eri: eritest.Client{WidgetID: "new"}, known: "old", stored: "old", casErr: errCAS, wantID: "new", wantStored: "old"},
+		{name: "cas error keeps the new card and advances message id", eri: eritest.Client{WidgetID: "new"}, known: "old", stored: "old", casErr: errCAS, wantID: "new", wantStored: "old"},
+		{name: "with widget timeout propagates bounded context to eri and un-timed context to cas", withTimeout: 10 * time.Second, eri: eritest.Client{WidgetID: "new"}, known: "old", stored: "old", wantID: "new", wantStored: "new", wantWrites: 1},
 		{name: "no store returns the new card", noStore: true, eri: eritest.Client{WidgetID: "new"}, known: "old", wantID: "new"},
 		{name: "widget error writes and deletes nothing", eri: eritest.Client{WidgetErr: errors.New("eri widget failure")}, known: "old", stored: "old", wantErr: "sync widget to eri: eri widget failure", wantStored: "old"},
 	}
@@ -380,7 +386,11 @@ func TestExecutor_SyncBuildWidget(t *testing.T) {
 			}
 			b := model.VanadisBuild{ID: "b1", Title: "Build 1", Status: "running", ThreadID: "th-1", StatusMessageID: tc.known}
 			chunks := []model.VanadisChunk{{ID: "c1", Title: "Chunk 1", Status: "running"}}
-			got, err := exec.SyncBuildWidget(context.Background(), vs, b, chunks, "Notice!")
+			ctx := context.Background()
+			if tc.withTimeout > 0 {
+				ctx = ericlient.WithWidgetTimeout(ctx, tc.withTimeout)
+			}
+			got, err := exec.SyncBuildWidget(ctx, vs, b, chunks, "Notice!")
 			if tc.wantErr == "" {
 				require.NoError(t, err)
 			} else {
@@ -393,6 +403,20 @@ func TestExecutor_SyncBuildWidget(t *testing.T) {
 			if !tc.nilExec {
 				require.NotNil(t, eri.LastWidget)
 				assert.Equal(t, "Notice!", eri.LastWidget.Banner)
+			}
+			if tc.casErr != nil && tc.wantID != "" && tc.known != "" {
+				assert.Equal(t, tc.wantID, exec.resolveLatestMessageID(b.ID, tc.known))
+			}
+			if tc.withTimeout > 0 && !tc.nilExec {
+				require.NotNil(t, eri.LastWidgetCtx)
+				deadline, ok := eri.LastWidgetCtx.Deadline()
+				assert.True(t, ok)
+				assert.LessOrEqual(t, time.Until(deadline), tc.withTimeout)
+				assert.Positive(t, time.Until(deadline))
+				if st.lastCtx != nil {
+					_, casHasDeadline := st.lastCtx.Deadline()
+					assert.False(t, casHasDeadline, "expected un-timed context passed to CAS")
+				}
 			}
 		})
 	}

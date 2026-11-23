@@ -135,8 +135,8 @@ func executeUpdateActiveStepTestCase(t *testing.T, tc updateActiveStepTestCase) 
 	if tc.expectWidget {
 		assertSyncedWidgetStep(t, eri, tc.req.ChunkID, tc.expectStep, tc.expectCleared)
 		assert.True(t, widgetTimedOut, "expected bounded context timeout on widget sync")
-		assert.LessOrEqual(t, remainingTimeout, 3*time.Second)
-		assert.Positive(t, remainingTimeout)
+		assert.LessOrEqual(t, remainingTimeout, ActiveStepWidgetTimeout)
+		assert.Greater(t, remainingTimeout, 3*time.Second)
 	}
 }
 

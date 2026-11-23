@@ -13,10 +13,14 @@ import (
 	restate "github.com/restatedev/sdk-go"
 
 	"github.com/azylman/aerial/pkg/buildplan"
+	"github.com/azylman/aerial/services/vanadis-restate/internal/ericlient"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/executor"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/model"
 	"github.com/azylman/aerial/services/vanadis-restate/internal/store"
 )
+
+// ActiveStepWidgetTimeout bounds the active-step status widget delivery timeout.
+const ActiveStepWidgetTimeout = 10 * time.Second
 
 // UpdateActiveStepRequest carries the target chunk and active step description.
 type UpdateActiveStepRequest = buildplan.UpdateActiveStepRequest
@@ -144,8 +148,7 @@ func (b *BuildObject) syncSingleActiveStepIteration(rc restate.RunContext, build
 	if bld == nil || bld.Quiet {
 		return
 	}
-	stepCtx, cancel := context.WithTimeout(rc, 3*time.Second)
-	defer cancel()
+	stepCtx := ericlient.WithWidgetTimeout(rc, ActiveStepWidgetTimeout)
 	if sErr := b.syncActiveStepWidget(stepCtx, *bld, chunks); sErr != nil {
 		slog.WarnContext(rc, "[vanadis-restate] sync widget warning on active step update", "build_id", buildID, "chunk_id", req.ChunkID, "error", sErr)
 	}
