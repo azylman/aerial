@@ -251,7 +251,9 @@ func TestJetStreamBus_NoClientBuffering(t *testing.T) {
 	t.Cleanup(func() { _ = sub.Unsubscribe() })
 	publishAll(t, bus, "aerial.jobs.buffer", "m1", "m2", "m3")
 
-	info := awaitConsumer(t, bus, StreamAerialJobs, "buffer-workers", func(ci *nats.ConsumerInfo) bool { return ci.NumAckPending >= 1 })
+	info := awaitConsumer(t, bus, StreamAerialJobs, "buffer-workers", func(ci *nats.ConsumerInfo) bool {
+		return ci.NumAckPending >= 1 && ci.NumPending >= 2
+	})
 	if info.NumAckPending != 1 || info.NumPending != 2 || info.NumWaiting != 0 {
 		t.Errorf("while busy: ack pending %d, pending %d, waiting %d; want 1, 2, 0", info.NumAckPending, info.NumPending, info.NumWaiting)
 	}
