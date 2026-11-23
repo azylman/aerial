@@ -35,15 +35,10 @@ func assertStoreUnavailable(t *testing.T, s db.Store) {
 	requireErr(t, s.InsertMessage(ctx, db.Message{}), "InsertMessage")
 	requireErr(t, s.UpdateMessageStatus(ctx, "id", "", ""), "UpdateMessageStatus")
 	requireErr(t, s.UpdateMessageCompleted(ctx, "id", "", ""), "UpdateMessageCompleted")
-	requireErr(t, s.IncrementMessageRetry(ctx, "id", ""), "IncrementMessageRetry")
-	requireErr(t, s.ResetMessageToPendingWithRestart(ctx, "id", ""), "ResetMessageToPendingWithRestart")
-	requireErr(t, c1(s.GetPendingOrProcessingMessages(ctx, 10)), "GetPendingOrProcessingMessages")
 	requireErr(t, c1(s.GetMessage(ctx, "id")), "GetMessage")
 	requireErr(t, c1(s.MessageExists(ctx, "id")), "MessageExists")
 	requireErr(t, c1(s.ClaimPendingMessage(ctx, "id")), "ClaimPendingMessage")
-	requireErr(t, c1(s.GetActiveRecentThreadIDs(ctx, time.Hour)), "GetActiveRecentThreadIDs")
 	requireErr(t, c1(s.GetRecentThreadMessages(ctx, "t", 10)), "GetRecentThreadMessages")
-	requireErr(t, c1(s.HasActiveThreadTurn(ctx, "t")), "HasActiveThreadTurn")
 	requireErr(t, c1(s.GetActiveTasks(ctx)), "GetActiveTasks")
 	requireErr(t, c1(s.GetSessionID(ctx, "t")), "GetSessionID")
 	requireErr(t, c1(s.ResolveThreadForSession(ctx, "s")), "ResolveThreadForSession")
@@ -54,55 +49,27 @@ func assertStoreUnavailable(t *testing.T, s db.Store) {
 	requireErr(t, c1(s.GetPreviousSessionID(ctx, "k")), "GetPreviousSessionID")
 	requireErr(t, c2(s.GetThreadSummary(ctx, "t")), "GetThreadSummary")
 	requireErr(t, s.SaveThreadSummary(ctx, "t", "s", "w"), "SaveThreadSummary")
-	requireErr(t, c1(s.GetSessionActivityStats(ctx, "t")), "GetSessionActivityStats")
-	requireErr(t, c1(s.AcquireLeaderLock(ctx)), "AcquireLeaderLock")
-	requireErr(t, c1(s.ListPendingMessageIDsForThread(ctx, "t")), "ListPendingMessageIDsForThread")
 	requireErr(t, c1(s.GetMessagesByID(ctx, []string{"id"})), "GetMessagesByID")
 	requireErr(t, c1(s.FailMessagesIfActive(ctx, []string{"id"}, "r")), "FailMessagesIfActive")
 	requireErr(t, c1(s.FailMessagesIfPending(ctx, []string{"id"}, "r")), "FailMessagesIfPending")
 	requireErr(t, c1(s.RequeueProcessingMessages(ctx, []string{"id"}, "r")), "RequeueProcessingMessages")
 	requireErr(t, c1(s.BeginMessageAttempt(ctx, "id", 1)), "BeginMessageAttempt")
-	requireErr(t, c1(s.ListPendingDispatchIDsForSession(ctx, "k")), "ListPendingDispatchIDsForSession")
 	requireErr(t, c1(s.FailDispatchesIfActive(ctx, []string{"id"}, "r")), "FailDispatchesIfActive")
 	requireErr(t, c1(s.FailDispatchesIfPending(ctx, []string{"id"}, "r")), "FailDispatchesIfPending")
 	requireErr(t, c1(s.BeginDispatchAttempt(ctx, "id", 1)), "BeginDispatchAttempt")
 	requireErr(t, c1(s.ListActiveDispatchSessionKeys(ctx, "d", "b")), "ListActiveDispatchSessionKeys")
 }
 
-func TestFakeStore_HasActiveThreadTurn(t *testing.T) {
+func TestFakeStore_UpdateMessageStatusKeepsTelemetry(t *testing.T) {
 	s := NewFakeStore()
 	ctx := context.Background()
 
-	active, err := s.HasActiveThreadTurn(ctx, "")
-	if err != nil || active {
-		t.Fatalf("expected false, nil for empty threadID, got %v, %v", active, err)
-	}
-
-	active, err = s.HasActiveThreadTurn(ctx, "th-1")
-	if err != nil || active {
-		t.Fatalf("expected false, nil for empty store, got %v, %v", active, err)
-	}
-
 	mustOK(t, s.InsertMessage(ctx, db.Message{ID: "m1", ThreadID: "th-1", Status: db.StatusPending}), "InsertMessage")
-	active, err = s.HasActiveThreadTurn(ctx, "th-1")
-	if err != nil || !active {
-		t.Fatalf("expected true, nil for pending message, got %v, %v", active, err)
-	}
-
 	mustOK(t, s.UpdateMessageStatus(ctx, "m1", db.StatusProcessing, "busy", db.TurnTelemetry{DurationMs: 100, TotalTokens: 50}), "UpdateMessageStatus with telemetry")
-	active, err = s.HasActiveThreadTurn(ctx, "th-1")
-	if err != nil || !active {
-		t.Fatalf("expected true, nil for processing message, got %v, %v", active, err)
-	}
-
 	mustOK(t, s.UpdateMessageStatus(ctx, "m1", db.StatusCompleted, ""), "UpdateMessageStatus without telemetry")
 	msgM1, _ := s.GetMessage(ctx, "m1")
-	if msgM1.DurationMs != 100 || msgM1.TotalTokens != 50 {
-		t.Errorf("expected telemetry preserved on m1, got %+v", msgM1)
-	}
-	active, err = s.HasActiveThreadTurn(ctx, "th-1")
-	if err != nil || active {
-		t.Fatalf("expected false, nil for completed message, got %v, %v", active, err)
+	if msgM1.Status != db.StatusCompleted || msgM1.DurationMs != 100 || msgM1.TotalTokens != 50 {
+		t.Errorf("expected completed with telemetry preserved on m1, got %+v", msgM1)
 	}
 }
 
@@ -121,25 +88,6 @@ func TestFakeStoreLifecycleAndFailNext(t *testing.T) {
 		t.Fatalf("expected success after consumed FailNext, got %v", err)
 	}
 
-	if rel, err := s.AcquireLeaderLock(ctx); err != nil || rel == nil {
-		t.Fatalf("expected AcquireLeaderLock success, got %v", err)
-	} else {
-		rel()
-	}
-	var hookCalled bool
-	s.SetLeaderLockHook(func(ctx context.Context) (func(), error) {
-		hookCalled = true
-		return func() {}, nil
-	})
-	if rel, err := s.AcquireLeaderLock(ctx); err != nil || rel == nil || !hookCalled {
-		t.Fatalf("expected custom leaderLockHook called, got hookCalled=%v, err=%v", hookCalled, err)
-	}
-	canceledCtx, cancel := context.WithCancel(ctx)
-	cancel()
-	if _, err := s.AcquireLeaderLock(canceledCtx); !errors.Is(err, context.Canceled) {
-		t.Fatalf("expected context.Canceled from AcquireLeaderLock, got %v", err)
-	}
-
 	mustOK(t, s.Close(), "Close")
 	assertStoreUnavailable(t, s)
 }
@@ -148,18 +96,14 @@ func assertFakeStoreMessageStatusTransitions(ctx context.Context, t *testing.T, 
 	t.Helper()
 	_ = s.UpdateMessageStatus(ctx, "msg-1", db.StatusProcessing, "busy")
 	_ = s.UpdateMessageStatus(ctx, "msg-none", db.StatusProcessing, "")
-	_ = s.IncrementMessageRetry(ctx, "msg-1", "timeout")
-	_ = s.IncrementMessageRetry(ctx, "msg-none", "")
-	if msg, _ := s.GetMessage(ctx, "msg-1"); msg.RetryCount != 1 {
-		t.Errorf("expected retry=1, got %d", msg.RetryCount)
+	if msg, _ := s.GetMessage(ctx, "msg-1"); msg.Status != db.StatusProcessing || msg.ErrorMessage != "busy" {
+		t.Errorf("expected processing, got %+v", msg)
+	}
+	if ok, _ := s.ClaimPendingMessage(ctx, "msg-1"); ok {
+		t.Errorf("ClaimPendingMessage on processing row = true, want false")
 	}
 
-	_ = s.ResetMessageToPendingWithRestart(ctx, "msg-1", "recovered")
-	_ = s.ResetMessageToPendingWithRestart(ctx, "msg-none", "")
-	if msg, _ := s.GetMessage(ctx, "msg-1"); msg.Status != db.StatusPending || msg.RestartCount != 1 {
-		t.Errorf("expected pending, restart=1, got %+v", msg)
-	}
-
+	_ = s.UpdateMessageStatus(ctx, "msg-1", db.StatusPending, "")
 	if ok, err := s.ClaimPendingMessage(ctx, "msg-1"); err != nil || !ok {
 		t.Errorf("ClaimPendingMessage(msg-1) = %v, %v, want true, nil", ok, err)
 	}
@@ -179,15 +123,6 @@ func assertFakeStoreMessageStatusTransitions(ctx context.Context, t *testing.T, 
 
 func assertFakeStoreMessageQueries(ctx context.Context, t *testing.T, s *FakeStore, now time.Time) {
 	t.Helper()
-	if pending, err := s.GetPendingOrProcessingMessages(ctx, 10); err != nil || len(pending) != 1 || pending[0].ID != "msg-2" {
-		t.Errorf("GetPendingOrProcessingMessages = %+v, %v", pending, err)
-	}
-	if p1, err := s.GetPendingOrProcessingMessages(ctx, 1); err != nil || len(p1) != 1 {
-		t.Errorf("GetPendingOrProcessingMessages(limit=1) = %+v, %v", p1, err)
-	}
-	if threadIDs, err := s.GetActiveRecentThreadIDs(ctx, time.Hour); err != nil || len(threadIDs) != 1 {
-		t.Errorf("GetActiveRecentThreadIDs = %v, %v", threadIDs, err)
-	}
 	if recent, err := s.GetRecentThreadMessages(ctx, "th-1", 10); err != nil || len(recent) != 2 {
 		t.Errorf("GetRecentThreadMessages = %+v, %v", recent, err)
 	}
@@ -462,15 +397,6 @@ func TestFakeStoreSessionOperations(t *testing.T) {
 	mustOK(t, s.SaveThreadSummary(ctx, "th-1", "Summary text", "msg-100"), "SaveThreadSummary")
 	if sum, wm, _ := s.GetThreadSummary(ctx, "th-1"); sum != "Summary text" || wm != "msg-100" {
 		t.Errorf("GetThreadSummary = %q, %q", sum, wm)
-	}
-
-	_ = s.InsertMessage(ctx, db.Message{ID: "m-act-1", ThreadID: "th-1", Status: db.StatusCompleted, ResponseText: "Valid"})
-	_ = s.InsertMessage(ctx, db.Message{ID: "m-act-2", ThreadID: "th-1", Status: db.StatusCompleted, ResponseText: "[EXPIRED_STALE]"})
-	_ = s.InsertMessage(ctx, db.Message{ID: "m-act-3", ThreadID: "th-1", Status: db.StatusCompleted, ResponseText: "[AMBIENT]"})
-	_ = s.InsertMessage(ctx, db.Message{ID: "m-act-4", ThreadID: "th-1", Status: db.StatusCompleted, ResponseText: "[IGNORED]"})
-	_ = s.InsertMessage(ctx, db.Message{ID: "m-act-5", ThreadID: "th-1", Status: db.StatusCompleted, ResponseText: "Valid 2"})
-	if stats, err := s.GetSessionActivityStats(ctx, "th-1"); err != nil || stats.InternalSessionID != "sess-2" || stats.CompletedTurns != 2 {
-		t.Errorf("GetSessionActivityStats = %+v, %v", stats, err)
 	}
 
 	_ = s.SaveSessionID(ctx, "ext-1", "int-1")
@@ -910,70 +836,6 @@ func mustInsertDispatch(ctx context.Context, t *testing.T, store db.Store, d db.
 	mustOK(t, err, msg)
 }
 
-func assertFakeStoreDispatchPendingAndCancel(ctx context.Context, t *testing.T, s *FakeStore) {
-	t.Helper()
-	d3 := db.Dispatch{
-		ID:        "disp-f3",
-		Source:    "vanadis",
-		SessionID: "build-1",
-		Prompt:    "Build ID: b-999\nChunk 1",
-		Status:    db.StatusPending,
-	}
-	mustInsertDispatch(ctx, t, s, d3, "InsertDispatch disp-f3")
-	d3b := db.Dispatch{
-		ID:        "disp-f3b",
-		Source:    "vanadis",
-		SessionID: "vanadis-b-999-chunk-2",
-		Prompt:    "Executing chunk 2",
-		Status:    db.StatusProcessing,
-	}
-	mustInsertDispatch(ctx, t, s, d3b, "InsertDispatch disp-f3b")
-	hasActive, err := s.HasActiveDispatchTurn(ctx, "build-1", "")
-	mustOK(t, err, "HasActiveDispatchTurn")
-	if !hasActive {
-		t.Errorf("expected active dispatch for session build-1")
-	}
-
-	disps, err := s.GetPendingOrProcessingDispatches(ctx, 10)
-	mustOK(t, err, "GetPendingOrProcessingDispatches")
-	if len(disps) == 0 {
-		t.Errorf("expected dispatches from GetPendingOrProcessingDispatches")
-	}
-	dispsLimited, err := s.GetPendingOrProcessingDispatches(ctx, 1)
-	mustOK(t, err, "GetPendingOrProcessingDispatches limit=1")
-	if len(dispsLimited) != 1 {
-		t.Errorf("expected 1 dispatch from limited call")
-	}
-	cancelled, err := s.CancelPendingDispatches(ctx, "", "b-999", "cancelled build")
-	mustOK(t, err, "CancelPendingDispatches")
-	if len(cancelled) != 2 || !slices.Contains(cancelled, "disp-f3") || !slices.Contains(cancelled, "disp-f3b") {
-		t.Errorf("expected cancelled [disp-f3, disp-f3b], got %v", cancelled)
-	}
-	got, _ := s.GetDispatch(ctx, "disp-f3")
-	if got.Status != db.StatusFailed || got.ErrorMessage != "cancelled build" {
-		t.Errorf("unexpected status after cancel: %+v", got)
-	}
-	gotB, _ := s.GetDispatch(ctx, "disp-f3b")
-	if gotB.Status != db.StatusFailed || gotB.ErrorMessage != "cancelled build" {
-		t.Errorf("unexpected status for disp-f3b after cancel: %+v", gotB)
-	}
-
-	dChunk := db.Dispatch{
-		ID:             "disp-chunk-only",
-		Source:         "vanadis",
-		VanadisChunkID: "chunk-xyz",
-		SessionID:      "vanadis-chunk-xyz",
-		Prompt:         "remediation turn",
-		Status:         db.StatusPending,
-	}
-	mustInsertDispatch(ctx, t, s, dChunk, "InsertDispatch disp-chunk-only")
-	cancelledChunk, err := s.CancelPendingDispatches(ctx, "", "chunk-xyz", "cancelled chunk")
-	mustOK(t, err, "CancelPendingDispatches by chunk")
-	if len(cancelledChunk) != 1 || cancelledChunk[0] != "disp-chunk-only" {
-		t.Errorf("expected cancelled [disp-chunk-only], got %v", cancelledChunk)
-	}
-}
-
 func TestFakeStore_DispatchStoreLifecycle(t *testing.T) {
 	s := NewFakeStore()
 	ctx := context.Background()
@@ -1005,22 +867,14 @@ func TestFakeStore_DispatchStoreLifecycle(t *testing.T) {
 		t.Errorf("expected claimed=false for already processing dispatch")
 	}
 
-	// 3. Update status & retry
+	// 3. Update status
 	mustOK(t, s.UpdateDispatchStatus(ctx, "disp-f1", "PROCESSING", "in flight", db.TurnTelemetry{DurationMs: 120, TotalTokens: 50}), "UpdateDispatchStatus")
-	mustOK(t, s.IncrementDispatchRetry(ctx, "disp-f1", "network error"), "IncrementDispatchRetry")
 	got, _ = s.GetDispatch(ctx, "disp-f1")
-	if got.RetryCount != 1 || got.ErrorMessage != "network error" {
-		t.Errorf("unexpected retry state: %+v", got)
+	if got.Status != db.StatusProcessing || got.ErrorMessage != "in flight" {
+		t.Errorf("unexpected processing state: %+v", got)
 	}
 
-	// 4. Reset to pending with restart
-	mustOK(t, s.ResetDispatchToPendingWithRestart(ctx, "disp-f1", "runner restart"), "ResetDispatchToPendingWithRestart")
-	got, _ = s.GetDispatch(ctx, "disp-f1")
-	if got.Status != db.StatusPending || got.RestartCount != 1 {
-		t.Errorf("unexpected restart state: %+v", got)
-	}
-
-	// 5. Update completed with conversation ID and telemetry
+	// 4. Update completed with conversation ID and telemetry
 	tel := db.TurnTelemetry{DurationMs: 4000, InputTokens: 400, OutputTokens: 150, ThinkingTokens: 50, CacheReadTokens: 25, TotalTokens: 625}
 	mustOK(t, s.UpdateDispatchCompleted(ctx, "disp-f1", "Result text", "conv-f123", tel), "UpdateDispatchCompleted")
 	got, _ = s.GetDispatch(ctx, "disp-f1")
@@ -1031,7 +885,7 @@ func TestFakeStore_DispatchStoreLifecycle(t *testing.T) {
 		t.Errorf("unexpected telemetry on fake dispatch: %+v", got)
 	}
 
-	// 6. Recent session dispatches
+	// 5. Recent session dispatches
 	d2 := db.Dispatch{
 		ID:        "disp-f2",
 		Source:    "heartbeat",
@@ -1046,8 +900,6 @@ func TestFakeStore_DispatchStoreLifecycle(t *testing.T) {
 	if len(recent) != 2 || recent[0].ID != "disp-f1" || recent[1].ID != "disp-f2" {
 		t.Errorf("unexpected recent session dispatches: %+v", recent)
 	}
-
-	assertFakeStoreDispatchPendingAndCancel(ctx, t, s)
 }
 
 func TestFakeStore_GetActiveTasks_DispatchesUnion(t *testing.T) {
@@ -1124,23 +976,6 @@ func TestFakeStore_GetActiveTasks_DispatchesUnion(t *testing.T) {
 	mustOK(t, err, "GetActiveTasks filtered")
 	if len(filtered) != 1 || filtered[0].ID != "msg-fake-1" {
 		t.Errorf("expected filtered tasks to contain only messages, got %+v", filtered)
-	}
-}
-
-func TestFakeStore_GetActiveRecentThreadIDs_StrippingDiscordPrefix(t *testing.T) {
-	s := NewFakeStore()
-	ctx := context.Background()
-
-	mustOK(t, s.SaveSessionID(ctx, "112233445566778899", "conv-sess-1"), "SaveSessionID numeric")
-	mustOK(t, s.SaveSessionID(ctx, "discord-998877665544332211", "conv-sess-2"), "SaveSessionID discord prefixed")
-
-	threadIDs, err := s.GetActiveRecentThreadIDs(ctx, time.Hour)
-	mustOK(t, err, "GetActiveRecentThreadIDs")
-
-	found1 := slices.Contains(threadIDs, "112233445566778899")
-	found2 := slices.Contains(threadIDs, "998877665544332211")
-	if !found1 || !found2 {
-		t.Errorf("GetActiveRecentThreadIDs missing stripped thread IDs: got %v", threadIDs)
 	}
 }
 

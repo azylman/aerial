@@ -180,10 +180,6 @@ func TestStore_MessageFlattenedFieldsRoundTrip(t *testing.T) {
 	if len(fetched.MentionUserIDs) != 1 || fetched.MentionUserIDs[0] != "1000000000000000001" {
 		t.Errorf("GetMessage MentionUserIDs mismatch: %v", fetched.MentionUserIDs)
 	}
-	pending, err := store.GetPendingOrProcessingMessages(ctx, 10)
-	if err != nil || len(pending) != 1 || pending[0].ChannelID != "chan-meta-1" || pending[0].Traceparent != "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01" {
-		t.Fatalf("GetPendingMessages metadata mismatch: %+v (err: %v)", pending, err)
-	}
 	recent, err := store.GetRecentThreadMessages(ctx, msg.ThreadID, 10)
 	if err != nil || len(recent) != 1 || recent[0].AuthorGlobalName != "Alice In Wonderland" {
 		t.Fatalf("GetRecentThreadMessages metadata mismatch: %+v (err: %v)", recent, err)

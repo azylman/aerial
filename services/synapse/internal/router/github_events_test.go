@@ -46,7 +46,11 @@ type ownedIngress struct {
 func (in *ownedIngress) serve(t *testing.T) string {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		raw, _ := io.ReadAll(r.Body)
+		raw, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 		path := r.URL.EscapedPath()
 		in.mu.Lock()
 		defer in.mu.Unlock()
@@ -129,7 +133,7 @@ func (h *ownedHarness) effectCount() int {
 	h.bus.mu.Unlock()
 	h.disp.mu.Lock()
 	defer h.disp.mu.Unlock()
-	return n + len(h.disp.promptCalls) + len(h.disp.dispatchCalls) + len(h.disp.directMessageCalls) + len(h.disp.reconcileCalls)
+	return n + len(h.disp.promptCalls) + len(h.disp.dispatchCalls) + len(h.disp.directMessageCalls)
 }
 
 // triggerEvents joins the event-trigger publishes as "source:event_type".
@@ -323,8 +327,8 @@ func TestRestateOwnedBuildMetadataPaths(t *testing.T) {
 			if _, err := h.srv.ProcessGitHubEvent(ownedCtx(), tc.event, "d1", tc.body); err != nil {
 				t.Fatalf("ProcessGitHubEvent() err = %v", err)
 			}
-			if paths, _ := h.ingress.sends(); len(paths) != 0 {
-				t.Fatalf("sends = %v, want none", paths)
+			if paths, bodies := h.ingress.sends(); len(paths) != 0 || len(bodies) != 0 {
+				t.Fatalf("sends = %v %v, want none", paths, bodies)
 			}
 		})
 	}

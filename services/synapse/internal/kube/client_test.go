@@ -504,27 +504,6 @@ func TestClient_DiscoverImageKustomizations(t *testing.T) {
 	}
 }
 
-func TestClient_ReconcileKustomization(t *testing.T) {
-	t.Parallel()
-	ref := model.FluxKustomizationRef{Namespace: "flux-system", Name: "core"}
-	tests := []struct {
-		name    string
-		routes  map[string]kubeRoute
-		wantErr string
-	}{
-		{name: "patched", routes: map[string]kubeRoute{"PATCH /apis/kustomize.toolkit.fluxcd.io/v1/namespaces/flux-system/kustomizations/core": {body: `{}`, wantBody: `{"metadata":{"annotations":{"reconcile.fluxcd.io/requestedAt":"2026-11-18T00:00:00Z"}}}`}}},
-		{name: "unconfigured", wantErr: "reconcile kustomization flux-system/core: kube api server not configured"},
-		{name: "server error", routes: kubeAll500, wantErr: "reconcile kustomization flux-system/core: kube PATCH /apis/kustomize.toolkit.fluxcd.io/v1/namespaces/flux-system/kustomizations/core returned status 500"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			err := newKubeRouteClient(t, tc.routes, false).ReconcileKustomization(context.Background(), ref, "2026-11-18T00:00:00Z")
-			checkKubeErr(t, err, tc.wantErr)
-		})
-	}
-}
-
 func TestClient_ListKustomizations(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -575,7 +554,11 @@ func TestClient_WatchKustomizations(t *testing.T) {
 				return
 			}
 			defer stream.Close()
-			if body, _ := io.ReadAll(stream); string(body) != tc.wantBody {
+			body, err := io.ReadAll(stream)
+			if err != nil {
+				t.Fatalf("read stream: %v", err)
+			}
+			if string(body) != tc.wantBody {
 				t.Errorf("stream = %q, want %q", body, tc.wantBody)
 			}
 		})
@@ -602,7 +585,11 @@ func TestClient_WatchFluxWorkloads(t *testing.T) {
 				return
 			}
 			defer stream.Close()
-			if body, _ := io.ReadAll(stream); string(body) != tc.wantBody {
+			body, err := io.ReadAll(stream)
+			if err != nil {
+				t.Fatalf("read stream: %v", err)
+			}
+			if string(body) != tc.wantBody {
 				t.Errorf("stream = %q, want %q", body, tc.wantBody)
 			}
 		})

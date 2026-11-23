@@ -121,6 +121,12 @@ func (s *RepoObjectService) HandleGitPush(ctx restate.ObjectContext, ev RepoEven
 	return s.reportRepoEffect(ctx, prwire.RepoHandlerGitPush, ev, out, err)
 }
 
+// HandleUntrackedReconcile patches an untracked PR commit's Kustomizations.
+func (s *RepoObjectService) HandleUntrackedReconcile(ctx restate.ObjectContext, ev RepoEvent) error {
+	out, err := s.handlers(ctx).HandleUntrackedReconcile(ctx, ev)
+	return s.reportRepoEffect(ctx, prwire.RepoHandlerUntrackedReconcile, ev, out, err)
+}
+
 // HandleImagePromotion promotes one commit's images and starts its rollout.
 func (s *RepoObjectService) HandleImagePromotion(ctx restate.ObjectContext, ev RepoEvent) error {
 	out, err := s.handlers(ctx).HandleImagePromotion(ctx, ev)
