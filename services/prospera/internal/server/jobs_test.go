@@ -60,7 +60,10 @@ func setupMockReporterServer(t *testing.T) (*Server, *fakes.FakeStore, *httptest
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
-	server, store, _ := setupTestServer()
+	server, store, cfg := setupTestServer()
+	if cfg == nil {
+		t.Fatal("setupTestServer returned nil config")
+	}
 	twilioMock := &fakes.FakeTwilio{
 		AudioData:   []byte("test-audio"),
 		ContentType: "audio/wav",
@@ -165,7 +168,11 @@ func TestServer_StartJobConsumers(t *testing.T) {
 			t.Parallel()
 			var server *Server
 			if !tc.nilServer {
-				server, _, _ = setupTestServer()
+				var cfg *config.Config
+				server, _, cfg = setupTestServer()
+				if cfg == nil {
+					t.Fatal("setupTestServer returned nil config")
+				}
 			}
 			var bus pubsub.Bus
 			switch tc.busKind {
@@ -294,6 +301,30 @@ func TestServer_HandleReportJob(t *testing.T) {
 	runJobHandlerCases(t, tests, (*Server).HandleReportJob)
 }
 
+func testVoicemailPayload(callID, recordingURL string) []byte {
+	b, err := json.Marshal(pubsub.ProsperaVoicemailJobArgs{
+		CallID:       callID,
+		RecordingURL: recordingURL,
+	})
+	if err != nil {
+		panic(err)
+	}
+	return b
+}
+
+func seedVoicemailCalls(t *testing.T, store *fakes.FakeStore) {
+	t.Helper()
+	calls := []model.VoiceCall{
+		{CallID: "call-vm-ok", ReportStatus: "awaiting_recording"},
+		{CallID: "call-vm-retry", ReportStatus: "failed"},
+	}
+	for _, c := range calls {
+		if err := store.CreateInboundCall(context.Background(), c); err != nil {
+			t.Fatalf("CreateInboundCall(%s): %v", c.CallID, err)
+		}
+	}
+}
+
 func TestServer_HandleVoicemailJob(t *testing.T) {
 	t.Parallel()
 
@@ -388,14 +419,7 @@ func TestServer_HandleVoicemailJob(t *testing.T) {
 			server, store, srv := setupMockReporterServer(t)
 			defer srv.Close()
 
-			_ = store.CreateInboundCall(context.Background(), model.VoiceCall{
-				CallID:       "call-vm-ok",
-				ReportStatus: "awaiting_recording",
-			})
-			_ = store.CreateInboundCall(context.Background(), model.VoiceCall{
-				CallID:       "call-vm-retry",
-				ReportStatus: "failed",
-			})
+			seedVoicemailCalls(t, store)
 
 			if tc.nilReporter {
 				server.reporter = nil
@@ -407,10 +431,7 @@ func TestServer_HandleVoicemailJob(t *testing.T) {
 			if !tc.skipMsg {
 				payload := tc.rawPayload
 				if payload == nil {
-					payload, _ = json.Marshal(pubsub.ProsperaVoicemailJobArgs{
-						CallID:       tc.callID,
-						RecordingURL: tc.recordingURL,
-					})
+					payload = testVoicemailPayload(tc.callID, tc.recordingURL)
 				}
 				pubMsg = &pubsubtest.Message{Payload: payload, Delivered: tc.delivered, TermErr: tc.termErr}
 			}
@@ -511,13 +532,15 @@ func triggerTwilioWebhooks(t *testing.T, server *Server, store *fakes.FakeStore,
 
 	// 1. Status webhook trigger post call report
 	callID := "call-bus-report-" + suffix
-	_ = store.CreateOutboundCall(context.Background(), model.VoiceCall{
+	if err := store.CreateOutboundCall(context.Background(), model.VoiceCall{
 		CallID:          callID,
 		ProviderCallSID: "CA-" + callID,
 		Direction:       "outbound",
 		State:           "in-progress",
 		ReportStatus:    "pending",
-	}, 5)
+	}, 5); err != nil {
+		t.Fatalf("CreateOutboundCall: %v", err)
+	}
 
 	statusForm := url.Values{
 		"CallSid":    []string{"CA-" + callID},
@@ -536,11 +559,13 @@ func triggerTwilioWebhooks(t *testing.T, server *Server, store *fakes.FakeStore,
 
 	// 2. Voicemail webhook
 	vmCallID := "call-bus-vm-" + suffix
-	_ = store.CreateInboundCall(context.Background(), model.VoiceCall{
+	if err := store.CreateInboundCall(context.Background(), model.VoiceCall{
 		CallID:          vmCallID,
 		ProviderCallSID: "CA-" + vmCallID,
 		ReportStatus:    "awaiting_recording",
-	})
+	}); err != nil {
+		t.Fatalf("CreateInboundCall: %v", err)
+	}
 	vmForm := url.Values{
 		"CallSid":      []string{"CA-" + vmCallID},
 		"RecordingSid": []string{"RE-" + vmCallID},
@@ -585,7 +610,9 @@ func TestServer_Webhooks_PublishToEventBus(t *testing.T) {
 	server, store, cfg := setupTestServer()
 	recordBus := newRecordPublishBus()
 	server.SetEventBus(recordBus)
-	_ = pubsub.EnsureCoreStreams(context.Background(), recordBus)
+	if err := pubsub.EnsureCoreStreams(context.Background(), recordBus); err != nil {
+		t.Fatalf("EnsureCoreStreams: %v", err)
+	}
 
 	callID, vmCallID, smsID := triggerTwilioWebhooks(t, server, store, cfg, "pub")
 
@@ -846,12 +873,14 @@ func TestRunApp_TranscriptBatcher(t *testing.T) {
 	// Test flush with active session
 	sess := mediastream.NewMediaStreamSession(mediastream.MediaStreamSessionConfig{CallID: "call-batch-test"})
 	sessionMgr.RegisterSession("call-batch-test", sess)
-	_ = store.CreateOutboundCall(context.Background(), model.VoiceCall{
+	if err := store.CreateOutboundCall(context.Background(), model.VoiceCall{
 		CallID: "call-batch-test",
 		Transcript: []model.TranscriptTurn{
 			{Role: "user", Text: "Batch turn"},
 		},
-	}, 5)
+	}, 5); err != nil {
+		t.Fatalf("CreateOutboundCall: %v", err)
+	}
 
 	flushActiveSessions(context.Background(), sessionMgr, reporter)
 
@@ -952,7 +981,9 @@ func startShutdownTestServer(t *testing.T, blockHTTP bool) (*http.Server, string
 		t.Fatalf("listen: %v", err)
 	}
 	go func() {
-		_ = httpSrv.Serve(ln)
+		if err := httpSrv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			t.Errorf("Serve: %v", err)
+		}
 	}()
 	t.Cleanup(func() {
 		closeRelease()
@@ -982,7 +1013,9 @@ func runShutdownAppCase(t *testing.T, tc shutdownAppTestCase) {
 			defer close(clientDone)
 			resp, postErr := http.Post(addr, "text/plain", strings.NewReader("x"))
 			if postErr == nil && resp != nil && resp.Body != nil {
-				_, _ = io.Copy(io.Discard, resp.Body)
+				if _, copyErr := io.Copy(io.Discard, resp.Body); copyErr != nil {
+					t.Errorf("io.Copy: %v", copyErr)
+				}
 				_ = resp.Body.Close()
 			}
 		}()
