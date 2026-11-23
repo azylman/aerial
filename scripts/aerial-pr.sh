@@ -157,9 +157,14 @@ init_scratch() {
     [ "${USE_LOOPBACK_GITHUB:-0}" = "1" ] && default_repo_url="${GITHUB_PROXY_BASE}/internal/github-git/${REPO_OWNER}/${REPO_NAME}.git"
     local repo_url="${AERIAL_REPO_URL_OVERRIDE:-$default_repo_url}" auth_header; auth_header=$(build_auth_header)
 
-    local base_dir="${AERIAL_SCRATCH_BASE_DIR:-/data/scratch}"
-    [ ! -d "$base_dir" ] || [ ! -w "$base_dir" ] && base_dir="/dev/shm"
-    [ ! -d "$base_dir" ] || [ ! -w "$base_dir" ] && base_dir="${TMPDIR:-/tmp}"
+    local base_dir="${AERIAL_SCRATCH_BASE_DIR:-}"
+    if [ -z "$base_dir" ]; then
+        base_dir="/data/scratch"
+        if [ ! -d "/data" ] || [ ! -w "/data" ]; then
+            base_dir="/dev/shm"
+            [ ! -d "$base_dir" ] || [ ! -w "$base_dir" ] && base_dir="${TMPDIR:-/tmp}"
+        fi
+    fi
     mkdir -p "$base_dir" && prune_stale_scratch_dirs "$base_dir"
 
     local vanadis_chunk_id target_id rand_suffix deterministic_dir="" branch_name="" clone_branch="${init_branch:-$DEFAULT_BRANCH}"

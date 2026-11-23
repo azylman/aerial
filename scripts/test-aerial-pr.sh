@@ -117,6 +117,13 @@ OUT_INIT_4=$(AERIAL_SCRATCH_BASE_DIR="$SCRATCH_BASE" AERIAL_REPO_URL_OVERRIDE="$
 BRANCH_4=$(echo "$OUT_INIT_4" | jq -r '.branch')
 assert_match '^feat/aerial-pr-vanadis-chunk_beta-t987654321098765432-[a-f0-9]{6}$' "$BRANCH_4" "init vanadis chunk branch with target_id"
 
+# Non-existent explicit AERIAL_SCRATCH_BASE_DIR is created and honored
+NONEXISTENT_BASE="${SCRATCH_BASE}/custom-scratch-dir"
+OUT_INIT_5=$(AERIAL_SCRATCH_BASE_DIR="$NONEXISTENT_BASE" AERIAL_REPO_URL_OVERRIDE="$TMP_REMOTE" bash "${AERIAL_PR}" init aerial)
+DIR_5=$(echo "$OUT_INIT_5" | jq -r '.scratch_dir')
+assert_eq "true" "$([ -d "$NONEXISTENT_BASE" ] && echo true || echo false)" "init creates explicit nonexistent AERIAL_SCRATCH_BASE_DIR"
+assert_match "^${NONEXISTENT_BASE}/" "$DIR_5" "init places scratch dir under explicit AERIAL_SCRATCH_BASE_DIR"
+
 # 4. submit_scratch: preflight verification, PR_DESCRIPTION.md cleanup, PR creation, branch reuse
 # Case 4A: Preflight verification failure stops submit
 SUBMIT_DIR_A=$(mktemp -d /tmp/aerial-pr-submit-a.XXXXXX)
