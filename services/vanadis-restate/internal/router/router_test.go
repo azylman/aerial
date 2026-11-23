@@ -102,8 +102,10 @@ func TestBuildRouterService_InvokerWiring(t *testing.T) {
 			ctx := context.Background()
 			require.NoError(t, inv.RoutePREvent(ctx, "b1", pubsub.PRLifecycleEvent{Repo: "aerial", PRNumber: 1}))
 			require.NoError(t, inv.RouteDispatchOutcome(ctx, "b1", pubsub.DispatchOutcomeEvent{VanadisChunkID: "c1"}))
-			_, _ = inv.RouteAttachPR(ctx, "b1", store.AttachChunkPRRequest{PRNumber: 1})
-			_, _ = inv.RouteFailChunk(ctx, "b1", model.FailChunkRequest{ChunkID: "c1"})
+			_, err := inv.RouteAttachPR(ctx, "b1", store.AttachChunkPRRequest{PRNumber: 1})
+			require.NoError(t, err)
+			_, err = inv.RouteFailChunk(ctx, "b1", model.FailChunkRequest{ChunkID: "c1"})
+			require.NoError(t, err)
 			require.NoError(t, inv.RouteReconcile(ctx, "b1", build.ReconcileBuildRequest{Reason: build.ReconcileReasonWidgetSync}))
 		})
 	}

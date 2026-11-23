@@ -23,6 +23,7 @@ func isolationChunk(id, status string, deps ...string) model.VanadisChunk {
 
 // isolationWakes records the first line of every wake prompt.
 type isolationWakes struct {
+	t       *testing.T
 	mu      sync.Mutex
 	headers []string
 	err     error
@@ -35,7 +36,10 @@ func (w *isolationWakes) client() *mockEriClient {
 		if w.err != nil {
 			return w.err
 		}
-		header, _, _ := strings.Cut(prompt, "\n")
+		header, _, ok := strings.Cut(prompt, "\n")
+		if w.t != nil {
+			require.True(w.t, ok)
+		}
 		w.headers = append(w.headers, header)
 		return nil
 	}}
@@ -147,7 +151,7 @@ func TestEvaluateBuildTerminalStatus(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			wakes := &isolationWakes{err: tc.promptErr}
+			wakes := &isolationWakes{t: t, err: tc.promptErr}
 			bld := model.VanadisBuild{ID: "b1", Status: tc.buildStatus, ThreadID: "th-1", Quiet: tc.quiet}
 			st, pool := seededStore(t, []model.VanadisBuild{bld}, nil)
 			if tc.failStatus {
@@ -163,7 +167,8 @@ func TestEvaluateBuildTerminalStatus(t *testing.T) {
 			assert.Equal(t, tc.wantStatus, got)
 			assert.Equal(t, tc.wantHeaders, wakes.headers)
 			assert.Equal(t, tc.wantNotified, tc.notified)
-			stored, _ := loadBuild(t, st, "b1")
+			stored, chunks := loadBuild(t, st, "b1")
+			assert.Empty(t, chunks)
 			assert.Equal(t, tc.wantStored, stored.Status)
 		})
 	}
@@ -206,9 +211,10 @@ func TestExecuteAuthoritativeTransition_FailureIsolation(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			wakes := &isolationWakes{}
+			wakes := &isolationWakes{t: t}
 			bld := model.VanadisBuild{ID: "b1", Status: tc.buildStatus, ThreadID: "th-1"}
-			st, _ := seededStore(t, []model.VanadisBuild{bld}, isolationSeed(tc.chunks))
+			st, pool := seededStore(t, []model.VanadisBuild{bld}, isolationSeed(tc.chunks))
+			require.NotNil(t, pool)
 			bo := NewBuildObject("", nil).WithAuthority(st, executor.NewExecutor("", wakes.client(), pubsub.NewMemoryBus(), "token", "example-owner", nil))
 			out, err := bo.executeAuthoritativeTransition(context.Background(), "b1", nil, tc.prior, nil, false)
 			require.NoError(t, err)
@@ -219,7 +225,8 @@ func TestExecuteAuthoritativeTransition_FailureIsolation(t *testing.T) {
 			assert.Equal(t, tc.wantIsolation, out.State.FailureIsolation)
 			assert.Equal(t, tc.wantNotified, out.State.FailureNotified)
 			assert.Equal(t, tc.wantStored, chunkStatuses(t, st, "b1"))
-			stored, _ := loadBuild(t, st, "b1")
+			stored, chunks := loadBuild(t, st, "b1")
+			require.Len(t, chunks, len(tc.chunks))
 			assert.Equal(t, tc.wantBuild, stored.Status)
 		})
 	}

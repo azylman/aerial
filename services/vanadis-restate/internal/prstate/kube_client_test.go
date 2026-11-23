@@ -31,7 +31,11 @@ type kubeServer struct {
 }
 
 func (k *kubeServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	body, _ := io.ReadAll(r.Body)
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	route := r.Method + " " + r.URL.Path
 	k.mu.Lock()
 	k.calls = append(k.calls, kubeCallLog{route: route, auth: r.Header.Get("Authorization"), body: string(body)})
@@ -349,7 +353,8 @@ func TestKubeClientTransportErrorRedactsReceiverURL(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			srv, _ := newKubeServer(t, nil)
+			srv, ks := newKubeServer(t, nil)
+			require.NotNil(t, ks)
 			receiver := srv.URL + "/hook/" + tc.secret
 			srv.Close()
 			kerr := NewKubeClient(srv.Client(), "", "", "", receiver).DispatchGitPush(context.Background(), GitPushRequest{Repo: "azylman/aerial", Ref: "refs/heads/main", Commit: "m1"})

@@ -32,7 +32,8 @@ func TestBuildObject_ExecutorErrorBranches(t *testing.T) {
 	t.Parallel()
 	b1 := model.VanadisBuild{ID: "b-err", Status: "running", ThreadID: "th-1"}
 	c1 := model.VanadisChunk{ID: "c1", BuildID: "b-err", ChunkIndex: 0, Title: "C1", Status: "running", Mode: "action"}
-	st, _ := seededStore(t, []model.VanadisBuild{b1}, []model.VanadisChunk{c1})
+	st, pool := seededStore(t, []model.VanadisBuild{b1}, []model.VanadisChunk{c1})
+	require.NotNil(t, pool)
 	eriErr := &mockEriClient{
 		cancelFn: func(context.Context, string) error { return errors.New("cancel err") },
 		promptFn: func(context.Context, string, string) error { return errors.New("prompt err") },
@@ -50,36 +51,44 @@ func TestBuildObject_ExecutorErrorBranches(t *testing.T) {
 
 	// notifyChunkFailure swallows cancel and widget errors; reconcile owns the wake
 	ctx := makeObjectMockContext(t, "b-err")
-	_, _ = restate.Run(ctx, func(rc restate.RunContext) (bool, error) {
+	_, err := restate.Run(ctx, func(rc restate.RunContext) (bool, error) {
 		assert.NoError(t, boErr.notifyChunkFailure(rc, b1, "c1", "reason"))
 		return true, nil
 	})
+	require.NoError(t, err)
 
 	// persistBuildCreation error branches
-	_, _ = restate.Run(ctx, func(rc restate.RunContext) (bool, error) {
-		_, _ = boErr.persistBuildCreation(rc, b1, []model.VanadisChunk{c1})
+	_, err = restate.Run(ctx, func(rc restate.RunContext) (bool, error) {
+		created, persistErr := boErr.persistBuildCreation(rc, b1, []model.VanadisChunk{c1})
+		require.Error(t, persistErr)
+		assert.False(t, created)
 		return true, nil
 	})
+	require.NoError(t, err)
 
 	// handlePREventType error branches
-	_, _ = restate.Run(ctx, func(rc restate.RunContext) (bool, error) {
+	_, err = restate.Run(ctx, func(rc restate.RunContext) (bool, error) {
 		boErr.handlePREventType(rc, "b-err", "c1", "check_failed", pubsub.PRLifecycleEvent{Event: "check_failed", CheckName: "unit-tests", HeadSHA: "head1", Repo: "aerial"})
 		boErr.handlePREventType(rc, "b-err", "c1", "conflict", pubsub.PRLifecycleEvent{Event: "conflict", HeadSHA: "head1"})
 		boErr.handlePREventType(rc, "b-err", "c1", "merged", pubsub.PRLifecycleEvent{Event: "merged"})
 		return true, nil
 	})
+	require.NoError(t, err)
 
 	storeErr := &store.Store{}
 	boStoreErr := NewBuildObject("", nil).WithAuthority(storeErr, execErr)
 	for _, act := range []string{"chunk_merged", "chunk_deploy_success", "action_completed", "chunk_failed", "cancelled"} {
 		boStoreErr.applyMutation(context.Background(), "b-err", &BuildMutationRequest{Action: act, ChunkID: "c1", Reason: "test"})
 	}
-	_, _ = boStoreErr.AttachPR(ctx, store.AttachChunkPRRequest{ChunkID: "c1", Repo: "aerial"})
-	_, _ = boErr.AttachPR(ctx, store.AttachChunkPRRequest{ChunkID: "c1", Repo: "aerial"})
-	_, _ = restate.Run(ctx, func(rc restate.RunContext) (bool, error) {
+	_, attachErr1 := boStoreErr.AttachPR(ctx, store.AttachChunkPRRequest{ChunkID: "c1", Repo: "aerial"})
+	require.Error(t, attachErr1)
+	_, attachErr2 := boErr.AttachPR(ctx, store.AttachChunkPRRequest{ChunkID: "c1", Repo: "aerial"})
+	require.Error(t, attachErr2)
+	_, err = restate.Run(ctx, func(rc restate.RunContext) (bool, error) {
 		assert.Error(t, boStoreErr.notifyChunkFailure(rc, b1, "c1", "reason"))
 		return true, nil
 	})
+	require.NoError(t, err)
 	assert.Error(t, boStoreErr.OnPREvent(ctx, pubsub.PRLifecycleEvent{Repo: "aerial", PRNumber: 101, Event: "check_failed", RolloutState: &pubsub.PRRolloutState{}}))
 }
 
@@ -255,7 +264,8 @@ func TestBuildObject_TransitionErrorPropagation(t *testing.T) {
 			b1 := model.VanadisBuild{ID: "b-trans", Title: "Build", Objective: "Obj", Status: "running", ThreadID: "th-1"}
 			c1 := model.VanadisChunk{ID: "c1", BuildID: "b-trans", Title: "Chunk 1", Instructions: "Inst 1", Status: "pending", Mode: "pr", Repo: "aerial", TargetFiles: []string{"pkg/a.go"}}
 			c2 := model.VanadisChunk{ID: "c2", BuildID: "b-trans", ChunkIndex: 1, Title: "Chunk 2", Instructions: "Inst 2", Status: "pending", Mode: "pr", Repo: "aerial", DependsOn: []string{"c1"}, TargetFiles: []string{"pkg/b.go"}}
-			st, _ := seededStore(t, []model.VanadisBuild{b1}, []model.VanadisChunk{c1, c2})
+			st, pool := seededStore(t, []model.VanadisBuild{b1}, []model.VanadisChunk{c1, c2})
+			require.NotNil(t, pool)
 
 			bo := NewBuildObject("", nil).WithAuthority(st, executor.NewExecutor(t.TempDir(), &mockEriClient{}, pubsub.NewMemoryBus(), "token", "example-owner", nil))
 			bo.runtimeFactory = func(restate.ObjectContext) objectRuntime {
@@ -293,7 +303,8 @@ func TestBuildObject_AuthoritativeFailureContinuation(t *testing.T) {
 	// failure and never relaunches.
 	bFailed := model.VanadisBuild{ID: "b-failed", Status: statusFailed, ThreadID: "th-1", Objective: "Test failure"}
 	cFailed := model.VanadisChunk{ID: "c1", BuildID: "b-failed", Mode: chunkModeAction, Status: statusFailed, StallNudges: 1}
-	st, _ := seededStore(t, []model.VanadisBuild{bFailed}, []model.VanadisChunk{cFailed})
+	st, pool := seededStore(t, []model.VanadisBuild{bFailed}, []model.VanadisChunk{cFailed})
+	require.NotNil(t, pool)
 	bus := &deploymentEventRecorder{}
 	var queuedPrompts []string
 	eri := &mockEriClient{promptFn: func(_ context.Context, _, prompt string) error {
@@ -322,7 +333,8 @@ func TestBuildObject_AuthoritativeFailureContinuation(t *testing.T) {
 	// 2. FailMutation retry logic: returns nil when !failed but chunk was already failed and accepted
 	bldAlreadyFailed := model.VanadisBuild{ID: "b-fail", Status: statusFailed}
 	chkAlreadyFailed := model.VanadisChunk{ID: "c1", BuildID: "b-fail", Mode: chunkModeAction, Status: statusFailed, StallNudges: 1}
-	storeRetryOk, _ := seededStore(t, []model.VanadisBuild{bldAlreadyFailed}, []model.VanadisChunk{chkAlreadyFailed})
+	storeRetryOk, poolRetryOk := seededStore(t, []model.VanadisBuild{bldAlreadyFailed}, []model.VanadisChunk{chkAlreadyFailed})
+	require.NotNil(t, poolRetryOk)
 	boFailRetry := NewBuildObject("", nil).WithAuthority(storeRetryOk, nil)
 	err = boFailRetry.failMutation(context.Background(), "b-fail", &BuildMutationRequest{Action: "chunk_failed", ChunkID: "c1", DispatchID: "vanadis-c1-turn-1"})
 	assert.NoError(t, err)
@@ -336,7 +348,8 @@ func TestBuildObject_AuthoritativeFailureContinuation(t *testing.T) {
 	bRunning := model.VanadisBuild{ID: "b-running", Status: "running", ThreadID: "th-1"}
 	cAction := model.VanadisChunk{ID: "c1", BuildID: "b-running", Status: "running", Mode: chunkModeAction}
 	cSibling := model.VanadisChunk{ID: "c2", BuildID: "b-running", ChunkIndex: 1, Status: "running", Mode: chunkModeAction}
-	storeFailChunk, _ := seededStore(t, []model.VanadisBuild{bRunning}, []model.VanadisChunk{cAction, cSibling})
+	storeFailChunk, poolFailChunk := seededStore(t, []model.VanadisBuild{bRunning}, []model.VanadisChunk{cAction, cSibling})
+	require.NotNil(t, poolFailChunk)
 	fakeRT := newFakeObjectRuntime("b-running")
 	boFailChunk := NewBuildObject("", nil, func(restate.ObjectContext) objectRuntime { return fakeRT }).WithAuthority(storeFailChunk, execFail)
 	ctxMock := makeObjectMockContext(t, "b-running")
@@ -344,7 +357,8 @@ func TestBuildObject_AuthoritativeFailureContinuation(t *testing.T) {
 	assert.ErrorContains(t, fErr, "prompt unavailable")
 	assert.False(t, restate.IsTerminalError(fErr), "a failed wake must stay retryable")
 	assert.Equal(t, map[string]string{"c1": statusFailed, "c2": statusRunning}, chunkStatuses(t, storeFailChunk, "b-running"))
-	stored, _ := loadBuild(t, storeFailChunk, "b-running")
+	stored, chunks := loadBuild(t, storeFailChunk, "b-running")
+	require.Len(t, chunks, 2)
 	assert.Equal(t, statusRunning, stored.Status)
 	assert.False(t, fakeRT.cleared, "ClearState must not be called on a running build")
 
@@ -353,7 +367,8 @@ func TestBuildObject_AuthoritativeFailureContinuation(t *testing.T) {
 	execSuccess := executor.NewExecutor(t.TempDir(), eriSuccess, pubsub.NewMemoryBus(), "token", "example-owner", nil)
 	cRunningPR := model.VanadisChunk{ID: "c1", BuildID: "b-failed", Mode: "pr", Repo: "aerial", Status: "running"}
 	cRunningPR.PRNumber = 101
-	storeFailChunkOk, _ := seededStore(t, []model.VanadisBuild{bFailed}, []model.VanadisChunk{cRunningPR})
+	storeFailChunkOk, poolFailChunkOk := seededStore(t, []model.VanadisBuild{bFailed}, []model.VanadisChunk{cRunningPR})
+	require.NotNil(t, poolFailChunkOk)
 	fakeRTOk := newFakeObjectRuntime("b-failed")
 	boFailChunkOk := NewBuildObject("", nil, func(restate.ObjectContext) objectRuntime { return fakeRTOk }).WithAuthority(storeFailChunkOk, execSuccess)
 	ctxMockOk := makeObjectMockContext(t, "b-failed")
@@ -445,8 +460,9 @@ func TestBuildObject_PRRecoveryWidget(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			st, _ := seededStore(t, []model.VanadisBuild{{ID: "b1", Status: tc.parent, ThreadID: "th-1"}},
+			st, pool := seededStore(t, []model.VanadisBuild{{ID: "b1", Status: tc.parent, ThreadID: "th-1"}},
 				[]model.VanadisChunk{{ID: "c1", BuildID: "b1", Mode: "pr", Repo: "owner/repo", Status: "pr_opened", PRNumber: 12, HeadSHA: "old"}, {ID: "c2", BuildID: "b1", ChunkIndex: 1, Mode: "pr", Status: "failed"}})
+			require.NotNil(t, pool)
 			var observed *executor.StatusWidgetRequest
 			eri := &mockEriClient{widgetFn: func(_ context.Context, req executor.StatusWidgetRequest) (string, error) {
 				observed = &req
@@ -595,7 +611,8 @@ func TestBuildObject_OnDispatchOutcome_CIFixupTurnEnded(t *testing.T) {
 			}))
 			t.Cleanup(api.Close)
 			build := model.VanadisBuild{ID: "b1", Status: statusRunning, ThreadID: "thread", Objective: "Fix CI"}
-			pgStore, _ := seededStore(t, []model.VanadisBuild{build}, []model.VanadisChunk{ciFailed})
+			pgStore, pool := seededStore(t, []model.VanadisBuild{build}, []model.VanadisChunk{ciFailed})
+			require.NotNil(t, pool)
 			st := &faultStore{VanadisStore: pgStore}
 			var prompts []string
 			eri := &mockEriClient{promptFn: func(_ context.Context, _, prompt string) error {

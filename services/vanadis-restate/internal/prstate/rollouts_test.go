@@ -261,7 +261,8 @@ func TestPRObjectServiceGetDeployView(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			mc, _ := newStateMock(t, tc.seed)
+			mc, rec := newStateMock(t, tc.seed)
+			require.NotNil(t, rec)
 			got, err := NewPRObjectService().GetDeployView(restate.WithMockContext(mc), DeployViewRequest{})
 			require.NoError(t, err)
 			require.Equal(t, tc.want, got)
@@ -320,7 +321,8 @@ func TestPRObjectServiceHandleKustomizationRequestedStartedFact(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			mc, _ := newStateMock(t, tc.seed)
+			mc, rec := newStateMock(t, tc.seed)
+			require.NotNil(t, rec)
 			stubRun(mc, true)
 			pub := &fakeFactPublisher{}
 			ev := PREvent{Repo: "azylman/aerial", PRNumber: 101, HeadSHA: "m1", Jobs: []string{"eri"}, KustomizationRequests: coreRequests, Facts: []pubsub.PRLifecycleEvent{started}}
@@ -351,7 +353,8 @@ func TestPRObjectServiceHandleReconcileLost(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			mc, _ := newStateMock(t, tc.seed)
+			mc, rec := newStateMock(t, tc.seed)
+			require.NotNil(t, rec)
 			stubRun(mc, true)
 			kube := &fakeKube{}
 			err := NewPRObjectService().WithKube(kube).HandleReconcileLost(restate.WithMockContext(mc), tc.ev)
@@ -407,7 +410,8 @@ func TestRepoObjectServiceRolloutIndex(t *testing.T) {
 			if *saved != nil {
 				after = *saved
 			}
-			listMC, _ := newRolloutIndexMock(t, tc.key, after)
+			listMC, listSaved := newRolloutIndexMock(t, tc.key, after)
+			require.NotNil(t, listSaved)
 			got, err := svc.ListRollouts(restate.WithMockContext(listMC), ListRolloutsRequest{})
 			require.NoError(t, err)
 			require.Equal(t, tc.wantList, got.Rollouts, "key "+tc.key)

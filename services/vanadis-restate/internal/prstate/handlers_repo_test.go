@@ -336,7 +336,10 @@ func TestRepoHandlers_HandlePRIndex(t *testing.T) {
 			if tc.loadErr {
 				return
 			}
-			pr, _, _ := testRepoHandlers(t, store, nil, nil).ResolvePRBySHA(context.Background(), "azylman/aerial", tc.probeSHA)
+			pr, _, ok := testRepoHandlers(t, store, nil, nil).ResolvePRBySHA(context.Background(), "azylman/aerial", tc.probeSHA)
+			if ok != (tc.wantPR > 0) {
+				t.Fatalf("ResolvePRBySHA(%q) ok = %v, want %v", tc.probeSHA, ok, tc.wantPR > 0)
+			}
 			if pr != tc.wantPR {
 				t.Fatalf("ResolvePRBySHA(%q) = %d, want %d", tc.probeSHA, pr, tc.wantPR)
 			}

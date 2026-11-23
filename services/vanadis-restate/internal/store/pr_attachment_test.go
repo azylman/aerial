@@ -326,7 +326,10 @@ func TestAttachPRTransaction(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			st, _ := tc.db.open(t)
+			st, pool := tc.db.open(t)
+			if tc.db.closed && pool != nil {
+				t.Fatalf("expected nil pool for closed db, got %v", pool)
+			}
 			_, _, _, err := st.attachPRTransaction(context.Background(), "c1", attachRequest("c1", "aerial"))
 			assertStoreErr(t, err, tc.wantErrIs, tc.wantErr)
 		})

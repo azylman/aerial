@@ -229,7 +229,8 @@ func TestGitHubClientListOpenPRs(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			c, _ := newFakeGitHub(t, tc.routes)
+			c, api := newFakeGitHub(t, tc.routes)
+			require.NotNil(t, api)
 			got, gerr := c.ListOpenPRs(context.Background(), tc.repo)
 			require.Equal(t, tc.want, got)
 			if tc.wantErrStatus == 0 {
@@ -365,7 +366,8 @@ func TestGitHubClientHeadChecksBlocked(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			c, _ := newFakeGitHub(t, tc.routes)
+			c, api := newFakeGitHub(t, tc.routes)
+			require.NotNil(t, api)
 			require.Equal(t, tc.want, c.HeadChecksBlocked(context.Background(), "azylman/aerial", tc.sha))
 		})
 	}
@@ -388,7 +390,8 @@ func TestGitHubClientRerunFailedJobs(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			c, _ := newFakeGitHub(t, tc.routes)
+			c, api := newFakeGitHub(t, tc.routes)
+			require.NotNil(t, api)
 			gerr := c.RerunFailedJobs(context.Background(), "azylman/aerial", tc.runID)
 			if tc.wantNil {
 				require.Nil(t, gerr)

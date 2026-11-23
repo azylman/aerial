@@ -75,7 +75,10 @@ func TestPostgresVanadisStore_RecoverFailedPR(t *testing.T) {
 			if tc.skip && !tc.legacySeed {
 				legacyChunk := chunk
 				legacyChunk.HeadSHA = ""
-				legacy, _ := rcOpen(t, tc.parent, []model.VanadisChunk{legacyChunk}, rcFailNoWrites)
+				legacy, legacyPool := rcOpen(t, tc.parent, []model.VanadisChunk{legacyChunk}, rcFailNoWrites)
+				if legacyPool == nil {
+					t.Fatal("expected non-nil legacyPool")
+				}
 				if legacyErr := legacy.recoverFailedPR(rcVerified(!tc.unverified), "c1", tc.head); !errors.Is(legacyErr, ErrPRTransitionSkipped) {
 					t.Fatalf("legacy error=%v", legacyErr)
 				}

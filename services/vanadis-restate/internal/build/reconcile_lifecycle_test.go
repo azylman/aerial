@@ -32,7 +32,8 @@ func TestBuildObject_LifecycleTransitionsAndFailures(t *testing.T) {
 
 	// 1. Cancel on already terminal build -> store.ErrBuildConflict
 	bTerm := model.VanadisBuild{ID: "b-term", Status: "completed", ThreadID: "th-1"}
-	storeTerm, _ := seededStore(t, []model.VanadisBuild{bTerm}, nil)
+	storeTerm, poolTerm := seededStore(t, []model.VanadisBuild{bTerm}, nil)
+	require.NotNil(t, poolTerm)
 	boTerm := NewBuildObject("", nil).WithAuthority(storeTerm, nil)
 	ctxTerm := makeObjectMockContext(t, "b-term")
 	_, err := boTerm.Cancel(ctxTerm, CancelBuildRequest{Reason: "test"})
@@ -53,16 +54,19 @@ func TestBuildObject_LifecycleTransitionsAndFailures(t *testing.T) {
 	// 3. UpdateChunk error in store
 	storeUpdErr := &store.Store{}
 	boUpdErr := NewBuildObject("", nil).WithAuthority(storeUpdErr, nil)
-	_, _ = boUpdErr.UpdateChunk(ctxCancel, store.UpdateChunkRequest{ChunkRef: "c1", Title: "new"})
+	_, err = boUpdErr.UpdateChunk(ctxCancel, store.UpdateChunkRequest{ChunkRef: "c1", Title: "new"})
+	require.Error(t, err)
 
 	// 4. AppendChunks error in store
-	_, _ = boUpdErr.AppendChunks(ctxCancel, AppendChunksRequest{Chunks: []store.CreateChunkInput{{Title: "C2"}}})
+	_, err = boUpdErr.AppendChunks(ctxCancel, AppendChunksRequest{Chunks: []store.CreateChunkInput{{Title: "C2"}}})
+	require.Error(t, err)
 
 	// 5. RemoveChunk error in store
 	assert.Error(t, boUpdErr.RemoveChunk(ctxCancel, RemoveChunkRequest{ChunkRef: "c1"}))
 
 	// 6. FailChunk error in store
-	_, _ = boUpdErr.FailChunk(ctxCancel, model.FailChunkRequest{ChunkID: "c1", Reason: "boom"})
+	_, err = boUpdErr.FailChunk(ctxCancel, model.FailChunkRequest{ChunkID: "c1", Reason: "boom"})
+	require.Error(t, err)
 
 	// 7. handlePREventType error branches
 	eriErr := &mockEriClient{
@@ -73,13 +77,14 @@ func TestBuildObject_LifecycleTransitionsAndFailures(t *testing.T) {
 	}
 	execErr := executor.NewExecutor(t.TempDir(), eriErr, &pubsubtest.FaultBus{PublishErr: errors.New("pub err")}, "token", "example-owner", nil)
 	boHandleErr := NewBuildObject("", nil).WithAuthority(storeUpdErr, execErr)
-	_, _ = restate.Run(ctxCancel, func(rc restate.RunContext) (bool, error) {
+	_, err = restate.Run(ctxCancel, func(rc restate.RunContext) (bool, error) {
 		boHandleErr.handlePREventType(rc, "b-more", "c1", "ci_failed", pubsub.PRLifecycleEvent{Event: "ci_failed", Repo: "aerial"})
 		boHandleErr.handlePREventType(rc, "b-more", "c1", "conflict", pubsub.PRLifecycleEvent{Event: "conflict"})
 		boHandleErr.handlePREventType(rc, "b-more", "c1", "closed", pubsub.PRLifecycleEvent{Event: "closed", Status: "closed"})
 		boHandleErr.handlePREventType(rc, "b-more", "c1", "merged", pubsub.PRLifecycleEvent{Event: "merged"})
 		return true, nil
 	})
+	require.NoError(t, err)
 
 	// 8. OnDispatchOutcome error branches in store
 	assert.Error(t, boUpdErr.OnDispatchOutcome(ctxCancel, pubsub.DispatchOutcomeEvent{VanadisChunkID: "c1", Status: "completed"}))
@@ -166,19 +171,26 @@ func TestBuildObject_LifecycleTransitionsAndFailures(t *testing.T) {
 	assert.Equal(t, statusRunning, lifecycleBuildStatus(t, storeTransErr, "b-fail-trans"))
 
 	// 10. UpdateBuild with widget sync error
-	storeUpdOk, _ := seededStore(t, []model.VanadisBuild{b1}, []model.VanadisChunk{c1})
+	storeUpdOk, poolUpdOk := seededStore(t, []model.VanadisBuild{b1}, []model.VanadisChunk{c1})
+	require.NotNil(t, poolUpdOk)
 	boUpdWidgetErr := NewBuildObject("", nil).WithAuthority(storeUpdOk, execErr)
-	_, _ = boUpdWidgetErr.UpdateBuild(ctxCancel, store.UpdateBuildRequest{Title: "new title"})
+	bldUp, errUp := boUpdWidgetErr.UpdateBuild(ctxCancel, store.UpdateBuildRequest{Title: "new title"})
+	require.NoError(t, errUp)
+	assert.Equal(t, "new title", bldUp.Title)
 
 	// 11. persistBuildCreation with widget sync error
-	storeCreate, _ := openStore(t)
+	storeCreate, poolCreate := openStore(t)
+	require.NotNil(t, poolCreate)
 	boCreateWidgetErr := NewBuildObject("", nil).WithAuthority(storeCreate, execErr)
-	_, _ = restate.Run(ctxCancel, func(rc restate.RunContext) (bool, error) {
+	created, err := restate.Run(ctxCancel, func(rc restate.RunContext) (bool, error) {
 		return boCreateWidgetErr.persistBuildCreation(rc, b1, []model.VanadisChunk{c1})
 	})
+	require.Error(t, err)
+	assert.False(t, created)
 
 	// 12. AttachPR widget sync error
-	_, _ = boUpdWidgetErr.AttachPR(ctxCancel, store.AttachChunkPRRequest{ChunkID: "c1", Repo: "aerial"})
+	_, err = boUpdWidgetErr.AttachPR(ctxCancel, store.AttachChunkPRRequest{ChunkID: "c1", Repo: "aerial"})
+	require.Error(t, err)
 }
 
 func TestDeploymentMutationPersistence(t *testing.T) {
@@ -901,6 +913,7 @@ func lifecycleChunk(t *testing.T, st *store.Store, buildID, chunkID string) mode
 // lifecycleBuildStatus reads the stored status of build id.
 func lifecycleBuildStatus(t *testing.T, st *store.Store, id string) string {
 	t.Helper()
-	b, _ := loadBuild(t, st, id)
+	b, chunks := loadBuild(t, st, id)
+	assert.NotNil(t, chunks)
 	return b.Status
 }

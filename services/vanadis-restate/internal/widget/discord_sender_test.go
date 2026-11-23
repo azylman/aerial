@@ -991,11 +991,17 @@ func TestDeliverStatusWidgetChannelSerialization(t *testing.T) {
 
 			doneFirst := make(chan struct{})
 			go func() {
-				_, _ = deliverer.DeliverStatusWidget(context.Background(), ericlient.StatusWidgetRequest{
+				defer close(doneFirst)
+				msgID, err := deliverer.DeliverStatusWidget(context.Background(), ericlient.StatusWidgetRequest{
 					ChannelID: tc.channelA,
 					Title:     "Build First",
 				})
-				close(doneFirst)
+				if err != nil {
+					t.Errorf("DeliverStatusWidget first failed: %v", err)
+				}
+				if msgID == "" {
+					t.Errorf("DeliverStatusWidget first returned empty msgID")
+				}
 			}()
 
 			<-chStarted
@@ -1012,11 +1018,17 @@ func TestDeliverStatusWidgetChannelSerialization(t *testing.T) {
 
 			doneSecond := make(chan struct{})
 			go func() {
-				_, _ = deliverer.DeliverStatusWidget(context.Background(), ericlient.StatusWidgetRequest{
+				defer close(doneSecond)
+				msgID, err := deliverer.DeliverStatusWidget(context.Background(), ericlient.StatusWidgetRequest{
 					ChannelID: tc.channelB,
 					Title:     "Build Second",
 				})
-				close(doneSecond)
+				if err != nil {
+					t.Errorf("DeliverStatusWidget second failed: %v", err)
+				}
+				if msgID == "" {
+					t.Errorf("DeliverStatusWidget second returned empty msgID")
+				}
 			}()
 
 			close(chRelease)

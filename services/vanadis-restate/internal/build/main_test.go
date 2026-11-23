@@ -238,7 +238,8 @@ func TestBuildObject_AuthoritativeHandlers(t *testing.T) {
 	eri := &mockEriClient{}
 	bus := pubsub.NewMemoryBus()
 	exec := executor.NewExecutor("", eri, bus, "test-token", "example-owner", nil)
-	st, _ := openStore(t)
+	st, pool := openStore(t)
+	require.NotNil(t, pool)
 
 	bo := NewBuildObject("", nil).WithAuthority(st, exec)
 
@@ -321,7 +322,8 @@ func TestBuildObject_AuthoritativeHandlers(t *testing.T) {
 	canBld, err := bo.Cancel(ctx, CancelBuildRequest{Reason: "user cancelled"})
 	assert.NoError(t, err)
 	assert.Equal(t, "b1", canBld.ID)
-	stored, _ = loadBuild(t, st, "b1")
+	stored, chunks = loadBuild(t, st, "b1")
+	require.Len(t, chunks, 2)
 	assert.Equal(t, statusCancelled, stored.Status)
 }
 
@@ -382,7 +384,8 @@ func TestBuildObject_CreateAndCancelErrors(t *testing.T) {
 
 	// Create with chunk with empty ID (generates auto ID)
 	ctxAuto := makeObjectMockContext(t, "b-auto")
-	storeCreate, _ := openStore(t)
+	storeCreate, poolCreate := openStore(t)
+	require.NotNil(t, poolCreate)
 	boCreate := NewBuildObject("", nil).WithAuthority(storeCreate, nil)
 	validNoChunkIDReq := CreateBuildRequest{
 		ID:        "b-auto",
@@ -431,7 +434,8 @@ func TestBuildObject_CancelTerminalBuilds(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			st, _ := seededStore(t, []model.VanadisBuild{{ID: "b1", ThreadID: "th-1", Status: tc.status}}, nil)
+			st, pool := seededStore(t, []model.VanadisBuild{{ID: "b1", ThreadID: "th-1", Status: tc.status}}, nil)
+			require.NotNil(t, pool)
 			rt := newFakeObjectRuntime("b1")
 			bo := NewBuildObject("", nil, func(restate.ObjectContext) objectRuntime { return rt }).WithAuthority(st, nil)
 			got, err := bo.Cancel(makeObjectMockContext(t, "b1"), CancelBuildRequest{})
@@ -442,7 +446,8 @@ func TestBuildObject_CancelTerminalBuilds(t *testing.T) {
 				assert.Equal(t, statusCancelled, got.Status)
 			}
 			assert.Equal(t, tc.wantCleared, rt.cleared)
-			stored, _ := loadBuild(t, st, "b1")
+			stored, chunks := loadBuild(t, st, "b1")
+			assert.Empty(t, chunks)
 			assert.Equal(t, tc.wantStored, stored.Status)
 		})
 	}
@@ -452,7 +457,8 @@ func TestBuildObject_HandlersWithAuthorityAndMockContext(t *testing.T) {
 	t.Parallel()
 	b1 := model.VanadisBuild{ID: "b-auth", Status: "running", ThreadID: "th-1"}
 	c1 := model.VanadisChunk{ID: "c1", BuildID: "b-auth", ChunkIndex: 0, Title: "C1", Status: "pending", Mode: "action", Repo: "aerial", PRNumber: 101}
-	st, _ := seededStore(t, []model.VanadisBuild{b1}, []model.VanadisChunk{c1})
+	st, pool := seededStore(t, []model.VanadisBuild{b1}, []model.VanadisChunk{c1})
+	require.NotNil(t, pool)
 	eri := &mockEriClient{}
 	exec := executor.NewExecutor(t.TempDir(), eri, nil, "token", "example-owner", nil)
 	bo := NewBuildObject("", nil).WithAuthority(st, exec)
