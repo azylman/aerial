@@ -165,24 +165,6 @@ func TestWorkerPool_HermeticByDefaultWithoutRetriever(t *testing.T) {
 	}
 }
 
-func TestProcessBurst_GracefulShutdown_ResetsToPendingWithoutRestartPenalty(t *testing.T) {
-	t.Parallel()
-	store := setupTestStore(t)
-	msg := db.Message{ID: "msg-graceful-shutdown", ThreadID: "thread-graceful", Content: "task interrupted by deployment", Status: db.StatusPending, CreatedAt: time.Now().UTC()}
-	_ = insertMessage(store, msg)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	pool := NewWorkerPool(WorkerPoolConfig{Store: store})
-	pool.ctx = ctx
-	pool.processBurst([]db.Message{msg})
-
-	updated, err := getMessage(store, "msg-graceful-shutdown")
-	if err != nil || updated == nil || updated.Status != db.StatusPending || updated.RestartCount != 0 {
-		t.Fatalf("updated = %+v (err=%v), want PENDING with restart_count=0", updated, err)
-	}
-}
-
 func TestIsRateLimitError_ExtendedKeywords(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -285,91 +267,6 @@ func TestWorkerPool_NotifierInvocationMatrix(t *testing.T) {
 			if tt.expectUnavailableMsg && deliveredNotif != notifier.ModelUnavailableMessage() {
 				t.Errorf("delivered=%q, want %q", deliveredNotif, notifier.ModelUnavailableMessage())
 			}
-		})
-	}
-}
-
-type workerPoolCancellationCase struct {
-	name, threadID, scheduleRunID, stderr string
-	maxAttempts, exitCode                 int
-	backoffBase                           time.Duration
-	err                                   error
-	expectDeliveredCheck                  bool
-}
-
-func runWorkerPoolCancellationCase(t *testing.T, tt workerPoolCancellationCase) {
-	t.Helper()
-	store := setupTestStore(t)
-	var pool *WorkerPool
-	deliveredCalled := false
-	var mu sync.Mutex
-
-	pool = NewWorkerPool(WorkerPoolConfig{
-		Store: store, MaxAttempts: tt.maxAttempts, BackoffBase: tt.backoffBase,
-		RunnerWithOptionsFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, opts runner.WatchdogOptions) (string, string, int, error) {
-			if tt.maxAttempts > 1 {
-				go func() {
-					for {
-						select {
-						case <-pool.ctx.Done():
-							return
-						default:
-						}
-						if m, _ := store.GetMessage(ctx, "msg-"+tt.name); m != nil && m.RetryCount > 0 {
-							pool.cancel()
-							return
-						}
-						runtime.Gosched()
-					}
-				}()
-			} else {
-				pool.cancel()
-			}
-			return "", tt.stderr, tt.exitCode, tt.err
-		},
-		DeliveryFunc: func(s *discordgo.Session, channelID, text string) error {
-			mu.Lock()
-			deliveredCalled = true
-			mu.Unlock()
-			return nil
-		},
-	})
-	pool.Start()
-	defer pool.Stop()
-
-	msgID := "msg-" + tt.name
-	msg := db.Message{ID: msgID, ThreadID: tt.threadID, Content: "cancel test"}
-	_ = insertMessage(store, msg)
-	pool.Enqueue(msg)
-	waitPoolWorkersDone(t, pool, 2*time.Second)
-
-	if tt.expectDeliveredCheck {
-		mu.Lock()
-		called := deliveredCalled
-		mu.Unlock()
-		if called {
-			t.Errorf("DeliveryFunc should not be called when pool is cancelled")
-		}
-	}
-	if dbMsg, _ := getMessage(store, msgID); dbMsg != nil && dbMsg.Status != db.StatusProcessing {
-		t.Errorf("Expected status PROCESSING after cancellation, got: %s", dbMsg.Status)
-	}
-}
-
-func TestWorkerPool_CancellationDuringBackoffSuite(t *testing.T) {
-	t.Parallel()
-	tests := []workerPoolCancellationCase{
-		{name: "Watchdog_CancelledDuringBackoff", threadID: "thread-wd-cancel", scheduleRunID: "run-wd-cancel", maxAttempts: 3, backoffBase: 500 * time.Millisecond, stderr: "inactivity timeout exceeded: [watchdog] hung process", exitCode: 124, err: context.DeadlineExceeded},
-		{name: "Watchdog_CancelledPostWatchdog", threadID: "thread-wd-post-cancel", maxAttempts: 1, backoffBase: 5 * time.Millisecond, stderr: "inactivity timeout exceeded: [watchdog] single attempt cancel", exitCode: 124, err: context.DeadlineExceeded, expectDeliveredCheck: true},
-		{name: "NonTransient_CancelledDuringTurn", threadID: "thread-nt-cancel", maxAttempts: 1, backoffBase: 5 * time.Millisecond, stderr: "Fatal: invalid prompt parameters", exitCode: 2, err: errors.New("non transient err"), expectDeliveredCheck: true},
-		{name: "RetryExhaustion_CancelledWithScheduleRunID", threadID: "thread-exh-cancel", scheduleRunID: "run-exh-cancel", maxAttempts: 1, backoffBase: 5 * time.Millisecond, stderr: "connection timed out", exitCode: 1, err: errors.New("timeout")},
-		{name: "RateLimit_CancelledDuringBackoff", threadID: "thread-rl-cancel", scheduleRunID: "run-rl-cancel", maxAttempts: 3, backoffBase: 500 * time.Millisecond, stderr: "Error 429: Resource has been exhausted (quota exceeded)", exitCode: 1, err: errors.New("rate limited")},
-		{name: "Transient_CancelledDuringBackoff", threadID: "thread-tr-cancel", scheduleRunID: "run-tr-cancel", maxAttempts: 3, backoffBase: 500 * time.Millisecond, stderr: "connection reset by peer", exitCode: 1, err: errors.New("transient network drop")},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			runWorkerPoolCancellationCase(t, tt)
 		})
 	}
 }
@@ -652,67 +549,6 @@ func runPreTurnHookBurst(t *testing.T, hookResps []*PreTurnResponse, hookErr err
 	return hookCalls, runnerCalls, capturedPrompt, capturedReq, saved
 }
 
-// runPreTurnHookBurstLegacyQueue drives the burst through the legacy processBurst path.
-func runPreTurnHookBurstLegacyQueue(t *testing.T, hookResps []*PreTurnResponse, hookErr error, timeoutAction string, initialRetry int, schedRunID string, waitAsync bool) (int, int, string, *PreTurnRequest, *db.Message) {
-	t.Helper()
-	store, doneCh := setupTestStore(t), make(chan struct{})
-	var mu sync.Mutex
-	var runnerCalls, hookCalls int
-	var capturedPrompt string
-	var capturedReq *PreTurnRequest
-
-	pool := NewWorkerPool(WorkerPoolConfig{
-		Store: store, SessionManager: session.New(t.TempDir(), ""), MaxAttempts: 3,
-		RetryDelayOverride: 10 * time.Millisecond, DeliveryFunc: noopDelivery,
-		WebhookDispatcher: &mockWebhookDispatcher{callPreTurnHookFunc: func(ctx context.Context, endpoint *config.WebhookEndpoint, req *PreTurnRequest) (*PreTurnResponse, error) {
-			mu.Lock()
-			hookCalls++
-			cnt := hookCalls
-			capturedReq = req
-			mu.Unlock()
-			if hookErr != nil {
-				return nil, hookErr
-			}
-			idx := min(cnt-1, len(hookResps)-1)
-			return hookResps[idx], nil
-		}},
-		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
-			mu.Lock()
-			runnerCalls++
-			capturedPrompt = prompt
-			mu.Unlock()
-			return mockJSONResponse(sessionID, "Turn proceeded"), "", 0, nil
-		},
-		OnMessageCompleted: func(m db.Message, status string) {
-			if m.ID == "msg-preturn-test" {
-				select {
-				case <-doneCh:
-				default:
-					close(doneCh)
-				}
-			}
-		},
-		ResolveChannelPolicy: func(channelID, channelName string) config.ChannelPolicy {
-			return config.ChannelPolicy{Mode: "channel", WakeMode: "all", Hooks: config.ChannelHooksConfig{
-				PreTurn: &config.WebhookEndpoint{URL: "http://sidecar.local/pre-turn", TimeoutMs: 1500, OnTimeoutAction: timeoutAction},
-			}}
-		},
-	})
-	defer pool.Stop()
-	now := time.Now().UTC()
-	msg := db.Message{ID: "msg-preturn-test", ThreadID: "chan-preturn", AuthorName: "user-alpha", Content: "test prompt for pre-turn", Status: db.StatusPending, RetryCount: initialRetry, CreatedAt: now}
-	_ = insertMessage(store, msg)
-	pool.processBurst([]db.Message{msg})
-	if waitAsync {
-		waitForCompletion(t, doneCh, 5*time.Second, "preturn-wait")
-	}
-
-	mu.Lock()
-	defer mu.Unlock()
-	saved, _ := getMessage(store, "msg-preturn-test")
-	return hookCalls, runnerCalls, capturedPrompt, capturedReq, saved
-}
-
 type preTurnHookCase struct {
 	name, timeoutAction, schedRunID, wantStatus, wantErrSub, wantPromptSub string
 	hookResps                                                              []*PreTurnResponse
@@ -761,19 +597,6 @@ func TestPreTurnHook_Lifecycle(t *testing.T) {
 	}
 }
 
-// TestPreTurnHook_Lifecycle_LegacyQueue runs preTurnHookCases through the legacy processBurst
-// path; it exists only while that path does (c06b deletes both).
-func TestPreTurnHook_Lifecycle_LegacyQueue(t *testing.T) {
-	t.Parallel()
-	for _, tc := range preTurnHookCases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			hc, rc, cp, cr, saved := runPreTurnHookBurstLegacyQueue(t, tc.hookResps, tc.hookErr, tc.timeoutAction, tc.initialRetry, tc.schedRunID, tc.rekick)
-			assertPreTurnHookCase(t, tc, hc, rc, cp, cr, saved)
-		})
-	}
-}
-
 func TestPreTurnHook_HelperEdgeCases(t *testing.T) {
 	t.Parallel()
 	if reqNil := buildPreTurnRequest(nil); reqNil == nil || reqNil.Timestamp.IsZero() {
@@ -784,7 +607,6 @@ func TestPreTurnHook_HelperEdgeCases(t *testing.T) {
 		t.Errorf("req = %+v", req)
 	}
 	teNoPool := &turnExecution{pool: nil, burst: []db.Message{msgA}}
-	teNoPool.rescheduleBurst(0)
 	teNoPool.abortBurst("test drop nil pool")
 
 	store, completedStatus := setupTestStore(t), ""
@@ -884,117 +706,6 @@ func TestPostTurnHook_Lifecycle(t *testing.T) {
 				t.Errorf("Error=%q, want %q", req.Error, tc.wantErrSub)
 			}
 		})
-	}
-}
-
-// TestPostTurnHook_RunnerPanicRecovery_LegacyQueue keeps the legacy-only RunnerPanicRecovery row
-// of TestPostTurnHook_Lifecycle on the legacy processBurst path (c06b deletes both). On the live
-// path a runner panic is a terminal step error and the turn fails through FailBurstTurn.
-func TestPostTurnHook_RunnerPanicRecovery_LegacyQueue(t *testing.T) {
-	t.Parallel()
-	store := setupTestStore(t)
-	var mu sync.Mutex
-	var got *PostTurnRequest
-	pool := NewWorkerPool(WorkerPoolConfig{
-		Store: store, MaxAttempts: 1,
-		WebhookDispatcher: &mockWebhookDispatcher{callPostTurnHookFunc: func(ctx context.Context, endpoint *config.WebhookEndpoint, req *PostTurnRequest) (*PostTurnResponse, error) {
-			mu.Lock()
-			reqCopy := *req
-			got = &reqCopy
-			mu.Unlock()
-			return &PostTurnResponse{Acknowledged: true}, nil
-		}},
-		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
-			panic("simulated runner crash inside runner function")
-		},
-		ResolveChannelPolicy: func(channelID, channelName string) config.ChannelPolicy {
-			return config.ChannelPolicy{Mode: "channel", WakeMode: "all", Hooks: config.ChannelHooksConfig{PostTurn: &config.WebhookEndpoint{URL: "http://sidecar.local/post-turn"}}}
-		},
-	})
-	defer pool.Stop()
-	msg := db.Message{ID: "msg-postturn-test", ThreadID: "chan-postturn-test", AuthorName: "user-alpha", Content: "run postturn test", Status: db.StatusPending, CreatedAt: time.Now().UTC()}
-	_ = insertMessage(store, msg)
-	pool.processBurst([]db.Message{msg})
-
-	mu.Lock()
-	defer mu.Unlock()
-	if got == nil || got.ChannelID != "chan-postturn-test" || got.Status != "failed" || !strings.Contains(got.Error, "simulated runner crash") {
-		t.Errorf("postReq = %+v, want failed with the panic text", got)
-	}
-}
-
-func TestPostTurnHook_SerializedRelease(t *testing.T) {
-	t.Parallel()
-	store := setupTestStore(t)
-	var mu sync.Mutex
-	turn1PostStarted, turn2Launched := make(chan struct{}), make(chan struct{})
-	turn1PostFinished, turn2PreCalledWhileTurn1InPost, turn2PreCalled := false, false, false
-
-	pool := NewWorkerPool(WorkerPoolConfig{
-		Store: store, MaxAttempts: 1,
-		WebhookDispatcher: &mockWebhookDispatcher{
-			callPreTurnHookFunc: func(ctx context.Context, endpoint *config.WebhookEndpoint, req *PreTurnRequest) (*PreTurnResponse, error) {
-				mu.Lock()
-				if req.ThreadID == "chan-serialized" && len(req.Messages) > 0 && req.Messages[0].ID == "msg-turn-2" {
-					turn2PreCalled = true
-					if !turn1PostFinished {
-						turn2PreCalledWhileTurn1InPost = true
-					}
-				}
-				mu.Unlock()
-				return &PreTurnResponse{Allow: true}, nil
-			},
-			callPostTurnHookFunc: func(ctx context.Context, endpoint *config.WebhookEndpoint, req *PostTurnRequest) (*PostTurnResponse, error) {
-				if req.ThreadID == "chan-serialized" {
-					select {
-					case <-turn1PostStarted:
-					default:
-						close(turn1PostStarted)
-						<-turn2Launched
-						for range 64 {
-							runtime.Gosched()
-						}
-						mu.Lock()
-						turn1PostFinished = true
-						mu.Unlock()
-					}
-				}
-				return &PostTurnResponse{Acknowledged: true}, nil
-			},
-		},
-		RunnerFunc: func(ctx context.Context, agyBin, prompt, sessionID, apiKey, model string, timeoutMinutes int) (string, string, int, error) {
-			return mockJSONResponse(sessionID, "ok"), "", 0, nil
-		},
-		ResolveChannelPolicy: func(channelID, channelName string) config.ChannelPolicy {
-			return config.ChannelPolicy{Mode: "channel", WakeMode: "all", Hooks: config.ChannelHooksConfig{
-				PreTurn: &config.WebhookEndpoint{URL: "http://sidecar.local/pre-turn"}, PostTurn: &config.WebhookEndpoint{URL: "http://sidecar.local/post-turn"},
-			}}
-		},
-	})
-
-	now := time.Now().UTC()
-	msg1, msg2 := db.Message{ID: "msg-turn-1", ThreadID: "chan-serialized", AuthorName: "user-one", Content: "turn 1", Status: db.StatusPending, CreatedAt: now}, db.Message{ID: "msg-turn-2", ThreadID: "chan-serialized", AuthorName: "user-two", Content: "turn 2", Status: db.StatusPending, CreatedAt: now.Add(time.Millisecond)}
-	_ = insertMessage(store, msg1)
-	_ = insertMessage(store, msg2)
-
-	var wg sync.WaitGroup
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		pool.processBurst([]db.Message{msg1})
-	}()
-	<-turn1PostStarted
-	go func() {
-		defer wg.Done()
-		close(turn2Launched)
-		pool.processBurst([]db.Message{msg2})
-	}()
-	wg.Wait()
-
-	mu.Lock()
-	defer mu.Unlock()
-	if !turn2PreCalled || turn2PreCalledWhileTurn1InPost {
-		t.Errorf("turn2PreCalled=%v, turn2PreCalledWhileTurn1InPost=%v", turn2PreCalled, turn2PreCalledWhileTurn1InPost)
 	}
 }
 

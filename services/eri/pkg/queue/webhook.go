@@ -306,7 +306,7 @@ const (
 )
 
 // preTurnDecision is what the pre_turn hook asked for. evaluatePreTurnHook only calls the hook;
-// callers apply the decision (legacy: abortBurst / rescheduleBurst; TurnRunner prep: journaled rows).
+// TurnRunner prep applies the decision as journaled row writes.
 type preTurnDecision struct {
 	action          preTurnAction
 	abortReason     string
@@ -361,22 +361,4 @@ func (te *turnExecution) applyPreTurnContext(d preTurnDecision) {
 	if d.metadata != nil {
 		te.hookMetadata = d.metadata
 	}
-}
-
-func (te *turnExecution) runPreTurnHook() bool {
-	if te == nil {
-		return true
-	}
-	d := te.evaluatePreTurnHook()
-	switch d.action {
-	case preTurnAbort:
-		te.abortBurst(d.abortReason)
-		return false
-	case preTurnReschedule:
-		te.rescheduleBurst(d.delaySeconds)
-		return false
-	case preTurnProceed:
-	}
-	te.applyPreTurnContext(d)
-	return true
 }

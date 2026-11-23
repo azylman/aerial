@@ -204,18 +204,6 @@ func (p *WorkerPool) tracer() trace.Tracer {
 	return p.cfg.TracerProvider.Tracer(runner.TracerScope)
 }
 
-// beginTurnTrace opens the turn's root span and returns the context carrying it.
-func (p *WorkerPool) beginTurnTrace(items []queuedTurnItem, conversationID, triggerType string, pickup time.Time) (context.Context, trace.Span) {
-	return startTurnSpan(p.ctx, p.tracer(), turnSpanSpec{
-		items: items, conversationID: conversationID, agentName: p.cfg.AgentName, triggerType: triggerType, pickup: pickup,
-	})
-}
-
-// turnSinkCloseGrace bounds how long a turn that ended without usage waits for the daemon to
-// report its failure. A cancelled or interrupted turn returns before the killed daemon reports,
-// and that report carries the tokens the turn already consumed.
-const turnSinkCloseGrace = 2 * time.Second
-
 // lateSinkUsage returns the usage the latest attempt's trace sink recorded once its turn closes,
 // or zero if there is no sink or ctx ends first.
 func (te *turnExecution) lateSinkUsage(ctx context.Context) runner.TokenUsage {
@@ -224,33 +212,6 @@ func (te *turnExecution) lateSinkUsage(ctx context.Context) runner.TokenUsage {
 	}
 	usage, _ := te.traceSink.Usage(ctx)
 	return usage
-}
-
-// turnStatusUnknown marks an attempted turn that ended without any path assigning its outcome.
-const turnStatusUnknown = "unknown"
-
-// endTurnSpan records model, usage and outcome (plus the prompt and response when the pool
-// captures content) on the root span and ends it.
-func (te *turnExecution) endTurnSpan() {
-	if te.turnSpan == nil {
-		return
-	}
-	usage := te.turnTokenUsage
-	if usage == (runner.TokenUsage{}) && te.turnCtx != nil {
-		// The turn context is usually canceled by now; the late-usage grace must outlive it.
-		ctx, cancel := context.WithTimeout(context.WithoutCancel(te.turnCtx), turnSinkCloseGrace)
-		usage = te.lateSinkUsage(ctx)
-		cancel()
-	}
-	status := te.turnStatus
-	if status == "" && te.turnAttempted {
-		// An attempted turn must end with an outcome; surface any path that forgot to assign one.
-		status = turnStatusUnknown
-	}
-	if te.pool != nil && te.pool.cfg.TraceContent {
-		te.turnSpan.SetAttributes(runner.ContentAttributes(te.sentPrompt, te.turnResponseText)...)
-	}
-	finishTurnSpan(te.turnSpan, te.turnModel, usage, status)
 }
 
 // finishTurnSpan records model, usage and outcome on a turn's root span, marks it failed for
@@ -264,17 +225,11 @@ func finishTurnSpan(span trace.Span, model string, usage runner.AgyUsage, status
 }
 
 // startChildSpan starts a child of the turn span on base, keeping base's cancellation.
-func (te *turnExecution) startChildSpan(base context.Context, name string, opts ...trace.SpanStartOption) (context.Context, trace.Span) {
+func (te *turnExecution) startChildSpan(base context.Context, name string) (context.Context, trace.Span) {
 	if te.turnSpan != nil {
 		base = trace.ContextWithSpan(base, te.turnSpan)
 	}
-	return te.pool.tracer().Start(base, name, opts...) //nolint:spancheck // the caller owns and ends the span
-}
-
-// beginSetupSpan opens turn.setup at pickup; it stays open until the first attempt hands the
-// prompt to the session, so every bit of eri-side startup time lands under a named span.
-func (te *turnExecution) beginSetupSpan() {
-	_, te.setupSpan = te.startChildSpan(te.turnCtxValue(), spanTurnSetup, trace.WithTimestamp(te.execStart))
+	return te.pool.tracer().Start(base, name) //nolint:spancheck // the caller owns and ends the span
 }
 
 // endSetupSpan ends turn.setup; it is idempotent so early exits and the first attempt can both call it.
@@ -340,15 +295,6 @@ func (p *WorkerPool) ActiveTurns() *runner.ActiveTurnRegistry {
 		return nil
 	}
 	return p.cfg.ActiveTurns
-}
-
-// markTurnActive registers the leased daemon's turn span in the pool's ActiveTurnRegistry so
-// the loopback MCP proxy parents the daemon's MCP calls under this turn, and returns the func
-// that clears it. Call it after the lease-release defer is registered so the turn is cleared
-// before the lease (and the daemon) can be handed to the next turn.
-func (te *turnExecution) markTurnActive() func() {
-	te.registerActiveTurn()
-	return te.clearActiveTurn
 }
 
 // registerActiveTurn registers the current lease's daemon under the turn span. It runs again
