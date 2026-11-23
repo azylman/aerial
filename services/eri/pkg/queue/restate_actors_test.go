@@ -45,7 +45,10 @@ func setupActorMockContext(t *testing.T, key, activeInvID string) (*mocks.MockCo
 	runHandler := func(fn func(restate.RunContext) (any, error), output any, opts ...restate.RunOption) restate.TerminalError {
 		res, err := fn(mockRunContext{Context: context.Background()})
 		if err != nil {
-			return restate.ToTerminalError(err)
+			if restate.IsTerminalError(err) {
+				return restate.AsTerminalError(err)
+			}
+			return restate.ToTerminalError(err, restate.WithErrorCode(mockRetryableCode))
 		}
 		if output != nil && res != nil {
 			outVal := reflect.ValueOf(output)
@@ -67,17 +70,16 @@ func setupActorMockContext(t *testing.T, key, activeInvID string) (*mocks.MockCo
 	return mc, mClient
 }
 
-func assertTerminalOrRetriableError(t *testing.T, err error, wantErrorSub string, wantTerminal bool) {
+// mockRetryableCode marks a retryable error returned from a mocked restate.Run step: the real
+// SDK would retry the step instead of surfacing it, so tests can tell it from a terminal 500.
+const mockRetryableCode restate.Code = 599
+
+func assertHandlerErrorCode(t *testing.T, err error, wantErrorSub string, wantCode restate.Code) {
 	t.Helper()
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), wantErrorSub)
 	require.True(t, restate.IsTerminalError(err))
-	termErr := restate.AsTerminalError(err)
-	if wantTerminal {
-		assert.Equal(t, restate.Code(400), termErr.Code(), "expected 400 terminal error")
-	} else {
-		assert.Equal(t, restate.Code(500), termErr.Code(), "expected non-terminal retriable error")
-	}
+	assert.Equal(t, wantCode, restate.AsTerminalError(err).Code())
 }
 
 func TestDeriveDeterministicIDs(t *testing.T) {

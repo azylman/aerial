@@ -358,3 +358,53 @@ func TestCoordinatorServiceNames(t *testing.T) {
 		})
 	}
 }
+
+// markSkippedCases is shared by the thread and dispatch markSkipped tests: both record tables
+// follow the same contract (only non-terminal rows become COMPLETED as skipped).
+var markSkippedCases = []struct {
+	name    string
+	status  string
+	errText string
+	want    rowWant
+}{
+	{name: "PendingSkipped", status: db.StatusPending, want: rowWant{status: db.StatusCompleted, errText: skippedActiveTurnReason}},
+	{name: "ProcessingSkipped", status: db.StatusProcessing, want: rowWant{status: db.StatusCompleted, errText: skippedActiveTurnReason}},
+	{name: "CompletedUntouched", status: db.StatusCompleted, want: rowWant{status: db.StatusCompleted}},
+	{name: "FailedUntouched", status: db.StatusFailed, errText: "boom", want: rowWant{status: db.StatusFailed, errText: "boom"}},
+}
+
+func TestThreadRecords_MarkSkipped(t *testing.T) {
+	t.Parallel()
+	for _, tc := range markSkippedCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			row := msgRow("m1", tcKey, tc.status)
+			row.ErrorMessage = tc.errText
+			store := seedStore(t, []db.Message{row}, nil, "")
+			require.NoError(t, threadRecords{store: store}.markSkipped(ctx, "m1"))
+			m, err := store.GetMessage(ctx, "m1")
+			require.NoError(t, err)
+			require.NotNil(t, m)
+			assert.Equal(t, tc.want, rowWant{status: m.Status, errText: m.ErrorMessage})
+		})
+	}
+}
+
+func TestDispatchRecords_MarkSkipped(t *testing.T) {
+	t.Parallel()
+	for _, tc := range markSkippedCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			row := dispRow("d1", "sess-1", tc.status)
+			row.ErrorMessage = tc.errText
+			store := seedStore(t, nil, []db.Dispatch{row}, "")
+			require.NoError(t, dispatchRecords{store: store}.markSkipped(ctx, "d1"))
+			d, err := store.GetDispatch(ctx, "d1")
+			require.NoError(t, err)
+			require.NotNil(t, d)
+			assert.Equal(t, tc.want, rowWant{status: d.Status, errText: d.ErrorMessage})
+		})
+	}
+}

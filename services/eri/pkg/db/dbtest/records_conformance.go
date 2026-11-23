@@ -23,6 +23,9 @@ const (
 	dSess           = "d-sess"
 	idMissing       = "missing"
 	failReason      = "stop"
+	opFailActive    = "fail-if-active"
+	opFailPending   = "fail-if-pending"
+	opSkipActive    = "skip-if-active"
 	b1Chunk2Session = "vanadis-b1-chunk-2"
 	sess1           = "sess-1"
 	oldErr          = "old"
@@ -179,18 +182,20 @@ func testGetMessagesByID(t *testing.T, factory RecordStoreFactory) {
 	}
 }
 
+// testFailRecords covers the guarded status transitions by ID: Fail*IfActive, Fail*IfPending and
+// Skip*IfActive all change only rows in their source statuses and return the IDs changed.
 func testFailRecords(t *testing.T, factory RecordStoreFactory, dispatch bool) {
 	t.Helper()
 	t.Parallel()
 	tests := []struct {
 		name        string
-		pendingOnly bool
+		op          string
 		ids         []string
 		wantChanged []string
 		want        map[string]recordState
 	}{
 		{
-			name: "if active fails pending and processing, leaves terminal rows", ids: []string{mProc, mPendA, mDone, mFail, idMissing},
+			name: "if active fails pending and processing, leaves terminal rows", op: opFailActive, ids: []string{mProc, mPendA, mDone, mFail, idMissing},
 			wantChanged: []string{mProc, mPendA},
 			want: map[string]recordState{
 				mProc: {db.StatusFailed, failReason, 1, 0}, mPendA: {db.StatusFailed, failReason, 0, 0},
@@ -198,31 +203,40 @@ func testFailRecords(t *testing.T, factory RecordStoreFactory, dispatch bool) {
 			},
 		},
 		{
-			name: "if pending leaves processing rows untouched", pendingOnly: true, ids: []string{mProc, mPendA, mDone},
+			name: "if pending leaves processing rows untouched", op: opFailPending, ids: []string{mProc, mPendA, mDone},
 			wantChanged: []string{mPendA},
 			want: map[string]recordState{
 				mProc: {db.StatusProcessing, "", 1, 0}, mPendA: {db.StatusFailed, failReason, 0, 0}, mDone: {db.StatusCompleted, "", 1, 0},
 			},
 		},
-		{name: "no ids", ids: []string{}, wantChanged: nil, want: map[string]recordState{mPendA: {db.StatusPending, "", 0, 0}}},
+		{
+			name: "skip completes pending and processing, leaves terminal rows", op: opSkipActive, ids: []string{mProc, mPendA, mDone, mFail, idMissing},
+			wantChanged: []string{mProc, mPendA},
+			want: map[string]recordState{
+				mProc: {db.StatusCompleted, failReason, 1, 0}, mPendA: {db.StatusCompleted, failReason, 0, 0},
+				mDone: {db.StatusCompleted, "", 1, 0}, mFail: {db.StatusFailed, oldErr, 0, 0}, mPendB: {db.StatusPending, "", 0, 0},
+			},
+		},
+		{name: "no ids", op: opFailActive, ids: []string{}, wantChanged: nil, want: map[string]recordState{mPendA: {db.StatusPending, "", 0, 0}}},
+		{name: "skip no ids", op: opSkipActive, ids: []string{}, wantChanged: nil, want: map[string]recordState{mPendA: {db.StatusPending, "", 0, 0}}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			s := newSeeded(t, factory)
-			ops := map[[2]bool]func(context.Context, []string, string) ([]string, error){
-				{false, false}: s.FailMessagesIfActive, {false, true}: s.FailMessagesIfPending,
-				{true, false}: s.FailDispatchesIfActive, {true, true}: s.FailDispatchesIfPending,
+			ops := map[bool]map[string]func(context.Context, []string, string) ([]string, error){
+				false: {opFailActive: s.FailMessagesIfActive, opFailPending: s.FailMessagesIfPending, opSkipActive: s.SkipMessagesIfActive},
+				true:  {opFailActive: s.FailDispatchesIfActive, opFailPending: s.FailDispatchesIfPending, opSkipActive: s.SkipDispatchesIfActive},
 			}
 			get := messageState
 			if dispatch {
 				get = dispatchState
 			}
-			got, err := ops[[2]bool{dispatch, tc.pendingOnly}](context.Background(), tc.ids, failReason)
+			got, err := ops[dispatch][tc.op](context.Background(), tc.ids, failReason)
 			if err != nil {
-				t.Fatalf("Fail records: %v", err)
+				t.Fatalf("%s records: %v", tc.op, err)
 			}
-			wantIDs(t, "Fail records changed", got, tc.wantChanged)
+			wantIDs(t, tc.op+" records changed", got, tc.wantChanged)
 			wantStates(t, s, get, tc.want)
 		})
 	}
